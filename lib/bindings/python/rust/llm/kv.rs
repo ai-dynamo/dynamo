@@ -13,7 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use super::*;
+use tracing;
+use llm_rs::kv_router::indexer::KvIndexerInterface;
 
 #[pyclass]
 pub(crate) struct KvRouter {
@@ -105,4 +109,72 @@ impl KvMetricsPublisher {
             )
             .map_err(to_pyerr)
     }
+}
+
+#[pyclass]
+pub(crate) struct OverlapScores(pub llm_rs::kv_router::indexer::OverlapScores);
+
+#[pymethods]
+impl OverlapScores {
+    fn scores(&self) -> HashMap<llm_rs::kv_router::indexer::WorkerId, u32> {
+        self.0.scores.clone()
+    }
+
+    fn frequencies(&self) -> Vec<usize> {
+        self.0.frequencies.clone()
+    }
+}
+
+#[pyclass]
+pub(crate) struct KvIndexer {
+    inner: Arc<llm_rs::kv_router::indexer::KvIndexer>,
+}
+
+#[pymethods]
+impl KvIndexer {
+    #[new]
+    fn new(component: Component, token: CancellationToken) -> PyResult<Self> {
+        let runtime = pyo3_async_runtimes::tokio::get_runtime();
+        runtime.block_on(async {
+            let kv_subject = component.inner.event_subject(llm_rs::kv_router::KV_EVENT_SUBJECT);
+            let inner: Arc<llm_rs::kv_router::indexer::KvIndexer> = llm_rs::kv_router::indexer::KvIndexer::new(token.inner).into();
+            let mut kv_events_rx = component.inner.drt().nats_client().client().subscribe(kv_subject).await.map_err(to_pyerr)?;
+            let kv_events_tx = inner.event_sender();
+        
+            // [FIXME] this is the added functionality to the indexer to subscribe to kv events,
+            // should have been made to a trait and implemented here? i.e. AsyncEngine style
+            tokio::spawn(async move {
+                while let Some(event) = kv_events_rx.next().await {
+                    let event: llm_rs::kv_router::indexer::RouterEvent = serde_json::from_slice(&event.payload).unwrap();
+                    tracing::debug!("received kv event: {:?}", event);
+                    if let Err(e) = kv_events_tx.send(event).await {
+                        tracing::trace!("failed to send kv event to indexer; shutting down: {:?}", e);
+                    }
+                }
+            });
+            Ok(Self { inner })
+        })
+    }
+
+    fn find_matches_for_request<'p>(
+        &self,
+        py: Python<'p>,
+        token_ids: Vec<u32>,
+        _lora_id: u64,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let indexer = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let rs_overlap_scores = indexer
+                .find_matches_for_request(token_ids.as_slice())
+                .await
+                .map_err(to_pyerr)?;
+            Ok(OverlapScores(rs_overlap_scores))
+        })
+    }
+}
+
+// [WIP] this should be a rust class for metrics subscription, not really scheduler
+#[pyclass]
+pub(crate) struct KvMetricsSubscriber {
+    inner: Arc<llm_rs::kv_router::scheduler::KvScheduler>,
 }

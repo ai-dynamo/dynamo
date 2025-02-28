@@ -25,6 +25,7 @@ pub mod protocols;
 pub mod publisher;
 pub mod scheduler;
 pub mod scoring;
+pub mod metrics_aggregator;
 
 use crate::kv_router::{
     indexer::{KvIndexer, KvIndexerInterface, RouterEvent},
