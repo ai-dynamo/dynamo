@@ -15,3 +15,5 @@
 
 from dynemo._core import KvMetricsPublisher as KvMetricsPublisher
 from dynemo._core import KvRouter as KvRouter
+from dynemo._core import KvIndexer as KvIndexer
+from dynemo._core import KvMetricsAggregator as KvMetricsAggregator

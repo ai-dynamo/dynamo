@@ -112,6 +112,7 @@ impl KvMetricsPublisher {
 }
 
 #[pyclass]
+#[derive(Clone)]
 pub(crate) struct OverlapScores(pub llm_rs::kv_router::indexer::OverlapScores);
 
 #[pymethods]
@@ -173,8 +174,64 @@ impl KvIndexer {
     }
 }
 
-// [WIP] this should be a rust class for metrics subscription, not really scheduler
 #[pyclass]
-pub(crate) struct KvMetricsSubscriber {
-    inner: Arc<llm_rs::kv_router::scheduler::KvScheduler>,
+#[derive(Clone)]
+pub(crate) struct EndpiontKvMetrics
+{
+    pub worker_ids: i64,
+    pub request_active_slots: u64,
+    pub request_total_slots: u64,
+    pub kv_active_blocks: u64,
+    pub kv_total_blocks: u64,
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub(crate) struct AggregatedMetrics {
+    pub endpoints: Vec<EndpiontKvMetrics>,
+    pub load_avg: f64,
+    pub load_std: f64,
+}
+
+
+#[pyclass]
+pub(crate) struct KvMetricsAggregator {
+    inner: Arc<llm_rs::kv_router::metrics_aggregator::KvMetricsAggregator>,
+}
+
+#[pymethods]
+impl KvMetricsAggregator {
+    #[new]
+    fn new(component: Component, token: CancellationToken) -> PyResult<Self> {
+        let runtime = pyo3_async_runtimes::tokio::get_runtime();
+        runtime.block_on(async {
+            let inner = llm_rs::kv_router::metrics_aggregator::KvMetricsAggregator::new(
+                component.inner.clone(),
+                token.inner,
+            )
+            .await;
+            Ok(Self { inner: inner.into() })
+        })
+    }
+    
+    fn get_metrics<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let endpoints = self.inner.get_endpoints();
+        let endpiont_kv_metrics = endpoints
+            .endpoints
+            .iter()
+            .map(|x| EndpiontKvMetrics {
+                worker_ids: x.worker_id(),
+                request_active_slots: x.data.request_active_slots,
+                request_total_slots: x.data.request_total_slots,
+                kv_active_blocks: x.data.kv_active_blocks,
+                kv_total_blocks: x.data.kv_total_blocks,
+            })
+            .collect();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Ok(AggregatedMetrics {
+                endpoints: endpiont_kv_metrics,
+                load_avg: endpoints.load_avg,
+                load_std: endpoints.load_std,
+            })})
+    }
 }

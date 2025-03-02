@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub use crate::kv_router::protocols::ForwardPassMetrics;
 
@@ -25,73 +25,130 @@ use triton_distributed_runtime::pipeline::network::{
 
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-use tracing as log;
+use triton_distributed_runtime::{component::Component, DistributedRuntime};
+use crate::kv_router::ProcessedEndpoints;
+use crate::kv_router::scheduler::{Service, Endpoint};
+use std::time::Duration;
 
 pub struct KvMetricsAggregator {
     pub service_name: String,
-
-    pub nats: nats::Client,
-    pub service_handler: Arc<dyn PushWorkHandler>,
-    pub metrics_rx: watch::Receiver<Arc<ForwardPassMetrics>>,
-    pub cancellation_token: CancellationToken,
+    pub endpoints: Arc<Mutex<ProcessedEndpoints>>,
 }
 
-/// version of crate
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+impl KvMetricsAggregator {
+    pub async fn new(
+        component: Component,
+        cancellation_token: CancellationToken
+    ) -> Self {
+        let (ep_tx, ep_rx) = tokio::sync::mpsc::channel(128);
 
-impl KvRoutedIngress {
-    pub fn builder() -> KvRoutedIngressBuilder {
-        KvRoutedIngressBuilder::default()
+        tokio::spawn(collect_endpoints(
+            component.drt().nats_client().clone(),
+            component.service_name(),
+            ep_tx,
+            cancellation_token.clone(),
+        ));
+        let mut ep_rx = ep_rx;
+
+        tracing::trace!("awaiting the start of the background endpoint subscriber");
+        let endpoints = Arc::new(Mutex::new(ProcessedEndpoints::default()));
+        let endpoints_clone = endpoints.clone();
+        tokio::spawn(async move {
+            tracing::debug!("scheduler background task started");
+            loop {
+                tracing::trace!("all workers busy; waiting for more capacity");
+                match ep_rx.recv().await {
+                    Some(endpoints) => {
+                        let mut shared_endpoint = endpoints_clone.lock().unwrap();
+                        *shared_endpoint = endpoints;
+                    },
+                    None => {
+                        tracing::trace!("endpoint subscriber shutdown");
+                        break;
+                    }
+                };
+            }
+
+            tracing::trace!("background endpoint subscriber shutting down");
+        });
+        Self {
+            service_name: component.service_name(),
+            endpoints: endpoints,
+        }
     }
 
-    pub async fn start(self) -> Result<()> {
-        let worker_id = self.worker_id;
+    pub fn get_endpoints(&self) -> ProcessedEndpoints {
+        let endpoints = self.endpoints.lock().unwrap();
+        endpoints.clone()
+    }
+}
 
-        log::trace!(
-            worker_id,
-            "Starting nats service: {}:{}",
-            self.service_name,
-            VERSION
+async fn collect_endpoints(
+    nats_client: triton_distributed_runtime::transports::nats::Client,
+    service_name: String,
+    ep_tx: tokio::sync::mpsc::Sender<ProcessedEndpoints>,
+    cancel: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::debug!("cancellation token triggered");
+                break;
+            }
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                tracing::trace!("collecting endpoints for service: {}", service_name);
+            }
+        }
+
+        let values = match nats_client
+            .get_endpoints(&service_name, Duration::from_secs(1))
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("Failed to retrieve endpoints for {}: {:?}", service_name, e);
+                continue;
+            }
+        };
+
+        tracing::debug!("values: {:?}", values);
+        let services: Vec<Service> = values
+            .into_iter()
+            .filter(|v| !v.is_empty())
+            .filter_map(|v| match serde_json::from_slice::<Service>(&v) {
+                Ok(service) => Some(service),
+                Err(e) => {
+                    tracing::warn!("For value: {:?} \nFailed to parse service: {:?}", v, e);
+                    None
+                }
+            })
+            .collect();
+        tracing::debug!("services: {:?}", services);
+
+        let endpoints: Vec<Endpoint> = services
+            .into_iter()
+            .flat_map(|s| s.endpoints)
+            .filter(|s| s.data.is_some())
+            .map(|s| Endpoint {
+                name: s.name,
+                subject: s.subject,
+                data: s.data.unwrap(),
+            })
+            .collect();
+        tracing::debug!("endpoints: {:?}", endpoints);
+
+        tracing::trace!(
+            "found {} endpoints for service: {}",
+            endpoints.len(),
+            service_name
         );
 
-        let mut metrics_rx = self.metrics_rx;
-        let worker_id_clone = worker_id.clone();
+        let processed = ProcessedEndpoints::new(endpoints);
 
-        let service = self
-            .nats
-            .client()
-            .service_builder()
-            .description("A handy min max service")
-            .stats_handler(move |name, stats| {
-                log::debug!(
-                    worker_id = worker_id_clone.as_str(),
-                    "[IN worker?] Stats for service {}: {:?}",
-                    name,
-                    stats
-                );
-                let metrics = metrics_rx.borrow_and_update().clone();
-                serde_json::to_value(&*metrics).unwrap()
-            })
-            .start(self.service_name.as_str(), VERSION)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to start service: {e}"))?;
-
-        let group = service.group(self.service_name.as_str());
-
-        log::trace!(worker_id, "Starting endpoint: {}", worker_id);
-
-        // creates an endpoint for the service
-        let service_endpoint = group
-            .endpoint(worker_id.clone())
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to start endpoint: {e}"))?;
-
-        let push_endpoint = PushEndpoint::builder()
-            .service_handler(self.service_handler)
-            .cancellation_token(self.cancellation_token)
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build push endpoint: {e}"))?;
-
-        push_endpoint.start(service_endpoint).await
+        // process endpoints into
+        if ep_tx.send(processed).await.is_err() {
+            tracing::trace!("failed to send processed endpoints; shutting down");
+            break;
+        }
     }
 }

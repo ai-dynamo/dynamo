@@ -233,3 +233,62 @@ class Backend:
         Start the backend engine and requests to the downstream LLM engine
         """
         ...
+class CancellationToken:
+    """
+    A cancellation token is used to cancel an operation
+    """
+
+    ...
+
+class OverlapScores:
+    """
+    A collection of scores for a given token ids
+    """
+
+    ...
+
+# [WIP] fix docs
+class KvIndexer:
+    """
+    A metrics publisher will provide KV metrics to the router.
+    """
+
+    ...
+
+    def __init__(self, component: Component, token: CancellationToken) -> None:
+        """
+        Create a `KvIndexer` object
+        """
+
+    def find_matches_for_request(self, token_ids: List[int], lora_id: int) -> OverlapScores:
+        """
+        Similar to Component.create_service, but only service created through
+        this method will interact with KV router of the same component.
+        """
+        ...
+
+class AggregatedMetrics:
+    """
+    A collection of scores for a given token ids
+    """
+
+    ...
+
+class KvMetricsAggregator:
+    """
+    A metrics publisher will provide KV metrics to the router.
+    """
+
+    ...
+
+    def __init__(self, component: Component, token: CancellationToken) -> None:
+        """
+        Create a `KvIndexer` object
+        """
+
+    def get_metrics(self) -> AggregatedMetrics:
+        """
+        Similar to Component.create_service, but only service created through
+        this method will interact with KV router of the same component.
+        """
+        ...
