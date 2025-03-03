@@ -176,23 +176,31 @@ impl KvIndexer {
 
 #[pyclass]
 #[derive(Clone)]
-pub(crate) struct EndpiontKvMetrics
+pub(crate) struct EndpointKvMetrics
 {
+    #[pyo3(get, set)]
     pub worker_ids: i64,
+    #[pyo3(get, set)]
     pub request_active_slots: u64,
+    #[pyo3(get, set)]
     pub request_total_slots: u64,
+    #[pyo3(get, set)]
     pub kv_active_blocks: u64,
+    #[pyo3(get, set)]
     pub kv_total_blocks: u64,
 }
+
 
 #[pyclass]
 #[derive(Clone)]
 pub(crate) struct AggregatedMetrics {
-    pub endpoints: Vec<EndpiontKvMetrics>,
+    #[pyo3(get, set)]
+    pub endpoints: Vec<EndpointKvMetrics>,
+    #[pyo3(get, set)]
     pub load_avg: f64,
+    #[pyo3(get, set)]
     pub load_std: f64,
 }
-
 
 #[pyclass]
 pub(crate) struct KvMetricsAggregator {
@@ -216,10 +224,10 @@ impl KvMetricsAggregator {
     
     fn get_metrics<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let endpoints = self.inner.get_endpoints();
-        let endpiont_kv_metrics = endpoints
+        let endpoint_kv_metrics = endpoints
             .endpoints
             .iter()
-            .map(|x| EndpiontKvMetrics {
+            .map(|x| EndpointKvMetrics {
                 worker_ids: x.worker_id(),
                 request_active_slots: x.data.request_active_slots,
                 request_total_slots: x.data.request_total_slots,
@@ -229,7 +237,7 @@ impl KvMetricsAggregator {
             .collect();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             Ok(AggregatedMetrics {
-                endpoints: endpiont_kv_metrics,
+                endpoints: endpoint_kv_metrics,
                 load_avg: endpoints.load_avg,
                 load_std: endpoints.load_std,
             })})
