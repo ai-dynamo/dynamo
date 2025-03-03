@@ -65,6 +65,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AsyncResponseStream>()?;
     m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<llm::kv::KvMetricsPublisher>()?;
+    m.add_class::<llm::model_card::ModelDeploymentCard>()?;
+    m.add_class::<llm::preprocessor::OAIChatPreprocessor>()?;
+    m.add_class::<llm::backend::Backend>()?;
 
     engine::add_to_module(m)?;
 

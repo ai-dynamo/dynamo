@@ -171,3 +171,37 @@ class KvMetricsPublisher:
         Update the KV metrics being reported.
         """
         ...
+
+
+class ModelDeploymentCard:
+    """
+    A model deployment card is a collection of model information
+    """
+    ...
+
+
+class OAIChatPreprocessor:
+    """
+    A preprocessor for OpenAI chat completions
+    """
+    ...
+
+    async def start(self) -> None:
+        """
+        Start the preprocessor
+        """
+        ...
+
+
+class Backend:
+    """
+    LLM Backend engine manages resources and concurrency for executing inference
+    requests in LLM engines (trtllm, vllm, sglang etc)
+    """
+    ...
+
+    async def start(self, handler: RequestHandler) -> None:
+        """
+        Start the backend engine and requests to the downstream LLM engine
+        """
+        ...

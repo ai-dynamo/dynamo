@@ -40,6 +40,7 @@ CMakeCache.txt
 
 **/__pycache__
 **/venv
+**/.venv
 *.cache
 
 # Examples
@@ -73,3 +74,5 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+
+**/.devcontainer
