@@ -67,10 +67,10 @@ class Router:
                 scores = await self.indexer.find_matches_for_request(request.tokens, lora_id)
                 print(f"Scores: {scores.scores()}")
                 metrics = await self.metrics_aggregator.get_metrics()
-                for endpoint in metrics.endpoints():
-                    print(f"Endpoint: {endpoint.worker_id()}")
-                    print(f"Endpoint: {endpoint.request_total_slots()}")
-                    print(f"Endpoint: {endpoint.kv_total_blocks()}")
+                for endpoint in metrics.endpoints:
+                    print(f"Endpoint: {endpoint.worker_id}")
+                    print(f"Endpoint: {endpoint.request_total_slots}")
+                    print(f"Endpoint: {endpoint.kv_total_blocks}")
             # [NOTE][TODO] Now that the scheduler may return more error messages,
             # now we are catching all exceptions and logging them. Should have
             # catch specific router exceptions once we have dedicated types.
