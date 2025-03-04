@@ -179,7 +179,7 @@ impl KvIndexer {
 pub(crate) struct EndpointKvMetrics
 {
     #[pyo3(get, set)]
-    pub worker_ids: i64,
+    pub worker_id: i64,
     #[pyo3(get, set)]
     pub request_active_slots: u64,
     #[pyo3(get, set)]
@@ -228,7 +228,7 @@ impl KvMetricsAggregator {
             .endpoints
             .iter()
             .map(|x| EndpointKvMetrics {
-                worker_ids: x.worker_id(),
+                worker_id: x.worker_id(),
                 request_active_slots: x.data.request_active_slots,
                 request_total_slots: x.data.request_total_slots,
                 kv_active_blocks: x.data.kv_active_blocks,
