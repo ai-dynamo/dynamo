@@ -17,7 +17,7 @@
 import asyncio
 
 import uvloop
-from processor_backend.common import parse_vllm_args
+from preprocessor.common import parse_vllm_args
 
 from triton_distributed.runtime import (
     DistributedRuntime,

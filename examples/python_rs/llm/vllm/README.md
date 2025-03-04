@@ -342,8 +342,59 @@ curl localhost:8080/v1/chat/completions   -H "Content-Type: application/json"   
     "system_fingerprint": null
 }
 ```
+### 6. Preprocessor and backend
 
-### 6. Known Issues and Limitations
+This deployment splits the pre-processing and backend for model serving.
+
+Run following commands in 4 terminals:
+
+**Terminal 1 - vLLM Worker:**
+```bash
+# Activate virtual environment
+source /opt/triton/venv/bin/activate
+cd /workspace/examples/python_rs/llm/vllm
+
+RUST_LOG=info python3 -m preprocessor.worker --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+```
+
+**Terminal 2 - preprocessor:**
+
+```bash
+# Activate virtual environment
+source /opt/triton/venv/bin/activate
+cd /workspace/examples/python_rs/llm/vllm
+
+RUST_LOG=info python3 -m preprocessor.processor --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+```
+
+**Terminal 3 - HTTP Server**
+
+Run the server logging (with debug level logging):
+```bash
+TRD_LOG=DEBUG http
+```
+By default the server will run on port 8080.
+
+Add model to the server:
+```bash
+llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B triton-init.preprocessor.generate
+```
+
+**Terminal 4 - client**
+
+```bash
+
+curl localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    "messages": [
+      {"role": "user", "content": "What is the capital of France?"}
+    ]
+  }'
+```
+
+### 7. Known Issues and Limitations
 
 - vLLM is not working well with the `fork` method for multiprocessing and TP > 1. This is a known issue and a workaround is to use the `spawn` method instead. See [vLLM issue](https://github.com/vllm-project/vllm/issues/6152).
 - `kv_rank` of `kv_producer` must be smaller than of `kv_consumer`.
