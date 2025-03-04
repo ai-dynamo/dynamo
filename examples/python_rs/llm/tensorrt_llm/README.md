@@ -200,7 +200,7 @@ Output:
 }
 ```
 
-### 2. Disaggregated Deployment
+### Disaggregated Deployment
 
 **Environment**
 This is the latest image with tensorrt_llm supporting distributed serving with pytorch workflow in LLM API.
