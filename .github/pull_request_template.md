@@ -14,6 +14,11 @@
 
 <!-- call out specific files that should be looked at closely -->
 
+#### Checklist:
+
+- [ ] PR title is of format `<commit_type>: <Title>`
+- [ ] Copywrite headers are correct on all changed files
+
 #### Test plan:
 
 <!-- list steps to verify -->
@@ -22,10 +27,6 @@
 
 - CI Pipeline ID:
 <!-- Only Pipeline ID and no direct link here -->
-
-#### Caveats:
-
-<!-- any limitations or possible things missing from this PR -->
 
 #### Related Issues: (use one of the action keywords Closes / Fixes / Resolves / Relates to)
 
