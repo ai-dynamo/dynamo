@@ -71,7 +71,6 @@ class VllmEngine(AsyncContextDecorator):
     def __init__(self, engine_args: NvAsyncEngineArgs, mdc: ModelDeploymentCard):
         self.mdc = mdc
         self.engine_args = engine_args
-        self.engine_client = None
         print("vllm backend started")
 
     async def __aenter__(self):

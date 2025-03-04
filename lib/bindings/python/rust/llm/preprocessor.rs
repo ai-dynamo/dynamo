@@ -29,7 +29,7 @@ use llm_rs::{
 
 use triton_distributed_runtime::pipeline::{Operator, ServiceFrontend, Source};
 
-use triton_distributed_runtime::pipeline::{ SegmentSink, SingleIn, ManyOut };
+use triton_distributed_runtime::pipeline::{ManyOut, SegmentSink, SingleIn};
 
 #[pyclass]
 pub(crate) struct OAIChatPreprocessor {
@@ -55,11 +55,12 @@ impl OAIChatPreprocessor {
 
     fn start<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let frontend = ServiceFrontend::<
-                SingleIn<NvCreateChatCompletionRequest>,
-                ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-            >::new();
+            SingleIn<NvCreateChatCompletionRequest>,
+            ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        >::new();
 
-        let network = SegmentSink::<SingleIn<BackendInput>, ManyOut<Annotated<BackendOutput>>>::new();
+        let network =
+            SegmentSink::<SingleIn<BackendInput>, ManyOut<Annotated<BackendOutput>>>::new();
 
         let preprocessor = self.inner.into_operator();
         let pipeline = frontend

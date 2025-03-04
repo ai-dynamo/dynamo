@@ -44,10 +44,8 @@ impl Backend {
     }
 
     fn start<'p>(&self, py: Python<'p>, generator: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let frontend = ServiceFrontend::<
-            SingleIn<BackendInput>,
-            ManyOut<Annotated<BackendOutput>>,
-        >::new();
+        let frontend =
+            ServiceFrontend::<SingleIn<BackendInput>, ManyOut<Annotated<BackendOutput>>>::new();
 
         let backend = self.inner.into_operator();
         let engine = Arc::new(PythonAsyncEngine::new(
