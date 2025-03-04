@@ -143,11 +143,14 @@ async fn app(runtime: Runtime) -> Result<()> {
                     match serde_json::from_slice::<KVHitRateEvent>(&msg.payload) {
                         Ok(event) => {
                             // TODO: Lower to debug
+                            let cache_hit_pct =
+                                (event.overlap_blocks as f64 / event.isl_blocks as f64) * 100.0;
                             tracing::info!(
-                                "Received KV hit rate event: worker_id={}, isl_blocks={}, overlap_blocks={}",
+                                "Received KV hit rate event: worker_id={}, isl_blocks={}, overlap_blocks={}, cache_hit_pct={:.2}%",
                                 event.worker_id,
                                 event.isl_blocks,
-                                event.overlap_blocks
+                                event.overlap_blocks,
+                                cache_hit_pct
                             );
 
                             // Update metrics with the event data
