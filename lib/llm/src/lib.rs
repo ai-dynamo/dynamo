@@ -20,6 +20,7 @@
 
 pub mod backend;
 pub mod common;
+pub mod disagg_router;
 pub mod engines;
 pub mod http;
 pub mod kv_router;
@@ -29,4 +30,3 @@ pub mod preprocessor;
 pub mod protocols;
 pub mod tokenizers;
 pub mod types;
-pub mod disagg_router;

@@ -13,14 +13,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tracing;
 
-use triton_distributed_runtime::DistributedRuntime;
 use triton_distributed_runtime::transports::etcd::WatchEvent;
+use triton_distributed_runtime::DistributedRuntime;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DisaggRouterConf {
@@ -48,23 +47,34 @@ impl DisaggRouterConf {
                 if let Some(kv) = kvs.first() {
                     match serde_json::from_slice::<DisaggRouterConf>(kv.value()) {
                         Ok(config) => {
-                            tracing::debug!("Found initial config for key {}: {:?}", etcd_key, config);
+                            tracing::debug!(
+                                "Found initial config for key {}: {:?}",
+                                etcd_key,
+                                config
+                            );
                             config
-                        },
+                        }
                         Err(e) => {
-                            tracing::warn!("Failed to parse initial config for key {}: {}", etcd_key, e);
+                            tracing::warn!(
+                                "Failed to parse initial config for key {}: {}",
+                                etcd_key,
+                                e
+                            );
                             DisaggRouterConf::default()
                         }
                     }
                 } else {
-                    tracing::debug!("No initial config found for key {}, using default", etcd_key);
+                    tracing::debug!(
+                        "No initial config found for key {}, using default",
+                        etcd_key
+                    );
                     DisaggRouterConf::default()
                 }
-            },
+            }
             Err(e) => {
                 tracing::warn!("Error fetching initial config for key {}: {}", etcd_key, e);
                 DisaggRouterConf::default()
-            },
+            }
         };
 
         // Create watch channel for config updates
@@ -149,9 +159,10 @@ impl DisaggregatedRouter {
     pub async fn new_with_etcd_and_default(
         drt: Arc<DistributedRuntime>,
         model_name: String,
-        default_max_local_prefill_length: i32
+        default_max_local_prefill_length: i32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let (mut config, watcher) = DisaggRouterConf::from_etcd_with_watcher(drt, &model_name).await?;
+        let (mut config, watcher) =
+            DisaggRouterConf::from_etcd_with_watcher(drt, &model_name).await?;
 
         // Use the provided default if no etcd value was found (when config is the default value)
         if config.max_local_prefill_length == DisaggRouterConf::default().max_local_prefill_length {
@@ -234,7 +245,7 @@ impl DisaggregatedRouter {
 
         // schedule the request purely based on the prefill length
         // TODO: apply math models and compare local vs remote prefill TTFT
-        return prefill_length - prefix_hit_length > max_local_prefill_length
+        return prefill_length - prefix_hit_length > max_local_prefill_length;
     }
 
     pub fn update_value(&self, max_local_prefill_length: i32) {
