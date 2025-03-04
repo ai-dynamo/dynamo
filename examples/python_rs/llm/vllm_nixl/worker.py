@@ -132,9 +132,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
 
         if engine_args.remote_prefill:
             metadata = engine_client.nixl_metadata
-
             metadata_store = NixlMetadataStore("test-nixl", runtime)
-
             await metadata_store.put(metadata.engine_id, metadata)
 
             await endpoint.serve_endpoint(

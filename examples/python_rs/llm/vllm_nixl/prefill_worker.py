@@ -79,11 +79,8 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     endpoint = component.endpoint("generate")
 
     async with build_async_engine_client_from_engine_args(engine_args) as engine_client:
-        # This should be replaced with etcd
         metadata = engine_client.nixl_metadata
-
         metadata_store = NixlMetadataStore("test-nixl", runtime)
-
         await metadata_store.put(metadata.engine_id, metadata)
 
         await endpoint.serve_endpoint(

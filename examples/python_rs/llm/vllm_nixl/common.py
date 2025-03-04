@@ -83,9 +83,7 @@ class NixlMetadataStore:
     async def put(self, engine_id, metadata: NixlMetadata):
         serialized_metadata = msgspec.msgpack.encode(metadata)
         key = "/".join([self._key_prefix, engine_id])
-
         await self._client.kv_put(key, serialized_metadata, None)
-
         self._stored.add(engine_id)
 
     async def get(self, engine_id) -> NixlMetadata:
@@ -94,9 +92,7 @@ class NixlMetadataStore:
                 return self._cached[engine_id]
 
             key = "/".join([self._key_prefix, engine_id])
-
             key_values = await self._client.kv_get_prefix(key)
-
             deserialized_metadata = None
 
             for item in key_values:
