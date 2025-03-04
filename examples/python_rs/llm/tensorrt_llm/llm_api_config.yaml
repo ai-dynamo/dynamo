@@ -17,12 +17,12 @@
 # In the case of disaggregated deployment, this config will apply to each server
 # and will be overwritten by the disaggregated config file
 
-model_name: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+model_name: "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 model_path: null
-tensor_parallel_size: 1
+tensor_parallel_size: 2
 moe_expert_parallel_size: 1
 enable_attention_dp: false
-max_num_tokens: 10240
+max_num_tokens: 4096
 max_batch_size: 16
 trust_remote_code: true
 backend: pytorch
@@ -31,5 +31,5 @@ kv_cache_config:
   free_gpu_memory_fraction: 0.95
 
 pytorch_backend_config:
-  enable_overlap_scheduler: false
-  use_cuda_graph: false
+  enable_overlap_scheduler: true
+  use_cuda_graph: true
