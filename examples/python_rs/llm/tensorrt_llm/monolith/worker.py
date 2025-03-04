@@ -129,7 +129,7 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
                 len(prompts) if request.n is None else len(prompts) * request.n
             )
 
-            # NOTE: somehow stream and non-stream is working with the same path
+            # NOTE: always send `stream: true` to the worker, and decide whether to aggregate  or not before sending the response back to client.
             response_generator = self.completions_processor.create_completion_generator(
                 request, generator, num_choices
             )

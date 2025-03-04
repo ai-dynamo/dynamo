@@ -258,7 +258,7 @@ Follow the instructions in the [Monolithic Deployment](#3-client) section to sen
 For more details on the disaggregated deployment, please refer to the [TRT-LLM example](#TODO).
 
 
-### 3. Multi-Node Disaggregated Deployment
+### Multi-Node Disaggregated Deployment
 
 To run the disaggregated deployment across multiple nodes, we need to launch the servers using MPI, pass the correct NATS and etcd endpoints to each server and update the LLMAPI disaggregated config file to use the correct endpoints.
 
@@ -304,7 +304,7 @@ export NATS_SERVER="nats://node1:4222"
 export ETCD_ENDPOINTS="http://node1:2379,http://node2:2379"
 ```
 
-3. Launch the workers from node1 or login node. WORLD_SIZE is similar to single node deployment. Update the `model.json` to point to the new disagg config file.
+3. Launch the workers from node1 or login node. WORLD_SIZE is similar to single node deployment.
 ```bash
 srun --mpi pmix -N NUM_NODES --ntasks WORLD_SIZE --ntasks-per-node=WORLD_SIZE --no-container-mount-home --overlap --container-image IMAGE --output batch_%x_%j.log --err batch_%x_%j.err --container-mounts PATH_TO_TRITON_DISTRIBUTED:/workspace --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/tensorrt_llm && python3 -m disaggregated.worker --engine_args llm_api_config.yaml -c disaggregated/llmapi_disaggregated_configs/multi_node_config.yaml' &
 ```

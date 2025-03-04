@@ -112,6 +112,7 @@ class ChatProcessor:
             # returning multiple logprobs is not supported
             first_logprob = ChatCompletionLogProbsContent(
                 token=token,
+                # NOTE: min logprob -9999.0 for probabilities extremely close to 0
                 logprob=max(logprob, -9999.0),
                 bytes=list(token.encode("utf-8", errors="replace")),
             )
@@ -141,7 +142,9 @@ class ChatProcessor:
                     choices=[choice_data],
                     model=self.model,
                 )
-                chunk.usage = self._stream_usage_info(self.request, num_tokens, 0)
+                chunk.usage = self._stream_usage_info(
+                    self.request, num_tokens, completion_tokens=0
+                )
 
                 return chunk
 
