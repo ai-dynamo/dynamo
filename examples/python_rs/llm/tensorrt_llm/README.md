@@ -327,4 +327,4 @@ srun --mpi pmix -N 1 --ntasks 1 --ntasks-per-node=1 --overlap --container-image 
 ```
 
 5. Send requests to the router.
-The router will start OAI compatible server. You can send requests to the router using the standard OAI format as shown in previous sections.
+The router will connect to the OAI compatible server. You can send requests to the router using the standard OAI format as shown in previous sections.
