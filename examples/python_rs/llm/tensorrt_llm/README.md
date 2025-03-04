@@ -104,7 +104,7 @@ llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 triton-init.tensor
 
 Note: The following commands are tested on machines withH100x8 GPUs
 
-##### Option 1.1 Single-Node Single-GPU
+##### Option 2.1 Single-Node Single-GPU
 
 ```bash
 # Launch worker
