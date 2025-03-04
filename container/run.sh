@@ -206,7 +206,6 @@ get_options() {
 	VOLUME_MOUNTS+=" -v ${SOURCE_DIR}/..:/workspace "
 	VOLUME_MOUNTS+=" -v /tmp:/tmp "
 	VOLUME_MOUNTS+=" -v /mnt/:/mnt "
-	VOLUME_MOUNTS+=" -v /ephemeral/:/ephemeral " # TODO: Remove this before merging
 
 	if [ -z "$HF_CACHE" ]; then
 	    HF_CACHE=$DEFAULT_HF_CACHE
