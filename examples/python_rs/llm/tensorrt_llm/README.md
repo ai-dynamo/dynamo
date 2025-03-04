@@ -96,8 +96,8 @@ By default the server will run on port 8080.
 
 Add model to the server:
 ```bash
-llmctl http add chat deepseek-ai/DeepSeek-R1-Distill-Llama-8B triton-init.tensorrt-llm.chat/completions
-llmctl http add completion deepseek-ai/DeepSeek-R1-Distill-Llama-8B triton-init.tensorrt-llm.completions
+llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 triton-init.tensorrt-llm.chat/completions
+llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 triton-init.tensorrt-llm.completions
 ```
 
 #### 2. Workers
@@ -141,7 +141,7 @@ TODO: Add multi-node multi-GPU example
 curl localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     "messages": [
       {"role": "user", "content": "What is the capital of France?"}
     ]
@@ -163,7 +163,7 @@ The output should look similar to:
     }
   ],
   "created": 1740617803,
-  "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+  "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
   "object": "chat.completion",
   "usage": null,
   "system_fingerprint": null
@@ -175,7 +175,7 @@ The output should look similar to:
 curl localhost:8080/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
-        "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         "prompt": "NVIDIA is a great company because",
         "max_tokens": 16,
         "temperature": 0
@@ -194,7 +194,7 @@ Output:
     }
   ],
   "created":1741024639,
-  "model":"deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+  "model":"TinyLlama/TinyLlama-1.1B-Chat-v1.0",
   "object":"completion",
   "usage":null
 }
@@ -220,8 +220,8 @@ By default the server will run on port 8080.
 
 Add model to the server:
 ```bash
-llmctl http add chat deepseek-ai/DeepSeek-R1-Distill-Llama-8B triton-init.router.chat/completions
-llmctl http add completion deepseek-ai/DeepSeek-R1-Distill-Llama-8B triton-init.router.completions
+llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 triton-init.router.chat/completions
+llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 triton-init.router.completions
 ```
 
 #### 2. Workers
@@ -270,7 +270,7 @@ salloc -A ACCOUNT -N NUM_NODES -p batch -J JOB_NAME -t HH:MM:SS
 
 You can use `squeue -u $USER` to check the URLs of the allocated nodes. These URLs should be added to the TRTLLM LLMAPI disaggregated config file as shown below.
 ```yaml
-model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
 ...
 context_servers:
   num_instances: 2

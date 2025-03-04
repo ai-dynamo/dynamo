@@ -14,12 +14,13 @@
 # limitations under the License.
 
 
+model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
 hostname: localhost
 port: 8000
 backend: "pytorch"
 context_servers:
   num_instances: 2
-  gpu_fraction: 0.60
+  gpu_fraction: 0.25
   tp_size: 2
   pp_size: 1
   urls:
@@ -27,7 +28,7 @@ context_servers:
       - "node1:8002"
 generation_servers:
   num_instances: 2
-  gpu_fraction: 0.60
+  gpu_fraction: 0.25
   tp_size: 2
   pp_size: 1
   urls:
