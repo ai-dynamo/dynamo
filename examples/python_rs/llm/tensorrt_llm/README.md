@@ -84,7 +84,7 @@ pip install /home/tensorrt_llm-*.whl
 
 Note: NATS and ETCD servers should be running and accessible from the container as described in the [Prerequisites](#prerequisites) section.
 
-### 1. Monolithic Deployment
+### Monolithic Deployment
 
 #### 1. HTTP Server
 
