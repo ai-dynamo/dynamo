@@ -1,0 +1,26 @@
+name: Copyright Checks
+
+on:
+  pull_request
+
+jobs:
+  copyright-checks:
+      runs-on: ubuntu-24.04
+      container:
+        image: ghcr.io/dynemo-ai/dynemo/helm-tester:0.1.1
+        options: --tty
+        volumes:
+        - ${{ github.workspace }}:/workspace
+      permissions:
+        contents: read
+        packages: read
+      steps:
+      - uses: actions/checkout@v4
+        # Allowlist both variants of the mounted source directory.
+      - run: git config --global --add safe.directory /__w/dynemo/dynemo
+      - run: git config --global --add safe.directory /workspace
+      - run: pwsh /workspace/.github/workflows/copyright-check.ps1
+        env:
+          NVBUILD_VERBOSITY: DETAILED
+        timeout-minutes: 2
+        working-directory: /workspace
