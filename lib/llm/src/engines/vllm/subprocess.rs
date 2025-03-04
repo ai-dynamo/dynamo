@@ -16,6 +16,8 @@
 use pyo3::{types::IntoPyDict, Python};
 use std::path::Path;
 
+use crate::engines::MultiNodeConfig;
+
 const PY_START_ENGINE: &std::ffi::CStr = cr#"
 import multiprocessing
 import signal
@@ -24,7 +26,18 @@ from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.usage.usage_lib import UsageContext
 
-engine_args = AsyncEngineArgs(model=f"{model_path}", served_model_name=None, tokenizer=f"{tokenizer_path}", task='generate', tokenizer_mode='auto', seed=0, max_model_len=8192, max_seq_len_to_capture=8192)
+engine_args = AsyncEngineArgs(
+    model=f"{model_path}",
+    served_model_name=None,
+    tokenizer=f"{tokenizer_path}",
+    task='generate',
+    tokenizer_mode='auto',
+    seed=0,
+    max_model_len=8192,
+    max_seq_len_to_capture=8192,
+    tensor_parallel_size = int(tp_size_str),
+    pipeline_parallel_size = int(nnodes_str),
+)
 
 ipc_path = f"ipc:///tmp/{socket_id}";
 
@@ -39,6 +52,8 @@ pub fn run_subprocess(
     socket_id: &str,
     model_card_path: &Path,
     model_path: &Path,
+    node_config: MultiNodeConfig,
+    tp_size: u32,
 ) -> anyhow::Result<()> {
     pyo3::prepare_freethreaded_python(); // or enable feature "auto-initialize"
     let card = model_card_path.display().to_string();
@@ -48,6 +63,8 @@ pub fn run_subprocess(
             ("socket_id", socket_id),
             ("tokenizer_path", card.as_str()),
             ("model_path", model_path_str.as_str()),
+            ("tp_size_str", &tp_size.to_string()),
+            ("nnodes_str", &node_config.num_nodes.to_string()),
         ]
         .into_py_dict(py)
         .unwrap();

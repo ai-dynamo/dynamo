@@ -13,8 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::PathBuf;
-use std::str::FromStr;
+#[cfg(any(feature = "vllm", feature = "sglang"))]
+use std::{future::Future, pin::Pin};
 
 use triton_distributed_llm::{
     backend::ExecutionContext,
@@ -29,8 +29,10 @@ use triton_distributed_llm::{
 };
 use triton_distributed_runtime::{component::Client, protocols::Endpoint, DistributedRuntime};
 
+mod flags;
+pub use flags::Flags;
 mod input;
-#[cfg(feature = "sglang")]
+#[cfg(any(feature = "vllm", feature = "sglang"))]
 mod net;
 mod opt;
 mod output;
@@ -40,90 +42,6 @@ pub use opt::{Input, Output};
 /// Technically the '://' is not part of the scheme but it eliminates several string
 /// concatenations.
 const ENDPOINT_SCHEME: &str = "tdr://";
-
-/// Required options depend on the in and out choices
-#[derive(clap::Parser, Debug, Clone)]
-#[command(version, about, long_about = None)]
-pub struct Flags {
-    /// Full path to the model, which can be either a GGUF file or a checked out HF repository.
-    /// For the `echo_full` engine omit the flag.
-    #[arg(index = 1)]
-    pub model_path_pos: Option<PathBuf>,
-
-    // `--model-path`. The one above is `tio <positional-model-path>`
-    #[arg(long = "model-path")]
-    pub model_path_flag: Option<PathBuf>,
-
-    /// HTTP port. `in=http` only
-    #[arg(long, default_value = "8080")]
-    pub http_port: u16,
-
-    /// The name of the model we are serving
-    #[arg(long)]
-    pub model_name: Option<String>,
-
-    /// llamacpp only
-    ///
-    /// The path to the tokenizer and model config because:
-    /// - llama_cpp only runs GGUF files
-    /// - our engine is a 'core' engine in that we do the tokenization, so we need the vocab
-    /// - TODO: we don't yet extract that from the GGUF. Once we do we can remove this flag.
-    #[arg(long)]
-    pub model_config: Option<PathBuf>,
-
-    /// sglang and trtllm only
-    ///
-    /// How many GPUs to use at once, total across all nodes.
-    /// This must divide by num_nodes, and each node must use the same number of GPUs.
-    #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(1..256))]
-    pub tensor_parallel_size: u32,
-
-    /// sglang only
-    ///
-    /// Use GPUs from this ID upwards.
-    /// If your machine has four GPUs but the first two (0 and 1) are in use,
-    /// pass --base-gpu-id 2 to use the third GPU (and up, if tensor_parallel_size > 1)
-    #[arg(long, default_value = "0", value_parser = clap::value_parser!(u32).range(0..256))]
-    pub base_gpu_id: u32,
-
-    /// sglang only
-    ///
-    /// How many nodes/hosts to use
-    #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(1..256))]
-    pub num_nodes: u32,
-
-    /// sglang only
-    ///
-    /// This nodes' unique ID, running from 0 to num_nodes.
-    #[arg(long, default_value = "0", value_parser = clap::value_parser!(u32).range(0..255))]
-    pub node_rank: u32,
-
-    /// sglang only
-    ///
-    /// The Torch Distributed init method address, in format <host>:<port>.
-    /// It becomes "tcp://<host>:<port>" when given to torch.distributed.init_process_group.
-    /// This expects to use the nccl backend (transparently to us here).
-    /// All nodes must use the same dist_init_addr, which is node_rank == 0's address.
-    #[arg(long)]
-    pub dist_init_addr: Option<String>,
-
-    /// Internal use only.
-    // Start the python vllm engine sub-process.
-    #[arg(long)]
-    #[clap(hide = true, default_value = "false")]
-    pub internal_vllm_process: bool,
-
-    /// Internal use only.
-    /// Start the sglang Python sub-process.
-    /// The params in the tuple are:
-    /// - the fd of the write end of a pipe where sglang will signal that it's ready.
-    /// - the node rank (0 for first host, 1 for second host, etc)
-    /// - the workers' rank (globally unique)
-    /// - the GPU to use (locally unique)
-    #[arg(long)]
-    #[clap(hide = true, value_parser = parse_sglang_flags)]
-    pub internal_sglang_process: Option<SgLangFlags>,
-}
 
 pub enum EngineConfig {
     /// An remote networked engine we don't know about yet
@@ -142,35 +60,15 @@ pub enum EngineConfig {
         engine: ExecutionContext,
         card: Box<ModelDeploymentCard>,
     },
+
+    /// vllm multi-node doesn't run an engine on nodes other than 0. 'ray' does all the work.
+    None,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct SgLangFlags {
-    pub pipe_fd: u32,
-    pub tp_rank: u32,
-    pub gpu_id: u32,
-}
-fn parse_sglang_flags(s: &str) -> Result<SgLangFlags, String> {
-    let nums: Vec<u32> = s
-        .split(',')
-        .map(u32::from_str)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-
-    if nums.len() != 3 {
-        return Err("Need exactly 3 numbers".into());
-    }
-
-    Ok(SgLangFlags {
-        pipe_fd: nums[0],
-        tp_rank: nums[1],
-        gpu_id: nums[2],
-    })
-}
-
+#[allow(unused_mut)]
 pub async fn run(
     runtime: triton_distributed_runtime::Runtime,
-    in_opt: Input,
+    mut in_opt: Input, // mut because vllm and sglang multi-node can change it
     out_opt: Output,
     flags: Flags,
     #[allow(unused_variables)] zmq_socket_prefix: Option<String>,
@@ -212,7 +110,7 @@ pub async fn run(
     };
 
     #[cfg(any(feature = "vllm", feature = "sglang"))]
-    let mut extra = None; // vllm and sglang sub-process
+    let mut extra: Option<Pin<Box<dyn Future<Output = ()> + Send>>> = None; // vllm and sglang sub-process
 
     // Create the engine matching `out`
     let engine_config = match out_opt {
@@ -293,16 +191,21 @@ pub async fn run(
             let Some(sock_prefix) = zmq_socket_prefix else {
                 anyhow::bail!("sglang requires zmq_socket_prefix");
             };
-            let node_conf = sglang::MultiNodeConfig {
+            let node_conf = triton_distributed_llm::engines::MultiNodeConfig {
                 num_nodes: flags.num_nodes,
                 node_rank: flags.node_rank,
-                dist_init_addr: flags.dist_init_addr,
+                leader_addr: flags.leader_addr.unwrap_or_default(),
             };
             if node_conf.num_nodes > 1 {
                 if let Ok(Some(if_name)) = net::get_primary_interface().await {
                     tracing::info!("If you see 'gloo' errors from sglang try setting these environment variables:");
                     tracing::info!("export GLOO_SOCKET_IFNAME={if_name}");
                     tracing::info!("export NCCL_SOCKET_IFNAME={if_name}");
+                }
+                if node_conf.node_rank != 0 {
+                    // Follower nodes take input from leader node over pytorch distributed, not
+                    // from user.
+                    in_opt = Input::None;
                 }
             }
 
@@ -315,7 +218,9 @@ pub async fn run(
                 flags.base_gpu_id,
             )
             .await?;
-            extra = Some(sglang_process);
+            extra = Some(Box::pin(async move {
+                let _ = sglang_process.await;
+            }));
             EngineConfig::StaticCore {
                 service_name: card.service_name.clone(),
                 engine,
@@ -325,6 +230,9 @@ pub async fn run(
         #[cfg(feature = "vllm")]
         Output::Vllm => {
             use triton_distributed_llm::engines::vllm;
+            if flags.base_gpu_id != 0 {
+                anyhow::bail!("vllm does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
+            }
             let Some(model_path) = model_path else {
                 anyhow::bail!(
                     "out=vllm requires flag --model-path=<full-path-to-hf-repo-or-model-gguf>"
@@ -345,19 +253,49 @@ pub async fn run(
             let Some(sock_prefix) = zmq_socket_prefix else {
                 anyhow::bail!("vllm requires zmq_socket_prefix");
             };
-            let (engine, vllm_process) =
-                vllm::make_engine(cancel_token.clone(), &card_path, &model_path, &sock_prefix)
-                    .await?;
-            extra = Some(vllm_process);
-            EngineConfig::StaticCore {
-                service_name: card.service_name.clone(),
-                engine,
-                card: Box::new(card),
+            let node_conf = triton_distributed_llm::engines::MultiNodeConfig {
+                num_nodes: flags.num_nodes,
+                node_rank: flags.node_rank,
+                leader_addr: flags.leader_addr.unwrap_or_default(),
+            };
+            if node_conf.num_nodes > 1 {
+                if let Ok(Some(if_name)) = net::get_primary_interface().await {
+                    tracing::info!("If you see network errors from vllm try setting this environment variable:");
+                    tracing::info!("export NCCL_SOCKET_IFNAME={if_name}");
+                }
+                if node_conf.node_rank != 0 {
+                    // Only node 0 runs vllm, the others communicate over ray
+                    in_opt = Input::None;
+                }
+            }
+            if node_conf.node_rank == 0 {
+                // vllm multi-node only the leader runs vllm
+                let (engine, vllm_future) = vllm::make_leader_engine(
+                    cancel_token.clone(),
+                    &card_path,
+                    &model_path,
+                    &sock_prefix,
+                    node_conf,
+                    flags.tensor_parallel_size,
+                )
+                .await?;
+                extra = Some(Box::pin(async move {
+                    let _ = vllm_future.await;
+                }));
+                EngineConfig::StaticCore {
+                    service_name: card.service_name.clone(),
+                    engine,
+                    card: Box::new(card),
+                }
+            } else {
+                // Nodes rank > 0 only run 'ray'
+                let stop_future = vllm::start_follower(cancel_token.clone(), node_conf).await?;
+                extra = Some(Box::pin(stop_future));
+                EngineConfig::None
             }
         }
         #[cfg(feature = "llamacpp")]
         Output::LlamaCpp => {
-            use anyhow::Context;
             use triton_distributed_llm::engines::llamacpp;
             let Some(model_path) = model_path else {
                 anyhow::bail!("out=llamacpp requires flag --model-path=<full-path-to-model-gguf>");
@@ -419,9 +357,8 @@ pub async fn run(
 
     #[cfg(any(feature = "vllm", feature = "sglang"))]
     // Allow engines to ask main thread to wait on an extra future.
-    // vllm and sglang use this to shut down sub-process
     if let Some(extra) = extra {
-        extra.await?;
+        extra.await;
     }
 
     Ok(())

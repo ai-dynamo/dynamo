@@ -24,7 +24,7 @@ use triton_distributed_runtime::pipeline::{Error, ManyOut, SingleIn};
 use triton_distributed_runtime::protocols::annotated::Annotated;
 use triton_distributed_runtime::runtime::CancellationToken;
 
-use crate::engines::sglang::MultiNodeConfig;
+use crate::engines::MultiNodeConfig;
 
 pub struct SgLangEngine {
     cancel_token: CancellationToken,

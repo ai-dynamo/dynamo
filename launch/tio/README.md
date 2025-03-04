@@ -139,6 +139,19 @@ Run (still inside that virtualenv) - GGUF:
 ./target/release/tio in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf --model-config ~/llm_models/Llama-3.2-3B-Instruct/
 ```
 
++ Multi-node:
+
+Node 1:
+```
+tio in=text out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --tensor-parallel-size 8 --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 0
+```
+
+Node 2:
+```
+tio in=none out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 1
+```
+
+
 ## trtllm
 
 TensorRT-LLM. Requires `clang` and `libclang-dev`.

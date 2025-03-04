@@ -96,6 +96,7 @@ pub async fn run(
                 .model_manager()
                 .add_chat_completions_model(&service_name, pipeline)?;
         }
+        EngineConfig::None => unreachable!(),
     }
     http_service.run(runtime.primary_token()).await
 }

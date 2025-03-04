@@ -24,11 +24,11 @@ license = "Apache-2.0"
 [features]
 mistralrs = ["triton-distributed-llm/mistralrs"]
 sglang = ["triton-distributed-llm/sglang", "dep:netlink-packet-route", "dep:rtnetlink"]
+vllm = ["triton-distributed-llm/vllm", "dep:netlink-packet-route", "dep:rtnetlink"]
 llamacpp = ["triton-distributed-llm/llamacpp"]
 trtllm = ["triton-distributed-llm/trtllm"]
 cuda = ["triton-distributed-llm/cuda"]
 metal = ["triton-distributed-llm/metal"]
-vllm = ["triton-distributed-llm/vllm"]
 
 [dependencies]
 anyhow = "1"

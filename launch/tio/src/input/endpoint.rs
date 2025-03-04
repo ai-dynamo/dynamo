@@ -78,6 +78,7 @@ pub async fn run(
         EngineConfig::Dynamic(_) => {
             anyhow::bail!("Cannot use endpoint for both in and out");
         }
+        EngineConfig::None => unreachable!(),
     };
 
     let model_registration = ModelEntry {
