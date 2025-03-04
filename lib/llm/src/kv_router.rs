@@ -21,11 +21,11 @@ use tokio_util::sync::CancellationToken;
 use tracing;
 
 pub mod indexer;
+pub mod metrics_aggregator;
 pub mod protocols;
 pub mod publisher;
 pub mod scheduler;
 pub mod scoring;
-pub mod metrics_aggregator;
 
 use crate::kv_router::{
     indexer::{KvIndexer, KvIndexerInterface, RouterEvent},

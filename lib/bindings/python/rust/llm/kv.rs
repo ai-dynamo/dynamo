@@ -16,8 +16,8 @@
 use std::collections::HashMap;
 
 use super::*;
-use tracing;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
+use tracing;
 
 #[pyclass]
 pub(crate) struct KvRouter {
@@ -137,19 +137,33 @@ impl KvIndexer {
     fn new(component: Component, token: CancellationToken) -> PyResult<Self> {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async {
-            let kv_subject = component.inner.event_subject(llm_rs::kv_router::KV_EVENT_SUBJECT);
-            let inner: Arc<llm_rs::kv_router::indexer::KvIndexer> = llm_rs::kv_router::indexer::KvIndexer::new(token.inner).into();
-            let mut kv_events_rx = component.inner.drt().nats_client().client().subscribe(kv_subject).await.map_err(to_pyerr)?;
+            let kv_subject = component
+                .inner
+                .event_subject(llm_rs::kv_router::KV_EVENT_SUBJECT);
+            let inner: Arc<llm_rs::kv_router::indexer::KvIndexer> =
+                llm_rs::kv_router::indexer::KvIndexer::new(token.inner).into();
+            let mut kv_events_rx = component
+                .inner
+                .drt()
+                .nats_client()
+                .client()
+                .subscribe(kv_subject)
+                .await
+                .map_err(to_pyerr)?;
             let kv_events_tx = inner.event_sender();
-        
+
             // [FIXME] this is the added functionality to the indexer to subscribe to kv events,
             // should have been made to a trait and implemented here? i.e. AsyncEngine style
             tokio::spawn(async move {
                 while let Some(event) = kv_events_rx.next().await {
-                    let event: llm_rs::kv_router::indexer::RouterEvent = serde_json::from_slice(&event.payload).unwrap();
+                    let event: llm_rs::kv_router::indexer::RouterEvent =
+                        serde_json::from_slice(&event.payload).unwrap();
                     tracing::debug!("received kv event: {:?}", event);
                     if let Err(e) = kv_events_tx.send(event).await {
-                        tracing::trace!("failed to send kv event to indexer; shutting down: {:?}", e);
+                        tracing::trace!(
+                            "failed to send kv event to indexer; shutting down: {:?}",
+                            e
+                        );
                     }
                 }
             });
@@ -176,8 +190,7 @@ impl KvIndexer {
 
 #[pyclass]
 #[derive(Clone)]
-pub(crate) struct EndpointKvMetrics
-{
+pub(crate) struct EndpointKvMetrics {
     #[pyo3(get, set)]
     pub worker_id: i64,
     #[pyo3(get, set)]
@@ -189,7 +202,6 @@ pub(crate) struct EndpointKvMetrics
     #[pyo3(get, set)]
     pub kv_total_blocks: u64,
 }
-
 
 #[pyclass]
 #[derive(Clone)]
@@ -218,10 +230,12 @@ impl KvMetricsAggregator {
                 token.inner,
             )
             .await;
-            Ok(Self { inner: inner.into() })
+            Ok(Self {
+                inner: inner.into(),
+            })
         })
     }
-    
+
     fn get_metrics<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let endpoints = self.inner.get_endpoints();
         let endpoint_kv_metrics = endpoints
@@ -240,6 +254,7 @@ impl KvMetricsAggregator {
                 endpoints: endpoint_kv_metrics,
                 load_avg: endpoints.load_avg,
                 load_std: endpoints.load_std,
-            })})
+            })
+        })
     }
 }

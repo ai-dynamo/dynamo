@@ -19,16 +19,15 @@ pub use crate::kv_router::protocols::ForwardPassMetrics;
 
 use anyhow::Result;
 use triton_distributed_runtime::pipeline::network::{
-    ingress::push_endpoint::PushEndpoint,
-    PushWorkHandler,
+    ingress::push_endpoint::PushEndpoint, PushWorkHandler,
 };
 
+use crate::kv_router::scheduler::{Endpoint, Service};
+use crate::kv_router::ProcessedEndpoints;
+use std::time::Duration;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use triton_distributed_runtime::{component::Component, DistributedRuntime};
-use crate::kv_router::ProcessedEndpoints;
-use crate::kv_router::scheduler::{Service, Endpoint};
-use std::time::Duration;
 
 pub struct KvMetricsAggregator {
     pub service_name: String,
@@ -36,10 +35,7 @@ pub struct KvMetricsAggregator {
 }
 
 impl KvMetricsAggregator {
-    pub async fn new(
-        component: Component,
-        cancellation_token: CancellationToken
-    ) -> Self {
+    pub async fn new(component: Component, cancellation_token: CancellationToken) -> Self {
         let (ep_tx, ep_rx) = tokio::sync::mpsc::channel(128);
 
         tokio::spawn(collect_endpoints(
@@ -61,7 +57,7 @@ impl KvMetricsAggregator {
                     Some(endpoints) => {
                         let mut shared_endpoint = endpoints_clone.lock().unwrap();
                         *shared_endpoint = endpoints;
-                    },
+                    }
                     None => {
                         tracing::trace!("endpoint subscriber shutdown");
                         break;

@@ -23,7 +23,7 @@ import uvloop
 from common.protocol import Tokens
 from vllm.logger import logger as vllm_logger
 
-from triton_distributed.llm import KvRouter, KvIndexer, KvMetricsAggregator
+from triton_distributed.llm import KvIndexer, KvMetricsAggregator
 from triton_distributed.runtime import (
     DistributedRuntime,
     triton_endpoint,
@@ -57,14 +57,15 @@ class Router:
         self.metrics_aggregator = metrics_aggregator
         self.routing_strategy = routing_strategy
 
-
     @triton_endpoint(Tokens, WorkerId)
     async def generate(self, request) -> AsyncIterator[WorkerId]:
         lora_id = 0
         worker_id = ""
         if self.routing_strategy == RoutingStrategy.PREFIX:
             try:
-                scores = await self.indexer.find_matches_for_request(request.tokens, lora_id)
+                scores = await self.indexer.find_matches_for_request(
+                    request.tokens, lora_id
+                )
                 print(f"Scores: {scores.scores()}")
                 metrics = await self.metrics_aggregator.get_metrics()
                 for endpoint in metrics.endpoints:
@@ -133,7 +134,9 @@ async def worker(runtime: DistributedRuntime, args: Namespace):
     metrics_aggregator = KvMetricsAggregator(kv_listener, runtime.primary_token())
 
     endpoint = router_component.endpoint("generate")
-    await endpoint.serve_endpoint(Router(indexer, metrics_aggregator, args.routing_strategy).generate)
+    await endpoint.serve_endpoint(
+        Router(indexer, metrics_aggregator, args.routing_strategy).generate
+    )
 
 
 if __name__ == "__main__":

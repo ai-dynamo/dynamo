@@ -242,15 +242,14 @@ class CancellationToken:
 
 class OverlapScores:
     """
-    A collection of scores for a given token ids
+    A collection of prefix matching scores of workers for a given token ids
     """
 
     ...
 
-# [WIP] fix docs
 class KvIndexer:
     """
-    A metrics publisher will provide KV metrics to the router.
+    A KV indexer that tracks the KV block operationss of the workers.
     """
 
     ...
@@ -262,33 +261,31 @@ class KvIndexer:
 
     def find_matches_for_request(self, token_ids: List[int], lora_id: int) -> OverlapScores:
         """
-        Similar to Component.create_service, but only service created through
-        this method will interact with KV router of the same component.
+        Return the overlapping scores of workers for the given token ids.
         """
         ...
 
 class AggregatedMetrics:
     """
-    A collection of scores for a given token ids
+    A collection of metrics of the endpoints
     """
 
     ...
 
 class KvMetricsAggregator:
     """
-    A metrics publisher will provide KV metrics to the router.
+    A metrics aggregator will collect KV metrics of the endpoints.
     """
 
     ...
 
     def __init__(self, component: Component, token: CancellationToken) -> None:
         """
-        Create a `KvIndexer` object
+        Create a `KvMetricsAggregator` object
         """
 
     def get_metrics(self) -> AggregatedMetrics:
         """
-        Similar to Component.create_service, but only service created through
-        this method will interact with KV router of the same component.
+        Return the aggregated metrics of the endpoints.
         """
         ...
