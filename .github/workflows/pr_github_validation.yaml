@@ -65,7 +65,7 @@ jobs:
           CACHE_FROM: "type=registry,ref=${{ steps.which_cache.outputs.cache_from_location }}"
           CACHE_TO: "type=registry,ref=${{ steps.which_cache.outputs.cache_to_location }},image-manifest=true,mode=max"
         run: |
-          ./container/build.sh --tag $IMAGE_TAG --framework ${{ matrix.framework }} --cache-from "${{ env.CACHE_FROM }}" --cache-to "${{ env.CACHE_TO }}"
+          ./container/build.sh --tag ${{ env.IMAGE_TAG }} --framework ${{ matrix.framework }} --cache-from "${{ env.CACHE_FROM }}" --cache-to "${{ env.CACHE_TO }}"
       - name: Run pytest
         env:
           PYTEST_MARKS: "pre_merge or mypy"

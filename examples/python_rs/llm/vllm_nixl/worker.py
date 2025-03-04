@@ -18,7 +18,7 @@ import asyncio
 import os
 
 import uvloop
-from utils.nixl import temp_metadata_file
+from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
 from utils.protocol import MyRequestOutput, vLLMGenerateRequest
 from utils.vllm import parse_vllm_args
@@ -170,19 +170,21 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
         # This should be replaced with etcd
         if engine_args.remote_prefill:
             metadata = engine_client.nixl_metadata
-            with temp_metadata_file(metadata.engine_id, metadata):
-                await asyncio.gather(
-                    endpoint.serve_endpoint(
-                        RequestHandler(
-                            model_name=engine_args.model,
-                            engine_client=engine_client,
-                            prefill_client=prefill_client,
-                            do_remote_prefill=True,
-                            disaggregated_router=disaggregated_router,
-                        ).generate
-                    ),
-                    metrics_publisher.create_endpoint(component),
-                )
+            metadata_store = NixlMetadataStore("triton-init", runtime)
+            await metadata_store.put(metadata.engine_id, metadata)
+
+            await asyncio.gather(
+                endpoint.serve_endpoint(
+                    RequestHandler(
+                        model_name=engine_args.model,
+                        engine_client=engine_client,
+                        prefill_client=prefill_client,
+                        do_remote_prefill=True,
+                        disaggregated_router=disaggregated_router,
+                    ).generate
+                ),
+                metrics_publisher.create_endpoint(component),
+            )
         else:
             await endpoint.serve_endpoint(
                 RequestHandler(
