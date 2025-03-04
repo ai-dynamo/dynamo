@@ -22,11 +22,19 @@
 //!   - These metrics will be scraped by the LLM NATS Service API's stats request
 //!   - Request Slots: [Active, Total]
 //!   - KV Cache Blocks: [Active, Total]
+//! - KV Hit Rate:
+//!   - These metrics will be collected from KV hit rate events published by the KV router
+//!   - ISL Blocks: Total blocks in the request
+//!   - Overlap Blocks: Blocks that were already in the KV cache
+//!   - Hit Rate Percentage: Percentage of blocks that were already in the KV cache
 
 use clap::Parser;
+use futures::stream::StreamExt;
+use std::sync::Arc;
+use triton_distributed_llm::kv_router::scheduler::KVHitRateEvent;
 use triton_distributed_runtime::{
     error, logging,
-    traits::events::EventPublisher,
+    traits::events::{EventPublisher, EventSubscriber},
     utils::{Duration, Instant},
     DistributedRuntime, ErrorContext, Result, Runtime, Worker,
 };
@@ -111,8 +119,59 @@ async fn app(runtime: Runtime) -> Result<()> {
 
     // TODO: Make metrics host/port configurable
     // Initialize Prometheus metrics and start server
-    let mut metrics_server = PrometheusMetricsServer::new()?;
-    metrics_server.start(9091);
+    let metrics_server = PrometheusMetricsServer::new()?;
+    let metrics_server = Arc::new(tokio::sync::Mutex::new(metrics_server));
+    metrics_server.lock().await.start(9091);
+
+    // Subscribe to KV hit rate events
+    let kv_hit_rate_subject = "kv-hit-rate";
+    tracing::info!("Subscribing to KV hit rate events on subject: {kv_hit_rate_subject}");
+
+    // Clone the metrics server and config for the subscription task
+    let metrics_server_clone = metrics_server.clone();
+    let config_clone = config.clone();
+    // Clone the namespace for the subscription task
+    let namespace_clone = namespace.clone();
+
+    // Spawn a task to handle KV hit rate events
+    tokio::spawn(async move {
+        match namespace_clone.subscribe(kv_hit_rate_subject).await {
+            Ok(mut subscriber) => {
+                tracing::info!("Successfully subscribed to KV hit rate events");
+
+                while let Some(msg) = subscriber.next().await {
+                    match serde_json::from_slice::<KVHitRateEvent>(&msg.payload) {
+                        Ok(event) => {
+                            // TODO: Lower to debug
+                            tracing::info!(
+                                "Received KV hit rate event: worker_id={}, isl_blocks={}, overlap_blocks={}",
+                                event.worker_id,
+                                event.isl_blocks,
+                                event.overlap_blocks
+                            );
+
+                            // Update metrics with the event data
+                            let mut metrics = metrics_server_clone.lock().await;
+                            metrics.update_kv_hit_rate(
+                                &config_clone,
+                                event.worker_id,
+                                event.isl_blocks,
+                                event.overlap_blocks,
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to deserialize KV hit rate event: {:?}", e);
+                        }
+                    }
+                }
+
+                tracing::warn!("KV hit rate event subscription stream ended");
+            }
+            Err(e) => {
+                tracing::error!("Failed to subscribe to KV hit rate events: {:?}", e);
+            }
+        }
+    });
 
     loop {
         let next = Instant::now() + Duration::from_secs(args.poll_interval);
@@ -123,10 +182,10 @@ async fn app(runtime: Runtime) -> Result<()> {
             collect_endpoints(&target_component, &service_subject, scrape_timeout).await?;
         let metrics = extract_metrics(&endpoints);
         let processed = postprocess_metrics(&metrics, &endpoints);
-        tracing::info!("Aggregated metrics: {processed:?}");
+        //tracing::info!("Aggregated metrics: {processed:?}");
 
         // Update Prometheus metrics
-        metrics_server.update(&config, &processed);
+        metrics_server.lock().await.update(&config, &processed);
 
         // TODO: Who needs to consume these events?
         // Publish metrics event

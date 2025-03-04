@@ -99,6 +99,18 @@ impl PrometheusMetricsServer {
     pub fn update(&mut self, config: &LLMWorkerLoadCapacityConfig, processed: &ProcessedEndpoints) {
         self.metrics.update(config, processed);
     }
+
+    /// Update KV hit rate metrics
+    pub fn update_kv_hit_rate(
+        &mut self,
+        config: &LLMWorkerLoadCapacityConfig,
+        worker_id: i64,
+        isl_blocks: usize,
+        overlap_blocks: usize,
+    ) {
+        self.metrics
+            .update_kv_hit_rate(config, worker_id, isl_blocks, overlap_blocks);
+    }
 }
 
 /// Prometheus metrics collection
@@ -109,6 +121,10 @@ pub struct PrometheusMetrics {
     requests_total: prometheus::GaugeVec,
     load_avg: prometheus::GaugeVec,
     load_std: prometheus::GaugeVec,
+    // New metrics for KV hit rate
+    kv_hit_rate_isl_blocks: prometheus::GaugeVec,
+    kv_hit_rate_overlap_blocks: prometheus::GaugeVec,
+    kv_hit_rate_percentage: prometheus::GaugeVec,
 }
 
 impl PrometheusMetrics {
@@ -144,6 +160,22 @@ impl PrometheusMetrics {
                 "llm_load_std",
                 "Load standard deviation across workers",
                 &["component", "endpoint"]
+            )?,
+            // New metrics for KV hit rate
+            kv_hit_rate_isl_blocks: register_gauge_vec!(
+                "llm_kv_hit_rate_isl_blocks",
+                "Total ISL blocks in KV hit rate events",
+                &["component", "endpoint", "worker_id"]
+            )?,
+            kv_hit_rate_overlap_blocks: register_gauge_vec!(
+                "llm_kv_hit_rate_overlap_blocks",
+                "Overlapping blocks in KV hit rate events",
+                &["component", "endpoint", "worker_id"]
+            )?,
+            kv_hit_rate_percentage: register_gauge_vec!(
+                "llm_kv_hit_rate_percentage",
+                "KV hit rate percentage (overlap/isl)",
+                &["component", "endpoint", "worker_id"]
             )?,
         })
     }
@@ -209,6 +241,43 @@ impl PrometheusMetrics {
         // Update aggregate metrics
         self.set_endpoint_gauge(&self.load_avg, config, processed.load_avg);
         self.set_endpoint_gauge(&self.load_std, config, processed.load_std);
+    }
+
+    /// Update KV hit rate metrics
+    pub fn update_kv_hit_rate(
+        &self,
+        config: &LLMWorkerLoadCapacityConfig,
+        worker_id: i64,
+        isl_blocks: usize,
+        overlap_blocks: usize,
+    ) {
+        let worker_id_str = worker_id.to_string();
+
+        // Set the ISL blocks and overlap blocks metrics
+        self.set_worker_gauge(
+            &self.kv_hit_rate_isl_blocks,
+            config,
+            &worker_id_str,
+            isl_blocks as f64,
+        );
+
+        self.set_worker_gauge(
+            &self.kv_hit_rate_overlap_blocks,
+            config,
+            &worker_id_str,
+            overlap_blocks as f64,
+        );
+
+        // Calculate and set the hit rate percentage
+        if isl_blocks > 0 {
+            let hit_rate_percentage = (overlap_blocks as f64 / isl_blocks as f64) * 100.0;
+            self.set_worker_gauge(
+                &self.kv_hit_rate_percentage,
+                config,
+                &worker_id_str,
+                hit_rate_percentage,
+            );
+        }
     }
 }
 

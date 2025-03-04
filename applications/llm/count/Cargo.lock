@@ -737,6 +737,7 @@ version = "0.1.0"
 dependencies = [
  "axum 0.6.20",
  "clap",
+ "futures",
  "opentelemetry",
  "opentelemetry-prometheus",
  "prometheus",
