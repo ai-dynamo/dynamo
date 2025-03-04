@@ -5,14 +5,14 @@ Run commands below in 4 terminals -
 TRD_LOG=DEBUG http
 ```
 
-- Terminal.2 [vLLM Backend]
+- Terminal.2 [vLLM worker]
 ```
-python -m processor_backend.vllm_backend --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+python -m preprocessor.worker --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
 ```
 
 - Terminal.3 [Processor]
 ```
-python -m preprocessor_backend.preprocessor --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+python -m preprocessor.preprocessor --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
 ```
 
 - Terminal.4

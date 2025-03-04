@@ -21,7 +21,7 @@ from contextlib import AsyncContextDecorator
 from typing import Any
 
 import uvloop
-from processor_backend.common import NvAsyncEngineArgs, parse_vllm_args
+from preprocessor.common import NvAsyncEngineArgs, parse_vllm_args
 from vllm import SamplingParams
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
