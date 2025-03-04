@@ -1,4 +1,4 @@
-# CODEOWNERS file for Triton Distributed
+# CODEOWNERS file for Dynemo
 #
 # For more information about CODEOWNERS files, see:
 # https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
@@ -17,8 +17,8 @@ Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo 
 /deploy/Kubernetes/ @whoisj @hutm @biswapanda
 
 # CI/CD
-/.github/ @triton-inference-server/devops @nnshah1
-CODEOWNERS @triton-inference-server/devops @nnshah1
+/.github/ @dynemo-ai/Devops @nnshah1
+CODEOWNERS @dynemo-ai/Devops @nnshah1
 
 # Legal
 /LICENSE @nv-anants @nvda-mesharma @glos-nv @dmitry-tokarev-nv

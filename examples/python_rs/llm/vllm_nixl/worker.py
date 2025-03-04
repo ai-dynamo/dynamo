@@ -19,7 +19,7 @@ import json
 
 import msgspec
 import uvloop
-from common import parse_vllm_args, temp_metadata_file
+from common import NixlMetadataStore, parse_vllm_args
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.multiprocessing.client import EngineClient
 from vllm.entrypoints.openai.api_server import (
@@ -93,6 +93,8 @@ class RequestHandler:
             await self.init()
         assert self.openai_serving_chat is not None
 
+        request.model = "vllm"
+
         if self.do_remote_prefill:
             remote_prefill_params = RemotePrefillParams(
                 is_remote_prefill=True,
@@ -130,19 +132,21 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
 
         if engine_args.remote_prefill:
             metadata = engine_client.nixl_metadata
-            with temp_metadata_file(metadata.engine_id, metadata):
-                await endpoint.serve_endpoint(
-                    RequestHandler(
-                        model_name=engine_args.model,
-                        engine_client=engine_client,
-                        prefill_client=prefill_client,
-                        do_remote_prefill=True,
-                    ).generate
-                )
+            metadata_store = NixlMetadataStore("test-nixl", runtime)
+            await metadata_store.put(metadata.engine_id, metadata)
+
+            await endpoint.serve_endpoint(
+                RequestHandler(
+                    model_name="vllm",
+                    engine_client=engine_client,
+                    prefill_client=prefill_client,
+                    do_remote_prefill=True,
+                ).generate
+            )
         else:
             await endpoint.serve_endpoint(
                 RequestHandler(
-                    model_name=engine_args.model,
+                    model_name="vllm",
                     engine_client=engine_client,
                     prefill_client=prefill_client,
                     do_remote_prefill=False,

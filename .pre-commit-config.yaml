@@ -57,6 +57,7 @@ repos:
     exclude: .devcontainer
   - id: check-toml
   - id: check-yaml
+    exclude: ^deploy/Kubernetes/.+/templates/.+\.yaml
   - id: check-shebang-scripts-are-executable
   - id: end-of-file-fixer
     types_or: [c, c++, cuda, proto, textproto, java, python]
@@ -77,8 +78,8 @@ repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.5.2
   hooks:
-    - id: ruff
-      args: [--fix, --exit-non-zero-on-fix]
+  - id: ruff
+    args: [--fix, --exit-non-zero-on-fix]
 
 # NOTE: pyright may be able to find other classes of errors not covered above,
 # but would require some configuring and venv setup to properly eliminate noise
