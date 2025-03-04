@@ -34,11 +34,12 @@ class NATSQueue:
         dequeue_timeout: float = 1,
     ):
         self.nats_url = nats_server
-        self.nc: Optional[NATS] = None
-        self.js = None
+        self._nc: Optional[NATS] = None
+        self._js = None
+        # TODO: check if this is needed
         # Sanitize stream_name to remove path separators
-        self.stream_name = stream_name.replace("/", "_").replace("\\", "_")
-        self.subject = f"{self.stream_name}.*"
+        self._stream_name = stream_name.replace("/", "_").replace("\\", "_")
+        self._subject = f"{self._stream_name}.*"
         self.dequeue_timeout = dequeue_timeout
         self._subscriber = None
 
@@ -52,6 +53,7 @@ class NATSQueue:
         dequeue_timeout: float = 1,
     ):
         """Get or create a singleton instance of NATSq"""
+        # TODO: check if this _lock is needed with GIL
         async with cls._lock:
             if cls._instance is None:
                 cls._instance = cls(
@@ -68,6 +70,7 @@ class NATSQueue:
                 cls._instance = None
                 raise
 
+    # TODO: check to see if this can be replaced by something like get_instance().close()
     @classmethod
     async def shutdown(cls):
         """Explicitly close the singleton instance if it exists"""
@@ -79,21 +82,20 @@ class NATSQueue:
     async def connect(self):
         """Establish connection and create stream if needed"""
         try:
-            if self.nc is None:
-                self.nc = NATS()
-                await self.nc.connect(self.nats_url)
-                self.js = self.nc.jetstream()
+            if self._nc is None:
+                self._nc = NATS()
+                await self._nc.connect(self.nats_url)
+                self._js = self._nc.jetstream()
                 # Check if stream exists, if not create it
                 try:
-                    await self.js.stream_info(self.stream_name)
+                    await self._js.stream_info(self._stream_name)
                 except NotFoundError:
-                    await self.js.add_stream(
-                        name=self.stream_name, subjects=[self.subject]
+                    await self._js.add_stream(
+                        name=self._stream_name, subjects=[self._subject]
                     )
-                    print(f"Stream '{self.stream_name}' created")
                 # Create persistent subscriber
-                self._subscriber = await self.js.pull_subscribe(
-                    f"{self.stream_name}.queue", durable="worker-group"
+                self._subscriber = await self._js.pull_subscribe(
+                    f"{self._stream_name}.queue", durable="worker-group"
                 )
         except NatsError as e:
             await self.close()
@@ -101,24 +103,25 @@ class NATSQueue:
 
     async def ensure_connection(self):
         """Ensure we have an active connection"""
-        if self.nc is None or self.nc.is_closed:
+        if self._nc is None or self._nc.is_closed:
             await self.connect()
 
     async def close(self):
         """Close the connection when done"""
-        if self.nc:
-            await self.nc.close()
-            self.nc = None
-            self.js = None
+        if self._nc:
+            await self._nc.close()
+            self._nc = None
+            self._js = None
             self._subscriber = None
 
-    async def enqueue_task(self, task_data) -> None:
+    # TODO: is enqueue/dequeue_object a better name for a general queue?
+    async def enqueue_task(self, task_data: bytes) -> None:
         """
         Enqueue a task using msgspec-encoded data
         """
         await self.ensure_connection()
         try:
-            await self.js.publish(f"{self.stream_name}.queue", task_data)
+            await self._js.publish(f"{self._stream_name}.queue", task_data)
         except NatsError as e:
             raise RuntimeError(f"Failed to enqueue task: {e}")
 

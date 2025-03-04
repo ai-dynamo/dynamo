@@ -72,6 +72,7 @@ class RequestHandler:
 
 @triton_worker()
 async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
+    # TODO: we don't need it now, but will need it after the queue is integrated to the runtime
     component = runtime.namespace("triton-init").component("prefill")
     await component.create_service()
 
@@ -80,11 +81,18 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
         metadata_store = NixlMetadataStore("triton-init", runtime)
         await metadata_store.put(metadata.engine_id, metadata)
 
+        # TODO: move this to prefill_queue.py
         prefill_queue_nats_server = os.getenv("NATS_SERVER", "nats://localhost:4222")
-        prefill_queue_stream_name = engine_args.model
+        prefill_queue_stream_name = (
+            engine_args.served_model_name
+            if engine_args.served_model_name is not None
+            else "vllm"
+        )
         vllm_logger.info(
             f"Prefill queue: {prefill_queue_nats_server}:{prefill_queue_stream_name}"
         )
+
+        request_handler = RequestHandler(engine_client, metadata_store)
 
         # TODO: integrate prefill_queue to an triton_distributed endpoint
         async with PrefillQueue.get_instance(
@@ -92,12 +100,12 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
             stream_name=prefill_queue_stream_name,
         ) as prefill_queue:
             while True:
+                # TODO: this might add a small overhead to pull prefill from nats
+                # need to test and check how much overhead it is
                 prefill_request = await prefill_queue.dequeue_prefill_request()
                 if prefill_request is not None:
                     vllm_logger.info(f"Dequeued prefill request: {prefill_request}")
-                    async for _ in RequestHandler(engine_client).generate(
-                        prefill_request
-                    ):
+                    async for _ in request_handler.generate(prefill_request):
                         pass
 
 

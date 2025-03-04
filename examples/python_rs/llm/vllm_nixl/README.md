@@ -99,7 +99,6 @@ The disaggregated router determines whether a request should be send to a
 remote prefill engine or a local prefill engine for prefilling based on the
 prefill length. When prefilling locally, the vllm scheduler will prioritize
 prefill request and pause any ongoing decode requests.
-Each decoder worker will launch its own prefill worker.
 For now, we use a simple heuristic to route to prefill engine
 if prefill length (including prefix catch hit) is greater than a threshold.
 This threshold can by dynamically adjusted at runtime through etcd.
@@ -111,15 +110,13 @@ curl -s -L http://localhost:2379/v3/kv/range -X POST   -d '{"key":"AA==", "range
 
 To update the threshold:
 ```
-ETCDCTL_API=3 etcdctl --endpoints=http://localhost:2379 put 'public/components/disagg_router/models/chat/deepseek-ai/DeepSeek-R1-Distill-Llama-8B' '{"max_local_prefill_length": <new_threshold>}'
+ETCDCTL_API=3 etcdctl --endpoints=http://localhost:2379 put 'public/components/disagg_router/models/chat/<vllm.served_model_name(default to "vllm")>' '{"max_local_prefill_length": <new_threshold>}'
 ```
 
 ### Workers
 
 ```
 # start prefill worker in Terminal 1
-# for xPyD, please first start the decode workers
-# so that prefill workers can get metadata of all decode workers
 cd /workspace/examples/python_rs/llm/vllm_nixl
 CUDA_VISIBLE_DEVICES=0 python prefill_worker.py \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
@@ -140,6 +137,7 @@ CUDA_VISIBLE_DEVICES=1,2 python3 worker.py \
 
 Alternatively, we also provide a script to launch all workers in one go:
 ```
+# this TODO: change to dynemo-deploy functionality
 ./start_single_node.sh
 # Usage [--model <model>] [--p_tensor_parallel_size <size>] [--d_tensor_parallel_size <size>] [--max_model_len <len>] [--max_num_batched_tokens <tokens>] [--max_num_seqs <seqs>] [--gpu_memory_utilization <utilization>] [--enable_chunked_prefill <True/False>] [--num_p <p>] [--num_d <d>]
 ```

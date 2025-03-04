@@ -123,10 +123,6 @@ for (( i=1; i<=num_d; i++ )); do
     curr_kv_rank=$((curr_kv_rank + 1))
 done
 
-# to ensure prefill workers get metadata of all decode workers.
-# can be removed if we have etcd watcher for discovery
-sleep 5
-
 for (( i=1; i<=num_p; i++ )); do
     cuda_devices=$(seq $curr_rank $(($curr_rank + $p_tensor_parallel_size - 1)))
     cuda_devices=$(echo $cuda_devices | tr ' ' ',')

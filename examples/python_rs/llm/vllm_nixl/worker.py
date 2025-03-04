@@ -62,12 +62,12 @@ class RequestHandler:
                 disaggregated_router is not None
             ), "Disaggregated router is required for remote prefill"
 
-        self.prefill_queue_nats_server = os.getenv(
+        self._prefill_queue_nats_server = os.getenv(
             "NATS_SERVER", "nats://localhost:4222"
         )
-        self.prefill_queue_stream_name = model_name
+        self._prefill_queue_stream_name = model_name
         vllm_logger.info(
-            f"Prefill queue: {self.prefill_queue_nats_server}:{self.prefill_queue_stream_name}"
+            f"Prefill queue: {self._prefill_queue_nats_server}:{self._prefill_queue_stream_name}"
         )
 
         print("RequestHandler initialized")
@@ -76,8 +76,8 @@ class RequestHandler:
         # TODO: integrate prefill_queue to an triton_distributed endpoint
         async def callback(request: RemotePrefillRequest):
             async with PrefillQueue.get_instance(
-                nats_server=self.prefill_queue_nats_server,
-                stream_name=self.prefill_queue_stream_name,
+                nats_server=self._prefill_queue_nats_server,
+                stream_name=self._prefill_queue_stream_name,
             ) as prefill_queue:
                 await prefill_queue.enqueue_prefill_request(request)
 
@@ -86,9 +86,14 @@ class RequestHandler:
     @triton_endpoint(vLLMGenerateRequest, MyRequestOutput)
     async def generate(self, request):
         # TODO: consider prefix hit when deciding prefill locally or remotely
-        if self.do_remote_prefill and self.disaggregated_router.prefill_remote(
-            len(request.engine_prompt["prompt_token_ids"]), 0
-        ):
+        if self.disaggregated_router is not None:
+            disagg_router_decision = self.disaggregated_router.prefill_remote(
+                len(request.engine_prompt["prompt_token_ids"]), 0
+            )
+        else:
+            # always prefill remotely if no disaggregated router is provided
+            disagg_router_decision = True
+        if self.do_remote_prefill and disagg_router_decision:
             remote_prefill_params = RemotePrefillParams(
                 is_remote_prefill=True,
                 remote_prefill_request_callback=self.get_remote_prefill_request_callback(),
@@ -135,6 +140,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
         .client()
     )
 
+    # TODO: do we need these env vars?
     VLLM_WORKER_ID = endpoint.lease_id()
     os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
     vllm_logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
@@ -148,9 +154,14 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     metrics_publisher = KvMetricsPublisher()
 
     async with build_async_engine_client_from_engine_args(engine_args) as engine_client:
+        served_model_name = (
+            engine_args.served_model_name
+            if engine_args.served_model_name is not None
+            else "vllm"
+        )
         disaggregated_router = DisaggregatedRouter(
             runtime,
-            engine_args.model,
+            served_model_name,
             100,  # note: this max_local_prefill_length will be updated by etcd
         )
 
@@ -176,7 +187,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
             await asyncio.gather(
                 endpoint.serve_endpoint(
                     RequestHandler(
-                        model_name=engine_args.model,
+                        model_name=served_model_name,
                         engine_client=engine_client,
                         prefill_client=prefill_client,
                         do_remote_prefill=True,
@@ -188,7 +199,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
         else:
             await endpoint.serve_endpoint(
                 RequestHandler(
-                    model_name=engine_args.model,
+                    model_name=served_model_name,
                     engine_client=engine_client,
                     prefill_client=prefill_client,
                     do_remote_prefill=False,
