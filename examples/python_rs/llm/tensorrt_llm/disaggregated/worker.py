@@ -85,8 +85,8 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
         )
 
         # needed for disagg
-        self.mpi_session = MpiCommSession(sub_comm, n_workers=sub_comm.Get_size())
-        engine_config.extra_args["_mpi_session"] = self.mpi_session
+        self._mpi_session = MpiCommSession(sub_comm, n_workers=sub_comm.Get_size())
+        engine_config.extra_args["_mpi_session"] = self._mpi_session
         super().__init__(engine_config)
 
     @triton_endpoint(DisaggChatCompletionRequest, DisaggChatCompletionStreamResponse)
@@ -95,7 +95,7 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
             raise RuntimeError("Engine not initialized")
 
         logger.debug(f"Received request: {request}")
-        chat_processor = ChatProcessor(self.model, self.tokenizer, request)
+        chat_processor = ChatProcessor(self._model, self._tokenizer, request)
 
         self._ongoing_request_count += 1
 
@@ -108,7 +108,7 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
                 if request.tools is None
                 else [tool.model_dump() for tool in request.tools]
             )
-            prompt: str = self.tokenizer.apply_chat_template(
+            prompt: str = self._tokenizer.apply_chat_template(
                 conversation=conversation,
                 tokenize=False,
                 add_generation_prompt=request.add_generation_prompt,

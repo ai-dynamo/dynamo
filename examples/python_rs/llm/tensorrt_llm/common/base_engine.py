@@ -28,36 +28,36 @@ from transformers import AutoTokenizer
 
 class BaseTensorrtLLMEngine:
     def __init__(self, engine_config: LLMAPIConfig):
-        self.engine_config = engine_config
-        logger.info(f"Using LLM API config: {self.engine_config}")
+        self._engine_config = engine_config
+        logger.info(f"Using LLM API config: {self._engine_config}")
 
         # model name for chat processor
-        self.model_name = self.engine_config.model_name
-        logger.info(f"Set model name: {self.model_name}")
+        self._model_name = self._engine_config.model_name
+        logger.info(f"Set model name: {self._model_name}")
 
         # model for LLMAPI input
-        self.model = self.model_name
+        self._model = self._model_name
 
-        if self.engine_config.model_path:
-            self.model = self.engine_config.model_path
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.engine_config.model_path
+        if self._engine_config.model_path:
+            self._model = self._engine_config.model_path
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self._engine_config.model_path
             )
-            logger.info(f"Using model from path: {self.engine_config.model_path}")
+            logger.info(f"Using model from path: {self._engine_config.model_path}")
         else:
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.engine_config.model_name
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self._engine_config.model_name
             )
 
         self._init_engine()
 
-        if self.engine_config.extra_args.get("tokenizer", None):
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.engine_config.extra_args.get("tokenizer", None)
+        if self._engine_config.extra_args.get("tokenizer", None):
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self._engine_config.extra_args.get("tokenizer", None)
             )
 
-        self.chat_processor = ChatProcessor(self.model_name, self.tokenizer)
-        self.completions_processor = CompletionsProcessor(self.model_name)
+        self.chat_processor = ChatProcessor(self._model_name, self._tokenizer)
+        self.completions_processor = CompletionsProcessor(self._model_name)
 
     def _init_engine(self):
         logger.info("Initializing engine")
@@ -94,7 +94,7 @@ class BaseTensorrtLLMEngine:
             try:
                 llm = await loop.run_in_executor(
                     None,
-                    lambda: LLM(model=self.model, **self.engine_config.to_dict()),
+                    lambda: LLM(model=self._model, **self._engine_config.to_dict()),
                 )
                 yield llm
             finally:

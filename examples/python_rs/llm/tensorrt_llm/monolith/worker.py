@@ -67,7 +67,7 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
                 if request.tools is None
                 else [tool.model_dump() for tool in request.tools]
             )
-            prompt: str = self.tokenizer.apply_chat_template(
+            prompt: str = self._tokenizer.apply_chat_template(
                 conversation=conversation,
                 tokenize=False,
                 add_generation_prompt=request.add_generation_prompt,
