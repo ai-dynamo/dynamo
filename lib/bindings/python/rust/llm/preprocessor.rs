@@ -17,29 +17,19 @@ use super::*;
 use crate::llm::model_card::ModelDeploymentCard;
 
 use llm_rs::{
-    pipeline::{BackendLLMService, OpenAIChatService},
     preprocessor::OpenAIPreprocessor,
     protocols::common::llm_backend::{BackendInput, BackendOutput},
-    // types::Annotated,
     types::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-            OpenAIChatCompletionsStreamingEngine,
         },
         Annotated,
     },
 };
 
-use triton_distributed_runtime::pipeline::{Operator, ServiceBackend, ServiceFrontend, Source};
+use triton_distributed_runtime::pipeline::{Operator, ServiceFrontend, Source};
 
-
-// use llm_rs::{
-//     pipeline::{Context, ManyOut, Operator, ServiceBackend, ServiceFrontend, SingleIn, Source},
-//     runtime::CancellationToken,
-// };
-
-
-// use triton_distributed_runtime::pipeline::{Operator, Source};
+use triton_distributed_runtime::pipeline::{ SegmentSink, SingleIn, ManyOut };
 
 #[pyclass]
 pub(crate) struct OAIChatPreprocessor {
@@ -68,7 +58,9 @@ impl OAIChatPreprocessor {
                 SingleIn<NvCreateChatCompletionRequest>,
                 ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
             >::new();
-        let network = BackendLLMService::segment_sink();
+
+        let network = SegmentSink::<SingleIn<BackendInput>, ManyOut<Annotated<BackendOutput>>>::new();
+
         let preprocessor = self.inner.into_operator();
         let pipeline = frontend
             .link(preprocessor.forward_edge())

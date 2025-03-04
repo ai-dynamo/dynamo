@@ -16,9 +16,10 @@
 use super::*;
 use crate::llm::model_card::ModelDeploymentCard;
 
-use llm_rs::pipeline::BackendLLMService;
+use llm_rs::protocols::common::llm_backend::{BackendInput, BackendOutput};
+use llm_rs::types::Annotated;
 
-use triton_distributed_runtime::pipeline::{Operator, ServiceBackend, Source};
+use triton_distributed_runtime::pipeline::{Operator, ServiceBackend, ServiceFrontend, Source};
 
 use crate::engine::PythonAsyncEngine;
 
@@ -43,7 +44,11 @@ impl Backend {
     }
 
     fn start<'p>(&self, py: Python<'p>, generator: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let frontend = BackendLLMService::segment_source();
+        let frontend = ServiceFrontend::<
+            SingleIn<BackendInput>,
+            ManyOut<Annotated<BackendOutput>>,
+        >::new();
+
         let backend = self.inner.into_operator();
         let engine = Arc::new(PythonAsyncEngine::new(
             generator,

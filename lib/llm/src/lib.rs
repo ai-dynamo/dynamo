@@ -29,4 +29,3 @@ pub mod preprocessor;
 pub mod protocols;
 pub mod tokenizers;
 pub mod types;
-pub mod pipeline;
