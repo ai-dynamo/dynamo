@@ -2,7 +2,7 @@
 
 <!-- Describe your pull request here. Please read the text below the line, and make sure you follow the checklist.-->
 
-#### Changes made and reasoning
+#### Details:
 
 <!-- Describe the changes made in this PR. -->
 
@@ -17,7 +17,6 @@
 #### Checklist:
 
 - [ ] PR title is of format `<commit_type>: <Title>`
-- [ ] Copywrite headers are correct on all changed files
 
 #### Test plan:
 
