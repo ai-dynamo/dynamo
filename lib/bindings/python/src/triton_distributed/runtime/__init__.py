@@ -16,12 +16,18 @@
 
 import asyncio
 from functools import wraps
-from typing import Any, AsyncGenerator, Callable, Type
+from typing import Any, AsyncGenerator, Callable, Type, Union
 
 from pydantic import BaseModel, ValidationError
 
+# List all the classes in the _core module for re-export
+# import * causes "unable to detect undefined names"
+from triton_distributed._core import Backend as Backend
 from triton_distributed._core import Client as Client
 from triton_distributed._core import DistributedRuntime as DistributedRuntime
+from triton_distributed._core import KvRouter as KvRouter
+from triton_distributed._core import ModelDeploymentCard as ModelDeploymentCard
+from triton_distributed._core import OAIChatPreprocessor as OAIChatPreprocessor
 
 
 def triton_worker():
@@ -54,7 +60,7 @@ def triton_worker():
 
 
 def triton_endpoint(
-    request_model: Type[BaseModel], response_model: Type[BaseModel]
+    request_model: Union[Type[BaseModel], Type[Any]], response_model: Type[BaseModel]
 ) -> Callable:
     def decorator(
         func: Callable[..., AsyncGenerator[Any, None]]
@@ -63,8 +69,8 @@ def triton_endpoint(
         async def wrapper(*args, **kwargs) -> AsyncGenerator[Any, None]:
             # Validate the request
             try:
-                if len(args) in [1, 2]:
-                    args_list = list(args)
+                args_list = list(args)
+                if len(args) in [1, 2] and issubclass(request_model, BaseModel):
                     if isinstance(args[-1], str):
                         args_list[-1] = request_model.parse_raw(args[-1])
                     elif isinstance(args[-1], dict):
