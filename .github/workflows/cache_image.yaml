@@ -16,7 +16,9 @@
 name: Cache base image
 
 on:
-  pull_request:
+  push:
+    branches:
+    - main
 
 jobs:
   build-test:
