@@ -18,10 +18,9 @@ import asyncio
 import os
 
 import uvloop
-from utils.nixl import find_remote_metadata, temp_metadata_file
+from utils.nixl import find_remote_metadata
 from utils.prefill_queue import PrefillQueue
 from utils.vllm import parse_vllm_args
-from common import find_remote_metadata, parse_vllm_args
 from vllm.distributed.device_communicators.nixl import NixlMetadata
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.api_server import (
@@ -67,7 +66,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     async with build_async_engine_client_from_engine_args(engine_args) as engine_client:
         # This should be replaced with etcd
         metadata = engine_client.nixl_metadata
-        
+
         print(f"Waiting for remote metadata for engine {metadata.engine_id}")
         remote_metadata: list[NixlMetadata] = []
         while not remote_metadata:
@@ -79,6 +78,12 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
         )
         for remote_metadata in remote_metadata:
             await engine_client.add_remote_nixl_metadata(remote_metadata)
+
+        prefill_queue_nats_server = os.getenv("NATS_SERVER", "nats://localhost:4222")
+        prefill_queue_stream_name = engine_args.model
+        vllm_logger.info(
+            f"Prefill queue: {prefill_queue_nats_server}:{prefill_queue_stream_name}"
+        )
 
         # TODO: integrate prefill_queue to an triton_distributed endpoint
         async with PrefillQueue.get_instance(
