@@ -125,7 +125,7 @@ Upon successful launch, the output should look similar to:
 
 `nvidia-smi` can be used to check the GPU usage and the model is loaded on single GPU.
 
-##### Option 1.2 Single-Node Multi-GPU
+##### Option 2.2 Single-Node Multi-GPU
 
 Update `tensor_parallel_size` in the `llm_api_config.yaml` to load the model with the desired number of GPUs.
 `nvidia-smi` can be used to check the GPU usage and the model is loaded on 4 GPUs.
