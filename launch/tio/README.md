@@ -118,7 +118,7 @@ Setup:
 uv venv
 source .venv/bin/activate
 uv pip install pip
-uv pip install vllm setuptools
+uv pip install vllm==0.7.3 setuptools
 ```
 
 **Note: If you're on Ubuntu 22.04 or earlier, you will need to add `--python=python3.10` to your `uv venv` command**
