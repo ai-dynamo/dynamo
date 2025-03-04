@@ -92,7 +92,7 @@ RUN cd examples/rust && \
     cp target/release/http /usr/local/bin/ && \
     cp target/release/llmctl /usr/local/bin/
 
-# TODO: Build tio
+# TODO: Build dynemo-run
 # COPY applications/...
 
 # Generate C bindings for kv cache routing in vLLM

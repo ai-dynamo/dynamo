@@ -1,6 +1,12 @@
-# triton-llm service runner
+# Dynemo service runner
 
-`tio` is a tool for exploring the triton-distributed and triton-llm components.
+`dynemo-run` is a tool for exploring the triton-distributed and triton-llm components.
+
+## Quickstart
+
+- Install Rust
+- `cargo install --features mistralrs,cuda --git https://github.com/dynemo-ai/dynemo.git dynemo-run`
+- `dynemo-run <GGUF or HF-repo-checkout>`
 
 ## Install and start pre-requisites
 
@@ -31,11 +37,11 @@ For example one of these should be fast and good quality on almost any machine: 
 
 *Text interface*
 
-`./target/release/tio Llama-3.2-1B-Instruct-Q4_K_M.gguf` or path to a Hugging Face repo checkout instead of the GGUF.
+`./target/release/dynemo-run Llama-3.2-1B-Instruct-Q4_K_M.gguf` or path to a Hugging Face repo checkout instead of the GGUF.
 
 *HTTP interface*
 
-`./target/release/tio in=http --model-path Llama-3.2-1B-Instruct-Q4_K_M.gguf`
+`./target/release/dynemo-run in=http --model-path Llama-3.2-1B-Instruct-Q4_K_M.gguf`
 
 List the models: `curl localhost:8080/v1/models`
 
@@ -48,19 +54,19 @@ curl -d '{"model": "Llama-3.2-1B-Instruct-Q4_K_M", "max_tokens": 2049, "messages
 
 Node 1:
 ```
-tio in=http out=tdr://llama3B_pool
+dynemo-run in=http out=dyn://llama3B_pool
 ```
 
 Node 2:
 ```
-tio in=tdr://llama3B_pool out=mistralrs ~/llm_models/Llama-3.2-3B-Instruct
+dynemo-run in=dyn://llama3B_pool out=mistralrs ~/llm_models/Llama-3.2-3B-Instruct
 ```
 
 This will use etcd to auto-discover the model and NATS to talk to it. You can run multiple workers on the same endpoint and it will pick one at random each time.
 
 The `ns/backend/mistralrs` are purely symbolic, pick anything as long as it has three parts, and it matches the other node.
 
-Run `tio --help` for more options.
+Run `dynemo-run --help` for more options.
 
 ## sglang
 
@@ -86,26 +92,26 @@ Any example above using `out=sglang` will work, but our sglang backend is also m
 
 Node 1:
 ```
-tio in=http out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 0 --dist-init-addr 10.217.98.122:9876
+dynemo-run in=http out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 0 --dist-init-addr 10.217.98.122:9876
 ```
 
 Node 2:
 ```
-tio in=none out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 1 --dist-init-addr 10.217.98.122:9876
+dynemo-run in=none out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 1 --dist-init-addr 10.217.98.122:9876
 ```
 
 ## llama_cpp
 
 - `cargo build --release --features llamacpp,cuda`
 
-- `tio out=llama_cpp --model-path ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf --model-config ~/llm_models/Llama-3.2-3B-Instruct/`
+- `dynemo-run out=llama_cpp --model-path ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf --model-config ~/llm_models/Llama-3.2-3B-Instruct/`
 
 The extra `--model-config` flag is because:
 - llama_cpp only runs GGUF
 - We send it tokens, meaning we do the tokenization ourself, so we need a tokenizer
 - We don't yet read it out of the GGUF (TODO), so we need an HF repo with `tokenizer.json` et al
 
-If the build step also builds llama_cpp libraries into `target/release` ("libllama.so", "libggml.so", "libggml-base.so", "libggml-cpu.so", "libggml-cuda.so"), then `tio` will need to find those at runtime. Set `LD_LIBRARY_PATH`, and be sure to deploy them alongside the `tio` binary.
+If the build step also builds llama_cpp libraries into `target/release` ("libllama.so", "libggml.so", "libggml-base.so", "libggml-cpu.so", "libggml-cuda.so"), then `dynemo-run` will need to find those at runtime. Set `LD_LIBRARY_PATH`, and be sure to deploy them alongside the `dynemo-run` binary.
 
 ## vllm
 
@@ -130,25 +136,25 @@ cargo build --release --features vllm
 
 Run (still inside that virtualenv) - HF repo:
 ```
-./target/release/tio in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct/
+./target/release/dynemo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct/
 
 ```
 
 Run (still inside that virtualenv) - GGUF:
 ```
-./target/release/tio in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf --model-config ~/llm_models/Llama-3.2-3B-Instruct/
+./target/release/dynemo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf --model-config ~/llm_models/Llama-3.2-3B-Instruct/
 ```
 
 + Multi-node:
 
 Node 1:
 ```
-tio in=text out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --tensor-parallel-size 8 --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 0
+dynemo-run in=text out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --tensor-parallel-size 8 --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 0
 ```
 
 Node 2:
 ```
-tio in=none out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 1
+dynemo-run in=none out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 1
 ```
 
 
@@ -163,7 +169,7 @@ cargo build --release --features trtllm
 
 Run:
 ```
-tio in=text out=trtllm --model-path /app/trtllm_engine/ --model-config ~/llm_models/Llama-3.2-3B-Instruct/
+dynemo-run in=text out=trtllm --model-path /app/trtllm_engine/ --model-config ~/llm_models/Llama-3.2-3B-Instruct/
 ```
 
 Note that TRT-LLM uses it's own `.engine` format for weights. Repo models must be converted like so:
@@ -181,7 +187,7 @@ python convert_checkpoint.py --model_dir /tmp/model/ --output_dir ./converted --
 trtllm-build --checkpoint_dir ./converted --output_dir ./final/trtllm_engine --use_paged_context_fmha enable --gemm_plugin auto
 ```
 
-The `--model-path` you give to `tio` must contain the `config.json` (TRT-LLM's , not the model's) and `rank0.engine` (plus other ranks if relevant).
+The `--model-path` you give to `dynemo-run` must contain the `config.json` (TRT-LLM's , not the model's) and `rank0.engine` (plus other ranks if relevant).
 
 + Execute
 TRT-LLM is a C++ library that must have been previously built and installed. It needs a lot of memory to compile. Gitlab builds a container you can try:

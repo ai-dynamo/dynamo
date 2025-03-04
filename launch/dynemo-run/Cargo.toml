@@ -14,7 +14,7 @@
 # limitations under the License.
 
 [package]
-name = "tio"
+name = "dynemo-run"
 version = "0.1.0"
 edition = "2021"
 authors = ["NVIDIA"]

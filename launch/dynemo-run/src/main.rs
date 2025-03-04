@@ -17,17 +17,17 @@ use std::env;
 
 use clap::Parser;
 
-use tio::{Input, Output};
+use dynemo_run::{Input, Output};
 use triton_distributed_runtime::logging;
 
 const HELP: &str = r#"
-tio is a single binary that wires together the various inputs (http, text, network) and workers (network, engine), that runs the services. It is the simplest way to use triton-distributed locally.
+dynemo-run is a single binary that wires together the various inputs (http, text, network) and workers (network, engine), that runs the services. It is the simplest way to use triton-distributed locally.
 
 Example:
 - cargo build --release --features mistralrs,cuda
 - cd target/release
-- ./tio hf_checkouts/Llama-3.2-3B-Instruct/
-- OR: ./tio Llama-3.2-1B-Instruct-Q4_K_M.gguf
+- ./dynemo-run hf_checkouts/Llama-3.2-3B-Instruct/
+- OR: ./dynemo-run Llama-3.2-1B-Instruct-Q4_K_M.gguf
 
 "#;
 
@@ -39,16 +39,16 @@ const DEFAULT_OUT: Output = Output::MistralRs;
 #[cfg(not(feature = "mistralrs"))]
 const DEFAULT_OUT: Output = Output::EchoFull;
 
-const ZMQ_SOCKET_PREFIX: &str = "tio";
+const ZMQ_SOCKET_PREFIX: &str = "dyn";
 
-const USAGE: &str = "USAGE: tio in=[http|text|tdr://<path>|none] out=[mistralrs|sglang|llamacpp|vllm|trtllm|echo_full|echo_core] [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0]";
+const USAGE: &str = "USAGE: dynemo-run in=[http|text|dyn://<path>|none] out=[mistralrs|sglang|llamacpp|vllm|trtllm|echo_full|echo_core] [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0]";
 
 fn main() -> anyhow::Result<()> {
     logging::init();
 
     // Call sub-processes before starting the Runtime machinery
     // For anything except sub-process starting try_parse_from will error.
-    if let Ok(flags) = tio::Flags::try_parse_from(env::args()) {
+    if let Ok(flags) = dynemo_run::Flags::try_parse_from(env::args()) {
         #[allow(unused_variables)]
         if let Some(sglang_flags) = flags.internal_sglang_process {
             let Some(model_path) = flags.model_path_flag.as_ref() else {
@@ -124,10 +124,10 @@ fn main() -> anyhow::Result<()> {
     // One per process. Wraps a Runtime with holds two tokio runtimes.
     let worker = triton_distributed_runtime::Worker::from_config(rt_config)?;
 
-    worker.execute(tio_wrapper)
+    worker.execute(wrapper)
 }
 
-async fn tio_wrapper(runtime: triton_distributed_runtime::Runtime) -> anyhow::Result<()> {
+async fn wrapper(runtime: triton_distributed_runtime::Runtime) -> anyhow::Result<()> {
     let mut in_opt = None;
     let mut out_opt = None;
     let args: Vec<String> = env::args().skip(1).collect();
@@ -171,13 +171,13 @@ async fn tio_wrapper(runtime: triton_distributed_runtime::Runtime) -> anyhow::Re
 
     // Clap skips the first argument expecting it to be the binary name, so add it back
     // Note `--model-path` has index=1 (in lib.rs) so that doesn't need a flag.
-    let flags = tio::Flags::try_parse_from(
-        ["tio".to_string()]
+    let flags = dynemo_run::Flags::try_parse_from(
+        ["dynemo-run".to_string()]
             .into_iter()
             .chain(env::args().skip(non_flag_params)),
     )?;
 
-    tio::run(
+    dynemo_run::run(
         runtime,
         in_opt,
         out_opt,
