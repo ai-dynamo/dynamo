@@ -93,6 +93,8 @@ class RequestHandler:
             await self.init()
         assert self.openai_serving_chat is not None
 
+        request.model = "vllm"
+
         if self.do_remote_prefill:
             remote_prefill_params = RemotePrefillParams(
                 is_remote_prefill=True,
@@ -137,7 +139,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
 
             await endpoint.serve_endpoint(
                 RequestHandler(
-                    model_name=engine_args.model,
+                    model_name="vllm",
                     engine_client=engine_client,
                     prefill_client=prefill_client,
                     do_remote_prefill=True,
@@ -146,7 +148,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
         else:
             await endpoint.serve_endpoint(
                 RequestHandler(
-                    model_name=engine_args.model,
+                    model_name="vllm",
                     engine_client=engine_client,
                     prefill_client=prefill_client,
                     do_remote_prefill=False,

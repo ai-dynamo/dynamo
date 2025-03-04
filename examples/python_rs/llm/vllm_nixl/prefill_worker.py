@@ -58,7 +58,7 @@ class RequestHandler:
             remote_metadata = await self._metadata_store.get(request.engine_id)
             await self.engine_client.add_remote_nixl_metadata(remote_metadata)
             print(
-                f"loaded metadata for {request.engine_id} into engine client {self.engine_client.nixl_metadata.engine_id}"
+                f"Loaded nixl metadata from engine {request.engine_id} into engine {self.engine_client.nixl_metadata.engine_id}"
             )
             self._loaded_metadata.add(request.engine_id)
 
@@ -102,5 +102,13 @@ if __name__ == "__main__":
     if engine_args.pipeline_parallel_size != 1:
         print("Pipeline parallel size is not supported yet, setting to 1")
         engine_args.pipeline_parallel_size = 1
+
+    if engine_args.disable_async_output_proc is not True:
+        print("Async output processing is not supported yet, setting to True")
+        engine_args.disable_async_output_proc = True
+
+    if engine_args.enforce_eager is not True:
+        print("Prefill must be done eagerly, setting to True")
+        engine_args.enforce_eager = True
 
     asyncio.run(worker(engine_args))
