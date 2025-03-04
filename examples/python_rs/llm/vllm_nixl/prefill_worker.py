@@ -18,8 +18,7 @@ import asyncio
 
 import msgspec
 import uvloop
-from common import find_remote_metadata, parse_vllm_args
-from vllm.distributed.device_communicators.nixl import NixlMetadata
+from common import NixlMetadataStore, parse_vllm_args
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
@@ -31,8 +30,10 @@ from triton_distributed.runtime import DistributedRuntime, triton_worker
 
 
 class RequestHandler:
-    def __init__(self, engine_client):
+    def __init__(self, engine_client, metadata_store):
         self.engine_client = engine_client
+        self._metadata_store = metadata_store
+        self._loaded_metadata = set()
         print("RequestHandler initialized")
 
     async def generate(self, raw_request: str):
@@ -49,6 +50,17 @@ class RequestHandler:
             decode_block_ids=request.block_ids,
             decode_engine_id=request.engine_id,
         )
+
+        # TODO check if metadata has changed
+        # and reload - currently only loading once
+
+        if request.engine_id not in self._loaded_metadata:
+            remote_metadata = await self._metadata_store.get(request.engine_id)
+            await self.engine_client.add_remote_nixl_metadata(remote_metadata)
+            print(
+                f"Loaded nixl metadata from engine {request.engine_id} into engine {self.engine_client.nixl_metadata.engine_id}"
+            )
+            self._loaded_metadata.add(request.engine_id)
 
         async for _ in self.engine_client.generate(
             request_id=request.request_id,
@@ -67,20 +79,13 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     endpoint = component.endpoint("generate")
 
     async with build_async_engine_client_from_engine_args(engine_args) as engine_client:
-        # This should be replaced with etcd
         metadata = engine_client.nixl_metadata
-        print(f"Waiting for remote metadata for engine {metadata.engine_id}")
-        remote_metadata: list[NixlMetadata] = []
-        while not remote_metadata:
-            await asyncio.sleep(1)
-            remote_metadata = find_remote_metadata(metadata.engine_id)
+        metadata_store = NixlMetadataStore("test-nixl", runtime)
+        await metadata_store.put(metadata.engine_id, metadata)
 
-        print(
-            f"Found {len(remote_metadata)} remote metadata for engine {metadata.engine_id}"
+        await endpoint.serve_endpoint(
+            RequestHandler(engine_client, metadata_store).generate
         )
-        for remote_metadata in remote_metadata:
-            await engine_client.add_remote_nixl_metadata(remote_metadata)
-        await endpoint.serve_endpoint(RequestHandler(engine_client).generate)
 
 
 if __name__ == "__main__":
