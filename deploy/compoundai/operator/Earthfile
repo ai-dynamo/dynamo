@@ -1,0 +1,33 @@
+VERSION 0.8
+
+# Base container for both build and test
+deps:
+    FROM ../../../+golang-base
+    COPY . /app/operator
+    WORKDIR /app/operator
+    RUN go mod download
+
+lint:
+    FROM +deps
+    RUN golangci-lint run --config ./.golangci.yml 
+
+build:
+    FROM +deps
+    RUN CGO_ENABLED=0 go build -o manager ./cmd/main.go
+    SAVE ARTIFACT manager
+
+test:
+    FROM +deps
+    RUN make test
+    SAVE ARTIFACT cover.out
+
+docker:
+    ARG CI_REGISTRY_IMAGE=my-registry
+    ARG CI_COMMIT_SHA=latest
+    ARG IMAGE_SUFFIX=compoundai-operator
+    FROM urm.nvidia.com/sw-gpu-ucs-hardened-docker/distroless/go:v3.1.3-amd64
+    WORKDIR /
+    COPY +build/manager .
+    USER 65532:65532
+    CMD ["./manager"]
+    SAVE IMAGE --push $CI_REGISTRY_IMAGE/$IMAGE_SUFFIX:$CI_COMMIT_SHA

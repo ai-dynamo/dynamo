@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "datastore.gitea.additional.config.name" . }}
+data:
+  server: |
+    DOMAIN={{ include "datastore.gitea.fullname" . }}
+    ROOT_URL={{ include "datastore.gitea.inernal-endpoint" . }}

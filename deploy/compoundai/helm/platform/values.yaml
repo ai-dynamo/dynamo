@@ -1,0 +1,27 @@
+# Used to generate top-level secrets (overridden by custom-values.yaml)
+existingSecret: ""
+existingImagePullSecret: ""
+ngcAPIKey: YOUR-NGC-API-KEY
+imagePullSecrets:
+  - name: nvcrimagepullsecret
+    registry: nvcr.io
+    username: $oauthtoken
+    password: YOUR-NGC-API-KEY
+# Subcharts
+nemo-datastore:
+  enabled: false
+compoundai-operator:
+  enabled: false
+  imagePullSecrets:
+    - name: gitlab-imagepull
+    - name: nvcrimagepullsecret
+  controllerManager:
+    manager:
+      image:
+        repository: gitlab-master.nvidia.com:5005/aire/microservices/nmp/compoundai-operator
+        tag: "latest"
+compoundai-server:
+  enabled: false
+  imagePullSecrets:
+    - name: gitlab-imagepull
+    - name: nvcrimagepullsecret

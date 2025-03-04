@@ -1,0 +1,34 @@
+{{- if .Values.checkDeprecation -}}
+  {{/* CUSTOM PROBES */}}
+  {{- if .Values.gitea.customLivenessProbe -}}
+    {{- fail "`gitea.customLivenessProbe` does no longer exist. Please refer to the changelog and configure `gitea.livenessProbe` instead." -}}
+  {{- end -}}
+  {{- if .Values.gitea.customReadinessProbe -}}
+    {{- fail "`gitea.customReadinessProbe` does no longer exist. Please refer to the changelog and configure `gitea.readinessProbe` instead." -}}
+  {{- end -}}
+  {{- if .Values.gitea.customStartupProbe -}}
+    {{- fail "`gitea.customStartupProbe` does no longer exist. Please refer to the changelog and configure `gitea.startupProbe` instead." -}}
+  {{- end -}}
+
+  {{/* LDAP SOURCES */}}
+  {{- if kindIs "map" .Values.gitea.ldap -}}
+    {{- fail "You can configure multiple LDAP sources. Please refer to the changelog and switch `gitea.ldap` from object to array notation." -}}
+  {{- end -}}
+  
+  {{/* OAUTH SOURCES */}}
+  {{- if kindIs "map" .Values.gitea.oauth -}}
+    {{- fail "You can configure multiple OAuth sources. Please refer to the changelog and switch `gitea.oauth` from object to array notation." -}}
+  {{- end -}}
+  
+  {{/* BUILTIN */}}
+  {{- if .Values.gitea.cache -}}
+    {{- if .Values.gitea.cache.builtIn -}}
+      {{- fail "`gitea.cache.builtIn` does no longer exist. Please use `memcached` at root level instead." -}}
+    {{- end -}}
+  {{- end -}}
+  {{- if .Values.gitea.database -}}
+    {{- if .Values.gitea.database.builtIn -}}
+      {{- fail "`gitea.database.builtIn` does no longer exist. Builtin databases can be configured inside the dependencies itself. Please refer to the changelog." -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}

@@ -1,0 +1,9 @@
+apiVersion: nvidia.com/v1alpha1
+kind: CompoundAIDeployment
+metadata:
+  labels:
+    app.kubernetes.io/name: compoundai-kubernetes-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: compoundaideployment-sample
+spec:
+  compoundAINim: frontend:2c4romhs6s33e4w7

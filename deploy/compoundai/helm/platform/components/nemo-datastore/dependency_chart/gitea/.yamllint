@@ -1,0 +1,20 @@
+---
+extends: default
+
+ignore: |
+  .yamllint
+  node_modules
+  templates
+
+
+rules:
+  truthy:
+    allowed-values: ['true', 'false']
+    check-keys: False
+    level: error
+  line-length: disable
+  document-start: disable
+  comments:
+    min-spaces-from-content: 1
+  braces:
+    max-spaces-inside: 2

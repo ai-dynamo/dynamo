@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gitea.fullname" . }}-http
+  labels:
+    {{- include "gitea.labels" . | nindent 4 }}
+    {{- if .Values.service.http.labels }}
+    {{- toYaml .Values.service.http.labels  | nindent 4 }}
+    {{- end }}
+  annotations:
+    {{- toYaml .Values.service.http.annotations | nindent 4 }}
+spec:
+  type: {{ .Values.service.http.type }}
+  {{- if and .Values.service.http.loadBalancerIP (eq .Values.service.http.type "LoadBalancer") }}
+  loadBalancerIP: {{ .Values.service.http.loadBalancerIP  }}
+  {{- end }}
+  {{- if .Values.service.http.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+  {{- range .Values.service.http.loadBalancerSourceRanges }}
+    - {{ . }}
+  {{- end }}
+  {{- end }}
+  {{- if .Values.service.http.externalIPs }}
+  externalIPs:
+    {{- toYaml .Values.service.http.externalIPs | nindent 4 }}
+  {{- end }}
+  {{- if .Values.service.http.ipFamilyPolicy }}
+  ipFamilyPolicy: {{ .Values.service.http.ipFamilyPolicy }}
+  {{- end }}
+  {{- with .Values.service.http.ipFamilies }}
+  ipFamilies:
+  {{- toYaml . | nindent 4 }}
+  {{- end -}}
+  {{- if .Values.service.http.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ .Values.service.http.externalTrafficPolicy }}
+  {{- end }}
+  {{- if and .Values.service.http.clusterIP (eq .Values.service.http.type "ClusterIP") }}
+  clusterIP: {{ .Values.service.http.clusterIP }}
+  {{- end }}
+  ports:
+  - name: http
+    port: {{ .Values.service.http.port }}
+    {{- if  .Values.service.http.nodePort }}
+    nodePort: {{ .Values.service.http.nodePort }}
+    {{- end }}
+    targetPort: {{ .Values.gitea.config.server.HTTP_PORT }}
+  selector:
+    {{- include "gitea.selectorLabels" . | nindent 4 }}

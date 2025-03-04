@@ -1,0 +1,21 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "compoundai-operator.fullname" . }}-compoundainimrequest-viewer-role
+  labels:
+  {{- include "compoundai-operator.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - nvidia.com
+  resources:
+  - compoundainimrequests
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - compoundainimrequests/status
+  verbs:
+  - get

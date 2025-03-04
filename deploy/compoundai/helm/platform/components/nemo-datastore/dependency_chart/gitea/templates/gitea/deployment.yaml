@@ -1,0 +1,400 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gitea.fullname" . }}
+  annotations:
+    {{- if .Values.deployment.annotations }}
+    {{- toYaml .Values.deployment.annotations | nindent 4 }}
+    {{- end }}
+  labels:
+    {{- include "gitea.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: {{ .Values.strategy.type }}
+    {{- if eq .Values.strategy.type "RollingUpdate" }}
+    rollingUpdate:
+      maxUnavailable: {{ .Values.strategy.rollingUpdate.maxUnavailable }}
+      maxSurge: {{ .Values.strategy.rollingUpdate.maxSurge }}
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "gitea.selectorLabels" . | nindent 6 }}
+      {{- if .Values.deployment.labels }}
+      {{- toYaml .Values.deployment.labels | nindent 6 }}
+      {{- end }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/gitea/config.yaml") . | sha256sum }}
+        {{- range $idx, $value := .Values.gitea.ldap }}
+        checksum/ldap_{{ $idx }}: {{ include "gitea.ldap_settings" (list $idx $value) | sha256sum }}
+        {{- end }}
+        {{- range $idx, $value := .Values.gitea.oauth }}
+        checksum/oauth_{{ $idx }}: {{ include "gitea.oauth_settings" (list $idx $value) | sha256sum }}
+        {{- end }}
+        {{- with .Values.gitea.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "gitea.labels" . | nindent 8 }}
+        {{- if .Values.deployment.labels }}
+        {{- toYaml .Values.deployment.labels | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- if .Values.schedulerName }}
+      schedulerName: "{{ .Values.schedulerName }}"
+      {{- end }}
+      {{- if (or .Values.serviceAccount.create .Values.serviceAccount.name) }}
+      serviceAccountName: {{ include "gitea.serviceAccountName" . }}
+      {{- end }}
+      {{- if .Values.priorityClassName }}
+      priorityClassName: "{{ .Values.priorityClassName }}"
+      {{- end }}
+      {{- include "gitea.images.pullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+        - name: init-directories
+          image: "{{ include "gitea.image" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/sbin/init_directory_structure.sh"]
+          env:
+            - name: GITEA_APP_INI
+              value: /data/gitea/conf/app.ini
+            - name: GITEA_CUSTOM
+              value: /data/gitea
+            - name: GITEA_WORK_DIR
+              value: /data
+            - name: GITEA_TEMP
+              value: /tmp/gitea
+            {{- if .Values.deployment.env }}
+            {{- toYaml .Values.deployment.env | nindent 12 }}
+            {{- end }}
+            {{- if .Values.signing.enabled }}
+            - name: GNUPGHOME
+              value: {{ .Values.signing.gpgHome }}
+            {{- end }}
+          volumeMounts:
+            - name: init
+              mountPath: /usr/sbin
+            - name: temp
+              mountPath: /tmp
+            - name: data
+              mountPath: /data
+              {{- if .Values.persistence.subPath }}
+              subPath: {{ .Values.persistence.subPath }}
+              {{- end }}
+            {{- include "gitea.init-additional-mounts" . | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.initContainers.resources | nindent 12 }}
+        - name: init-app-ini
+          image: "{{ include "gitea.image" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/sbin/config_environment.sh"]
+          env:
+            - name: GITEA_APP_INI
+              value: /data/gitea/conf/app.ini
+            - name: GITEA_CUSTOM
+              value: /data/gitea
+            - name: GITEA_WORK_DIR
+              value: /data
+            - name: GITEA_TEMP
+              value: /tmp/gitea
+            {{- if .Values.deployment.env }}
+            {{- toYaml .Values.deployment.env | nindent 12 }}
+            {{- end }}
+            {{- if .Values.gitea.additionalConfigFromEnvs }}
+            {{- toYaml .Values.gitea.additionalConfigFromEnvs | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /usr/sbin
+            - name: temp
+              mountPath: /tmp
+            - name: data
+              mountPath: /data
+              {{- if .Values.persistence.subPath }}
+              subPath: {{ .Values.persistence.subPath }}
+              {{- end }}
+            - name: inline-config-sources
+              mountPath: /env-to-ini-mounts/inlines/
+            {{- range $idx, $value := .Values.gitea.additionalConfigSources }}
+            - name: additional-config-sources-{{ $idx }}
+              mountPath: "/env-to-ini-mounts/additionals/{{ $idx }}/"
+            {{- end }}
+            {{- include "gitea.init-additional-mounts" . | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.initContainers.resources | nindent 12 }}
+        {{- if .Values.signing.enabled }}
+        - name: configure-gpg
+          image: "{{ include "gitea.image" . }}"
+          command: ["/usr/sbin/configure_gpg_environment.sh"]
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- /* By default this container runs as user 1000 unless otherwise stated */ -}}
+            {{- $csc := deepCopy .Values.containerSecurityContext -}}
+            {{- if not (hasKey $csc "runAsUser") -}}
+            {{- $_ := set $csc "runAsUser" 1000 -}}
+            {{- end -}}
+            {{- toYaml $csc | nindent 12 }}
+          env:
+            - name: GNUPGHOME
+              value: {{ .Values.signing.gpgHome }}
+          volumeMounts:
+            - name: init
+              mountPath: /usr/sbin
+            - name: data
+              mountPath: /data
+              {{- if .Values.persistence.subPath }}
+              subPath: {{ .Values.persistence.subPath }}
+              {{- end }}
+            - name: gpg-private-key
+              mountPath: /raw
+              readOnly: true
+            {{- if .Values.extraVolumeMounts }}
+            {{- toYaml .Values.extraVolumeMounts | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.initContainers.resources | nindent 12 }}
+        {{- end }}
+        - name: configure-gitea
+          image: "{{ include "gitea.image" . }}"
+          command: ["/usr/sbin/configure_gitea.sh"]
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- /* By default this container runs as user 1000 unless otherwise stated */ -}}
+            {{- $csc := deepCopy .Values.containerSecurityContext -}}
+            {{- if not (hasKey $csc "runAsUser") -}}
+            {{- $_ := set $csc "runAsUser" 1000 -}}
+            {{- end -}}
+            {{- toYaml $csc | nindent 12 }}
+          env:
+            - name: GITEA_APP_INI
+              value: /data/gitea/conf/app.ini
+            - name: GITEA_CUSTOM
+              value: /data/gitea
+            - name: GITEA_WORK_DIR
+              value: /data
+            - name: GITEA_TEMP
+              value: /tmp/gitea
+            {{- if .Values.image.rootless }}
+            - name: HOME
+              value: /data/gitea/git
+            {{- end }}
+            {{- if .Values.gitea.ldap }}
+            {{- range $idx, $value := .Values.gitea.ldap }}
+            {{- if $value.existingSecret }}
+            - name: GITEA_LDAP_BIND_DN_{{ $idx }}
+              valueFrom:
+                secretKeyRef:
+                  key:  bindDn
+                  name: {{ $value.existingSecret }}
+            - name: GITEA_LDAP_PASSWORD_{{ $idx }}
+              valueFrom:
+                secretKeyRef:
+                  key:  bindPassword
+                  name: {{ $value.existingSecret }}
+            {{- else }}
+            - name: GITEA_LDAP_BIND_DN_{{ $idx }}
+              value: {{ $value.bindDn | quote }}
+            - name: GITEA_LDAP_PASSWORD_{{ $idx }}
+              value: {{ $value.bindPassword | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.gitea.oauth }}
+            {{- range $idx, $value := .Values.gitea.oauth }}
+            {{- if $value.existingSecret }}
+            - name: GITEA_OAUTH_KEY_{{ $idx }}
+              valueFrom:
+                secretKeyRef:
+                  key:  key
+                  name: {{ $value.existingSecret }}
+            - name: GITEA_OAUTH_SECRET_{{ $idx }}
+              valueFrom:
+                secretKeyRef:
+                  key:  secret
+                  name: {{ $value.existingSecret }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.gitea.admin.existingSecret }}
+            - name: GITEA_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  key:  username
+                  name: {{ .Values.gitea.admin.existingSecret }}
+            - name: GITEA_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key:  password
+                  name: {{ .Values.gitea.admin.existingSecret }}
+            {{- else }}
+            - name: GITEA_ADMIN_USERNAME
+              value: {{ .Values.gitea.admin.username | quote }}
+            - name: GITEA_ADMIN_PASSWORD
+              value: {{ .Values.gitea.admin.password | quote }}
+            {{- end }}
+            {{- if .Values.deployment.env }}
+            {{- toYaml .Values.deployment.env | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: init
+              mountPath: /usr/sbin
+            - name: temp
+              mountPath: /tmp
+            - name: data
+              mountPath: /data
+              {{- if .Values.persistence.subPath }}
+              subPath: {{ .Values.persistence.subPath }}
+              {{- end }}
+            {{- include "gitea.init-additional-mounts" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.initContainers.resources | nindent 12 }}
+      terminationGracePeriodSeconds: {{ .Values.deployment.terminationGracePeriodSeconds }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ include "gitea.image" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # SSH Port values have to be set here as well for openssh configuration
+            - name: SSH_LISTEN_PORT
+              value: {{ .Values.gitea.config.server.SSH_LISTEN_PORT | quote }}
+            - name: SSH_PORT
+              value: {{ .Values.gitea.config.server.SSH_PORT | quote }}
+            {{- if not .Values.image.rootless }}
+            - name: SSH_LOG_LEVEL
+              value: {{ .Values.gitea.ssh.logLevel | quote }}
+            {{- end }}
+            - name: GITEA_APP_INI
+              value: /data/gitea/conf/app.ini
+            - name: GITEA_CUSTOM
+              value: /data/gitea
+            - name: GITEA_WORK_DIR
+              value: /data
+            - name: GITEA_TEMP
+              value: /tmp/gitea
+            - name: TMPDIR
+              value: /tmp/gitea
+            {{- if .Values.image.rootless }}
+            - name: HOME
+              value: /data/gitea/git
+            {{- end }}
+            {{- if .Values.signing.enabled }}
+            - name: GNUPGHOME
+              value: {{ .Values.signing.gpgHome }}
+            {{- end }}
+            {{- if .Values.deployment.env }}
+            {{- toYaml .Values.deployment.env | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: ssh
+              containerPort: {{ .Values.gitea.config.server.SSH_LISTEN_PORT }}
+            {{- if .Values.service.ssh.hostPort }}
+              hostPort: {{ .Values.service.ssh.hostPort }}
+            {{- end }}
+            - name: http
+              containerPort: {{ .Values.gitea.config.server.HTTP_PORT }}
+            {{- if .Values.gitea.config.server.ENABLE_PPROF }}
+            - name: profiler
+              containerPort: 6060
+            {{- end }}
+          {{- if .Values.gitea.livenessProbe.enabled }}
+          livenessProbe:
+            {{- toYaml (omit .Values.gitea.livenessProbe "enabled") | nindent 12 }}
+          {{- end }}
+          {{- if .Values.gitea.readinessProbe.enabled }}
+          readinessProbe:
+            {{- toYaml (omit .Values.gitea.readinessProbe "enabled") | nindent 12 }}
+          {{- end }}
+          {{- if .Values.gitea.startupProbe.enabled }}
+          startupProbe:
+            {{- toYaml (omit .Values.gitea.startupProbe "enabled") | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- /* Honor the deprecated securityContext variable when defined */ -}}
+            {{- if .Values.containerSecurityContext -}}
+            {{ toYaml .Values.containerSecurityContext | nindent 12 -}}
+            {{- else -}}
+            {{ toYaml .Values.securityContext | nindent 12 -}}
+            {{- end }}
+          volumeMounts:
+            - name: temp
+              mountPath: /tmp
+            - name: data
+              mountPath: /data
+              {{- if .Values.persistence.subPath }}
+              subPath: {{ .Values.persistence.subPath }}
+              {{- end }}
+            {{- include "gitea.container-additional-mounts" . | nindent 12 }}
+      {{- with .Values.global.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+    {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints: 
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+    {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+    {{- if .Values.dnsConfig }}
+      dnsConfig:
+        {{- toYaml .Values.dnsConfig | nindent 8 }}
+    {{- end }}
+      volumes:
+        - name: init
+          secret:
+            secretName: {{ include "gitea.fullname" . }}-init
+            defaultMode: 110
+        - name: config
+          secret:
+            secretName: {{ include "gitea.fullname" . }}
+            defaultMode: 110
+        {{- if gt (len .Values.extraVolumes) 0 }}
+        {{- toYaml .Values.extraVolumes | nindent 8 }}
+        {{- end }}
+        - name: inline-config-sources
+          secret:
+            secretName: {{ include "gitea.fullname" . }}-inline-config
+        {{- range $idx, $value := .Values.gitea.additionalConfigSources }}
+        - name: additional-config-sources-{{ $idx }}
+          {{- toYaml $value | nindent 10 }}
+        {{- end }}
+        - name: temp
+          emptyDir: {}
+        {{- if .Values.signing.enabled }}
+        - name: gpg-private-key
+          secret:
+            secretName: {{ include "gitea.gpg-key-secret-name" . }}
+            items:
+              - key: privateKey
+                path: private.asc
+            defaultMode: 0100
+        {{- end }}
+  {{- if .Values.persistence.enabled }}
+    {{- if .Values.persistence.mount }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.claimName }}
+    {{- end }}
+  {{- else if not .Values.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+  {{- end }}

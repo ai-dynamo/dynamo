@@ -1,0 +1,23 @@
+# permissions for end users to view compoundainimrequests.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: compoundai-kubernetes-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: compoundainimrequest-viewer-role
+rules:
+- apiGroups:
+  - nvidia.com
+  resources:
+  - compoundainimrequests
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - compoundainimrequests/status
+  verbs:
+  - get

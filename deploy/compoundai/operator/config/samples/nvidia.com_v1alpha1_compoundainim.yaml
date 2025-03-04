@@ -1,0 +1,9 @@
+apiVersion: nvidia.com/v1alpha1
+kind: CompoundAINim
+metadata:
+  labels:
+    app.kubernetes.io/name: compoundai-kubernetes-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: compoundainim-sample
+spec:
+  # TODO(user): Add fields here

@@ -1,0 +1,23 @@
+apiVersion: v2
+name: compoundai-helm-chart
+maintainers:
+  - name: NVIDIA, Inc.
+    url: https://www.nvidia.com
+description: A Helm chart for NVIDIA CompoundAI Platform.
+type: application
+version: 25.2.0-rc3
+home: https://nvidia.com
+dependencies:
+  - name: compoundai-operator
+    alias: compoundai-operator
+    version: 0.1.0
+    repository: file://components/compoundai-operator
+    condition: compoundai-operator.enabled
+  - name: nemo-datastore
+    version: 0.1.10
+    repository: "file://components/nemo-datastore"
+    condition: nemo-datastore.enabled
+  - name: compoundai-server
+    version: 0.1.1
+    repository: "file://components/compoundai-server"
+    condition: compoundai-server.enabled

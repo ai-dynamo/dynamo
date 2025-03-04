@@ -1,0 +1,10 @@
+
+apiVersion: v1
+kind: Namespace
+metadata:
+ name: cai-hannahz
+ labels:
+   nscleanup/enabled: 'false' # this enables automated cleanup
+   nvcr-imagepull: enabled # adds nvcr imagepull secret
+   gitlab-imagepull: enabled # adds gitlab imagepull secret
+   istio-injection: 'false'

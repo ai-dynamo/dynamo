@@ -1,0 +1,17 @@
+{{- if .Values.gitea.metrics.serviceMonitor.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "gitea.fullname" . }}
+  labels:
+    {{- include "gitea.labels" . | nindent 4 }}
+    {{- if .Values.gitea.metrics.serviceMonitor.additionalLabels }}
+    {{- toYaml .Values.gitea.metrics.serviceMonitor.additionalLabels | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "gitea.selectorLabels" . | nindent 6 }}
+  endpoints:
+  - port: http
+{{- end -}}

@@ -1,0 +1,60 @@
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  extends: [
+    'gitea>gitea/renovate-config',
+    ':automergeMinor',
+    'schedule:automergeDaily',
+    'schedule:weekends',
+  ],
+  labels: [
+    'kind/dependency',
+  ],
+  automergeStrategy: 'squash',
+  customManagers: [
+    {
+      description: 'Gitea-version of https://docs.renovatebot.com/presets-regexManagers/#regexmanagersgithubactionsversions',
+      customType: 'regex',
+      fileMatch: [
+        '.gitea/workflows/.+\\.ya?ml$',
+      ],
+      matchStrings: [
+        '# renovate: datasource=(?<datasource>[a-z-.]+?) depName=(?<depName>[^\\s]+?)(?: (?:lookupName|packageName)=(?<packageName>[^\\s]+?))?(?: versioning=(?<versioning>[a-z-0-9]+?))?\\s+[A-Za-z0-9_]+?_VERSION\\s*:\\s*["\']?(?<currentValue>.+?)["\']?\\s',
+      ],
+    },
+    {
+      description: 'Detect helm-unittest yaml schema file',
+      customType: 'regex',
+      fileMatch: ['.vscode/settings\\.json$'],
+      matchStrings: [
+        'https:\\/\\/raw\\.githubusercontent\\.com\\/(?<depName>[^\\s]+?)\\/(?<currentValue>v[0-9.]+?)\\/schema\\/helm-testsuite\\.json',
+      ],
+      datasourceTemplate: 'github-releases',
+    },
+  ],
+  packageRules: [
+    {
+      groupName: 'subcharts (minor & patch)',
+      matchManagers: [
+        'helmv3',
+      ],
+      matchUpdateTypes: [
+        'minor',
+        'patch',
+        'digest',
+      ],
+    },
+    {
+      groupName: 'workflow dependencies (minor & patch)',
+      matchManagers: [
+        'github-actions',
+        'npm',
+        'custom.regex',
+      ],
+      matchUpdateTypes: [
+        'minor',
+        'patch',
+        'digest',
+      ],
+    },
+  ],
+}

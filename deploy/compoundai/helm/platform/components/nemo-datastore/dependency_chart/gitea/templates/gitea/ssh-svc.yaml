@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gitea.fullname" . }}-ssh
+  labels:
+    {{- include "gitea.labels" . | nindent 4 }}
+    {{- if .Values.service.ssh.labels }}
+    {{- toYaml .Values.service.ssh.labels  | nindent 4 }}
+    {{- end }}
+  annotations:
+    {{- toYaml .Values.service.ssh.annotations | nindent 4 }}
+spec:
+  type: {{ .Values.service.ssh.type }}
+  {{- if eq .Values.service.ssh.type "LoadBalancer" }}
+  {{- if .Values.service.ssh.loadBalancerIP }}
+  loadBalancerIP: {{ .Values.service.ssh.loadBalancerIP }}
+  {{- end -}}
+  {{- if .Values.service.ssh.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+  {{- range .Values.service.ssh.loadBalancerSourceRanges }}
+    - {{ . }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  {{- if and .Values.service.ssh.clusterIP (eq .Values.service.ssh.type "ClusterIP") }}
+  clusterIP: {{ .Values.service.ssh.clusterIP }}
+  {{- end }}
+  {{- if .Values.service.ssh.externalIPs }}
+  externalIPs:
+    {{- toYaml .Values.service.ssh.externalIPs | nindent 4 }}
+  {{- end }}
+  {{- if .Values.service.ssh.ipFamilyPolicy }}
+  ipFamilyPolicy: {{ .Values.service.ssh.ipFamilyPolicy }}
+  {{- end }}
+  {{- with .Values.service.ssh.ipFamilies }}
+  ipFamilies:
+  {{- toYaml . | nindent 4 }}
+  {{- end -}}
+  {{- if .Values.service.ssh.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ .Values.service.ssh.externalTrafficPolicy }}
+  {{- end }}
+  ports:
+  - name: ssh
+    port: {{ .Values.service.ssh.port }}
+    {{- if .Values.gitea.config.server.SSH_LISTEN_PORT }}
+    targetPort: {{ .Values.gitea.config.server.SSH_LISTEN_PORT }}
+    {{- end }}
+    protocol: TCP
+    {{- if .Values.service.ssh.nodePort }}
+    nodePort: {{ .Values.service.ssh.nodePort }}
+    {{- end }}
+  selector:
+    {{- include "gitea.selectorLabels" . | nindent 4 }}

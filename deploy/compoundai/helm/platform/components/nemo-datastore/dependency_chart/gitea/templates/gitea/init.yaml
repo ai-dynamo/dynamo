@@ -1,0 +1,213 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "gitea.fullname" . }}-init
+  labels:
+    {{- include "gitea.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  configure_gpg_environment.sh: |-
+    #!/usr/bin/env bash
+    set -eu
+
+    gpg --batch --import /raw/private.asc
+  init_directory_structure.sh: |-
+    #!/usr/bin/env bash
+
+    set -euo pipefail
+
+    {{- if .Values.initPreScript }}
+    # BEGIN: initPreScript
+    {{- with .Values.initPreScript -}}
+    {{ . | nindent 4}}
+    {{- end -}}
+    # END: initPreScript
+    {{- end }}
+
+    set -x
+
+    {{- if not .Values.image.rootless }}
+    chown 1000:1000 /data
+    {{- end }}
+    mkdir -p /data/git/.ssh
+    chmod -R 700 /data/git/.ssh
+    [ ! -d /data/gitea/conf ] && mkdir -p /data/gitea/conf
+
+    # prepare temp directory structure
+    mkdir -p "${GITEA_TEMP}"
+    {{- if not .Values.image.rootless }}
+    chown 1000:1000 "${GITEA_TEMP}"
+    {{- end }}
+    chmod ug+rwx "${GITEA_TEMP}"
+
+    {{ if .Values.signing.enabled -}}
+    if [ ! -d "${GNUPGHOME}" ]; then
+      mkdir -p "${GNUPGHOME}"
+      chmod 700 "${GNUPGHOME}"
+      chown 1000:1000 "${GNUPGHOME}"
+    fi
+    {{- end }}
+
+  configure_gitea.sh: |-
+    #!/usr/bin/env bash
+
+    set -euo pipefail
+
+    echo '==== BEGIN GITEA CONFIGURATION ===='
+
+    { # try
+      gitea migrate
+    } || { # catch
+      echo "Gitea migrate might fail due to database connection...This init-container will try again in a few seconds"
+      exit 1
+    }
+
+    {{- if include "redis.servicename" . }}
+    function test_redis_connection() {
+      local RETRY=0
+      local MAX=30
+      
+      echo 'Wait for redis to become avialable...'
+      until [ "${RETRY}" -ge "${MAX}" ]; do
+        nc -vz -w2 {{ include "redis.servicename" . }} {{ include "redis.port" . }} && break
+        RETRY=$[${RETRY}+1]
+        echo "...not ready yet (${RETRY}/${MAX})"
+      done
+
+      if [ "${RETRY}" -ge "${MAX}" ]; then
+        echo "Redis not reachable after '${MAX}' attempts!"
+        exit 1
+      fi
+    }
+
+    test_redis_connection
+    {{- end }}
+    
+
+    {{- if or .Values.gitea.admin.existingSecret (and .Values.gitea.admin.username .Values.gitea.admin.password) }}
+    function configure_admin_user() {
+      local full_admin_list=$(gitea admin user list --admin)
+      local actual_user_table=''
+
+      # We might have distorted output due to warning logs, so we have to detect the actual user table by its headline and trim output above that line
+      local regex="(.*)(ID\s+Username\s+Email\s+IsActive.*)"
+      if [[ "${full_admin_list}" =~ $regex ]]; then
+        actual_user_table=$(echo "${BASH_REMATCH[2]}" | tail -n+2) # tail'ing to drop the table headline
+      else
+        # This code block should never be reached, as long as the output table header remains the same.
+        # If this code block is reached, the regex doesn't match anymore and we probably have to adjust this script.
+
+        echo "ERROR: 'configure_admin_user' was not able to determine the current list of admin users."
+        echo "       Please review the output of 'gitea admin user list --admin' shown below."
+        echo "       If you think it is an issue with the Helm Chart provisioning, file an issue at https://gitea.com/gitea/helm-chart/issues."
+        echo "DEBUG: Output of 'gitea admin user list --admin'"
+        echo "--"
+        echo "${full_admin_list}"
+        echo "--"
+        exit 1
+      fi
+
+      local ACCOUNT_ID=$(echo "${actual_user_table}" | grep -E "\s+${GITEA_ADMIN_USERNAME}\s+" | awk -F " " "{printf \$1}")
+      if [[ -z "${ACCOUNT_ID}" ]]; then
+        echo "No admin user '${GITEA_ADMIN_USERNAME}' found. Creating now..."
+        gitea admin user create --admin --username "${GITEA_ADMIN_USERNAME}" --password "${GITEA_ADMIN_PASSWORD}" --email {{ .Values.gitea.admin.email | quote }} --must-change-password=false
+        echo '...created.'
+      else
+        echo "Admin account '${GITEA_ADMIN_USERNAME}' already exist. Running update to sync password..."
+        gitea admin user change-password --username "${GITEA_ADMIN_USERNAME}" --password "${GITEA_ADMIN_PASSWORD}"
+        echo '...password sync done.'
+      fi
+    }
+
+    configure_admin_user
+    {{- end }}
+
+    function configure_ldap() {
+      {{- if .Values.gitea.ldap }}
+      {{- range $idx, $value := .Values.gitea.ldap }}
+      local LDAP_NAME={{ (printf "%s" $value.name) | squote }}
+      local full_auth_list=$(gitea admin auth list --vertical-bars)
+      local actual_auth_table=''
+
+      # We might have distorted output due to warning logs, so we have to detect the actual user table by its headline and trim output above that line
+      local regex="(.*)(ID\s+\|Name\s+\|Type\s+\|Enabled.*)"
+      if [[ "${full_auth_list}" =~ $regex ]]; then
+        actual_auth_table=$(echo "${BASH_REMATCH[2]}" | tail -n+2) # tail'ing to drop the table headline
+      else
+        # This code block should never be reached, as long as the output table header remains the same.
+        # If this code block is reached, the regex doesn't match anymore and we probably have to adjust this script.
+
+        echo "ERROR: 'configure_ldap' was not able to determine the current list of authentication sources."
+        echo "       Please review the output of 'gitea admin auth list --vertical-bars' shown below."
+        echo "       If you think it is an issue with the Helm Chart provisioning, file an issue at https://gitea.com/gitea/helm-chart/issues."
+        echo "DEBUG: Output of 'gitea admin auth list --vertical-bars'"
+        echo "--"
+        echo "${full_auth_list}"
+        echo "--"
+        exit 1
+      fi
+
+      local GITEA_AUTH_ID=$(echo "${actual_auth_table}" | grep -E "\|${LDAP_NAME}\s+\|" | grep -iE '\|LDAP \(via BindDN\)\s+\|' | awk -F " "  "{print \$1}")
+
+      if [[ -z "${GITEA_AUTH_ID}" ]]; then
+        echo "No ldap configuration found with name '${LDAP_NAME}'. Installing it now..."
+        gitea admin auth add-ldap {{- include "gitea.ldap_settings" (list $idx $value) | indent 1 }}
+        echo '...installed.'
+      else
+        echo "Existing ldap configuration with name '${LDAP_NAME}': '${GITEA_AUTH_ID}'. Running update to sync settings..."
+        gitea admin auth update-ldap --id "${GITEA_AUTH_ID}" {{- include "gitea.ldap_settings" (list $idx $value) | indent 1 }}
+        echo '...sync settings done.'
+      fi
+      {{- end }}
+      {{- else }}
+        echo 'no ldap configuration... skipping.'
+      {{- end }}
+    }
+
+    configure_ldap
+
+    function configure_oauth() {
+      {{- if .Values.gitea.oauth }}
+      {{- range $idx, $value := .Values.gitea.oauth }}
+      local OAUTH_NAME={{ (printf "%s" $value.name) | squote }}
+      local full_auth_list=$(gitea admin auth list --vertical-bars)
+      local actual_auth_table=''
+
+      # We might have distorted output due to warning logs, so we have to detect the actual user table by its headline and trim output above that line
+      local regex="(.*)(ID\s+\|Name\s+\|Type\s+\|Enabled.*)"
+      if [[ "${full_auth_list}" =~ $regex ]]; then
+        actual_auth_table=$(echo "${BASH_REMATCH[2]}" | tail -n+2) # tail'ing to drop the table headline
+      else
+        # This code block should never be reached, as long as the output table header remains the same.
+        # If this code block is reached, the regex doesn't match anymore and we probably have to adjust this script.
+
+        echo "ERROR: 'configure_oauth' was not able to determine the current list of authentication sources."
+        echo "       Please review the output of 'gitea admin auth list --vertical-bars' shown below."
+        echo "       If you think it is an issue with the Helm Chart provisioning, file an issue at https://gitea.com/gitea/helm-chart/issues."
+        echo "DEBUG: Output of 'gitea admin auth list --vertical-bars'"
+        echo "--"
+        echo "${full_auth_list}"
+        echo "--"
+        exit 1
+      fi
+
+      local AUTH_ID=$(echo "${actual_auth_table}" | grep -E "\|${OAUTH_NAME}\s+\|" | grep -iE '\|OAuth2\s+\|' | awk -F " "  "{print \$1}")
+
+      if [[ -z "${AUTH_ID}" ]]; then
+        echo "No oauth configuration found with name '${OAUTH_NAME}'. Installing it now..."
+        gitea admin auth add-oauth {{- include "gitea.oauth_settings" (list $idx $value) | indent 1 }}
+        echo '...installed.'
+      else
+        echo "Existing oauth configuration with name '${OAUTH_NAME}': '${AUTH_ID}'. Running update to sync settings..."
+        gitea admin auth update-oauth --id "${AUTH_ID}" {{- include "gitea.oauth_settings" (list $idx $value) | indent 1 }}
+        echo '...sync settings done.'
+      fi
+      {{- end }}
+      {{- else }}
+        echo 'no oauth configuration... skipping.'
+      {{- end }}
+    }
+
+    configure_oauth
+
+    echo '==== END GITEA CONFIGURATION ===='
