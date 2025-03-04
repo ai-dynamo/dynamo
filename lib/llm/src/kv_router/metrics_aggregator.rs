@@ -17,17 +17,11 @@ use std::sync::{Arc, Mutex};
 
 pub use crate::kv_router::protocols::ForwardPassMetrics;
 
-use anyhow::Result;
-use triton_distributed_runtime::pipeline::network::{
-    ingress::push_endpoint::PushEndpoint, PushWorkHandler,
-};
-
 use crate::kv_router::scheduler::{Endpoint, Service};
 use crate::kv_router::ProcessedEndpoints;
 use std::time::Duration;
-use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-use triton_distributed_runtime::{component::Component, DistributedRuntime};
+use triton_distributed_runtime::component::Component;
 
 pub struct KvMetricsAggregator {
     pub service_name: String,
@@ -69,7 +63,7 @@ impl KvMetricsAggregator {
         });
         Self {
             service_name: component.service_name(),
-            endpoints: endpoints,
+            endpoints,
         }
     }
 
