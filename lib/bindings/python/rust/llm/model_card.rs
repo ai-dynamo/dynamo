@@ -27,11 +27,11 @@ impl ModelDeploymentCard {}
 #[pymethods]
 impl ModelDeploymentCard {
     #[staticmethod]
-    fn from_local_path<'p>(
+    fn from_local_path(
         path: String,
         model_name: String,
-        py: Python<'p>,
-    ) -> PyResult<Bound<'p, PyAny>> {
+        py: Python<'_>,
+    ) -> PyResult<Bound<'_, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let card = RsModelDeploymentCard::from_local_path(&path, Some(&model_name))
                 .await
