@@ -195,7 +195,7 @@ Output:
   ],
   "created":1741024639,
   "model":"TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-  "object":"completion",
+  "object":"text_completion",
   "usage":null
 }
 ```
