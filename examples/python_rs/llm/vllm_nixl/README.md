@@ -36,7 +36,7 @@ Start required services (etcd and NATS):
 ## Build docker
 
 ```
-./container/build.sh --framework VLLM_NIXL --target dev --build-context nixl=<path to downloaded nixl repo @ fc912eb012597be67de11fa9ba0599e4e1974fa2>
+./container/build.sh --framework VLLM_NIXL --target dev --build-context nixl=<path to downloaded nixl repo @ c53bb19a6a114e9093071bd1f2904f996ae1839b>
 ```
 
 ## Run container
@@ -129,10 +129,11 @@ CUDA_VISIBLE_DEVICES=0 python prefill_worker.py \
 
 # start decode worker in Terminal 2
 cd /workspace/examples/python_rs/llm/vllm_nixl
-CUDA_VISIBLE_DEVICES=1 python3 worker.py \
+CUDA_VISIBLE_DEVICES=1,2 python3 worker.py \
     --remote-prefill \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
+    --tensor-parallel-size 2 \
     --kv-transfer-config \
     '{"kv_connector":"TritonNixlConnector"}'
 ```

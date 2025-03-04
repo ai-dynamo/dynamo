@@ -21,6 +21,7 @@ import uvloop
 from utils.nixl import find_remote_metadata, temp_metadata_file
 from utils.prefill_queue import PrefillQueue
 from utils.vllm import parse_vllm_args
+from common import find_remote_metadata, parse_vllm_args
 from vllm.distributed.device_communicators.nixl import NixlMetadata
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.api_server import (
@@ -66,40 +67,32 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     async with build_async_engine_client_from_engine_args(engine_args) as engine_client:
         # This should be replaced with etcd
         metadata = engine_client.nixl_metadata
-        with temp_metadata_file(metadata.engine_id, metadata):
-            print(f"Waiting for remote metadata for engine {metadata.engine_id}")
-            remote_metadata: list[NixlMetadata] = []
-            while not remote_metadata:
-                await asyncio.sleep(1)
-                remote_metadata = find_remote_metadata(metadata.engine_id)
+        
+        print(f"Waiting for remote metadata for engine {metadata.engine_id}")
+        remote_metadata: list[NixlMetadata] = []
+        while not remote_metadata:
+            await asyncio.sleep(1)
+            remote_metadata = find_remote_metadata(metadata.engine_id)
 
-            print(
-                f"Found {len(remote_metadata)} remote metadata for engine {metadata.engine_id}"
-            )
-            for remote_metadata in remote_metadata:
-                await engine_client.add_remote_nixl_metadata(remote_metadata)
+        print(
+            f"Found {len(remote_metadata)} remote metadata for engine {metadata.engine_id}"
+        )
+        for remote_metadata in remote_metadata:
+            await engine_client.add_remote_nixl_metadata(remote_metadata)
 
-            prefill_queue_nats_server = os.getenv(
-                "NATS_SERVER", "nats://localhost:4222"
-            )
-            prefill_queue_stream_name = engine_args.model
-            vllm_logger.info(
-                f"Prefill queue: {prefill_queue_nats_server}:{prefill_queue_stream_name}"
-            )
-
-            # TODO: integrate prefill_queue to an triton_distributed endpoint
-            async with PrefillQueue.get_instance(
-                nats_server=prefill_queue_nats_server,
-                stream_name=prefill_queue_stream_name,
-            ) as prefill_queue:
-                while True:
-                    prefill_request = await prefill_queue.dequeue_prefill_request()
-                    if prefill_request is not None:
-                        vllm_logger.info(f"Dequeued prefill request: {prefill_request}")
-                        async for _ in RequestHandler(engine_client).generate(
-                            prefill_request
-                        ):
-                            pass
+        # TODO: integrate prefill_queue to an triton_distributed endpoint
+        async with PrefillQueue.get_instance(
+            nats_server=prefill_queue_nats_server,
+            stream_name=prefill_queue_stream_name,
+        ) as prefill_queue:
+            while True:
+                prefill_request = await prefill_queue.dequeue_prefill_request()
+                if prefill_request is not None:
+                    vllm_logger.info(f"Dequeued prefill request: {prefill_request}")
+                    async for _ in RequestHandler(engine_client).generate(
+                        prefill_request
+                    ):
+                        pass
 
 
 if __name__ == "__main__":
@@ -113,5 +106,13 @@ if __name__ == "__main__":
     if engine_args.pipeline_parallel_size != 1:
         print("Pipeline parallel size is not supported yet, setting to 1")
         engine_args.pipeline_parallel_size = 1
+
+    if engine_args.disable_async_output_proc is not True:
+        print("Async output processing is not supported yet, setting to True")
+        engine_args.disable_async_output_proc = True
+
+    if engine_args.enforce_eager is not True:
+        print("Prefill must be done eagerly, setting to True")
+        engine_args.enforce_eager = True
 
     asyncio.run(worker(engine_args))

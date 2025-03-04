@@ -26,7 +26,7 @@ on:
     branches:
     - main
     paths:
-    - pre-merge-rust.yml
+    - .github/workflows/pre-merge-rust.yml
     - 'lib/runtime/**'
     - 'lib/llm/**'
     - 'lib/bindings/**'
@@ -66,6 +66,7 @@ jobs:
       if: ${{ env.ACT }}
       run: |
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        rustup toolchain install 1.85.0-x86_64-unknown-linux-gnu
         echo "$HOME/.cargo/bin" >> $GITHUB_PATH
     - name: Set up Rust Toolchain Components
       run: rustup component add rustfmt clippy
@@ -84,7 +85,6 @@ jobs:
       run: |
         cargo-deny --version || cargo install cargo-deny@0.16.4
         cargo-deny check --hide-inclusion-graph licenses --config ${{ github.workspace }}/deny.toml
-      timeout-minutes: 5
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
       run: cargo test --locked --all-targets
