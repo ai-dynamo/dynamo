@@ -202,8 +202,8 @@ func (r *CompoundAINimDeploymentReconciler) Reconcile(ctx context.Context, req c
 
 	compoundAINimFoundCondition := meta.FindStatusCondition(compoundAINimDeployment.Status.Conditions, v1alpha1.CompoundAIDeploymentConditionTypeCompoundAINimFound)
 	if compoundAINimFoundCondition != nil && compoundAINimFoundCondition.Status == metav1.ConditionUnknown {
-		logs.Info(fmt.Sprintf("Getting Compount AI NIM %s", compoundAINimDeployment.Spec.CompoundAINim))
-		r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetCompoundAINim", "Getting Compount AI NIM %s", compoundAINimDeployment.Spec.CompoundAINim)
+		logs.Info(fmt.Sprintf("Getting Compound AI NIM %s", compoundAINimDeployment.Spec.CompoundAINim))
+		r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetCompoundAINim", "Getting Compound AI NIM %s", compoundAINimDeployment.Spec.CompoundAINim)
 	}
 	compoundAINimRequest := &v1alpha1.CompoundAINimRequest{}
 	compoundAINimCR := &v1alpha1.CompoundAINim{}

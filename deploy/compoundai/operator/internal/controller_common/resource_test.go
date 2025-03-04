@@ -151,7 +151,7 @@ func TestIsSpecChanged(t *testing.T) {
 											map[string]interface{}{
 												"containerPort": 80,
 											},
-										}, // swith order of env
+										}, // switch order of env
 										"env": []interface{}{
 											map[string]interface{}{"name": "ENV_VAR2", "value": "value2"},
 											map[string]interface{}{"name": "ENV_VAR1", "value": "value1"},

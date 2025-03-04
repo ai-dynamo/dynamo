@@ -114,8 +114,8 @@ func DefaultDeploymentTargetHPAConf() *schemas.DeploymentTargetHPAConf {
 
 // DefaultDeploymentStrategy generates a default DeploymentStrategy
 func DefaultDeploymentStrategy() *schemas.DeploymentStrategy {
-	strat := schemas.DeploymentStrategyRollingUpdate
-	return &strat
+	strategy := schemas.DeploymentStrategyRollingUpdate
+	return &strategy
 }
 
 // Helper function to return a pointer to an int32

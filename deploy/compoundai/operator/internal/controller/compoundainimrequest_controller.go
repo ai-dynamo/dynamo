@@ -40,13 +40,11 @@ import (
 	commonconsts "github.com/dynemo-ai/dynemo/deploy/compoundai/operator/pkg/compoundai/consts"
 	"github.com/ettle/strcase"
 	"github.com/huandu/xstrings"
-	"github.com/mitchellh/hashstructure/v2"
 	"github.com/prometheus/common/version"
 	"github.com/prune998/docker-registry-client/registry"
 	"github.com/rs/xid"
 	"github.com/sergeymakinen/go-quote/unix"
 	"github.com/sirupsen/logrus"
-	"gopkg.in/yaml.v2"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -75,8 +73,8 @@ const (
 	KubeAnnotationCompoundAINimRequestImageBuiderHash = "yatai.ai/bento-request-image-builder-hash"
 	KubeAnnotationCompoundAINimRequestModelSeederHash = "yatai.ai/bento-request-model-seeder-hash"
 	KubeLabelYataiImageBuilderSeparateModels          = "yatai.ai/yatai-image-builder-separate-models"
-	KubeAnnotationCompoundAINimStorageNS              = "yatai.ai/bento-storage-namepsace"
-	KubeAnnotationModelStorageNS                      = "yatai.ai/model-storage-namepsace"
+	KubeAnnotationCompoundAINimStorageNS              = "yatai.ai/bento-storage-namespace"
+	KubeAnnotationModelStorageNS                      = "yatai.ai/model-storage-namespace"
 	StoreSchemaAWS                                    = "aws"
 	StoreSchemaGCP                                    = "gcp"
 )
@@ -637,7 +635,7 @@ func (r *CompoundAINimRequestReconciler) ensureImageExists(ctx context.Context, 
 			Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeImageBuilding,
 			Status:  metav1.ConditionFalse,
 			Reason:  "Reconciling",
-			Message: fmt.Sprintf("Image building job %s is successed.", job.Name),
+			Message: fmt.Sprintf("Image building job %s is succeeded.", job.Name),
 		},
 		metav1.Condition{
 			Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeImageExists,

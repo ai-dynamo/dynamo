@@ -167,7 +167,7 @@ func (s *deploymentRevisionService) Terminate(ctx context.Context, deploymentRev
 	for _, target := range deploymentTargets {
 		_, err := DeploymentTargetService.Terminate(ctx, target)
 		if err != nil {
-			log.Error().Msgf("Error occured when terminating targets for revision: %s", err.Error())
+			log.Error().Msgf("Error occurred when terminating targets for revision: %s", err.Error())
 			return err
 		}
 	}

@@ -150,7 +150,7 @@ func (r *CompoundAIDeploymentReconciler) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, err
 	}
 
-	allReady := true
+	allAreReady := true
 	// reconcile the CompoundAINimDeployments
 	for serviceName, compoundAINimDeployment := range compoundAINimDeployments {
 		logger.Info("Reconciling the CompoundAINimDeployment", "serviceName", serviceName, "compoundAINimDeployment", compoundAINimDeployment)
@@ -164,10 +164,10 @@ func (r *CompoundAIDeploymentReconciler) Reconcile(ctx context.Context, req ctrl
 			return ctrl.Result{}, err
 		}
 		if !compoundAINimDeployment.Status.IsReady() {
-			allReady = false
+			allAreReady = false
 		}
 	}
-	if allReady {
+	if allAreReady {
 		compoundAIDeployment.SetState(ReadyState)
 		readyStatus = metav1.ConditionTrue
 	} else {
