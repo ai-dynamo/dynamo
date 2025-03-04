@@ -18,7 +18,7 @@ import asyncio
 
 import msgspec
 import uvloop
-from common import find_remote_metadata, parse_vllm_args, temp_metadata_file
+from common import find_remote_metadata, parse_vllm_args
 from vllm.distributed.device_communicators.nixl import NixlMetadata
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.api_server import (
@@ -69,19 +69,18 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     async with build_async_engine_client_from_engine_args(engine_args) as engine_client:
         # This should be replaced with etcd
         metadata = engine_client.nixl_metadata
-        with temp_metadata_file(metadata.engine_id, metadata):
-            print(f"Waiting for remote metadata for engine {metadata.engine_id}")
-            remote_metadata: list[NixlMetadata] = []
-            while not remote_metadata:
-                await asyncio.sleep(1)
-                remote_metadata = find_remote_metadata(metadata.engine_id)
+        print(f"Waiting for remote metadata for engine {metadata.engine_id}")
+        remote_metadata: list[NixlMetadata] = []
+        while not remote_metadata:
+            await asyncio.sleep(1)
+            remote_metadata = find_remote_metadata(metadata.engine_id)
 
-            print(
-                f"Found {len(remote_metadata)} remote metadata for engine {metadata.engine_id}"
-            )
-            for remote_metadata in remote_metadata:
-                await engine_client.add_remote_nixl_metadata(remote_metadata)
-            await endpoint.serve_endpoint(RequestHandler(engine_client).generate)
+        print(
+            f"Found {len(remote_metadata)} remote metadata for engine {metadata.engine_id}"
+        )
+        for remote_metadata in remote_metadata:
+            await engine_client.add_remote_nixl_metadata(remote_metadata)
+        await endpoint.serve_endpoint(RequestHandler(engine_client).generate)
 
 
 if __name__ == "__main__":
@@ -95,5 +94,13 @@ if __name__ == "__main__":
     if engine_args.pipeline_parallel_size != 1:
         print("Pipeline parallel size is not supported yet, setting to 1")
         engine_args.pipeline_parallel_size = 1
+
+    if engine_args.disable_async_output_proc is not True:
+        print("Async output processing is not supported yet, setting to True")
+        engine_args.disable_async_output_proc = True
+
+    if engine_args.enforce_eager is not True:
+        print("Prefill must be done eagerly, setting to True")
+        engine_args.enforce_eager = True
 
     asyncio.run(worker(engine_args))
