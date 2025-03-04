@@ -1,6 +1,6 @@
 ## CAI Data Model
 
-Each resource in the CAI data model is scoped either at the user or organization level. For user scoping, a user can only see resources they own. For org level scoping, 
+Each resource in the CAI data model is scoped either at the user or organization level. For user scoping, a user can only see resources they own. For org level scoping,
 users can see any resource that belongs to their organization. The user's organization and user ID are automatically included in request headers by KAS Direct. If absent, these values default to "default".
 The default scoping for most resources is user, although there are some exceptions to this. To enforce org level scoping change
 the `RESOURCE_SCOPE` env var in `.env`.
@@ -12,7 +12,7 @@ All clusters are required to have org level scoping. A cluster doesn't refer to 
 some separation and organization of deployments. Currently, all deployments will run on the `compoundai` namespace. Each organization must include a cluster named default because the CLI defaults to this cluster during deployment commands.
 
 #### 2. Deployments
-Deployments are user level scoped. The `deployment` entity is used to keep track of the deployment status, K8s namespace, and other metadata. A `deployment` has 
+Deployments are user level scoped. The `deployment` entity is used to keep track of the deployment status, K8s namespace, and other metadata. A `deployment` has
 1 to n `deployment_revision`'s. Each deployment always has 1 active deployment revisions.
 
 

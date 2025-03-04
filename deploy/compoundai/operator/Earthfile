@@ -9,7 +9,7 @@ deps:
 
 lint:
     FROM +deps
-    RUN golangci-lint run --config ./.golangci.yml 
+    RUN golangci-lint run --config ./.golangci.yml
 
 build:
     FROM +deps

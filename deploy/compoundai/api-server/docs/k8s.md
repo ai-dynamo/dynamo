@@ -11,10 +11,10 @@ There are currently two urls that can be used for the API server.
 
 ### Compound NIM Deployments
 All CRDs are created in the `compoundai` namespace. These are
-reconciled by the NeMo operator, and image builder jobs and deployments 
-are created in this namespace. 
+reconciled by the NeMo operator, and image builder jobs and deployments
+are created in this namespace.
 
-The API spec allows users to 
+The API spec allows users to
 specify the namespace their Compound NIMs are deployed to. However,
 the CLI and V2 APIs default currently to `compoundai`.
 

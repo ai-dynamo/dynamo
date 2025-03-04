@@ -4,7 +4,7 @@ The NVIDIA Compound AI Kubernetes Operator uses the [operator framework](https:/
 
 ## pre-requisites
 NEMO kubernetes operator has been built using [kubebuilder](https://github.com/kubernetes-sigs/kubebuilder)
-you need to install it on your machine 
+you need to install it on your machine
 
 ### Build
 
