@@ -55,7 +55,7 @@ impl KvMetricsAggregator {
                         }
                     },
                     None => {
-                        tracing::trace!("endpoint subscriber shutdown");
+                        tracing::warn!("endpoint subscriber shutdown");
                         break;
                     }
                 };
