@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Count is a metrics aggregator designed to operate within a namespace and collect
+//! Metrics is a metrics aggregator designed to operate within a namespace and collect
 //! metrics from all workers.
 //!
 //! Metrics will collect for now:
@@ -32,12 +32,12 @@ use triton_distributed_runtime::{
 };
 
 // Import from our library
-use count::{
+use metrics::{
     collect_endpoints, extract_metrics, postprocess_metrics, LLMWorkerLoadCapacityConfig,
     PrometheusMetricsServer,
 };
 
-/// CLI arguments for the count application
+/// CLI arguments for the metrics application
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {

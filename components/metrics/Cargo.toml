@@ -14,15 +14,15 @@
 # limitations under the License.
 
 [package]
-name = "count"
+name = "metrics"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
 # local
-triton-distributed-runtime = { path = "../../../lib/runtime" }
-triton-distributed-llm = { path = "../../../lib/llm" }
+triton-distributed-runtime = { path = "../../lib/runtime" }
+triton-distributed-llm = { path = "../../lib/llm" }
 
 # workspace - todo
 

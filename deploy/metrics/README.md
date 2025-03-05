@@ -11,12 +11,12 @@ This directory contains configuration for visualizing metrics from the metrics a
 
 1. Make sure Docker and Docker Compose are installed on your system
 
-2. Start `count` and the corresponding `examples/rust/service_metrics/bin/server.rs` that populates dummy KV Cache metrics.
+2. Start `metrics` and the corresponding `examples/rust/service_metrics/bin/server.rs` that populates dummy KV Cache metrics.
 
 3. Start the visualization stack:
 
   ```bash
-  docker compose up -d
+  docker compose --profile metrics up -d
   ```
 
 4. Web servers started:
@@ -27,7 +27,7 @@ This directory contains configuration for visualizing metrics from the metrics a
 
 ### Prometheus
 
-The Prometheus configuration is defined in `prometheus.yml`. It is configured to scrape metrics from the metrics aggregation service endpoint.
+The Prometheus configuration is defined in `dashboard/prometheus.yml`. It is configured to scrape metrics from the metrics aggregation service endpoint.
 
 Note: You may need to adjust the target based on your host configuration and network setup.
 
@@ -41,10 +41,10 @@ Grafana is pre-configured with:
 
 The following configuration files should be present in this directory:
 - `docker-compose.yml`: Defines the Prometheus and Grafana services
-- `prometheus.yml`: Contains Prometheus scraping configuration
-- `grafana.json`: Contains Grafana dashboard configuration
-- `grafana-datasources.yml`: Contains Grafana datasource configuration
-- `grafana-dashboard-providers.yml`: Contains Grafana dashboard provider configuration
+- `dashboard/prometheus.yml`: Contains Prometheus scraping configuration
+- `dashboard/grafana.json`: Contains Grafana dashboard configuration
+- `dashboard/grafana-datasources.yml`: Contains Grafana datasource configuration
+- `dashboard/grafana-dashboard-providers.yml`: Contains Grafana dashboard provider configuration
 
 ## Metrics
 

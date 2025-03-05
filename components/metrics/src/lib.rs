@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Library functions for the count application.
+//! Library functions for the metrics application.
 
 use axum::{routing::get, Router};
 use prometheus::register_gauge_vec;
