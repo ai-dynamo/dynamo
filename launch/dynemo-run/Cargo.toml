@@ -18,7 +18,7 @@ name = "dynemo-run"
 version = "0.1.0"
 edition = "2021"
 authors = ["NVIDIA"]
-homepage = "https://github.com/triton-inference-server/triton_distributed"
+homepage = "https://github.com/dynemo-ai/dynemo"
 license = "Apache-2.0"
 
 [features]

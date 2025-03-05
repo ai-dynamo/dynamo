@@ -1,6 +1,6 @@
 # Dynemo service runner
 
-`dynemo-run` is a tool for exploring the triton-distributed and triton-llm components.
+`dynemo-run` is a tool for exploring the dynemo components.
 
 ## Quickstart
 

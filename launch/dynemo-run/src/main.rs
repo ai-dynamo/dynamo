@@ -21,7 +21,7 @@ use dynemo_run::{Input, Output};
 use triton_distributed_runtime::logging;
 
 const HELP: &str = r#"
-dynemo-run is a single binary that wires together the various inputs (http, text, network) and workers (network, engine), that runs the services. It is the simplest way to use triton-distributed locally.
+dynemo-run is a single binary that wires together the various inputs (http, text, network) and workers (network, engine), that runs the services. It is the simplest way to use dynemo locally.
 
 Example:
 - cargo build --release --features mistralrs,cuda
