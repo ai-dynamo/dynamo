@@ -20,6 +20,7 @@ from typing import ClassVar, Optional
 
 from nats.aio.client import Client as NATS
 from nats.errors import Error as NatsError
+from nats.js.client import JetStreamContext
 from nats.js.errors import NotFoundError
 
 
@@ -35,7 +36,7 @@ class NATSQueue:
     ):
         self.nats_url = nats_server
         self._nc: Optional[NATS] = None
-        self._js = None
+        self._js: Optional[JetStreamContext] = None
         # TODO: check if this is needed
         # Sanitize stream_name to remove path separators
         self._stream_name = stream_name.replace("/", "_").replace("\\", "_")
@@ -134,6 +135,7 @@ class NATSQueue:
                 msg = msgs[0]
                 await msg.ack()
                 return msg.data
+            return None
         except asyncio.TimeoutError:
             return None
         except NatsError as e:
