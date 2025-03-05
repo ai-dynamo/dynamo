@@ -24,7 +24,7 @@
 //!   - KV Cache Blocks: [Active, Total]
 
 use clap::Parser;
-use triton_distributed_runtime::{
+use dynemo_runtime::{
     error, logging,
     traits::events::EventPublisher,
     utils::{Duration, Instant},
@@ -50,7 +50,7 @@ struct Args {
     endpoint: String,
 
     /// Namespace to operate in
-    #[arg(long, env = "TRD_NAMESPACE", default_value = "triton-init")]
+    #[arg(long, env = "DYN_NAMESPACE", default_value = "dynemo-init")]
     namespace: String,
 
     /// Polling interval in seconds (minimum 1 second)
