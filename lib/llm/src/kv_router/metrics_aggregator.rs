@@ -30,7 +30,7 @@ pub struct KvMetricsAggregator {
 
 impl KvMetricsAggregator {
     pub async fn new(component: Component, cancellation_token: CancellationToken) -> Self {
-        let (ep_tx, ep_rx) = tokio::sync::mpsc::channel(128);
+        let (ep_tx, mut ep_rx) = tokio::sync::mpsc::channel(128);
 
         tokio::spawn(collect_endpoints(
             component.drt().nats_client().clone(),
@@ -38,7 +38,6 @@ impl KvMetricsAggregator {
             ep_tx,
             cancellation_token.clone(),
         ));
-        let mut ep_rx = ep_rx;
 
         tracing::trace!("awaiting the start of the background endpoint subscriber");
         let endpoints = Arc::new(Mutex::new(ProcessedEndpoints::default()));
@@ -46,12 +45,15 @@ impl KvMetricsAggregator {
         tokio::spawn(async move {
             tracing::debug!("scheduler background task started");
             loop {
-                tracing::trace!("all workers busy; waiting for more capacity");
                 match ep_rx.recv().await {
-                    Some(endpoints) => {
-                        let mut shared_endpoint = endpoints_clone.lock().unwrap();
-                        *shared_endpoint = endpoints;
-                    }
+                    Some(endpoints) => match endpoints_clone.lock() {
+                        Ok(mut shared_endpoint) => {
+                            *shared_endpoint = endpoints;
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to acquire lock on endpoints: {:?}", e);
+                        }
+                    },
                     None => {
                         tracing::trace!("endpoint subscriber shutdown");
                         break;
@@ -68,8 +70,13 @@ impl KvMetricsAggregator {
     }
 
     pub fn get_endpoints(&self) -> ProcessedEndpoints {
-        let endpoints = self.endpoints.lock().unwrap();
-        endpoints.clone()
+        match self.endpoints.lock() {
+            Ok(endpoints) => endpoints.clone(),
+            Err(e) => {
+                tracing::error!("Failed to acquire lock on endpoints: {:?}", e);
+                ProcessedEndpoints::default()
+            }
+        }
     }
 }
 
@@ -134,8 +141,6 @@ async fn collect_endpoints(
         );
 
         let processed = ProcessedEndpoints::new(endpoints);
-
-        // process endpoints into
         if ep_tx.send(processed).await.is_err() {
             tracing::trace!("failed to send processed endpoints; shutting down");
             break;

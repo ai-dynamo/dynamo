@@ -113,16 +113,20 @@ impl KvMetricsPublisher {
 
 #[pyclass]
 #[derive(Clone)]
-pub(crate) struct OverlapScores(pub llm_rs::kv_router::indexer::OverlapScores);
+pub(crate) struct OverlapScores {
+    inner: llm_rs::kv_router::indexer::OverlapScores,
+}
 
 #[pymethods]
 impl OverlapScores {
+    #[getter]
     fn scores(&self) -> HashMap<llm_rs::kv_router::indexer::WorkerId, u32> {
-        self.0.scores.clone()
+        self.inner.scores.clone()
     }
 
+    #[getter]
     fn frequencies(&self) -> Vec<usize> {
-        self.0.frequencies.clone()
+        self.inner.frequencies.clone()
     }
 }
 
@@ -134,14 +138,17 @@ pub(crate) struct KvIndexer {
 #[pymethods]
 impl KvIndexer {
     #[new]
-    fn new(component: Component, token: CancellationToken) -> PyResult<Self> {
+    fn new(component: Component) -> PyResult<Self> {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async {
             let kv_subject = component
                 .inner
                 .event_subject(llm_rs::kv_router::KV_EVENT_SUBJECT);
             let inner: Arc<llm_rs::kv_router::indexer::KvIndexer> =
-                llm_rs::kv_router::indexer::KvIndexer::new(token.inner).into();
+                llm_rs::kv_router::indexer::KvIndexer::new(
+                    component.inner.drt().runtime().child_token(),
+                )
+                .into();
             let mut kv_events_rx = component
                 .inner
                 .drt()
@@ -183,7 +190,9 @@ impl KvIndexer {
                 .find_matches_for_request(token_ids.as_slice())
                 .await
                 .map_err(to_pyerr)?;
-            Ok(OverlapScores(rs_overlap_scores))
+            Ok(OverlapScores {
+                inner: rs_overlap_scores,
+            })
         })
     }
 }
@@ -222,12 +231,12 @@ pub(crate) struct KvMetricsAggregator {
 #[pymethods]
 impl KvMetricsAggregator {
     #[new]
-    fn new(component: Component, token: CancellationToken) -> PyResult<Self> {
+    fn new(component: Component) -> PyResult<Self> {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async {
             let inner = llm_rs::kv_router::metrics_aggregator::KvMetricsAggregator::new(
                 component.inner.clone(),
-                token.inner,
+                component.inner.drt().runtime().child_token(),
             )
             .await;
             Ok(Self {

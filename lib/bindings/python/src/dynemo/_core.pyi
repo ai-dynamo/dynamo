@@ -233,28 +233,24 @@ class Backend:
         Start the backend engine and requests to the downstream LLM engine
         """
         ...
-class CancellationToken:
-    """
-    A cancellation token is used to cancel an operation
-    """
 
-    ...
 
 class OverlapScores:
     """
-    A collection of prefix matching scores of workers for a given token ids
+    A collection of prefix matching scores of workers for a given token ids.
+    'scores' is a map of worker id to the score which is the number of matching blocks.
     """
 
     ...
 
 class KvIndexer:
     """
-    A KV indexer that tracks the KV block operationss of the workers.
+    A KV Indexer that tracks KV Events emitted by workers. Events include add_block and remove_block.
     """
 
     ...
 
-    def __init__(self, component: Component, token: CancellationToken) -> None:
+    def __init__(self, component: Component) -> None:
         """
         Create a `KvIndexer` object
         """
@@ -279,7 +275,7 @@ class KvMetricsAggregator:
 
     ...
 
-    def __init__(self, component: Component, token: CancellationToken) -> None:
+    def __init__(self, component: Component) -> None:
         """
         Create a `KvMetricsAggregator` object
         """
