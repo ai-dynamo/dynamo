@@ -26,7 +26,8 @@ import typing as t
 from typing import Any
 
 import click
-from triton_distributed_rs import DistributedRuntime, triton_endpoint, triton_worker
+
+from dynemo.rs import DistributedRuntime, triton_endpoint, triton_worker
 
 logger = logging.getLogger("compoundai.serve.nova")
 

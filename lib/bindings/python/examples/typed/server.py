@@ -19,11 +19,7 @@ import asyncio
 import uvloop
 from protocol import Request, Response
 
-from triton_distributed.runtime import (
-    DistributedRuntime,
-    triton_endpoint,
-    triton_worker,
-)
+from dynemo.runtime import DistributedRuntime, triton_endpoint, triton_worker
 
 uvloop.install()
 

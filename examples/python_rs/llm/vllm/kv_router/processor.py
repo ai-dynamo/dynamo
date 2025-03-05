@@ -34,12 +34,7 @@ from vllm.logger import logger as vllm_logger
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from triton_distributed.runtime import (
-    Client,
-    DistributedRuntime,
-    triton_endpoint,
-    triton_worker,
-)
+from dynemo.runtime import Client, DistributedRuntime, triton_endpoint, triton_worker
 
 
 class RequestType(Enum):

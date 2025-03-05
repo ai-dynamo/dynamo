@@ -16,7 +16,7 @@
 #[cfg(any(feature = "vllm", feature = "sglang"))]
 use std::{future::Future, pin::Pin};
 
-use triton_distributed_llm::{
+use dynemo.llm::{
     backend::ExecutionContext,
     model_card::model::ModelDeploymentCard,
     types::{
@@ -27,7 +27,7 @@ use triton_distributed_llm::{
         Annotated,
     },
 };
-use triton_distributed_runtime::{component::Client, protocols::Endpoint, DistributedRuntime};
+use dynemo.runtime::{component::Client, protocols::Endpoint, DistributedRuntime};
 
 mod flags;
 pub use flags::Flags;
@@ -67,7 +67,7 @@ pub enum EngineConfig {
 
 #[allow(unused_mut)]
 pub async fn run(
-    runtime: triton_distributed_runtime::Runtime,
+    runtime: dynemo.runtime::Runtime,
     mut in_opt: Input, // mut because vllm and sglang multi-node can change it
     out_opt: Output,
     flags: Flags,
@@ -173,13 +173,13 @@ pub async fn run(
             };
             EngineConfig::StaticFull {
                 service_name: model_name,
-                engine: triton_distributed_llm::engines::mistralrs::make_engine(&model_path)
+                engine: dynemo.llm::engines::mistralrs::make_engine(&model_path)
                     .await?,
             }
         }
         #[cfg(feature = "sglang")]
         Output::SgLang => {
-            use triton_distributed_llm::engines::sglang;
+            use dynemo.llm::engines::sglang;
             let Some(model_path) = model_path else {
                 anyhow::bail!("out=sglang requires flag --model-path=<full-path-to-model-dir>");
             };
@@ -191,7 +191,7 @@ pub async fn run(
             let Some(sock_prefix) = zmq_socket_prefix else {
                 anyhow::bail!("sglang requires zmq_socket_prefix");
             };
-            let node_conf = triton_distributed_llm::engines::MultiNodeConfig {
+            let node_conf = dynemo.llm::engines::MultiNodeConfig {
                 num_nodes: flags.num_nodes,
                 node_rank: flags.node_rank,
                 leader_addr: flags.leader_addr.unwrap_or_default(),
@@ -229,7 +229,7 @@ pub async fn run(
         }
         #[cfg(feature = "vllm")]
         Output::Vllm => {
-            use triton_distributed_llm::engines::vllm;
+            use dynemo.llm::engines::vllm;
             if flags.base_gpu_id != 0 {
                 anyhow::bail!("vllm does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
             }
@@ -253,7 +253,7 @@ pub async fn run(
             let Some(sock_prefix) = zmq_socket_prefix else {
                 anyhow::bail!("vllm requires zmq_socket_prefix");
             };
-            let node_conf = triton_distributed_llm::engines::MultiNodeConfig {
+            let node_conf = dynemo.llm::engines::MultiNodeConfig {
                 num_nodes: flags.num_nodes,
                 node_rank: flags.node_rank,
                 leader_addr: flags.leader_addr.unwrap_or_default(),
@@ -296,7 +296,7 @@ pub async fn run(
         }
         #[cfg(feature = "llamacpp")]
         Output::LlamaCpp => {
-            use triton_distributed_llm::engines::llamacpp;
+            use dynemo.llm::engines::llamacpp;
             let Some(model_path) = model_path else {
                 anyhow::bail!("out=llamacpp requires flag --model-path=<full-path-to-model-gguf>");
             };
@@ -317,7 +317,7 @@ pub async fn run(
         }
         #[cfg(feature = "trtllm")]
         Output::TrtLLM => {
-            use triton_distributed_llm::engines::trtllm;
+            use dynemo.llm::engines::trtllm;
             let Some(model_path) = model_path else {
                 anyhow::bail!("out=trtllm requires flag --model-path=<full-path-to-model-dir>");
             };

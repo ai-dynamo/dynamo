@@ -100,20 +100,20 @@ COPY lib/bindings /workspace/lib/bindings
 RUN cd lib/bindings/c && \
 cargo build --release --locked && cargo doc --no-deps
 
-# Build triton_distributed wheel
+# Build dynemo.wheel
 RUN source /opt/triton/venv/bin/activate && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/triton_distributed*cp312*.whl
+    uv pip install /workspace/dist/dynemo.cp312*.whl
 
 # Package the bindings
 RUN mkdir -p /opt/triton/bindings/wheels && \
     mkdir /opt/triton/bindings/lib && \
-    cp dist/triton_distributed*cp312*.whl /opt/triton/bindings/wheels/. && \
-    cp lib/bindings/c/target/release/libtriton_distributed_llm_capi.so /opt/triton/bindings/lib/. && \
+    cp dist/dynemo.cp312*.whl /opt/triton/bindings/wheels/. && \
+    cp lib/bindings/c/target/release/libdynemo.llm_capi.so /opt/triton/bindings/lib/. && \
     cp -r lib/bindings/c/include /opt/triton/bindings/.
 
 # Tell vllm to use the Triton LLM C API for KV Cache Routing
-ENV VLLM_KV_CAPI_PATH="/opt/triton/bindings/lib/libtriton_distributed_llm_capi.so"
+ENV VLLM_KV_CAPI_PATH="/opt/triton/bindings/lib/libdynemo.llm_capi.so"
 
 # FIXME: Copy more specific folders in for dev/debug after directory restructure
 COPY . /workspace
@@ -139,7 +139,7 @@ RUN apt update -y && \
 ENV VIRTUAL_ENV=/opt/triton/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV RAPIDS_LIBUCX_PREFER_SYSTEM_LIBRARY=true
-ENV VLLM_KV_CAPI_PATH="/opt/triton/bindings/lib/libtriton_distributed_llm_capi.so"
+ENV VLLM_KV_CAPI_PATH="/opt/triton/bindings/lib/libdynemo.llm_capi.so"
 
 # Copy binaries
 COPY --from=dev /usr/local/bin/http /usr/local/bin/http

@@ -18,20 +18,20 @@ use async_stream::stream;
 use prometheus::{proto::MetricType, Registry};
 use reqwest::StatusCode;
 use std::sync::Arc;
-use triton_distributed_llm::http::service::{
+use dynemo.llm::http::service::{
     error::HttpError,
     metrics::{Endpoint, RequestType, Status},
     service_v2::HttpService,
     Metrics,
 };
-use triton_distributed_llm::protocols::{
+use dynemo.llm::protocols::{
     openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{CompletionRequest, CompletionResponse},
     },
     Annotated,
 };
-use triton_distributed_runtime::{
+use dynemo.runtime::{
     pipeline::{
         async_trait, AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
     },

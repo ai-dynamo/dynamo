@@ -27,8 +27,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use triton_distributed_llm::tokenizers::traits::{Decoder, Encoder};
-use triton_distributed_llm::tokenizers::*;
+use dynemo.llm::tokenizers::traits::{Decoder, Encoder};
+use dynemo.llm::tokenizers::*;
 
 const TEST_PROMPTS: [&str; 4] = [
     "deep learning is",

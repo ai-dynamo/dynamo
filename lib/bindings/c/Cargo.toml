@@ -19,11 +19,11 @@ version = "0.2.1"
 edition = "2021"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
-homepage = "https://github.com/triton-inference-server/triton_distributed"
-repository = "https://github.com/triton-inference-server/triton_distributed"
+homepage = "https://github.com/dynemo-ai/dynemo"
+repository = "https://github.com/dynemo-ai/dynemo.git"
 
 [lib]
-name = "triton_distributed_llm_capi"
+name = "dynemo.llm_capi"
 crate-type = ["cdylib"]
 
 [build-dependencies]

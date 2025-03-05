@@ -14,12 +14,12 @@
 # limitations under the License.
 
 [project]
-name = "triton-distributed"
+name = "dynemo"
 version = "0.2.1"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
-    { name = "NVIDIA Inc.", email = "sw-dl-triton@nvidia.com" },
+    { name = "NVIDIA Inc.", email = "sw-dl-dynemo@nvidia.com" },
 ]
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -30,11 +30,11 @@ dependencies = [
 ]
 
 [tool.maturin]
-module-name = "triton_distributed._core"
+module-name = "dynemo._core"
 # Point to the Rust crate directory
 manifest-path = "lib/bindings/python/Cargo.toml"
 # Include all Python packages
-python-packages = ["triton_distributed"]
+python-packages = ["dynemo"]
 # Specify the Python source directory
 python-source = "lib/bindings/python/src"
 
@@ -75,7 +75,7 @@ line_length = 88
 balanced_wrapping = true
 indent = "    "
 skip = ["build"]
-known_first_party = ["triton_distributed"]
+known_first_party = ["dynemo"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

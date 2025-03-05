@@ -25,12 +25,8 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.logger import logger as vllm_logger
 from vllm.sampling_params import RequestOutputKind
 
-from triton_distributed.llm import KvMetricsPublisher
-from triton_distributed.runtime import (
-    DistributedRuntime,
-    triton_endpoint,
-    triton_worker,
-)
+from dynemo.llm import KvMetricsPublisher
+from dynemo.runtime import DistributedRuntime, triton_endpoint, triton_worker
 
 vllm_logger.info(f"VLLM_KV_CAPI_PATH: {os.environ['VLLM_KV_CAPI_PATH']}")
 

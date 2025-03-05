@@ -27,9 +27,9 @@ use llm_rs::{
     },
 };
 
-use triton_distributed_runtime::pipeline::{Operator, ServiceFrontend, Source};
+use dynemo.runtime::pipeline::{Operator, ServiceFrontend, Source};
 
-use triton_distributed_runtime::pipeline::{ManyOut, SegmentSink, SingleIn};
+use dynemo.runtime::pipeline::{ManyOut, SegmentSink, SingleIn};
 
 #[pyclass]
 pub(crate) struct OAIChatPreprocessor {

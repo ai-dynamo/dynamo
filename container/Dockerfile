@@ -159,25 +159,25 @@ COPY lib/bindings /workspace/lib/bindings
 RUN cd lib/bindings/c/ && \
     cargo build --release --locked && cargo doc --no-deps
 
-# Install uv, create virtualenv for general use, and build triton_distributed  wheel
+# Install uv, create virtualenv for general use, and build dynemo. wheel
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN mkdir /opt/triton && \
     uv venv /opt/triton/venv --python 3.12 && \
     source /opt/triton/venv/bin/activate && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/triton_distributed*cp312*.whl
+    uv pip install /workspace/dist/dynemo.cp312*.whl
 
 # Package the bindings
 RUN mkdir -p /opt/triton/bindings/wheels && \
     mkdir /opt/triton/bindings/lib && \
-    cp dist/triton_distributed*cp312*.whl /opt/triton/bindings/wheels/. && \
-    cp lib/bindings/c/target/release/libtriton_distributed_llm_capi.so /opt/triton/bindings/lib/. && \
+    cp dist/dynemo.cp312*.whl /opt/triton/bindings/wheels/. && \
+    cp lib/bindings/c/target/release/libdynemo.llm_capi.so /opt/triton/bindings/lib/. && \
     cp -r lib/bindings/c/include /opt/triton/bindings/.
 
-# Install triton_distributed_runtime and triton_distributed_llm wheels globally in container for tests that
+# Install dynemo.runtime and dynemo.llm wheels globally in container for tests that
 # currently run without virtual environment activated.
 # TODO: In future, we may use a virtualenv for everything and remove this.
-RUN pip install /opt/triton/bindings/wheels/triton_distributed*cp312*.whl
+RUN pip install /opt/triton/bindings/wheels/dynemo.cp312*.whl
 
 # Copy everything in after install steps to avoid re-running build/install
 # commands on unrelated changes in other dirs.

@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use triton_distributed_llm::{
+use dynemo.llm::{
     backend::Backend,
     http::service::discovery::ModelEntry,
     model_type::ModelType,
@@ -25,10 +25,10 @@ use triton_distributed_llm::{
         Annotated,
     },
 };
-use triton_distributed_runtime::pipeline::{
+use dynemo.runtime::pipeline::{
     network::Ingress, ManyOut, Operator, SegmentSource, ServiceBackend, SingleIn, Source,
 };
-use triton_distributed_runtime::{protocols::Endpoint, DistributedRuntime, Runtime};
+use dynemo.runtime::{protocols::Endpoint, DistributedRuntime, Runtime};
 
 use crate::EngineConfig;
 

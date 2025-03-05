@@ -16,9 +16,9 @@
 use anyhow::Ok;
 
 use serde::{Deserialize, Serialize};
-use triton_distributed_llm::model_card::model::{ModelDeploymentCard, PromptContextMixin};
-use triton_distributed_llm::preprocessor::prompt::PromptFormatter;
-use triton_distributed_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynemo.llm::model_card::model::{ModelDeploymentCard, PromptContextMixin};
+use dynemo.llm::preprocessor::prompt::PromptFormatter;
+use dynemo.llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 
 use hf_hub::{api::tokio::ApiBuilder, Cache, Repo, RepoType};
 

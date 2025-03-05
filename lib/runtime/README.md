@@ -71,7 +71,7 @@ When developing or running examples, any process or user that shared your core-s
 be operating within your distributed runtime.
 
 The current examples use a hard-coded `namespace`. We will address the `namespace` collisions in this
-[issue](https://github.com/triton-inference-server/triton_distributed/issues/114).
+[issue](https://github.com/triton-inference-server/dynemo.issues/114).
 
 All examples require the `etcd` and `nats.io` pre-requisites to be running and available.
 

@@ -20,12 +20,8 @@ import uvloop
 from common.protocol import Request, Response
 from vllm.logger import logger as vllm_logger
 
-from triton_distributed.llm import KvRouter
-from triton_distributed.runtime import (
-    DistributedRuntime,
-    triton_endpoint,
-    triton_worker,
-)
+from dynemo.llm import KvRouter
+from dynemo.runtime import DistributedRuntime, triton_endpoint, triton_worker
 
 
 class Router:

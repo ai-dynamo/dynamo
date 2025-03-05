@@ -16,7 +16,7 @@
 use futures::StreamExt;
 use service_metrics::DEFAULT_NAMESPACE;
 
-use triton_distributed_runtime::{
+use dynemo.runtime::{
     logging, protocols::annotated::Annotated, utils::Duration, DistributedRuntime, Result, Runtime,
     Worker,
 };

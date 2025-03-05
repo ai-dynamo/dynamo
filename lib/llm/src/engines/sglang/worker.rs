@@ -37,8 +37,8 @@ use tokio::sync::mpsc::Sender;
 use tokio::{io::AsyncBufReadExt, sync::mpsc::error::SendError};
 use tokio::{io::AsyncReadExt as _, task::JoinHandle};
 
-use triton_distributed_runtime::protocols::annotated::Annotated;
-use triton_distributed_runtime::runtime::CancellationToken;
+use dynemo.runtime::protocols::annotated::Annotated;
+use dynemo.runtime::runtime::CancellationToken;
 
 use crate::engines::sglang::MultiGPUConfig;
 use crate::engines::MultiNodeConfig;

@@ -28,7 +28,7 @@ from vllm.entrypoints.openai.api_server import (
 )
 from vllm.outputs import CompletionOutput
 
-from triton_distributed.runtime import (
+from dynemo.runtime import (
     Backend,
     DistributedRuntime,
     ModelDeploymentCard,

@@ -16,14 +16,14 @@
 use clap::Parser;
 use std::sync::Arc;
 
-use triton_distributed_llm::{
+use dynemo.llm::{
     http::service::{
         discovery::{model_watcher, ModelWatchState},
         service_v2::HttpService,
     },
     model_type::ModelType,
 };
-use triton_distributed_runtime::{
+use dynemo.runtime::{
     logging, transports::etcd::PrefixWatcher, DistributedRuntime, Result, Runtime, Worker,
 };
 

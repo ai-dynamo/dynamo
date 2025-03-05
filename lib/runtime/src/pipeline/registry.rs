@@ -22,7 +22,7 @@ use std::sync::Arc;
 /// # Examples
 ///
 /// ```
-/// use triton_distributed_runtime::pipeline::registry::Registry;
+/// use dynemo.runtime::pipeline::registry::Registry;
 ///
 /// let mut registry = Registry::new();
 ///

@@ -21,7 +21,7 @@ import uvloop
 from client import init as client_init
 from server import init as server_init
 
-from triton_distributed.runtime import DistributedRuntime, triton_worker
+from dynemo.runtime import DistributedRuntime, triton_worker
 
 
 def random_string(length=10):

@@ -18,7 +18,7 @@ use std::{
     io::{ErrorKind, Read, Write},
     sync::Arc,
 };
-use triton_distributed_llm::{
+use dynemo.llm::{
     backend::Backend,
     preprocessor::OpenAIPreprocessor,
     types::{
@@ -29,7 +29,7 @@ use triton_distributed_llm::{
         Annotated,
     },
 };
-use triton_distributed_runtime::{
+use dynemo.runtime::{
     pipeline::{Context, ManyOut, Operator, ServiceBackend, ServiceFrontend, SingleIn, Source},
     runtime::CancellationToken,
 };

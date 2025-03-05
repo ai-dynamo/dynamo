@@ -15,7 +15,7 @@
 
 use async_openai::types::CreateCompletionRequestArgs;
 use serde::{Deserialize, Serialize};
-use triton_distributed_llm::protocols::openai::{self, completions::CompletionRequest};
+use dynemo.llm::protocols::openai::{self, completions::CompletionRequest};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct CompletionSample {

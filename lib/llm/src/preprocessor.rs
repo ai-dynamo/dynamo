@@ -35,11 +35,11 @@ use tracing;
 use crate::model_card::model::{ModelDeploymentCard, ModelInfo, TokenizerKind};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 
-use triton_distributed_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
-use triton_distributed_runtime::pipeline::{
+use dynemo.runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
+use dynemo.runtime::pipeline::{
     async_trait, AsyncEngineContext, Error, ManyOut, Operator, SingleIn,
 };
-use triton_distributed_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
+use dynemo.runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 
 use crate::protocols::{
     common::{SamplingOptionsProvider, StopConditionsProvider},

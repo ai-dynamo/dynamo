@@ -21,7 +21,7 @@ mod integration {
     use futures::StreamExt;
     use std::{sync::Arc, time::Duration};
     use tokio::time::Instant;
-    use triton_distributed_runtime::{
+    use dynemo.runtime::{
         logging,
         pipeline::{
             async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,

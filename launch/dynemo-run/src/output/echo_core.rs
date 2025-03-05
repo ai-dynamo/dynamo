@@ -18,12 +18,12 @@ use std::{sync::Arc, time::Duration};
 use async_stream::stream;
 use async_trait::async_trait;
 
-use triton_distributed_llm::backend::ExecutionContext;
-use triton_distributed_llm::preprocessor::BackendInput;
-use triton_distributed_llm::protocols::common::llm_backend::LLMEngineOutput;
-use triton_distributed_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
-use triton_distributed_runtime::pipeline::{Error, ManyOut, SingleIn};
-use triton_distributed_runtime::protocols::annotated::Annotated;
+use dynemo.llm::backend::ExecutionContext;
+use dynemo.llm::preprocessor::BackendInput;
+use dynemo.llm::protocols::common::llm_backend::LLMEngineOutput;
+use dynemo.runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
+use dynemo.runtime::pipeline::{Error, ManyOut, SingleIn};
+use dynemo.runtime::protocols::annotated::Annotated;
 
 /// How long to sleep between echoed tokens.
 /// 50ms gives us 20 tok/s.

@@ -34,7 +34,7 @@ use futures::stream::{self, StreamExt};
 use tracing as log;
 
 use crate::model_card::model::{ModelDeploymentCard, TokenizerKind};
-use triton_distributed_runtime::{
+use dynemo.runtime::{
     pipeline::{
         async_trait, AsyncEngineContextProvider, ManyOut, Operator, ResponseStream,
         ServerStreamingEngine, SingleIn,

@@ -36,7 +36,7 @@ pub type DataStream<T> = Pin<Box<dyn Stream<Item = T> + Send + Sync>>;
 // has become the common response envelope for triton-distributed.
 // We may want to move the original Annotated back here and has a Infallible conversion to the the
 // ResponseEnvelop in triton-distributed.
-pub use triton_distributed_runtime::protocols::annotated::Annotated;
+pub use dynemo.runtime::protocols::annotated::Annotated;
 
 /// The LLM responses have multiple different fields and nests of objects to get to the actual
 /// text completion returned. This trait can be applied to the `choice` level objects to extract

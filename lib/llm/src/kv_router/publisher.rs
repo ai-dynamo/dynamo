@@ -19,7 +19,7 @@ use futures::stream;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing as log;
-use triton_distributed_runtime::{
+use dynemo.runtime::{
     component::Component,
     pipeline::{
         network::Ingress, AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream,

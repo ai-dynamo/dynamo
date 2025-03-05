@@ -18,7 +18,7 @@ use super::nvext::NvExtProvider;
 use super::OpenAISamplingOptionsProvider;
 use super::OpenAIStopConditionsProvider;
 use serde::{Deserialize, Serialize};
-use triton_distributed_runtime::protocols::annotated::AnnotationsProvider;
+use dynemo.runtime::protocols::annotated::AnnotationsProvider;
 use validator::Validate;
 
 mod aggregator;

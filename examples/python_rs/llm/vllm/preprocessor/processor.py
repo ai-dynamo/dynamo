@@ -19,7 +19,7 @@ import asyncio
 import uvloop
 from preprocessor.common import parse_vllm_args
 
-from triton_distributed.runtime import (
+from dynemo.runtime import (
     DistributedRuntime,
     ModelDeploymentCard,
     OAIChatPreprocessor,

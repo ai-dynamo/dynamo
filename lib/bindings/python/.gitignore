@@ -1,2 +1,2 @@
 /target
-python/triton_distributed/*.so
+python/dynemo.*.so

@@ -28,11 +28,7 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.logger import logger as vllm_logger
 
-from triton_distributed.runtime import (
-    DistributedRuntime,
-    triton_endpoint,
-    triton_worker,
-)
+from dynemo.runtime import DistributedRuntime, triton_endpoint, triton_worker
 
 
 class VllmEngine(BaseVllmEngine, ProcessMixIn):

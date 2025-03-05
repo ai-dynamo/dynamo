@@ -17,8 +17,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::backend::ExecutionContext;
-use triton_distributed_runtime::pipeline::error as pipeline_error;
-use triton_distributed_runtime::CancellationToken;
+use dynemo.runtime::pipeline::error as pipeline_error;
+use dynemo.runtime::CancellationToken;
 
 mod worker;
 

@@ -19,7 +19,7 @@ import string
 
 import uvloop
 
-from triton_distributed.runtime import DistributedRuntime, triton_worker
+from dynemo.runtime import DistributedRuntime, triton_worker
 
 # Soak Test
 #

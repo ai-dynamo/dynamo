@@ -24,11 +24,7 @@ from common.protocol import PrefillRequest, PrefillResponse
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.logger import logger as vllm_logger
 
-from triton_distributed.runtime import (
-    DistributedRuntime,
-    triton_endpoint,
-    triton_worker,
-)
+from dynemo.runtime import DistributedRuntime, triton_endpoint, triton_worker
 
 
 class VllmPrefillEngine(BaseVllmEngine):
