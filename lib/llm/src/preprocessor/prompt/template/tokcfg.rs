@@ -129,8 +129,8 @@ pub fn tojson(value: Value, kwargs: Kwargs) -> Result<Value, Error> {
         let mut buf = Vec::new();
         let repeat = b" ".repeat(indent);
         let formatter = serde_json::ser::PrettyFormatter::with_indent(&repeat);
-        let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
-        value.serialize(&mut ser).unwrap();
+        let mut json = serde_json::Serializer::with_formatter(&mut buf, formatter);
+        value.serialize(&mut json).unwrap();
         String::from_utf8(buf).map_err(|err| {
             Error::new(ErrorKind::BadSerialization, "cannot serialize to JSON").with_source(err)
         })
