@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use hello_world::DEFAULT_NAMESPACE;
-use dynemo.runtime::{
+use dynemo_runtime::{
     logging, protocols::annotated::Annotated, stream::StreamExt, DistributedRuntime, Result,
     Runtime, Worker,
 };

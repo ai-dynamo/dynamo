@@ -15,7 +15,7 @@
 
 use async_openai::types::CreateCompletionRequestArgs;
 use serde::{Deserialize, Serialize};
-use dynemo.llm::protocols::openai::{self, completions::CompletionRequest};
+use dynemo_llm::protocols::openai::{self, completions::CompletionRequest};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct CompletionSample {

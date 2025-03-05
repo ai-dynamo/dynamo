@@ -25,14 +25,14 @@ use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 use tracing_subscriber::FmtSubscriber;
 
-use dynemo.runtime::{
+use dynemo_runtime::{
     self as rs,
     pipeline::{EngineStream, ManyOut, SingleIn},
     protocols::annotated::Annotated as RsAnnotated,
     traits::DistributedRuntimeProvider,
 };
 
-use dynemo.llm::{self as llm_rs};
+use dynemo_llm::{self as llm_rs};
 
 mod engine;
 mod llm;

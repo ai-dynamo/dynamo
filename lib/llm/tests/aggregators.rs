@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use futures::StreamExt;
-use dynemo.llm::protocols::{
+use dynemo_llm::protocols::{
     codec::{create_message_stream, Message, SseCodecError},
     openai::{chat_completions::NvCreateChatCompletionResponse, completions::CompletionResponse},
     ContentProvider, DataStream,

@@ -18,7 +18,7 @@ use futures::stream::StreamExt;
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 use tracing;
-use dynemo.runtime::{component::Component, DistributedRuntime};
+use dynemo_runtime::{component::Component, DistributedRuntime};
 
 pub mod indexer;
 pub mod protocols;

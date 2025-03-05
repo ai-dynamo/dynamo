@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use crate::backend::ExecutionContext;
-use dynemo.runtime::pipeline::error as pipeline_error;
+use dynemo_runtime::pipeline::error as pipeline_error;
 
 pub mod executor;
 

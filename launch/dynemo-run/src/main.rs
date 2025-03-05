@@ -18,7 +18,7 @@ use std::env;
 use clap::Parser;
 
 use dynemo_run::{Input, Output};
-use dynemo.runtime::logging;
+use dynemo_runtime::logging;
 
 const HELP: &str = r#"
 dynemo-run is a single binary that wires together the various inputs (http, text, network) and workers (network, engine), that runs the services. It is the simplest way to use dynemo locally.
@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
             if cfg!(feature = "sglang") {
                 #[cfg(feature = "sglang")]
                 {
-                    use dynemo.llm::engines::sglang;
+                    use dynemo_llm::engines::sglang;
                     let gpu_config = sglang::MultiGPUConfig {
                         tp_size: flags.tensor_parallel_size,
                         tp_rank: sglang_flags.tp_rank,
@@ -98,7 +98,7 @@ fn main() -> anyhow::Result<()> {
             if cfg!(feature = "vllm") {
                 #[cfg(feature = "vllm")]
                 {
-                    use dynemo.llm::engines::vllm;
+                    use dynemo_llm::engines::vllm;
                     let node_config = dynemo.llm::engines::MultiNodeConfig {
                         num_nodes: flags.num_nodes,
                         node_rank: flags.node_rank,

@@ -16,7 +16,7 @@
 #[cfg(any(feature = "vllm", feature = "sglang"))]
 use std::{future::Future, pin::Pin};
 
-use dynemo.llm::{
+use dynemo_llm::{
     backend::ExecutionContext,
     model_card::model::ModelDeploymentCard,
     types::{
@@ -27,7 +27,7 @@ use dynemo.llm::{
         Annotated,
     },
 };
-use dynemo.runtime::{component::Client, protocols::Endpoint, DistributedRuntime};
+use dynemo_runtime::{component::Client, protocols::Endpoint, DistributedRuntime};
 
 mod flags;
 pub use flags::Flags;
@@ -179,7 +179,7 @@ pub async fn run(
         }
         #[cfg(feature = "sglang")]
         Output::SgLang => {
-            use dynemo.llm::engines::sglang;
+            use dynemo_llm::engines::sglang;
             let Some(model_path) = model_path else {
                 anyhow::bail!("out=sglang requires flag --model-path=<full-path-to-model-dir>");
             };
@@ -229,7 +229,7 @@ pub async fn run(
         }
         #[cfg(feature = "vllm")]
         Output::Vllm => {
-            use dynemo.llm::engines::vllm;
+            use dynemo_llm::engines::vllm;
             if flags.base_gpu_id != 0 {
                 anyhow::bail!("vllm does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
             }
@@ -296,7 +296,7 @@ pub async fn run(
         }
         #[cfg(feature = "llamacpp")]
         Output::LlamaCpp => {
-            use dynemo.llm::engines::llamacpp;
+            use dynemo_llm::engines::llamacpp;
             let Some(model_path) = model_path else {
                 anyhow::bail!("out=llamacpp requires flag --model-path=<full-path-to-model-gguf>");
             };
@@ -317,7 +317,7 @@ pub async fn run(
         }
         #[cfg(feature = "trtllm")]
         Output::TrtLLM => {
-            use dynemo.llm::engines::trtllm;
+            use dynemo_llm::engines::trtllm;
             let Some(model_path) = model_path else {
                 anyhow::bail!("out=trtllm requires flag --model-path=<full-path-to-model-dir>");
             };

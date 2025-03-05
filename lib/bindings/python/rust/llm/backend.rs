@@ -19,7 +19,7 @@ use crate::llm::model_card::ModelDeploymentCard;
 use llm_rs::protocols::common::llm_backend::{BackendInput, BackendOutput};
 use llm_rs::types::Annotated;
 
-use dynemo.runtime::pipeline::{Operator, ServiceBackend, ServiceFrontend, Source};
+use dynemo_runtime::pipeline::{Operator, ServiceBackend, ServiceFrontend, Source};
 
 use crate::engine::PythonAsyncEngine;
 

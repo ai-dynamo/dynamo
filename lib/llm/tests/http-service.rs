@@ -18,20 +18,20 @@ use async_stream::stream;
 use prometheus::{proto::MetricType, Registry};
 use reqwest::StatusCode;
 use std::sync::Arc;
-use dynemo.llm::http::service::{
+use dynemo_llm::http::service::{
     error::HttpError,
     metrics::{Endpoint, RequestType, Status},
     service_v2::HttpService,
     Metrics,
 };
-use dynemo.llm::protocols::{
+use dynemo_llm::protocols::{
     openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{CompletionRequest, CompletionResponse},
     },
     Annotated,
 };
-use dynemo.runtime::{
+use dynemo_runtime::{
     pipeline::{
         async_trait, AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
     },

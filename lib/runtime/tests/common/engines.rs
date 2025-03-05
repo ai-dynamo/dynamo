@@ -21,12 +21,12 @@ use async_trait::async_trait;
 use futures::Stream;
 use tokio::sync::mpsc;
 
-use dynemo.runtime::engine::{
+use dynemo_runtime::engine::{
     AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, AsyncEngineStream,
     Data as DataType, Engine, EngineStream,
 };
 
-use dynemo.runtime::pipeline::{
+use dynemo_runtime::pipeline::{
     context::{Context, StreamContext},
     Error, ManyOut, SingleIn,
 };

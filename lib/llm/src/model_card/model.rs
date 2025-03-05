@@ -37,7 +37,7 @@ use std::time::Duration;
 
 use derive_builder::Builder;
 
-use dynemo.runtime::slug::Slug;
+use dynemo_runtime::slug::Slug;
 
 pub const BUCKET_NAME: &str = "mdc";
 

@@ -17,8 +17,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::backend::ExecutionContext;
-use dynemo.runtime::pipeline::error as pipeline_error;
-use dynemo.runtime::CancellationToken;
+use dynemo_runtime::pipeline::error as pipeline_error;
+use dynemo_runtime::CancellationToken;
 
 mod worker;
 

@@ -16,8 +16,8 @@
 use clap::{Parser, Subcommand};
 use tracing as log;
 
-use dynemo.llm::{http::service::discovery::ModelEntry, model_type::ModelType};
-use dynemo.runtime::{
+use dynemo_llm::{http::service::discovery::ModelEntry, model_type::ModelType};
+use dynemo_runtime::{
     distributed::DistributedConfig, logging, protocols::Endpoint, raise, DistributedRuntime,
     Result, Runtime, Worker,
 };

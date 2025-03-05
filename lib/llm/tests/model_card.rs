@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use tempfile::tempdir;
-use dynemo.llm::model_card::model::{
+use dynemo_llm::model_card::model::{
     ModelDeploymentCard, PromptFormatterArtifact, TokenizerKind,
 };
 

@@ -19,7 +19,7 @@ use futures::stream;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing as log;
-use dynemo.runtime::{
+use dynemo_runtime::{
     component::Component,
     pipeline::{
         network::Ingress, AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream,

@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use dynemo.llm::{
+use dynemo_llm::{
     backend::Backend,
     http::service::discovery::ModelEntry,
     model_type::ModelType,
@@ -25,10 +25,10 @@ use dynemo.llm::{
         Annotated,
     },
 };
-use dynemo.runtime::pipeline::{
+use dynemo_runtime::pipeline::{
     network::Ingress, ManyOut, Operator, SegmentSource, ServiceBackend, SingleIn, Source,
 };
-use dynemo.runtime::{protocols::Endpoint, DistributedRuntime, Runtime};
+use dynemo_runtime::{protocols::Endpoint, DistributedRuntime, Runtime};
 
 use crate::EngineConfig;
 

@@ -27,8 +27,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use dynemo.llm::tokenizers::traits::{Decoder, Encoder};
-use dynemo.llm::tokenizers::*;
+use dynemo_llm::tokenizers::traits::{Decoder, Encoder};
+use dynemo_llm::tokenizers::*;
 
 const TEST_PROMPTS: [&str; 4] = [
     "deep learning is",

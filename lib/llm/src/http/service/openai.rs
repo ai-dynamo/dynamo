@@ -48,7 +48,7 @@ use crate::types::{
     Annotated,
 };
 
-use dynemo.runtime::pipeline::{AsyncEngineContext, Context};
+use dynemo_runtime::pipeline::{AsyncEngineContext, Context};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ErrorResponse {

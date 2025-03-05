@@ -16,7 +16,7 @@
 use service_metrics::{MyStats, DEFAULT_NAMESPACE};
 
 use std::sync::Arc;
-use dynemo.runtime::{
+use dynemo_runtime::{
     logging,
     pipeline::{
         async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,

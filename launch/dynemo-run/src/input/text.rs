@@ -18,7 +18,7 @@ use std::{
     io::{ErrorKind, Read, Write},
     sync::Arc,
 };
-use dynemo.llm::{
+use dynemo_llm::{
     backend::Backend,
     preprocessor::OpenAIPreprocessor,
     types::{
@@ -29,7 +29,7 @@ use dynemo.llm::{
         Annotated,
     },
 };
-use dynemo.runtime::{
+use dynemo_runtime::{
     pipeline::{Context, ManyOut, Operator, ServiceBackend, ServiceFrontend, SingleIn, Source},
     runtime::CancellationToken,
 };

@@ -19,7 +19,7 @@ pub use protocols::{Annotated, TokenIdType};
 
 pub mod openai {
     use super::*;
-    use dynemo.runtime::pipeline::{ServerStreamingEngine, UnaryEngine};
+    use dynemo_runtime::pipeline::{ServerStreamingEngine, UnaryEngine};
 
     pub mod completions {
         use super::*;

@@ -95,7 +95,7 @@ impl From<&str> for Endpoint {
     ///
     /// # Examples
     /// ```ignore
-    /// use dynemo.:protocols::Endpoint;
+    /// use dynemo_:protocols::Endpoint;
     ///
     /// let endpoint = Endpoint::from("namespace/component/endpoint");
     /// assert_eq!(endpoint.namespace, "namespace");
@@ -150,7 +150,7 @@ impl FromStr for Endpoint {
     /// # Examples
     /// ```ignore
     /// use std::str::FromStr;
-    /// use dynemo.:protocols::Endpoint;
+    /// use dynemo_:protocols::Endpoint;
     ///
     /// let endpoint: Endpoint = "namespace/component/endpoint".parse().unwrap();
     /// assert_eq!(endpoint.namespace, "namespace");

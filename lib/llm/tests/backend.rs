@@ -13,8 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use dynemo.llm::backend::Backend;
-use dynemo.llm::model_card::model::ModelDeploymentCard;
+use dynemo_llm::backend::Backend;
+use dynemo_llm::model_card::model::ModelDeploymentCard;
 
 #[tokio::test]
 async fn test_sequence_factory() {

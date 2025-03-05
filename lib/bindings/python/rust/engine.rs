@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 pub use serde::{Deserialize, Serialize};
-pub use dynemo.runtime::{
+pub use dynemo_runtime::{
     error,
     pipeline::{
         async_trait, AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream,

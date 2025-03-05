@@ -18,9 +18,9 @@ use async_trait::async_trait;
 use futures::stream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use dynemo.runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
-use dynemo.runtime::pipeline::{ManyOut, SingleIn};
-use dynemo.runtime::protocols::annotated::Annotated;
+use dynemo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
+use dynemo_runtime::pipeline::{ManyOut, SingleIn};
+use dynemo_runtime::protocols::annotated::Annotated;
 
 use super::Executor;
 use crate::protocols::common::llm_backend::{BackendInput, LLMEngineOutput};

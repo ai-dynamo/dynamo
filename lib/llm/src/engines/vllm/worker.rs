@@ -26,8 +26,8 @@ use pyo3::{
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 use tokio::{io::AsyncBufReadExt, sync::mpsc::error::SendError};
-use dynemo.runtime::protocols::annotated::Annotated;
-use dynemo.runtime::CancellationToken;
+use dynemo_runtime::protocols::annotated::Annotated;
+use dynemo_runtime::CancellationToken;
 
 use crate::engines::MultiNodeConfig;
 use crate::protocols::common::llm_backend::LLMEngineOutput;

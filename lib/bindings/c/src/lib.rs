@@ -19,10 +19,10 @@ use once_cell::sync::OnceCell;
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use dynemo.llm::kv_router::{
+use dynemo_llm::kv_router::{
     indexer::compute_block_hash_for_seq, protocols::*, publisher::KvEventPublisher,
 };
-use dynemo.runtime::{DistributedRuntime, Worker};
+use dynemo_runtime::{DistributedRuntime, Worker};
 static WK: OnceCell<Worker> = OnceCell::new();
 static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
 // [FIXME] shouldn't the publisher be instance passing between API calls?
