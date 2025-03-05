@@ -26,7 +26,8 @@ import typing as t
 from typing import Any
 
 import click
-from triton_distributed_rs import DistributedRuntime, triton_endpoint, triton_worker
+
+from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
 logger = logging.getLogger("compoundai.serve.nova")
 
@@ -102,7 +103,7 @@ def main(
             server_context.worker_index = worker_id
         class_instance = service.inner()
 
-        @triton_worker()
+        @dynemo_worker()
         async def worker(runtime: DistributedRuntime):
             if service_name and service_name != service.name:
                 server_context.service_type = "service"
@@ -157,12 +158,12 @@ def main(
                     # Bind an instance of inner to the endpoint
                     bound_method = endpoint.func.__get__(class_instance)
                     # Only pass request type for now, use Any for response
-                    # TODO: Handle a triton_endpoint not having types
+                    # TODO: Handle a dynemo_endpoint not having types
                     # TODO: Handle multiple endpoints in a single component
-                    triton_wrapped_method = triton_endpoint(endpoint.request_type, Any)(
+                    dynemo_wrapped_method = dynemo_endpoint(endpoint.request_type, Any)(
                         bound_method
                     )
-                    result = await td_endpoint.serve_endpoint(triton_wrapped_method)
+                    result = await td_endpoint.serve_endpoint(dynemo_wrapped_method)
                     # WARNING: unreachable code :( because serve blocks
                     logger.info(f"[{run_id}] Result: {result}")
                     logger.info(f"[{run_id}] Registered endpoint '{name}'")

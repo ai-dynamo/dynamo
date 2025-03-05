@@ -1,0 +1,35 @@
+VERSION 0.8
+
+
+build:
+    FROM golang:1.23
+    ARG TARGETOS
+    ARG TARGETARCH
+    WORKDIR /workspace
+    COPY go.mod go.mod
+    COPY go.sum go.sum
+    RUN go mod download
+    COPY api/ api/
+    COPY .env .env
+    RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o server api/main.go
+    SAVE ARTIFACT /workspace/server
+    SAVE ARTIFACT /workspace/.env
+
+#TODO: mkhadkevich earthly tests fail https://gitlab-master.nvidia.com/aire/microservices/compoundai/-/jobs/144475821
+#test:
+#    FROM +build
+#    # copy test files
+#    COPY tests/ tests/
+#    RUN go test ./...
+
+docker:
+    ARG CI_REGISTRY_IMAGE=my-registry
+    ARG CI_COMMIT_SHA=latest
+    ARG IMAGE=compound-api-server
+    FROM gcr.io/distroless/static:nonroot
+    WORKDIR /
+    COPY +build/server .
+    COPY +build/.env .
+    USER 65532:65532
+    ENTRYPOINT ["/server"]
+    SAVE IMAGE --push $CI_REGISTRY_IMAGE/$IMAGE:$CI_COMMIT_SHA

@@ -21,12 +21,12 @@
 if [ $# -gt 2 ]; then
     echo "Usage: $0 [model_name] [endpoint_name]"
     echo "Optional: model_name (default: deepseek-ai/DeepSeek-R1-Distill-Llama-8B)"
-    echo "Optional: endpoint_name (default: triton-init.vllm.generate)"
+    echo "Optional: endpoint_name (default: dynemo.vllm.generate)"
     exit 1
 fi
 
 MODEL_NAME=${1:-"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"}
-ENDPOINT_NAME=${2:-"triton-init.vllm.generate"}
+ENDPOINT_NAME=${2:-"dynemo.vllm.generate"}
 SESSION_NAME="vllm_disagg"
 WORKDIR="$(dirname $0)/.."
 INIT_CMD="cd $WORKDIR"
@@ -49,7 +49,7 @@ tmux split-window -v
 ########################################################
 HTTP_HOST="localhost"
 HTTP_PORT=8080
-HTTP_CMD="TRD_LOG=DEBUG http --host ${HTTP_HOST} --port ${HTTP_PORT}"
+HTTP_CMD="DYN_LOG=DEBUG http --host ${HTTP_HOST} --port ${HTTP_PORT}"
 tmux select-pane -t 0
 tmux send-keys "$INIT_CMD && $HTTP_CMD" C-m
 

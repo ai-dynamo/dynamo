@@ -15,157 +15,152 @@
 
 
 import asyncio
-import threading
-from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional, Tuple
+import json
+import signal
+import uuid
 
 import uvloop
-from common.parser import parse_tensorrt_llm_args
-from common.protocol import Request, Response
-from tensorrt_llm import SamplingParams
-from tensorrt_llm._torch import LLM
-from tensorrt_llm._torch.pyexecutor.config import PyTorchConfig
+from common.base_engine import BaseTensorrtLLMEngine
+from common.parser import LLMAPIConfig, parse_tensorrt_llm_args
+from common.processor import merge_promises, parse_chat_message_content
+from tensorrt_llm.executor import CppExecutorError
 from tensorrt_llm.logger import logger
-
-from triton_distributed.runtime import (
-    DistributedRuntime,
-    triton_endpoint,
-    triton_worker,
+from tensorrt_llm.serve.openai_protocol import (
+    ChatCompletionRequest,
+    ChatCompletionStreamResponse,
+    CompletionRequest,
+    CompletionStreamResponse,
 )
 
-logger.set_level("info")
+from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
+
+logger.set_level("debug")
 
 
-class TensorrtLLMEngine:
+class TensorrtLLMEngine(BaseTensorrtLLMEngine):
     """
     Request handler for the generate endpoint
     """
 
-    def __init__(self, engine_args: Tuple[Dict[str, Any], Dict[str, Any]]):
-        self.pytorch_config_args, self.llm_engine_args = engine_args
-        self._init_engine()
+    def __init__(self, engine_config: LLMAPIConfig):
+        super().__init__(engine_config)
 
-    def _init_engine(self):
-        logger.info("Initializing engine")
-        # Run the engine in a separate thread running the AsyncIO event loop.
-        self._llm_engine: Optional[Any] = None
-        self._llm_engine_start_cv = threading.Condition()
-        self._llm_engine_shutdown_event = asyncio.Event()
-        self._event_thread = threading.Thread(
-            target=asyncio.run, args=(self._run_llm_engine(),)
-        )
-        self._event_thread.start()
-        with self._llm_engine_start_cv:
-            while self._llm_engine is None:
-                self._llm_engine_start_cv.wait()
+    @dynemo_endpoint(ChatCompletionRequest, ChatCompletionStreamResponse)
+    async def generate_chat(self, request):
+        if self._llm_engine is None:
+            raise RuntimeError("Engine not initialized")
 
-        # The 'threading.Thread()' will not raise the exception here should the engine
-        # failed to start, so the exception is passed back via the engine variable.
-        if isinstance(self._llm_engine, Exception):
-            e = self._llm_engine
-            logger.error(f"Failed to start engine: {e}")
-            if self._event_thread is not None:
-                self._event_thread.join()
-                self._event_thread = None
-            raise e
-
-    async def _run_llm_engine(self):
-        # Counter to keep track of ongoing request counts.
-        self._ongoing_request_count = 0
-
-        @asynccontextmanager
-        async def async_llm_wrapper():
-            # Create LLM in a thread to avoid blocking
-            loop = asyncio.get_running_loop()
-            try:
-                pytorch_config = PyTorchConfig(**self.pytorch_config_args)
-                llm = await loop.run_in_executor(
-                    None,
-                    lambda: LLM(
-                        **self.llm_engine_args, pytorch_backend_config=pytorch_config
-                    ),
-                )
-                yield llm
-            finally:
-                if "llm" in locals():
-                    # Run shutdown in a thread to avoid blocking
-                    await loop.run_in_executor(None, llm.shutdown)
+        logger.debug(f"Received chat request: {request}")
+        request_id = str(uuid.uuid4())
+        self._ongoing_request_count += 1
 
         try:
-            async with async_llm_wrapper() as engine:
-                # Capture the engine event loop and make it visible to other threads.
-                self._event_loop = asyncio.get_running_loop()
+            conversation = []
+            for message in request.messages:
+                conversation.extend(parse_chat_message_content(message))
+            tool_dicts = (
+                None
+                if request.tools is None
+                else [tool.model_dump() for tool in request.tools]
+            )
+            prompt: str = self._tokenizer.apply_chat_template(
+                conversation=conversation,
+                tokenize=False,
+                add_generation_prompt=request.add_generation_prompt,
+                tools=tool_dicts,
+                documents=request.documents,
+                chat_template=request.chat_template,
+                **(request.chat_template_kwargs or {}),
+            )
+            sampling_params = request.to_sampling_params()
 
-                # Signal the engine is started and make it visible to other threads.
-                with self._llm_engine_start_cv:
-                    self._llm_engine = engine
-                    self._llm_engine_start_cv.notify_all()
+            promise = self._llm_engine.generate_async(
+                prompt,
+                sampling_params,
+                streaming=request.stream,
+            )
+            # NOTE: somehow stream and non-stream is working with the same path
+            response_generator = self.chat_processor.stream_response(
+                request, request_id, conversation, promise
+            )
+            async for response in response_generator:
+                yield response
 
-                logger.info("Engine loaded and ready to serve...")
-
-                # Wait for the engine shutdown signal.
-                await self._llm_engine_shutdown_event.wait()
-
-                # Wait for the ongoing requests to complete.
-                while self._ongoing_request_count > 0:
-                    logger.info(
-                        "Awaiting remaining {} requests".format(
-                            self._ongoing_request_count
-                        )
-                    )
-                    await asyncio.sleep(1)
-
-                # Cancel all tasks in the event loop.
-                for task in asyncio.all_tasks(loop=self._event_loop):
-                    if task is not asyncio.current_task():
-                        task.cancel()
-
+            self._ongoing_request_count -= 1
+        except CppExecutorError:
+            # If internal executor error is raised, shutdown the server
+            signal.raise_signal(signal.SIGINT)
         except Exception as e:
-            # Signal and pass the exception back via the engine variable if the engine
-            # failed to start. If the engine has started, re-raise the exception.
-            with self._llm_engine_start_cv:
-                if self._llm_engine is None:
-                    self._llm_engine = e
-                    self._llm_engine_start_cv.notify_all()
-                    return
-            raise e
+            raise RuntimeError("Failed to generate: " + str(e))
 
-        self._llm_engine = None
-        logger.info("Shutdown complete")
-
-    @triton_endpoint(Request, Response)
-    async def generate(self, request):
+    @dynemo_endpoint(CompletionRequest, CompletionStreamResponse)
+    async def generate_completion(self, request):
         if self._llm_engine is None:
             raise RuntimeError("Engine not initialized")
 
         self._ongoing_request_count += 1
-        logger.debug(f"Received request: {request}")
-        sampling_params = SamplingParams(**request.sampling_params)
-        async for response in self._llm_engine.generate_async(
-            request.prompt, sampling_params, streaming=request.streaming
+        logger.debug(f"Received completion request: {request}")
+
+        if isinstance(request.prompt, str) or (
+            isinstance(request.prompt, list) and isinstance(request.prompt[0], int)
         ):
-            logger.debug(f"Generated response: {response}")
-            yield response.outputs[0].text
+            prompts = [request.prompt]
+        else:
+            prompts = request.prompt
 
-        self._ongoing_request_count -= 1
+        promises = []
+        sampling_params = request.to_sampling_params()
+
+        try:
+            for prompt in prompts:
+                promise = self._llm_engine.generate_async(
+                    prompt,
+                    sampling_params,
+                    streaming=request.stream,
+                )
+                promises.append(promise)
+
+            generator = merge_promises(promises)
+            num_choices = (
+                len(prompts) if request.n is None else len(prompts) * request.n
+            )
+
+            # NOTE: always send `stream: true` to the worker, and decide whether to aggregate  or not before sending the response back to client.
+            response_generator = self.completions_processor.create_completion_generator(
+                request, generator, num_choices
+            )
+            async for response in response_generator:
+                yield json.loads(response)
+
+            self._ongoing_request_count -= 1
+        except CppExecutorError:
+            # If internal executor error is raised, shutdown the server
+            signal.raise_signal(signal.SIGINT)
+        except Exception as e:
+            raise RuntimeError("Failed to generate: " + str(e))
 
 
-@triton_worker()
-async def worker(
-    runtime: DistributedRuntime, engine_args: Tuple[Dict[str, Any], Dict[str, Any]]
-):
+@dynemo_worker()
+async def worker(runtime: DistributedRuntime, engine_config: LLMAPIConfig):
     """
     Instantiate a `backend` component and serve the `generate` endpoint
     A `Component` can serve multiple endpoints
     """
-    component = runtime.namespace("triton-init").component("tensorrt-llm")
+    component = runtime.namespace("dynemo").component("tensorrt-llm")
     await component.create_service()
 
-    endpoint = component.endpoint("generate")
-    await endpoint.serve_endpoint(TensorrtLLMEngine(engine_args).generate)
+    completions_endpoint = component.endpoint("completions")
+    chat_completions_endpoint = component.endpoint("chat/completions")
+
+    engine = TensorrtLLMEngine(engine_config)
+
+    await asyncio.gather(
+        completions_endpoint.serve_endpoint(engine.generate_completion),
+        chat_completions_endpoint.serve_endpoint(engine.generate_chat),
+    )
 
 
 if __name__ == "__main__":
     uvloop.install()
-    _, engine_args = parse_tensorrt_llm_args()
-    asyncio.run(worker(engine_args))
+    args, engine_config = parse_tensorrt_llm_args()
+    asyncio.run(worker(engine_config))

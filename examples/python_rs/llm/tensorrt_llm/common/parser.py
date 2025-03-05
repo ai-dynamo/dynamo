@@ -14,75 +14,93 @@
 # limitations under the License.
 
 import argparse
-import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-# Define the expected keys for each config
-# TODO: Add more keys as needed
-PYTORCH_CONFIG_KEYS = {
-    "use_cuda_graph",
-    "cuda_graph_batch_sizes",
-    "cuda_graph_max_batch_size",
-    "cuda_graph_padding_enabled",
-    "enable_overlap_scheduler",
-    "kv_cache_dtype",
-    "torch_compile_enabled",
-    "torch_compile_fullgraph",
-    "torch_compile_inductor_enabled",
-}
-
-LLM_ENGINE_KEYS = {
-    "model",
-    "tokenizer",
-    "tokenizer_model",
-    "skip_tokenizer_init",
-    "trust_remote_code",
-    "tensor_parallel_size",
-    "dtype",
-    "revision",
-    "tokenizer_revision",
-    "speculative_model",
-    "enable_chunked_prefill",
-}
+import yaml
+from tensorrt_llm._torch.pyexecutor.config import PyTorchConfig
+from tensorrt_llm.llmapi import KvCacheConfig
 
 
-def _get_llm_args(args_dict):
-    # Validation checks
-    for k, v in args_dict.items():
-        if (
-            k not in LLM_ENGINE_KEYS
-            and k not in PYTORCH_CONFIG_KEYS
-            and k != "copyright"
-        ):
-            raise ValueError(f"Unrecognized key in --engine_args file: {k}")
+@dataclass
+class LLMAPIConfig:
+    def __init__(
+        self,
+        model_name: str,
+        model_path: str | None = None,
+        pytorch_backend_config: PyTorchConfig | None = None,
+        kv_cache_config: KvCacheConfig | None = None,
+        **kwargs,
+    ):
+        self.model_name = model_name
+        self.model_path = model_path
+        self.pytorch_backend_config = pytorch_backend_config
+        self.kv_cache_config = kv_cache_config
+        self.extra_args = kwargs
 
-    pytorch_config_args = {
-        k: v for k, v in args_dict.items() if k in PYTORCH_CONFIG_KEYS and v is not None
-    }
-    llm_engine_args = {
-        k: v for k, v in args_dict.items() if k in LLM_ENGINE_KEYS and v is not None
-    }
-    if "model" not in llm_engine_args:
+    def to_dict(self) -> Dict[str, Any]:
+        data = {
+            "pytorch_backend_config": self.pytorch_backend_config,
+            "kv_cache_config": self.kv_cache_config,
+        }
+        if self.extra_args:
+            data.update(self.extra_args)
+        return data
+
+    def update_sub_configs(self, other_config: Dict[str, Any]):
+        if "pytorch_backend_config" in other_config:
+            self.pytorch_backend_config = PyTorchConfig(
+                **other_config["pytorch_backend_config"]
+            )
+            self.extra_args.pop("pytorch_backend_config", None)
+
+        if "kv_cache_config" in other_config:
+            self.kv_cache_config = KvCacheConfig(**other_config["kv_cache_config"])
+            self.extra_args.pop("kv_cache_config", None)
+
+
+def _get_llm_args(engine_config):
+    # Only do model validation checks and leave other checks to LLMAPI
+    if "model_name" not in engine_config:
         raise ValueError("Model name is required in the TRT-LLM engine config.")
-    if os.path.exists(llm_engine_args["model"]):
-        llm_engine_args["model"] = Path(llm_engine_args["model"])
 
-    return (pytorch_config_args, llm_engine_args)
+    if engine_config.get("model_path", ""):
+        if os.path.exists(engine_config.get("model_path", "")):
+            engine_config["model_path"] = Path(engine_config["model_path"])
+        else:
+            raise ValueError(f"Model path {engine_config['model_path']} does not exist")
+
+    model_name = engine_config["model_name"]
+    model_path = engine_config.get("model_path", None)
+
+    engine_config.pop("model_name")
+    engine_config.pop("model_path", None)
+
+    # Store all other args as kwargs
+    llm_api_config = LLMAPIConfig(
+        model_name=model_name,
+        model_path=model_path,
+        **engine_config,
+    )
+    # Parse supported sub configs and remove from kwargs
+    llm_api_config.update_sub_configs(engine_config)
+
+    return llm_api_config
 
 
 def _init_engine_args(engine_args_filepath):
     """Initialize engine arguments from config file."""
     if not os.path.isfile(engine_args_filepath):
         raise ValueError(
-            f"'{engine_args_filepath}' containing TRT-LLM engine args must be provided in when launching the worker"
+            "'YAML file containing TRT-LLM engine args must be provided in when launching the worker."
         )
 
     try:
         with open(engine_args_filepath) as file:
-            trtllm_engine_config = json.load(file)
-    except json.JSONDecodeError as e:
+            trtllm_engine_config = yaml.safe_load(file)
+    except yaml.YAMLError as e:
         raise RuntimeError(f"Failed to parse engine config: {e}")
 
     return _get_llm_args(trtllm_engine_config)

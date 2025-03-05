@@ -20,7 +20,7 @@ limitations under the License.
 ## Build docker
 
 ```
-./container/build.sh --framework VLLM_NIXL --target dev --build-context nixl=<path to downloaded nixl repo @ fc912eb012597be67de11fa9ba0599e4e1974fa2>
+./container/build.sh --framework VLLM_NIXL --target dev --build-context nixl=<path to downloaded nixl repo @ c53bb19a6a114e9093071bd1f2904f996ae1839b>
 ```
 
 ## Run container
@@ -33,7 +33,7 @@ All of the commands below are run inside the same container.
 
 ## Run deployment
 
-Add model to triton and start http server.
+Add model to dynemo and start http server.
 
 In terminal 0:
 ```
@@ -65,19 +65,20 @@ CUDA_VISIBLE_DEVICES=0 python prefill_worker.py \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
     --kv-transfer-config \
-    '{"kv_connector":"TritonNixlConnector"}'
+    '{"kv_connector":"DynemoNixlConnector"}'
 ```
 
 In terminal 2:
 
 ```
 cd /workspace/examples/python_rs/llm/vllm_nixl
-CUDA_VISIBLE_DEVICES=1 python3 worker.py \
+CUDA_VISIBLE_DEVICES=1,2 python3 worker.py \
     --remote-prefill \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
+    --tensor-parallel-size 2 \
     --kv-transfer-config \
-    '{"kv_connector":"TritonNixlConnector"}'
+    '{"kv_connector":"DynemoNixlConnector"}'
 ```
 
 
@@ -156,7 +157,7 @@ rm -r /tmp/nixl
 - [x] Zero copy
 - [x] Conditional remote prefill
 - [x] Manual example with tp > 1
-- [x] Run on triton distributed runtime
+- [x] Run on dynemo distributed runtime
 - [x] add oai http endpoint
 - [x] Sample only on decode, do note return remote prefill response
 - [x] Check if all transfers finished before moving to decode

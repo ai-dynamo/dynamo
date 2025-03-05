@@ -16,6 +16,8 @@
 use pyo3::{types::IntoPyDict, Python};
 use std::{os::fd::RawFd, path::Path};
 
+use crate::engines::MultiNodeConfig;
+
 const PY_START_ENGINE: &std::ffi::CStr = cr#"
 from multiprocessing.connection import Connection
 import signal
@@ -86,7 +88,7 @@ pub fn run_subprocess(
     // The write half of a pipe, where sglang will signal when it's ready
     notify_pipe_fd: RawFd,
     // Multi node. Usually Default::default
-    node_config: super::MultiNodeConfig,
+    node_config: MultiNodeConfig,
     // Multi GPU. Usually Default::default
     gpu_config: super::MultiGPUConfig,
 ) -> anyhow::Result<()> {
@@ -103,10 +105,7 @@ pub fn run_subprocess(
             ("gpu_id_str", &gpu_config.gpu_id.to_string()),
             ("nnodes_str", &node_config.num_nodes.to_string()),
             ("node_rank_str", &node_config.node_rank.to_string()),
-            (
-                "dist_init_addr",
-                &node_config.dist_init_addr.unwrap_or_default().to_string(),
-            ),
+            ("dist_init_addr", &node_config.leader_addr),
         ]
         .into_py_dict(py)
         .unwrap();

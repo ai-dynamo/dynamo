@@ -17,12 +17,12 @@ import asyncio
 
 import uvloop
 
-from triton_distributed.runtime import DistributedRuntime, triton_worker
+from dynemo.runtime import DistributedRuntime, dynemo_worker
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime):
-    await init(runtime, "triton-init")
+    await init(runtime, "dynemo")
 
 
 async def init(runtime: DistributedRuntime, ns: str):

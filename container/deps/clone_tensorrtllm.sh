@@ -16,7 +16,7 @@
 
 TENSORRTLLM_BACKEND_REPO_TAG=
 TENSORRTLLM_BACKEND_REBUILD=
-TRITON_LLM_PATH=
+DYNEMO_LLM_PATH=
 GIT_TOKEN=
 GIT_REPO=
 
@@ -43,9 +43,9 @@ get_options() {
 		missing_requirement $1
             fi
             ;;
-    --triton-llm-path)
+    --dynemo-llm-path)
             if [ "$2" ]; then
-                TRITON_LLM_PATH=$2
+                DYNEMO_LLM_PATH=$2
                 shift
             else
 		missing_requirement $1
@@ -147,7 +147,7 @@ if [ ! -z ${TENSORRTLLM_BACKEND_REBUILD} ]; then
 
     # Build the backend
     (cd inflight_batcher_llm/src \
-        && cmake -DCMAKE_INSTALL_PREFIX:PATH=`pwd`/install -DUSE_CXX11_ABI=1 -DTRITON_LLM_PATH=$TRITON_LLM_PATH .. \
+        && cmake -DCMAKE_INSTALL_PREFIX:PATH=`pwd`/install -DUSE_CXX11_ABI=1 -DDYNEMO_LLM_PATH=$DYNEMO_LLM_PATH .. \
         && make install \
         && cp libtriton_tensorrtllm.so /opt/tritonserver/backends/tensorrtllm/ \
         && cp trtllmExecutorWorker /opt/tritonserver/backends/tensorrtllm/ \

@@ -17,7 +17,7 @@ import asyncio
 
 import uvloop
 
-from triton_distributed.runtime import DistributedRuntime, triton_worker
+from dynemo.runtime import DistributedRuntime, dynemo_worker
 
 uvloop.install()
 
@@ -28,7 +28,7 @@ class RequestHandler:
             yield char
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime):
     component = runtime.namespace("examples/bls").component("foo")
     await component.create_service()

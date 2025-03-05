@@ -26,7 +26,7 @@ on:
     branches:
     - main
     paths:
-    - pre-merge-rust.yml
+    - .github/workflows/pre-merge-rust.yml
     - 'lib/runtime/**'
     - 'lib/llm/**'
     - 'lib/bindings/**'
@@ -40,7 +40,7 @@ jobs:
   pre-merge-rust:
     runs-on: ubuntu-latest
     strategy:
-      matrix: { dir: ['lib/runtime', 'lib/llm', 'lib/bindings/c', 'lib/bindings/python', 'launch/tio', 'applications/llm/count', 'examples/rust'] }
+      matrix: { dir: ['lib/runtime', 'lib/llm', 'lib/bindings/c', 'lib/bindings/python', 'launch/dynemo-run', 'applications/llm/count', 'examples/rust'] }
     permissions:
       contents: read
     steps:
@@ -85,7 +85,6 @@ jobs:
       run: |
         cargo-deny --version || cargo install cargo-deny@0.16.4
         cargo-deny check --hide-inclusion-graph licenses --config ${{ github.workspace }}/deny.toml
-      timeout-minutes: 5
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
       run: cargo test --locked --all-targets

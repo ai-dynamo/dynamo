@@ -23,12 +23,8 @@ import uvloop
 from common.protocol import Tokens
 from vllm.logger import logger as vllm_logger
 
-from triton_distributed.llm import KvRouter
-from triton_distributed.runtime import (
-    DistributedRuntime,
-    triton_endpoint,
-    triton_worker,
-)
+from dynemo.llm import KvRouter
+from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
 WorkerId = str
 
@@ -55,7 +51,7 @@ class Router:
         self.router = router
         self.routing_strategy = routing_strategy
 
-    @triton_endpoint(Tokens, WorkerId)
+    @dynemo_endpoint(Tokens, WorkerId)
     async def generate(self, request) -> AsyncIterator[WorkerId]:
         lora_id = 0
         worker_id = None
@@ -82,14 +78,14 @@ class Router:
             )
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime, args: Namespace):
     """
     Set up the worker clients.
-    Serve the triton-init.router.generate endpoint.
+    Serve the dynemo.router.generate endpoint.
     """
     workers_client = (
-        await runtime.namespace("triton-init")
+        await runtime.namespace("dynemo")
         .component("vllm")
         .endpoint("generate")
         .client()
@@ -114,10 +110,10 @@ async def worker(runtime: DistributedRuntime, args: Namespace):
         + "\n".join(f"id: {id}" for id in workers_client.endpoint_ids())
     )
 
-    kv_listener = runtime.namespace("triton-init").component("vllm")
+    kv_listener = runtime.namespace("dynemo").component("vllm")
     await kv_listener.create_service()
 
-    router_component = runtime.namespace("triton-init").component("router")
+    router_component = runtime.namespace("dynemo").component("router")
     await router_component.create_service()
 
     router = KvRouter(runtime, kv_listener)

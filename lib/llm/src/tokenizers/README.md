@@ -13,7 +13,7 @@
 
 #### HuggingFace Tokenizer
 ```rust
-use triton_distributed_llm::tokenizers::hf::HuggingFaceTokenizer;
+use dynemo_llm::tokenizers::hf::HuggingFaceTokenizer;
 
 let hf_tokenizer = HuggingFaceTokenizer::from_file("tests/data/sample-models/TinyLlama_v1.1/tokenizer.json")
     .expect("Failed to load HuggingFace tokenizer");
@@ -22,7 +22,7 @@ let hf_tokenizer = HuggingFaceTokenizer::from_file("tests/data/sample-models/Tin
 ### Encoding and Decoding Text
 
 ```rust
-use triton_distributed_llm::tokenizers::{HuggingFaceTokenizer, traits::{Encoder, Decoder}};
+use dynemo_llm::tokenizers::{HuggingFaceTokenizer, traits::{Encoder, Decoder}};
 
 let tokenizer = HuggingFaceTokenizer::from_file("tests/data/sample-models/TinyLlama_v1.1/tokenizer.json")
     .expect("Failed to load HuggingFace tokenizer");
@@ -40,7 +40,7 @@ assert_eq!(text, decoded_text);
 
 // Using the Sequence object for encoding and decoding
 
-use triton_distributed_llm::tokenizers::{Sequence, Tokenizer};
+use dynemo_llm::tokenizers::{Sequence, Tokenizer};
 use std::sync::{Arc, RwLock};
 
 let tokenizer = Tokenizer::from(Arc::new(tokenizer));

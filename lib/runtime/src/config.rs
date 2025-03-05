@@ -35,7 +35,7 @@ impl WorkerConfig {
         // All calls should be global and thread safe.
         Figment::new()
             .merge(Serialized::defaults(Self::default()))
-            .merge(Env::prefixed("TRD_WORKER_"))
+            .merge(Env::prefixed("DYN_WORKER_"))
             .extract()
             .unwrap() // safety: Called on startup, so panic is reasonable
     }
@@ -81,10 +81,10 @@ impl RuntimeConfig {
     pub(crate) fn figment() -> Figment {
         Figment::new()
             .merge(Serialized::defaults(RuntimeConfig::default()))
-            .merge(Toml::file("/opt/triton/defaults/runtime.toml"))
-            .merge(Toml::file("/opt/triton/etc/runtime.toml"))
-            .merge(Env::prefixed("TRD_RUNTIME_").filter_map(|k| {
-                let full_key = format!("TRD_RUNTIME_{}", k.as_str());
+            .merge(Toml::file("/opt/dynemo/defaults/runtime.toml"))
+            .merge(Toml::file("/opt/dynemo/etc/runtime.toml"))
+            .merge(Env::prefixed("DYN_RUNTIME_").filter_map(|k| {
+                let full_key = format!("DYN_RUNTIME_{}", k.as_str());
                 // filters out empty environment variables
                 match std::env::var(&full_key) {
                     Ok(v) if !v.is_empty() => Some(k.into()),
@@ -97,10 +97,10 @@ impl RuntimeConfig {
     /// Configuration is priorities in the following order, where the last has the lowest priority:
     /// 1. Environment variables (top priority)
     ///     TO DO: Add documentation for configuration files. Paths should be configurable.
-    /// 2. /opt/triton/etc/runtime.toml
-    /// 3. /opt/triton/defaults/runtime.toml (lowest priority)
+    /// 2. /opt/dynemo/etc/runtime.toml
+    /// 3. /opt/dynemo/defaults/runtime.toml (lowest priority)
     ///
-    /// Environment variables are prefixed with `TRD_RUNTIME_`
+    /// Environment variables are prefixed with `DYN_RUNTIME_`
     pub fn from_settings() -> Result<RuntimeConfig> {
         let config: RuntimeConfig = Self::figment().extract()?;
         config.validate()?;
@@ -159,15 +159,15 @@ pub fn is_truthy(val: &str) -> bool {
 }
 
 /// Check whether JSONL logging enabled
-/// Set the `TRD_LOGGING_JSONL` environment variable a [`is_truthy`] value
+/// Set the `DYN_LOGGING_JSONL` environment variable a [`is_truthy`] value
 pub fn jsonl_logging_enabled() -> bool {
-    env_is_truthy("TRD_LOGGING_JSONL")
+    env_is_truthy("DYN_LOGGING_JSONL")
 }
 
 /// Check whether logging with ANSI terminal escape codes and colors is disabled.
-/// Set the `TRD_SDK_DISABLE_ANSI_LOGGING` environment variable a [`is_truthy`] value
+/// Set the `DYN_SDK_DISABLE_ANSI_LOGGING` environment variable a [`is_truthy`] value
 pub fn disable_ansi_logging() -> bool {
-    env_is_truthy("TRD_SDK_DISABLE_ANSI_LOGGING")
+    env_is_truthy("DYN_SDK_DISABLE_ANSI_LOGGING")
 }
 
 #[cfg(test)]
@@ -178,8 +178,8 @@ mod tests {
     fn test_runtime_config_with_env_vars() -> Result<()> {
         temp_env::with_vars(
             vec![
-                ("TRD_RUNTIME_NUM_WORKER_THREADS", Some("24")),
-                ("TRD_RUNTIME_MAX_BLOCKING_THREADS", Some("32")),
+                ("DYN_RUNTIME_NUM_WORKER_THREADS", Some("24")),
+                ("DYN_RUNTIME_MAX_BLOCKING_THREADS", Some("32")),
             ],
             || {
                 let config = RuntimeConfig::from_settings()?;
@@ -194,8 +194,8 @@ mod tests {
     fn test_runtime_config_defaults() -> Result<()> {
         temp_env::with_vars(
             vec![
-                ("TRD_RUNTIME_NUM_WORKER_THREADS", None::<&str>),
-                ("TRD_RUNTIME_MAX_BLOCKING_THREADS", Some("")),
+                ("DYN_RUNTIME_NUM_WORKER_THREADS", None::<&str>),
+                ("DYN_RUNTIME_MAX_BLOCKING_THREADS", Some("")),
             ],
             || {
                 let config = RuntimeConfig::from_settings()?;
@@ -215,8 +215,8 @@ mod tests {
     fn test_runtime_config_rejects_invalid_thread_count() -> Result<()> {
         temp_env::with_vars(
             vec![
-                ("TRD_RUNTIME_NUM_WORKER_THREADS", Some("0")),
-                ("TRD_RUNTIME_MAX_BLOCKING_THREADS", Some("0")),
+                ("DYN_RUNTIME_NUM_WORKER_THREADS", Some("0")),
+                ("DYN_RUNTIME_MAX_BLOCKING_THREADS", Some("0")),
             ],
             || {
                 let result = RuntimeConfig::from_settings();

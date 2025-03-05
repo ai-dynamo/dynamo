@@ -20,13 +20,11 @@ use prometheus::register_gauge_vec;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
-use triton_distributed_llm::kv_router::protocols::ForwardPassMetrics;
-use triton_distributed_llm::kv_router::scheduler::Endpoint;
-use triton_distributed_llm::kv_router::scoring::ProcessedEndpoints;
+use dynemo_llm::kv_router::protocols::ForwardPassMetrics;
+use dynemo_llm::kv_router::scheduler::Endpoint;
+use dynemo_llm::kv_router::scoring::ProcessedEndpoints;
 
-use triton_distributed_runtime::{
-    distributed::Component, service::EndpointInfo, utils::Duration, Result,
-};
+use dynemo_runtime::{distributed::Component, service::EndpointInfo, utils::Duration, Result};
 
 /// Configuration for LLM worker load capacity metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -17,7 +17,7 @@ import asyncio
 
 import uvloop
 
-from triton_distributed.runtime import DistributedRuntime, triton_worker
+from dynemo.runtime import DistributedRuntime, dynemo_worker
 
 uvloop.install()
 
@@ -32,7 +32,7 @@ class RequestHandler:
             yield output.get("data")
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime):
     # client to backend
     backend = (

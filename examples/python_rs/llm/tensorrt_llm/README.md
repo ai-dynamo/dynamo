@@ -84,20 +84,32 @@ pip install /home/tensorrt_llm-*.whl
 
 Note: NATS and ETCD servers should be running and accessible from the container as described in the [Prerequisites](#prerequisites) section.
 
-### 1. Monolithic Deployment
+### Monolithic Deployment
 
-Run the server and client components in separate terminal sessions:
+#### 1. HTTP Server
 
-**Server:**
+Run the server logging (with debug level logging):
+```bash
+DYN_LOG=DEBUG http &
+```
+By default the server will run on port 8080.
+
+Add model to the server:
+```bash
+llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynemo.tensorrt-llm.chat/completions
+llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynemo.tensorrt-llm.completions
+```
+
+#### 2. Workers
 
 Note: The following commands are tested on machines withH100x8 GPUs
 
-#### Option 1.1 Single-Node Single-GPU
+##### Option 2.1 Single-Node Single-GPU
 
 ```bash
 # Launch worker
 cd /workspace/examples/python_rs/llm/tensorrt_llm
-mpirun --allow-run-as-root -n 1 --oversubscribe python3 -m monolith.worker --engine_args model.json
+mpirun --allow-run-as-root -n 1 --oversubscribe python3 -m monolith.worker --engine_args llm_api_config.yaml 1>agg_worker.log 2>&1 &
 ```
 
 Upon successful launch, the output should look similar to:
@@ -113,66 +125,114 @@ Upon successful launch, the output should look similar to:
 
 `nvidia-smi` can be used to check the GPU usage and the model is loaded on single GPU.
 
-#### Option 1.2 Single-Node Multi-GPU
+##### Option 2.2 Single-Node Multi-GPU
 
-Update `tensor_parallel_size` in the `model.json` to load the model with the desired number of GPUs.
-For this example, we will load the model with 4 GPUs.
-
-```bash
-# Launch worker
-cd /workspace/examples/python_rs/llm/tensorrt_llm
-mpirun --allow-run-as-root -n 1 --oversubscribe python3 -m monolith.worker --engine_args model.json
-```
+Update `tensor_parallel_size` in the `llm_api_config.yaml` to load the model with the desired number of GPUs.
 `nvidia-smi` can be used to check the GPU usage and the model is loaded on 4 GPUs.
 
-#### Option 1.3 Multi-Node Multi-GPU
+##### Option 2.3 Multi-Node Multi-GPU
 
-Tanmay[WIP]
+TODO: Add multi-node multi-GPU example
 
-**Client:**
+#### 3. Client
 
 ```bash
-
-# Run client
-python3 -m common.client \
-    --prompt "Describe the capital of France" \
-    --max-tokens 10 \
-    --temperature 0.5 \
-    --component tensorrt-llm
+# Chat Completion
+curl localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "messages": [
+      {"role": "user", "content": "What is the capital of France?"}
+    ]
+  }'
 ```
 
 The output should look similar to:
-```
-Annotated(data=',', event=None, comment=[], id=None)
-Annotated(data=', Paris', event=None, comment=[], id=None)
-Annotated(data=', Paris,', event=None, comment=[], id=None)
-Annotated(data=', Paris, in', event=None, comment=[], id=None)
-Annotated(data=', Paris, in terms', event=None, comment=[], id=None)
-Annotated(data=', Paris, in terms of', event=None, comment=[], id=None)
-Annotated(data=', Paris, in terms of its', event=None, comment=[], id=None)
-Annotated(data=', Paris, in terms of its history', event=None, comment=[], id=None)
-Annotated(data=', Paris, in terms of its history,', event=None, comment=[], id=None)
-Annotated(data=', Paris, in terms of its history, culture', event=None, comment=[], id=None)
+```json
+{
+  "id": "ab013077-8fb2-433e-bd7d-88133fccd497",
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": "The capital of France is Paris."
+      },
+      "index": 0,
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1740617803,
+  "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+  "object": "chat.completion",
+  "usage": null,
+  "system_fingerprint": null
+}
 ```
 
-### 2. Disaggregated Deployment
+```bash
+# Completion
+curl localhost:8080/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+        "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        "prompt": "The capital of France is",
+        "max_tokens": 1,
+        "temperature": 0
+    }'
+```
 
-#### 2.1 Single-Node Disaggregated Deployment
+Output:
+```json
+{
+  "id":"cmpl-e0d75aca1bd540399809c9b609eaf010",
+  "choices":[
+    {
+      "text":"Paris",
+      "index":0,
+      "finish_reason":"length"
+    }
+  ],
+  "created":1741024639,
+  "model":"TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+  "object":"text_completion",
+  "usage":null
+}
+```
+
+### Disaggregated Deployment
 
 **Environment**
 This is the latest image with tensorrt_llm supporting distributed serving with pytorch workflow in LLM API.
-
 
 Run the container interactively with the following command:
 ```bash
 ./container/run.sh --image IMAGE -it
 ```
 
+#### 1. HTTP Server
+
+Run the server logging (with debug level logging):
+```bash
+DYN_LOG=DEBUG http &
+```
+By default the server will run on port 8080.
+
+Add model to the server:
+```bash
+llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynemo.router.chat/completions
+llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynemo.router.completions
+```
+
+#### 2. Workers
+
+##### Option 2.1 Single-Node Disaggregated Deployment
+
 **TRTLLM LLMAPI Disaggregated config file**
 Define disaggregated config file similar to the example [single_node_config.yaml](disaggregated/llmapi_disaggregated_configs/single_node_config.yaml). The important sections are the model, context_servers and generation_servers.
 
 
-**Launch the servers**
+1. **Launch the servers**
 
 Launch context and generation servers.\
 WORLD_SIZE is the total number of workers covering all the servers described in disaggregated configuration.\
@@ -180,32 +240,25 @@ For example, 2 TP2 generation servers are 2 servers but 4 workers/mpi executor.
 
 ```bash
 cd /workspace/examples/python_rs/llm/tensorrt_llm/
-mpirun --allow-run-as-root --oversubscribe -n WORLD_SIZE python3 -m disaggregated.worker --engine_args model.json -c disaggregated/llmapi_disaggregated_configs/single_node_config.yaml &
+mpirun --allow-run-as-root --oversubscribe -n WORLD_SIZE python3 -m disaggregated.worker --engine_args llm_api_config.yaml -c disaggregated/llmapi_disaggregated_configs/single_node_config.yaml 1>disagg_workers.log 2>&1 &
 ```
 If using the provided [single_node_config.yaml](disaggregated/llmapi_disaggregated_configs/single_node_config.yaml), WORLD_SIZE should be 3 as it has 2 context servers(TP=1) and 1 generation server(TP=1).
 
-**Launch the router**
+2. **Launch the router**
 
 ```bash
 cd /workspace/examples/python_rs/llm/tensorrt_llm/
-python3 -m disaggregated.router -c disaggregated/llmapi_disaggregated_configs/single_node_config.yaml &
+python3 -m disaggregated.router 1>router.log 2>&1 &
 ```
 
-**Send Requests**
+3. **Send Requests**
+Follow the instructions in the [Monolithic Deployment](#3-client) section to send requests to the router.
 
-```bash
-cd /workspace/examples/python_rs/llm/tensorrt_llm/
-python3 -m common.client \
-    --prompt "Describe the capital of France" \
-    --max-tokens 10 \
-    --temperature 0.5 \
-    --component router
-```
 
 For more details on the disaggregated deployment, please refer to the [TRT-LLM example](#TODO).
 
 
-### 3. Multi-Node Disaggregated Deployment
+### Multi-Node Disaggregated Deployment
 
 To run the disaggregated deployment across multiple nodes, we need to launch the servers using MPI, pass the correct NATS and etcd endpoints to each server and update the LLMAPI disaggregated config file to use the correct endpoints.
 
@@ -251,9 +304,9 @@ export NATS_SERVER="nats://node1:4222"
 export ETCD_ENDPOINTS="http://node1:2379,http://node2:2379"
 ```
 
-3. Launch the workers from node1 or login node. WORLD_SIZE is similar to single node deployment. Update the `model.json` to point to the new disagg config file.
+3. Launch the workers from node1 or login node. WORLD_SIZE is similar to single node deployment.
 ```bash
-srun --mpi pmix -N NUM_NODES --ntasks WORLD_SIZE --ntasks-per-node=WORLD_SIZE --no-container-mount-home --overlap --container-image IMAGE --output batch_%x_%j.log --err batch_%x_%j.err --container-mounts PATH_TO_TRITON_DISTRIBUTED:/workspace --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/tensorrt_llm && python3 -m disaggregated.worker --engine_args model.json -c disaggregated/llmapi_disaggregated_configs/multi_node_config.yaml' &
+srun --mpi pmix -N NUM_NODES --ntasks WORLD_SIZE --ntasks-per-node=WORLD_SIZE --no-container-mount-home --overlap --container-image IMAGE --output batch_%x_%j.log --err batch_%x_%j.err --container-mounts PATH_TO_TRITON_DISTRIBUTED:/workspace --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/tensorrt_llm && python3 -m disaggregated.worker --engine_args llm_api_config.yaml -c disaggregated/llmapi_disaggregated_configs/multi_node_config.yaml' &
 ```
 
 Once the workers are launched, you should see the output similar to the following in the worker logs.
@@ -270,25 +323,8 @@ Once the workers are launched, you should see the output similar to the followin
 
 4. Launch the router from node1 or login node.
 ```bash
-srun --mpi pmix -N 1 --ntasks 1 --ntasks-per-node=1 --overlap --container-image IMAGE --output batch_router_%x_%j.log --err batch_router_%x_%j.err --container-mounts PATH_TO_TRITON_DISTRIBUTED:/workspace  --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/tensorrt_llm && python3 -m disaggregated.router -c disaggregated/llmapi_disaggregated_configs/multi_node_config.yaml' &
+srun --mpi pmix -N 1 --ntasks 1 --ntasks-per-node=1 --overlap --container-image IMAGE --output batch_router_%x_%j.log --err batch_router_%x_%j.err --container-mounts PATH_TO_TRITON_DISTRIBUTED:/workspace  --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/tensorrt_llm && python3 -m disaggregated.router' &
 ```
 
 5. Send requests to the router.
-```bash
-srun --mpi pmix -N 1 --ntasks 1 --ntasks-per-node=1 --overlap --container-image IMAGE --output batch_client_%x_%j.log --err batch_client_%x_%j.err --container-mounts PATH_TO_TRITON_DISTRIBUTED:/workspace  --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/tensorrt_llm && python3 -m common.client --prompt "Describe the capital of France" --max-tokens 10 --temperature 0.5 --component router' &
-```
-
-Finally, you should see the output similar to the following in the client logs.
-
-```
-Annotated(data='and', event=None, comment=[], id=None)
-Annotated(data='and its', event=None, comment=[], id=None)
-Annotated(data='and its significance', event=None, comment=[], id=None)
-Annotated(data='and its significance in', event=None, comment=[], id=None)
-Annotated(data='and its significance in the', event=None, comment=[], id=None)
-Annotated(data='and its significance in the country', event=None, comment=[], id=None)
-Annotated(data="and its significance in the country'", event=None, comment=[], id=None)
-Annotated(data="and its significance in the country's", event=None, comment=[], id=None)
-Annotated(data="and its significance in the country's history", event=None, comment=[], id=None)
-Annotated(data="and its significance in the country's history.", event=None, comment=[], id=None)
-```
+The router will connect to the OAI compatible server. You can send requests to the router using the standard OAI format as shown in previous sections.

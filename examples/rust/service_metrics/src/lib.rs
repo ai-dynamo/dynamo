@@ -15,7 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_NAMESPACE: &str = "triton-init";
+pub const DEFAULT_NAMESPACE: &str = "dynemo";
 
 #[derive(Serialize, Deserialize)]
 // Dummy Stats object to demonstrate how to attach a custom stats handler

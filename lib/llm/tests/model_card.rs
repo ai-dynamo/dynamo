@@ -13,10 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use dynemo_llm::model_card::model::{ModelDeploymentCard, PromptFormatterArtifact, TokenizerKind};
 use tempfile::tempdir;
-use triton_distributed_llm::model_card::model::{
-    ModelDeploymentCard, PromptFormatterArtifact, TokenizerKind,
-};
 
 const HF_PATH: &str = "tests/data/sample-models/TinyLlama_v1.1";
 
