@@ -118,7 +118,7 @@ for (( i=1; i<=num_d; i++ )); do
     --enable-prefix-caching \
     --tensor-parallel-size ${d_tensor_parallel_size} \
     --block-size ${block_size} \
-    --kv-transfer-config '{"kv_connector":"TritonNixlConnector"}' & disown
+    --kv-transfer-config '{"kv_connector":"DynemoNixlConnector"}' & disown
     curr_rank=$((curr_rank + d_tensor_parallel_size))
     curr_kv_rank=$((curr_kv_rank + 1))
 done
@@ -137,7 +137,7 @@ for (( i=1; i<=num_p; i++ )); do
     --enforce-eager \
     --tensor-parallel-size ${p_tensor_parallel_size} \
     --block-size ${block_size} \
-    --kv-transfer-config '{"kv_connector":"TritonNixlConnector"}' & disown
+    --kv-transfer-config '{"kv_connector":"DynemoNixlConnector"}' & disown
     curr_rank=$((curr_rank + p_tensor_parallel_size))
     curr_kv_rank=$((curr_kv_rank + 1))
 done
