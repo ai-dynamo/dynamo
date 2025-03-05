@@ -94,7 +94,7 @@ class CustomRouter:
     def _cost_function(self, scores, metrics):
         # naive cost function for demonstration purposes
         current_best = ("", 0)
-        for worker_id, score in scores.scores().items():
+        for worker_id, score in scores.scores.items():
             if score > current_best[1]:
                 current_best = (worker_id, score)
         for endpoint in metrics.endpoints:
