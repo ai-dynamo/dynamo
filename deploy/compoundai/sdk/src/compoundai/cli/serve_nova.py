@@ -27,7 +27,7 @@ from typing import Any
 
 import click
 
-from dynemo.rs import DistributedRuntime, triton_endpoint, triton_worker
+from dynemo.runtime import DistributedRuntime, triton_endpoint, triton_worker
 
 logger = logging.getLogger("compoundai.serve.nova")
 
