@@ -13,10 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use rand::Rng;
-use std::sync::Arc;
-use triton_distributed_llm::kv_router::protocols::ForwardPassMetrics;
-use triton_distributed_runtime::{
+use dynemo_llm::kv_router::protocols::ForwardPassMetrics;
+use dynemo_runtime::{
     logging,
     pipeline::{
         async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
@@ -25,6 +23,8 @@ use triton_distributed_runtime::{
     protocols::annotated::Annotated,
     stream, DistributedRuntime, Result, Runtime, Worker,
 };
+use rand::Rng;
+use std::sync::Arc;
 
 fn main() -> Result<()> {
     logging::init();
@@ -69,7 +69,7 @@ async fn backend(runtime: DistributedRuntime) -> Result<()> {
     // we must first create a service, then we can attach one more more endpoints
 
     runtime
-        .namespace("triton-init")?
+        .namespace("dynemo")?
         .component("backend")?
         .service_builder()
         .create()

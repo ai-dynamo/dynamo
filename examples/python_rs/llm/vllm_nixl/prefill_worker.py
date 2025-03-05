@@ -29,7 +29,7 @@ from vllm.inputs.data import TokensPrompt
 from vllm.logger import logger as vllm_logger
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 
-from triton_distributed.runtime import DistributedRuntime, triton_worker
+from dynemo.runtime import DistributedRuntime, dynemo_worker
 
 
 class RequestHandler:
@@ -70,7 +70,7 @@ class RequestHandler:
             yield
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     # TODO: we don't need it now, but will need it after the queue is integrated to the runtime
     component = runtime.namespace("triton-init").component("prefill")

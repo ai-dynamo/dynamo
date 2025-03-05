@@ -71,7 +71,7 @@ The run script offers a few common workflows:
 1. Running a command in a container and exiting.
 
 ```
-./container/run.sh -- python3 -c "import triton_distributed.runtime; help(triton_distributed.runtime)"
+./container/run.sh -- python3 -c "import dynemo.runtime; help(dynemo.runtime)"
 ```
 
 2. Starting an interactive shell.

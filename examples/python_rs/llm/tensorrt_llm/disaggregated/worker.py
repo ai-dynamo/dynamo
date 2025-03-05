@@ -15,21 +15,26 @@
 
 
 import asyncio
+import json
 import os
-import threading
-from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional, Tuple
+import signal
 
 import uvloop
-from common.parser import parse_tensorrt_llm_args
-from common.protocol import DisaggregatedRequest, DisaggregatedResponse
+from common.base_engine import BaseTensorrtLLMEngine
+from common.disagg_processor import ChatProcessor, parse_chat_message_content
+from common.parser import LLMAPIConfig, parse_tensorrt_llm_args
+from common.processor import merge_promises
+from common.protocol import (
+    DisaggChatCompletionRequest,
+    DisaggChatCompletionStreamResponse,
+    DisaggCompletionStreamResponse,
+    DisaggregatedTypeConverter,
+)
 from mpi4py.futures import MPICommExecutor
 from mpi4py.MPI import COMM_WORLD
-from tensorrt_llm import SamplingParams
-from tensorrt_llm._torch import LLM
-from tensorrt_llm._torch.pyexecutor.config import PyTorchConfig
 from tensorrt_llm._utils import set_mpi_comm
-from tensorrt_llm.llmapi import DisaggregatedParams, KvCacheConfig, MpiCommSession
+from tensorrt_llm.executor import CppExecutorError
+from tensorrt_llm.llmapi import MpiCommSession
 from tensorrt_llm.llmapi.disagg_utils import (
     CtxGenServerConfig,
     DisaggServerConfig,
@@ -37,177 +42,179 @@ from tensorrt_llm.llmapi.disagg_utils import (
     split_world_comm,
 )
 from tensorrt_llm.logger import logger
+from tensorrt_llm.serve.openai_protocol import CompletionRequest
 
-from triton_distributed.runtime import DistributedRuntime, triton_worker
+from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
-logger.set_level("info")
+logger.set_level("debug")
 
 
-class TensorrtLLMEngine:
+def update_args_from_disagg_config(
+    engine_config: LLMAPIConfig, server_config: CtxGenServerConfig
+):
+    # Overwrite the LLM API config with the disaggregated config
+    # Allows for different configs for context and generation servers
+    engine_config.extra_args.update(**server_config.other_args)
+    engine_config.update_sub_configs(server_config.other_args)
+    return engine_config
+
+
+class TensorrtLLMEngine(BaseTensorrtLLMEngine):
     """
     Request handler for the generate endpoint
     """
 
     def __init__(
         self,
-        engine_args: Tuple[Dict[str, Any], Dict[str, Any]],
+        engine_config: LLMAPIConfig,
         disagg_config: DisaggServerConfig,
         instance_idx: int,
         sub_comm,
     ):
-        self.pytorch_config_args, self.llm_engine_args = engine_args
         self.disagg_config = disagg_config
         self.instance_idx = instance_idx
         self.server_config: CtxGenServerConfig = disagg_config.server_configs[
             instance_idx
         ]
-        self.mpi_session = MpiCommSession(sub_comm, n_workers=sub_comm.Get_size())
-        self._init_engine()
-
-    def _init_engine(self):
-        logger.info("Initializing engine")
-
-        # Run the engine in a separate thread running the AsyncIO event loop.
-        self._llm_engine: Optional[Any] = None
-        self._llm_engine_start_cv = threading.Condition()
-        self._llm_engine_shutdown_event = asyncio.Event()
-        self._event_thread = threading.Thread(
-            target=asyncio.run, args=(self._run_llm_engine(),)
+        engine_config = update_args_from_disagg_config(
+            engine_config, self.server_config
         )
-        self._event_thread.start()
-        with self._llm_engine_start_cv:
-            while self._llm_engine is None:
-                self._llm_engine_start_cv.wait()
 
-        # The 'threading.Thread()' will not raise the exception here should the engine
-        # failed to start, so the exception is passed back via the engine variable.
-        if isinstance(self._llm_engine, Exception):
-            e = self._llm_engine
-            logger.error(f"Failed to start engine: {e}")
-            if self._event_thread is not None:
-                self._event_thread.join()
-                self._event_thread = None
-            raise e
+        # needed for disagg
+        self._mpi_session = MpiCommSession(sub_comm, n_workers=sub_comm.Get_size())
+        engine_config.extra_args["_mpi_session"] = self._mpi_session
+        super().__init__(engine_config)
 
-    async def _run_llm_engine(self):
-        # Counter to keep track of ongoing request counts.
-        self._ongoing_request_count = 0
+    @dynemo_endpoint(DisaggChatCompletionRequest, DisaggChatCompletionStreamResponse)
+    async def generate_chat(self, request):
+        if self._llm_engine is None:
+            raise RuntimeError("Engine not initialized")
 
-        @asynccontextmanager
-        async def async_llm_wrapper():
-            # Create LLM in a thread to avoid blocking
-            loop = asyncio.get_running_loop()
-            try:
-                pytorch_config = PyTorchConfig(**self.pytorch_config_args)
-                # TODO: maybe add build config
-                llm = await loop.run_in_executor(
-                    None,
-                    lambda: LLM(
-                        **self.llm_engine_args,
-                        tensor_parallel_size=self.server_config.other_args.get(
-                            "tensor_parallel_size", 1
-                        ),
-                        pipeline_parallel_size=self.server_config.other_args.get(
-                            "pipeline_parallel_size", 1
-                        ),
-                        gpus_per_node=None,
-                        trust_remote_code=True,
-                        _mpi_session=self.mpi_session,
-                        kv_cache_config=KvCacheConfig(
-                            **self.server_config.other_args.get("kv_cache_config", {})
-                        ),
-                        pytorch_backend_config=pytorch_config,
-                        backend="pytorch",
-                    ),
-                )
-                yield llm
-            finally:
-                if "llm" in locals():
-                    # Run shutdown in a thread to avoid blocking
-                    await loop.run_in_executor(None, llm.shutdown)
+        logger.debug(f"Received request: {request}")
+        chat_processor = ChatProcessor(self._model, self._tokenizer, request)
+
+        self._ongoing_request_count += 1
 
         try:
-            async with async_llm_wrapper() as engine:
-                # Capture the engine event loop and make it visible to other threads.
-                self._event_loop = asyncio.get_running_loop()
+            conversation = []
+            for message in request.messages:
+                conversation.extend(parse_chat_message_content(message))
+            tool_dicts = (
+                None
+                if request.tools is None
+                else [tool.model_dump() for tool in request.tools]
+            )
+            prompt: str = self._tokenizer.apply_chat_template(
+                conversation=conversation,
+                tokenize=False,
+                add_generation_prompt=request.add_generation_prompt,
+                tools=tool_dicts,
+                documents=request.documents,
+                chat_template=request.chat_template,
+                **(request.chat_template_kwargs or {}),
+            )
+            sampling_params = request.to_sampling_params()
+            disaggregated_params = (
+                DisaggregatedTypeConverter.to_llm_disaggregated_params(
+                    request.disaggregated_params
+                )
+            )
 
-                # Signal the engine is started and make it visible to other threads.
-                with self._llm_engine_start_cv:
-                    self._llm_engine = engine
-                    self._llm_engine_start_cv.notify_all()
-
-                logger.info("Engine loaded and ready to serve...")
-
-                # Wait for the engine shutdown signal.
-                await self._llm_engine_shutdown_event.wait()
-
-                # Wait for the ongoing requests to complete.
-                while self._ongoing_request_count > 0:
-                    logger.info(
-                        "Awaiting remaining {} requests".format(
-                            self._ongoing_request_count
+            final_result = None
+            async for result in self._llm_engine.generate_async(
+                prompt,
+                sampling_params,
+                streaming=request.stream,
+                disaggregated_params=disaggregated_params,
+            ):
+                final_result = result
+                logger.debug(f"Generated result: {result}")
+                if self.server_config.type == "ctx":
+                    disaggregated_response = chat_processor.get_chat_stream_response(
+                        request.id,
+                        result,
+                        first_iteration=True,
+                    )
+                    disaggregated_response.disaggregated_params = (
+                        DisaggregatedTypeConverter.to_oai_disaggregated_params(
+                            result.outputs[0].disaggregated_params
                         )
                     )
-                    await asyncio.sleep(1)
+                    yield disaggregated_response.model_dump_json()
+                else:
+                    yield chat_processor.get_chat_stream_response(
+                        request.id,
+                        result,
+                        first_iteration=False,
+                    ).model_dump_json(
+                        exclude_unset=True, exclude={"disaggregated_params"}
+                    )
 
-                # Cancel all tasks in the event loop.
-                for task in asyncio.all_tasks(loop=self._event_loop):
-                    if task is not asyncio.current_task():
-                        task.cancel()
+            if request.stream_options and request.stream_options.include_usage:
+                yield chat_processor.create_final_stream_response(
+                    request.id,
+                    final_result,
+                ).model_dump_json(exclude_unset=True, exclude={"disaggregated_params"})
 
+        except CppExecutorError:
+            # If internal executor error is raised, shutdown the server
+            signal.raise_signal(signal.SIGINT)
         except Exception as e:
-            # Signal and pass the exception back via the engine variable if the engine
-            # failed to start. If the engine has started, re-raise the exception.
-            with self._llm_engine_start_cv:
-                if self._llm_engine is None:
-                    self._llm_engine = e
-                    self._llm_engine_start_cv.notify_all()
-                    return
-            raise e
+            raise RuntimeError("Failed to generate: " + str(e))
 
-        self._llm_engine = None
-        logger.info("Shutdown complete")
+        self._ongoing_request_count -= 1
 
-    async def generate(self, request):
+    @dynemo_endpoint(CompletionRequest, DisaggCompletionStreamResponse)
+    async def generate_completions(self, request):
         if self._llm_engine is None:
             raise RuntimeError("Engine not initialized")
 
         self._ongoing_request_count += 1
-        logger.debug(f"Received request: {request}")
-        request = DisaggregatedRequest.parse_raw(request)
-        sampling_params = SamplingParams(**request.sampling_params)
-        disaggregated_params = DisaggregatedParams(**request.disaggregated_params)
+        logger.debug(f"[worker] Received completions request: {request}")
 
-        # Opaque state is  described as an additional state needing to be exchanged
-        # between context and gen instances
-        if disaggregated_params.opaque_state is not None:
-            disaggregated_params.opaque_state = (
-                disaggregated_params.opaque_state.encode("utf-8")
-                .decode("unicode_escape")
-                .encode("latin1")
+        if not isinstance(request.prompt, str):
+            # Check if it's a list and contains integers
+            if isinstance(request.prompt, list) and len(request.prompt) == 1:
+                request.prompt = request.prompt[0]
+            elif not isinstance(request.prompt, list) or not all(
+                isinstance(x, int) for x in request.prompt
+            ):
+                raise ValueError(
+                    "Disaggregated server currently only supports single string prompt or list of integers in request"
+                )
+
+        sampling_params = request.to_sampling_params()
+        llm_disaggregated_params = (
+            DisaggregatedTypeConverter.to_llm_disaggregated_params(
+                request.disaggregated_params
             )
+        )
 
-        async for response in self._llm_engine.generate_async(
+        # only 1 prompt is supported for now
+        promise = self._llm_engine.generate_async(
             request.prompt,
             sampling_params,
-            streaming=request.streaming,
-            disaggregated_params=disaggregated_params,
-        ):
-            logger.debug(f"Generated response: {response}")
-            if self.server_config.type == "ctx":
-                yield DisaggregatedResponse(
-                    text=response.outputs[0].text,
-                    disaggregated_params=response.outputs[0].disaggregated_params,
-                ).model_dump_json()
-            else:
-                yield response.outputs[0].text
+            streaming=request.stream,
+            disaggregated_params=llm_disaggregated_params,
+        )
+        generator = merge_promises([promise])
+        num_choices = 1 if request.n is None else request.n
+        if request.stream:
+            response_generator = self.completions_processor.create_completion_generator(
+                request, generator, num_choices
+            )
+            async for response in response_generator:
+                yield json.loads(response)
+        else:
+            raise RuntimeError("Non-streaming is not supported")
+
         self._ongoing_request_count -= 1
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(
     runtime: DistributedRuntime,
-    engine_args: Tuple[Dict[str, Any], Dict[str, Any]],
+    engine_config: LLMAPIConfig,
     disagg_config: DisaggServerConfig,
     instance_idx: int,
     sub_comm,
@@ -219,20 +226,21 @@ async def worker(
     server_type = disagg_config.server_configs[instance_idx].type
     logger.info(f"Starting {server_type} server")
 
-    component = runtime.namespace("triton-init").component(
-        f"tensorrt-llm-{server_type}"
-    )
+    component = runtime.namespace("dynemo").component(f"tensorrt-llm-{server_type}")
     await component.create_service()
 
-    endpoint = component.endpoint("generate")
-    await endpoint.serve_endpoint(
-        TensorrtLLMEngine(engine_args, disagg_config, instance_idx, sub_comm).generate
+    completions_endpoint = component.endpoint("completions")
+    chat_endpoint = component.endpoint("chat/completions")
+    engine = TensorrtLLMEngine(engine_config, disagg_config, instance_idx, sub_comm)
+    await asyncio.gather(
+        completions_endpoint.serve_endpoint(engine.generate_completions),
+        chat_endpoint.serve_endpoint(engine.generate_chat),
     )
 
 
 if __name__ == "__main__":
     uvloop.install()
-    args, engine_args = parse_tensorrt_llm_args()
+    args, engine_config = parse_tensorrt_llm_args()
 
     if args.llmapi_disaggregated_config is None or not os.path.exists(
         args.llmapi_disaggregated_config
@@ -254,7 +262,7 @@ if __name__ == "__main__":
     logger.info(f"is_leader: {is_leader}, instance_idx: {instance_idx}")
 
     if is_leader:
-        asyncio.run(worker(engine_args, disagg_config, instance_idx, sub_comm))
+        asyncio.run(worker(engine_config, disagg_config, instance_idx, sub_comm))
     else:
         with MPICommExecutor(sub_comm) as executor:
             if not is_leader and executor is not None:

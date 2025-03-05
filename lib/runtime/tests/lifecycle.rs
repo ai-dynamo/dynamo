@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use triton_distributed_runtime::{worker::Worker, Result, Runtime};
+use dynemo_runtime::{worker::Worker, Result, Runtime};
 
 async fn hello_world(_runtime: Runtime) -> Result<()> {
     Ok(())

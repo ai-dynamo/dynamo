@@ -15,8 +15,7 @@
 
 use std::sync::Arc;
 
-pub use serde::{Deserialize, Serialize};
-pub use triton_distributed_runtime::{
+pub use dynemo_runtime::{
     error,
     pipeline::{
         async_trait, AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream,
@@ -25,6 +24,7 @@ pub use triton_distributed_runtime::{
     protocols::annotated::Annotated,
     Error, Result,
 };
+pub use serde::{Deserialize, Serialize};
 
 use pyo3::prelude::*;
 use pyo3_async_runtimes::TaskLocals;
@@ -192,7 +192,6 @@ where
                                 // tell the python async generator to stop generating
                                 // right now, this is impossible as we are not passing the context to the python async generator
                                 // todo: add task-local context to the python async generator
-                                // see: https://github.com/triton-inference-server/triton_distributed/issues/130
                                 ctx.stop_generating();
                                 let msg = format!("critical error: invalid response object from python async generator; application-logic-mismatch: {}", e);
                                 tracing::error!(request_id, "{}", msg);

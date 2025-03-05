@@ -1,5 +1,5 @@
 ---
-source: triton-llm/tests/openai_completions.rs
+source: dynemo-llm/tests/openai_completions.rs
 expression: request
 ---
 {

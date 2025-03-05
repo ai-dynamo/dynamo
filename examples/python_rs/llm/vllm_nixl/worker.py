@@ -31,12 +31,8 @@ from vllm.logger import logger as vllm_logger
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
-from triton_distributed.llm import DisaggregatedRouter, KvMetricsPublisher
-from triton_distributed.runtime import (
-    DistributedRuntime,
-    triton_endpoint,
-    triton_worker,
-)
+from dynemo.llm import DisaggregatedRouter, KvMetricsPublisher
+from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
 
 class RequestHandler:
@@ -83,7 +79,7 @@ class RequestHandler:
 
         return callback
 
-    @triton_endpoint(vLLMGenerateRequest, MyRequestOutput)
+    @dynemo_endpoint(vLLMGenerateRequest, MyRequestOutput)
     async def generate(self, request):
         # TODO: consider prefix hit when deciding prefill locally or remotely
         if self.disaggregated_router is not None:
@@ -126,7 +122,7 @@ class RequestHandler:
             ).model_dump_json()
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     component = runtime.namespace("triton-init").component("vllm")
     await component.create_service()

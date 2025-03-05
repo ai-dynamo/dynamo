@@ -16,4 +16,7 @@
 use super::*;
 
 pub mod disagg_router;
+pub mod backend;
 pub mod kv;
+pub mod model_card;
+pub mod preprocessor;

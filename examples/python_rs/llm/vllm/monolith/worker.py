@@ -28,11 +28,7 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.logger import logger as vllm_logger
 
-from triton_distributed.runtime import (
-    DistributedRuntime,
-    triton_endpoint,
-    triton_worker,
-)
+from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
 
 class VllmEngine(BaseVllmEngine, ProcessMixIn):
@@ -43,7 +39,7 @@ class VllmEngine(BaseVllmEngine, ProcessMixIn):
     def __init__(self, engine_args: AsyncEngineArgs):
         super().__init__(engine_args)
 
-    @triton_endpoint(ChatCompletionRequest, ChatCompletionStreamResponse)
+    @dynemo_endpoint(ChatCompletionRequest, ChatCompletionStreamResponse)
     async def generate(self, raw_request):
         if self.engine_client is None:
             await self.initialize()
@@ -75,13 +71,13 @@ class VllmEngine(BaseVllmEngine, ProcessMixIn):
             yield response
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     """
     Instantiate a `backend` component and serve the `generate` endpoint
     A `Component` can serve multiple endpoints
     """
-    component = runtime.namespace("triton-init").component("vllm")
+    component = runtime.namespace("dynemo").component("vllm")
     await component.create_service()
 
     endpoint = component.endpoint("generate")
