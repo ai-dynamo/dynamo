@@ -77,6 +77,7 @@ class Router:
                 f"Routing strategy {self.routing_strategy} not implemented"
             )
 
+
 class CustomRouter:
     """
     Request handler for the generate endpoint
