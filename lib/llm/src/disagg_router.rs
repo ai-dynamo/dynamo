@@ -245,7 +245,7 @@ impl DisaggregatedRouter {
 
         // schedule the request purely based on the prefill length
         // TODO: apply math models and compare local vs remote prefill TTFT
-        return prefill_length - prefix_hit_length > max_local_prefill_length;
+        prefill_length - prefix_hit_length > max_local_prefill_length
     }
 
     pub fn update_value(&self, max_local_prefill_length: i32) {
