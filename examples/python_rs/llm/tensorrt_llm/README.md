@@ -176,8 +176,8 @@ curl localhost:8080/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
         "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        "prompt": "NVIDIA is a great company because",
-        "max_tokens": 16,
+        "prompt": "The capital of France is",
+        "max_tokens": 1,
         "temperature": 0
     }'
 ```
@@ -188,7 +188,7 @@ Output:
   "id":"cmpl-e0d75aca1bd540399809c9b609eaf010",
   "choices":[
     {
-      "text":"they are always pushing the boundaries of what is possible with technology. They are constantly",
+      "text":"Paris",
       "index":0,
       "finish_reason":"length"
     }
