@@ -128,6 +128,8 @@ llama-cpp-2 = { version = "0.1.86", optional = true }
 tokenizers = { version = "0.21.0", default-features = false, features = [
   "onig",
   "esaxx_fast",
+  # Waiting for release: https://github.com/huggingface/tokenizers/issues/1736
+  # "rustls-tls",
 ] }
 sentencepiece = { version = "0.11.2", optional = true }
 
