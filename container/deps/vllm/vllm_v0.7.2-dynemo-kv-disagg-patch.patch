@@ -31,7 +31,7 @@ index 9ba49757..a2f88854 100644
                  f"and `kv_both`")
  
 -        if self.kv_connector is not None and self.kv_role is None:
-+        if self.kv_connector is not None and self.kv_connector != "TritonNixlConnector" and self.kv_role is None:
++        if self.kv_connector is not None and self.kv_connector != "DynemoNixlConnector" and self.kv_role is None:
              raise ValueError("Please specify kv_disagg_role when kv_connector "
                               "is set, supported roles are `kv_producer`, "
                               "`kv_consumer`, and `kv_both`")
@@ -44,7 +44,7 @@ index 9ba49757..a2f88854 100644
      def need_kv_parallel_group(self) -> bool:
          # for those database-based connector, vLLM does not need to create
          # parallel group, and in that case the kv parallel size will be 1.
-+        if self.kv_connector == "TritonNixlConnector":
++        if self.kv_connector == "DynemoNixlConnector":
 +            return False
          return self.kv_connector is not None and self.kv_parallel_size > 1
  
@@ -277,7 +277,7 @@ index 00000000..350453cd
 +logger = logging.getLogger(__name__)
 +
 +
-+class TritonResult:
++class DynemoResult:
 +    OK = 0
 +    ERR = 1
 +
@@ -295,7 +295,7 @@ index 00000000..350453cd
 +
 +            result = self.lib.dynemo_llm_init(namespace.encode(),
 +                                              component.encode(), worker_id)
-+            if result == TritonResult.OK:
++            if result == DynemoResult.OK:
 +                logger.info(
 +                    "KVCacheEventManager initialized successfully. Ready to publish KV Cache Events"
 +                )
@@ -346,7 +346,7 @@ index 00000000..350453cd
 +            0,  # uint64_t lora_id
 +        )
 +
-+        if result == TritonResult.OK:
++        if result == DynemoResult.OK:
 +            logger.debug(f"Store - Published KV Event: {block.content_hash}")
 +        else:
 +            logger.debug(
@@ -361,7 +361,7 @@ index 00000000..350453cd
 +            1,
 +        )
 +
-+        if result == TritonResult.OK:
++        if result == DynemoResult.OK:
 +            logger.debug(f"Remove - Published KV Event: {block_hash}")
 +        else:
 +            logger.debug(f"Remove - Failed to Publish KV Event: {block_hash}")
@@ -662,7 +662,7 @@ index 00000000..bc962726
 +    kv_caches_base_addr: List[List[Tuple[int, int]]] # base address for each rank for each layer for keys and values
 +
 +
-+class TritonNixlConnector:
++class DynemoNixlConnector:
 +    def __init__(self, vllm_config: VllmConfig, engine_id: str, rank: int):
 +        self.vllm_config = vllm_config
 +        self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
@@ -886,9 +886,9 @@ index fe480533..61a357d0 100644
      "SimpleConnector")
 +
 +KVConnectorFactory.register_connector(
-+    "TritonNcclConnector",
++    "DynemoNcclConnector",
 +    "vllm.distributed.kv_transfer.kv_connector.dynemo_connector",
-+    "TritonConnector")
++    "DynemoConnector")
 \ No newline at end of file
 diff --git a/vllm/distributed/kv_transfer/kv_connector/simple_connector.py b/vllm/distributed/kv_transfer/kv_connector/simple_connector.py
 index 2033e976..e33919c1 100644
@@ -1218,7 +1218,7 @@ index 2033e976..e33919c1 100644
 +                world_group.broadcast_object(kv_config_enhanced)
 +
 +            else:
-+                raise NotImplementedError("MooncakeConnector is not supported in Triton Distributed vllm patch")
++                raise NotImplementedError("MooncakeConnector is not supported in Dynemo Distributed vllm patch")
 +        else:
 +            kv_config_enhanced = world_group.broadcast_object()
 +        logger.info("kv_config_enhanced: %s", kv_config_enhanced)
@@ -1265,7 +1265,7 @@ index 00000000..cb3b3660
 +logger = init_logger(__name__)
 +
 +
-+class TritonConnector(KVConnectorBase):
++class DynemoConnector(KVConnectorBase):
 +
 +    def __init__(
 +        self,
@@ -1279,16 +1279,16 @@ index 00000000..cb3b3660
 +        self.tp_size = config.parallel_config.tensor_parallel_size
 +        self.rank = rank
 +
-+        if self.config.kv_connector != "TritonNcclConnector":
-+            raise NotImplementedError("Only TritonNcclConnector is supported by the TritonConnector class")
++        if self.config.kv_connector != "DynemoNcclConnector":
++            raise NotImplementedError("Only DynemoNcclConnector is supported by the DynemoConnector class")
 +
 +        from vllm.distributed.kv_transfer.kv_pipe.pynccl_pipe import (
 +            PyNcclPipe)
 +        from vllm.distributed.kv_transfer.kv_pipe.dynemo_nccl_pipe import (
-+            TritonNcclDataPlane)
++            DynemoNcclDataPlane)
 +        
 +        logger.info(
-+            "Initializing TritonNcclConnector under kv_transfer_config %s",
++            "Initializing DynemoNcclConnector under kv_transfer_config %s",
 +            self.config)
 +
 +        self.lookup_buffer_size = self.config.kv_buffer_size
@@ -1320,7 +1320,7 @@ index 00000000..cb3b3660
 +            port_offset=port_offset_base,
 +        )
 +
-+        self.data_plane = TritonNcclDataPlane(
++        self.data_plane = DynemoNcclDataPlane(
 +            data_pipe=self.data_pipe,
 +            port=self._get_data_plane_port(self.global_kv_rank),
 +        )
@@ -2075,7 +2075,7 @@ index 00000000..8a356504
 +logger = logging.getLogger(__name__)
 +
 +
-+class TritonNcclDataPlane:
++class DynemoNcclDataPlane:
 +    def __init__(
 +        self,
 +        data_pipe: PyNcclPipe,
@@ -2304,7 +2304,7 @@ index d82d9ad9..9ba1a326 100644
  
 +        self.engine_id = str(uuid.uuid4())
 +        self._nixl_agents_names: Optional[List[str]] = None
-+        if self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.kv_connector == "TritonNixlConnector":
++        if self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.kv_connector == "DynemoNixlConnector":
 +            self._nixl_agents_names = self._initialize_nixl()
 +
 +        self._request_notif_counter = defaultdict(lambda: -self.parallel_config.tensor_parallel_size)
@@ -2700,7 +2700,7 @@ index 85b5f31e..d33d546a 100644
 +    
 +    @property
 +    def using_nixl_connector(self) -> bool:
-+        return self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.kv_connector == "TritonNixlConnector"
++        return self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.kv_connector == "DynemoNixlConnector"
 +
      @staticmethod
      def is_unsupported_config(engine_args: AsyncEngineArgs):
@@ -3335,7 +3335,7 @@ index 12baecde..cbada27f 100644
          if self.vllm_config.kv_transfer_config is None:
              return False
 +        
-+        if self.vllm_config.kv_transfer_config.kv_connector == "TritonNixlConnector":
++        if self.vllm_config.kv_transfer_config.kv_connector == "DynemoNixlConnector":
 +            return False
  
          prefill_meta = model_input.attn_metadata.prefill_metadata
@@ -3345,7 +3345,7 @@ index 12baecde..cbada27f 100644
          if self.vllm_config.kv_transfer_config is None:
              return False
 +        
-+        if self.vllm_config.kv_transfer_config.kv_connector == "TritonNixlConnector":
++        if self.vllm_config.kv_transfer_config.kv_connector == "DynemoNixlConnector":
 +            return False
  
          prefill_meta = model_input.attn_metadata.prefill_metadata
@@ -3367,7 +3367,7 @@ index 582aa460..ffb7b403 100644
  from vllm.worker.pooling_model_runner import PoolingModelRunner
  from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                       WorkerInput)
-+from vllm.distributed.device_communicators.nixl import TritonNixlConnector
++from vllm.distributed.device_communicators.nixl import DynemoNixlConnector
 +
  
  logger = init_logger(__name__)
@@ -3381,7 +3381,7 @@ index 582aa460..ffb7b403 100644
 +        # TODO ptarasiewicz nixl can also support DRAM
 +        assert self.device_config.device_type == "cuda", "Currently only CUDA is supported for Nixl connector"
 +
-+        self.nixl_connector = TritonNixlConnector(self.vllm_config, engine_id, self.local_rank) # TODO ptarasiewicz: rank or local_rank?
++        self.nixl_connector = DynemoNixlConnector(self.vllm_config, engine_id, self.local_rank) # TODO ptarasiewicz: rank or local_rank?
 +        assert len(self.cache_engine) == 1, "Only one cache engine is supported for now"
 +        self.nixl_connector.register_kv_caches(self.cache_engine[0].gpu_cache)
 +        return self.nixl_connector.agent_name
@@ -3452,7 +3452,7 @@ index 819b81fb..d9c039eb 100644
  from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                             ModelRunnerBase,
                                             ModelRunnerInputBase)
-+from vllm.distributed.device_communicators.nixl import TritonNixlConnector
++from vllm.distributed.device_communicators.nixl import DynemoNixlConnector
  
  logger = init_logger(__name__)
  
@@ -3460,7 +3460,7 @@ index 819b81fb..d9c039eb 100644
          from vllm.platforms import current_platform
          self.current_platform = current_platform
  
-+        self.nixl_connector: Optional[TritonNixlConnector] = None
++        self.nixl_connector: Optional[DynemoNixlConnector] = None
 +
      @abstractmethod
      def init_device(self) -> None:
