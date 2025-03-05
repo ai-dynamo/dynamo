@@ -19,6 +19,7 @@ use async_stream::stream;
 use async_trait::async_trait;
 
 use crate::engines::vllm::worker;
+use crate::engines::MultiNodeConfig;
 use crate::protocols::common::llm_backend::{BackendInput, LLMEngineOutput};
 use triton_distributed_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use triton_distributed_runtime::pipeline::{Error, ManyOut, SingleIn};
@@ -36,8 +37,18 @@ impl VllmEngine {
         sock_code: &str,
         card_path: &Path,
         model_path: &Path,
+        node_conf: MultiNodeConfig,
+        tensor_parallel_size: u32,
     ) -> anyhow::Result<Self> {
-        let w = worker::start(cancel_token.clone(), sock_code, card_path, model_path).await?;
+        let w = worker::start(
+            cancel_token.clone(),
+            sock_code,
+            card_path,
+            model_path,
+            node_conf,
+            tensor_parallel_size,
+        )
+        .await?;
         let engine = VllmEngine {
             cancel_token,
             worker: w,

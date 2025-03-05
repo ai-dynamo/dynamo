@@ -91,6 +91,7 @@ pub async fn run(
             tracing::info!("Model: {service_name} with pre-processing");
             (service_name, pipeline, true)
         }
+        EngineConfig::None => unreachable!(),
     };
     main_loop(cancel_token, &service_name, engine, inspect_template).await
 }

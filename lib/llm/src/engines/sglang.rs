@@ -34,11 +34,8 @@ pub async fn make_engine(
     model_path: &Path,
     // Unique string to name zmq sockets
     sock_code: &str,
-    // Multi node settings:
-    // - num_nodes: How many nodes/hosts we are using
-    // - node_rank: Unique consecutive int starting at 0 to identify this node
-    // - dist_init_addr: Torch Distributed init method addr:port
-    node_conf: MultiNodeConfig,
+    // Multi node settings
+    node_conf: super::MultiNodeConfig,
     // How many GPUs to use
     tensor_parallel_size: u32,
     // The base GPU ID to start allocating GPUs from
@@ -74,26 +71,6 @@ impl Default for MultiGPUConfig {
             tp_size: 1,
             tp_rank: 0,
             gpu_id: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MultiNodeConfig {
-    /// How many nodes / hosts we are using
-    pub num_nodes: u32,
-    /// Unique consecutive integer to identify this node
-    pub node_rank: u32,
-    /// host:port of head / control node
-    pub dist_init_addr: Option<String>,
-}
-
-impl Default for MultiNodeConfig {
-    fn default() -> Self {
-        MultiNodeConfig {
-            num_nodes: 1,
-            node_rank: 0,
-            dist_init_addr: None,
         }
     }
 }

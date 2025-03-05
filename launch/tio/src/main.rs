@@ -41,7 +41,7 @@ const DEFAULT_OUT: Output = Output::EchoFull;
 
 const ZMQ_SOCKET_PREFIX: &str = "tio";
 
-const USAGE: &str = "USAGE: tio in=[http|text|tdr://<path>|none] out=[mistralrs|sglang|llamacpp|vllm|trtllm|echo_full|echo_core] [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--dist-init-addr=127.0.0.1:9876] [--base-gpu-id=0]";
+const USAGE: &str = "USAGE: tio in=[http|text|tdr://<path>|none] out=[mistralrs|sglang|llamacpp|vllm|trtllm|echo_full|echo_core] [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0]";
 
 fn main() -> anyhow::Result<()> {
     logging::init();
@@ -66,10 +66,10 @@ fn main() -> anyhow::Result<()> {
                         tp_rank: sglang_flags.tp_rank,
                         gpu_id: sglang_flags.gpu_id,
                     };
-                    let node_config = sglang::MultiNodeConfig {
+                    let node_config = triton_distributed_llm::engines::MultiNodeConfig {
                         num_nodes: flags.num_nodes,
                         node_rank: flags.node_rank,
-                        dist_init_addr: flags.dist_init_addr,
+                        leader_addr: flags.leader_addr.unwrap_or_default(),
                     };
                     return sglang::run_subprocess(
                         ZMQ_SOCKET_PREFIX,
@@ -99,7 +99,18 @@ fn main() -> anyhow::Result<()> {
                 #[cfg(feature = "vllm")]
                 {
                     use triton_distributed_llm::engines::vllm;
-                    return vllm::run_subprocess(ZMQ_SOCKET_PREFIX, &model_config, &model_path);
+                    let node_config = triton_distributed_llm::engines::MultiNodeConfig {
+                        num_nodes: flags.num_nodes,
+                        node_rank: flags.node_rank,
+                        leader_addr: flags.leader_addr.unwrap_or_default(),
+                    };
+                    return vllm::run_subprocess(
+                        ZMQ_SOCKET_PREFIX,
+                        &model_config,
+                        &model_path,
+                        node_config,
+                        flags.tensor_parallel_size,
+                    );
                 }
             } else {
                 panic!("Rebuild with --features=vllm");
