@@ -91,12 +91,8 @@ class CompoundService(Service[T]):
             except (json.JSONDecodeError, ValueError) as e:
                 raise ValueError(f"Failed to parse BENTOML_RUNNER_MAP: {str(e)}") from e
 
-        # Ensure namespace and name are not None
-        namespace = self._nova_config.namespace or "default"
-        name = self._nova_config.name or self.inner.__name__
-
-        print(f"Using default Nova address: {namespace}/{name}")
-        return (namespace, name)
+        print(f"Using default Nova address: {self._nova_config.namespace}/{self._nova_config.name}")
+        return (self._nova_config.namespace, self._nova_config.name)
 
     def get_nova_endpoints(self) -> Dict[str, NovaEndpoint]:
         """Get all registered Nova endpoints"""
