@@ -23,13 +23,13 @@ from dynemo.runtime import (
     DistributedRuntime,
     ModelDeploymentCard,
     OAIChatPreprocessor,
-    triton_worker,
+    dynemo_worker,
 )
 
 uvloop.install()
 
 
-@triton_worker()
+@dynemo_worker()
 async def preprocessor(runtime: DistributedRuntime, model_name: str, model_path: str):
     # create model deployment card
     mdc = await ModelDeploymentCard.from_local_path(model_path, model_name)

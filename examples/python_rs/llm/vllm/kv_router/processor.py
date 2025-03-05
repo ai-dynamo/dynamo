@@ -34,7 +34,7 @@ from vllm.logger import logger as vllm_logger
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from dynemo.runtime import Client, DistributedRuntime, triton_endpoint, triton_worker
+from dynemo.runtime import Client, DistributedRuntime, dynemo_endpoint, dynemo_worker
 
 
 class RequestType(Enum):
@@ -157,18 +157,18 @@ class Processor(ProcessMixIn):
                     f"Request type {request_type} not implemented"
                 )
 
-    @triton_endpoint(ChatCompletionRequest, ChatCompletionStreamResponse)
+    @dynemo_endpoint(ChatCompletionRequest, ChatCompletionStreamResponse)
     async def generate_chat(self, raw_request):
         async for response in self._generate(raw_request, RequestType.CHAT):
             yield response
 
-    @triton_endpoint(CompletionRequest, CompletionStreamResponse)
+    @dynemo_endpoint(CompletionRequest, CompletionStreamResponse)
     async def generate_completions(self, raw_request):
         async for response in self._generate(raw_request, RequestType.COMPLETION):
             yield response
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     """
     Set up clients to the router and workers.

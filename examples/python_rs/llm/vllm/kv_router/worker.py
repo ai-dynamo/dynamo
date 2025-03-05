@@ -26,7 +26,7 @@ from vllm.logger import logger as vllm_logger
 from vllm.sampling_params import RequestOutputKind
 
 from dynemo.llm import KvMetricsPublisher
-from dynemo.runtime import DistributedRuntime, triton_endpoint, triton_worker
+from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
 vllm_logger.info(f"VLLM_KV_CAPI_PATH: {os.environ['VLLM_KV_CAPI_PATH']}")
 
@@ -48,7 +48,7 @@ class VllmEngine(BaseVllmEngine):
         assert self.engine_client is not None, "engine_client was not initialized"
         self.engine_client.set_metrics_publisher(self.metrics_publisher)
 
-    @triton_endpoint(vLLMGenerateRequest, MyRequestOutput)
+    @dynemo_endpoint(vLLMGenerateRequest, MyRequestOutput)
     async def generate(self, request) -> AsyncIterator:
         assert (
             self.engine_client is not None
@@ -73,7 +73,7 @@ class VllmEngine(BaseVllmEngine):
             ).model_dump_json()
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     """
     Serve the dynemo.vllm.generate endpoint.

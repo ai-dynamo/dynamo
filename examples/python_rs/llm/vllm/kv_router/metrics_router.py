@@ -21,7 +21,7 @@ from common.protocol import Request, Response
 from vllm.logger import logger as vllm_logger
 
 from dynemo.llm import KvRouter
-from dynemo.runtime import DistributedRuntime, triton_endpoint, triton_worker
+from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
 
 class Router:
@@ -37,7 +37,7 @@ class Router:
         self.router = router
         self.workers_client = workers_client
 
-    @triton_endpoint(Request, Response)
+    @dynemo_endpoint(Request, Response)
     async def generate(self, request):
         lora_id = 0
         worker_id = None
@@ -69,7 +69,7 @@ class Router:
             resp = resp.data() if hasattr(resp, "data") else resp
             yield resp
 
-    @triton_endpoint(Request, Response)
+    @dynemo_endpoint(Request, Response)
     async def mock_generate(self, request):
         print(f"Received request: {request}")
         yield "Hello, World!"
@@ -78,7 +78,7 @@ class Router:
 ROUTE_SELF = True
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime):
     workers_client = (
         await runtime.namespace("dynemo")

@@ -32,8 +32,8 @@ from dynemo.runtime import (
     Backend,
     DistributedRuntime,
     ModelDeploymentCard,
-    triton_endpoint,
-    triton_worker,
+    dynemo_endpoint,
+    dynemo_worker,
 )
 
 finish_reason_map = {
@@ -107,7 +107,7 @@ class VllmEngine(AsyncContextDecorator):
         }
         return SamplingParams(**sampling_params)
 
-    @triton_endpoint(Any, CompletionOutput)
+    @dynemo_endpoint(Any, CompletionOutput)
     async def generate(self, request):
         state = DeltaState()
         request_id = str(uuid.uuid4())
@@ -122,7 +122,7 @@ class VllmEngine(AsyncContextDecorator):
                 yield self.to_backend_output(choice, delta_token_ids)
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime, engine_args: NvAsyncEngineArgs):
     """
     Instantiate a `backend` component and serve the `generate` endpoint

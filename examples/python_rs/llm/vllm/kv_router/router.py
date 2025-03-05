@@ -24,7 +24,7 @@ from common.protocol import Tokens
 from vllm.logger import logger as vllm_logger
 
 from dynemo.llm import KvRouter
-from dynemo.runtime import DistributedRuntime, triton_endpoint, triton_worker
+from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
 WorkerId = str
 
@@ -51,7 +51,7 @@ class Router:
         self.router = router
         self.routing_strategy = routing_strategy
 
-    @triton_endpoint(Tokens, WorkerId)
+    @dynemo_endpoint(Tokens, WorkerId)
     async def generate(self, request) -> AsyncIterator[WorkerId]:
         lora_id = 0
         worker_id = None
@@ -78,7 +78,7 @@ class Router:
             )
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime, args: Namespace):
     """
     Set up the worker clients.

@@ -19,7 +19,7 @@ import asyncio
 import uvloop
 from protocol import Request, Response
 
-from dynemo.runtime import DistributedRuntime, triton_endpoint, triton_worker
+from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
 uvloop.install()
 
@@ -29,13 +29,13 @@ class RequestHandler:
     Request handler for the generate endpoint
     """
 
-    @triton_endpoint(Request, Response)
+    @dynemo_endpoint(Request, Response)
     async def generate(self, request):
         for char in request.data:
             yield char
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime):
     """
     Instantiate a `backend` component and serve the `generate` endpoint

@@ -31,7 +31,7 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.logger import logger as vllm_logger
 
-from dynemo.runtime import DistributedRuntime, triton_endpoint, triton_worker
+from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
 
 class VllmDecodeEngine(BaseVllmEngine, ProcessMixIn):
@@ -54,7 +54,7 @@ class VllmDecodeEngine(BaseVllmEngine, ProcessMixIn):
         self.kv_transfer_config = engine_args.create_engine_config().kv_transfer_config
         self.kv_rank = self.kv_transfer_config.kv_rank
 
-    @triton_endpoint(ChatCompletionRequest, ChatCompletionStreamResponse)
+    @dynemo_endpoint(ChatCompletionRequest, ChatCompletionStreamResponse)
     async def generate(self, raw_request):
         if self.engine_client is None:
             await self.initialize()
@@ -103,7 +103,7 @@ class VllmDecodeEngine(BaseVllmEngine, ProcessMixIn):
         await prefill_output
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     """
     Instantiate a `backend` component and serve the `generate` endpoint

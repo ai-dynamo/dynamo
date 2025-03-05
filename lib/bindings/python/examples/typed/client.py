@@ -17,10 +17,10 @@ import asyncio
 
 from protocol import Request
 
-from dynemo.runtime import DistributedRuntime, triton_worker
+from dynemo.runtime import DistributedRuntime, dynemo_worker
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime):
     """
     Instantiate a `backend` client and call the `generate` endpoint

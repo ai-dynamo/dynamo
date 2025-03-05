@@ -17,7 +17,7 @@ import asyncio
 
 import uvloop
 
-from dynemo.runtime import DistributedRuntime, triton_worker
+from dynemo.runtime import DistributedRuntime, dynemo_worker
 
 
 class RequestHandler:
@@ -31,7 +31,7 @@ class RequestHandler:
             yield char
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime):
     await init(runtime, "dynemo")
 

@@ -72,9 +72,9 @@ class NovaClient:
 
                 else:
                     # Create nova worker if no runtime
-                    from dynemo.runtime import DistributedRuntime, triton_worker
+                    from dynemo.runtime import DistributedRuntime, dynemo_worker
 
-                    @triton_worker()
+                    @dynemo_worker()
                     async def stream_worker(runtime: DistributedRuntime):
                         try:
                             # Store runtime for future use

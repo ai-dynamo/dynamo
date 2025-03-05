@@ -44,7 +44,7 @@ from tensorrt_llm.llmapi.disagg_utils import (
 from tensorrt_llm.logger import logger
 from tensorrt_llm.serve.openai_protocol import CompletionRequest
 
-from dynemo.runtime import DistributedRuntime, triton_endpoint, triton_worker
+from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
 logger.set_level("debug")
 
@@ -85,7 +85,7 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
         engine_config.extra_args["_mpi_session"] = self._mpi_session
         super().__init__(engine_config)
 
-    @triton_endpoint(DisaggChatCompletionRequest, DisaggChatCompletionStreamResponse)
+    @dynemo_endpoint(DisaggChatCompletionRequest, DisaggChatCompletionStreamResponse)
     async def generate_chat(self, request):
         if self._llm_engine is None:
             raise RuntimeError("Engine not initialized")
@@ -164,7 +164,7 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
 
         self._ongoing_request_count -= 1
 
-    @triton_endpoint(CompletionRequest, DisaggCompletionStreamResponse)
+    @dynemo_endpoint(CompletionRequest, DisaggCompletionStreamResponse)
     async def generate_completions(self, request):
         if self._llm_engine is None:
             raise RuntimeError("Engine not initialized")
@@ -211,7 +211,7 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
         self._ongoing_request_count -= 1
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(
     runtime: DistributedRuntime,
     engine_config: LLMAPIConfig,

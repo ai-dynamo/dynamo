@@ -21,7 +21,7 @@ import uvloop
 from client import init as client_init
 from server import init as server_init
 
-from dynemo.runtime import DistributedRuntime, triton_worker
+from dynemo.runtime import DistributedRuntime, dynemo_worker
 
 
 def random_string(length=10):
@@ -29,7 +29,7 @@ def random_string(length=10):
     return "".join(random.choices(chars, k=length))
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime):
     ns = random_string()
     task = asyncio.create_task(server_init(runtime, ns))
