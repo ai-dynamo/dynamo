@@ -39,7 +39,7 @@ class MockEngine:
     def __init__(self, metrics_publisher, worker_id):
         self.worker_id = worker_id
         # KV events
-        self.lib = ctypes.CDLL("/opt/triton/llm_binding/lib/libtriton_llm_capi.so")
+        self.lib = ctypes.CDLL("/opt/triton/llm_binding/lib/libdynemo_llm_capi.so")
         self.lib.triton_llm_init.argtypes = [c_char_p, c_char_p, c_int64]
         self.lib.triton_llm_init.restype = c_uint32
         result = self.lib.triton_llm_init(

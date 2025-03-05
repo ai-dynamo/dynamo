@@ -19,7 +19,7 @@ version = "0.2.1"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
-    { name = "NVIDIA Inc.", email = "sw-dl-dynemo@nvidia.com" },
+    { name = "NVIDIA Inc.", email = "sw-dl-triton@nvidia.com" },
 ]
 license = { file = "LICENSE" }
 requires-python = ">=3.10"

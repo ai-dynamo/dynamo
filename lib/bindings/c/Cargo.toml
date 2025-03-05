@@ -14,7 +14,7 @@
 # limitations under the License.
 
 [package]
-name = "libtriton-distributed-llm"
+name = "libdynemo-llm"
 version = "0.2.1"
 edition = "2021"
 authors = ["NVIDIA"]
@@ -23,15 +23,15 @@ homepage = "https://github.com/dynemo-ai/dynemo"
 repository = "https://github.com/dynemo-ai/dynemo.git"
 
 [lib]
-name = "dynemo.llm_capi"
+name = "dynemo_llm_capi"
 crate-type = ["cdylib"]
 
 [build-dependencies]
 cbindgen = "0.27"
 
 [dependencies]
-triton-distributed-llm = { path = "../../llm" }
-triton-distributed-runtime = { path = "../../runtime" }
+dynemo-llm = { path = "../../llm" }
+dynemo-runtime = { path = "../../runtime" }
 
 anyhow = { version = "1" }
 futures = "0.3"

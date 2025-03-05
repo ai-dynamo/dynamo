@@ -22,7 +22,7 @@ homepage = "https://github.com/dynemo-ai/dynemo"
 repository = "https://github.com/dynemo-ai/dynemo.git"
 
 [package]
-name = "triton-distributed-llm"
+name = "dynemo-llm"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -43,7 +43,7 @@ vulkan = ["llama-cpp-2/vulkan"]
 
 [workspace.dependencies]
 # local or crates.io
-triton-distributed-runtime = { version = "0.2.0", path = "../runtime" }
+dynemo-runtime = { version = "0.2.0", path = "../runtime" }
 
 # crates.io
 anyhow = { version = "1" }
@@ -66,7 +66,7 @@ strum = { version = "0.27", features = ["derive"] }
 [dependencies]
 
 # repo
-triton-distributed-runtime = { workspace = true }
+dynemo-runtime = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }

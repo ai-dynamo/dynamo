@@ -91,7 +91,7 @@ impl ErrorResponse {
         )
     }
 
-    /// The OAI endpoints call an [`dynemo.runtime::engine::AsyncEngine`] which are specialized to return
+    /// The OAI endpoints call an [`dynemo_runtime::engine::AsyncEngine`] which are specialized to return
     /// an [`anyhow::Error`]. This method will convert the [`anyhow::Error`] into an [`HttpError`].
     /// If successful, it will return the [`HttpError`] as an [`ErrorResponse::internal_server_error`]
     /// with the details of the error.

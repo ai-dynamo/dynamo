@@ -67,7 +67,7 @@ pub enum EngineConfig {
 
 #[allow(unused_mut)]
 pub async fn run(
-    runtime: dynemo.runtime::Runtime,
+    runtime: dynemo_runtime::Runtime,
     mut in_opt: Input, // mut because vllm and sglang multi-node can change it
     out_opt: Output,
     flags: Flags,
@@ -173,8 +173,7 @@ pub async fn run(
             };
             EngineConfig::StaticFull {
                 service_name: model_name,
-                engine: dynemo.llm::engines::mistralrs::make_engine(&model_path)
-                    .await?,
+                engine: dynemo_llm::engines::mistralrs::make_engine(&model_path).await?,
             }
         }
         #[cfg(feature = "sglang")]
@@ -191,7 +190,7 @@ pub async fn run(
             let Some(sock_prefix) = zmq_socket_prefix else {
                 anyhow::bail!("sglang requires zmq_socket_prefix");
             };
-            let node_conf = dynemo.llm::engines::MultiNodeConfig {
+            let node_conf = dynemo_llm::engines::MultiNodeConfig {
                 num_nodes: flags.num_nodes,
                 node_rank: flags.node_rank,
                 leader_addr: flags.leader_addr.unwrap_or_default(),
@@ -253,7 +252,7 @@ pub async fn run(
             let Some(sock_prefix) = zmq_socket_prefix else {
                 anyhow::bail!("vllm requires zmq_socket_prefix");
             };
-            let node_conf = dynemo.llm::engines::MultiNodeConfig {
+            let node_conf = dynemo_llm::engines::MultiNodeConfig {
                 num_nodes: flags.num_nodes,
                 node_rank: flags.node_rank,
                 leader_addr: flags.leader_addr.unwrap_or_default(),

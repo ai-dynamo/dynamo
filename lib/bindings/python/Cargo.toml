@@ -30,8 +30,8 @@ crate-type = ["cdylib"]
 
 
 [dependencies]
-triton-distributed-llm = { path = "../../llm" }
-triton-distributed-runtime = { path = "../../runtime" }
+dynemo-llm = { path = "../../llm" }
+dynemo-runtime = { path = "../../runtime" }
 
 futures = "0.3"
 once_cell = "1.20.3"

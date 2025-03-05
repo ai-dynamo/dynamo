@@ -16,7 +16,7 @@
 ARG BASE_IMAGE="nvcr.io/nvidia/tritonserver"
 ARG BASE_IMAGE_TAG="25.01-py3"
 
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS triton-distributed
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS dynemo
 
 # TODO: non root user by default
 
@@ -34,7 +34,7 @@ RUN rustup toolchain install 1.85.0-x86_64-unknown-linux-gnu
 
 # Install OpenAI-compatible frontend and its dependencies from triton server
 # repository. These are used to have a consistent interface, schema, and FastAPI
-# app between Triton Core and Triton Distributed implementations.
+# app between Triton Core and Dynemo implementations.
 ARG OPENAI_SERVER_TAG="r25.01"
 RUN mkdir -p /opt/tritonserver/python && \
     cd /opt/tritonserver/python && \
@@ -106,7 +106,7 @@ ENV VLLM_GENERATE_WORKERS=${VLLM_FRAMEWORK:+1}
 ENV VLLM_BASELINE_TP_SIZE=${VLLM_FRAMEWORK:+1}
 ENV VLLM_CONTEXT_TP_SIZE=${VLLM_FRAMEWORK:+1}
 ENV VLLM_GENERATE_TP_SIZE=${VLLM_FRAMEWORK:+1}
-ENV VLLM_KV_CAPI_PATH="/opt/triton/llm_binding/lib/libtriton_llm_capi.so"
+ENV VLLM_KV_CAPI_PATH="/opt/triton/llm_binding/lib/libdynemo_llm_capi.so"
 ENV PYTHONUNBUFFERED=1
 
 # Install NATS - pointing toward NATS github instead of binaries.nats.dev due to server instability
