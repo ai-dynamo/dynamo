@@ -57,13 +57,13 @@ The example is designed to run in a containerized environment using Triton Distr
 
 Run the server logging (with debug level logging):
 ```bash
-TRD_LOG=DEBUG http
+DYN_LOG=DEBUG http
 ```
 By default the server will run on port 8080.
 
 Add model to the server:
 ```bash
-llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B triton-init.vllm.generate
+llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynemo.vllm.generate
 ```
 
 ##### Example Output
@@ -71,7 +71,7 @@ llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B triton-init
 +------------+------------------------------------------+-----------+-----------+----------+
 | MODEL TYPE | MODEL NAME                               | NAMESPACE | COMPONENT | ENDPOINT |
 +------------+------------------------------------------+-----------+-----------+----------+
-| chat       | deepseek-ai/DeepSeek-R1-Distill-Llama-8B | triton-init | vllm      | generate |
+| chat       | deepseek-ai/DeepSeek-R1-Distill-Llama-8B | dynemo | vllm      | generate |
 +------------+------------------------------------------+-----------+-----------+----------+
 ```
 
@@ -304,7 +304,7 @@ Note: block-size must be 64, otherwise Router won't work (accepts only 64 tokens
 **Terminal 5 - Client:**
 Don't forget to add the model to the server:
 ```bash
-llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B triton-init.process.chat/completions
+llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynemo.process.chat/completions
 ```
 
 ```bash
@@ -371,13 +371,13 @@ RUST_LOG=info python3 -m preprocessor.processor --model deepseek-ai/DeepSeek-R1-
 
 Run the server logging (with debug level logging):
 ```bash
-TRD_LOG=DEBUG http
+DYN_LOG=DEBUG http
 ```
 By default the server will run on port 8080.
 
 Add model to the server:
 ```bash
-llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B triton-init.preprocessor.generate
+llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B dynemo.preprocessor.generate
 ```
 
 **Terminal 4 - client**

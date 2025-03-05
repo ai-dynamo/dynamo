@@ -35,7 +35,7 @@ class RequestHandler:
 
 @triton_worker()
 async def worker(runtime: DistributedRuntime):
-    await init(runtime, "triton-init")
+    await init(runtime, "dynemo")
 
 
 async def init(runtime: DistributedRuntime, ns: str):

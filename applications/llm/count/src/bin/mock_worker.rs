@@ -69,7 +69,7 @@ async fn backend(runtime: DistributedRuntime) -> Result<()> {
     // we must first create a service, then we can attach one more more endpoints
 
     runtime
-        .namespace("dynemo-init")?
+        .namespace("dynemo")?
         .component("backend")?
         .service_builder()
         .create()

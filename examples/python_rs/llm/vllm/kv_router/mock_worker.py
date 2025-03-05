@@ -42,9 +42,7 @@ class MockEngine:
         self.lib = ctypes.CDLL("/opt/triton/llm_binding/lib/libdynemo_llm_capi.so")
         self.lib.triton_llm_init.argtypes = [c_char_p, c_char_p, c_int64]
         self.lib.triton_llm_init.restype = c_uint32
-        result = self.lib.triton_llm_init(
-            "triton-init".encode(), "vllm".encode(), worker_id
-        )
+        result = self.lib.triton_llm_init("dynemo".encode(), "vllm".encode(), worker_id)
         if result == TritonResult.OK:
             vllm_logger.info(
                 "KVCacheEventManager initialized successfully. Ready to publish KV Cache Events"
@@ -154,7 +152,7 @@ async def worker(runtime: DistributedRuntime):
     Instantiate a `backend` component and serve the `generate` endpoint
     A `Component` can serve multiple endpoints
     """
-    component = runtime.namespace("triton-init").component("vllm")
+    component = runtime.namespace("dynemo").component("vllm")
     metrics_publisher = KvMetricsPublisher()
     await metrics_publisher.create_service(component)
 

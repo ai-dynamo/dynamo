@@ -172,23 +172,23 @@ class Processor(ProcessMixIn):
 async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     """
     Set up clients to the router and workers.
-    Serve the triton-init.process.chat/completions endpoint.
+    Serve the dynemo.process.chat/completions endpoint.
     """
     workers_client = (
-        await runtime.namespace("triton-init")
+        await runtime.namespace("dynemo")
         .component("vllm")
         .endpoint("generate")
         .client()
     )
 
     router_client = (
-        await runtime.namespace("triton-init")
+        await runtime.namespace("dynemo")
         .component("router")
         .endpoint("generate")
         .client()
     )
 
-    preprocess_component = runtime.namespace("triton-init").component("process")
+    preprocess_component = runtime.namespace("dynemo").component("process")
     await preprocess_component.create_service()
 
     chat_endpoint = preprocess_component.endpoint("chat/completions")

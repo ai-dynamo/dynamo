@@ -226,9 +226,7 @@ async def worker(
     server_type = disagg_config.server_configs[instance_idx].type
     logger.info(f"Starting {server_type} server")
 
-    component = runtime.namespace("triton-init").component(
-        f"tensorrt-llm-{server_type}"
-    )
+    component = runtime.namespace("dynemo").component(f"tensorrt-llm-{server_type}")
     await component.create_service()
 
     completions_endpoint = component.endpoint("completions")

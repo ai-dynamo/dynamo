@@ -142,29 +142,29 @@ async def worker(runtime: DistributedRuntime):
     Instantiate a `backend` component and serve the `generate` endpoint
     A `Component` can serve multiple endpoints
     """
-    component = runtime.namespace("triton-init").component("router")
+    component = runtime.namespace("dynemo").component("router")
     await component.create_service()
 
     ctx_completion_client = (
-        await runtime.namespace("triton-init")
+        await runtime.namespace("dynemo")
         .component("tensorrt-llm-ctx")
         .endpoint("completions")
         .client()
     )
     gen_completion_client = (
-        await runtime.namespace("triton-init")
+        await runtime.namespace("dynemo")
         .component("tensorrt-llm-gen")
         .endpoint("completions")
         .client()
     )
     ctx_chat_client = (
-        await runtime.namespace("triton-init")
+        await runtime.namespace("dynemo")
         .component("tensorrt-llm-ctx")
         .endpoint("chat/completions")
         .client()
     )
     gen_chat_client = (
-        await runtime.namespace("triton-init")
+        await runtime.namespace("dynemo")
         .component("tensorrt-llm-gen")
         .endpoint("chat/completions")
         .client()

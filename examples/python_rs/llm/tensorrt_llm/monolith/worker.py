@@ -146,7 +146,7 @@ async def worker(runtime: DistributedRuntime, engine_config: LLMAPIConfig):
     Instantiate a `backend` component and serve the `generate` endpoint
     A `Component` can serve multiple endpoints
     """
-    component = runtime.namespace("triton-init").component("tensorrt-llm")
+    component = runtime.namespace("dynemo").component("tensorrt-llm")
     await component.create_service()
 
     completions_endpoint = component.endpoint("completions")

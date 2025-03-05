@@ -82,10 +82,10 @@ class Router:
 async def worker(runtime: DistributedRuntime, args: Namespace):
     """
     Set up the worker clients.
-    Serve the triton-init.router.generate endpoint.
+    Serve the dynemo.router.generate endpoint.
     """
     workers_client = (
-        await runtime.namespace("triton-init")
+        await runtime.namespace("dynemo")
         .component("vllm")
         .endpoint("generate")
         .client()
@@ -110,10 +110,10 @@ async def worker(runtime: DistributedRuntime, args: Namespace):
         + "\n".join(f"id: {id}" for id in workers_client.endpoint_ids())
     )
 
-    kv_listener = runtime.namespace("triton-init").component("vllm")
+    kv_listener = runtime.namespace("dynemo").component("vllm")
     await kv_listener.create_service()
 
-    router_component = runtime.namespace("triton-init").component("router")
+    router_component = runtime.namespace("dynemo").component("router")
     await router_component.create_service()
 
     router = KvRouter(runtime, kv_listener)

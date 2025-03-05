@@ -38,7 +38,7 @@ async def worker(
     """
     # create client
     client = (
-        await runtime.namespace("triton-init")
+        await runtime.namespace("dynemo")
         .component(component)
         .endpoint("generate")
         .client()

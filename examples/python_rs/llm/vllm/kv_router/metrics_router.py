@@ -81,7 +81,7 @@ ROUTE_SELF = True
 @triton_worker()
 async def worker(runtime: DistributedRuntime):
     workers_client = (
-        await runtime.namespace("triton-init")
+        await runtime.namespace("dynemo")
         .component("vllm")
         .endpoint("generate")
         .client()
@@ -98,7 +98,7 @@ async def worker(runtime: DistributedRuntime):
     # simply be ignored, but before that, we will make sure that the services
     # of the same namespace::component are created via KvMetricsPublisher,
     # if it is also used to create endpoints.
-    kv_listener = runtime.namespace("triton-init").component("vllm")
+    kv_listener = runtime.namespace("dynemo").component("vllm")
     await kv_listener.create_service()
     router = KvRouter(runtime, kv_listener)
     # i.e. below will cause panic
@@ -107,7 +107,7 @@ async def worker(runtime: DistributedRuntime):
     #     Router(router, workers_client).mock_generate
     # )
 
-    router_component = runtime.namespace("triton-init").component("frontend")
+    router_component = runtime.namespace("dynemo").component("frontend")
     await router_component.create_service()
 
     endpoint = router_component.endpoint("generate")

@@ -8,10 +8,10 @@ the services associated with that endpoint, do some postprocessing on them,
 and then publish an event with the postprocessed data.
 
 ```bash
-# For more details, try TRD_LOG=debug
-TRD_LOG=info cargo run --bin count -- --namespace dynemo-init --component backend --endpoint generate
+# For more details, try DYN_LOG=debug
+DYN_LOG=info cargo run --bin count -- --namespace dynemo --component backend --endpoint generate
 
-# 2025-02-26T18:45:05.467026Z  INFO count: Creating unique instance of Count at dynemo-init/components/count/instance
+# 2025-02-26T18:45:05.467026Z  INFO count: Creating unique instance of Count at dynemo/components/count/instance
 # 2025-02-26T18:45:05.472146Z  INFO count: Scraping service dynemo_init_backend_720278f8 and filtering on subject dynemo_init_backend_720278f8.generate
 # ...
 ```

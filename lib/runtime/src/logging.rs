@@ -17,13 +17,13 @@
 //!
 //! - Configuration loaded from:
 //!   1. Environment variables (highest priority).
-//!   2. Optional TOML file pointed to by the `TRD_LOGGING_CONFIG_PATH` environment variable.
+//!   2. Optional TOML file pointed to by the `DYN_LOGGING_CONFIG_PATH` environment variable.
 //!   3. `/opt/triton/etc/logging.toml`.
 //!
 //! Logging can take two forms: `READABLE` or `JSONL`. The default is `READABLE`. `JSONL`
-//! can be enabled by setting the `TRD_LOGGING_JSONL` environment variable to `1`.
+//! can be enabled by setting the `DYN_LOGGING_JSONL` environment variable to `1`.
 //!
-//! Filters can be configured using the `TRD_LOG` environment variable or by setting the `filters`
+//! Filters can be configured using the `DYN_LOG` environment variable or by setting the `filters`
 //! key in the TOML configuration file. Filters are comma-separated key-value pairs where the key
 //! is the crate or module name and the value is the log level. The default log level is `error`.
 //!
@@ -53,13 +53,13 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::{filter::Directive, fmt};
 
 /// ENV used to set the log level
-const FILTER_ENV: &str = "TRD_LOG";
+const FILTER_ENV: &str = "DYN_LOG";
 
 /// Default log level
 const DEFAULT_FILTER_LEVEL: &str = "error";
 
 /// ENV used to set the path to the logging configuration file
-const CONFIG_PATH_ENV: &str = "TRD_LOGGING_CONFIG_PATH";
+const CONFIG_PATH_ENV: &str = "DYN_LOGGING_CONFIG_PATH";
 
 /// Once instance to ensure the logger is only initialized once
 static INIT: Once = Once::new();

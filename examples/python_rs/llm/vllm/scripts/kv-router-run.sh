@@ -22,14 +22,14 @@ if [ $# -lt 2 ]; then
     echo "Usage: $0 <number_of_workers> <routing_strategy> [model_name] [endpoint_name]"
     echo "Error: Must specify at least number of workers and routing strategy"
     echo "Optional: model_name (default: deepseek-ai/DeepSeek-R1-Distill-Llama-8B)"
-    echo "Optional: endpoint_name (default: triton-init.process.chat/completions)"
+    echo "Optional: endpoint_name (default: dynemo.process.chat/completions)"
     exit 1
 fi
 
 NUM_WORKERS=$1
 ROUTING_STRATEGY=$2
 MODEL_NAME=${3:-"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"}
-ENDPOINT_NAME=${4:-"triton-init.process.chat/completions"}
+ENDPOINT_NAME=${4:-"dynemo.process.chat/completions"}
 VALID_STRATEGIES=("prefix")
 SESSION_NAME="v"
 WORKDIR="/workspace/examples/python_rs/llm/vllm"
@@ -42,7 +42,7 @@ fi
 ########################################################
 # HTTP Server
 ########################################################
-HTTP_CMD="TRD_LOG=DEBUG http"
+HTTP_CMD="DYN_LOG=DEBUG http"
 tmux new-session -d -s "$SESSION_NAME-http"
 tmux send-keys -t "$SESSION_NAME-http" "$INIT_CMD && $HTTP_CMD" C-m
 

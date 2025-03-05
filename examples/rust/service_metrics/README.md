@@ -4,14 +4,14 @@ This example extends the hello_world example by calling the `scrape_service` met
 with the service name for the request response the client just issued a request.
 
 ```bash
-TRD_LOG=debug cargo run --bin server
+DYN_LOG=debug cargo run --bin server
 ```
 
 The client can now observe some basic statistics about each instance of the service
 begin hosted.
 
 ```bash
-TRD_LOG=info cargo run --bin client
+DYN_LOG=info cargo run --bin client
 ```
 
 ## Example Output

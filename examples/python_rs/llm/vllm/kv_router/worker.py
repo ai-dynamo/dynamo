@@ -76,9 +76,9 @@ class VllmEngine(BaseVllmEngine):
 @triton_worker()
 async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     """
-    Serve the triton-init.vllm.generate endpoint.
+    Serve the dynemo.vllm.generate endpoint.
     """
-    worker_component = runtime.namespace("triton-init").component("vllm")
+    worker_component = runtime.namespace("dynemo").component("vllm")
     await worker_component.create_service()
 
     worker_endpoint = worker_component.endpoint("generate")
@@ -87,7 +87,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
     vllm_logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
 
-    VLLM_KV_NAMESPACE = "triton-init"
+    VLLM_KV_NAMESPACE = "dynemo"
     os.environ["VLLM_KV_NAMESPACE"] = str(VLLM_KV_NAMESPACE)
 
     VLLM_KV_COMPONENT = "vllm"

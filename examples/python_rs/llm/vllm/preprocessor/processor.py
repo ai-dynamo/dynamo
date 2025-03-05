@@ -34,12 +34,12 @@ async def preprocessor(runtime: DistributedRuntime, model_name: str, model_path:
     # create model deployment card
     mdc = await ModelDeploymentCard.from_local_path(model_path, model_name)
     # create preprocessor endpoint
-    component = runtime.namespace("triton-init").component("preprocessor")
+    component = runtime.namespace("dynemo").component("preprocessor")
     await component.create_service()
     endpoint = component.endpoint("generate")
 
     # create backend endpoint
-    backend = runtime.namespace("triton-init").component("backend").endpoint("generate")
+    backend = runtime.namespace("dynemo").component("backend").endpoint("generate")
 
     # start preprocessor service with next backend
     chat = OAIChatPreprocessor(mdc, endpoint, next=backend)

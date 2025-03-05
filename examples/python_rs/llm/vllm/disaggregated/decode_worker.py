@@ -109,11 +109,11 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     Instantiate a `backend` component and serve the `generate` endpoint
     A `Component` can serve multiple endpoints
     """
-    component = runtime.namespace("triton-init").component("vllm")
+    component = runtime.namespace("dynemo").component("vllm")
     await component.create_service()
 
     prefill = (
-        await runtime.namespace("triton-init")
+        await runtime.namespace("dynemo")
         .component("prefill")
         .endpoint("generate")
         .client()
