@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use super::{SamplingOptions, StopConditions};
 use crate::protocols::TokenIdType;
 
-/// [`PreprocessedRequest`] is the internal representation of an LLM request. The [`triton-llm-preprocessor`]
+/// [`PreprocessedRequest`] is the internal representation of an LLM request. The [`dynemo-llm-preprocessor`]
 /// crate is responsible for converting request from the public APIs to this internal representation.
 #[derive(Serialize, Deserialize, Debug, Clone, Builder)]
 pub struct PreprocessedRequest {

@@ -13,10 +13,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! # Triton LLM Protocols
+//! # Dynemo LLM Protocols
 //!
 //! This module contains the protocols, i.e. messages formats, used to exchange requests and responses
-//! both publicly via the HTTP API and internally between Triton components.
+//! both publicly via the HTTP API and internally between Dynemo components.
 //!
 
 use futures::{Stream, StreamExt};
@@ -33,9 +33,9 @@ pub type DataStream<T> = Pin<Box<dyn Stream<Item = T> + Send + Sync>>;
 
 // TODO: This is an awkward dependency that we need to address
 // Originally, all the Annotated/SSE Codec bits where in the LLM protocol module; however, [Annotated]
-// has become the common response envelope for triton-distributed.
+// has become the common response envelope for dynemo-distributed.
 // We may want to move the original Annotated back here and has a Infallible conversion to the the
-// ResponseEnvelop in triton-distributed.
+// ResponseEnvelop in dynemo-distributed.
 pub use dynemo_runtime::protocols::annotated::Annotated;
 
 /// The LLM responses have multiple different fields and nests of objects to get to the actual

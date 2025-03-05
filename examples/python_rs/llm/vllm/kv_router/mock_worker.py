@@ -26,7 +26,7 @@ from dynemo.llm import KvMetricsPublisher
 from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
 
-class TritonResult:
+class DynemoResult:
     OK = 0
     ERR = 1
 
@@ -39,11 +39,11 @@ class MockEngine:
     def __init__(self, metrics_publisher, worker_id):
         self.worker_id = worker_id
         # KV events
-        self.lib = ctypes.CDLL("/opt/triton/llm_binding/lib/libdynemo_llm_capi.so")
+        self.lib = ctypes.CDLL("/opt/dynemo/llm_binding/lib/libdynemo_llm_capi.so")
         self.lib.dynemo_llm_init.argtypes = [c_char_p, c_char_p, c_int64]
         self.lib.dynemo_llm_init.restype = c_uint32
         result = self.lib.dynemo_llm_init("dynemo".encode(), "vllm".encode(), worker_id)
-        if result == TritonResult.OK:
+        if result == DynemoResult.OK:
             vllm_logger.info(
                 "KVCacheEventManager initialized successfully. Ready to publish KV Cache Events"
             )
@@ -126,7 +126,7 @@ class MockEngine:
         )
         self.event_id_counter += 1
 
-        if result == TritonResult.OK:
+        if result == DynemoResult.OK:
             vllm_logger.debug(f"Store - Published KV Event: {self.event_id_counter}")
         else:
             vllm_logger.debug(

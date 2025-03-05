@@ -43,7 +43,7 @@ get_options() {
 		missing_requirement $1
             fi
             ;;
-    --triton-llm-path)
+    --dynemo-llm-path)
             if [ "$2" ]; then
                 DYNEMO_LLM_PATH=$2
                 shift

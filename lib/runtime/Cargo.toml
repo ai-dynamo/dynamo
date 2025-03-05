@@ -23,7 +23,7 @@ authors = ["NVIDIA"]
 license = "Apache-2.0"
 homepage = "https://github.com/dynemo-ai/dynemo"
 repository = "https://github.com/dynemo-ai/dynemo.git"
-keywords = ["llm", "genai", "inference", "nvidia", "distributed", "triton"]
+keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynemo"]
 
 [features]
 default = []

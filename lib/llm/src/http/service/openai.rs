@@ -516,7 +516,7 @@ pub fn list_models_router(
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     // TODO: Why do we have this endpoint?
-    let custom_path = path.unwrap_or("/triton/alpha/list-models".to_string());
+    let custom_path = path.unwrap_or("/dynemo/alpha/list-models".to_string());
     let doc_for_custom = RouteDoc::new(axum::http::Method::GET, &custom_path);
 
     // Standard OpenAI compatible list models endpoint

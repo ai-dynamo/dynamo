@@ -33,7 +33,7 @@ ENDPOINT_NAME=${4:-"dynemo.process.chat/completions"}
 VALID_STRATEGIES=("prefix")
 SESSION_NAME="v"
 WORKDIR="/workspace/examples/python_rs/llm/vllm"
-INIT_CMD="source /opt/triton/venv/bin/activate && cd $WORKDIR"
+INIT_CMD="source /opt/dynemo/venv/bin/activate && cd $WORKDIR"
 
 if [[ ! " ${VALID_STRATEGIES[@]} " =~ " ${ROUTING_STRATEGY} " ]]; then
     echo "Error: Invalid routing strategy. Must be one of: ${VALID_STRATEGIES[*]}"
