@@ -15,9 +15,6 @@
 
 use anyhow::Error;
 use async_stream::stream;
-use prometheus::{proto::MetricType, Registry};
-use reqwest::StatusCode;
-use std::sync::Arc;
 use dynemo_llm::http::service::{
     error::HttpError,
     metrics::{Endpoint, RequestType, Status},
@@ -37,6 +34,9 @@ use dynemo_runtime::{
     },
     CancellationToken,
 };
+use prometheus::{proto::MetricType, Registry};
+use reqwest::StatusCode;
+use std::sync::Arc;
 
 struct CounterEngine {}
 

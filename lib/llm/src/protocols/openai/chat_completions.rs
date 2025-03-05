@@ -17,8 +17,8 @@ use super::nvext::NvExt;
 use super::nvext::NvExtProvider;
 use super::OpenAISamplingOptionsProvider;
 use super::OpenAIStopConditionsProvider;
-use serde::{Deserialize, Serialize};
 use dynemo_runtime::protocols::annotated::AnnotationsProvider;
+use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 mod aggregator;

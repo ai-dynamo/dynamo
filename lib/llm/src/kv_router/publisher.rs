@@ -15,10 +15,6 @@
 
 use crate::kv_router::{indexer::RouterEvent, protocols::*, KV_EVENT_SUBJECT};
 use async_trait::async_trait;
-use futures::stream;
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tracing as log;
 use dynemo_runtime::{
     component::Component,
     pipeline::{
@@ -28,6 +24,10 @@ use dynemo_runtime::{
     protocols::annotated::Annotated,
     DistributedRuntime, Error, Result,
 };
+use futures::stream;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tracing as log;
 
 pub struct KvEventPublisher {
     tx: mpsc::UnboundedSender<KvCacheEvent>,

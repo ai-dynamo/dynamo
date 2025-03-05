@@ -15,7 +15,6 @@
 
 use service_metrics::{MyStats, DEFAULT_NAMESPACE};
 
-use std::sync::Arc;
 use dynemo_runtime::{
     logging,
     pipeline::{
@@ -25,6 +24,7 @@ use dynemo_runtime::{
     protocols::annotated::Annotated,
     stream, DistributedRuntime, Result, Runtime, Worker,
 };
+use std::sync::Arc;
 
 fn main() -> Result<()> {
     logging::init();

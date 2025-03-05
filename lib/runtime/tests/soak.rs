@@ -18,9 +18,6 @@ mod integration {
 
     pub const DEFAULT_NAMESPACE: &str = "triton-init";
 
-    use futures::StreamExt;
-    use std::{sync::Arc, time::Duration};
-    use tokio::time::Instant;
     use dynemo_runtime::{
         logging,
         pipeline::{
@@ -30,6 +27,9 @@ mod integration {
         protocols::annotated::Annotated,
         DistributedRuntime, ErrorContext, Result, Runtime, Worker,
     };
+    use futures::StreamExt;
+    use std::{sync::Arc, time::Duration};
+    use tokio::time::Instant;
 
     #[test]
     fn main() -> Result<()> {

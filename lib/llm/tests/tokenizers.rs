@@ -25,10 +25,10 @@
 //! in a hashmap. We will then use these hashes to test that the tokenizer is working correctly. This
 //! will detect if upstream dependency changes result in different/new behavior.
 
-use std::collections::HashMap;
-use std::sync::Arc;
 use dynemo_llm::tokenizers::traits::{Decoder, Encoder};
 use dynemo_llm::tokenizers::*;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 const TEST_PROMPTS: [&str; 4] = [
     "deep learning is",

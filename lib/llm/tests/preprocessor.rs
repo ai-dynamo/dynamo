@@ -15,10 +15,10 @@
 
 use anyhow::Ok;
 
-use serde::{Deserialize, Serialize};
 use dynemo_llm::model_card::model::{ModelDeploymentCard, PromptContextMixin};
 use dynemo_llm::preprocessor::prompt::PromptFormatter;
 use dynemo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use serde::{Deserialize, Serialize};
 
 use hf_hub::{api::tokio::ApiBuilder, Cache, Repo, RepoType};
 

@@ -13,11 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use hello_world::DEFAULT_NAMESPACE;
 use dynemo_runtime::{
     logging, protocols::annotated::Annotated, stream::StreamExt, DistributedRuntime, Result,
     Runtime, Worker,
 };
+use hello_world::DEFAULT_NAMESPACE;
 
 fn main() -> Result<()> {
     logging::init();
