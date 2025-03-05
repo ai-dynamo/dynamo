@@ -149,7 +149,7 @@ if [ ! -z ${TENSORRTLLM_BACKEND_REBUILD} ]; then
     (cd inflight_batcher_llm/src \
         && cmake -DCMAKE_INSTALL_PREFIX:PATH=`pwd`/install -DUSE_CXX11_ABI=1 -DDYNEMO_LLM_PATH=$DYNEMO_LLM_PATH .. \
         && make install \
-        && cp libdynemo_tensorrtllm.so /opt/tritonserver/backends/tensorrtllm/ \
+        && cp libtriton_tensorrtllm.so /opt/tritonserver/backends/tensorrtllm/ \
         && cp trtllmExecutorWorker /opt/tritonserver/backends/tensorrtllm/ \
     )
 fi
