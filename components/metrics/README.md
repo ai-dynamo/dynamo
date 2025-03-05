@@ -32,8 +32,8 @@ cargo run --bin mock_worker
 After a matching endpoint gets started, you should see the warnings go away
 since the endpoint will automatically get discovered.
 
-When stats are found from the target endpoints being listened on, metrics will
-aggregate and publish some metrics as both an event and to a prometheus web server:
+When stats are found from target endpoints, the metrics component will
+aggregate and publish metrics as both events and as updates to a prometheus server:
 ```
 2025-02-28T04:05:58.077901Z  INFO metrics: Aggregated metrics: ProcessedEndpoints { endpoints: [Endpoint { name: "worker-7587884888253033398", subject: "triton_init_backend_720278f8.generate-694d951a80e06bb6", data: ForwardPassMetrics { request_active_slots: 58, request_total_slots: 100, kv_active_blocks: 77, kv_total_blocks: 100 } }, Endpoint { name: "worker-7587884888253033401", subject: "triton_init_backend_720278f8.generate-694d951a80e06bb9", data: ForwardPassMetrics { request_active_slots: 71, request_total_slots: 100, kv_active_blocks: 29, kv_total_blocks: 100 } }], worker_ids: [7587884888253033398, 7587884888253033401], load_avg: 53.0, load_std: 24.0 }
 ```
