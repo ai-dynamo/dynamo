@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tracing;
 
-use triton_distributed_runtime::transports::etcd::WatchEvent;
-use triton_distributed_runtime::DistributedRuntime;
+use dynemo_runtime::transports::etcd::WatchEvent;
+use dynemo_runtime::DistributedRuntime;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DisaggRouterConf {
