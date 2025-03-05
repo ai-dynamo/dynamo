@@ -68,7 +68,8 @@ To launch disaggregated vllm deployment, there are three major components:
 ```
 # Processor must take the same args as the worker
 # This is temporary until we communicate the ModelDeploymentCard over etcd
-cd /workspace/examples/python_rs/llm/vllm
+# Currently only block-size=64 is supported
+cd /workspace/examples/python_rs/llm/vllm_nixl
 RUST_LOG=info python3 processor.py \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
@@ -121,8 +122,11 @@ cd /workspace/examples/python_rs/llm/vllm_nixl
 CUDA_VISIBLE_DEVICES=0 python prefill_worker.py \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
-    --kv-transfer-config \
-    '{"kv_connector":"TritonNixlConnector"}'
+    --kv-transfer-config '{"kv_connector":"TritonNixlConnector"}' \
+    --enable-prefix-caching \
+    --block-size 64 \
+    --max-num-batched-tokens 16384 \
+    --max-model-len 16384
 
 # start decode worker in Terminal 2
 cd /workspace/examples/python_rs/llm/vllm_nixl
@@ -131,8 +135,11 @@ CUDA_VISIBLE_DEVICES=1,2 python3 worker.py \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
     --tensor-parallel-size 2 \
-    --kv-transfer-config \
-    '{"kv_connector":"TritonNixlConnector"}'
+    --kv-transfer-config '{"kv_connector":"TritonNixlConnector"}' \
+    --enable-prefix-caching \
+    --block-size 64 \
+    --max-num-batched-tokens 16384 \
+    --max-model-len 16384
 ```
 
 Alternatively, we also provide a script to launch all workers in one go:
