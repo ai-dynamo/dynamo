@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Cache base image
+name: Main Branch Validation
 
 on:
   push:
@@ -30,7 +30,9 @@ jobs:
         - vllm
     name: Build and Test - ${{ matrix.framework }}
     env:
+      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework }}
       IMAGE_TAG: ghcr.io/dynemo-ai/dynemo:latest-${{ matrix.framework }}
+      PYTEST_XML_FILE: pytest_test_report.xml
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -55,3 +57,20 @@ jobs:
         CACHE_TO: "type=registry,ref=${{ steps.which_cache.outputs.cache_to_location }},image-manifest=true,mode=max"
       run: |
         ./container/build.sh --tag ${{ env.IMAGE_TAG }} --framework ${{ matrix.framework }} --cache-from "${{ env.CACHE_FROM }}" --cache-to "${{ env.CACHE_TO }}"
+    - name: Run pytest
+      env:
+        PYTEST_MARKS: "pre_merge or mypy"
+      run: |
+        docker run -w /workspace --name ${{ env.CONTAINER_ID }} ${{ env.IMAGE_TAG }} pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m "${{ env.PYTEST_MARKS }}"
+    - name: Copy test report from test Container
+      if: always()
+      run: |
+        docker cp ${{ env.CONTAINER_ID }}:/workspace/${{ env.PYTEST_XML_FILE }} .
+    - name: Archive test report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: ${{ matrix.framework }}-python-test-results
+        if-no-files-found: error
+        path: |
+          ${{ env.PYTEST_XML_FILE }}
