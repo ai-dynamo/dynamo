@@ -20,8 +20,7 @@ from typing import ClassVar, Optional
 
 from nats.aio.client import Client as NATS
 from nats.errors import Error as NatsError
-from nats.js.api import PullSubscription
-from nats.js.client import JetStreamContext
+from nats.js.client import JetStreamContext, PullSubscription
 from nats.js.errors import NotFoundError
 
 
