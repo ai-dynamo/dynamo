@@ -78,7 +78,7 @@ ARG TENSORRTLLM_SKIP_CLONE=
 ENV FRAMEWORK=${FRAMEWORK}
 RUN --mount=type=bind,source=./container/deps/requirements.tensorrtllm.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/clone_tensorrtllm.sh,target=/tmp/clone_tensorrtllm.sh \
-    if [[ "$FRAMEWORK" == "TENSORRTLLM" ]] ; then pip install --timeout=2000 -r /tmp/requirements.txt; if [ ${TENSORRTLLM_SKIP_CLONE} -ne 1 ] ; then /tmp/clone_tensorrtllm.sh --tensorrtllm-backend-repo-tag ${TENSORRTLLM_BACKEND_REPO_TAG} --tensorrtllm-backend-rebuild ${TENSORRTLLM_BACKEND_REBUILD} --triton-llm-path /opt/triton/llm_binding ; fi ; fi
+    if [[ "$FRAMEWORK" == "TENSORRTLLM" ]] ; then pip install --timeout=2000 -r /tmp/requirements.txt; if [ ${TENSORRTLLM_SKIP_CLONE} -ne 1 ] ; then /tmp/clone_tensorrtllm.sh --tensorrtllm-backend-repo-tag ${TENSORRTLLM_BACKEND_REPO_TAG} --tensorrtllm-backend-rebuild ${TENSORRTLLM_BACKEND_REBUILD} --triton-llm-path /opt/dynemo/llm_binding ; fi ; fi
 
 
 RUN --mount=type=bind,source=./container/deps/requirements.standard.txt,target=/tmp/requirements.txt \
@@ -106,7 +106,7 @@ ENV VLLM_GENERATE_WORKERS=${VLLM_FRAMEWORK:+1}
 ENV VLLM_BASELINE_TP_SIZE=${VLLM_FRAMEWORK:+1}
 ENV VLLM_CONTEXT_TP_SIZE=${VLLM_FRAMEWORK:+1}
 ENV VLLM_GENERATE_TP_SIZE=${VLLM_FRAMEWORK:+1}
-ENV VLLM_KV_CAPI_PATH="/opt/triton/llm_binding/lib/libdynemo_llm_capi.so"
+ENV VLLM_KV_CAPI_PATH="/opt/dynemo/llm_binding/lib/libdynemo_llm_capi.so"
 ENV PYTHONUNBUFFERED=1
 
 # Install NATS - pointing toward NATS github instead of binaries.nats.dev due to server instability
@@ -159,27 +159,27 @@ COPY lib/bindings /workspace/lib/bindings
 RUN cd lib/bindings/c/ && \
     cargo build --release --locked && cargo doc --no-deps
 
-# Install uv, create virtualenv for general use, and build dynemo. wheel
+# Install uv, create virtualenv for general use, and build dynemo wheel
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN mkdir /opt/triton && \
-    uv venv /opt/triton/venv --python 3.12 && \
-    source /opt/triton/venv/bin/activate && \
+RUN mkdir /opt/dynemo && \
+    uv venv /opt/dynemo/venv --python 3.12 && \
+    source /opt/dynemo/venv/bin/activate && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/dynemo.cp312*.whl
+    uv pip install /workspace/dist/dynemo*cp312*.whl
 
 # Package the bindings
-RUN mkdir -p /opt/triton/bindings/wheels && \
-    mkdir /opt/triton/bindings/lib && \
-    cp dist/dynemo.cp312*.whl /opt/triton/bindings/wheels/. && \
-    cp lib/bindings/c/target/release/libdynemo.llm_capi.so /opt/triton/bindings/lib/. && \
-    cp -r lib/bindings/c/include /opt/triton/bindings/.
+RUN mkdir -p /opt/dynemo/bindings/wheels && \
+    mkdir /opt/dynemo/bindings/lib && \
+    cp dist/dynemo*cp312*.whl /opt/dynemo/bindings/wheels/. && \
+    cp lib/bindings/c/target/release/libdynemo_llm_capi.so /opt/dynemo/bindings/lib/. && \
+    cp -r lib/bindings/c/include /opt/dynemo/bindings/.
 
 # Install dynemo.runtime and dynemo.llm wheels globally in container for tests that
 # currently run without virtual environment activated.
 # TODO: In future, we may use a virtualenv for everything and remove this.
-RUN pip install /opt/triton/bindings/wheels/dynemo.cp312*.whl
+RUN pip install /opt/dynemo/bindings/wheels/dynemo*cp312*.whl
 
-# Copy everything in after install steps to avoid re-running build/install
+# Copy everything in after ginstall steps to avoid re-running build/install
 # commands on unrelated changes in other dirs.
 COPY . /workspace
 
