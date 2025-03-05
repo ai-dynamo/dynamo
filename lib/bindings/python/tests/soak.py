@@ -19,7 +19,7 @@ import string
 
 import uvloop
 
-from dynemo.runtime import DistributedRuntime, triton_worker
+from dynemo.runtime import DistributedRuntime, dynemo_worker
 
 # Soak Test
 #
@@ -31,7 +31,7 @@ from dynemo.runtime import DistributedRuntime, triton_worker
 # could still eventually be a problem.
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime):
     ns = random_string()
     task = asyncio.create_task(server_init(runtime, ns))

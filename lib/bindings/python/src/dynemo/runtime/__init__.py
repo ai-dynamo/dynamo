@@ -30,7 +30,7 @@ from dynemo._core import ModelDeploymentCard as ModelDeploymentCard
 from dynemo._core import OAIChatPreprocessor as OAIChatPreprocessor
 
 
-def triton_worker():
+def dynemo_worker():
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
@@ -59,7 +59,7 @@ def triton_worker():
     return decorator
 
 
-def triton_endpoint(
+def dynemo_endpoint(
     request_model: Union[Type[BaseModel], Type[Any]], response_model: Type[BaseModel]
 ) -> Callable:
     def decorator(
