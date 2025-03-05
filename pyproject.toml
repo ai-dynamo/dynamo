@@ -54,8 +54,8 @@ build-backend = "maturin"
 # skip = "./.git,./.github,./src/grpc_generated"
 skip = "./.git,./.github,./lib/llm/tests/data"
 
-# ignore short words, and typename parameters like OffsetT
-ignore-regex = "\\b(.{1,4}|[A-Z]\\w*T)\\b"
+# ignore short words, and typename parameters
+#ignore-regex = "\\b(.{1,4}|[A-Z]\\w*T)\\b"
 # ignore allowed words
 # ignoring atleast to avoid testing::AtLeast from getting flagged
 ignore-words-list = "atleast,afterall"
