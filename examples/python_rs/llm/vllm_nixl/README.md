@@ -57,13 +57,24 @@ llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynemo-init
 TRT_LOG=DEBUG http --port 8181
 ```
 
+### Monolithic Deployment
+
+```
+cd /workspace/examples/python_rs/llm/vllm_nixl
+CUDA_VISIBLE_DEVICES=0 python3 worker.py \
+    --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+    --enforce-eager
+```
+
+### Disaggregated Deployment
+
 To launch disaggregated vllm deployment, there are three major components:
 1. Processor
 2. KV Router
 3. Disaggregated Router
 4. Prefill and Decode Workers
 
-### Processor
+#### Processor
 
 ```
 # Processor must take the same args as the worker
@@ -78,7 +89,7 @@ RUST_LOG=info python3 processor.py \
     --max-model-len 16384
 ```
 
-### KV Router
+#### KV Router
 
 The KV Router is a component that aggregates KV Events from all the workers and maintains a prefix tree of the cached tokens. It makes decisions on which worker to route requests to based on the length of the prefix match and the load on the workers.
 
@@ -94,7 +105,7 @@ You can choose only the prefix strategy for now:
 - `prefix`: Route requests to the worker that has the longest prefix match.
 
 
-### Disaggregated Router
+#### Disaggregated Router
 
 The disaggregated router determines whether a request should be send to a
 remote prefill engine or a local prefill engine for prefilling based on the
@@ -114,7 +125,7 @@ To update the threshold:
 ETCDCTL_API=3 etcdctl --endpoints=http://localhost:2379 put 'public/components/disagg_router/models/chat/<vllm.served_model_name(default to "vllm")>' '{"max_local_prefill_length": <new_threshold>}'
 ```
 
-### Workers
+#### Workers
 
 ```
 # start prefill worker in Terminal 1
