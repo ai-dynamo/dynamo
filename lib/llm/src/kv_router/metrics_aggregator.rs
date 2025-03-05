@@ -19,9 +19,9 @@ pub use crate::kv_router::protocols::ForwardPassMetrics;
 
 use crate::kv_router::scheduler::{Endpoint, Service};
 use crate::kv_router::ProcessedEndpoints;
+use dynemo_runtime::component::Component;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use triton_distributed_runtime::component::Component;
 
 pub struct KvMetricsAggregator {
     pub service_name: String,
@@ -81,7 +81,7 @@ impl KvMetricsAggregator {
 }
 
 async fn collect_endpoints(
-    nats_client: triton_distributed_runtime::transports::nats::Client,
+    nats_client: dynemo_runtime::transports::nats::Client,
     service_name: String,
     ep_tx: tokio::sync::mpsc::Sender<ProcessedEndpoints>,
     cancel: CancellationToken,
