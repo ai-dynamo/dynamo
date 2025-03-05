@@ -53,7 +53,7 @@ Add model to dynemo and start http server.
 
 
 ```
-llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B triton-init.process.chat/completions
+llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynemo-init.process.chat/completions
 TRT_LOG=DEBUG http --port 8181
 ```
 

@@ -124,13 +124,13 @@ class RequestHandler:
 
 @dynemo_worker()
 async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
-    component = runtime.namespace("triton-init").component("vllm")
+    component = runtime.namespace("dynemo-init").component("vllm")
     await component.create_service()
 
     endpoint = component.endpoint("generate")
 
     prefill_client = (
-        await runtime.namespace("triton-init")
+        await runtime.namespace("dynemo-init")
         .component("prefill")
         .endpoint("generate")
         .client()
@@ -141,7 +141,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
     vllm_logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
 
-    VLLM_KV_NAMESPACE = "triton-init"
+    VLLM_KV_NAMESPACE = "dynemo-init"
     os.environ["VLLM_KV_NAMESPACE"] = str(VLLM_KV_NAMESPACE)
 
     VLLM_KV_COMPONENT = "vllm"
@@ -177,7 +177,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
         # This should be replaced with etcd
         if engine_args.remote_prefill:
             metadata = engine_client.nixl_metadata
-            metadata_store = NixlMetadataStore("triton-init", runtime)
+            metadata_store = NixlMetadataStore("dynemo-init", runtime)
             await metadata_store.put(metadata.engine_id, metadata)
 
             await asyncio.gather(
