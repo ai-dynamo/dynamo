@@ -20,7 +20,7 @@ from typing import ClassVar, Optional
 
 from nats.aio.client import Client as NATS
 from nats.errors import Error as NatsError
-from nats.js.client import JetStreamContext, PullSubscription
+from nats.js.client import JetStreamContext
 from nats.js.errors import NotFoundError
 
 
@@ -42,7 +42,7 @@ class NATSQueue:
         self._stream_name = stream_name.replace("/", "_").replace("\\", "_")
         self._subject = f"{self._stream_name}.*"
         self.dequeue_timeout = dequeue_timeout
-        self._subscriber: Optional[PullSubscription] = None
+        self._subscriber: Optional[JetStreamContext.PullSubscription] = None
 
     @classmethod
     @asynccontextmanager
