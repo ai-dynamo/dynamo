@@ -159,7 +159,7 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 # Common dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    pip install --timeout=2000 --requirement /tmp/requirements.txt
+    uv pip install --requirement /tmp/requirements.txt
 
 # Install patched vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
