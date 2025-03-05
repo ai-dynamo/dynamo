@@ -20,6 +20,7 @@ from typing import ClassVar, Optional
 
 from nats.aio.client import Client as NATS
 from nats.errors import Error as NatsError
+from nats.js.api import PullSubscription
 from nats.js.client import JetStreamContext
 from nats.js.errors import NotFoundError
 
@@ -42,7 +43,7 @@ class NATSQueue:
         self._stream_name = stream_name.replace("/", "_").replace("\\", "_")
         self._subject = f"{self._stream_name}.*"
         self.dequeue_timeout = dequeue_timeout
-        self._subscriber = None
+        self._subscriber: Optional[PullSubscription] = None
 
     @classmethod
     @asynccontextmanager
@@ -122,7 +123,7 @@ class NATSQueue:
         """
         await self.ensure_connection()
         try:
-            await self._js.publish(f"{self._stream_name}.queue", task_data)
+            await self._js.publish(f"{self._stream_name}.queue", task_data)  # type: ignore
         except NatsError as e:
             raise RuntimeError(f"Failed to enqueue task: {e}")
 
@@ -130,7 +131,7 @@ class NATSQueue:
         """Dequeue and return a task as raw bytes, to be decoded with msgspec"""
         await self.ensure_connection()
         try:
-            msgs = await self._subscriber.fetch(1, timeout=self.dequeue_timeout)
+            msgs = await self._subscriber.fetch(1, timeout=self.dequeue_timeout)  # type: ignore
             if msgs:
                 msg = msgs[0]
                 await msg.ack()
