@@ -159,7 +159,6 @@ impl ReservedBlocks {
 
 #[cfg(test)]
 mod tests {
-    use crate::tokens::TokenSequence;
 
     use super::*;
 
@@ -175,8 +174,10 @@ mod tests {
         let seq1 = create_token_sequence(&[1, 2, 3, 4]);
         let seq2 = create_token_sequence(&[5, 6, 7, 8]);
 
-        let mut blocks1 = create_blocks(seq1, 2);
-        let mut blocks2 = create_blocks(seq2, 2);
+        // This is creating new KvBlock; this is will be done when the block manager is initialized
+        // but since we are not using the block manager in this test, we need to create them manually
+        let blocks1 = create_blocks(seq1, 2);
+        let blocks2 = create_blocks(seq2, 2);
 
         // Insert Sequence 2
         for block in blocks2.into_iter().rev() {
@@ -192,6 +193,10 @@ mod tests {
         assert_eq!(available_blocks.total_blocks(), 4);
         assert_eq!(available_blocks.available_blocks(), 4);
 
+        // Initialize of the KvBlocks is complete - there are 4 blocks with state in the available pool
+
+        // Mimic a request for 2 tokens and test the block matching sequence
+        // This pattern will be used in the KvBlockManager
         let req1 = create_token_sequence(&[1, 2]);
         let seq1 = req1.into_sequence(2);
         let (blocks, tail_block) = seq1.into_parts();
@@ -204,6 +209,7 @@ mod tests {
         let matched = available_blocks.match_token_blocks(&blocks).await.unwrap();
         assert_eq!(matched.len(), 1);
 
+        // possible update the api to take a vec of unique blocks and return a vec of reserved blocks
         let reserved: Vec<ReservedBlock> = matched
             .into_iter()
             .map(|unique_block| reserved_blocks.register(unique_block).unwrap())
