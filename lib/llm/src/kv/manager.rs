@@ -51,13 +51,8 @@ impl KvStorageManager {
 
         // shift the blocks to the left by the number of inflight blocks
         let unmatched_blocks = &blocks[inflight_blocks.len()..];
-        let unmatched_hashes = unmatched_blocks
-            .iter()
-            .map(|b| b.sequence_hash())
-            .collect::<Vec<_>>();
-
         // match the remaining blocks to freed gpu blocks (available_blocks)
-        let unregistered_blocks = self.available_blocks.match_blocks(unmatched_hashes).await?;
+        let unregistered_blocks = self.available_blocks.match_token_blocks(unmatched_blocks).await?;
         log::debug!("matched {} freed blocks", unregistered_blocks.len());
 
         // the blocks from the freed blocks pool must be registered as inflight blocks
@@ -141,28 +136,28 @@ pub struct PrefillOffload {
     tail_prefill_block: PartialKvBlock,
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use dynemo_runtime::logging::init;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynemo_runtime::logging::init;
 
-//     #[tokio::test]
-//     async fn test() {
-//         init();
+    #[tokio::test]
+    async fn test() {
+        init();
 
-//         let mut manager = KvStorageManager::new(2);
+        let mut manager = KvStorageManager::new(2).await;
 
-//         for _ in 0..100 {
-//             manager.available_blocks.insert(KvBlock::default());
-//         }
+        for _ in 0..100 {
+            let _ = manager.available_blocks.insert(KvBlock::default()).await;
+        }
 
-//         let tokens = Tokens::from([0_i32, 1, 2, 3, 4, 5, 6, 7, 8].as_ref());
+        let tokens = Tokens::from([0_i32, 1, 2, 3, 4, 5, 6, 7, 8].as_ref());
 
-//         // this is good for the scheduler to make a local decision as it now knows how many
-//         // net-new blocks need to be prefilled
-//         let sequence = manager.prepare_prefill_sequence(tokens).unwrap();
+        // this is good for the scheduler to make a local decision as it now knows how many
+        // net-new blocks need to be prefilled
+        let sequence = manager.prepare_prefill_sequence(tokens).await.unwrap();
 
-//         assert_eq!(sequence.inflight_blocks.len(), 0);
-//         assert_eq!(sequence.remaining_blocks.len(), 4);
-//     }
-// }
+        assert_eq!(sequence.inflight_blocks.len(), 0);
+        assert_eq!(sequence.remaining_blocks.len(), 4);
+    }
+}

@@ -160,6 +160,7 @@ impl ReservedBlocks {
 #[cfg(test)]
 mod tests {
     use crate::tokens::TokenSequence;
+    use std::thread;
 
     use super::*;
 
@@ -232,5 +233,64 @@ mod tests {
         available_blocks.fence().await.unwrap();
 
         assert_eq!(available_blocks.available_blocks(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_reserved_blocks_concurrent() {
+        let available_blocks = AvailableBlocks::new().await;
+        let mut reserved_blocks = ReservedBlocks::new(2);
+
+        const SEQ_LEN: usize = 1000;
+        let mut tokens : [u32; SEQ_LEN] = [0; SEQ_LEN];
+        for idx in 0..SEQ_LEN {
+            tokens[idx] = idx as u32;
+        }
+
+        for _ in 0..10 {
+            // Generate a token sequence and then get KV blocks created for it through
+            // available_blocks
+            let seq = create_token_sequence(&tokens);
+            let blocks = create_blocks(seq, 2);
+
+            for block in blocks.into_iter().rev() {
+                available_blocks.insert(block).await.unwrap();
+            }
+
+            let (token_blocks, _) = create_token_sequence(&tokens).into_sequence(2).into_parts();
+            let matched = available_blocks.match_token_blocks(&token_blocks).await.unwrap();
+            assert_eq!(matched.len(), SEQ_LEN / 2);
+
+            // Reserve the blocks and lose all references to them in a task
+            let mut reserved: Vec<ReservedBlock> = matched
+                .into_iter()
+                .map(|unique_block| reserved_blocks.register(unique_block).unwrap())
+                .collect();
+
+            let join_handle = tokio::spawn(async move { reserved.clear(); });
+
+            // While the task is running, generate more KV blocks for the same sequence and
+            // register them
+            let seq = create_token_sequence(&tokens);
+            let blocks = create_blocks(seq, SEQ_LEN / 2);
+
+            for block in blocks.into_iter().rev() {
+                available_blocks.insert(block).await.unwrap();
+            }
+
+            let (token_blocks, _) = create_token_sequence(&tokens).into_sequence(2).into_parts();
+            let matched = available_blocks.match_token_blocks(&token_blocks).await.unwrap();
+
+            assert_eq!(matched.len(), SEQ_LEN / 2);
+
+            let mut reserved: Vec<ReservedBlock> = matched
+                .into_iter()
+                .map(|unique_block| reserved_blocks.register(unique_block).unwrap())
+                .collect();
+            assert_eq!(reserved.len(), SEQ_LEN / 2);
+
+            let _ = join_handle.await;
+
+            reserved.clear();
+        }
     }
 }
