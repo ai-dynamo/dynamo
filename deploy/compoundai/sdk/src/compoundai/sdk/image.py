@@ -13,13 +13,15 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-# wrapper over bento images to handle TritonDistributed base image
+# wrapper over bento images to handle Dynemo base image
 
-import bentoml
 import os
 
+import bentoml
 
-#TODO: "triton-distributed:latest-vllm" image will not be available to image builder
+# TODO: "dynemo:latest-vllm" image will not be available to image builder
 # so we need to use the nova-base image. We'd consider publishing the image to a public registry.
-image_name = os.getenv("NOVA_IMAGE", "nvcr.io/nvidian/nim-llm-dev/yatai-bentos:nova-base-0886e19")
+image_name = os.getenv(
+    "NOVA_IMAGE", "nvcr.io/nvidian/nim-llm-dev/yatai-bentos:nova-base-0886e19"
+)
 NOVA_IMAGE = bentoml.images.PythonImage(base_image=image_name)

@@ -151,17 +151,20 @@ class NovaDependency(Dependency[T]):
         """
         # TODO: Read the runtime from the tdist since it is not stored in global
         if self._runtime is None:
-            print("Get Endpoint: Runtime not set for NovaDependency. Cannot get endpoint.")
+            print(
+                "Get Endpoint: Runtime not set for NovaDependency. Cannot get endpoint."
+            )
             raise ValueError("Runtime not set for NovaDependency")
 
         address = self.on.nova_address()
         comp_ns, comp_name = address
         print("Get Endpoint: Nova ADDRESS: ", address)
-        return await self._runtime.namespace(comp_ns)\
-            .component(comp_name)\
-            .endpoint(name)\
+        return (
+            await self._runtime.namespace(comp_ns)
+            .component(comp_name)
+            .endpoint(name)
             .client()
-
+        )
 
     def set_runtime(self, runtime: Any) -> None:
         """Set the Nova runtime for this dependency"""

@@ -445,7 +445,6 @@ def serve_http(
 
         # inject runner map now
         inject_env = {"BENTOML_RUNNER_MAP": json.dumps(dependency_map)}
-        print(f"inject_env: {inject_env}")
 
         for watcher in watchers:
             if watcher.env is None:

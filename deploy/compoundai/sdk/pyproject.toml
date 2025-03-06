@@ -23,7 +23,7 @@ authors = [
     { name = "biswa.panda", email = "biswaranjanp@nvidia.com" }
 ]
 dependencies = [
-    # TODO: currently compatible with bentoml==1.4.1, 
+    # TODO: currently compatible with bentoml==1.4.1,
     # v1.4.2 has removed normalize_identifier which is used in compoundai
     "bentoml==1.4.1",
     "types-psutil==7.0.0.20250218",

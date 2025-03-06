@@ -26,10 +26,9 @@ import typing as t
 from typing import Any
 
 import click
+from compoundai import tdist_context
 
 from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
-
-from compoundai import tdist_context
 
 logger = logging.getLogger("compoundai.serve.nova")
 logger.setLevel(logging.INFO)
@@ -109,12 +108,6 @@ def main(
         async def worker(runtime: DistributedRuntime):
             global tdist_context
             tdist_context["runtime"] = runtime
-            # init service instance, calls __init__
-            #TODO:bis: delete this print
-            print(
-                f"SERVE NOVA triton_worker sn: {service_name} tdist_context: {tdist_context}, runtime: {runtime}"
-            )
-            # logger.info(f"setting tdist_context: {tdist_context}, runtime: {runtime}")
             if service_name and service_name != service.name:
                 server_context.service_type = "service"
             else:
@@ -146,14 +139,12 @@ def main(
                     logger.error(error_msg)
                     raise ValueError(error_msg)
 
-                print(f"[{run_id}] Nova endpoints: {nova_endpoints}")
                 endpoints = []
                 for name, endpoint in nova_endpoints.items():
                     td_endpoint = component.endpoint(name)
                     logger.info(f"[{run_id}] Registering endpoint '{name}'")
                     endpoints.append(td_endpoint)
                     # Bind an instance of inner to the endpoint
-                    # bound_method = endpoint.func.__get__(service.inner())
                 tdist_context["component"] = component
                 tdist_context["endpoints"] = endpoints
                 class_instance = service.inner()
@@ -166,9 +157,7 @@ def main(
                     dynemo_wrapped_method = dynemo_endpoint(endpoint.request_type, Any)(
                         bound_method
                     )
-                    twm.append(triton_wrapped_method)
-                #TODO:bis: delete this print
-                print(f"SETTING sn:{service_name} tdist_context: {tdist_context}")
+                    twm.append(dynemo_wrapped_method)
                 # Run startup hooks before setting up endpoints
                 for name, member in vars(class_instance.__class__).items():
                     if callable(member) and getattr(
@@ -184,12 +173,10 @@ def main(
                             )
                         else:
                             logger.info(f"[{run_id}] Completed startup hook: {name}")
-                #TODO:bis: delete this print
-                print(f"serve nova STARTING sn:{service_name}, endpoints:{endpoints}")
                 logger.info(
                     f"[{run_id}] Starting {service.name} instance with all registered endpoints"
                 )
-                #TODO:bis: convert to list
+                # TODO:bis: convert to list
                 result = await endpoints[0].serve_endpoint(twm[0])
 
             except Exception as e:
