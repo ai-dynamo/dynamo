@@ -17,7 +17,7 @@ from bentoml import api
 from bentoml._internal.context import server_context
 from compoundai.sdk.decorators import async_onstart, dynemo_api, dynemo_endpoint
 from compoundai.sdk.dependency import depends
-from compoundai.sdk.image import NOVA_IMAGE
+from compoundai.sdk.image import DYNEMO_IMAGE
 from compoundai.sdk.service import service
 
 tdist_context = {}
@@ -29,7 +29,7 @@ __all__ = [
     "dynemo_api",
     "dynemo_endpoint",
     "depends",
-    "NOVA_IMAGE",
+    "DYNEMO_IMAGE",
     "service",
     "tdist_context",
 ]

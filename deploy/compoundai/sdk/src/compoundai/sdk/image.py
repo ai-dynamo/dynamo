@@ -19,9 +19,7 @@ import os
 
 import bentoml
 
-# TODO: "dynemo:latest-vllm" image will not be available to image builder
-# so we need to use the dynemo-base image. We'd consider publishing the image to a public registry.
-image_name = os.getenv(
-    "NOVA_IMAGE", "nvcr.io/nvidian/nim-llm-dev/yatai-bentos:dynemo-base-0886e19"
-)
-NOVA_IMAGE = bentoml.images.PythonImage(base_image=image_name)
+# TODO: "dynemo:latest-vllm" image will not be available to image builder in k8s
+# so We'd consider publishing the base image for releases to public nvcr.io registry.
+image_name = os.getenv("DYNEMO_IMAGE", "dynemo:latest-vllm")
+DYNEMO_IMAGE = bentoml.images.PythonImage(base_image=image_name)
