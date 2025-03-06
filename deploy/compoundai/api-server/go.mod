@@ -5,7 +5,7 @@ go 1.23.1
 replace github.com/dynemo-ai/dynemo/deploy/compoundai/operator => ../operator
 
 require (
-	github.com/ghodsss/yaml v1.0.0
+	github.com/ghodss/yaml v1.0.0
 	github.com/gin-gonic/gin v1.10.0
 	github.com/invopop/jsonschema v0.12.0
 	github.com/joho/godotenv v1.5.1
