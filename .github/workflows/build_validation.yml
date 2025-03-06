@@ -73,8 +73,8 @@ jobs:
                 echo "USING ${{ env.DEFAULT_CACHE_LOCATION }}"
                 echo "cache_from_location=${{ env.DEFAULT_CACHE_LOCATION }}" >> $GITHUB_OUTPUT
               fi
-          fi    
-          echo "cache_to_location=${{ env.IMAGE_TAG }}" >> $GITHUB_OUTPUT     
+          fi
+          echo "cache_to_location=${{ env.IMAGE_TAG }}" >> $GITHUB_OUTPUT
       - name: Build image
         env:
           CACHE_FROM: "type=registry,ref=${{ steps.which_cache.outputs.cache_from_location }}"

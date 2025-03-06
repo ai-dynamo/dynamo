@@ -71,7 +71,7 @@ jobs:
           const inProgressCount = runs.data.workflow_runs.filter(run => run.status === 'in_progress').length;
           const queuedCount = runs.data.workflow_runs.filter(run => run.status === 'queued').length;
           const skip_ci = inProgressCount > 0 || queuedCount > 0;
-          console.log(`Validation Workflow is running: ${skip_ci}`); #Debugging, will remove.
+          console.log(`Validation Workflow is running: ${skip_ci}`);
           core.setOutput('skip_ci', skip_ci.toString());
     - name: Trigger Pipeline
       run: |
