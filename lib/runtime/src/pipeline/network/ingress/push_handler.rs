@@ -81,7 +81,7 @@ where
             .map_err(PipelineError::GenerateError);
 
         // the prolouge is sent to the client to indicate that the stream is ready to receive data
-        // or if teh generate call failed, the error is sent to the client
+        // or if the generate call failed, the error is sent to the client
         let mut stream = match stream {
             Ok(stream) => {
                 tracing::trace!("Successfully generated response stream; sending prologue");

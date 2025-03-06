@@ -50,17 +50,15 @@ build-backend = "maturin"
 # this is only to allow you to run codespell interactively
 # this also overrides the grpc_generated folder, since it is generated
 
-# TODO add skip files for generated code
-# skip = "./.git,./.github,./src/grpc_generated"
-skip = "./.git,./.github,./lib/llm/tests/data"
+# Ignore data files and auto-generated files
+skip = "./.git,./.github,./lib/llm/tests/data,*.lock,*.sum"
 
-# ignore short words, and typename parameters like OffsetT
-ignore-regex = "\\b(.{1,4}|[A-Z]\\w*T)\\b"
-# ignore allowed words
-# ignoring atleast to avoid testing::AtLeast from getting flagged
-ignore-words-list = "atleast,afterall"
+# ignore allowed words used in code
+ignore-words-list = "afterall,ser,ende"
 # use the 'clear' dictionary for unambiguous spelling mistakes
 builtin = "clear"
+# use custom dictionary in addition to the built-in one
+dictionary = "./codespell.txt"
 # disable warnings about binary files and wrong encoding
 quiet-level = 3
 

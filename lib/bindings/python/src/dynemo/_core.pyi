@@ -233,3 +233,55 @@ class Backend:
         Start the backend engine and requests to the downstream LLM engine
         """
         ...
+
+
+class OverlapScores:
+    """
+    A collection of prefix matching scores of workers for a given token ids.
+    'scores' is a map of worker id to the score which is the number of matching blocks.
+    """
+
+    ...
+
+class KvIndexer:
+    """
+    A KV Indexer that tracks KV Events emitted by workers. Events include add_block and remove_block.
+    """
+
+    ...
+
+    def __init__(self, component: Component) -> None:
+        """
+        Create a `KvIndexer` object
+        """
+
+    def find_matches_for_request(self, token_ids: List[int], lora_id: int) -> OverlapScores:
+        """
+        Return the overlapping scores of workers for the given token ids.
+        """
+        ...
+
+class AggregatedMetrics:
+    """
+    A collection of metrics of the endpoints
+    """
+
+    ...
+
+class KvMetricsAggregator:
+    """
+    A metrics aggregator will collect KV metrics of the endpoints.
+    """
+
+    ...
+
+    def __init__(self, component: Component) -> None:
+        """
+        Create a `KvMetricsAggregator` object
+        """
+
+    def get_metrics(self) -> AggregatedMetrics:
+        """
+        Return the aggregated metrics of the endpoints.
+        """
+        ...
