@@ -9,6 +9,8 @@ jobs:
   job:
     runs-on: ubuntu-latest
     steps:
-    - run: |
-      echo "Running on branch ${{ github.ref_name }}"
+    - name: Echo the branch name
+      run: |
+        echo 'Running on branch: ${{ github.ref_name }}'
+        echo 'Running on SHA: ${{ github.sha }}'
 
