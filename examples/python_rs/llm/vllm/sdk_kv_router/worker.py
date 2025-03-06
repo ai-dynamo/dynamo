@@ -27,10 +27,10 @@ with bentoml.importing():
 
 from compoundai import (
     async_onstart,
+    dynemo_context,
     dynemo_endpoint,
     server_context,
     service,
-    tdist_context,
 )
 
 from dynemo.llm import KvMetricsPublisher
@@ -62,7 +62,7 @@ class VllmEngine(BaseVllmEngine):
             block_size=64,
             max_model_len=16384,
         )
-        VLLM_WORKER_ID = tdist_context["endpoints"][0].lease_id()
+        VLLM_WORKER_ID = dynemo_context["endpoints"][0].lease_id()
         os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
         os.environ["VLLM_KV_NAMESPACE"] = "triton-init"
         os.environ["VLLM_KV_COMPONENT"] = "vllm"
@@ -72,7 +72,7 @@ class VllmEngine(BaseVllmEngine):
         super().__init__(self.engine_args)
 
     async def create_metrics_publisher_endpoint(self):
-        component = tdist_context["component"]
+        component = dynemo_context["component"]
         await self.metrics_publisher.create_endpoint(component)
 
     @async_onstart

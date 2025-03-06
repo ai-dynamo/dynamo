@@ -17,7 +17,7 @@ from enum import Enum
 
 import bentoml
 from common.protocol import Tokens
-from compoundai import async_onstart, dynemo_endpoint, service, tdist_context
+from compoundai import async_onstart, dynemo_context, dynemo_endpoint, service
 
 with bentoml.importing():
     from dynemo.runtime import KvRouter
@@ -48,9 +48,8 @@ class Router:
     def __init__(self):
         self.model_name = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
         self.routing_strategy = RoutingStrategy.PREFIX
-        self.runtime = tdist_context["runtime"]
+        self.runtime = dynemo_context["runtime"]
         self.min_workers = 1
-        self.router = None
 
     @async_onstart
     async def init_engine(self):

@@ -26,7 +26,7 @@ import typing as t
 from typing import Any
 
 import click
-from compoundai import tdist_context
+from compoundai import dynemo_context
 
 from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
@@ -72,9 +72,9 @@ def main(
     from bentoml._internal.log import configure_server_logging
 
     run_id = generate_run_id()
-    tdist_context["service_name"] = service_name
-    tdist_context["runner_map"] = runner_map
-    tdist_context["worker_id"] = worker_id
+    dynemo_context["service_name"] = service_name
+    dynemo_context["runner_map"] = runner_map
+    dynemo_context["worker_id"] = worker_id
 
     # Import service first to check configuration
     service = import_service(bento_identifier)
@@ -106,8 +106,8 @@ def main(
 
         @dynemo_worker()
         async def worker(runtime: DistributedRuntime):
-            global tdist_context
-            tdist_context["runtime"] = runtime
+            global dynemo_context
+            dynemo_context["runtime"] = runtime
             if service_name and service_name != service.name:
                 server_context.service_type = "service"
             else:
@@ -145,8 +145,8 @@ def main(
                     logger.info(f"[{run_id}] Registering endpoint '{name}'")
                     endpoints.append(td_endpoint)
                     # Bind an instance of inner to the endpoint
-                tdist_context["component"] = component
-                tdist_context["endpoints"] = endpoints
+                dynemo_context["component"] = component
+                dynemo_context["endpoints"] = endpoints
                 class_instance = service.inner()
                 twm = []
                 for name, endpoint in dynemo_endpoints.items():

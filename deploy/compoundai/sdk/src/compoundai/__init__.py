@@ -20,7 +20,7 @@ from compoundai.sdk.dependency import depends
 from compoundai.sdk.image import DYNEMO_IMAGE
 from compoundai.sdk.service import service
 
-tdist_context = {}
+dynemo_context = {}
 
 __all__ = [
     "api",
@@ -31,5 +31,5 @@ __all__ = [
     "depends",
     "DYNEMO_IMAGE",
     "service",
-    "tdist_context",
+    "dynemo_context",
 ]

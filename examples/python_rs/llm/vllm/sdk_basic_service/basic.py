@@ -63,10 +63,11 @@ class Backend:
         print("Starting backend")
 
     @dynemo_endpoint()
-    async def generate(self, text: RequestType):
+    async def generate(self, req: RequestType):
         """Generate tokens."""
-        text = f"{text.text}-back"
-        print(f"Backend received: {text}")
+        req_text = req.text
+        print(f"Backend received: {req_text}")
+        text = f"{req_text}-back"
         for token in text.split():
             yield f"Backend: {token}"
 
@@ -83,12 +84,13 @@ class Middle:
         print("Starting middle")
 
     @dynemo_endpoint()
-    async def generate(self, text: RequestType):
+    async def generate(self, req: RequestType):
         """Forward requests to backend."""
-        text = f"{text.text}-mid"
-        print(f"Middle received: {text}")
-        txt = RequestType(text=text)
-        async for response in self.backend.generate(txt.model_dump_json()):
+        req_text = req.text
+        print(f"Middle received: {req_text}")
+        text = f"{req_text}-mid"
+        next_request = RequestType(text=text).model_dump_json()
+        async for response in self.backend.generate(next_request):
             print(f"Middle received response: {response}")
             yield f"Middle: {response}"
 
