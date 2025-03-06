@@ -13,11 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use dynemo_runtime::component::Namespace;
+use dynemo_runtime::traits::events::EventPublisher;
 use serde::{Deserialize, Serialize};
 use std::borrow::BorrowMut;
 use std::cmp::min;
-use triton_distributed_runtime::component::Namespace;
-use triton_distributed_runtime::traits::events::EventPublisher;
 
 use crate::kv_router::indexer::OverlapScores;
 pub use crate::kv_router::protocols::{ForwardPassMetrics, KV_BLOCK_SIZE};
@@ -126,7 +126,7 @@ impl KvScheduler {
             let mut event_rx = event_rx;
             let subject = "kv-hit-rate";
             while let Some(event) = event_rx.recv().await {
-                if let Err(e) = ns_publisher.publish(&subject, &event).await {
+                if let Err(e) = ns_publisher.publish(subject, &event).await {
                     tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
                 }
             }
@@ -136,8 +136,8 @@ impl KvScheduler {
         // Example of how to subscribe to KV hit rate events
         // This demonstrates the usage of the new subscription functionality
         tokio::spawn(async move {
+            use dynemo_runtime::traits::events::EventSubscriber;
             use futures::stream::StreamExt;
-            use triton_distributed_runtime::traits::events::EventSubscriber;
 
             // Subscribe to KV hit rate events
             match ns_subscriber.subscribe("kv-hit-rate").await {

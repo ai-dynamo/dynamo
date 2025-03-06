@@ -15,7 +15,6 @@
 
 use anyhow::Result;
 use dynemo_runtime::{component::Component, component::Namespace, DistributedRuntime};
-use dynemo_runtime::{component::Component, DistributedRuntime};
 use futures::stream::StreamExt;
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
