@@ -69,6 +69,7 @@ jobs:
           const inProgressCount = runs.data.workflow_runs.filter(run => run.status === 'in_progress').length;
           const queuedCount = runs.data.workflow_runs.filter(run => run.status === 'queued').length;
           const skip_ci = inProgressCount > 0 || queuedCount > 0;
+          console.log(`Validation Workflow is running: ${skip_ci}`); #Debugging, will remove.
           core.setOutput('skip_ci', skip_ci.toString());
     - name: Trigger Pipeline
       run: |
@@ -76,6 +77,7 @@ jobs:
         declare -A ci_variables
 
         if [  "${{ vars.ALLOW_GITLAB_TEST_SKIP }}" == "1" && "${{ steps.check_workflow.outputs.skip_ci }}" == "true" ]; then
+          echo "Github Workflow has run and RUN_PRE_MERGE_TESTS variable value is False"
           ci_variables["RUN_PRE_MERGE_TESTS"]="false"
         fi
 
