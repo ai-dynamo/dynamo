@@ -81,7 +81,7 @@ jobs:
         #!/bin/bash -e
         declare -A ci_variables
 
-        if [  "${{ vars.ALLOW_GITLAB_TEST_SKIP }}" == "1" && "${{ steps.check_workflow.outputs.skip_ci }}" == "true" ]; then
+        if [[ "${{ vars.ALLOW_GITLAB_TEST_SKIP }}" == "1" && "${{ steps.check_workflow.outputs.skip_ci }}" == "true" ]]; then
           echo "Github Workflow has run and RUN_PRE_MERGE_TESTS variable value is False"
           ci_variables["RUN_PRE_MERGE_TESTS"]="false"
         fi
