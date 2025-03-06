@@ -53,6 +53,8 @@ tensorrtllm_checkpoints/
 tensorrtllm_engines/
 api_server_models/
 server/
+# Replay/Snapshot test artifacts
+*.new
 
 **/*backups*
 
