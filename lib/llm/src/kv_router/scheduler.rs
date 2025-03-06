@@ -113,55 +113,16 @@ impl KvScheduler {
             }
         };
 
-        // Spawn a channel to asynchronously emit events on
+        // Channel to asynchronously publish metric events on
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<KVHitRateEvent>();
-
-        // Clone the namespace for the subscriber task
-        let ns_publisher = ns.clone();
-        let ns_subscriber = ns.clone();
 
         // Publisher task
         tokio::spawn(async move {
             let mut event_rx = event_rx;
             let subject = "kv-hit-rate";
             while let Some(event) = event_rx.recv().await {
-                if let Err(e) = ns_publisher.publish(subject, &event).await {
+                if let Err(e) = ns.publish(subject, &event).await {
                     tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
-                }
-            }
-        });
-
-        // TODO: This is just an eaxmple for now and should be removed/commented out
-        // Example of how to subscribe to KV hit rate events
-        // This demonstrates the usage of the new subscription functionality
-        tokio::spawn(async move {
-            use dynemo_runtime::traits::events::EventSubscriber;
-            use futures::stream::StreamExt;
-
-            // Subscribe to KV hit rate events
-            match ns_subscriber.subscribe("kv-hit-rate").await {
-                Ok(mut subscriber) => {
-                    tracing::info!("Successfully subscribed to KV hit rate events");
-
-                    // Process incoming events
-                    while let Some(msg) = subscriber.next().await {
-                        match serde_json::from_slice::<KVHitRateEvent>(&msg.payload) {
-                            Ok(event) => {
-                                tracing::info!(
-                                    "Received KV hit rate event: worker_id={}, isl_blocks={}, overlap_blocks={}",
-                                    event.worker_id,
-                                    event.isl_blocks,
-                                    event.overlap_blocks
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to deserialize KV hit rate event: {:?}", e);
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Failed to subscribe to KV hit rate events: {:?}", e);
                 }
             }
         });

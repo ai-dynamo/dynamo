@@ -57,7 +57,9 @@ impl KvRouter {
         let nats_client = runtime.nats_client();
         let service_name = backend.service_name();
         let kv_subject = backend.event_subject(KV_EVENT_SUBJECT);
-        let namespace = runtime.namespace("triton-init")?;
+        let namespace = runtime.namespace(backend.namespace())?;
+
+        tracing::info!("Component Namespace {}", backend.namespace());
         tracing::info!("Component Service Name {}", service_name);
         tracing::info!("KV Subject {}", kv_subject);
         Self::new(nats_client, service_name, kv_subject, namespace).await

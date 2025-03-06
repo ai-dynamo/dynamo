@@ -24,10 +24,8 @@
 //!   - KV Cache Blocks: [Active, Total]
 //! - KV Hit Rate:
 //!   - These metrics will be collected from KV hit rate events published by the KV router
-//!   - ISL Blocks: Total blocks in the request
-//!   - Overlap Blocks: Blocks that were already in the KV cache
-//!   - Hit Rate Percentage: Percentage of blocks that were already in the KV cache
-
+//!   - ISL Blocks: Cumulative count of total blocks in all KV hit rate events
+//!   - Overlap Blocks: Cumulative count of blocks that were already in the KV cache
 use clap::Parser;
 use dynemo_llm::kv_router::scheduler::KVHitRateEvent;
 use dynemo_runtime::{
