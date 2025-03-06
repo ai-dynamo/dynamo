@@ -16,6 +16,9 @@
 name: NVIDIA Test Github Validation
 
 on:
+  push:
+    branches:
+    - main
   pull_request:
     paths-ignore:
       - 'deploy/Kubernetes/**'
@@ -32,7 +35,7 @@ jobs:
     name: Build and Test - ${{ matrix.framework }}
     env:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework }}
-      IMAGE_TAG: ghcr.io/dynemo-ai/dynemo:pr_${{ github.event.pull_request.number}}_${{ matrix.framework }}
+      IMAGE_TAG: ghcr.io/dynemo-ai/dynemo:latest-${{ matrix.framework }}
       PYTEST_XML_FILE: pytest_test_report.xml
     steps:
       - name: Checkout repository
@@ -45,21 +48,33 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set IMAGE_TAG based on Event
+        id: set_image_tag
+        run: |
+          if [ "${{ github.event_name }}" == "push" ]; then
+            echo "IMAGE_TAG=ghcr.io/dynemo-ai/dynemo:latest-${{ matrix.framework }}" >> $GITHUB_ENV
+          elif [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "IMAGE_TAG=ghcr.io/dynemo-ai/dynemo:pr_${{ github.event.pull_request.number }}_${{ matrix.framework }}" >> $GITHUB_ENV
+          fi
       - name: Decide on cache
         id: which_cache
         env:
           DEFAULT_CACHE_LOCATION: ghcr.io/dynemo-ai/dynemo:latest-${{ matrix.framework }}
         run: |
           set +e
-          docker manifest inspect ${{ env.IMAGE_TAG }}
-          if [ $? -eq 0 ]; then
-            echo "USING ${{ env.IMAGE_TAG }}"
-            echo "cache_from_location=${{ env.IMAGE_TAG }}" >> $GITHUB_OUTPUT
+          if [ "${{ github.event_name }}" == "push" ]; then
+              echo "cache_from_location=${{ env.IMAGE_TAG }}" >> $GITHUB_OUTPUT
           else
-            echo "USING ${{ env.DEFAULT_CACHE_LOCATION }}"
-            echo "cache_from_location=${{ env.DEFAULT_CACHE_LOCATION }}" >> $GITHUB_OUTPUT
-          fi
-          echo "cache_to_location=${{ env.IMAGE_TAG }}" >> $GITHUB_OUTPUT
+              docker manifest inspect ${{ env.IMAGE_TAG }}
+              if [ $? -eq 0 ]; then
+                echo "USING ${{ env.IMAGE_TAG }}"
+                echo "cache_from_location=${{ env.IMAGE_TAG }}" >> $GITHUB_OUTPUT
+              else
+                echo "USING ${{ env.DEFAULT_CACHE_LOCATION }}"
+                echo "cache_from_location=${{ env.DEFAULT_CACHE_LOCATION }}" >> $GITHUB_OUTPUT
+              fi
+          fi    
+          echo "cache_to_location=${{ env.IMAGE_TAG }}" >> $GITHUB_OUTPUT     
       - name: Build image
         env:
           CACHE_FROM: "type=registry,ref=${{ steps.which_cache.outputs.cache_from_location }}"

@@ -50,10 +50,35 @@ jobs:
             - 'examples/python_rs/llm/**'
             - 'container/deps/requirements.vllm.txt'
             - 'container/deps/vllm/**'
+    - name: Check if Validation Workflow has run
+      id: check_worfkflow
+      uses: actions/github-script@v6
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const eventName = context.eventName;
+          const commit_sha = context.sha;
+          const workflow_id = 'build_validation.yml';
+          const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: workflow_id,
+              head_sha: commit_sha,
+              event: eventName
+            });
+          const inProgressCount = runs.data.workflow_runs.filter(run => run.status === 'in_progress').length;
+          const queuedCount = runs.data.workflow_runs.filter(run => run.status === 'queued').length;
+          const skip_ci = inProgressCount > 0 || queuedCount > 0;
+          core.setOutput('skip_ci', skip_ci.toString());
     - name: Trigger Pipeline
       run: |
         #!/bin/bash -e
         declare -A ci_variables
+
+        if [  "${{ vars.ALLOW_GITLAB_TEST_SKIP }}" == "1" && "${{ steps.check_workflow.outputs.skip_ci }}" == "true" ]; then
+          ci_variables["RUN_PRE_MERGE_TESTS"]="false"
+        fi
+
         if [ "${{ steps.src_changes.outputs.vllm }}" == "true" ]; then
           ci_variables["RUN_VLLM"]="true"
         fi
