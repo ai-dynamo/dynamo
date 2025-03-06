@@ -16,11 +16,10 @@
 [project]
 name = "compoundai"
 version = "0.1.0"
-description = "Add your description here"
+description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
-    { name = "mabdulwahhab", email = "mabdulwahhab@nvidia.com" },
-    { name = "biswa.panda", email = "biswaranjanp@nvidia.com" }
+    { name = "NVIDIA Inc.", email = "sw-dl-dynemo@nvidia.com" },
 ]
 dependencies = [
     # TODO: currently compatible with bentoml==1.4.1,
