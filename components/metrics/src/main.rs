@@ -24,7 +24,7 @@
 //!   - KV Cache Blocks: [Active, Total]
 
 use clap::Parser;
-use triton_distributed_runtime::{
+use dynemo_runtime::{
     error, logging,
     traits::events::EventPublisher,
     utils::{Duration, Instant},
@@ -50,7 +50,7 @@ struct Args {
     endpoint: String,
 
     /// Namespace to operate in
-    #[arg(long, env = "TRD_NAMESPACE", default_value = "triton-init")]
+    #[arg(long, env = "DYN_NAMESPACE", default_value = "dynemo")]
     namespace: String,
 
     /// Polling interval in seconds (minimum 1 second)
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn test_namespace_from_env() {
-        env::set_var("TRD_NAMESPACE", "test-namespace");
+        env::set_var("DYN_NAMESPACE", "test-namespace");
         let args = Args::parse_from(["count", "--component", "comp", "--endpoint", "end"]);
         assert_eq!(args.namespace, "test-namespace");
     }

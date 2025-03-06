@@ -23,7 +23,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-triton-distributed-runtime = { workspace = true }
+dynemo-runtime = { workspace = true }
 
 # third-party
 futures = { workspace = true }

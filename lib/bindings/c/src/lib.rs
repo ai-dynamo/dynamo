@@ -19,10 +19,10 @@ use once_cell::sync::OnceCell;
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use triton_distributed_llm::kv_router::{
+use dynemo_llm::kv_router::{
     indexer::compute_block_hash_for_seq, protocols::*, publisher::KvEventPublisher,
 };
-use triton_distributed_runtime::{DistributedRuntime, Worker};
+use dynemo_runtime::{DistributedRuntime, Worker};
 static WK: OnceCell<Worker> = OnceCell::new();
 static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
 // [FIXME] shouldn't the publisher be instance passing between API calls?
@@ -41,7 +41,7 @@ fn initialize_tracing() {
 }
 
 #[repr(u32)]
-pub enum TritonLlmResult {
+pub enum DynemoLlmResult {
     OK = 0,
     ERR = 1,
 }
@@ -49,17 +49,17 @@ pub enum TritonLlmResult {
 /// # Safety
 /// the namespace_c_str and component_c_str are passed as pointers to C strings
 #[no_mangle]
-pub unsafe extern "C" fn triton_llm_init(
+pub unsafe extern "C" fn dynemo_llm_init(
     namespace_c_str: *const c_char,
     component_c_str: *const c_char,
     worker_id: i64,
-) -> TritonLlmResult {
+) -> DynemoLlmResult {
     initialize_tracing();
     let wk = match WK.get_or_try_init(Worker::from_settings) {
         Ok(wk) => wk.clone(),
         Err(e) => {
             eprintln!("Failed to initialize runtime: {:?}", e);
-            return TritonLlmResult::ERR;
+            return DynemoLlmResult::ERR;
         }
     };
     let rt = wk.runtime();
@@ -73,7 +73,7 @@ pub unsafe extern "C" fn triton_llm_init(
             Ok(_) => Ok(()),
             Err(e) => {
                 eprintln!("Failed to initialize distributed runtime: {:?}", e);
-                Err(TritonLlmResult::ERR)
+                Err(DynemoLlmResult::ERR)
             }
         }
     });
@@ -81,7 +81,7 @@ pub unsafe extern "C" fn triton_llm_init(
         Ok(s) => s.to_string(),
         Err(e) => {
             eprintln!("Failed to convert C string to Rust string: {:?}", e);
-            return TritonLlmResult::ERR;
+            return DynemoLlmResult::ERR;
         }
     };
 
@@ -89,18 +89,18 @@ pub unsafe extern "C" fn triton_llm_init(
         Ok(s) => s.to_string(),
         Err(e) => {
             eprintln!("Failed to convert C string to Rust string: {:?}", e);
-            return TritonLlmResult::ERR;
+            return DynemoLlmResult::ERR;
         }
     };
 
     match result {
         Ok(_) => match KV_PUB
-            .get_or_try_init(move || triton_create_kv_publisher(namespace, component, worker_id))
+            .get_or_try_init(move || dynemo_create_kv_publisher(namespace, component, worker_id))
         {
-            Ok(_) => TritonLlmResult::OK,
+            Ok(_) => DynemoLlmResult::OK,
             Err(e) => {
                 eprintln!("Failed to initialize distributed runtime: {:?}", e);
-                TritonLlmResult::ERR
+                DynemoLlmResult::ERR
             }
         },
         Err(e) => e,
@@ -108,33 +108,33 @@ pub unsafe extern "C" fn triton_llm_init(
 }
 
 #[no_mangle]
-pub extern "C" fn triton_llm_shutdown() -> TritonLlmResult {
+pub extern "C" fn dynemo_llm_shutdown() -> DynemoLlmResult {
     let wk = match WK.get() {
         Some(wk) => wk,
         None => {
             eprintln!("Runtime not initialized");
-            return TritonLlmResult::ERR;
+            return DynemoLlmResult::ERR;
         }
     };
 
     wk.runtime().shutdown();
 
-    TritonLlmResult::OK
+    DynemoLlmResult::OK
 }
 
 #[no_mangle]
-pub extern "C" fn triton_llm_load_publisher_create() -> TritonLlmResult {
-    TritonLlmResult::OK
+pub extern "C" fn dynemo_llm_load_publisher_create() -> DynemoLlmResult {
+    DynemoLlmResult::OK
 }
 
 // instantiate a kv publisher
 // this will bring up the task to publish and the channels to await publishing events
-// the [`triton_kv_publish_store_event`] call will use a handle to the publisher to send events
-// store and the [`triton_kv_event_create_removed`] will create remove events
+// the [`dynemo_kv_publish_store_event`] call will use a handle to the publisher to send events
+// store and the [`dynemo_kv_event_create_removed`] will create remove events
 // these call mus be driving by external c++ threads that are consuming the kv events from the
 // c++ executor api
 
-fn triton_create_kv_publisher(
+fn dynemo_create_kv_publisher(
     namespace: String,
     component: String,
     worker_id: i64,
@@ -238,7 +238,7 @@ fn kv_event_create_removed_from_parts(
 /// parent_hash is passed as pointer to indicate whether the blocks
 /// has a parent hash or not. nullptr is used to represent no parent hash
 #[no_mangle]
-pub unsafe extern "C" fn triton_kv_event_publish_stored(
+pub unsafe extern "C" fn dynemo_kv_event_publish_stored(
     event_id: u64,
     token_ids: *const u32,
     num_block_tokens: *const usize,
@@ -246,7 +246,7 @@ pub unsafe extern "C" fn triton_kv_event_publish_stored(
     num_blocks: usize,
     parent_hash: *const u64,
     lora_id: u64,
-) -> TritonLlmResult {
+) -> DynemoLlmResult {
     let publisher = KV_PUB.get().unwrap();
     let parent_hash = {
         if parent_hash.is_null() {
@@ -265,40 +265,40 @@ pub unsafe extern "C" fn triton_kv_event_publish_stored(
         lora_id,
     );
     match publisher.publish(event) {
-        Ok(_) => TritonLlmResult::OK,
+        Ok(_) => DynemoLlmResult::OK,
         Err(e) => {
             eprintln!("Error publishing stored kv event {:?}", e);
-            TritonLlmResult::ERR
+            DynemoLlmResult::ERR
         }
     }
 }
 
 #[no_mangle]
-pub extern "C" fn triton_kv_event_publish_removed(
+pub extern "C" fn dynemo_kv_event_publish_removed(
     event_id: u64,
     block_ids: *const u64,
     num_blocks: usize,
-) -> TritonLlmResult {
+) -> DynemoLlmResult {
     let publisher = KV_PUB.get().unwrap();
     let event = kv_event_create_removed_from_parts(event_id, block_ids, num_blocks);
     match publisher.publish(event) {
-        Ok(_) => TritonLlmResult::OK,
+        Ok(_) => DynemoLlmResult::OK,
         Err(e) => {
             eprintln!("Error publishing removed kv event {:?}", e);
-            TritonLlmResult::ERR
+            DynemoLlmResult::ERR
         }
     }
 }
 
 // #[no_mangle]
-// pub extern "C" fn triton_kv_publish_store_event(
+// pub extern "C" fn dynemo_kv_publish_store_event(
 //     event_id: u64,
 //     token_ids: *const u32,
 //     num_tokens: usize,
 //     lora_id: u64,
-// ) -> TritonLlmResult {
+// ) -> DynemoLlmResult {
 //     // if event.is_null() || token_ids.is_null() {
-//     //     return tritonKvErrorType::INVALID_TOKEN_IDS;
+//     //     return dynemoKvErrorType::INVALID_TOKEN_IDS;
 //     // }
 
 //     // let tokens = unsafe { std::slice::from_raw_parts(token_ids, num_tokens) }.to_vec();
@@ -311,15 +311,15 @@ pub extern "C" fn triton_kv_event_publish_removed(
 
 //     // unsafe { *event = Box::into_raw(new_event) };
 
-//     TritonLlmResult::OK
+//     DynemoLlmResult::OK
 // }
 
 // #[no_mangle]
-// pub extern "C" fn triton_kv_event_create_removed(
+// pub extern "C" fn dynemo_kv_event_create_removed(
 //     event_id: u64,
 //     block_hashes: *const u64,
 //     num_hashes: usize,
-// ) -> TritonLlmResult {
+// ) -> DynemoLlmResult {
 //     // if event.is_null() || block_hashes.is_null() {
 //     //     return -1;
 //     // }
@@ -334,19 +334,19 @@ pub extern "C" fn triton_kv_event_publish_removed(
 
 //     // unsafe { *event = Box::into_raw(new_event) };
 //     // 0
-//     TritonLlmResult::OK
+//     DynemoLlmResult::OK
 // }
 
 // /// create load publisher object and return a handle
 // /// load publisher will instantiate the nats service and tie its stats handler to
 // /// a watch channel receiver.  the watch channel sender will be attach to the
-// /// handle and calls to [`triton_load_stats_publish`] issue the stats to the watch t
-// pub extern "C" fn triton_load_publisher_create() -> *mut LoadPublisher {
+// /// handle and calls to [`dynemo_load_stats_publish`] issue the stats to the watch t
+// pub extern "C" fn dynemo_load_publisher_create() -> *mut LoadPublisher {
 //     // let publisher = Box::new(LoadPublisher::new());
 //     // Box::into_raw(publisher)
 // }
 
-// pub extern "C" fn triton_load_stats_publish(
+// pub extern "C" fn dynemo_load_stats_publish(
 //     publisher: *mut LoadPublisher,
 //     active_slots: u64,
 //     total_slots: u64,

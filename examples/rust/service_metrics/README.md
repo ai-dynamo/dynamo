@@ -4,14 +4,14 @@ This example extends the hello_world example by calling the `scrape_service` met
 with the service name for the request response the client just issued a request.
 
 ```bash
-TRD_LOG=debug cargo run --bin server
+DYN_LOG=debug cargo run --bin server
 ```
 
 The client can now observe some basic statistics about each instance of the service
 begin hosted.
 
 ```bash
-TRD_LOG=info cargo run --bin client
+DYN_LOG=info cargo run --bin client
 ```
 
 ## Example Output
@@ -27,7 +27,7 @@ Annotated { data: Some("o"), id: None, event: None, comment: None }
 Annotated { data: Some("r"), id: None, event: None, comment: None }
 Annotated { data: Some("l"), id: None, event: None, comment: None }
 Annotated { data: Some("d"), id: None, event: None, comment: None }
-ServiceSet { services: [ServiceInfo { name: "triton_init_backend_720278f8", id: "eOHMc4ndRw8s5flv4WOZx7", version: "0.0.1", started: "2025-02-26T18:54:04.917294605Z", endpoints: [EndpointInfo { name: "triton_init_backend_720278f8-generate-694d951a80e06abf", subject: "triton_init_backend_720278f8.generate-694d951a80e06abf", data: Some(Metrics(Object {"average_processing_time": Number(53662), "data": Object {"val": Number(10)}, "last_error": String(""), "num_errors": Number(0), "num_requests": Number(2), "processing_time": Number(107325), "queue_group": String("q")})) }] }] }
+ServiceSet { services: [ServiceInfo { name: "dynemo_init_backend_720278f8", id: "eOHMc4ndRw8s5flv4WOZx7", version: "0.0.1", started: "2025-02-26T18:54:04.917294605Z", endpoints: [EndpointInfo { name: "dynemo_init_backend_720278f8-generate-694d951a80e06abf", subject: "dynemo_init_backend_720278f8.generate-694d951a80e06abf", data: Some(Metrics(Object {"average_processing_time": Number(53662), "data": Object {"val": Number(10)}, "last_error": String(""), "num_errors": Number(0), "num_requests": Number(2), "processing_time": Number(107325), "queue_group": String("q")})) }] }] }
 ```
 
 Note the following stats in the output demonstrate the custom

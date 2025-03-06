@@ -8,17 +8,17 @@ the services associated with that endpoint, do some postprocessing on them,
 and then publish an event with the postprocessed data.
 
 ```bash
-# For more details, try TRD_LOG=debug
-TRD_LOG=info cargo run --bin metrics -- --namespace triton-init --component backend --endpoint generate
+# For more details, try DYN_LOG=debug
+DYN_LOG=info cargo run --bin metrics -- --namespace dynemo --component backend --endpoint generate
 
-# 2025-02-26T18:45:05.467026Z  INFO metrics: Creating unique instance of Metrics at triton-init/components/metrics/instance
-# 2025-02-26T18:45:05.472146Z  INFO metrics: Scraping service triton_init_backend_720278f8 and filtering on subject triton_init_backend_720278f8.generate
+# 2025-02-26T18:45:05.467026Z  INFO metrics: Creating unique instance of Metrics at dynemo/components/metrics/instance
+# 2025-02-26T18:45:05.472146Z  INFO metrics: Scraping service dynemo_backend_720278f8 and filtering on subject dynemo_backend_720278f8.generate
 # ...
 ```
 
 With no matching endpoints running, you should see warnings in the logs:
 ```bash
-2025-02-26T18:45:06.474161Z  WARN metrics: No endpoints found matching subject triton_init_backend_720278f8.generate
+2025-02-26T18:45:06.474161Z  WARN metrics: No endpoints found matching subject dynemo_backend_720278f8.generate
 ```
 
 To see metrics published to a matching endpoint, you can use the
@@ -35,7 +35,7 @@ since the endpoint will automatically get discovered.
 When stats are found from target endpoints, the metrics component will
 aggregate and publish metrics as both events and as updates to a prometheus server:
 ```
-2025-02-28T04:05:58.077901Z  INFO metrics: Aggregated metrics: ProcessedEndpoints { endpoints: [Endpoint { name: "worker-7587884888253033398", subject: "triton_init_backend_720278f8.generate-694d951a80e06bb6", data: ForwardPassMetrics { request_active_slots: 58, request_total_slots: 100, kv_active_blocks: 77, kv_total_blocks: 100 } }, Endpoint { name: "worker-7587884888253033401", subject: "triton_init_backend_720278f8.generate-694d951a80e06bb9", data: ForwardPassMetrics { request_active_slots: 71, request_total_slots: 100, kv_active_blocks: 29, kv_total_blocks: 100 } }], worker_ids: [7587884888253033398, 7587884888253033401], load_avg: 53.0, load_std: 24.0 }
+2025-02-28T04:05:58.077901Z  INFO metrics: Aggregated metrics: ProcessedEndpoints { endpoints: [Endpoint { name: "worker-7587884888253033398", subject: "dynemo_backend_720278f8.generate-694d951a80e06bb6", data: ForwardPassMetrics { request_active_slots: 58, request_total_slots: 100, kv_active_blocks: 77, kv_total_blocks: 100 } }, Endpoint { name: "worker-7587884888253033401", subject: "dynemo_backend_720278f8.generate-694d951a80e06bb9", data: ForwardPassMetrics { request_active_slots: 71, request_total_slots: 100, kv_active_blocks: 29, kv_total_blocks: 100 } }], worker_ids: [7587884888253033398, 7587884888253033401], load_avg: 53.0, load_std: 24.0 }
 ```
 
 To see the metrics being published in prometheus format, you can run:

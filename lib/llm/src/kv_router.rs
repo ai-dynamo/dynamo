@@ -14,13 +14,14 @@
 // limitations under the License.
 
 use anyhow::Result;
+use dynemo_runtime::{component::Component, DistributedRuntime};
 use futures::stream::StreamExt;
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 use tracing;
-use triton_distributed_runtime::{component::Component, DistributedRuntime};
 
 pub mod indexer;
+pub mod metrics_aggregator;
 pub mod protocols;
 pub mod publisher;
 pub mod scheduler;
@@ -62,7 +63,7 @@ impl KvRouter {
     }
 
     pub async fn new(
-        nats_client: triton_distributed_runtime::transports::nats::Client,
+        nats_client: dynemo_runtime::transports::nats::Client,
         service_name: String,
         kv_subject: String,
     ) -> Result<Arc<Self>> {
@@ -135,7 +136,7 @@ impl KvRouter {
 }
 
 async fn collect_endpoints(
-    nats_client: triton_distributed_runtime::transports::nats::Client,
+    nats_client: dynemo_runtime::transports::nats::Client,
     service_name: String,
     ep_tx: tokio::sync::mpsc::Sender<ProcessedEndpoints>,
     cancel: CancellationToken,

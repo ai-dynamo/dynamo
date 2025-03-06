@@ -13,9 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use hello_world::DEFAULT_NAMESPACE;
-use std::sync::Arc;
-use triton_distributed_runtime::{
+use dynemo_runtime::{
     logging,
     pipeline::{
         async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
@@ -24,6 +22,8 @@ use triton_distributed_runtime::{
     protocols::annotated::Annotated,
     stream, DistributedRuntime, Result, Runtime, Worker,
 };
+use hello_world::DEFAULT_NAMESPACE;
+use std::sync::Arc;
 
 fn main() -> Result<()> {
     logging::init();

@@ -15,8 +15,7 @@
 
 use service_metrics::{MyStats, DEFAULT_NAMESPACE};
 
-use std::sync::Arc;
-use triton_distributed_runtime::{
+use dynemo_runtime::{
     logging,
     pipeline::{
         async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
@@ -25,6 +24,7 @@ use triton_distributed_runtime::{
     protocols::annotated::Annotated,
     stream, DistributedRuntime, Result, Runtime, Worker,
 };
+use std::sync::Arc;
 
 fn main() -> Result<()> {
     logging::init();

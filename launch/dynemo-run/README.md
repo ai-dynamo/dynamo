@@ -2,16 +2,15 @@
 
 `dynemo-run` is a tool for exploring the dynemo components.
 
-## Quickstart
+## Setup
 
-- Install Rust
-- `cargo install --features mistralrs,cuda --git https://github.com/dynemo-ai/dynemo.git dynemo-run`
-- `dynemo-run <GGUF or HF-repo-checkout>`
+Libraries (Ubuntu):
+```
+apt install -y build-essential libhwloc-dev libudev-dev pkg-config libssl-dev protobuf-compiler python3-dev
+```
 
-## Install and start pre-requisites
-
-Rust:
-```bash
+Install Rust:
+```
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 

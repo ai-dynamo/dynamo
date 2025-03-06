@@ -20,12 +20,8 @@ import uvloop
 from common.protocol import Request, Response
 from vllm.logger import logger as vllm_logger
 
-from triton_distributed.llm import KvRouter
-from triton_distributed.runtime import (
-    DistributedRuntime,
-    triton_endpoint,
-    triton_worker,
-)
+from dynemo.llm import KvRouter
+from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
 
 class Router:
@@ -41,7 +37,7 @@ class Router:
         self.router = router
         self.workers_client = workers_client
 
-    @triton_endpoint(Request, Response)
+    @dynemo_endpoint(Request, Response)
     async def generate(self, request):
         lora_id = 0
         worker_id = None
@@ -73,7 +69,7 @@ class Router:
             resp = resp.data() if hasattr(resp, "data") else resp
             yield resp
 
-    @triton_endpoint(Request, Response)
+    @dynemo_endpoint(Request, Response)
     async def mock_generate(self, request):
         print(f"Received request: {request}")
         yield "Hello, World!"
@@ -82,10 +78,10 @@ class Router:
 ROUTE_SELF = True
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime):
     workers_client = (
-        await runtime.namespace("triton-init")
+        await runtime.namespace("dynemo")
         .component("vllm")
         .endpoint("generate")
         .client()
@@ -102,7 +98,7 @@ async def worker(runtime: DistributedRuntime):
     # simply be ignored, but before that, we will make sure that the services
     # of the same namespace::component are created via KvMetricsPublisher,
     # if it is also used to create endpoints.
-    kv_listener = runtime.namespace("triton-init").component("vllm")
+    kv_listener = runtime.namespace("dynemo").component("vllm")
     await kv_listener.create_service()
     router = KvRouter(runtime, kv_listener)
     # i.e. below will cause panic
@@ -111,7 +107,7 @@ async def worker(runtime: DistributedRuntime):
     #     Router(router, workers_client).mock_generate
     # )
 
-    router_component = runtime.namespace("triton-init").component("frontend")
+    router_component = runtime.namespace("dynemo").component("frontend")
     await router_component.create_service()
 
     endpoint = router_component.endpoint("generate")

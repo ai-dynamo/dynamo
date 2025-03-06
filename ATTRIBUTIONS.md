@@ -17,7 +17,7 @@ limitations under the License.
 
 # Open Source License Attribution
 
-   Triton Distributed uses Open Source components. You can find the details of these open-source projects along with license information below.
+   Dynemo uses Open Source components. You can find the details of these open-source projects along with license information below.
    We are grateful to the developers for their contributions to open source and acknowledge these below.
 
 ## nats-py - [Apache License 2.0](https://github.com/nats-io/nats.py/blob/main/LICENSE)

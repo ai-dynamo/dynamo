@@ -150,17 +150,17 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 
 # Install uv and create virtualenv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN mkdir /opt/triton && \
-    uv venv /opt/triton/venv --python 3.12
+RUN mkdir /opt/dynemo && \
+    uv venv /opt/dynemo/venv --python 3.12
 
 # Activate virtual environment
-ENV VIRTUAL_ENV=/opt/triton/venv
+ENV VIRTUAL_ENV=/opt/dynemo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 # Install patched vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
 ARG VLLM_REF="v0.7.2"
-ARG VLLM_PATCH="vllm_${VLLM_REF}-triton-kv-disagg-patch.patch"
+ARG VLLM_PATCH="vllm_${VLLM_REF}-dynemo-kv-disagg-patch.patch"
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     bash /tmp/deps/vllm/install.sh --patch /tmp/deps/vllm/${VLLM_PATCH} --ref ${VLLM_REF} --install-cmd "uv pip install --editable" --use-precompiled --installation-dir /opt/vllm
 
@@ -225,25 +225,25 @@ COPY lib/bindings /workspace/lib/bindings
 RUN cd lib/bindings/c && \
     cargo build --release --locked && cargo doc --no-deps
 
-# Build triton_distributed wheel
-RUN source /opt/triton/venv/bin/activate && \
+# Build dynemo wheel
+RUN source /opt/dynemo/venv/bin/activate && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/triton_distributed*cp312*.whl
+    uv pip install /workspace/dist/dynemo*cp312*.whl
 
 # Package the bindings
-RUN mkdir -p /opt/triton/bindings/wheels && \
-    mkdir /opt/triton/bindings/lib && \
-    cp dist/triton_distributed*cp312*.whl /opt/triton/bindings/wheels/. && \
-    cp lib/bindings/c/target/release/libtriton_distributed_llm_capi.so /opt/triton/bindings/lib/. && \
-    cp -r lib/bindings/c/include /opt/triton/bindings/.
+RUN mkdir -p /opt/dynemo/bindings/wheels && \
+    mkdir /opt/dynemo/bindings/lib && \
+    cp dist/dynemo*cp312*.whl /opt/dynemo/bindings/wheels/. && \
+    cp lib/bindings/c/target/release/libdynemo_llm_capi.so /opt/dynemo/bindings/lib/. && \
+    cp -r lib/bindings/c/include /opt/dynemo/bindings/.
 
-# Tell vllm to use the Triton LLM C API for KV Cache Routing
-ENV VLLM_KV_CAPI_PATH="/opt/triton/bindings/lib/libtriton_distributed_llm_capi.so"
+# Tell vllm to use the Dynemo LLM C API for KV Cache Routing
+ENV VLLM_KV_CAPI_PATH="/opt/dynemo/bindings/lib/libdynemo_llm_capi.so"
 
 # FIXME: Copy more specific folders in for dev/debug after directory restructure
 COPY . /workspace
 
-# FIXME: May want a modification with triton-distributed banner on entry
+# FIXME: May want a modification with dynemo-distributed banner on entry
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
 CMD []
@@ -261,10 +261,10 @@ RUN apt update -y && \
     echo "set -g mouse on" >> /root/.tmux.conf
 
 # Set environment variables
-ENV VIRTUAL_ENV=/opt/triton/venv
+ENV VIRTUAL_ENV=/opt/dynemo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV RAPIDS_LIBUCX_PREFER_SYSTEM_LIBRARY=true
-ENV VLLM_KV_CAPI_PATH="/opt/triton/bindings/lib/libtriton_distributed_llm_capi.so"
+ENV VLLM_KV_CAPI_PATH="/opt/dynemo/bindings/lib/libdynemo_llm_capi.so"
 
 # Copy binaries
 COPY --from=dev /usr/local/bin/http /usr/local/bin/http
@@ -291,7 +291,7 @@ COPY examples/python_rs/llm/vllm_nixl /workspace/examples/python_rs/llm/vllm_nix
 
 WORKDIR /workspace
 
-# FIXME: May want a modification with triton-distributed banner on entry
+# FIXME: May want a modification with dynemo-distributed banner on entry
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
 CMD []

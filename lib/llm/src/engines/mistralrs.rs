@@ -21,17 +21,17 @@ use async_trait::async_trait;
 use either::Either;
 use indexmap::IndexMap;
 use mistralrs::{
-    Constraint, DefaultSchedulerMethod, Device, DeviceMapMetadata, DeviceMapSetting,
+    AutoDeviceMapParams, Constraint, DefaultSchedulerMethod, Device, DeviceMapSetting,
     GGUFLoaderBuilder, GGUFSpecificConfig, MemoryGpuConfig, MistralRs, MistralRsBuilder,
     ModelDType, NormalLoaderBuilder, NormalRequest, NormalSpecificConfig, PagedAttentionConfig,
     Pipeline, Request, RequestMessage, ResponseOk, SamplingParams, SchedulerConfig, TokenSource,
 };
 use tokio::sync::mpsc::channel;
 
-use triton_distributed_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
-use triton_distributed_runtime::pipeline::error as pipeline_error;
-use triton_distributed_runtime::pipeline::{Error, ManyOut, SingleIn};
-use triton_distributed_runtime::protocols::annotated::Annotated;
+use dynemo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
+use dynemo_runtime::pipeline::error as pipeline_error;
+use dynemo_runtime::pipeline::{Error, ManyOut, SingleIn};
+use dynemo_runtime::protocols::annotated::Annotated;
 
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -40,6 +40,15 @@ use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine
 
 /// If user does not provide a max_tokens limit prompt+output to this many
 const DEFAULT_MAX_TOKENS: i32 = 8192;
+
+/// TODO: tune. Presumably we read it from model's config.json?
+const MAX_SEQ_LEN: usize = 4096;
+
+// TODO: tune, maybe implement batching.
+const MAX_BATCH_SIZE: usize = 2;
+
+/// TODO: tune
+const PAGED_ATTENTION_MAX_NUM_SEQS: usize = 5;
 
 pub async fn make_engine(
     gguf_path: &Path,
@@ -125,7 +134,10 @@ impl MistralRsEngine {
             &ModelDType::Auto,
             &best_device()?,
             false,
-            DeviceMapSetting::Map(DeviceMapMetadata::dummy()),
+            DeviceMapSetting::Auto(AutoDeviceMapParams::Text {
+                max_seq_len: MAX_SEQ_LEN,
+                max_batch_size: MAX_BATCH_SIZE,
+            }),
             None,
             paged_attention_config,
         )?;
@@ -138,7 +150,7 @@ impl MistralRsEngine {
                 }
             };
             SchedulerConfig::PagedAttentionMeta {
-                max_num_seqs: 5,
+                max_num_seqs: PAGED_ATTENTION_MAX_NUM_SEQS,
                 config,
             }
         } else {

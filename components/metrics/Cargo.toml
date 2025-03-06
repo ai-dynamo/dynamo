@@ -21,8 +21,9 @@ license = "Apache-2.0"
 
 [dependencies]
 # local
-triton-distributed-runtime = { path = "../../lib/runtime" }
-triton-distributed-llm = { path = "../../lib/llm" }
+
+dynemo-runtime = { path = "../../lib/runtime" }
+dynemo-llm = { path = "../../lib/llm" }
 
 # workspace - todo
 

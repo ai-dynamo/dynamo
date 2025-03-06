@@ -70,8 +70,7 @@ above, you can manually launch each:
 When developing or running examples, any process or user that shared your core-services (`etcd` and `nats.io`) will
 be operating within your distributed runtime.
 
-The current examples use a hard-coded `namespace`. We will address the `namespace` collisions in this
-[issue](https://github.com/triton-inference-server/triton_distributed/issues/114).
+The current examples use a hard-coded `namespace`. We will address the `namespace` collisions later.
 
 All examples require the `etcd` and `nats.io` pre-requisites to be running and available.
 

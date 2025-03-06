@@ -32,11 +32,7 @@ from tensorrt_llm.serve.openai_protocol import (
     CompletionStreamResponse,
 )
 
-from triton_distributed.runtime import (
-    DistributedRuntime,
-    triton_endpoint,
-    triton_worker,
-)
+from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
 logger.set_level("debug")
 
@@ -49,7 +45,7 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
     def __init__(self, engine_config: LLMAPIConfig):
         super().__init__(engine_config)
 
-    @triton_endpoint(ChatCompletionRequest, ChatCompletionStreamResponse)
+    @dynemo_endpoint(ChatCompletionRequest, ChatCompletionStreamResponse)
     async def generate_chat(self, request):
         if self._llm_engine is None:
             raise RuntimeError("Engine not initialized")
@@ -97,7 +93,7 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
         except Exception as e:
             raise RuntimeError("Failed to generate: " + str(e))
 
-    @triton_endpoint(CompletionRequest, CompletionStreamResponse)
+    @dynemo_endpoint(CompletionRequest, CompletionStreamResponse)
     async def generate_completion(self, request):
         if self._llm_engine is None:
             raise RuntimeError("Engine not initialized")
@@ -144,13 +140,13 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
             raise RuntimeError("Failed to generate: " + str(e))
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime, engine_config: LLMAPIConfig):
     """
     Instantiate a `backend` component and serve the `generate` endpoint
     A `Component` can serve multiple endpoints
     """
-    component = runtime.namespace("triton-init").component("tensorrt-llm")
+    component = runtime.namespace("dynemo").component("tensorrt-llm")
     await component.create_service()
 
     completions_endpoint = component.endpoint("completions")

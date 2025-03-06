@@ -23,12 +23,8 @@ import uvloop
 from common.protocol import Tokens
 from vllm.logger import logger as vllm_logger
 
-from triton_distributed.llm import KvRouter
-from triton_distributed.runtime import (
-    DistributedRuntime,
-    triton_endpoint,
-    triton_worker,
-)
+from dynemo.llm import KvIndexer, KvMetricsAggregator, KvRouter
+from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
 WorkerId = str
 
@@ -55,7 +51,7 @@ class Router:
         self.router = router
         self.routing_strategy = routing_strategy
 
-    @triton_endpoint(Tokens, WorkerId)
+    @dynemo_endpoint(Tokens, WorkerId)
     async def generate(self, request) -> AsyncIterator[WorkerId]:
         lora_id = 0
         worker_id = None
@@ -82,14 +78,68 @@ class Router:
             )
 
 
-@triton_worker()
+class CustomRouter:
+    """
+    Request handler for the generate endpoint
+    """
+
+    def __init__(
+        self,
+        indexer: KvIndexer,
+        metrics_aggregator: KvMetricsAggregator,
+    ):
+        self.indexer = indexer
+        self.metrics_aggregator = metrics_aggregator
+
+    def _cost_function(self, scores, metrics):
+        # naive cost function for demonstration purposes
+        current_best = ("", 0)
+        for worker_id, score in scores.scores.items():
+            if score > current_best[1]:
+                current_best = (worker_id, score)
+        for endpoint in metrics.endpoints:
+            if endpoint.worker_id == current_best[0]:
+                print(f"Metrics of endpoint: {endpoint.worker_id}")
+                print(
+                    f"request slot usage: {endpoint.request_active_slots} / {endpoint.request_total_slots}"
+                )
+                print(
+                    f"KV block usage: {endpoint.kv_active_blocks} / {endpoint.kv_total_blocks}"
+                )
+        return current_best[0]
+
+    @dynemo_endpoint(Tokens, WorkerId)
+    async def generate(self, request) -> AsyncIterator[WorkerId]:
+        lora_id = 0
+        worker_id = ""
+        try:
+            scores = await self.indexer.find_matches_for_request(
+                request.tokens, lora_id
+            )
+            metrics = await self.metrics_aggregator.get_metrics()
+            worker_id = self._cost_function(scores, metrics)
+
+        # [NOTE][TODO] Now that the scheduler may return more error messages,
+        # now we are catching all exceptions and logging them. Should have
+        # catch specific router exceptions once we have dedicated types.
+        except Exception as e:
+            vllm_logger.info(f"{e}")
+            worker_id = ""
+            vllm_logger.exception(f"Error during worker selection: {e}")
+
+        vllm_logger.info(f"Scheduling to worker_id: {worker_id}")
+
+        yield str(worker_id)
+
+
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime, args: Namespace):
     """
     Set up the worker clients.
-    Serve the triton-init.router.generate endpoint.
+    Serve the dynemo.router.generate endpoint.
     """
     workers_client = (
-        await runtime.namespace("triton-init")
+        await runtime.namespace("dynemo")
         .component("vllm")
         .endpoint("generate")
         .client()
@@ -114,16 +164,23 @@ async def worker(runtime: DistributedRuntime, args: Namespace):
         + "\n".join(f"id: {id}" for id in workers_client.endpoint_ids())
     )
 
-    kv_listener = runtime.namespace("triton-init").component("vllm")
+    kv_listener = runtime.namespace("dynemo").component("vllm")
     await kv_listener.create_service()
 
-    router_component = runtime.namespace("triton-init").component("router")
+    router_component = runtime.namespace("dynemo").component("router")
     await router_component.create_service()
 
-    router = KvRouter(runtime, kv_listener)
-
     endpoint = router_component.endpoint("generate")
-    await endpoint.serve_endpoint(Router(router, args.routing_strategy).generate)
+
+    if args.custom_router:
+        indexer = KvIndexer(kv_listener)
+        metrics_aggregator = KvMetricsAggregator(kv_listener)
+        await endpoint.serve_endpoint(
+            CustomRouter(indexer, metrics_aggregator).generate
+        )
+    else:
+        router = KvRouter(runtime, kv_listener)
+        await endpoint.serve_endpoint(Router(router, args.routing_strategy).generate)
 
 
 if __name__ == "__main__":
@@ -150,6 +207,12 @@ if __name__ == "__main__":
         type=str,
         default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         help="Model that is being served",
+    )
+    parser.add_argument(
+        "--custom-router",
+        type=bool,
+        default=False,
+        help="Whether to use custom router or not",
     )
     args = parser.parse_args()
 

@@ -13,7 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// Forward openai_api_rs::v1 to triton_distributed_llm::protocols::openai::v1
 pub mod chat_completions;
 pub mod completions;
 pub mod models;

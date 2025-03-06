@@ -15,10 +15,10 @@
 
 use anyhow::Ok;
 
+use dynemo_llm::model_card::model::{ModelDeploymentCard, PromptContextMixin};
+use dynemo_llm::preprocessor::prompt::PromptFormatter;
+use dynemo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use serde::{Deserialize, Serialize};
-use triton_distributed_llm::model_card::model::{ModelDeploymentCard, PromptContextMixin};
-use triton_distributed_llm::preprocessor::prompt::PromptFormatter;
-use triton_distributed_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 
 use hf_hub::{api::tokio::ApiBuilder, Cache, Repo, RepoType};
 

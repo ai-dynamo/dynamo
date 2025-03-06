@@ -18,13 +18,13 @@ use std::{sync::Arc, time::Duration};
 use async_stream::stream;
 use async_trait::async_trait;
 
-use triton_distributed_llm::protocols::openai::chat_completions::{
+use dynemo_llm::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
 };
-use triton_distributed_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
-use triton_distributed_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
-use triton_distributed_runtime::pipeline::{Error, ManyOut, SingleIn};
-use triton_distributed_runtime::protocols::annotated::Annotated;
+use dynemo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+use dynemo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
+use dynemo_runtime::pipeline::{Error, ManyOut, SingleIn};
+use dynemo_runtime::protocols::annotated::Annotated;
 
 /// How long to sleep between echoed tokens.
 /// 50ms gives us 20 tok/s.

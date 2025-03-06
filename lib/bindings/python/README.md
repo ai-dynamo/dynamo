@@ -41,7 +41,7 @@ source .venv/bin/activate
 uv pip install maturin
 ```
 
-4. Build and install triton_distributed wheel
+4. Build and install dynemo wheel
 ```
 maturin develop --uv
 ```
