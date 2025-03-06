@@ -58,7 +58,9 @@ class DynemoEndpoint:
         return await self.func(*args, **kwargs)
 
 
-def dynemo_endpoint(name: str | None = None) -> t.Callable[[t.Callable], DynemoEndpoint]:
+def dynemo_endpoint(
+    name: str | None = None,
+) -> t.Callable[[t.Callable], DynemoEndpoint]:
     """Decorator for Dynemo endpoints.
 
     Args:
