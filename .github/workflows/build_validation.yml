@@ -51,29 +51,23 @@ jobs:
       - name: Set IMAGE_TAG based on Event
         id: set_image_tag
         run: |
-          if [ "${{ github.event_name }}" == "push" ]; then
-            echo "IMAGE_TAG=ghcr.io/dynemo-ai/dynemo:latest-${{ matrix.framework }}" >> $GITHUB_ENV
-          elif [ "${{ github.event_name }}" == "pull_request" ]; then
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
             echo "IMAGE_TAG=ghcr.io/dynemo-ai/dynemo:pr_${{ github.event.pull_request.number }}_${{ matrix.framework }}" >> $GITHUB_ENV
           fi
       - name: Decide on cache
         id: which_cache
         env:
-          DEFAULT_CACHE_LOCATION: ghcr.io/dynemo-ai/dynemo:latest-${{ matrix.framework }}
+          CACHE_LOCATION: ghcr.io/dynemo-ai/dynemo:latest-${{ matrix.framework }}
         run: |
           set +e
-          if [ "${{ github.event_name }}" == "push" ]; then
-              echo "cache_from_location=${{ env.IMAGE_TAG }}" >> $GITHUB_OUTPUT
-          else
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
               docker manifest inspect ${{ env.IMAGE_TAG }}
               if [ $? -eq 0 ]; then
                 echo "USING ${{ env.IMAGE_TAG }}"
-                echo "cache_from_location=${{ env.IMAGE_TAG }}" >> $GITHUB_OUTPUT
-              else
-                echo "USING ${{ env.DEFAULT_CACHE_LOCATION }}"
-                echo "cache_from_location=${{ env.DEFAULT_CACHE_LOCATION }}" >> $GITHUB_OUTPUT
+                echo "CACHE_LOCATION=${{ env.IMAGE_TAG }}" >> $GITHUB_ENV
               fi
           fi
+          echo "cache_from_location=${{ env.CACHE_LOCATION }}" >> $GITHUB_OUTPUT
           echo "cache_to_location=${{ env.IMAGE_TAG }}" >> $GITHUB_OUTPUT
       - name: Build image
         env:
@@ -102,6 +96,7 @@ jobs:
   event_file:
     name: "Event File"
     runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'pull_request' }}
     steps:
       - name: Upload
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
