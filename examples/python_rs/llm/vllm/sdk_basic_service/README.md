@@ -9,12 +9,12 @@ Users/Clients (HTTP)
 ┌─────────────┐
 │  Frontend   │  HTTP API endpoint (/generate)
 └─────────────┘
-      │ nova/distributed-runtime
+      │ dynemo/distributed-runtime
       ▼
 ┌─────────────┐
 │   Middle    │
 └─────────────┘
-      │ nova/distributed-runtime
+      │ dynemo/distributed-runtime
       ▼
 ┌─────────────┐
 │  Backend    │

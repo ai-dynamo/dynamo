@@ -30,7 +30,7 @@ from compoundai import tdist_context
 
 from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
-logger = logging.getLogger("compoundai.serve.nova")
+logger = logging.getLogger("compoundai.serve.dynemo")
 logger.setLevel(logging.INFO)
 
 
@@ -65,7 +65,7 @@ def main(
     worker_env: str | None,
     worker_id: int | None,
 ) -> None:
-    """Start a worker for the given service - either Nova or regular service"""
+    """Start a worker for the given service - either Dynemo or regular service"""
     from _bentoml_impl.loader import import_service
     from bentoml._internal.container import BentoMLContainer
     from bentoml._internal.context import server_context
@@ -99,8 +99,8 @@ def main(
             t.cast(t.Dict[str, str], json.loads(runner_map))
         )
 
-    # Check if Nova is enabled for this service
-    if service.is_nova_component():
+    # Check if Dynemo is enabled for this service
+    if service.is_dynemo_component():
         if worker_id is not None:
             server_context.worker_index = worker_id
 
@@ -115,8 +115,8 @@ def main(
 
             server_context.service_name = service.name
 
-            # Get Nova configuration and create component
-            namespace, component_name = service.nova_address()
+            # Get Dynemo configuration and create component
+            namespace, component_name = service.dynemo_address()
             logger.info(
                 f"[{run_id}] Registering component {namespace}/{component_name}"
             )
@@ -132,15 +132,15 @@ def main(
                     dep.set_runtime(runtime)
                     logger.info(f"[{run_id}] Set runtime for dependency: {dep}")
 
-                # Then register all Nova endpoints
-                nova_endpoints = service.get_nova_endpoints()
-                if not nova_endpoints:
-                    error_msg = f"[{run_id}] FATAL ERROR: No Nova endpoints found in service {service.name}!"
+                # Then register all Dynemo endpoints
+                dynemo_endpoints = service.get_dynemo_endpoints()
+                if not dynemo_endpoints:
+                    error_msg = f"[{run_id}] FATAL ERROR: No Dynemo endpoints found in service {service.name}!"
                     logger.error(error_msg)
                     raise ValueError(error_msg)
 
                 endpoints = []
-                for name, endpoint in nova_endpoints.items():
+                for name, endpoint in dynemo_endpoints.items():
                     td_endpoint = component.endpoint(name)
                     logger.info(f"[{run_id}] Registering endpoint '{name}'")
                     endpoints.append(td_endpoint)
@@ -149,7 +149,7 @@ def main(
                 tdist_context["endpoints"] = endpoints
                 class_instance = service.inner()
                 twm = []
-                for name, endpoint in nova_endpoints.items():
+                for name, endpoint in dynemo_endpoints.items():
                     bound_method = endpoint.func.__get__(class_instance)
                     # Only pass request type for now, use Any for response
                     # TODO: Handle a dynemo_endpoint not having types
@@ -180,7 +180,7 @@ def main(
                 result = await endpoints[0].serve_endpoint(twm[0])
 
             except Exception as e:
-                logger.error(f"[{run_id}] Error in Nova component setup: {str(e)}")
+                logger.error(f"[{run_id}] Error in Dynemo component setup: {str(e)}")
                 raise
 
         asyncio.run(worker())

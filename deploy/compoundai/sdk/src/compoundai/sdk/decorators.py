@@ -23,13 +23,13 @@ import bentoml
 from pydantic import BaseModel
 
 
-class NovaEndpoint:
-    """Decorator class for Nova endpoints"""
+class DynemoEndpoint:
+    """Decorator class for Dynemo endpoints"""
 
     def __init__(self, func: t.Callable, name: str | None = None):
         self.func = func
         self.name = name or func.__name__
-        self.is_nova_endpoint = True
+        self.is_dynemo_endpoint = True
 
         # Extract request type from hints
         hints = get_type_hints(func)
@@ -58,29 +58,29 @@ class NovaEndpoint:
         return await self.func(*args, **kwargs)
 
 
-def nova_endpoint(name: str | None = None) -> t.Callable[[t.Callable], NovaEndpoint]:
-    """Decorator for Nova endpoints.
+def dynemo_endpoint(name: str | None = None) -> t.Callable[[t.Callable], DynemoEndpoint]:
+    """Decorator for Dynemo endpoints.
 
     Args:
         name: Optional name for the endpoint. Defaults to function name.
 
     Example:
-        @nova_endpoint()
+        @dynemo_endpoint()
         def my_endpoint(self, input: str) -> str:
             return input
 
-        @nova_endpoint(name="custom_name")
+        @dynemo_endpoint(name="custom_name")
         def another_endpoint(self, input: str) -> str:
             return input
     """
 
-    def decorator(func: t.Callable) -> NovaEndpoint:
-        return NovaEndpoint(func, name)
+    def decorator(func: t.Callable) -> DynemoEndpoint:
+        return DynemoEndpoint(func, name)
 
     return decorator
 
 
-def nova_api(func: t.Callable) -> t.Callable:
+def dynemo_api(func: t.Callable) -> t.Callable:
     """Decorator for BentoML API endpoints.
 
     Args:

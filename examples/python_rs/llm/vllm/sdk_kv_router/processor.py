@@ -29,11 +29,11 @@ with bentoml.importing():
     from common.chat_processor import ChatProcessor, ProcessMixIn
     from common.protocol import MyRequestOutput, Tokens, vLLMGenerateRequest
 
-from compoundai import depends, nova_endpoint, service, tdist_context
+from compoundai import depends, dynemo_endpoint, service, tdist_context
 
 
 @service(
-    nova={
+    dynemo={
         "enabled": True,
         "namespace": "triton-init",
     },
@@ -82,7 +82,6 @@ class Processor(ProcessMixIn):
             # Deserialize the response from the engine
             # Creates correct vLLM objects for each field
             output = MyRequestOutput.model_validate_json(resp.data())
-            # OpenAIServingChat.chat_completion_stream_generator() method expects a RequestOutput object
             yield RequestOutput(
                 request_id=output.request_id,
                 prompt=output.prompt,
@@ -93,7 +92,7 @@ class Processor(ProcessMixIn):
                 metrics=output.metrics,
             )
 
-    @nova_endpoint()
+    @dynemo_endpoint()
     async def generate(self, raw_request: ChatCompletionRequest):
         request_id = str(uuid.uuid4())
         (
@@ -110,7 +109,7 @@ class Processor(ProcessMixIn):
             worker_id = worker
             break
         runtime = tdist_context["runtime"]
-        comp_ns, comp_name = VllmEngine.nova_address()
+        comp_ns, comp_name = VllmEngine.dynemo_address()
         worker_client = (
             await runtime.namespace(comp_ns)
             .component(comp_name)

@@ -1,5 +1,5 @@
 from compoundai import api
-from compoundai.sdk.decorators import nova_endpoint
+from compoundai.sdk.decorators import dynemo_endpoint
 from compoundai.sdk.dependency import depends
 from compoundai.sdk.service import service
 from pydantic import BaseModel
@@ -13,12 +13,12 @@ Users/Clients (HTTP)
 ┌─────────────┐
 │  Frontend   │  HTTP API endpoint (/generate)
 └─────────────┘
-      │ nova/distributed-runtime
+      │ dynemo/distributed-runtime
       ▼
 ┌─────────────┐
 │   Middle    │
 └─────────────┘
-      │ nova/distributed-runtime
+      │ dynemo/distributed-runtime
       ▼
 ┌─────────────┐
 │  Backend    │
@@ -37,7 +37,7 @@ class ResponseType(BaseModel):
 @service(
     resources={"cpu": "2"},
     traffic={"timeout": 30},
-    nova={
+    dynemo={
         "enabled": True,
         "namespace": "inference",
     },
@@ -47,7 +47,7 @@ class Backend:
     def __init__(self) -> None:
         print("Starting backend")
 
-    @nova_endpoint()
+    @dynemo_endpoint()
     async def generate(self, text: RequestType):
         """Generate tokens."""
         text = f"{text.text}-back"
@@ -59,7 +59,7 @@ class Backend:
 @service(
     resources={"cpu": "2"},
     traffic={"timeout": 30},
-    nova={"enabled": True, "namespace": "inference"},
+    dynemo={"enabled": True, "namespace": "inference"},
 )
 class Middle:
     backend = depends(Backend)
@@ -67,7 +67,7 @@ class Middle:
     def __init__(self) -> None:
         print("Starting middle")
 
-    @nova_endpoint()
+    @dynemo_endpoint()
     async def generate(self, text: RequestType):
         """Forward requests to backend."""
         text = f"{text.text}-mid"

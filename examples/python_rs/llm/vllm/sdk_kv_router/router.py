@@ -17,7 +17,7 @@ from enum import Enum
 
 import bentoml
 from common.protocol import Tokens
-from compoundai import async_onstart, nova_endpoint, service, tdist_context
+from compoundai import async_onstart, dynemo_endpoint, service, tdist_context
 
 with bentoml.importing():
     from dynemo.runtime import KvRouter
@@ -33,7 +33,7 @@ class RoutingStrategy(Enum):
 
 
 @service(
-    nova={
+    dynemo={
         "enabled": True,
         "namespace": "triton-init",
     },
@@ -79,7 +79,7 @@ class Router:
         await kv_listener.create_service()
         self.router = KvRouter(self.runtime, kv_listener)
 
-    @nova_endpoint()
+    @dynemo_endpoint()
     async def generate(self, request: Tokens):
         lora_id = 0
         worker_id = ""

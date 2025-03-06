@@ -27,7 +27,7 @@ with bentoml.importing():
 
 from compoundai import (
     async_onstart,
-    nova_endpoint,
+    dynemo_endpoint,
     server_context,
     service,
     tdist_context,
@@ -41,7 +41,7 @@ lease_id = None
 
 
 @service(
-    nova={
+    dynemo={
         "enabled": True,
         "namespace": "triton-init",
     },
@@ -86,7 +86,7 @@ class VllmEngine(BaseVllmEngine):
         task = asyncio.create_task(self.create_metrics_publisher_endpoint())
         task.add_done_callback(lambda _: print("metrics publisher endpoint created"))
 
-    @nova_endpoint()
+    @dynemo_endpoint()
     async def generate(self, request: vLLMGenerateRequest):
         sampling_params = request.sampling_params
         # rust HTTP requires Delta streaming

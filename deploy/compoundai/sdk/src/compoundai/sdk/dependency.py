@@ -23,25 +23,25 @@ from compoundai.sdk.service import CompoundService
 T = TypeVar("T")
 
 
-class NovaClient:
-    """Client for calling Nova endpoints with streaming support"""
+class DynemoClient:
+    """Client for calling Dynemo endpoints with streaming support"""
 
     def __init__(self, service: CompoundService[Any]):
         self._service = service
-        self._endpoints = service.get_nova_endpoints()
-        self._nova_clients: Dict[str, Any] = {}
+        self._endpoints = service.get_dynemo_endpoints()
+        self._dynemo_clients: Dict[str, Any] = {}
         self._runtime = None
 
     def __getattr__(self, name: str) -> Any:
         if name not in self._endpoints:
             raise AttributeError(
-                f"No Nova endpoint '{name}' found on service '{self._service.name}'. "
+                f"No Dynemo endpoint '{name}' found on service '{self._service.name}'. "
                 f"Available endpoints: {list(self._endpoints.keys())}"
             )
 
         # For streaming endpoints, create/cache the stream function
-        if name not in self._nova_clients:
-            namespace, component_name = self._service.nova_address()
+        if name not in self._dynemo_clients:
+            namespace, component_name = self._service.dynemo_address()
 
             # Create async generator function that uses Queue for streaming
             async def get_stream(*args, **kwargs):
@@ -71,7 +71,7 @@ class NovaClient:
                             raise
 
                 else:
-                    # Create nova worker if no runtime
+                    # Create dynemo worker if no runtime
                     from dynemo.runtime import DistributedRuntime, dynemo_worker
 
                     @dynemo_worker()
@@ -114,13 +114,13 @@ class NovaClient:
                     except Exception:
                         raise
 
-            self._nova_clients[name] = get_stream
+            self._dynemo_clients[name] = get_stream
 
-        return self._nova_clients[name]
+        return self._dynemo_clients[name]
 
 
-class NovaDependency(Dependency[T]):
-    """Enhanced dependency that supports Nova endpoints"""
+class DynemoDependency(Dependency[T]):
+    """Enhanced dependency that supports Dynemo endpoints"""
 
     def __init__(
         self,
@@ -130,7 +130,7 @@ class NovaDependency(Dependency[T]):
         cluster: str | None = None,
     ):
         super().__init__(on, url=url, deployment=deployment, cluster=cluster)
-        self._nova_client: Optional[NovaClient] = None
+        self._dynemo_client: Optional[DynemoClient] = None
         self._runtime = None
 
     # offers an escape hatch to get the endpoint directly
@@ -142,7 +142,7 @@ class NovaDependency(Dependency[T]):
         ...
         await dep.get_endpoint("generate") # equivalent to the following
         router_client = (
-            await runtime.namespace("triton-init")
+            await runtime.namespace("dynemo-init")
             .component("router")
             .endpoint("generate")
             .client()
@@ -152,13 +152,13 @@ class NovaDependency(Dependency[T]):
         # TODO: Read the runtime from the tdist since it is not stored in global
         if self._runtime is None:
             print(
-                "Get Endpoint: Runtime not set for NovaDependency. Cannot get endpoint."
+                "Get Endpoint: Runtime not set for DynemoDependency. Cannot get endpoint."
             )
-            raise ValueError("Runtime not set for NovaDependency")
+            raise ValueError("Runtime not set for DynemoDependency")
 
-        address = self.on.nova_address()
+        address = self.on.dynemo_address()
         comp_ns, comp_name = address
-        print("Get Endpoint: Nova ADDRESS: ", address)
+        print("Get Endpoint: Dynemo ADDRESS: ", address)
         return (
             await self._runtime.namespace(comp_ns)
             .component(comp_name)
@@ -167,19 +167,19 @@ class NovaDependency(Dependency[T]):
         )
 
     def set_runtime(self, runtime: Any) -> None:
-        """Set the Nova runtime for this dependency"""
+        """Set the Dynemo runtime for this dependency"""
         self._runtime = runtime
-        if self._nova_client:
-            self._nova_client._runtime = runtime
+        if self._dynemo_client:
+            self._dynemo_client._runtime = runtime
 
     def get(self, *args: Any, **kwargs: Any) -> T | Any:
-        # If this is a Nova-enabled service, return the Nova client
-        if isinstance(self.on, CompoundService) and self.on.is_nova_component():
-            if self._nova_client is None:
-                self._nova_client = NovaClient(self.on)
+        # If this is a Dynemo-enabled service, return the Dynemo client
+        if isinstance(self.on, CompoundService) and self.on.is_dynemo_component():
+            if self._dynemo_client is None:
+                self._dynemo_client = DynemoClient(self.on)
                 if self._runtime:
-                    self._nova_client._runtime = self._runtime
-            return self._nova_client
+                    self._dynemo_client._runtime = self._runtime
+            return self._dynemo_client
 
         # Otherwise fall back to normal BentoML dependency resolution
         return super().get(*args, **kwargs)
@@ -191,11 +191,11 @@ def depends(
     url: str | None = None,
     deployment: str | None = None,
     cluster: str | None = None,
-) -> NovaDependency[T]:
-    """Create a dependency that's Nova-aware.
+) -> DynemoDependency[T]:
+    """Create a dependency that's Dynemo-aware.
 
-    If the dependency is on a Nova-enabled service, this will return a client
-    that can call Nova endpoints. Otherwise behaves like normal BentoML dependency.
+    If the dependency is on a Dynemo-enabled service, this will return a client
+    that can call Dynemo endpoints. Otherwise behaves like normal BentoML dependency.
 
     Args:
         on: The service to depend on
@@ -204,8 +204,8 @@ def depends(
         cluster: Cluster name
 
     Raises:
-        AttributeError: When trying to call a non-existent Nova endpoint
+        AttributeError: When trying to call a non-existent Dynemo endpoint
     """
     if on is not None and not isinstance(on, Service):
         raise TypeError("depends() expects a class decorated with @service()")
-    return NovaDependency(on, url=url, deployment=deployment, cluster=cluster)
+    return DynemoDependency(on, url=url, deployment=deployment, cluster=cluster)

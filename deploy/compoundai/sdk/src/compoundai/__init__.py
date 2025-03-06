@@ -15,7 +15,7 @@
 
 from bentoml import api
 from bentoml._internal.context import server_context
-from compoundai.sdk.decorators import async_onstart, nova_api, nova_endpoint
+from compoundai.sdk.decorators import async_onstart, dynemo_api, dynemo_endpoint
 from compoundai.sdk.dependency import depends
 from compoundai.sdk.image import NOVA_IMAGE
 from compoundai.sdk.service import service
@@ -26,8 +26,8 @@ __all__ = [
     "api",
     "server_context",
     "async_onstart",
-    "nova_api",
-    "nova_endpoint",
+    "dynemo_api",
+    "dynemo_endpoint",
     "depends",
     "NOVA_IMAGE",
     "service",
