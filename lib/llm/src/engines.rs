@@ -28,6 +28,9 @@ pub mod vllm;
 #[cfg(feature = "trtllm")]
 pub mod trtllm;
 
+#[cfg(feature = "python")]
+pub mod python;
+
 #[derive(Debug, Clone)]
 pub struct MultiNodeConfig {
     /// How many nodes / hosts we are using

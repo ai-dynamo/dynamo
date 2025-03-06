@@ -43,6 +43,10 @@ pub use opt::{Input, Output};
 /// concatenations.
 const ENDPOINT_SCHEME: &str = "dyn://";
 
+/// How we identify a python string endpoint
+#[cfg(feature = "python")]
+const PYTHON_STR_SCHEME: &str = "pystr:";
+
 pub enum EngineConfig {
     /// An remote networked engine we don't know about yet
     /// We don't have the pre-processor yet so this is only text requests. Type will change later.
@@ -332,6 +336,19 @@ pub async fn run(
                 service_name: card.service_name.clone(),
                 engine,
                 card: Box::new(card),
+            }
+        }
+        #[cfg(feature = "python")]
+        Output::PythonStr(path_str) => {
+            use dynemo_llm::engines::python;
+            let Some(model_name) = model_name else {
+                anyhow::bail!("Provide model service name as `--model-name <this>`");
+            };
+            let p = std::path::PathBuf::from(path_str);
+            let engine = python::make_string_engine(&p).await?;
+            EngineConfig::StaticFull {
+                service_name: model_name,
+                engine,
             }
         }
     };
