@@ -59,8 +59,11 @@ jobs:
         github-token: ${{ secrets.GITHUB_TOKEN }}
         script: |
           const eventName = context.eventName;
-          const commit_sha = context.sha;
+          let commit_sha = context.sha;
           const workflow_id = 'build_validation.yml';
+          if (eventName === 'pull_request') {
+            commit_sha = context.payload.pull_request.head.sha;
+          }
           const runs = await github.rest.actions.listWorkflowRuns({
               owner: context.repo.owner,
               repo: context.repo.repo,
