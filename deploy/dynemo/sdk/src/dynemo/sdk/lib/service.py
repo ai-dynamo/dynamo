@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple, TypeVar, Union
 
 from _bentoml_sdk import Service, ServiceConfig
 from _bentoml_sdk.images import Image
-from compoundai.sdk.decorators import DynemoEndpoint
+from dynemo.sdk.lib.decorators import DynemoEndpoint
 
 T = TypeVar("T", bound=object)
 

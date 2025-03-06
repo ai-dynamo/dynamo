@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional, TypeVar
 
 from _bentoml_sdk.service import Service
 from _bentoml_sdk.service.dependency import Dependency
-from compoundai.sdk.service import CompoundService
+from dynemo.sdk.lib.service import CompoundService
 
 T = TypeVar("T")
 

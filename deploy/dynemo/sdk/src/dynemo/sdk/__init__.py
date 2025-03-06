@@ -15,10 +15,10 @@
 
 from bentoml import api
 from bentoml._internal.context import server_context
-from compoundai.sdk.decorators import async_onstart, dynemo_api, dynemo_endpoint
-from compoundai.sdk.dependency import depends
-from compoundai.sdk.image import DYNEMO_IMAGE
-from compoundai.sdk.service import service
+from dynemo.sdk.lib.decorators import async_onstart, dynemo_api, dynemo_endpoint
+from dynemo.sdk.lib.dependency import depends
+from dynemo.sdk.lib.image import DYNEMO_IMAGE
+from dynemo.sdk.lib.service import service
 
 dynemo_context = {}
 

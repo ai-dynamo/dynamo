@@ -244,7 +244,7 @@ ENV VLLM_KV_CAPI_PATH="/opt/dynemo/bindings/lib/libdynemo_llm_capi.so"
 COPY . /workspace
 # Install dynemo sdk for local dev and cluster deployment
 RUN source /opt/dynemo/venv/bin/activate && \
-    cd /workspace/deploy/compoundai/sdk && \
+    cd /workspace/deploy/dynemo/sdk && \
     uv pip install -e .
 
 # FIXME: May want a modification with dynemo-distributed banner on entry
