@@ -17,6 +17,7 @@ pub mod manager;
 pub mod reserved;
 pub mod reuse;
 pub mod sequence;
+pub mod storage;
 
 use reserved::*;
 

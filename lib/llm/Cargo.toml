@@ -95,7 +95,8 @@ async-openai = "0.27.2"
 blake3 = "1"
 derive-getters = "0.5"
 regex = "1"
-# cudarc = { version = "0.13", optional = true }
+cudarc = { version = "0.13", features = ["cuda-12060"] }
+candle-core = { version = "0.8.3", features = ["cuda" ] }
 
 # protocols
 chrono = { version = "0.4", default-features = false, features = [
