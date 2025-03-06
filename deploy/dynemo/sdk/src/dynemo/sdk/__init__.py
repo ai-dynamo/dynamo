@@ -15,6 +15,7 @@
 
 from bentoml import api
 from bentoml._internal.context import server_context
+
 from dynemo.sdk.lib.decorators import async_onstart, dynemo_api, dynemo_endpoint
 from dynemo.sdk.lib.dependency import depends
 from dynemo.sdk.lib.image import DYNEMO_IMAGE
