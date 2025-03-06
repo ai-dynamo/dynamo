@@ -1,0 +1,14 @@
+name: pr-copy-bot
+
+on:
+  push:
+    branches:
+      - "pull-request/[0-9]+"
+
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    steps:
+    - run: |
+      echo "Running on branch ${{ github.ref_name }}"
+
