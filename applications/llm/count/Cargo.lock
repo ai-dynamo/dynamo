@@ -739,6 +739,7 @@ dependencies = [
  "clap",
  "dynemo-llm",
  "dynemo-runtime",
+ "futures",
  "opentelemetry",
  "opentelemetry-prometheus",
  "prometheus",

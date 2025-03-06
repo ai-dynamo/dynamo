@@ -50,6 +50,8 @@ jobs:
             - 'examples/python_rs/llm/**'
             - 'container/deps/requirements.vllm.txt'
             - 'container/deps/vllm/**'
+          sdk:
+            - 'deploy/compoundai/**'
     - name: Check if Validation Workflow has run
       id: check_worfkflow
       uses: actions/github-script@v6
@@ -83,6 +85,10 @@ jobs:
 
         if [ "${{ steps.src_changes.outputs.vllm }}" == "true" ]; then
           ci_variables["RUN_VLLM"]="true"
+        fi
+
+        if [ "${{ steps.src_changes.outputs.sdk }}" == "true" ]; then
+          ci_variables["RUN_SDK_CI"]="true"
         fi
 
         ci_args=""

@@ -41,9 +41,8 @@ repos:
   rev: v2.2.4
   hooks:
   - id: codespell
+    # Use pyproject.toml for codespell configuration
     additional_dependencies: [tomli]
-    args: ["--toml", "pyproject.toml"]
-    exclude: (?x)^(.*stemmer.*|.*stop_words.*|^CHANGELOG.md$|.*lib/llm/tests/data.*)
 
 # More details about these pre-commit hooks here:
 # https://pre-commit.com/hooks.html

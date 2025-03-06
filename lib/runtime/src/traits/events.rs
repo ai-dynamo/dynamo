@@ -56,3 +56,24 @@ pub trait EventPublisher {
     // fn publisher(&self, event_name: impl AsRef<str>) -> Result<Publisher>;
     // fn publisher_bytes(&self, event_name: impl AsRef<str>) -> &PublisherBytes;
 }
+
+/// A trait for subscribing to events in the event plane.
+///
+/// This trait provides methods to subscribe to events published on specific subjects.
+#[async_trait]
+pub trait EventSubscriber {
+    /// Subscribe to events with the given event name.
+    /// The `event_name` will be `.` concatenated with the base subject provided by the implementation.
+    /// Returns a subscriber that can be used to receive events.
+    async fn subscribe(
+        &self,
+        event_name: impl AsRef<str> + Send + Sync,
+    ) -> Result<async_nats::Subscriber>;
+
+    /// Subscribe to events with the given event name and deserialize them to the specified type.
+    /// This is a convenience method that combines subscribe and deserialization.
+    async fn subscribe_with_type<T: for<'de> Deserialize<'de> + Send + 'static>(
+        &self,
+        event_name: impl AsRef<str> + Send + Sync,
+    ) -> Result<impl futures::Stream<Item = Result<T>> + Send>;
+}

@@ -22,14 +22,20 @@
 //!   - These metrics will be scraped by the LLM NATS Service API's stats request
 //!   - Request Slots: [Active, Total]
 //!   - KV Cache Blocks: [Active, Total]
-
+//! - KV Hit Rate:
+//!   - These metrics will be collected from KV hit rate events published by the KV router
+//!   - ISL Blocks: Cumulative count of total blocks in all KV hit rate events
+//!   - Overlap Blocks: Cumulative count of blocks that were already in the KV cache
 use clap::Parser;
+use dynemo_llm::kv_router::scheduler::KVHitRateEvent;
 use dynemo_runtime::{
     error, logging,
-    traits::events::EventPublisher,
+    traits::events::{EventPublisher, EventSubscriber},
     utils::{Duration, Instant},
     DistributedRuntime, ErrorContext, Result, Runtime, Worker,
 };
+use futures::stream::StreamExt;
+use std::sync::Arc;
 
 // Import from our library
 use count::{
@@ -111,8 +117,65 @@ async fn app(runtime: Runtime) -> Result<()> {
 
     // TODO: Make metrics host/port configurable
     // Initialize Prometheus metrics and start server
-    let mut metrics_server = PrometheusMetricsServer::new()?;
-    metrics_server.start(9091);
+    let metrics_server = PrometheusMetricsServer::new()?;
+    // Metrics will be updated concurrently, so protect it with a mutex:
+    // - Main loop: Collect and process ForwardPassMetrics at an interval from endpoint stats handlers
+    // - Subscription task: Collect and process KVHitRateEvent metrics from the KV router as they are published
+    let metrics_server = Arc::new(tokio::sync::Mutex::new(metrics_server));
+    metrics_server.lock().await.start(9091);
+
+    // Subscribe to KV hit rate events
+    let kv_hit_rate_subject = "kv-hit-rate";
+    tracing::info!("Subscribing to KV hit rate events on subject: {kv_hit_rate_subject}");
+
+    // Clone the metrics server and config for the subscription task
+    let metrics_server_clone = metrics_server.clone();
+    let config_clone = config.clone();
+    // Clone the namespace for the subscription task
+    let namespace_clone = namespace.clone();
+
+    // Spawn a task to handle KV hit rate events
+    tokio::spawn(async move {
+        match namespace_clone.subscribe(kv_hit_rate_subject).await {
+            Ok(mut subscriber) => {
+                tracing::info!("Successfully subscribed to KV hit rate events");
+
+                while let Some(msg) = subscriber.next().await {
+                    match serde_json::from_slice::<KVHitRateEvent>(&msg.payload) {
+                        Ok(event) => {
+                            // TODO: Lower to debug
+                            let cache_hit_pct =
+                                (event.overlap_blocks as f64 / event.isl_blocks as f64) * 100.0;
+                            tracing::info!(
+                                "Received KV hit rate event: worker_id={}, isl_blocks={}, overlap_blocks={}, cache_hit_pct={:.2}%",
+                                event.worker_id,
+                                event.isl_blocks,
+                                event.overlap_blocks,
+                                cache_hit_pct
+                            );
+
+                            // Update metrics with the event data
+                            let mut metrics = metrics_server_clone.lock().await;
+                            metrics.update_kv_hit_rate(
+                                &config_clone,
+                                event.worker_id,
+                                event.isl_blocks,
+                                event.overlap_blocks,
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to deserialize KV hit rate event: {:?}", e);
+                        }
+                    }
+                }
+
+                tracing::warn!("KV hit rate event subscription stream ended");
+            }
+            Err(e) => {
+                tracing::error!("Failed to subscribe to KV hit rate events: {:?}", e);
+            }
+        }
+    });
 
     loop {
         let next = Instant::now() + Duration::from_secs(args.poll_interval);
@@ -123,12 +186,14 @@ async fn app(runtime: Runtime) -> Result<()> {
             collect_endpoints(&target_component, &service_subject, scrape_timeout).await?;
         let metrics = extract_metrics(&endpoints);
         let processed = postprocess_metrics(&metrics, &endpoints);
-        tracing::info!("Aggregated metrics: {processed:?}");
+        tracing::debug!("Aggregated metrics: {processed:?}");
 
         // Update Prometheus metrics
-        metrics_server.update(&config, &processed);
+        metrics_server.lock().await.update(&config, &processed);
 
-        // TODO: Who needs to consume these events?
+        // TODO: Enable KV Routers to subscribe to metrics events published here
+        // for a single view of the aggregated metrics, as opposed to the current
+        // approach where each KV Router computes and published its own metrics.
         // Publish metrics event
         namespace.publish(&event_name, &processed).await?;
 

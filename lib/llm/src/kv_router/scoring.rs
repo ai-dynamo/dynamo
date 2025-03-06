@@ -20,7 +20,7 @@ use std::collections::HashSet;
 
 use crate::kv_router::scheduler::Endpoint;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct ProcessedEndpoints {
     pub endpoints: Vec<Endpoint>,
     pub worker_ids: Vec<i64>,
