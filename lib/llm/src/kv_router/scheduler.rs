@@ -30,7 +30,6 @@ pub struct KVHitRateEvent {
     pub overlap_blocks: usize,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 pub enum KvSchedulerError {
     #[error("no endpoints aviailable to route work")]
@@ -238,7 +237,6 @@ impl KvScheduler {
         Ok(KvScheduler { request_tx })
     }
 
-    #[allow(dead_code)]
     pub async fn schedule(
         &self,
         overlap: OverlapScores,
