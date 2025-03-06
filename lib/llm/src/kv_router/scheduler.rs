@@ -272,7 +272,6 @@ pub fn select_worker(
             + (1.0 - alpha) * normalized_new_tokens
             + gamma * request_load_ratio;
 
-        // TODO: Track load_deviation, etc. past the loop
         tracing::debug!("worker: {}; load_deviation: {}; normalized new blocks: {}; request_load_ratio: {} cost: {}",
                 worker_id,
                 load_deviation,

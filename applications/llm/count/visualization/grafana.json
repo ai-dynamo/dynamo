@@ -677,7 +677,7 @@
               }
             ]
           },
-          "unit": "none"
+          "unit": "percent"
         },
         "overrides": []
       },
@@ -687,7 +687,7 @@
         "x": 12,
         "y": 16
       },
-      "id": 6,
+      "id": 9,
       "options": {
         "legend": {
           "calcs": [
@@ -703,7 +703,7 @@
           "sort": "none"
         }
       },
-      "title": "Available Resources",
+      "title": "Cumulative KV Cache Hit Rate",
       "type": "timeseries",
       "targets": [
         {
@@ -712,22 +712,10 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(llm_kv_blocks_total{component=\"$component\", endpoint=\"$endpoint\"} - llm_kv_blocks_active{component=\"$component\", endpoint=\"$endpoint\"})",
-          "legendFormat": "Available KV Blocks",
+          "expr": "100 * sum(llm_kv_hit_rate_overlap_blocks{component=\"$component\", endpoint=\"$endpoint\"}) / sum(llm_kv_hit_rate_isl_blocks{component=\"$component\", endpoint=\"$endpoint\"})",
+          "legendFormat": "Overall Hit Rate",
           "range": true,
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum(llm_requests_total_slots{component=\"$component\", endpoint=\"$endpoint\"} - llm_requests_active_slots{component=\"$component\", endpoint=\"$endpoint\"})",
-          "hide": false,
-          "legendFormat": "Available Request Slots",
-          "range": true,
-          "refId": "B"
         }
       ]
     },
@@ -781,7 +769,7 @@
               }
             ]
           },
-          "unit": "percent"
+          "unit": "none"
         },
         "overrides": []
       },
@@ -791,7 +779,7 @@
         "x": 0,
         "y": 24
       },
-      "id": 9,
+      "id": 6,
       "options": {
         "legend": {
           "calcs": [
@@ -807,7 +795,7 @@
           "sort": "none"
         }
       },
-      "title": "Cumulative KV Cache Hit Rate",
+      "title": "Available Resources",
       "type": "timeseries",
       "targets": [
         {
@@ -816,10 +804,22 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "100 * sum(llm_kv_hit_rate_overlap_blocks{component=\"$component\", endpoint=\"$endpoint\"}) / sum(llm_kv_hit_rate_isl_blocks{component=\"$component\", endpoint=\"$endpoint\"})",
-          "legendFormat": "Overall Hit Rate",
+          "expr": "sum(llm_kv_blocks_total{component=\"$component\", endpoint=\"$endpoint\"} - llm_kv_blocks_active{component=\"$component\", endpoint=\"$endpoint\"})",
+          "legendFormat": "Available KV Blocks",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(llm_requests_total_slots{component=\"$component\", endpoint=\"$endpoint\"} - llm_requests_active_slots{component=\"$component\", endpoint=\"$endpoint\"})",
+          "hide": false,
+          "legendFormat": "Available Request Slots",
+          "range": true,
+          "refId": "B"
         }
       ]
     }

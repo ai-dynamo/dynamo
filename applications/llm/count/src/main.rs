@@ -118,6 +118,9 @@ async fn app(runtime: Runtime) -> Result<()> {
     // TODO: Make metrics host/port configurable
     // Initialize Prometheus metrics and start server
     let metrics_server = PrometheusMetricsServer::new()?;
+    // Metrics will be updated concurrently, so protect it with a mutex:
+    // - Main loop: Collect and process ForwardPassMetrics at an interval from endpoint stats handlers
+    // - Subscription task: Collect and process KVHitRateEvent metrics from the KV router as they are published
     let metrics_server = Arc::new(tokio::sync::Mutex::new(metrics_server));
     metrics_server.lock().await.start(9091);
 
@@ -183,12 +186,14 @@ async fn app(runtime: Runtime) -> Result<()> {
             collect_endpoints(&target_component, &service_subject, scrape_timeout).await?;
         let metrics = extract_metrics(&endpoints);
         let processed = postprocess_metrics(&metrics, &endpoints);
-        //tracing::info!("Aggregated metrics: {processed:?}");
+        tracing::debug!("Aggregated metrics: {processed:?}");
 
         // Update Prometheus metrics
         metrics_server.lock().await.update(&config, &processed);
 
-        // TODO: Who needs to consume these events?
+        // TODO: Enable KV Routers to subscribe to metrics events published here
+        // for a single view of the aggregated metrics, as opposed to the current
+        // approach where each KV Router computes and published its own metrics.
         // Publish metrics event
         namespace.publish(&event_name, &processed).await?;
 
