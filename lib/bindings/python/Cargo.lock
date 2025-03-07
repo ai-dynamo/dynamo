@@ -984,6 +984,8 @@ dependencies = [
  "minijinja-contrib",
  "prometheus",
  "pyo3",
+ "pyo3-async-runtimes",
+ "pythonize",
  "regex",
  "semver",
  "serde",

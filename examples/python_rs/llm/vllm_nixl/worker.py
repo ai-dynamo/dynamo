@@ -79,7 +79,7 @@ class RequestHandler:
     def get_remote_prefill_request_callback(self):
         async def callback(request: RemotePrefillRequest):
             json_request = msgspec.json.encode(request).decode("utf-8")
-            self.prefill_client.generate(json_request)
+            self.prefill_client.round_robin(json_request)
 
         return callback
 

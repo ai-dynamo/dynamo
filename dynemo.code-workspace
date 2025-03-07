@@ -6,7 +6,7 @@
     ],
     "settings": {
         "rust-analyzer.linkedProjects": [
-            "applications/llm/count/Cargo.toml",
+            "components/metrics/Cargo.toml",
             "lib/llm/Cargo.toml",
             "lib/runtime/Cargo.toml",
             "lib/bindings/python/Cargo.toml",
