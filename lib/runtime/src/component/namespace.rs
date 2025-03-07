@@ -14,10 +14,12 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+use futures::stream::StreamExt;
+use futures::{Stream, TryStreamExt};
 
 use super::*;
 
-use crate::traits::events::EventPublisher;
+use crate::traits::events::{EventPublisher, EventSubscriber};
 
 #[async_trait]
 impl EventPublisher for Namespace {
@@ -49,6 +51,32 @@ impl EventPublisher for Namespace {
     }
 }
 
+#[async_trait]
+impl EventSubscriber for Namespace {
+    async fn subscribe(
+        &self,
+        event_name: impl AsRef<str> + Send + Sync,
+    ) -> Result<async_nats::Subscriber> {
+        let subject = format!("{}.{}", self.subject(), event_name.as_ref());
+        Ok(self.drt().nats_client().client().subscribe(subject).await?)
+    }
+
+    async fn subscribe_with_type<T: for<'de> Deserialize<'de> + Send + 'static>(
+        &self,
+        event_name: impl AsRef<str> + Send + Sync,
+    ) -> Result<impl Stream<Item = Result<T>> + Send> {
+        let subscriber = self.subscribe(event_name).await?;
+
+        // Transform the subscriber into a stream of deserialized events
+        let stream = subscriber.map(move |msg| {
+            serde_json::from_slice::<T>(&msg.payload)
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize event: {}", e))
+        });
+
+        Ok(stream)
+    }
+}
+
 #[cfg(feature = "integration")]
 #[cfg(test)]
 mod tests {
@@ -62,6 +90,29 @@ mod tests {
         let dtr = DistributedRuntime::from_settings(rt.clone()).await.unwrap();
         let ns = dtr.namespace("test".to_string()).unwrap();
         ns.publish("test", &"test".to_string()).await.unwrap();
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_subscribe() {
+        let rt = Runtime::from_current().unwrap();
+        let dtr = DistributedRuntime::from_settings(rt.clone()).await.unwrap();
+        let ns = dtr.namespace("test".to_string()).unwrap();
+
+        // Create a subscriber
+        let subscriber = ns.subscribe("test").await.unwrap();
+
+        // Publish a message
+        ns.publish("test", &"test_message".to_string())
+            .await
+            .unwrap();
+
+        // Receive the message
+        if let Some(msg) = subscriber.next().await {
+            let received = String::from_utf8(msg.payload.to_vec()).unwrap();
+            assert_eq!(received, "\"test_message\"");
+        }
+
         rt.shutdown();
     }
 }

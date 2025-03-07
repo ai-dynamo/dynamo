@@ -14,13 +14,13 @@
 # limitations under the License.
 
 [package]
-name = "triton-distributed-py3"
+name = "dynemo-py3"
 version = "0.2.1"
 edition = "2021"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
-homepage = "https://github.com/triton-inference-server/triton_distributed"
-repository = "https://github.com/triton-inference-server/triton_distributed"
+homepage = "https://github.com/dynemo-ai/dynemo"
+repository = "https://github.com/dynemo-ai/dynemo.git"
 
 [lib]
 path = "rust/lib.rs"
@@ -30,8 +30,8 @@ crate-type = ["cdylib"]
 
 
 [dependencies]
-triton-distributed-llm = { path = "../../llm" }
-triton-distributed-runtime = { path = "../../runtime" }
+dynemo-llm = { path = "../../llm", features = ["python"] }
+dynemo-runtime = { path = "../../runtime" }
 
 futures = "0.3"
 once_cell = "1.20.3"

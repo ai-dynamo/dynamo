@@ -53,7 +53,8 @@ We provide 3 types of builds:
 
 1. `STANDARD` which includes our default set of backends (onnx, openvino...)
 2. `TENSORRTLLM` which includes our TRT-LLM backend
-3. `VLLM` which includes our VLLM backend
+3. `VLLM` which includes our VLLM backend using NCCL communication library.
+4. `VLLM_NIXL` which includes our VLLM backend using new NIXL communication library.
 
 For example, if you want to build a container for the `STANDARD` backends you can run
 
@@ -71,7 +72,7 @@ The run script offers a few common workflows:
 1. Running a command in a container and exiting.
 
 ```
-./container/run.sh -- python3 -c "import triton_distributed.runtime; help(triton_distributed.runtime)"
+./container/run.sh -- python3 -c "import dynemo.runtime; help(dynemo.runtime)"
 ```
 
 2. Starting an interactive shell.

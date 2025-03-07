@@ -19,6 +19,8 @@ use std::{
 };
 
 use async_zmq::{SinkExt, StreamExt};
+use dynemo_runtime::protocols::annotated::Annotated;
+use dynemo_runtime::CancellationToken;
 use pyo3::{
     prelude::*,
     types::{IntoPyDict, PyBytes, PyString},
@@ -26,9 +28,8 @@ use pyo3::{
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 use tokio::{io::AsyncBufReadExt, sync::mpsc::error::SendError};
-use triton_distributed_runtime::protocols::annotated::Annotated;
-use triton_distributed_runtime::CancellationToken;
 
+use crate::engines::MultiNodeConfig;
 use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::FinishReason;
@@ -156,6 +157,8 @@ pub async fn start(
     sock_code: &str,
     card_path: &Path,
     model_path: &Path,
+    _node_conf: MultiNodeConfig,
+    tensor_parallel_size: u32,
 ) -> anyhow::Result<VllmWorker> {
     pyo3::prepare_freethreaded_python(); // or enable feature "auto-initialize"
 
@@ -168,7 +171,14 @@ pub async fn start(
         heartbeat,
     } = zmq_sockets(sock_code)?;
 
-    let vllm_process = start_vllm(card_path, model_path, &py_imports, data).await?;
+    let vllm_process = start_vllm(
+        card_path,
+        model_path,
+        &py_imports,
+        data,
+        tensor_parallel_size,
+    )
+    .await?;
     let vllm_join_handle = watch_vllm(cancel_token.clone(), vllm_process);
 
     tokio::spawn(heartbeat_loop(cancel_token.clone(), heartbeat));
@@ -285,12 +295,13 @@ async fn start_vllm(
     model_path: &Path,
     python_imports: &Imports,
     mut data_socket: async_zmq::Dealer<IntoIter<Vec<u8>>, Vec<u8>>,
+    tensor_parallel_size: u32,
 ) -> anyhow::Result<tokio::process::Child> {
-    // The in/out args are not used but we currently require them for parsing cli args
     let vllm_args = [
         "--internal-vllm-process",
         &format!("--model-config={}", card_path.display()),
         &format!("--model-path={}", model_path.display()),
+        &format!("--tensor-parallel-size={tensor_parallel_size}"),
     ];
 
     let self_path = std::env::current_exe()?;

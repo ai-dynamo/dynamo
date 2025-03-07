@@ -22,6 +22,6 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
-triton-distributed-runtime = { workspace = true }
+dynemo-runtime = { workspace = true }
 
 # third-party

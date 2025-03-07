@@ -1,5 +1,5 @@
 ---
-source: triton-llm/tests/openai_completions.rs
+source: dynemo-llm/tests/openai_completions.rs
 description: "should have prompt, model, and stop fields"
 expression: sample.request
 ---

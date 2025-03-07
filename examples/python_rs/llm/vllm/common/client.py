@@ -19,12 +19,12 @@ import asyncio
 
 import uvloop
 
-from triton_distributed.runtime import DistributedRuntime, triton_worker
+from dynemo.runtime import DistributedRuntime, dynemo_worker
 
 from .protocol import Request
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(
     runtime: DistributedRuntime,
     component: str,
@@ -36,9 +36,7 @@ async def worker(
     Instantiate a `backend` client and call the `generate` endpoint
     """
     # get endpoint
-    endpoint = (
-        runtime.namespace("triton-init").component(component).endpoint("generate")
-    )
+    endpoint = runtime.namespace("dynemo").component(component).endpoint("generate")
 
     # create client
     client = await endpoint.client()

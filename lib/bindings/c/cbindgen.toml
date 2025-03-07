@@ -15,7 +15,7 @@
 
 language = "C++"
 cpp_compat = true
-include_guard = "__NVIDIA_TRITON_LLM_API__"
+include_guard = "__NVIDIA_DYNEMO_LLM_API__"
 
 
 [enum]
@@ -25,7 +25,7 @@ enum_class = false
 
 
 [export]
-include = ["TritonLlmResult", "triton_llm_init", "triton_llm_shutdown"]
+include = ["DynemoLlmResult", "dynemo_llm_init", "dynemo_llm_shutdown"]
 
 [export.rename]
-"TritonLlmResult" = "triton_llm_result_t"
+"DynemoLlmResult" = "dynemo_llm_result_t"

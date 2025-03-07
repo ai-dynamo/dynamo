@@ -120,7 +120,7 @@ $global:copyright_results = @{
 
 # === end common.ps1 extensions ===
 
-$ignored_files = @('.clang-format', '.gitattributes', '.gitignore', '.gitkeep', '.patch', 'Cargo.lock', 'LICENSE', 'uv.lock', 'rust-toolchain.toml')
+$ignored_files = @('.clang-format', '.gitattributes', '.gitignore', '.gitkeep', '.patch', 'Cargo.lock', 'LICENSE', 'uv.lock', 'rust-toolchain.toml', 'codespell.txt')
 write-debug "<copyright-check> ignored_files = ['$($ignored_files -join "','")']."
 $ignored_paths = @('.github', '.mypy_cache', '.pytest_cache', 'lib/llm/tests/data/sample-models')
 write-debug "<copyright-check> ignored_paths = ['$($ignored_paths -join "','")']."

@@ -37,10 +37,11 @@ use tokio::sync::mpsc::Sender;
 use tokio::{io::AsyncBufReadExt, sync::mpsc::error::SendError};
 use tokio::{io::AsyncReadExt as _, task::JoinHandle};
 
-use triton_distributed_runtime::protocols::annotated::Annotated;
-use triton_distributed_runtime::runtime::CancellationToken;
+use dynemo_runtime::protocols::annotated::Annotated;
+use dynemo_runtime::runtime::CancellationToken;
 
-use crate::engines::sglang::{MultiGPUConfig, MultiNodeConfig};
+use crate::engines::sglang::MultiGPUConfig;
+use crate::engines::MultiNodeConfig;
 use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::FinishReason;
@@ -302,9 +303,10 @@ pub async fn start(
     let py_imports = Arc::new(python_imports());
 
     if tp_size < node_conf.num_nodes {
-        anyhow::bail!("Need at least as many GPUs as nodes. In nio set --tensor-parallel-size >= --num-nodes.");
+        anyhow::bail!(
+            "Need at least as many GPUs as nodes. Pass --tensor-parallel-size >= --num-nodes."
+        );
     }
-
     let tp_size_per_node = tp_size / node_conf.num_nodes;
     let tp_rank_start = tp_size_per_node * node_conf.node_rank;
     let tp_rank_end = tp_size_per_node * (node_conf.node_rank + 1);
@@ -460,8 +462,11 @@ async fn start_sglang(
         format!("--num-nodes={}", node_conf.num_nodes),
         format!("--node-rank={}", node_conf.node_rank),
     ];
-    if let Some(dist_init_addr) = node_conf.dist_init_addr {
-        args.push(format!("--dist-init-addr={dist_init_addr}"));
+    if node_conf.num_nodes > 1 {
+        if node_conf.leader_addr.is_empty() {
+            anyhow::bail!("Missing --leader-addr for multi-node");
+        }
+        args.push(format!("--leader-addr={}", node_conf.leader_addr));
     }
     let self_path = std::env::current_exe()?;
     let mut proc = tokio::process::Command::new(self_path)

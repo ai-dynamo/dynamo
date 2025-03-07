@@ -50,12 +50,18 @@ jobs:
             - 'examples/python_rs/llm/**'
             - 'container/deps/requirements.vllm.txt'
             - 'container/deps/vllm/**'
+          sdk:
+            - 'deploy/compoundai/**'
     - name: Trigger Pipeline
       run: |
         #!/bin/bash -e
         declare -A ci_variables
         if [ "${{ steps.src_changes.outputs.vllm }}" == "true" ]; then
           ci_variables["RUN_VLLM"]="true"
+        fi
+
+        if [ "${{ steps.src_changes.outputs.sdk }}" == "true" ]; then
+          ci_variables["RUN_SDK_CI"]="true"
         fi
 
         ci_args=""

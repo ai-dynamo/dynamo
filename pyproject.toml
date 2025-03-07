@@ -14,12 +14,12 @@
 # limitations under the License.
 
 [project]
-name = "triton-distributed"
+name = "dynemo"
 version = "0.2.1"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
-    { name = "NVIDIA Inc.", email = "sw-dl-triton@nvidia.com" },
+    { name = "NVIDIA Inc.", email = "sw-dl-dynemo@nvidia.com" },
 ]
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -30,11 +30,11 @@ dependencies = [
 ]
 
 [tool.maturin]
-module-name = "triton_distributed._core"
+module-name = "dynemo._core"
 # Point to the Rust crate directory
 manifest-path = "lib/bindings/python/Cargo.toml"
 # Include all Python packages
-python-packages = ["triton_distributed"]
+python-packages = ["dynemo"]
 # Specify the Python source directory
 python-source = "lib/bindings/python/src"
 
@@ -50,17 +50,15 @@ build-backend = "maturin"
 # this is only to allow you to run codespell interactively
 # this also overrides the grpc_generated folder, since it is generated
 
-# TODO add skip files for generated code
-# skip = "./.git,./.github,./src/grpc_generated"
-skip = "./.git,./.github,./lib/llm/tests/data"
+# Ignore data files and auto-generated files
+skip = "./.git,./.github,./lib/llm/tests/data,*.lock,*.sum"
 
-# ignore short words, and typename parameters like OffsetT
-ignore-regex = "\\b(.{1,4}|[A-Z]\\w*T)\\b"
-# ignore allowed words
-# ignoring atleast to avoid testing::AtLeast from getting flagged
-ignore-words-list = "atleast"
+# ignore allowed words used in code
+ignore-words-list = "afterall,ser,ende"
 # use the 'clear' dictionary for unambiguous spelling mistakes
 builtin = "clear"
+# use custom dictionary in addition to the built-in one
+dictionary = "./codespell.txt"
 # disable warnings about binary files and wrong encoding
 quiet-level = 3
 
@@ -75,7 +73,7 @@ line_length = 88
 balanced_wrapping = true
 indent = "    "
 skip = ["build"]
-known_first_party = ["triton_distributed"]
+known_first_party = ["dynemo"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -136,5 +134,10 @@ check_untyped_defs = true
 
 [[tool.mypy.overrides]]
 # Skip mypy analysis on internal dependencies of vllm
-module = ["vllm.*"]
+module = ["vllm.*", "bentoml.*", "fs.*", "_bentoml_sdk.*"]
 follow_imports = "skip"
+ignore_missing_imports = true
+
+# declare namespace packages
+[tool.setuptools]
+namespace-packages = ["dynemo", "dynemo.sdk"]

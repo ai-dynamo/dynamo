@@ -27,3 +27,26 @@ pub mod vllm;
 
 #[cfg(feature = "trtllm")]
 pub mod trtllm;
+
+#[cfg(feature = "python")]
+pub mod python;
+
+#[derive(Debug, Clone)]
+pub struct MultiNodeConfig {
+    /// How many nodes / hosts we are using
+    pub num_nodes: u32,
+    /// Unique consecutive integer to identify this node
+    pub node_rank: u32,
+    /// host:port of head / control node
+    pub leader_addr: String,
+}
+
+impl Default for MultiNodeConfig {
+    fn default() -> Self {
+        MultiNodeConfig {
+            num_nodes: 1,
+            node_rank: 0,
+            leader_addr: "".to_string(),
+        }
+    }
+}

@@ -16,8 +16,8 @@
 use clap::{Parser, Subcommand};
 use tracing as log;
 
-use triton_distributed_llm::{http::service::discovery::ModelEntry, model_type::ModelType};
-use triton_distributed_runtime::{
+use dynemo_llm::{http::service::discovery::ModelEntry, model_type::ModelType};
+use dynemo_runtime::{
     distributed::DistributedConfig, logging, protocols::Endpoint, raise, DistributedRuntime,
     Result, Runtime, Worker,
 };

@@ -24,11 +24,7 @@ from common.protocol import PrefillRequest, PrefillResponse
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.logger import logger as vllm_logger
 
-from triton_distributed.runtime import (
-    DistributedRuntime,
-    triton_endpoint,
-    triton_worker,
-)
+from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
 
 class VllmPrefillEngine(BaseVllmEngine):
@@ -49,7 +45,7 @@ class VllmPrefillEngine(BaseVllmEngine):
         self.kv_transfer_config = engine_args.create_engine_config().kv_transfer_config
         self.kv_rank = self.kv_transfer_config.kv_rank
 
-    @triton_endpoint(PrefillRequest, PrefillResponse)
+    @dynemo_endpoint(PrefillRequest, PrefillResponse)
     async def generate(self, request):
         if self.engine_client is None:
             await self.initialize()
@@ -66,13 +62,13 @@ class VllmPrefillEngine(BaseVllmEngine):
                 yield True
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     """
     Instantiate a `backend` component and serve the `generate` endpoint
     A `Component` can serve multiple endpoints
     """
-    component = runtime.namespace("triton-init").component("prefill")
+    component = runtime.namespace("dynemo").component("prefill")
     await component.create_service()
 
     async with VllmPrefillEngine(engine_args) as prefill_engine:

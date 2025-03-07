@@ -13,4 +13,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub const DEFAULT_NAMESPACE: &str = "triton-init";
+pub const DEFAULT_NAMESPACE: &str = "dynemo";
