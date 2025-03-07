@@ -138,3 +138,7 @@ check_untyped_defs = true
 # Skip mypy analysis on internal dependencies of vllm
 module = ["vllm.*"]
 follow_imports = "skip"
+
+# declare namespace packages
+[tool.setuptools]
+namespace-packages = ["dynemo", "dynemo.sdk"]

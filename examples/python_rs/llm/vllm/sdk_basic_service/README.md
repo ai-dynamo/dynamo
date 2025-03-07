@@ -40,10 +40,22 @@ Users/Clients (HTTP)
 
 
 ## Unified serve
-Launch all three services using a single command -
+1. Launch all three services using a single command -
 
 ```bash
 cd /workspace/examples/python_rs/llm/vllm
 
 dynemo-sdk serve sdk_basic_service.basic:Frontend
+```
+
+2. Send request to frontend using curl -
+
+```bash
+curl -X 'POST' \
+  'http://localhost:3000/generate' \
+  -H 'accept: text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "text": "test"
+}'
 ```
