@@ -957,7 +957,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo.llm"
+name = "dynamo-llm"
 version = "0.2.1"
 dependencies = [
  "anyhow",
@@ -1006,10 +1006,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynemo-py3"
+name = "dynamo-py3"
 version = "0.2.1"
 dependencies = [
- "dynamo.llm",
+ "dynamo-llm",
  "dynamo-runtime",
  "futures",
  "once_cell",
