@@ -66,7 +66,7 @@ fn main() -> anyhow::Result<()> {
                         tp_rank: sglang_flags.tp_rank,
                         gpu_id: sglang_flags.gpu_id,
                     };
-                    let node_config = dynamo.llm::engines::MultiNodeConfig {
+                    let node_config = dynamo_llm::engines::MultiNodeConfig {
                         num_nodes: flags.num_nodes,
                         node_rank: flags.node_rank,
                         leader_addr: flags.leader_addr.unwrap_or_default(),
@@ -99,7 +99,7 @@ fn main() -> anyhow::Result<()> {
                 #[cfg(feature = "vllm")]
                 {
                     use dynamo_llm::engines::vllm;
-                    let node_config = dynamo.llm::engines::MultiNodeConfig {
+                    let node_config = dynamo_llm::engines::MultiNodeConfig {
                         num_nodes: flags.num_nodes,
                         node_rank: flags.node_rank,
                         leader_addr: flags.leader_addr.unwrap_or_default(),
@@ -119,15 +119,15 @@ fn main() -> anyhow::Result<()> {
     }
 
     // max_worker_threads and max_blocking_threads from env vars or config file.
-    let rt_config = dynamo.runtime::RuntimeConfig::from_settings()?;
+    let rt_config = dynamo_runtime::RuntimeConfig::from_settings()?;
 
     // One per process. Wraps a Runtime with holds two tokio runtimes.
-    let worker = dynamo.runtime::Worker::from_config(rt_config)?;
+    let worker = dynamo_runtime::Worker::from_config(rt_config)?;
 
     worker.execute(wrapper)
 }
 
-async fn wrapper(runtime: dynamo.runtime::Runtime) -> anyhow::Result<()> {
+async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
     let mut in_opt = None;
     let mut out_opt = None;
     let args: Vec<String> = env::args().skip(1).collect();

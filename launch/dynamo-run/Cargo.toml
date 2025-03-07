@@ -22,14 +22,14 @@ homepage = "https://github.com/dynemo-ai/dynemo"
 license = "Apache-2.0"
 
 [features]
-mistralrs = ["dynamo.llm/mistralrs"]
-sglang = ["dynamo.llm/sglang", "dep:netlink-packet-route", "dep:rtnetlink"]
-vllm = ["dynamo.llm/vllm", "dep:netlink-packet-route", "dep:rtnetlink"]
-llamacpp = ["dynamo.llm/llamacpp"]
-trtllm = ["dynamo.llm/trtllm"]
-python = ["dynamo.llm/python"]
-cuda = ["dynamo.llm/cuda"]
-metal = ["dynamo.llm/metal"]
+mistralrs = ["dynamo-llm/mistralrs"]
+sglang = ["dynamo-llm/sglang", "dep:netlink-packet-route", "dep:rtnetlink"]
+vllm = ["dynamo-llm/vllm", "dep:netlink-packet-route", "dep:rtnetlink"]
+llamacpp = ["dynamo-llm/llamacpp"]
+trtllm = ["dynamo-llm/trtllm"]
+python = ["dynamo-llm/python"]
+cuda = ["dynamo-llm/cuda"]
+metal = ["dynamo-llm/metal"]
 
 [dependencies]
 anyhow = "1"
@@ -50,4 +50,4 @@ tokio-util = { version = "0.7", features = ["codec", "net"] }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
 dynamo-runtime = { path = "../../lib/runtime" }
-dynamo.llm = { path = "../../lib/llm" }
+dynamo-llm = { path = "../../lib/llm" }
