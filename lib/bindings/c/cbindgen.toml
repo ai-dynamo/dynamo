@@ -25,7 +25,7 @@ enum_class = false
 
 
 [export]
-include = ["DynamoLlmResult", "dynamo.llm_init", "dynamo.llm_shutdown"]
+include = ["DynamoLlmResult", "dynamo_llm_init", "dynamo_llm_shutdown"]
 
 [export.rename]
-"DynamoLlmResult" = "dynamo.llm_result_t"
+"DynamoLlmResult" = "dynamo_llm_result_t"

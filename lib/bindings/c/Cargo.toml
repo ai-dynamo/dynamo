@@ -14,7 +14,7 @@
 # limitations under the License.
 
 [package]
-name = "libdynamo.llm"
+name = "libdynamo_llm"
 version = "0.2.1"
 edition = "2021"
 authors = ["NVIDIA"]
@@ -23,14 +23,14 @@ homepage = "https://github.com/dynemo-ai/dynemo"
 repository = "https://github.com/dynemo-ai/dynemo.git"
 
 [lib]
-name = "dynamo.llm_capi"
+name = "dynamo_llm_capi"
 crate-type = ["cdylib"]
 
 [build-dependencies]
 cbindgen = "0.27"
 
 [dependencies]
-dynamo.llm = { path = "../../llm" }
+dynamo-llm = { path = "../../llm" }
 dynamo-runtime = { path = "../../runtime" }
 
 anyhow = { version = "1" }

@@ -22,7 +22,7 @@ homepage = "https://github.com/dynemo-ai/dynemo"
 repository = "https://github.com/dynemo-ai/dynemo.git"
 
 [package]
-name = "dynamo.llm"
+name = "dynamo-llm"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

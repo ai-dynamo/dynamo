@@ -49,7 +49,7 @@ pub enum DynamoLlmResult {
 /// # Safety
 /// the namespace_c_str and component_c_str are passed as pointers to C strings
 #[no_mangle]
-pub unsafe extern "C" fn dynamo.llm_init(
+pub unsafe extern "C" fn dynamo_llm_init(
     namespace_c_str: *const c_char,
     component_c_str: *const c_char,
     worker_id: i64,
@@ -108,7 +108,7 @@ pub unsafe extern "C" fn dynamo.llm_init(
 }
 
 #[no_mangle]
-pub extern "C" fn dynamo.llm_shutdown() -> DynamoLlmResult {
+pub extern "C" fn dynamo_llm_shutdown() -> DynamoLlmResult {
     let wk = match WK.get() {
         Some(wk) => wk,
         None => {
@@ -123,7 +123,7 @@ pub extern "C" fn dynamo.llm_shutdown() -> DynamoLlmResult {
 }
 
 #[no_mangle]
-pub extern "C" fn dynamo.llm_load_publisher_create() -> DynamoLlmResult {
+pub extern "C" fn dynamo_llm_load_publisher_create() -> DynamoLlmResult {
     DynamoLlmResult::OK
 }
 

@@ -39,10 +39,10 @@ class MockEngine:
     def __init__(self, metrics_publisher, worker_id):
         self.worker_id = worker_id
         # KV events
-        self.lib = ctypes.CDLL("/opt/dynamo/llm_binding/lib/libdynamo.llm_capi.so")
-        self.lib.dynamo.llm_init.argtypes = [c_char_p, c_char_p, c_int64]
-        self.lib.dynamo.llm_init.restype = c_uint32
-        result = self.lib.dynamo.llm_init("dynamo".encode(), "vllm".encode(), worker_id)
+        self.lib = ctypes.CDLL("/opt/dynamo/llm_binding/lib/libdynamo_llm_capi.so")
+        self.lib.dynamo_llm_init.argtypes = [c_char_p, c_char_p, c_int64]
+        self.lib.dynamo_llm_init.restype = c_uint32
+        result = self.lib.dynamo_llm_init("dynamo".encode(), "vllm".encode(), worker_id)
         if result == DynamoResult.OK:
             vllm_logger.info(
                 "KVCacheEventManager initialized successfully. Ready to publish KV Cache Events"
