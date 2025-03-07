@@ -14,7 +14,75 @@
 // limitations under the License.
 
 #[cfg(not(feature = "trtllm"))]
-fn main() {}
+fn main() {
+    use std::{env, path::PathBuf, process::Command};
+
+    println!("cargo:rerun-if-changed=src/kernels/block_copy.cu");
+
+    let cuda_lib = match env::var("CUDA_ROOT") {
+        Ok(path) => path,
+        Err(_) => {
+            // Default locations based on OS
+            if cfg!(target_os = "windows") {
+                "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v11.8".to_string()
+            } else {
+                "/usr/local/cuda".to_string()
+            }
+        }
+    };
+
+    let cuda_lib_path = PathBuf::from(&cuda_lib).join("lib64");
+    println!("cargo:rustc-link-search=native={}", cuda_lib_path.display());
+    println!("cargo:rustc-link-lib=dylib=cudart");
+
+    // Create kernels directory for output if it doesn't exist
+    std::fs::create_dir_all("src/kernels").unwrap_or_else(|_| {
+        println!("Kernels directory already exists");
+    });
+
+    // Compile CUDA code
+    let output = Command::new("nvcc")
+        .arg("src/kernels/block_copy.cu")
+        .arg("-O3")
+        .arg("--compiler-options")
+        .arg("-fPIC")
+        .arg("-o")
+        .arg("src/kernels/libblock_copy.o")
+        .arg("-c")
+        .output()
+        .expect("Failed to compile CUDA code");
+
+    if !output.status.success() {
+        panic!(
+            "Failed to compile CUDA kernel: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // Create static library
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("lib")
+            .arg("/OUT:src/kernels/block_copy.lib")
+            .arg("src/kernels/libblock_copy.o")
+            .output()
+            .expect("Failed to create static library");
+        println!("cargo:rustc-link-search=native=src/kernels");
+        println!("cargo:rustc-link-lib=static=block_copy");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("ar")
+            .arg("rcs")
+            .arg("src/kernels/libblock_copy.a")
+            .arg("src/kernels/libblock_copy.o")
+            .output()
+            .expect("Failed to create static library");
+        println!("cargo:rustc-link-search=native=src/kernels");
+        println!("cargo:rustc-link-lib=static=block_copy");
+    }
+}
 
 #[cfg(feature = "trtllm")]
 fn main() {
