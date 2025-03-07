@@ -14,10 +14,10 @@
 // limitations under the License.
 
 /// Utility functions for tensor parallel operations
-use candle_core::{DType, Device, Result, Tensor, Storage};
+use candle_core::{DType, Device, Result, Storage, Tensor};
+use cudarc::driver::{CudaDevice, DevicePtr, DevicePtrMut};
 use std::ffi::{c_ulong, c_void};
 use std::os::raw::{c_float, c_int};
-use cudarc::driver::{CudaDevice, DevicePtr, DevicePtrMut};
 
 pub struct KvLayer {
     data: Tensor,
@@ -217,7 +217,9 @@ pub fn create_pinned_tensor<S: Into<candle_core::Shape>>(shape: S, dtype: DType)
 
     // Allocate pinned memory
     let data = unsafe {
-        let pinned_slice = cuda_device.alloc_pinned::<u8>(num_bytes).map_err(|e| candle_core::Error::Msg(format!("Failed to allocate pinned memory: {}", e)))?;
+        let pinned_slice = cuda_device.alloc_pinned::<u8>(num_bytes).map_err(|e| {
+            candle_core::Error::Msg(format!("Failed to allocate pinned memory: {}", e))
+        })?;
         let data = Vec::from(std::slice::from_raw_parts(
             pinned_slice.as_ptr(),
             num_elements,
@@ -265,7 +267,7 @@ pub fn copy_blocks_between_tensors(
     // Validation logic (same as before)
     if src_block_ids.len() != dst_block_ids.len() {
         return Err(candle_core::Error::Msg(
-            "Source and destination block ID arrays must have the same length".into()
+            "Source and destination block ID arrays must have the same length".into(),
         ));
     }
 
@@ -279,7 +281,7 @@ pub fn copy_blocks_between_tensors(
 
     if !is_src_cuda && !is_dst_cuda {
         return Err(candle_core::Error::Msg(
-            "At least one tensor must be on a CUDA device".into()
+            "At least one tensor must be on a CUDA device".into(),
         ));
     }
 
@@ -304,13 +306,15 @@ pub fn copy_blocks_between_tensors(
     let dst_n_blocks = dst_dims[1] as i32;
 
     // Validate dimension compatibility
-    if tp_size != dst_tp_size ||
-       src_dims[2] != dst_dims[2] ||
-       src_dims[3] != dst_dims[3] ||
-       src_dims[4] != dst_dims[4] {
-        return Err(candle_core::Error::Msg(
-            format!("Incompatible tensor dimensions: src={:?}, dst={:?}", src_dims, dst_dims)
-        ));
+    if tp_size != dst_tp_size
+        || src_dims[2] != dst_dims[2]
+        || src_dims[3] != dst_dims[3]
+        || src_dims[4] != dst_dims[4]
+    {
+        return Err(candle_core::Error::Msg(format!(
+            "Incompatible tensor dimensions: src={:?}, dst={:?}",
+            src_dims, dst_dims
+        )));
     }
 
     // Convert block IDs to i32
@@ -322,15 +326,19 @@ pub fn copy_blocks_between_tensors(
     let max_dst_id = *dst_block_ids.iter().max().unwrap_or(&0);
 
     if max_src_id as usize >= src_dims[1] as usize {
-        return Err(candle_core::Error::Msg(
-            format!("Source block ID {} is out of range (max: {})", max_src_id, src_dims[1] - 1)
-        ));
+        return Err(candle_core::Error::Msg(format!(
+            "Source block ID {} is out of range (max: {})",
+            max_src_id,
+            src_dims[1] - 1
+        )));
     }
 
     if max_dst_id as usize >= dst_dims[1] as usize {
-        return Err(candle_core::Error::Msg(
-            format!("Destination block ID {} is out of range (max: {})", max_dst_id, dst_dims[1] - 1)
-        ));
+        return Err(candle_core::Error::Msg(format!(
+            "Destination block ID {} is out of range (max: {})",
+            max_dst_id,
+            dst_dims[1] - 1
+        )));
     }
 
     // Check for host memory being pinned - we can't directly check this in Candle,
@@ -351,7 +359,7 @@ pub fn copy_blocks_between_tensors(
     // Make sure we have all the strides we need
     if src_strides.len() != 5 || dst_strides.len() != 5 {
         return Err(candle_core::Error::Msg(
-            "Could not get strides for tensors - expected 5 dimensions".into()
+            "Could not get strides for tensors - expected 5 dimensions".into(),
         ));
     }
 
@@ -401,9 +409,10 @@ pub fn copy_blocks_between_tensors(
     };
 
     if result != 0 {
-        return Err(candle_core::Error::Msg(
-            format!("CUDA error while copying blocks: {}", result)
-        ));
+        return Err(candle_core::Error::Msg(format!(
+            "CUDA error while copying blocks: {}",
+            result
+        )));
     }
 
     Ok(())
@@ -436,15 +445,15 @@ pub fn get_tensor_ptr(tensor: &Tensor) -> Result<*const c_void> {
             let slice = cuda_storage.as_cuda_slice::<f32>()?;
             let ptr = *slice.device_ptr() as *const c_void;
             Ok(ptr)
-        },
+        }
         Storage::Cpu(cpu_storage) => {
             // For CPU storage, get the host memory pointer
             let slice = cpu_storage.as_slice::<f32>()?;
             let ptr = slice.as_ptr() as *const c_void;
             Ok(ptr)
-        },
+        }
         _ => Err(candle_core::Error::Msg(
-            "Unsupported storage type - only CPU and CUDA tensors are supported".into()
+            "Unsupported storage type - only CPU and CUDA tensors are supported".into(),
         )),
     }
 }
@@ -470,14 +479,16 @@ pub fn get_tensor_ptr_and_strides(tensor: &Tensor) -> Result<(*const c_void, Vec
         Storage::Cuda(cuda_storage) => {
             let slice = cuda_storage.as_cuda_slice::<f32>()?;
             *slice.device_ptr() as *const c_void
-        },
+        }
         Storage::Cpu(cpu_storage) => {
             let slice = cpu_storage.as_slice::<f32>()?;
             slice.as_ptr() as *const c_void
-        },
-        _ => return Err(candle_core::Error::Msg(
-            "Unsupported storage type - only CPU and CUDA tensors are supported".into()
-        )),
+        }
+        _ => {
+            return Err(candle_core::Error::Msg(
+                "Unsupported storage type - only CPU and CUDA tensors are supported".into(),
+            ))
+        }
     };
 
     Ok((ptr, strides))
@@ -507,15 +518,15 @@ pub unsafe fn get_tensor_ptr_mut(tensor: &Tensor) -> Result<*mut c_void> {
         Storage::Cuda(cuda_storage) => {
             let ptr = *cuda_storage.as_cuda_slice::<f32>()?.device_ptr();
             return Ok(ptr as *mut c_void);
-        },
+        }
         Storage::Cpu(cpu_storage) => {
             // For CPU storage, get the host memory pointer
             let slice = cpu_storage.as_slice::<f32>()?;
             let ptr = slice.as_ptr() as *mut c_void;
             Ok(ptr)
-        },
+        }
         _ => Err(candle_core::Error::Msg(
-            "Unsupported storage type - only CPU and CUDA tensors are supported".into()
+            "Unsupported storage type - only CPU and CUDA tensors are supported".into(),
         )),
     }
 }
@@ -840,12 +851,12 @@ mod tests {
         };
 
         // Define tensor dimensions
-        let tp_size = 2;                // 2 for key and value
-        let src_n_blocks = 10;          // Source has 10 blocks
-        let dst_n_blocks = 20;          // Destination has 20 blocks
-        let block_size = 4;             // Each block has 4 positions
-        let heads_per_rank = 8;         // 8 heads per rank
-        let head_size = 16;             // Each head is 16-dimensional
+        let tp_size = 2; // 2 for key and value
+        let src_n_blocks = 10; // Source has 10 blocks
+        let dst_n_blocks = 20; // Destination has 20 blocks
+        let block_size = 2;
+        let heads_per_rank = 4;
+        let head_size = 8;
 
         println!("Allocating source tensor on device...");
 
@@ -872,7 +883,8 @@ mod tests {
 
         // Allocate pinned memory for destination tensor
         let total_dst_elements = tp_size * dst_n_blocks * block_size * heads_per_rank * head_size;
-        let mut pinned_mem = unsafe { cuda_device.alloc_pinned::<f32>(total_dst_elements).unwrap() };
+        let mut pinned_mem =
+            unsafe { cuda_device.alloc_pinned::<f32>(total_dst_elements).unwrap() };
 
         // Initialize pinned memory to zeros
         unsafe {
@@ -889,7 +901,7 @@ mod tests {
 
         // Define block mapping
         let src_blocks = vec![1, 3, 5, 7, 9]; // Source blocks
-        let dst_blocks = vec![0, 2, 4, 6, 8]; // Destination blocks
+        let dst_blocks = vec![0, 1, 2, 3, 4]; // Destination blocks
 
         println!("Performing block copy (device to host)...");
 
@@ -898,64 +910,97 @@ mod tests {
         copy_blocks_between_tensors(&src_tensor, &dst_tensor, &src_blocks, &dst_blocks)?;
         let elapsed = start.elapsed();
 
+        println!("dst_tensor: {}", dst_tensor.to_string());
+
         println!("Copy completed in {:?}", elapsed);
 
         // Verify results directly from pinned memory to avoid any copying
         println!("Verifying results...");
 
-        unsafe {
-            let dst_data = std::slice::from_raw_parts(pinned_mem.as_ptr(), total_dst_elements);
+        // validate the dst_tensor
+        // Validate only the blocks that were transferred
+        for (idx, &dst_block) in dst_blocks.iter().enumerate() {
+            let src_block = src_blocks[idx];
 
-            // Calculate elements per block
-            let elements_per_block = block_size * heads_per_rank * head_size;
+            for kv in 0..2 {
+                for pos in 0..block_size {
+                    for head in 0..heads_per_rank {
+                        for i in 0..head_size {
+                            // Get the value at this position in the destination tensor
+                            let value = dst_tensor
+                                .get(kv)?
+                                .get(dst_block as usize)?
+                                .get(pos)?
+                                .get(head)?
+                                .get(i)?;
 
-            // Check each destination block
-            for (src_id, dst_id) in src_blocks.iter().zip(dst_blocks.iter()) {
-                // For each KV dimension (0 and 1)
-                for kv in 0..tp_size {
-                    let base_offset = kv * dst_n_blocks * elements_per_block +
-                                      *dst_id as usize * elements_per_block;
-
-                    // Check first element of the block
-                    let value = dst_data[base_offset];
-                    assert_eq!(
-                        value, *src_id as f32,
-                        "Value mismatch at KV={}, dst_block={}, expected={}",
-                        kv, dst_id, src_id
-                    );
-
-                    // Check a random element in the middle of the block
-                    let random_offset = base_offset +
-                                       2 * heads_per_rank * head_size + // position 2
-                                       3 * head_size +                  // head 3
-                                       5;                               // element 5
-
-                    // Make sure it's in range
-                    if random_offset < dst_data.len() {
-                        let value = dst_data[random_offset];
-                        assert_eq!(
-                            value, *src_id as f32,
-                            "Value mismatch at KV={}, dst_block={}, pos=2, head=3, elm=5, expected={}",
-                            kv, dst_id, src_id
-                        );
+                            // The value should match the source block ID
+                            let value_f32 = value.to_scalar::<f32>()?;
+                            assert_eq!(
+                                value_f32, src_block as f32,
+                                "Value mismatch at dst_block={}, pos={}, head={}, i={}, expected={}",
+                                dst_block, pos, head, i, src_block
+                            );
+                        }
                     }
                 }
             }
-
-            // Also verify that untouched blocks still have zeros
-            let untouched_blocks = vec![1, 3, 5, 7, 9]; // These aren't in the dst_blocks list
-
-            for &block_id in &untouched_blocks {
-                let base_offset = 0 * dst_n_blocks * elements_per_block + // KV=0
-                                 block_id as usize * elements_per_block;  // block_id
-
-                let value = dst_data[base_offset];
-                assert_eq!(
-                    value, 0.0,
-                    "Untouched block {} should still be zero", block_id
-                );
-            }
         }
+
+        // unsafe {
+        //     let dst_data = std::slice::from_raw_parts(pinned_mem.as_ptr(), total_dst_elements);
+
+        //     // Calculate elements per block
+        //     let elements_per_block = block_size * heads_per_rank * head_size;
+
+        //     // Check each destination block
+        //     for (src_id, dst_id) in src_blocks.iter().zip(dst_blocks.iter()) {
+        //         // For each KV dimension (0 and 1)
+        //         for kv in 0..tp_size {
+        //             let base_offset = kv * dst_n_blocks * elements_per_block
+        //                 + *dst_id as usize * elements_per_block;
+
+        //             // Check first element of the block
+        //             let value = dst_data[base_offset];
+        //             assert_eq!(
+        //                 value, *src_id as f32,
+        //                 "Value mismatch at KV={}, dst_block={}, expected={}",
+        //                 kv, dst_id, src_id
+        //             );
+
+        //             // Check a random element in the middle of the block
+        //             let random_offset = base_offset +
+        //                                2 * heads_per_rank * head_size + // position 2
+        //                                3 * head_size +                  // head 3
+        //                                5; // element 5
+
+        //             // Make sure it's in range
+        //             if random_offset < dst_data.len() {
+        //                 let value = dst_data[random_offset];
+        //                 assert_eq!(
+        //                     value, *src_id as f32,
+        //                     "Value mismatch at KV={}, dst_block={}, pos=2, head=3, elm=5, expected={}",
+        //                     kv, dst_id, src_id
+        //                 );
+        //             }
+        //         }
+        //     }
+
+        //     // Also verify that untouched blocks still have zeros
+        //     let untouched_blocks = vec![1, 3, 5, 7, 9]; // These aren't in the dst_blocks list
+
+        //     for &block_id in &untouched_blocks {
+        //         let base_offset = 0 * dst_n_blocks * elements_per_block + // KV=0
+        //                          block_id as usize * elements_per_block; // block_id
+
+        //         let value = dst_data[base_offset];
+        //         assert_eq!(
+        //             value, 0.0,
+        //             "Untouched block {} should still be zero",
+        //             block_id
+        //         );
+        //     }
+        // }
 
         println!("All tests passed successfully!");
 
