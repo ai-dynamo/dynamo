@@ -55,7 +55,7 @@ func ToDeploymentTargetSchemas(ctx context.Context, deploymentTargets []*models.
 			return nil, errors.Errorf("Invalid format for DynamoNIM version tag %s. Expected 2 parts got %d", deploymentTarget.DynamoNimVersionTag, len(dynamoNimParts))
 		}
 
-		dynamoNimVersionFullSchema, err := services.DatastoreService.GetDynamoNimVersion(ctx, dynamoNimParts[0], dynamoNimParts[1])
+		dynamoNimVersionFullSchema, err := services.DatabaseService.GetDynamoNimVersion(ctx, dynamoNimParts[0], dynamoNimParts[1])
 		if err != nil {
 			dynamoNimVersionFullSchema = nil // We shouldn't fail the request if this info is missing
 		}

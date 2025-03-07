@@ -20,6 +20,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/consts"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/database"
@@ -27,6 +28,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
 	"github.com/rs/zerolog/log"
 	"gorm.io/gorm"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type deploymentTargetService struct{}
@@ -193,7 +196,7 @@ func (s *deploymentTargetService) Deploy(ctx context.Context, deploymentTarget *
 
 	err := s.getDB(ctx).Where("id = ?", deploymentTarget.ID).Save(deploymentTarget).Error
 	if err != nil {
-		deleteErr := DeploymentManagementService.Delete(ctx, deploymentTarget)
+		deleteErr := s.deleteKubeResources(ctx, deploymentTarget)
 		if deleteErr != nil {
 			log.Error().Msg("Failed to clean up kube resources for erroneous deployment")
 		}
@@ -206,13 +209,45 @@ func (s *deploymentTargetService) Deploy(ctx context.Context, deploymentTarget *
 }
 
 func (s *deploymentTargetService) Terminate(ctx context.Context, deploymentTarget *models.DeploymentTarget) (*models.DeploymentTarget, error) {
-	err := DeploymentManagementService.Delete(ctx, deploymentTarget)
+	err := s.deleteKubeResources(ctx, deploymentTarget)
 	if err != nil {
 		log.Error().Msgf("Failed to terminate kube resources for deployment target %s\n", deploymentTarget.DynamoNimVersionTag)
 		return nil, err
 	}
 
 	return deploymentTarget, nil
+}
+
+// deleteKubeResources deletes the Kubernetes resources associated with a deployment target
+func (s *deploymentTargetService) deleteKubeResources(ctx context.Context, deploymentTarget *models.DeploymentTarget) error {
+	kubeClient, err := K8sService.GetK8sClient("")
+	if err != nil {
+		return fmt.Errorf("failed to get Kubernetes client: %w", err)
+	}
+
+	if deploymentTarget.KubeDeploymentId != "" {
+		// Extract namespace and name from KubeDeploymentId if needed
+		// assuming KubeDeploymentId is in format "namespace/name"
+		namespace := "default" // Default namespace
+		deploymentName := deploymentTarget.KubeDeploymentId
+
+		// If KubeDeploymentId contains namespace information, parse it
+		if parts := strings.Split(deploymentTarget.KubeDeploymentId, "/"); len(parts) == 2 {
+			namespace = parts[0]
+			deploymentName = parts[1]
+		}
+
+		// Delete the deployment
+		err = kubeClient.AppsV1().Deployments(namespace).Delete(ctx, deploymentName, metav1.DeleteOptions{})
+		if err != nil && !k8serrors.IsNotFound(err) {
+			log.Error().Err(err).Msgf("Failed to delete Kubernetes deployment %s", deploymentTarget.KubeDeploymentId)
+			return err
+		}
+	}
+
+	// TODO: Figure out whether we need KubeDeploymentId or KubeRequestId or if we delete it from k8s some other way
+
+	return nil
 }
 
 func (s *deploymentTargetService) getDB(ctx context.Context) *gorm.DB {

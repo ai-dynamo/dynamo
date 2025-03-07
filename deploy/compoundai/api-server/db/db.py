@@ -37,7 +37,7 @@ if not database_url:  # default to sqlite in-memory
     connect_args = {"check_same_thread": False}
     logger.warning("WARNING: Using SQLite in-memory database, no data persistence")  # noqa: T201
 
-
+os.environ["API_DATABASE_URL"] = database_url
 engine = create_engine(database_url, echo=True)
 async_engine = create_async_engine(database_url, echo=True)
 
