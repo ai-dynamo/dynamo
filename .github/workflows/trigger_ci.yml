@@ -60,7 +60,7 @@ jobs:
         script: |
           const eventName = context.eventName;
           let commit_sha = context.sha;
-          const workflow_id = 'build_validation.yml';
+          const workflow_id = 'pre-merge-python.yml';
           if (eventName === 'pull_request') {
             commit_sha = context.payload.pull_request.head.sha;
           }
