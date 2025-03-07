@@ -156,20 +156,28 @@ Node 2:
 dynemo-run in=none out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 1
 ```
 
-## python
+## Python bring-your-own-engine
 
 You can provide your own engine in a Python file. The file must provide a generator with this signature:
 ```
 async def generate(request):
 ```
 
+Build: `cargo build --release --features python`
+
+### Python does the pre-processing
+
+If the Python engine wants to receive and returns strings - it will do the prompt templating and tokenization itself - run it like this:
+
+```
+dynemo-run out=pystr:/home/user/my_python_engine.py --name <model-name>
+```
+
 - The `request` parameter is a map, an OpenAI compatible create chat completion request: https://platform.openai.com/docs/api-reference/chat/create
 - The function must `yield` a series of maps conforming to create chat completion stream response (example below).
+- The `--name` flag is the name we serve the model under, if using an HTTP front end.
 
 The file is loaded once at startup and kept in memory.
-
-- Build: `cargo build --release --features python`
-- Run: `dynemo-run out=pystr:/home/user/my_python_engine.py --name <model-name>`
 
 Example engine:
 ```
@@ -193,6 +201,44 @@ async def generate(request):
     yield {"id":"1","choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"stop"}],"created":1841762283,"model":"Llama-3.2-1B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
 ```
 
+### Dynemo does the pre-processing
+
+If the Python engine wants to receive and return tokens - the prompt templating and tokenization is already done - run it like this:
+```
+dynemo-run out=pytok:/home/user/my_python_engine.py --model-path <hf-repo-checkout>
+```
+
+- The request parameter is a map that looks like this:
+```
+{'token_ids': [128000, 128006, 9125, 128007, ... lots more ... ], 'stop_conditions': {'max_tokens': 8192, 'stop': None, 'stop_token_ids_hidden': [128001, 128008, 128009], 'min_tokens': None, 'ignore_eos': None}, 'sampling_options': {'n': None, 'best_of': None, 'presence_penalty': None, 'frequency_penalty': None, 'repetition_penalty': None, 'temperature': None, 'top_p': None, 'top_k': None, 'min_p': None, 'use_beam_search': None, 'length_penalty': None, 'seed': None}, 'eos_token_ids': [128001, 128008, 128009], 'mdc_sum': 'f1cd44546fdcbd664189863b7daece0f139a962b89778469e4cffc9be58ccc88', 'annotations': []}
+```
+
+- The `generate` function must `yield` a series of maps that look like this:
+```
+{"token_ids":[791],"tokens":None,"text":None,"cum_log_probs":None,"log_probs":None,"finish_reason":None}
+```
+
+- Command like flag `--model-path` which must point to a Hugging Face repo checkout containing the `tokenizer.json`. The `--name` flag is optional. If not provided we use the HF repo name (directory name) as the model name.
+
+Example engine:
+```
+import asyncio
+
+async def generate(request):
+    yield {"token_ids":[791]}
+    await asyncio.sleep(0.1)
+    yield {"token_ids":[6864]}
+    await asyncio.sleep(0.1)
+    yield {"token_ids":[315]}
+    await asyncio.sleep(0.1)
+    yield {"token_ids":[9822]}
+    await asyncio.sleep(0.1)
+    yield {"token_ids":[374]}
+    await asyncio.sleep(0.1)
+    yield {"token_ids":[12366]}
+    await asyncio.sleep(0.1)
+    yield {"token_ids":[13]}
+```
 
 ## trtllm
 
@@ -228,7 +274,7 @@ The `--model-path` you give to `dynemo-run` must contain the `config.json` (TRT-
 + Execute
 TRT-LLM is a C++ library that must have been previously built and installed. It needs a lot of memory to compile. Gitlab builds a container you can try:
 ```
-sudo docker run --gpus all -it -v /home/graham:/outside-home gitlab-master.nvidia.com:5005/dl/ai-services/libraries/rust/nim-nvllm/tensorrt_llm_runtime:85fa4a6f
+sudo docker run --gpus all -it -v /home/user:/outside-home gitlab-master.nvidia.com:5005/dl/ai-services/libraries/rust/nim-nvllm/tensorrt_llm_runtime:85fa4a6f
 ```
 
 Copy the trt-llm engine, the model's `.json` files (for the model deployment card) and the `nio` binary built for the correct glibc (container is Ubuntu 22.04 currently) into that container.
