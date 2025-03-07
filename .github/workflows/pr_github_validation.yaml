@@ -57,9 +57,9 @@ jobs:
             echo "cache_to_location=''" >> $GITHUB_OUTPUT
           else
             echo "USING ${{ env.IMAGE_TAG }}"
-            echo "cache_to_location='--cache-to \"type=registry,ref=${{ env.IMAGE_TAG }},image-manifest=true,mode=max\"'" >> $GITHUB_OUTPUT
+            echo "cache_to_location=--cache-to \"type=registry,ref=${{ env.IMAGE_TAG }},image-manifest=true,mode=max\"" >> $GITHUB_OUTPUT
           fi
-          echo "cache_from_location='--cache-from \"type=registry,ref=${{ env.IMAGE_TAG }}\"'" >> $GITHUB_OUTPUT
+          echo "cache_from_location=--cache-from \"type=registry,ref=${{ env.IMAGE_TAG }}\"" >> $GITHUB_OUTPUT
       - name: Build image
         run: |
           echo "./container/build.sh --tag ${{ env.IMAGE_TAG }} --framework ${{ matrix.framework }} ${{ steps.which_caches.outputs.cache_from_location }} ${{ steps.which_caches.outputs.cache_to_location }}"
