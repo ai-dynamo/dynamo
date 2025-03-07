@@ -125,14 +125,14 @@ copy_blocks_kernel(
   }
 }
 
-// Host-callable function
+// Asynchronous kernel launcher with no synchronization or memcpy operations
 extern "C" cudaError_t
-copy_blocks(
-    const void* src_data, void* dst_data, const int* src_block_ids, int num_src_blocks, const int* dst_block_ids,
+copy_blocks_launcher(
+    const void* src_data, void* dst_data, const int* h_src_block_ids, int num_src_blocks, const int* h_dst_block_ids,
     int num_dst_blocks, int src_n_blocks, int dst_n_blocks, int kv_size, int block_size, int heads_per_rank,
     int head_size, int elem_size, size_t src_tp_stride, size_t src_block_stride, size_t src_pos_stride,
     size_t src_head_stride, size_t dst_tp_stride, size_t dst_block_stride, size_t dst_pos_stride,
-    size_t dst_head_stride)
+    size_t dst_head_stride, int* d_src_block_ids, int* d_dst_block_ids, cudaEvent_t event, cudaStream_t stream)
 {
   // Validate inputs
   if (src_data == NULL || dst_data == NULL) {
@@ -140,8 +140,8 @@ copy_blocks(
     return cudaErrorInvalidValue;
   }
 
-  if (src_block_ids == NULL || dst_block_ids == NULL) {
-    fprintf(stderr, "NULL block ID pointers\n");
+  if (d_src_block_ids == NULL || d_dst_block_ids == NULL) {
+    fprintf(stderr, "NULL device block ID pointers\n");
     return cudaErrorInvalidValue;
   }
 
@@ -157,17 +157,6 @@ copy_blocks(
     return cudaErrorInvalidValue;
   }
 
-  // Copy block IDs to device
-  int* d_src_blocks = NULL;
-  int* d_dst_blocks = NULL;
-
-  // TODO: Create class/struct with preallocated memory for block_ids and two cuda events
-  CUDA_CHECK(cudaMalloc(&d_src_blocks, num_src_blocks * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&d_dst_blocks, num_dst_blocks * sizeof(int)));
-
-  CUDA_CHECK(cudaMemcpy(d_src_blocks, src_block_ids, num_src_blocks * sizeof(int), cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_dst_blocks, dst_block_ids, num_dst_blocks * sizeof(int), cudaMemcpyHostToDevice));
-
   // Calculate grid dimensions with ELEMENTS_PER_THREAD adjustment
   int elements_per_block = block_size * heads_per_rank * head_size;
   int total_elements = elements_per_block * num_src_blocks * kv_size;
@@ -180,39 +169,82 @@ copy_blocks(
   // Validate grid size
   if (grid_size <= 0) {
     fprintf(stderr, "Invalid grid size: %d\n", grid_size);
-    cudaFree(d_src_blocks);
-    cudaFree(d_dst_blocks);
     return cudaErrorInvalidValue;
   }
 
-  // Print debug information
+  // Print debug information (optional, can be removed for production)
   printf("Starting kernel: blocks=%d, threads=%d, total elements=%d\n", grid_size, cuda_block_size, total_elements);
   printf("Elements per thread: %d, Total threads: %d\n", ELEMENTS_PER_THREAD, total_threads);
   printf(
       "Dimensions: tp=%d, blocks=%d, size=%d, heads=%d, headsize=%d, elemsize=%d\n", kv_size, num_src_blocks,
       block_size, heads_per_rank, head_size, elem_size);
 
-  // Launch kernel
-  copy_blocks_kernel<<<grid_size, cuda_block_size>>>(
-      src_data, dst_data, d_src_blocks, d_dst_blocks, num_src_blocks, kv_size, block_size, heads_per_rank, head_size,
-      elem_size, src_tp_stride, src_block_stride, src_pos_stride, src_head_stride, dst_tp_stride, dst_block_stride,
-      dst_pos_stride, dst_head_stride);
+  // Launch kernel on specified stream
+  copy_blocks_kernel<<<grid_size, cuda_block_size, 0, stream>>>(
+      src_data, dst_data, d_src_block_ids, d_dst_block_ids, num_src_blocks, kv_size, block_size, heads_per_rank,
+      head_size, elem_size, src_tp_stride, src_block_stride, src_pos_stride, src_head_stride, dst_tp_stride,
+      dst_block_stride, dst_pos_stride, dst_head_stride);
 
-  // Check for kernel errors immediately
+  // Check for kernel launch errors immediately
   cudaError_t kernel_error = cudaGetLastError();
   if (kernel_error != cudaSuccess) {
     fprintf(stderr, "Kernel execution error: %s\n", cudaGetErrorString(kernel_error));
-    cudaFree(d_src_blocks);
-    cudaFree(d_dst_blocks);
     return kernel_error;
   }
 
+  // Record event on the stream (for synchronization by caller)
+  if (event != NULL) {
+    CUDA_CHECK(cudaEventRecord(event, stream));
+  }
+
+  return cudaSuccess;
+}
+
+// Synchronous kernel launcher that will allocate device memory for the block IDs,
+extern "C" cudaError_t
+copy_blocks(
+    const void* src_data, void* dst_data, const int* h_src_block_ids, int num_src_blocks, const int* h_dst_block_ids,
+    int num_dst_blocks, int src_n_blocks, int dst_n_blocks, int kv_size, int block_size, int heads_per_rank,
+    int head_size, int elem_size, size_t src_tp_stride, size_t src_block_stride, size_t src_pos_stride,
+    size_t src_head_stride, size_t dst_tp_stride, size_t dst_block_stride, size_t dst_pos_stride,
+    size_t dst_head_stride)
+{
+  // Allocate device memory for block IDs
+  int* d_src_blocks_ids = NULL;
+  int* d_dst_blocks_ids = NULL;
+
+  CUDA_CHECK(cudaMalloc(&d_src_blocks_ids, num_src_blocks * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_dst_blocks_ids, num_dst_blocks * sizeof(int)));
+
+  CUDA_CHECK(cudaMemcpy(d_src_blocks_ids, h_src_block_ids, num_src_blocks * sizeof(int), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_dst_blocks_ids, h_dst_block_ids, num_dst_blocks * sizeof(int), cudaMemcpyHostToDevice));
+
+  // Create CUDA event
+  cudaEvent_t event;
+  CUDA_CHECK(cudaEventCreate(&event));
+
+  // Launch kernel with the launcher function
+  cudaError_t result = copy_blocks_launcher(
+      src_data, dst_data, h_src_block_ids, num_src_blocks, h_dst_block_ids, num_dst_blocks, src_n_blocks, dst_n_blocks,
+      kv_size, block_size, heads_per_rank, head_size, elem_size, src_tp_stride, src_block_stride, src_pos_stride,
+      src_head_stride, dst_tp_stride, dst_block_stride, dst_pos_stride, dst_head_stride, d_src_blocks_ids,
+      d_dst_blocks_ids, event, 0);  // Use default stream (0)
+
+  // Handle errors from kernel launch
+  if (result != cudaSuccess) {
+    cudaFree(d_src_blocks_ids);
+    cudaFree(d_dst_blocks_ids);
+    cudaEventDestroy(event);
+    return result;
+  }
+
   // Wait for completion
-  CUDA_CHECK(cudaDeviceSynchronize());
+  CUDA_CHECK(cudaEventSynchronize(event));
 
   // Clean up
-  cudaFree(d_src_blocks);
-  cudaFree(d_dst_blocks);
+  cudaFree(d_src_blocks_ids);
+  cudaFree(d_dst_blocks_ids);
+  cudaEventDestroy(event);
 
   printf("Kernel execution completed successfully\n");
   return cudaSuccess;
@@ -242,6 +274,8 @@ struct BlockCopyControl {
 
   BlockCopyControl(int num_blocks);
   ~BlockCopyControl();
+
+  void reset();
 };
 
 BlockCopyControl::BlockCopyControl(int num_blocks)
@@ -260,14 +294,14 @@ BlockCopyControl::BlockCopyControl(int num_blocks)
     return;
   }
 
-  status = cudaEventCreate(&start_event);
+  status = cudaEventCreateWithFlags(&start_event, cudaEventDisableTiming);
   if (status != cudaSuccess) {
     fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(status));
     cudaFree(d_src_blocks);
     cudaFree(d_dst_blocks);
   }
 
-  status = cudaEventCreate(&stop_event);
+  status = cudaEventCreateWithFlags(&stop_event, cudaEventDisableTiming);
   if (status != cudaSuccess) {
     fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(status));
     cudaFree(d_src_blocks);
@@ -279,4 +313,6 @@ BlockCopyControl::~BlockCopyControl()
 {
   cudaFree(d_src_blocks);
   cudaFree(d_dst_blocks);
+  cudaEventDestroy(start_event);
+  cudaEventDestroy(stop_event);
 }

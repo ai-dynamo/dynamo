@@ -30,7 +30,7 @@ license.workspace = true
 homepage.workspace = true
 
 [features]
-default = []
+default = ["cuda_kv"]
 mistralrs = ["dep:mistralrs"]
 llamacpp = ["dep:llama-cpp-2"]
 sglang = ["dep:async_zmq"]
