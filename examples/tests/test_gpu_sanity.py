@@ -22,11 +22,15 @@ pytestmark = pytest.mark.gpu
 
 def test_detect_gpu():
     try:
-        result = subprocess.run(['nvidia-smi'], capture_output=True, text=True, check=True)
+        result = subprocess.run(
+            ["nvidia-smi"], capture_output=True, text=True, check=True
+        )
         print("\nAvailable GPUs:")
         print(result.stdout)
         assert "NVIDIA" in result.stdout, "No NVIDIA GPUs found in nvidia-smi output"
     except subprocess.CalledProcessError as e:
         pytest.fail(f"nvidia-smi command failed with error: {e}")
     except FileNotFoundError:
-        pytest.fail("nvidia-smi command not found. Ensure NVIDIA drivers are properly installed.")
+        pytest.fail(
+            "nvidia-smi command not found. Ensure NVIDIA drivers are properly installed."
+        )
