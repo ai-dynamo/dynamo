@@ -13,6 +13,8 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
+from typing import Any
+
 from bentoml import api  # type: ignore
 from bentoml._internal.context import server_context  # type: ignore
 
@@ -21,7 +23,7 @@ from dynemo.sdk.lib.dependency import depends
 from dynemo.sdk.lib.image import DYNEMO_IMAGE
 from dynemo.sdk.lib.service import service
 
-dynemo_context = {}
+dynemo_context: dict[str, Any] = {}
 
 __all__ = [
     "api",
