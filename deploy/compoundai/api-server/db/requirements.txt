@@ -1,0 +1,6 @@
+fastapi==0.115.4
+pydantic==2.9.0
+boto3==1.37.1
+sqlmodel==0.0.22
+botocore==1.37.1
+base58==2.1.1

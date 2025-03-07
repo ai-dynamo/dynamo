@@ -122,7 +122,7 @@ func RetrieveDynamoNimDownloadURL(ctx context.Context, dynamoDeployment *v1alpha
 		recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for dynamoNim %s from yatai service", dynamoDeployment.Spec.DynamoNim)
 		dynamoNimDownloadURL = dynamoNim_.PresignedDownloadUrl
 	} else {
-		dynamoNimDownloadURL = fmt.Sprintf("%s/api/v1/bento_repositories/%s/bentos/%s/download", yataiConf.Endpoint, dynamoNimRepositoryName, dynamoNimVersion)
+		dynamoNimDownloadURL = fmt.Sprintf("%s/api/v1/compound_nims/%s/versions/%s/download", yataiConf.Endpoint, dynamoNimRepositoryName, dynamoNimVersion)
 		dynamoNimApiToken = fmt.Sprintf("%s:%s:$%s", commonconsts.YataiImageBuilderComponentName, yataiConf.ClusterName, commonconsts.EnvYataiApiToken)
 	}
 
