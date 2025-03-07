@@ -26,7 +26,7 @@ any required CRDs. They keep track of important information such as the Dynamo N
 
 
 ### Dynamo NIMs
-All Dynamo NIMs should be user scoped by default. Note: NDS v1 does not currently support user-level scoping. This functionality should be implemented during the migration from NDS v1.
+All Dynamo NIMs should be user scoped by default. You can set the scope to "org" by setting the RESOURCE_SCOPE environment variable to "organization".
 
 ##### 1. Dynamo NIM
 This is the overarching resource that is used to keep track of a complete Dynamo NIM. The Dynamo NIM resource functions similarly to a Docker repository. For a Dynamo NIM tag formatted as `<name>:<tag>`, this resource represents the `<name>` portion.

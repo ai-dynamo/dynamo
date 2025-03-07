@@ -28,27 +28,27 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-type databaseService struct {
-	dbURL string
+type backendService struct {
+	backendURL string
 }
 
-var DatabaseService = databaseService{}
+var BackendService = backendService{}
 
-// InitDatabaseService initializes the database service with the provided URL
-func InitDatabaseService(dbURL string) {
-	DatabaseService = databaseService{dbURL: dbURL}
+// InitBackendService initializes the backend service with the provided URL
+func InitBackendService(backendURL string) {
+	BackendService = backendService{backendURL: backendURL}
 }
 
 /**
 	 This service connects to the postgresql database
 **/
 
-func (s *databaseService) GetDBURL() string {
-	return s.dbURL
+func (s *backendService) GetBackendURL() string {
+	return s.backendURL
 }
 
-func (s *databaseService) GetDynamoNimVersion(ctx context.Context, dynamoNim string, dynamoNimVersion string) (*schemas.DynamoNimVersionFullSchema, error) {
-	getUrl := fmt.Sprintf("%s/api/v1/dynamo_nims/%s/versions/%s", s.dbURL, dynamoNim, dynamoNimVersion)
+func (s *backendService) GetDynamoNimVersion(ctx context.Context, dynamoNim string, dynamoNimVersion string) (*schemas.DynamoNimVersionFullSchema, error) {
+	getUrl := fmt.Sprintf("%s/api/v1/dynamo_nims/%s/versions/%s", s.backendURL, dynamoNim, dynamoNimVersion)
 
 	_, body, err := client.SendRequestJSON(getUrl, http.MethodGet, nil)
 	if err != nil {

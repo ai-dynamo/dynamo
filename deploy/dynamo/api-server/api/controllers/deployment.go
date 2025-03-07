@@ -222,7 +222,7 @@ func (c *deploymentController) Update(ctx *gin.Context) {
 func (c *deploymentController) updateDeploymentEntities(ctx context.Context, schema schemas.UpdateDeploymentSchema, deployment *models.Deployment, ownership *schemas.OwnershipSchema) (*models.Deployment, error) {
 	dynamoNimVersions := map[string]*schemas.DynamoNimVersionFullSchema{}
 	for _, target := range schema.Targets {
-		dynamoNimVersionSchema, err := services.DatabaseService.GetDynamoNimVersion(ctx, target.DynamoNim, target.Version)
+		dynamoNimVersionSchema, err := services.BackendService.GetDynamoNimVersion(ctx, target.DynamoNim, target.Version)
 		if err != nil {
 			return nil, err
 		}

@@ -34,19 +34,19 @@ const (
 	port = 8181
 )
 
-// getDatabaseURL gets the database URL from the Python db.py script
-func getDatabaseURL() string {
+// getBackend gets the backend URL from the Python db.py script
+func getBackendURL() string {
 	// First check environment variable
-	dbURL, err := utils.MustGetEnv("API_DATABASE_URL")
+	backendURL, err := utils.MustGetEnv("API_BACKEND_URL")
 	if err != nil {
-		log.Fatalf("Failed to get database URL: %v", err)
+		log.Fatalf("Failed to get backend URL: %v", err)
 	}
-	return dbURL
+	return backendURL
 }
 
 func startDatabase() {
 	// Check if the database is already running
-	cmd := exec.Command("python3", "../db/db.py")
+	cmd := exec.Command("python3", "../db/start_db.py")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -77,12 +77,12 @@ func main() {
 	// Start the database first
 	startDatabase()
 
-	// Get the database URL
-	dbURL := getDatabaseURL()
-	log.Printf("Using database URL: %s", dbURL)
+	// Get the backend URL
+	backendURL := getBackendURL()
+	log.Printf("Using backend URL: %s", backendURL)
 
 	// Set the database URL for services
-	services.InitDatabaseService(dbURL)
+	services.InitBackendService(backendURL)
 
 	// Start the API server
 	runtime.Runtime.StartServer(port)
