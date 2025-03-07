@@ -15,4 +15,4 @@
 
 
 def main() -> None:
-    print("Hello from compoundai!")
+    print("Hello from dyenmo sdk!")

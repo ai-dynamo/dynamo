@@ -26,11 +26,10 @@ import typing as t
 from typing import Any
 
 import click
-from compoundai import dynemo_context
-
+from dynemo.sdk import dynemo_context
 from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
-logger = logging.getLogger("compoundai.serve.dynemo")
+logger = logging.getLogger("dynemo.sdk.serve.dynemo")
 logger.setLevel(logging.INFO)
 
 

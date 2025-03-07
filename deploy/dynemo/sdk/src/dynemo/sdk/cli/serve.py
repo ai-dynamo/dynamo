@@ -318,7 +318,7 @@ def build_serve_command() -> click.Group:
         else:
             # bentoml>=1.2
             # from _bentoml_impl.server import serve_http
-            from compoundai.cli.serving import serve_http  # type: ignore
+            from dynemo.sdk.cli.serving import serve_http  # type: ignore
 
             svc.inject_config()
             serve_http(

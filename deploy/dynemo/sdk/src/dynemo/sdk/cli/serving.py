@@ -177,7 +177,7 @@ def create_dynemo_watcher(
     # Create Dynemo-specific worker args
     args = [
         "-m",
-        "compoundai.cli.serve_dynemo",  # Use our Dynemo worker module
+        "dynemo.sdk.cli.serve_dynemo",  # Use our Dynemo worker module
         bento_identifier,
         "--service-name",
         svc.name,
@@ -410,7 +410,7 @@ def serve_http(
             # Create Dynemo-specific watcher using existing socket
             args = [
                 "-m",
-                "compoundai.cli.serve_dynemo",  # Use our Dynemo worker module
+                "dynemo.sdk.cli.serve_dynemo",  # Use our Dynemo worker module
                 bento_identifier,
                 "--service-name",
                 svc.name,
