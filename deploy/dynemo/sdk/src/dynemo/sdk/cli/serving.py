@@ -47,7 +47,7 @@ class ServiceProtocol(Protocol):
     models: list[Any]
     bento: Any
 
-    def is_nova_component(self) -> bool:
+    def is_dynemo_component(self) -> bool:
         ...
 
 
@@ -155,7 +155,7 @@ def create_dependency_watcher(
     return watcher, socket, uri
 
 
-def create_nova_watcher(
+def create_dynemo_watcher(
     bento_identifier: str,
     svc: ServiceProtocol,
     uds_path: str,
@@ -165,7 +165,7 @@ def create_nova_watcher(
     working_dir: Optional[str] = None,
     env: Optional[Dict[str, str]] = None,
 ) -> tuple[Watcher, CircusSocket, str]:
-    """Create a watcher for a Nova service in the dependency graph"""
+    """Create a watcher for a Dynemo service in the dependency graph"""
     from bentoml.serving import create_watcher
 
     # Get socket for this service
@@ -174,10 +174,10 @@ def create_nova_watcher(
     # Get worker configuration
     num_workers, worker_envs = scheduler.get_worker_env(svc)
 
-    # Create Nova-specific worker args
+    # Create Dynemo-specific worker args
     args = [
         "-m",
-        "compoundai.cli.serve_nova",  # Use our Nova worker module
+        "dynemo.sdk.cli.serve_dynemo",  # Use our Dynemo worker module
         bento_identifier,
         "--service-name",
         svc.name,
@@ -190,7 +190,7 @@ def create_nova_watcher(
 
     # Create the watcher with dependency map in environment
     watcher = create_watcher(
-        name=f"nova_service_{svc.name}",
+        name=f"dynemo_service_{svc.name}",
         args=args,
         numprocesses=num_workers,
         working_dir=working_dir,
@@ -306,12 +306,12 @@ def serve_http(
                     if name in dependency_map:
                         continue
 
-                    # Check if this is a Nova service
+                    # Check if this is a Dynemo service
                     if (
-                        hasattr(dep_svc, "is_nova_component")
-                        and dep_svc.is_nova_component()
+                        hasattr(dep_svc, "is_dynemo_component")
+                        and dep_svc.is_dynemo_component()
                     ):
-                        new_watcher, new_socket, uri = create_nova_watcher(
+                        new_watcher, new_socket, uri = create_dynemo_watcher(
                             bento_id,
                             dep_svc,
                             uds_path,
@@ -354,7 +354,7 @@ def serve_http(
         except ValueError as e:
             raise BentoMLConfigException(f"Invalid host IP address: {host}") from e
 
-        if not svc.is_nova_component():
+        if not svc.is_dynemo_component():
             sockets.append(
                 CircusSocket(
                     name=API_SERVER_NAME,
@@ -405,12 +405,12 @@ def serve_http(
 
         scheme = "https" if BentoMLContainer.ssl.enabled.get() else "http"
 
-        # Check if this is a Nova service
-        if hasattr(svc, "is_nova_component") and svc.is_nova_component():
-            # Create Nova-specific watcher using existing socket
+        # Check if this is a Dynemo service
+        if hasattr(svc, "is_dynemo_component") and svc.is_dynemo_component():
+            # Create Dynemo-specific watcher using existing socket
             args = [
                 "-m",
-                "compoundai.cli.serve_nova",  # Use our Nova worker module
+                "dynemo.sdk.cli.serve_dynemo",  # Use our Dynemo worker module
                 bento_identifier,
                 "--service-name",
                 svc.name,
@@ -418,7 +418,7 @@ def serve_http(
                 "$(CIRCUS.WID)",
             ]
             watcher = create_watcher(
-                name=f"nova_service_{svc.name}",
+                name=f"dynemo_service_{svc.name}",
                 args=args,
                 numprocesses=num_workers,
                 working_dir=str(bento_path.absolute()),
@@ -426,7 +426,7 @@ def serve_http(
                 env=env,  # Dependency map will be injected by serve_http
             )
             watchers.append(watcher)
-            print(f"nova_service_{svc.name} entrypoint created")
+            print(f"dynemo_service_{svc.name} entrypoint created")
         else:
             # Create regular BentoML service watcher
             watchers.append(
@@ -445,7 +445,6 @@ def serve_http(
 
         # inject runner map now
         inject_env = {"BENTOML_RUNNER_MAP": json.dumps(dependency_map)}
-        print(f"inject_env: {inject_env}")
 
         for watcher in watchers:
             if watcher.env is None:
@@ -474,12 +473,15 @@ def serve_http(
         arbiter.exit_stack.callback(shutil.rmtree, uds_path, ignore_errors=True)
         arbiter.start(
             cb=lambda _: logger.info(  # type: ignore
-                "Starting Nova Service %s (%s/%s) listening on %s://%s:%d (Press CTRL+C to quit)"
-                if (hasattr(svc, "is_nova_component") and svc.is_nova_component())
+                "Starting Dynemo Service %s (%s/%s) listening on %s://%s:%d (Press CTRL+C to quit)"
+                if (hasattr(svc, "is_dynemo_component") and svc.is_dynemo_component())
                 else 'Starting production %s BentoServer from "%s" (Press CTRL+C to quit)',
                 *(
-                    (svc.name, *svc.nova_address(), scheme, log_host, port)
-                    if (hasattr(svc, "is_nova_component") and svc.is_nova_component())
+                    (svc.name, *svc.dynemo_address(), scheme, log_host, port)
+                    if (
+                        hasattr(svc, "is_dynemo_component")
+                        and svc.is_dynemo_component()
+                    )
                     else (scheme.upper(), bento_identifier)
                 ),
             ),

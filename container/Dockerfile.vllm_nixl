@@ -115,7 +115,6 @@ ENV CPATH=/usr/local/ompi/include:$CPATH
 ENV PATH=/usr/local/ompi/bin:$PATH
 ENV PKG_CONFIG_PATH=/usr/local/ompi/lib/pkgconfig:$PKG_CONFIG_PATH
 
-
 COPY --from=nixl . /opt/nixl
 
 RUN cd /opt/nixl && \
@@ -127,6 +126,8 @@ RUN cd /opt/nixl && \
 
 ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
 ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/:$PYTHONPATH
+ENV UCX_TLS=^cuda_ipc
+ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/x86_64-linux-gnu/plugins
 
 RUN ls -l /usr/local/nixl/
 RUN ls -l /usr/local/nixl/include/
@@ -229,10 +230,14 @@ COPY lib/bindings /workspace/lib/bindings
 RUN cd lib/bindings/c && \
     cargo build --release --locked && cargo doc --no-deps
 
-# Build dynamo wheel
+COPY deploy/dynemo/sdk /workspace/deploy/dynemo/sdk
+# Build dynemo wheel
 RUN source /opt/dynamo/venv/bin/activate && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/dynamo*cp312*.whl
+    uv pip install /workspace/dist/dynamo*cp312*.whl && \
+    cd /workspace/deploy/dynemo/sdk && \
+    uv build --wheel --out-dir /workspace/dist && \
+    uv pip install /workspace/dist/dynemo_sdk*any.whl
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \

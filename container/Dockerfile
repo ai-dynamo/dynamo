@@ -154,6 +154,9 @@ RUN cd examples/rust && \
     cp target/release/http /usr/local/bin/ && \
     cp target/release/llmctl /usr/local/bin/
 
+COPY deploy/dynemo/sdk /workspace/deploy/dynemo/sdk
+
+
 # Generate C bindings. Note that this is required for TRTLLM backend re-build
 COPY lib/bindings /workspace/lib/bindings
 RUN cd lib/bindings/c/ && \
@@ -166,6 +169,9 @@ RUN mkdir /opt/dynamo && \
     source /opt/dynamo/venv/bin/activate && \
     uv build --wheel --out-dir /workspace/dist && \
     uv pip install /workspace/dist/dynamo*cp312*.whl
+    cd /workspace/deploy/dynemo/sdk && \
+    uv build --wheel --out-dir /workspace/dist && \
+    uv pip install /workspace/dist/dynemo_sdk*any.whl
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
@@ -177,7 +183,9 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
 # Install dynamo.runtime and dynamo.llm wheels globally in container for tests that
 # currently run without virtual environment activated.
 # TODO: In future, we may use a virtualenv for everything and remove this.
-RUN pip install /opt/dynamo/bindings/wheels/dynamo*cp312*.whl
+RUN cd /opt/dynamo/bindings/wheels && \
+    pip install dynamo*cp312*.whl  && \
+    pip install /workspace/dist/dynemo_sdk*any.whl
 
 # Copy everything in after ginstall steps to avoid re-running build/install
 # commands on unrelated changes in other dirs.

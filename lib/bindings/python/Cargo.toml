@@ -30,7 +30,8 @@ crate-type = ["cdylib"]
 
 
 [dependencies]
-dynamo-llm = { path = "../../llm" }
+
+dynamo-llm = { path = "../../llm", features = ["python"] }
 dynamo-runtime = { path = "../../runtime" }
 
 futures = "0.3"

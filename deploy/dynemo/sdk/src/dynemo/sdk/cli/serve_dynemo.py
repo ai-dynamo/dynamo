@@ -26,10 +26,12 @@ import typing as t
 from typing import Any
 
 import click
+from dynemo.sdk import dynemo_context
 
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
-logger = logging.getLogger("compoundai.serve.nova")
+logger = logging.getLogger("dynemo.sdk.serve.dynemo")
+logger.setLevel(logging.INFO)
 
 
 def generate_run_id():
@@ -63,16 +65,16 @@ def main(
     worker_env: str | None,
     worker_id: int | None,
 ) -> None:
-    """Start a worker for the given service - either Nova or regular service"""
+    """Start a worker for the given service - either Dynemo or regular service"""
     from _bentoml_impl.loader import import_service
     from bentoml._internal.container import BentoMLContainer
     from bentoml._internal.context import server_context
     from bentoml._internal.log import configure_server_logging
 
     run_id = generate_run_id()
-
-    # print the contents of the environment variable BENTOML_RUNNER_MAP
-    print(f"BENTOML_RUNNER_MAP: {os.environ['BENTOML_RUNNER_MAP']}")
+    dynemo_context["service_name"] = service_name
+    dynemo_context["runner_map"] = runner_map
+    dynemo_context["worker_id"] = worker_id
 
     # Import service first to check configuration
     service = import_service(bento_identifier)
@@ -97,14 +99,15 @@ def main(
             t.cast(t.Dict[str, str], json.loads(runner_map))
         )
 
-    # Check if Nova is enabled for this service
-    if service.is_nova_component():
+    # Check if Dynemo is enabled for this service
+    if service.is_dynemo_component():
         if worker_id is not None:
             server_context.worker_index = worker_id
-        class_instance = service.inner()
 
         @dynamo_worker()
         async def worker(runtime: DistributedRuntime):
+            global dynemo_context
+            dynemo_context["runtime"] = runtime
             if service_name and service_name != service.name:
                 server_context.service_type = "service"
             else:
@@ -112,8 +115,8 @@ def main(
 
             server_context.service_name = service.name
 
-            # Get Nova configuration and create component
-            namespace, component_name = service.nova_address()
+            # Get Dynemo configuration and create component
+            namespace, component_name = service.dynemo_address()
             logger.info(
                 f"[{run_id}] Registering component {namespace}/{component_name}"
             )
@@ -124,6 +127,37 @@ def main(
                 await component.create_service()
                 logger.info(f"[{run_id}] Created {service.name} component")
 
+                # Set runtime on all dependencies
+                for dep in service.dependencies.values():
+                    dep.set_runtime(runtime)
+                    logger.info(f"[{run_id}] Set runtime for dependency: {dep}")
+
+                # Then register all Dynemo endpoints
+                dynemo_endpoints = service.get_dynemo_endpoints()
+                if not dynemo_endpoints:
+                    error_msg = f"[{run_id}] FATAL ERROR: No Dynemo endpoints found in service {service.name}!"
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+
+                endpoints = []
+                for name, endpoint in dynemo_endpoints.items():
+                    td_endpoint = component.endpoint(name)
+                    logger.info(f"[{run_id}] Registering endpoint '{name}'")
+                    endpoints.append(td_endpoint)
+                    # Bind an instance of inner to the endpoint
+                dynemo_context["component"] = component
+                dynemo_context["endpoints"] = endpoints
+                class_instance = service.inner()
+                twm = []
+                for name, endpoint in dynemo_endpoints.items():
+                    bound_method = endpoint.func.__get__(class_instance)
+                    # Only pass request type for now, use Any for response
+                    # TODO: Handle a dynamo_endpoint not having types
+                    # TODO: Handle multiple endpoints in a single component
+                    dynamo_wrapped_method = dynamo_endpoint(endpoint.request_type, Any)(
+                        bound_method
+                    )
+                    twm.append(dynamo_wrapped_method)
                 # Run startup hooks before setting up endpoints
                 for name, member in vars(class_instance.__class__).items():
                     if callable(member) and getattr(
@@ -132,50 +166,21 @@ def main(
                         logger.info(f"[{run_id}] Running startup hook: {name}")
                         result = getattr(class_instance, name)()
                         if inspect.isawaitable(result):
+                            # await on startup hook async_onstart
                             await result
                             logger.info(
                                 f"[{run_id}] Completed async startup hook: {name}"
                             )
                         else:
                             logger.info(f"[{run_id}] Completed startup hook: {name}")
-
-                # Set runtime on all dependencies
-                for dep in service.dependencies.values():
-                    dep.set_runtime(runtime)
-                    logger.info(f"[{run_id}] Set runtime for dependency: {dep}")
-
-                # Then register all Nova endpoints
-                nova_endpoints = service.get_nova_endpoints()
-                if not nova_endpoints:
-                    error_msg = f"[{run_id}] FATAL ERROR: No Nova endpoints found in service {service.name}!"
-                    logger.error(error_msg)
-                    raise ValueError(error_msg)
-
-                print(f"[{run_id}] Nova endpoints: {nova_endpoints}")
-                for name, endpoint in nova_endpoints.items():
-                    td_endpoint = component.endpoint(name)
-                    logger.info(f"[{run_id}] Registering endpoint '{name}'")
-                    # Bind an instance of inner to the endpoint
-                    bound_method = endpoint.func.__get__(class_instance)
-                    # Only pass request type for now, use Any for response
-                    # TODO: Handle a dynamo_endpoint not having types
-                    # TODO: Handle multiple endpoints in a single component
-                    dynamo_wrapped_method = dynamo_endpoint(endpoint.request_type, Any)(
-                        bound_method
-                    )
-                    result = await td_endpoint.serve_endpoint(dynamo_wrapped_method)
-                    # WARNING: unreachable code :( because serve blocks
-                    logger.info(f"[{run_id}] Result: {result}")
-                    logger.info(f"[{run_id}] Registered endpoint '{name}'")
-
                 logger.info(
-                    f"[{run_id}] Started {service.name} instance with all endpoints registered"
+                    f"[{run_id}] Starting {service.name} instance with all registered endpoints"
                 )
-                logger.info(
-                    f"[{run_id}] Available endpoints: {service.list_nova_endpoints()}"
-                )
+                # TODO:bis: convert to list
+                result = await endpoints[0].serve_endpoint(twm[0])
+
             except Exception as e:
-                logger.error(f"[{run_id}] Error in Nova component setup: {str(e)}")
+                logger.error(f"[{run_id}] Error in Dynemo component setup: {str(e)}")
                 raise
 
         asyncio.run(worker())

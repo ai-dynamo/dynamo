@@ -24,7 +24,7 @@ pub use dynamo_runtime::{
         SingleIn,
     },
     protocols::annotated::Annotated,
-    Error, Result,
+    CancellationToken, Error, Result,
 };
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyDict};
@@ -35,6 +35,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot::Sender;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 
+use crate::backend::ExecutionContext;
 use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 
 /// Python snippet to import a file as a module
@@ -53,34 +54,63 @@ spec.loader.exec_module(module)
 
 /// An engine that takes and returns strings, feeding them to a python written engine
 pub async fn make_string_engine(
+    cancel_token: CancellationToken,
     py_file: &Path,
 ) -> pipeline_error::Result<OpenAIChatCompletionsStreamingEngine> {
     pyo3::prepare_freethreaded_python();
 
-    let engine = PythonStringEngine::new(py_file).await?;
+    let engine = new_engine(cancel_token, py_file).await?;
     let engine: OpenAIChatCompletionsStreamingEngine = Arc::new(engine);
     Ok(engine)
 }
 
-struct PythonStringEngine {
-    _user_module: PyObject,
-    generator: Arc<Py<PyAny>>,
-    event_loop: Arc<Py<PyAny>>,
+/// An engine that takes and returns tokens.
+pub async fn make_token_engine(
+    cancel_token: CancellationToken,
+    py_file: &Path,
+) -> pipeline_error::Result<ExecutionContext> {
+    pyo3::prepare_freethreaded_python();
+
+    let engine = new_engine(cancel_token, py_file).await?;
+    let engine: ExecutionContext = Arc::new(engine);
+    Ok(engine)
 }
 
-impl PythonStringEngine {
-    async fn new(py_file: &Path) -> anyhow::Result<Self> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::task::spawn_blocking(move || run_asyncio(tx));
-        let event_loop = rx.await?;
+#[derive(Clone)]
+pub struct PythonServerStreamingEngine {
+    _cancel_token: CancellationToken,
+    generator: Arc<PyObject>,
+    event_loop: Arc<PyObject>,
+}
 
-        let user_module = python_file_to_module(py_file)?;
-        let generator = Python::with_gil(|py| user_module.getattr(py, "generate").unwrap());
-        Ok(PythonStringEngine {
-            _user_module: user_module,
-            generator: Arc::new(generator),
+async fn new_engine(
+    cancel_token: CancellationToken,
+    py_file: &Path,
+) -> anyhow::Result<PythonServerStreamingEngine> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::task::spawn_blocking(move || run_asyncio(tx));
+    let event_loop = rx.await?;
+
+    let user_module = python_file_to_module(py_file)?;
+    let generator = Python::with_gil(|py| user_module.getattr(py, "generate").unwrap());
+    Ok(PythonServerStreamingEngine::new(
+        cancel_token,
+        Arc::new(generator),
+        event_loop,
+    ))
+}
+
+impl PythonServerStreamingEngine {
+    pub fn new(
+        cancel_token: CancellationToken,
+        generator: Arc<PyObject>,
+        event_loop: Arc<PyObject>,
+    ) -> Self {
+        PythonServerStreamingEngine {
+            _cancel_token: cancel_token,
+            generator,
             event_loop,
-        })
+        }
     }
 }
 
@@ -123,7 +153,8 @@ enum ResponseProcessingError {
 }
 
 #[async_trait]
-impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error> for PythonStringEngine
+impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error>
+    for PythonServerStreamingEngine
 where
     Req: Data + Serialize,
     Resp: Data + for<'de> Deserialize<'de>,

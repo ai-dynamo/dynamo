@@ -22,6 +22,7 @@ use std::cmp::min;
 use crate::kv_router::indexer::OverlapScores;
 pub use crate::kv_router::protocols::{ForwardPassMetrics, KV_BLOCK_SIZE};
 use crate::kv_router::scoring::ProcessedEndpoints;
+use crate::kv_router::KV_HIT_RATE_SUBJECT;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KVHitRateEvent {
@@ -119,9 +120,8 @@ impl KvScheduler {
         // Publisher task
         tokio::spawn(async move {
             let mut event_rx = event_rx;
-            let subject = "kv-hit-rate";
             while let Some(event) = event_rx.recv().await {
-                if let Err(e) = ns.publish(subject, &event).await {
+                if let Err(e) = ns.publish(KV_HIT_RATE_SUBJECT, &event).await {
                     tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
                 }
             }

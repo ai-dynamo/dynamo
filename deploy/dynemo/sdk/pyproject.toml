@@ -14,22 +14,31 @@
 #  limitations under the License.
 
 [project]
-name = "compoundai"
+name = "dynemo-sdk"
 version = "0.1.0"
-description = "Add your description here"
+description = "Distributed Inference Framework - SDK"
 readme = "README.md"
 authors = [
-    { name = "mabdulwahhab", email = "mabdulwahhab@nvidia.com" }
+    { name = "NVIDIA Inc.", email = "sw-dl-dynemo@nvidia.com" },
 ]
-requires-python = "==3.10.*"
 dependencies = [
-    "bentoml>=1.4.1",
+    # TODO: currently compatible with bentoml==1.4.1,
+    # v1.4.2 has removed normalize_identifier which is used in compoundai
+    # "dynemo=={dynemo_version}",
+    "bentoml==1.4.1",
     "types-psutil==7.0.0.20250218",
 ]
 
 [project.scripts]
-compoundai = "compoundai.cli.cli:cli"
+dynemo-sdk = "dynemo.sdk.cli.cli:cli"
+
+[tool.setuptools]
+namespace-packages = ["dynemo"]
+package-dir = {"dynemo.sdk" = "src/dynemo/sdk"}
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dynemo"]
