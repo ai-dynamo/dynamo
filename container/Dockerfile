@@ -165,7 +165,9 @@ RUN mkdir /opt/dynemo && \
     uv venv /opt/dynemo/venv --python 3.12 && \
     source /opt/dynemo/venv/bin/activate && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/dynemo*cp312*.whl
+    uv pip install /workspace/dist/dynemo*cp312*.whl && \
+    cd /workspace/deploy/dynemo/sdk && \
+    uv build --wheel --out-dir /workspace/dist
 
 # Package the bindings
 RUN mkdir -p /opt/dynemo/bindings/wheels && \
@@ -177,7 +179,8 @@ RUN mkdir -p /opt/dynemo/bindings/wheels && \
 # Install dynemo.runtime and dynemo.llm wheels globally in container for tests that
 # currently run without virtual environment activated.
 # TODO: In future, we may use a virtualenv for everything and remove this.
-RUN pip install /opt/dynemo/bindings/wheels/dynemo*cp312*.whl
+RUN cd /opt/dynemo/bindings/wheels && \
+    pip install dynemo*cp312*.whl dynemo_sdk*any.whl
 
 # Copy everything in after ginstall steps to avoid re-running build/install
 # commands on unrelated changes in other dirs.
