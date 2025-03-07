@@ -27,6 +27,7 @@ use dynemo_llm::{
 use dynemo_runtime::{
     pipeline::{Context, ManyOut, Operator, ServiceBackend, ServiceFrontend, SingleIn, Source},
     runtime::CancellationToken,
+    DistributedRuntime, Runtime,
 };
 use futures::StreamExt;
 use std::{
@@ -43,6 +44,7 @@ const MAX_TOKENS: u32 = 8192;
 const IS_A_TTY: i32 = 1;
 
 pub async fn run(
+    runtime: Runtime,
     cancel_token: CancellationToken,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
@@ -51,11 +53,22 @@ pub async fn run(
         OpenAIChatCompletionsStreamingEngine,
         bool,
     ) = match engine_config {
-        EngineConfig::Dynamic(client) => {
+        EngineConfig::Dynamic(endpoint_id) => {
+            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
+
+            let endpoint = distributed_runtime
+                .namespace(endpoint_id.namespace)?
+                .component(endpoint_id.component)?
+                .endpoint(endpoint_id.name);
+
+            let client = endpoint.client::<NvCreateChatCompletionRequest, Annotated<NvCreateChatCompletionStreamResponse>>().await?;
+            tracing::info!("Waiting for remote model..");
+            client.wait_for_endpoints().await?;
+            tracing::info!("Model discovered");
+
             // The service_name isn't used for text chat outside of logs,
             // so use the path. That avoids having to listen on etcd for model registration.
-            let service_name = client.path();
-            tracing::info!("Model: {service_name}");
+            let service_name = endpoint.subject();
             (service_name, Arc::new(client), false)
         }
         EngineConfig::StaticFull {

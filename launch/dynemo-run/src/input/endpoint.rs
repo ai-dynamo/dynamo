@@ -41,7 +41,7 @@ pub async fn run(
     let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
 
     let cancel_token = runtime.primary_token().clone();
-    let endpoint: Endpoint = path.parse()?;
+    let endpoint_id: Endpoint = path.parse()?;
 
     let etcd_client = distributed.etcd_client();
 
@@ -83,28 +83,29 @@ pub async fn run(
 
     let model_registration = ModelEntry {
         name: service_name.to_string(),
-        endpoint: endpoint.clone(),
+        endpoint: endpoint_id.clone(),
         model_type: ModelType::Chat,
     };
+
+    let component = distributed
+        .namespace(endpoint_id.namespace)?
+        .component(endpoint_id.component)?;
+    let endpoint = component
+        .service_builder()
+        .create()
+        .await?
+        .endpoint(endpoint_id.name);
+    let network_name = endpoint.subject();
+    tracing::debug!("Registering with etcd as {network_name}");
     etcd_client
         .kv_create(
-            path.clone(),
+            network_name.clone(),
             serde_json::to_vec_pretty(&model_registration)?,
             None,
         )
         .await?;
 
-    let rt_fut = distributed
-        .namespace(endpoint.namespace)?
-        .component(endpoint.component)?
-        .service_builder()
-        .create()
-        .await?
-        .endpoint(endpoint.name)
-        .endpoint_builder()
-        .handler(ingress)
-        .start();
-
+    let rt_fut = endpoint.endpoint_builder().handler(ingress).start();
     tokio::select! {
         _ = rt_fut => {
             tracing::debug!("Endpoint ingress ended");

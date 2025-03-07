@@ -46,18 +46,25 @@ pub async fn run(
         .enable_cmpl_endpoints(true)
         .build()?;
     match engine_config {
-        EngineConfig::Dynamic(client) => {
-            let service_name = client.path();
+        EngineConfig::Dynamic(endpoint) => {
+            // This will attempt to connect to NATS and etcd
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
+
+            let component = distributed_runtime
+                .namespace(endpoint.namespace)?
+                .component(endpoint.component)?;
+            let network_prefix = component.service_name();
+
             // Listen for models registering themselves in etcd, add them to HTTP service
             let state = Arc::new(discovery::ModelWatchState {
-                prefix: service_name.clone(),
-                model_type: ModelType::Chat, // Tio currently supports only chat models
+                prefix: network_prefix.clone(),
+                model_type: ModelType::Chat,
                 manager: http_service.model_manager().clone(),
                 drt: distributed_runtime.clone(),
             });
+            tracing::info!("Waiting for remote model at {network_prefix}");
             let etcd_client = distributed_runtime.etcd_client();
-            let models_watcher = etcd_client.kv_get_and_watch_prefix(service_name).await?;
+            let models_watcher = etcd_client.kv_get_and_watch_prefix(network_prefix).await?;
             let (_prefix, _watcher, receiver) = models_watcher.dissolve();
             let _watcher_task = tokio::spawn(discovery::model_watcher(state, receiver));
         }
