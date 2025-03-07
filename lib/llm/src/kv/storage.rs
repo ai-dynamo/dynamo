@@ -78,7 +78,7 @@ impl KvLayer {
         // todo - implement a kernel to copy the blocks if either are gpu tensors
         if self.data.device().is_cuda() || dst_layer.data.device().is_cuda() {
             // call the cuda kernel to copy the blocks
-            copy_blocks_between_tensors(&self.data, &dst_layer.data, src_blocks, dst_blocks)?;
+            copy_blocks_between_layers(&self.data, &dst_layer.data, src_blocks, dst_blocks)?;
         } else {
             for kv in 0..2 {
                 for (src_idx, dst_idx) in src_blocks.iter().zip(dst_blocks.iter()) {
@@ -259,7 +259,7 @@ extern "C" {
 }
 /// Copy blocks between tensors - works with any combination of
 /// device/host tensors as long as host memory is pinned
-pub fn copy_blocks_between_tensors(
+pub fn copy_blocks_between_layers(
     src_tensor: &Tensor,
     dst_tensor: &Tensor,
     src_block_ids: &[usize],
@@ -911,7 +911,7 @@ mod tests {
 
         // Time the operation
         let start = Instant::now();
-        copy_blocks_between_tensors(&src_tensor, &dst_tensor, &src_blocks, &dst_blocks)?;
+        copy_blocks_between_layers(&src_tensor, &dst_tensor, &src_blocks, &dst_blocks)?;
         let elapsed = start.elapsed();
 
         println!("dst_tensor: {}", dst_tensor);
