@@ -357,7 +357,7 @@ pub async fn run(
         }
         #[cfg(feature = "python")]
         Output::PythonTok(path_str) => {
-            use dynemo_llm::engines::python;
+            use dynamo_llm::engines::python;
             let Some(card) = maybe_card.clone() else {
                 anyhow::bail!("Could not find tokenizer. Pass flag --model-path <path>");
             };
