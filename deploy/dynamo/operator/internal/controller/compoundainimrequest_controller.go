@@ -71,18 +71,18 @@ import (
 )
 
 const (
-	KubeAnnotationCompoundAINimRequestHash            = "yatai.ai/bento-request-hash"
-	KubeAnnotationCompoundAINimRequestImageBuiderHash = "yatai.ai/bento-request-image-builder-hash"
-	KubeAnnotationCompoundAINimRequestModelSeederHash = "yatai.ai/bento-request-model-seeder-hash"
+	KubeAnnotationDynamoNimRequestHash            = "yatai.ai/bento-request-hash"
+	KubeAnnotationDynamoNimRequestImageBuiderHash = "yatai.ai/bento-request-image-builder-hash"
+	KubeAnnotationDynamoNimRequestModelSeederHash = "yatai.ai/bento-request-model-seeder-hash"
 	KubeLabelYataiImageBuilderSeparateModels          = "yatai.ai/yatai-image-builder-separate-models"
-	KubeAnnotationCompoundAINimStorageNS              = "yatai.ai/bento-storage-namespace"
+	KubeAnnotationDynamoNimStorageNS              = "yatai.ai/bento-storage-namespace"
 	KubeAnnotationModelStorageNS                      = "yatai.ai/model-storage-namespace"
 	StoreSchemaAWS                                    = "aws"
 	StoreSchemaGCP                                    = "gcp"
 )
 
-// CompoundAINimRequestReconciler reconciles a CompoundAINimRequest object
-type CompoundAINimRequestReconciler struct {
+// DynamoNimRequestReconciler reconciles a DynamoNimRequest object
+type DynamoNimRequestReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
@@ -105,7 +105,7 @@ type CompoundAINimRequestReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 // TODO(user): Modify the Reconcile function to compare the state specified by
-// the CompoundAINimRequest object against the actual cluster state, and then
+// the DynamoNimRequest object against the actual cluster state, and then
 // perform operations to make the cluster state reflect the state specified by
 // the user.
 //
@@ -113,10 +113,10 @@ type CompoundAINimRequestReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.18.2/pkg/reconcile
 //
 //nolint:gocyclo,nakedret
-func (r *CompoundAINimRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
+func (r *DynamoNimRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	logs := log.FromContext(ctx)
 
-	compoundAINimRequest := &nvidiacomv1alpha1.CompoundAINimRequest{}
+	compoundAINimRequest := &nvidiacomv1alpha1.DynamoNimRequest{}
 
 	err = r.Get(ctx, req.NamespacedName, compoundAINimRequest)
 
@@ -134,7 +134,7 @@ func (r *CompoundAINimRequestReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 
 	for _, condition := range compoundAINimRequest.Status.Conditions {
-		if condition.Type == nvidiacomv1alpha1.CompoundAIDeploymentConditionTypeAvailable && condition.Status == metav1.ConditionTrue {
+		if condition.Type == nvidiacomv1alpha1.DynamoDeploymentConditionTypeAvailable && condition.Status == metav1.ConditionTrue {
 			logs.Info("Skip available compoundAINimRequest")
 			return
 		}
@@ -143,19 +143,19 @@ func (r *CompoundAINimRequestReconciler) Reconcile(ctx context.Context, req ctrl
 	if len(compoundAINimRequest.Status.Conditions) == 0 {
 		compoundAINimRequest, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeModelsSeeding,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeModelsSeeding,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
 				Message: "Starting to reconcile compoundAINimRequest",
 			},
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeImageBuilding,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeImageBuilding,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
 				Message: "Starting to reconcile compoundAINimRequest",
 			},
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeImageExists,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeImageExists,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
 				Message: "Starting to reconcile compoundAINimRequest",
@@ -177,7 +177,7 @@ func (r *CompoundAINimRequestReconciler) Reconcile(ctx context.Context, req ctrl
 		r.Recorder.Eventf(compoundAINimRequest, corev1.EventTypeWarning, "ReconcileError", "Failed to reconcile compoundAINimRequest: %v", err)
 		_, err_ := r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeCompoundAINimAvailable,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeDynamoNimAvailable,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
 				Message: err.Error(),
@@ -189,11 +189,11 @@ func (r *CompoundAINimRequestReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 	}()
 
-	compoundAINimAvailableCondition := meta.FindStatusCondition(compoundAINimRequest.Status.Conditions, nvidiacomv1alpha1.CompoundAINimRequestConditionTypeCompoundAINimAvailable)
+	compoundAINimAvailableCondition := meta.FindStatusCondition(compoundAINimRequest.Status.Conditions, nvidiacomv1alpha1.DynamoNimRequestConditionTypeDynamoNimAvailable)
 	if compoundAINimAvailableCondition == nil || compoundAINimAvailableCondition.Status != metav1.ConditionUnknown {
 		compoundAINimRequest, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeCompoundAINimAvailable,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeDynamoNimAvailable,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
 				Message: "Reconciling",
@@ -231,10 +231,10 @@ func (r *CompoundAINimRequestReconciler) Reconcile(ctx context.Context, req ctrl
 		result = imageExistsResult
 		compoundAINimRequest, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeCompoundAINimAvailable,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeDynamoNimAvailable,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
-				Message: "CompoundAINim image is building",
+				Message: "DynamoNim image is building",
 			},
 		)
 		if err != nil {
@@ -252,7 +252,7 @@ func (r *CompoundAINimRequestReconciler) Reconcile(ctx context.Context, req ctrl
 		result = modelsExistsResult
 		compoundAINimRequest, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeCompoundAINimAvailable,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeDynamoNimAvailable,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
 				Message: "Model is seeding",
@@ -264,12 +264,12 @@ func (r *CompoundAINimRequestReconciler) Reconcile(ctx context.Context, req ctrl
 		return
 	}
 
-	compoundAINimCR := &nvidiacomv1alpha1.CompoundAINim{
+	compoundAINimCR := &nvidiacomv1alpha1.DynamoNim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      compoundAINimRequest.Name,
 			Namespace: compoundAINimRequest.Namespace,
 		},
-		Spec: nvidiacomv1alpha1.CompoundAINimSpec{
+		Spec: nvidiacomv1alpha1.DynamoNimSpec{
 			Tag:         compoundAINimRequest.Spec.BentoTag,
 			Image:       imageInfo.ImageName,
 			ServiceName: compoundAINimRequest.Spec.ServiceName,
@@ -304,7 +304,7 @@ func (r *CompoundAINimRequestReconciler) Reconcile(ctx context.Context, req ctrl
 
 	if compoundAINimRequest.Spec.DownloadURL == "" {
 		var compoundAINim *schemasv1.BentoFullSchema
-		compoundAINim, err = r.getCompoundAINim(ctx, compoundAINimRequest)
+		compoundAINim, err = r.getDynamoNim(ctx, compoundAINimRequest)
 		if err != nil {
 			err = errors.Wrap(err, "get compoundAINim")
 			return
@@ -314,27 +314,27 @@ func (r *CompoundAINimRequestReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 	}
 
-	r.Recorder.Eventf(compoundAINimRequest, corev1.EventTypeNormal, "CompoundAINimImageBuilder", "Creating CompoundAINim CR %s in namespace %s", compoundAINimCR.Name, compoundAINimCR.Namespace)
+	r.Recorder.Eventf(compoundAINimRequest, corev1.EventTypeNormal, "DynamoNimImageBuilder", "Creating DynamoNim CR %s in namespace %s", compoundAINimCR.Name, compoundAINimCR.Namespace)
 	err = r.Create(ctx, compoundAINimCR)
 	isAlreadyExists := k8serrors.IsAlreadyExists(err)
 	if err != nil && !isAlreadyExists {
-		err = errors.Wrap(err, "create CompoundAINim resource")
+		err = errors.Wrap(err, "create DynamoNim resource")
 		return
 	}
 	if isAlreadyExists {
-		oldCompoundAINimCR := &nvidiacomv1alpha1.CompoundAINim{}
-		r.Recorder.Eventf(compoundAINimRequest, corev1.EventTypeNormal, "CompoundAINimImageBuilder", "Updating CompoundAINim CR %s in namespace %s", compoundAINimCR.Name, compoundAINimCR.Namespace)
-		err = r.Get(ctx, types.NamespacedName{Name: compoundAINimCR.Name, Namespace: compoundAINimCR.Namespace}, oldCompoundAINimCR)
+		oldDynamoNimCR := &nvidiacomv1alpha1.DynamoNim{}
+		r.Recorder.Eventf(compoundAINimRequest, corev1.EventTypeNormal, "DynamoNimImageBuilder", "Updating DynamoNim CR %s in namespace %s", compoundAINimCR.Name, compoundAINimCR.Namespace)
+		err = r.Get(ctx, types.NamespacedName{Name: compoundAINimCR.Name, Namespace: compoundAINimCR.Namespace}, oldDynamoNimCR)
 		if err != nil {
-			err = errors.Wrap(err, "get CompoundAINim resource")
+			err = errors.Wrap(err, "get DynamoNim resource")
 			return
 		}
-		if !reflect.DeepEqual(oldCompoundAINimCR.Spec, compoundAINimCR.Spec) {
-			oldCompoundAINimCR.OwnerReferences = compoundAINimCR.OwnerReferences
-			oldCompoundAINimCR.Spec = compoundAINimCR.Spec
-			err = r.Update(ctx, oldCompoundAINimCR)
+		if !reflect.DeepEqual(oldDynamoNimCR.Spec, compoundAINimCR.Spec) {
+			oldDynamoNimCR.OwnerReferences = compoundAINimCR.OwnerReferences
+			oldDynamoNimCR.Spec = compoundAINimCR.Spec
+			err = r.Update(ctx, oldDynamoNimCR)
 			if err != nil {
-				err = errors.Wrap(err, "update CompoundAINim resource")
+				err = errors.Wrap(err, "update DynamoNim resource")
 				return
 			}
 		}
@@ -342,10 +342,10 @@ func (r *CompoundAINimRequestReconciler) Reconcile(ctx context.Context, req ctrl
 
 	compoundAINimRequest, err = r.setStatusConditions(ctx, req,
 		metav1.Condition{
-			Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeCompoundAINimAvailable,
+			Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeDynamoNimAvailable,
 			Status:  metav1.ConditionTrue,
 			Reason:  "Reconciling",
-			Message: "CompoundAINim is generated",
+			Message: "DynamoNim is generated",
 		},
 	)
 	if err != nil {
@@ -360,36 +360,36 @@ func isEstargzEnabled() bool {
 }
 
 type ensureImageExistsOption struct {
-	compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest
+	compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest
 	req                  ctrl.Request
 }
 
 //nolint:gocyclo,nakedret
-func (r *CompoundAINimRequestReconciler) ensureImageExists(ctx context.Context, opt ensureImageExistsOption) (compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest, imageInfo ImageInfo, imageExists bool, result ctrl.Result, err error) { // nolint: unparam
+func (r *DynamoNimRequestReconciler) ensureImageExists(ctx context.Context, opt ensureImageExistsOption) (compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest, imageInfo ImageInfo, imageExists bool, result ctrl.Result, err error) { // nolint: unparam
 	logs := log.FromContext(ctx)
 
 	compoundAINimRequest = opt.compoundAINimRequest
 	req := opt.req
 
 	imageInfo, err = r.getImageInfo(ctx, GetImageInfoOption{
-		CompoundAINimRequest: compoundAINimRequest,
+		DynamoNimRequest: compoundAINimRequest,
 	})
 	if err != nil {
 		err = errors.Wrap(err, "get image info")
 		return
 	}
 
-	imageExistsCheckedCondition := meta.FindStatusCondition(compoundAINimRequest.Status.Conditions, nvidiacomv1alpha1.CompoundAINimRequestConditionTypeImageExistsChecked)
-	imageExistsCondition := meta.FindStatusCondition(compoundAINimRequest.Status.Conditions, nvidiacomv1alpha1.CompoundAINimRequestConditionTypeImageExists)
+	imageExistsCheckedCondition := meta.FindStatusCondition(compoundAINimRequest.Status.Conditions, nvidiacomv1alpha1.DynamoNimRequestConditionTypeImageExistsChecked)
+	imageExistsCondition := meta.FindStatusCondition(compoundAINimRequest.Status.Conditions, nvidiacomv1alpha1.DynamoNimRequestConditionTypeImageExists)
 	if imageExistsCheckedCondition == nil || imageExistsCheckedCondition.Status != metav1.ConditionTrue || imageExistsCheckedCondition.Message != imageInfo.ImageName {
 		imageExistsCheckedCondition = &metav1.Condition{
-			Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeImageExistsChecked,
+			Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeImageExistsChecked,
 			Status:  metav1.ConditionUnknown,
 			Reason:  "Reconciling",
 			Message: imageInfo.ImageName,
 		}
 		compoundAINimAvailableCondition := &metav1.Condition{
-			Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeCompoundAINimAvailable,
+			Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeDynamoNimAvailable,
 			Status:  metav1.ConditionUnknown,
 			Reason:  "Reconciling",
 			Message: "Checking image exists",
@@ -414,13 +414,13 @@ func (r *CompoundAINimRequestReconciler) ensureImageExists(ctx context.Context, 
 		if imageExists {
 			r.Recorder.Eventf(compoundAINimRequest, corev1.EventTypeNormal, "CheckingImage", "Image exists: %s", imageInfo.ImageName)
 			imageExistsCheckedCondition = &metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeImageExistsChecked,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeImageExistsChecked,
 				Status:  metav1.ConditionTrue,
 				Reason:  "Reconciling",
 				Message: imageInfo.ImageName,
 			}
 			imageExistsCondition = &metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeImageExists,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeImageExists,
 				Status:  metav1.ConditionTrue,
 				Reason:  "Reconciling",
 				Message: imageInfo.ImageName,
@@ -432,13 +432,13 @@ func (r *CompoundAINimRequestReconciler) ensureImageExists(ctx context.Context, 
 		} else {
 			r.Recorder.Eventf(compoundAINimRequest, corev1.EventTypeNormal, "CheckingImage", "Image not exists: %s", imageInfo.ImageName)
 			imageExistsCheckedCondition = &metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeImageExistsChecked,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeImageExistsChecked,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
 				Message: fmt.Sprintf("Image not exists: %s", imageInfo.ImageName),
 			}
 			imageExistsCondition = &metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeImageExists,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeImageExists,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
 				Message: fmt.Sprintf("Image %s is not exists", imageInfo.ImageName),
@@ -484,7 +484,7 @@ func (r *CompoundAINimRequestReconciler) ensureImageExists(ctx context.Context, 
 	for _, job_ := range jobs.Items {
 		job_ := job_
 
-		oldHash := job_.Annotations[KubeAnnotationCompoundAINimRequestHash]
+		oldHash := job_.Annotations[KubeAnnotationDynamoNimRequestHash]
 		if oldHash != compoundAINimRequestHashStr {
 			logs.Info("Because hash changed, delete old job", "job", job_.Name, "oldHash", oldHash, "newHash", compoundAINimRequestHashStr)
 			// --cascade=foreground
@@ -523,7 +523,7 @@ func (r *CompoundAINimRequestReconciler) ensureImageExists(ctx context.Context, 
 	if job == nil {
 		job, err = r.generateImageBuilderJob(ctx, GenerateImageBuilderJobOption{
 			ImageInfo:            imageInfo,
-			CompoundAINimRequest: compoundAINimRequest,
+			DynamoNimRequest: compoundAINimRequest,
 		})
 		if err != nil {
 			err = errors.Wrap(err, "generate image builder job")
@@ -546,7 +546,7 @@ func (r *CompoundAINimRequestReconciler) ensureImageExists(ctx context.Context, 
 		logs.Error(err, "Failed to re-fetch compoundAINimRequest")
 		return
 	}
-	imageBuildingCondition := meta.FindStatusCondition(compoundAINimRequest.Status.Conditions, nvidiacomv1alpha1.CompoundAINimRequestConditionTypeImageBuilding)
+	imageBuildingCondition := meta.FindStatusCondition(compoundAINimRequest.Status.Conditions, nvidiacomv1alpha1.DynamoNimRequestConditionTypeImageBuilding)
 
 	isJobFailed := false
 	isJobRunning := true
@@ -571,14 +571,14 @@ func (r *CompoundAINimRequestReconciler) ensureImageExists(ctx context.Context, 
 		conditions := make([]metav1.Condition, 0)
 		if job.Status.Active > 0 {
 			conditions = append(conditions, metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeImageBuilding,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeImageBuilding,
 				Status:  metav1.ConditionTrue,
 				Reason:  "Reconciling",
 				Message: fmt.Sprintf("Image building job %s is running", job.Name),
 			})
 		} else {
 			conditions = append(conditions, metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeImageBuilding,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeImageBuilding,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
 				Message: fmt.Sprintf("Image building job %s is waiting", job.Name),
@@ -587,7 +587,7 @@ func (r *CompoundAINimRequestReconciler) ensureImageExists(ctx context.Context, 
 		if compoundAINimRequest.Spec.ImageBuildTimeout != nil {
 			if imageBuildingCondition != nil && imageBuildingCondition.LastTransitionTime.Add(time.Duration(*compoundAINimRequest.Spec.ImageBuildTimeout)).Before(time.Now()) {
 				conditions = append(conditions, metav1.Condition{
-					Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeImageBuilding,
+					Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeImageBuilding,
 					Status:  metav1.ConditionFalse,
 					Reason:  "Timeout",
 					Message: fmt.Sprintf("Image building job %s is timeout", job.Name),
@@ -605,7 +605,7 @@ func (r *CompoundAINimRequestReconciler) ensureImageExists(ctx context.Context, 
 		}
 
 		if imageBuildingCondition != nil && imageBuildingCondition.Status != metav1.ConditionTrue && isJobRunning {
-			r.Recorder.Eventf(compoundAINimRequest, corev1.EventTypeNormal, "CompoundAINimImageBuilder", "Image is building now")
+			r.Recorder.Eventf(compoundAINimRequest, corev1.EventTypeNormal, "DynamoNimImageBuilder", "Image is building now")
 		}
 
 		return
@@ -614,13 +614,13 @@ func (r *CompoundAINimRequestReconciler) ensureImageExists(ctx context.Context, 
 	if isJobFailed {
 		compoundAINimRequest, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeImageBuilding,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeImageBuilding,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
 				Message: fmt.Sprintf("Image building job %s is failed.", job.Name),
 			},
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeCompoundAINimAvailable,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeDynamoNimAvailable,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
 				Message: fmt.Sprintf("Image building job %s is failed.", job.Name),
@@ -634,13 +634,13 @@ func (r *CompoundAINimRequestReconciler) ensureImageExists(ctx context.Context, 
 
 	compoundAINimRequest, err = r.setStatusConditions(ctx, req,
 		metav1.Condition{
-			Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeImageBuilding,
+			Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeImageBuilding,
 			Status:  metav1.ConditionFalse,
 			Reason:  "Reconciling",
 			Message: fmt.Sprintf("Image building job %s is succeeded.", job.Name),
 		},
 		metav1.Condition{
-			Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeImageExists,
+			Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeImageExists,
 			Status:  metav1.ConditionTrue,
 			Reason:  "Reconciling",
 			Message: imageInfo.ImageName,
@@ -650,7 +650,7 @@ func (r *CompoundAINimRequestReconciler) ensureImageExists(ctx context.Context, 
 		return
 	}
 
-	r.Recorder.Eventf(compoundAINimRequest, corev1.EventTypeNormal, "CompoundAINimImageBuilder", "Image has been built successfully")
+	r.Recorder.Eventf(compoundAINimRequest, corev1.EventTypeNormal, "DynamoNimImageBuilder", "Image has been built successfully")
 
 	imageExists = true
 
@@ -658,24 +658,24 @@ func (r *CompoundAINimRequestReconciler) ensureImageExists(ctx context.Context, 
 }
 
 type ensureModelsExistsOption struct {
-	compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest
+	compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest
 	req                  ctrl.Request
 }
 
 //nolint:gocyclo,nakedret
-func (r *CompoundAINimRequestReconciler) ensureModelsExists(ctx context.Context, opt ensureModelsExistsOption) (compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest, modelsExists bool, result ctrl.Result, err error) { // nolint: unparam
+func (r *DynamoNimRequestReconciler) ensureModelsExists(ctx context.Context, opt ensureModelsExistsOption) (compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest, modelsExists bool, result ctrl.Result, err error) { // nolint: unparam
 	compoundAINimRequest = opt.compoundAINimRequest
 	modelTags := make([]string, 0)
 	for _, model := range compoundAINimRequest.Spec.Models {
 		modelTags = append(modelTags, model.Tag)
 	}
 
-	modelsExistsCondition := meta.FindStatusCondition(compoundAINimRequest.Status.Conditions, nvidiacomv1alpha1.CompoundAINimRequestConditionTypeModelsExists)
+	modelsExistsCondition := meta.FindStatusCondition(compoundAINimRequest.Status.Conditions, nvidiacomv1alpha1.DynamoNimRequestConditionTypeModelsExists)
 	r.Recorder.Eventf(compoundAINimRequest, corev1.EventTypeNormal, "SeparateModels", "Separate models are enabled")
 	if modelsExistsCondition == nil || modelsExistsCondition.Status == metav1.ConditionUnknown {
 		r.Recorder.Eventf(compoundAINimRequest, corev1.EventTypeNormal, "ModelsExists", "Models are not ready")
 		modelsExistsCondition = &metav1.Condition{
-			Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeModelsExists,
+			Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeModelsExists,
 			Status:  metav1.ConditionFalse,
 			Reason:  "Reconciling",
 			Message: "Models are not ready",
@@ -720,7 +720,7 @@ func (r *CompoundAINimRequestReconciler) ensureModelsExists(ctx context.Context,
 	for _, job_ := range jobs.Items {
 		job_ := job_
 
-		oldHash := job_.Annotations[KubeAnnotationCompoundAINimRequestHash]
+		oldHash := job_.Annotations[KubeAnnotationDynamoNimRequestHash]
 		if oldHash != compoundAINimRequestHashStr {
 			r.Recorder.Eventf(compoundAINimRequest, corev1.EventTypeNormal, "DeleteJob", "Because hash changed, delete old job %s, oldHash: %s, newHash: %s", job_.Name, oldHash, compoundAINimRequestHashStr)
 			// --cascade=foreground
@@ -770,7 +770,7 @@ func (r *CompoundAINimRequestReconciler) ensureModelsExists(ctx context.Context,
 		}
 		if isPVCNotFound {
 			pvc = r.generateModelPVC(GenerateModelPVCOption{
-				CompoundAINimRequest: compoundAINimRequest,
+				DynamoNimRequest: compoundAINimRequest,
 				Model:                &model,
 			})
 			err = r.Create(ctx, pvc)
@@ -782,7 +782,7 @@ func (r *CompoundAINimRequestReconciler) ensureModelsExists(ctx context.Context,
 		}
 		var job *batchv1.Job
 		job, err = r.generateModelSeederJob(ctx, GenerateModelSeederJobOption{
-			CompoundAINimRequest: compoundAINimRequest,
+			DynamoNimRequest: compoundAINimRequest,
 			Model:                &model,
 		})
 		if err != nil {
@@ -847,13 +847,13 @@ func (r *CompoundAINimRequestReconciler) ensureModelsExists(ctx context.Context,
 		r.Recorder.Event(compoundAINimRequest, corev1.EventTypeNormal, "ModelsExists", msg)
 		compoundAINimRequest, err = r.setStatusConditions(ctx, opt.req,
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeModelsExists,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeModelsExists,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
 				Message: msg,
 			},
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeCompoundAINimAvailable,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeDynamoNimAvailable,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
 				Message: msg,
@@ -878,13 +878,13 @@ func (r *CompoundAINimRequestReconciler) ensureModelsExists(ctx context.Context,
 	if modelsExists {
 		compoundAINimRequest, err = r.setStatusConditions(ctx, opt.req,
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeModelsExists,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeModelsExists,
 				Status:  metav1.ConditionTrue,
 				Reason:  "Reconciling",
 				Message: fmt.Sprintf("%s:%s", getJuiceFSStorageClassName(), strings.Join(modelTags, ", ")),
 			},
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeModelsSeeding,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeModelsSeeding,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
 				Message: "All models have been seeded.",
@@ -896,7 +896,7 @@ func (r *CompoundAINimRequestReconciler) ensureModelsExists(ctx context.Context,
 	} else {
 		compoundAINimRequest, err = r.setStatusConditions(ctx, opt.req,
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.CompoundAINimRequestConditionTypeModelsSeeding,
+				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeModelsSeeding,
 				Status:  metav1.ConditionTrue,
 				Reason:  "Reconciling",
 				Message: fmt.Sprintf("Model seeder jobs are not ready: %s.", strings.Join(notReadyJobNames, ", ")),
@@ -909,8 +909,8 @@ func (r *CompoundAINimRequestReconciler) ensureModelsExists(ctx context.Context,
 	return
 }
 
-func (r *CompoundAINimRequestReconciler) setStatusConditions(ctx context.Context, req ctrl.Request, conditions ...metav1.Condition) (compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest, err error) {
-	compoundAINimRequest = &nvidiacomv1alpha1.CompoundAINimRequest{}
+func (r *DynamoNimRequestReconciler) setStatusConditions(ctx context.Context, req ctrl.Request, conditions ...metav1.Condition) (compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest, err error) {
+	compoundAINimRequest = &nvidiacomv1alpha1.DynamoNimRequest{}
 	/*
 		Please don't blame me when you see this kind of code,
 		this is to avoid "the object has been modified; please apply your changes to the latest version and try again" when updating CR status,
@@ -941,28 +941,28 @@ func (r *CompoundAINimRequestReconciler) setStatusConditions(ctx context.Context
 	return
 }
 
-type CompoundAINimImageBuildEngine string
+type DynamoNimImageBuildEngine string
 
 const (
-	CompoundAINimImageBuildEngineKaniko           CompoundAINimImageBuildEngine = "kaniko"
-	CompoundAINimImageBuildEngineBuildkit         CompoundAINimImageBuildEngine = "buildkit"
-	CompoundAINimImageBuildEngineBuildkitRootless CompoundAINimImageBuildEngine = "buildkit-rootless"
+	DynamoNimImageBuildEngineKaniko           DynamoNimImageBuildEngine = "kaniko"
+	DynamoNimImageBuildEngineBuildkit         DynamoNimImageBuildEngine = "buildkit"
+	DynamoNimImageBuildEngineBuildkitRootless DynamoNimImageBuildEngine = "buildkit-rootless"
 )
 
 const (
-	EnvCompoundAINimImageBuildEngine = "BENTO_IMAGE_BUILD_ENGINE"
+	EnvDynamoNimImageBuildEngine = "BENTO_IMAGE_BUILD_ENGINE"
 )
 
-func getCompoundAINimImageBuildEngine() CompoundAINimImageBuildEngine {
-	engine := os.Getenv(EnvCompoundAINimImageBuildEngine)
+func getDynamoNimImageBuildEngine() DynamoNimImageBuildEngine {
+	engine := os.Getenv(EnvDynamoNimImageBuildEngine)
 	if engine == "" {
-		return CompoundAINimImageBuildEngineKaniko
+		return DynamoNimImageBuildEngineKaniko
 	}
-	return CompoundAINimImageBuildEngine(engine)
+	return DynamoNimImageBuildEngine(engine)
 }
 
 //nolint:nakedret
-func (r *CompoundAINimRequestReconciler) makeSureDockerConfigJSONSecret(ctx context.Context, namespace string, dockerRegistryConf *commonconfig.DockerRegistryConfig) (dockerConfigJSONSecret *corev1.Secret, err error) {
+func (r *DynamoNimRequestReconciler) makeSureDockerConfigJSONSecret(ctx context.Context, namespace string, dockerRegistryConf *commonconfig.DockerRegistryConfig) (dockerConfigJSONSecret *corev1.Secret, err error) {
 	if dockerRegistryConf.Username == "" {
 		return
 	}
@@ -1040,7 +1040,7 @@ func (r *CompoundAINimRequestReconciler) makeSureDockerConfigJSONSecret(ctx cont
 }
 
 //nolint:nakedret
-func (r *CompoundAINimRequestReconciler) getYataiClient(ctx context.Context) (yataiClient **yataiclient.YataiClient, yataiConf **commonconfig.YataiConfig, err error) {
+func (r *DynamoNimRequestReconciler) getYataiClient(ctx context.Context) (yataiClient **yataiclient.YataiClient, yataiConf **commonconfig.YataiConfig, err error) {
 	yataiConf_, err := commonconfig.GetYataiConfig(ctx, func(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
 		secret := &corev1.Secret{}
 		err := r.Get(ctx, types.NamespacedName{
@@ -1074,7 +1074,7 @@ func (r *CompoundAINimRequestReconciler) getYataiClient(ctx context.Context) (ya
 	return
 }
 
-func (r *CompoundAINimRequestReconciler) getYataiClientWithAuth(ctx context.Context, compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest) (**yataiclient.YataiClient, **commonconfig.YataiConfig, error) {
+func (r *DynamoNimRequestReconciler) getYataiClientWithAuth(ctx context.Context, compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest) (**yataiclient.YataiClient, **commonconfig.YataiConfig, error) {
 	orgId, ok := compoundAINimRequest.Labels[commonconsts.NgcOrganizationHeaderName]
 	if !ok {
 		orgId = commonconsts.DefaultOrgId
@@ -1085,7 +1085,7 @@ func (r *CompoundAINimRequestReconciler) getYataiClientWithAuth(ctx context.Cont
 		userId = commonconsts.DefaultUserId
 	}
 
-	auth := yataiclient.CompoundAIAuthHeaders{
+	auth := yataiclient.DynamoAuthHeaders{
 		OrgId:  orgId,
 		UserId: userId,
 	}
@@ -1100,7 +1100,7 @@ func (r *CompoundAINimRequestReconciler) getYataiClientWithAuth(ctx context.Cont
 }
 
 //nolint:nakedret
-func (r *CompoundAINimRequestReconciler) getDockerRegistry(ctx context.Context, compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest) (dockerRegistry modelschemas.DockerRegistrySchema, err error) {
+func (r *DynamoNimRequestReconciler) getDockerRegistry(ctx context.Context, compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest) (dockerRegistry modelschemas.DockerRegistrySchema, err error) {
 	if compoundAINimRequest != nil && compoundAINimRequest.Spec.DockerConfigJSONSecretName != "" {
 		secret := &corev1.Secret{}
 		err = r.Get(ctx, types.NamespacedName{
@@ -1227,11 +1227,11 @@ func isAddNamespacePrefix() bool {
 	return os.Getenv("ADD_NAMESPACE_PREFIX_TO_IMAGE_NAME") == trueStr
 }
 
-func getCompoundAINimImagePrefix(compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest) string {
+func getDynamoNimImagePrefix(compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest) string {
 	if compoundAINimRequest == nil {
 		return ""
 	}
-	prefix, exist := compoundAINimRequest.Annotations[KubeAnnotationCompoundAINimStorageNS]
+	prefix, exist := compoundAINimRequest.Annotations[KubeAnnotationDynamoNimStorageNS]
 	if exist && prefix != "" {
 		return fmt.Sprintf("%s.", prefix)
 	}
@@ -1241,7 +1241,7 @@ func getCompoundAINimImagePrefix(compoundAINimRequest *nvidiacomv1alpha1.Compoun
 	return ""
 }
 
-func getModelNamespace(compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest) string {
+func getModelNamespace(compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest) string {
 	if compoundAINimRequest == nil {
 		return ""
 	}
@@ -1255,7 +1255,7 @@ func getModelNamespace(compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequ
 	return ""
 }
 
-func getCompoundAINimImageName(compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest, dockerRegistry modelschemas.DockerRegistrySchema, compoundAINimRepositoryName, compoundAINimVersion string, inCluster bool) string {
+func getDynamoNimImageName(compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest, dockerRegistry modelschemas.DockerRegistrySchema, compoundAINimRepositoryName, compoundAINimVersion string, inCluster bool) string {
 	if compoundAINimRequest != nil && compoundAINimRequest.Spec.Image != "" {
 		return compoundAINimRequest.Spec.Image
 	}
@@ -1274,23 +1274,23 @@ func getCompoundAINimImageName(compoundAINimRequest *nvidiacomv1alpha1.CompoundA
 		tail += ".esgz"
 	}
 
-	tag = fmt.Sprintf("yatai.%s%s", getCompoundAINimImagePrefix(compoundAINimRequest), tail)
+	tag = fmt.Sprintf("yatai.%s%s", getDynamoNimImagePrefix(compoundAINimRequest), tail)
 
 	if len(tag) > 128 {
 		hashStr := hash(tail)
-		tag = fmt.Sprintf("yatai.%s%s", getCompoundAINimImagePrefix(compoundAINimRequest), hashStr)
+		tag = fmt.Sprintf("yatai.%s%s", getDynamoNimImagePrefix(compoundAINimRequest), hashStr)
 		if len(tag) > 128 {
-			tag = fmt.Sprintf("yatai.%s", hash(fmt.Sprintf("%s%s", getCompoundAINimImagePrefix(compoundAINimRequest), tail)))[:128]
+			tag = fmt.Sprintf("yatai.%s", hash(fmt.Sprintf("%s%s", getDynamoNimImagePrefix(compoundAINimRequest), tail)))[:128]
 		}
 	}
 	return fmt.Sprintf("%s:%s", uri, tag)
 }
 
-func isSeparateModels(compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest) (separateModels bool) {
+func isSeparateModels(compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest) (separateModels bool) {
 	return compoundAINimRequest.Annotations[commonconsts.KubeAnnotationYataiImageBuilderSeparateModels] == commonconsts.KubeLabelValueTrue
 }
 
-func checkImageExists(compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest, dockerRegistry modelschemas.DockerRegistrySchema, imageName string) (bool, error) {
+func checkImageExists(compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest, dockerRegistry modelschemas.DockerRegistrySchema, imageName string) (bool, error) {
 	if compoundAINimRequest.Annotations["yatai.ai/force-build-image"] == commonconsts.KubeLabelValueTrue {
 		return false, nil
 	}
@@ -1336,26 +1336,26 @@ type ImageInfo struct {
 }
 
 type GetImageInfoOption struct {
-	CompoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest
+	DynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest
 }
 
 //nolint:nakedret
-func (r *CompoundAINimRequestReconciler) getImageInfo(ctx context.Context, opt GetImageInfoOption) (imageInfo ImageInfo, err error) {
-	compoundAINimRepositoryName, _, compoundAINimVersion := xstrings.Partition(opt.CompoundAINimRequest.Spec.BentoTag, ":")
-	dockerRegistry, err := r.getDockerRegistry(ctx, opt.CompoundAINimRequest)
+func (r *DynamoNimRequestReconciler) getImageInfo(ctx context.Context, opt GetImageInfoOption) (imageInfo ImageInfo, err error) {
+	compoundAINimRepositoryName, _, compoundAINimVersion := xstrings.Partition(opt.DynamoNimRequest.Spec.BentoTag, ":")
+	dockerRegistry, err := r.getDockerRegistry(ctx, opt.DynamoNimRequest)
 	if err != nil {
 		err = errors.Wrap(err, "get docker registry")
 		return
 	}
 	imageInfo.DockerRegistry = dockerRegistry
-	imageInfo.ImageName = getCompoundAINimImageName(opt.CompoundAINimRequest, dockerRegistry, compoundAINimRepositoryName, compoundAINimVersion, false)
-	imageInfo.InClusterImageName = getCompoundAINimImageName(opt.CompoundAINimRequest, dockerRegistry, compoundAINimRepositoryName, compoundAINimVersion, true)
+	imageInfo.ImageName = getDynamoNimImageName(opt.DynamoNimRequest, dockerRegistry, compoundAINimRepositoryName, compoundAINimVersion, false)
+	imageInfo.InClusterImageName = getDynamoNimImageName(opt.DynamoNimRequest, dockerRegistry, compoundAINimRepositoryName, compoundAINimVersion, true)
 
-	imageInfo.DockerConfigJSONSecretName = opt.CompoundAINimRequest.Spec.DockerConfigJSONSecretName
+	imageInfo.DockerConfigJSONSecretName = opt.DynamoNimRequest.Spec.DockerConfigJSONSecretName
 
-	imageInfo.DockerRegistryInsecure = opt.CompoundAINimRequest.Annotations[commonconsts.KubeAnnotationDockerRegistryInsecure] == "true"
-	if opt.CompoundAINimRequest.Spec.OCIRegistryInsecure != nil {
-		imageInfo.DockerRegistryInsecure = *opt.CompoundAINimRequest.Spec.OCIRegistryInsecure
+	imageInfo.DockerRegistryInsecure = opt.DynamoNimRequest.Annotations[commonconsts.KubeAnnotationDockerRegistryInsecure] == "true"
+	if opt.DynamoNimRequest.Spec.OCIRegistryInsecure != nil {
+		imageInfo.DockerRegistryInsecure = *opt.DynamoNimRequest.Spec.OCIRegistryInsecure
 	}
 
 	if imageInfo.DockerConfigJSONSecretName == "" {
@@ -1371,13 +1371,13 @@ func (r *CompoundAINimRequestReconciler) getImageInfo(ctx context.Context, opt G
 		}
 		imageInfo.DockerRegistryInsecure = !dockerRegistryConf.Secure
 		var dockerConfigSecret *corev1.Secret
-		r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Making sure docker config secret %s in namespace %s", commonconsts.KubeSecretNameRegcred, opt.CompoundAINimRequest.Namespace)
-		dockerConfigSecret, err = r.makeSureDockerConfigJSONSecret(ctx, opt.CompoundAINimRequest.Namespace, dockerRegistryConf)
+		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Making sure docker config secret %s in namespace %s", commonconsts.KubeSecretNameRegcred, opt.DynamoNimRequest.Namespace)
+		dockerConfigSecret, err = r.makeSureDockerConfigJSONSecret(ctx, opt.DynamoNimRequest.Namespace, dockerRegistryConf)
 		if err != nil {
 			err = errors.Wrap(err, "make sure docker config secret")
 			return
 		}
-		r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Docker config secret %s in namespace %s is ready", commonconsts.KubeSecretNameRegcred, opt.CompoundAINimRequest.Namespace)
+		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Docker config secret %s in namespace %s is ready", commonconsts.KubeSecretNameRegcred, opt.DynamoNimRequest.Namespace)
 		if dockerConfigSecret != nil {
 			imageInfo.DockerConfigJSONSecretName = dockerConfigSecret.Name
 		}
@@ -1385,7 +1385,7 @@ func (r *CompoundAINimRequestReconciler) getImageInfo(ctx context.Context, opt G
 	return
 }
 
-func (r *CompoundAINimRequestReconciler) getCompoundAINim(ctx context.Context, compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest) (compoundAINim *schemasv1.BentoFullSchema, err error) {
+func (r *DynamoNimRequestReconciler) getDynamoNim(ctx context.Context, compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest) (compoundAINim *schemasv1.BentoFullSchema, err error) {
 	compoundAINimRepositoryName, _, compoundAINimVersion := xstrings.Partition(compoundAINimRequest.Spec.BentoTag, ":")
 
 	yataiClient_, _, err := r.getYataiClient(ctx)
@@ -1401,27 +1401,27 @@ func (r *CompoundAINimRequestReconciler) getCompoundAINim(ctx context.Context, c
 
 	yataiClient := *yataiClient_
 
-	r.Recorder.Eventf(compoundAINimRequest, corev1.EventTypeNormal, "FetchCompoundAINim", "Getting compoundAINim %s from yatai service", compoundAINimRequest.Spec.BentoTag)
+	r.Recorder.Eventf(compoundAINimRequest, corev1.EventTypeNormal, "FetchDynamoNim", "Getting compoundAINim %s from yatai service", compoundAINimRequest.Spec.BentoTag)
 	compoundAINim, err = yataiClient.GetBento(ctx, compoundAINimRepositoryName, compoundAINimVersion)
 	if err != nil {
 		err = errors.Wrap(err, "get compoundAINim")
 		return
 	}
-	r.Recorder.Eventf(compoundAINimRequest, corev1.EventTypeNormal, "FetchCompoundAINim", "Got compoundAINim %s from yatai service", compoundAINimRequest.Spec.BentoTag)
+	r.Recorder.Eventf(compoundAINimRequest, corev1.EventTypeNormal, "FetchDynamoNim", "Got compoundAINim %s from yatai service", compoundAINimRequest.Spec.BentoTag)
 	return
 }
 
-func (r *CompoundAINimRequestReconciler) getImageBuilderJobName() string {
+func (r *DynamoNimRequestReconciler) getImageBuilderJobName() string {
 	guid := xid.New()
 	return fmt.Sprintf("yatai-dynamonim-image-builder-%s", guid.String())
 }
 
-func (r *CompoundAINimRequestReconciler) getModelSeederJobName() string {
+func (r *DynamoNimRequestReconciler) getModelSeederJobName() string {
 	guid := xid.New()
 	return fmt.Sprintf("yatai-model-seeder-%s", guid.String())
 }
 
-func (r *CompoundAINimRequestReconciler) getModelSeederJobLabels(compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest, model *nvidiacomv1alpha1.BentoModel) map[string]string {
+func (r *DynamoNimRequestReconciler) getModelSeederJobLabels(compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest, model *nvidiacomv1alpha1.BentoModel) map[string]string {
 	compoundAINimRepositoryName, _, compoundAINimVersion := xstrings.Partition(compoundAINimRequest.Spec.BentoTag, ":")
 	modelRepositoryName, _, modelVersion := xstrings.Partition(model.Tag, ":")
 	return map[string]string{
@@ -1434,7 +1434,7 @@ func (r *CompoundAINimRequestReconciler) getModelSeederJobLabels(compoundAINimRe
 	}
 }
 
-func (r *CompoundAINimRequestReconciler) getModelSeederPodLabels(compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest, model *nvidiacomv1alpha1.BentoModel) map[string]string {
+func (r *DynamoNimRequestReconciler) getModelSeederPodLabels(compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest, model *nvidiacomv1alpha1.BentoModel) map[string]string {
 	compoundAINimRepositoryName, _, compoundAINimVersion := xstrings.Partition(compoundAINimRequest.Spec.BentoTag, ":")
 	modelRepositoryName, _, modelVersion := xstrings.Partition(model.Tag, ":")
 	return map[string]string{
@@ -1448,7 +1448,7 @@ func (r *CompoundAINimRequestReconciler) getModelSeederPodLabels(compoundAINimRe
 	}
 }
 
-func (r *CompoundAINimRequestReconciler) getImageBuilderJobLabels(compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest) map[string]string {
+func (r *DynamoNimRequestReconciler) getImageBuilderJobLabels(compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest) map[string]string {
 	compoundAINimRepositoryName, _, compoundAINimVersion := xstrings.Partition(compoundAINimRequest.Spec.BentoTag, ":")
 	labels := map[string]string{
 		commonconsts.KubeLabelBentoRequest:         compoundAINimRequest.Name,
@@ -1465,7 +1465,7 @@ func (r *CompoundAINimRequestReconciler) getImageBuilderJobLabels(compoundAINimR
 	return labels
 }
 
-func (r *CompoundAINimRequestReconciler) getImageBuilderPodLabels(compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest) map[string]string {
+func (r *DynamoNimRequestReconciler) getImageBuilderPodLabels(compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest) map[string]string {
 	compoundAINimRepositoryName, _, compoundAINimVersion := xstrings.Partition(compoundAINimRequest.Spec.BentoTag, ":")
 	return map[string]string{
 		commonconsts.KubeLabelBentoRequest:         compoundAINimRequest.Name,
@@ -1482,7 +1482,7 @@ func hash(text string) string {
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
-func (r *CompoundAINimRequestReconciler) getModelPVCName(compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest, model *nvidiacomv1alpha1.BentoModel) string {
+func (r *DynamoNimRequestReconciler) getModelPVCName(compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest, model *nvidiacomv1alpha1.BentoModel) string {
 	storageClassName := getJuiceFSStorageClassName()
 	var hashStr string
 	ns := getModelNamespace(compoundAINimRequest)
@@ -1498,7 +1498,7 @@ func (r *CompoundAINimRequestReconciler) getModelPVCName(compoundAINimRequest *n
 	return pvcName
 }
 
-func (r *CompoundAINimRequestReconciler) getJuiceFSModelPath(compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest, model *nvidiacomv1alpha1.BentoModel) string {
+func (r *DynamoNimRequestReconciler) getJuiceFSModelPath(compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest, model *nvidiacomv1alpha1.BentoModel) string {
 	modelRepositoryName, _, modelVersion := xstrings.Partition(model.Tag, ":")
 	ns := getModelNamespace(compoundAINimRequest)
 	if isHuggingfaceModel(model) {
@@ -1518,12 +1518,12 @@ func isHuggingfaceModel(model *nvidiacomv1alpha1.BentoModel) bool {
 }
 
 type GenerateModelPVCOption struct {
-	CompoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest
+	DynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest
 	Model                *nvidiacomv1alpha1.BentoModel
 }
 
 //nolint:nakedret
-func (r *CompoundAINimRequestReconciler) generateModelPVC(opt GenerateModelPVCOption) (pvc *corev1.PersistentVolumeClaim) {
+func (r *DynamoNimRequestReconciler) generateModelPVC(opt GenerateModelPVCOption) (pvc *corev1.PersistentVolumeClaim) {
 	storageSize := resource.MustParse("100Gi")
 	if opt.Model.Size != nil {
 		storageSize = *opt.Model.Size
@@ -1533,12 +1533,12 @@ func (r *CompoundAINimRequestReconciler) generateModelPVC(opt GenerateModelPVCOp
 		}
 		storageSize.Set(storageSize.Value() * 2)
 	}
-	path := r.getJuiceFSModelPath(opt.CompoundAINimRequest, opt.Model)
-	pvcName := r.getModelPVCName(opt.CompoundAINimRequest, opt.Model)
+	path := r.getJuiceFSModelPath(opt.DynamoNimRequest, opt.Model)
+	pvcName := r.getModelPVCName(opt.DynamoNimRequest, opt.Model)
 	pvc = &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      pvcName,
-			Namespace: opt.CompoundAINimRequest.Namespace,
+			Namespace: opt.DynamoNimRequest.Namespace,
 			Annotations: map[string]string{
 				"path": path,
 			},
@@ -1557,12 +1557,12 @@ func (r *CompoundAINimRequestReconciler) generateModelPVC(opt GenerateModelPVCOp
 }
 
 type GenerateModelSeederJobOption struct {
-	CompoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest
+	DynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest
 	Model                *nvidiacomv1alpha1.BentoModel
 }
 
 //nolint:nakedret
-func (r *CompoundAINimRequestReconciler) generateModelSeederJob(ctx context.Context, opt GenerateModelSeederJobOption) (job *batchv1.Job, err error) {
+func (r *DynamoNimRequestReconciler) generateModelSeederJob(ctx context.Context, opt GenerateModelSeederJobOption) (job *batchv1.Job, err error) {
 	// nolint: gosimple
 	podTemplateSpec, err := r.generateModelSeederPodTemplateSpec(ctx, GenerateModelSeederPodTemplateSpecOption(opt))
 	if err != nil {
@@ -1570,17 +1570,17 @@ func (r *CompoundAINimRequestReconciler) generateModelSeederJob(ctx context.Cont
 		return
 	}
 	kubeAnnotations := make(map[string]string)
-	hashStr, err := r.getHashStr(opt.CompoundAINimRequest)
+	hashStr, err := r.getHashStr(opt.DynamoNimRequest)
 	if err != nil {
 		err = errors.Wrap(err, "failed to get hash string")
 		return
 	}
-	kubeAnnotations[KubeAnnotationCompoundAINimRequestHash] = hashStr
+	kubeAnnotations[KubeAnnotationDynamoNimRequestHash] = hashStr
 	job = &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        r.getModelSeederJobName(),
-			Namespace:   opt.CompoundAINimRequest.Namespace,
-			Labels:      r.getModelSeederJobLabels(opt.CompoundAINimRequest, opt.Model),
+			Namespace:   opt.DynamoNimRequest.Namespace,
+			Labels:      r.getModelSeederJobLabels(opt.DynamoNimRequest, opt.Model),
 			Annotations: kubeAnnotations,
 		},
 		Spec: batchv1.JobSpec{
@@ -1601,7 +1601,7 @@ func (r *CompoundAINimRequestReconciler) generateModelSeederJob(ctx context.Cont
 			Template: *podTemplateSpec,
 		},
 	}
-	err = ctrl.SetControllerReference(opt.CompoundAINimRequest, job, r.Scheme)
+	err = ctrl.SetControllerReference(opt.DynamoNimRequest, job, r.Scheme)
 	if err != nil {
 		err = errors.Wrapf(err, "set controller reference for job %s", job.Name)
 		return
@@ -1610,13 +1610,13 @@ func (r *CompoundAINimRequestReconciler) generateModelSeederJob(ctx context.Cont
 }
 
 type GenerateModelSeederPodTemplateSpecOption struct {
-	CompoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest
+	DynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest
 	Model                *nvidiacomv1alpha1.BentoModel
 }
 
 //nolint:nakedret
-func (r *CompoundAINimRequestReconciler) generateModelSeederPodTemplateSpec(ctx context.Context, opt GenerateModelSeederPodTemplateSpecOption) (pod *corev1.PodTemplateSpec, err error) {
-	kubeLabels := r.getModelSeederPodLabels(opt.CompoundAINimRequest, opt.Model)
+func (r *DynamoNimRequestReconciler) generateModelSeederPodTemplateSpec(ctx context.Context, opt GenerateModelSeederPodTemplateSpecOption) (pod *corev1.PodTemplateSpec, err error) {
+	kubeLabels := r.getModelSeederPodLabels(opt.DynamoNimRequest, opt.Model)
 
 	volumes := make([]corev1.Volume, 0)
 
@@ -1638,7 +1638,7 @@ func (r *CompoundAINimRequestReconciler) generateModelSeederPodTemplateSpec(ctx 
 		},
 	}
 
-	downloaderContainerEnvFrom := opt.CompoundAINimRequest.Spec.DownloaderContainerEnvFrom
+	downloaderContainerEnvFrom := opt.DynamoNimRequest.Spec.DownloaderContainerEnvFrom
 
 	if yataiAPITokenSecretName != "" {
 		downloaderContainerEnvFrom = append(downloaderContainerEnvFrom, corev1.EnvFromSource{
@@ -1675,23 +1675,23 @@ func (r *CompoundAINimRequestReconciler) generateModelSeederPodTemplateSpec(ctx 
 		yataiConf := *yataiConf_
 
 		var model_ *schemasv1.ModelFullSchema
-		r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting model %s from yatai service", model.Tag)
+		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting model %s from yatai service", model.Tag)
 		model_, err = yataiClient.GetModel(ctx, modelRepositoryName, modelVersion)
 		if err != nil {
 			err = errors.Wrap(err, "get model")
 			return
 		}
-		r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Model %s is got from yatai service", model.Tag)
+		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Model %s is got from yatai service", model.Tag)
 
 		if model_.TransmissionStrategy != nil && *model_.TransmissionStrategy == modelschemas.TransmissionStrategyPresignedURL {
 			var model0 *schemasv1.ModelSchema
-			r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for model %s from yatai service", model.Tag)
+			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for model %s from yatai service", model.Tag)
 			model0, err = yataiClient.PresignModelDownloadURL(ctx, modelRepositoryName, modelVersion)
 			if err != nil {
 				err = errors.Wrap(err, "presign model download url")
 				return
 			}
-			r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Presigned url for model %s is got from yatai service", model.Tag)
+			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Presigned url for model %s is got from yatai service", model.Tag)
 			modelDownloadURL = model0.PresignedDownloadUrl
 		} else {
 			modelDownloadURL = fmt.Sprintf("%s/api/v1/model_repositories/%s/models/%s/download", yataiConf.Endpoint, modelRepositoryName, modelVersion)
@@ -1775,7 +1775,7 @@ echo "Done"
 		return
 	}
 	modelSeedCommand := modelSeedCommandOutput.String()
-	pvcName := r.getModelPVCName(opt.CompoundAINimRequest, model)
+	pvcName := r.getModelPVCName(opt.DynamoNimRequest, model)
 	volumes = append(volumes, corev1.Volume{
 		Name: pvcName,
 		VolumeSource: corev1.VolumeSource{
@@ -1807,7 +1807,7 @@ echo "Done"
 	})
 
 	kubeAnnotations := make(map[string]string)
-	kubeAnnotations[KubeAnnotationCompoundAINimRequestModelSeederHash] = opt.CompoundAINimRequest.Annotations[KubeAnnotationCompoundAINimRequestModelSeederHash]
+	kubeAnnotations[KubeAnnotationDynamoNimRequestModelSeederHash] = opt.DynamoNimRequest.Annotations[KubeAnnotationDynamoNimRequestModelSeederHash]
 
 	pod = &corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1837,7 +1837,7 @@ echo "Done"
 	}
 
 	configCmName := "yatai-image-builder-config"
-	r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateModelSeederPod", "Getting configmap %s from namespace %s", configCmName, configNamespace)
+	r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateModelSeederPod", "Getting configmap %s from namespace %s", configCmName, configNamespace)
 	configCm := &corev1.ConfigMap{}
 	err = r.Get(ctx, types.NamespacedName{Name: configCmName, Namespace: configNamespace}, configCm)
 	configCmIsNotFound := k8serrors.IsNotFound(err)
@@ -1848,7 +1848,7 @@ echo "Done"
 	err = nil
 
 	if !configCmIsNotFound {
-		r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateModelSeederPod", "Configmap %s is got from namespace %s", configCmName, configNamespace)
+		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateModelSeederPod", "Configmap %s is got from namespace %s", configCmName, configNamespace)
 
 		globalExtraPodSpec = &dynamoCommon.ExtraPodSpec{}
 
@@ -1860,7 +1860,7 @@ echo "Done"
 			}
 		}
 	} else {
-		r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateModelSeederPod", "Configmap %s is not found in namespace %s", configCmName, configNamespace)
+		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateModelSeederPod", "Configmap %s is not found in namespace %s", configCmName, configNamespace)
 	}
 
 	if globalExtraPodSpec != nil {
@@ -1873,18 +1873,18 @@ echo "Done"
 		pod.Spec.ServiceAccountName = globalExtraPodSpec.ServiceAccountName
 	}
 
-	injectPodAffinity(&pod.Spec, opt.CompoundAINimRequest)
+	injectPodAffinity(&pod.Spec, opt.DynamoNimRequest)
 
 	return
 }
 
 type GenerateImageBuilderJobOption struct {
 	ImageInfo            ImageInfo
-	CompoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest
+	DynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest
 }
 
 //nolint:nakedret
-func (r *CompoundAINimRequestReconciler) generateImageBuilderJob(ctx context.Context, opt GenerateImageBuilderJobOption) (job *batchv1.Job, err error) {
+func (r *DynamoNimRequestReconciler) generateImageBuilderJob(ctx context.Context, opt GenerateImageBuilderJobOption) (job *batchv1.Job, err error) {
 	// nolint: gosimple
 	podTemplateSpec, err := r.generateImageBuilderPodTemplateSpec(ctx, GenerateImageBuilderPodTemplateSpecOption(opt))
 	if err != nil {
@@ -1892,17 +1892,17 @@ func (r *CompoundAINimRequestReconciler) generateImageBuilderJob(ctx context.Con
 		return
 	}
 	kubeAnnotations := make(map[string]string)
-	hashStr, err := r.getHashStr(opt.CompoundAINimRequest)
+	hashStr, err := r.getHashStr(opt.DynamoNimRequest)
 	if err != nil {
 		err = errors.Wrap(err, "failed to get hash string")
 		return
 	}
-	kubeAnnotations[KubeAnnotationCompoundAINimRequestHash] = hashStr
+	kubeAnnotations[KubeAnnotationDynamoNimRequestHash] = hashStr
 	job = &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        r.getImageBuilderJobName(),
-			Namespace:   opt.CompoundAINimRequest.Namespace,
-			Labels:      r.getImageBuilderJobLabels(opt.CompoundAINimRequest),
+			Namespace:   opt.DynamoNimRequest.Namespace,
+			Labels:      r.getImageBuilderJobLabels(opt.DynamoNimRequest),
 			Annotations: kubeAnnotations,
 		},
 		Spec: batchv1.JobSpec{
@@ -1923,7 +1923,7 @@ func (r *CompoundAINimRequestReconciler) generateImageBuilderJob(ctx context.Con
 			Template: *podTemplateSpec,
 		},
 	}
-	err = ctrl.SetControllerReference(opt.CompoundAINimRequest, job, r.Scheme)
+	err = ctrl.SetControllerReference(opt.DynamoNimRequest, job, r.Scheme)
 	if err != nil {
 		err = errors.Wrapf(err, "set controller reference for job %s", job.Name)
 		return
@@ -1931,7 +1931,7 @@ func (r *CompoundAINimRequestReconciler) generateImageBuilderJob(ctx context.Con
 	return
 }
 
-func injectPodAffinity(podSpec *corev1.PodSpec, compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest) {
+func injectPodAffinity(podSpec *corev1.PodSpec, compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest) {
 	if podSpec.Affinity == nil {
 		podSpec.Affinity = &corev1.Affinity{}
 	}
@@ -1960,13 +1960,13 @@ const ModelSeederJobFailedExitCode = 42
 
 type GenerateImageBuilderPodTemplateSpecOption struct {
 	ImageInfo            ImageInfo
-	CompoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest
+	DynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest
 }
 
 //nolint:gocyclo,nakedret
-func (r *CompoundAINimRequestReconciler) generateImageBuilderPodTemplateSpec(ctx context.Context, opt GenerateImageBuilderPodTemplateSpecOption) (pod *corev1.PodTemplateSpec, err error) {
-	compoundAINimRepositoryName, _, compoundAINimVersion := xstrings.Partition(opt.CompoundAINimRequest.Spec.BentoTag, ":")
-	kubeLabels := r.getImageBuilderPodLabels(opt.CompoundAINimRequest)
+func (r *DynamoNimRequestReconciler) generateImageBuilderPodTemplateSpec(ctx context.Context, opt GenerateImageBuilderPodTemplateSpecOption) (pod *corev1.PodTemplateSpec, err error) {
+	compoundAINimRepositoryName, _, compoundAINimVersion := xstrings.Partition(opt.DynamoNimRequest.Spec.BentoTag, ":")
+	kubeLabels := r.getImageBuilderPodLabels(opt.DynamoNimRequest)
 
 	inClusterImageName := opt.ImageInfo.InClusterImageName
 
@@ -2023,14 +2023,14 @@ func (r *CompoundAINimRequestReconciler) generateImageBuilderPodTemplateSpec(ctx
 
 	var compoundAINim *schemasv1.BentoFullSchema
 	yataiAPITokenSecretName := ""
-	compoundAINimDownloadURL := opt.CompoundAINimRequest.Spec.DownloadURL
+	compoundAINimDownloadURL := opt.DynamoNimRequest.Spec.DownloadURL
 	compoundAINimDownloadHeader := ""
 
 	if compoundAINimDownloadURL == "" {
 		var yataiClient_ **yataiclient.YataiClient
 		var yataiConf_ **commonconfig.YataiConfig
 
-		yataiClient_, yataiConf_, err = r.getYataiClientWithAuth(ctx, opt.CompoundAINimRequest)
+		yataiClient_, yataiConf_, err = r.getYataiClientWithAuth(ctx, opt.DynamoNimRequest)
 		if err != nil {
 			err = errors.Wrap(err, "get yatai client")
 			return
@@ -2044,23 +2044,23 @@ func (r *CompoundAINimRequestReconciler) generateImageBuilderPodTemplateSpec(ctx
 		yataiClient := *yataiClient_
 		yataiConf := *yataiConf_
 
-		r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting compoundAINim %s from yatai service", opt.CompoundAINimRequest.Spec.BentoTag)
+		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting compoundAINim %s from yatai service", opt.DynamoNimRequest.Spec.BentoTag)
 		compoundAINim, err = yataiClient.GetBento(ctx, compoundAINimRepositoryName, compoundAINimVersion)
 		if err != nil {
 			err = errors.Wrap(err, "get compoundAINim")
 			return
 		}
-		r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got compoundAINim %s from yatai service", opt.CompoundAINimRequest.Spec.BentoTag)
+		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got compoundAINim %s from yatai service", opt.DynamoNimRequest.Spec.BentoTag)
 
 		if compoundAINim.TransmissionStrategy != nil && *compoundAINim.TransmissionStrategy == modelschemas.TransmissionStrategyPresignedURL {
 			var compoundAINim_ *schemasv1.BentoSchema
-			r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for compoundAINim %s from yatai service", opt.CompoundAINimRequest.Spec.BentoTag)
+			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for compoundAINim %s from yatai service", opt.DynamoNimRequest.Spec.BentoTag)
 			compoundAINim_, err = yataiClient.PresignBentoDownloadURL(ctx, compoundAINimRepositoryName, compoundAINimVersion)
 			if err != nil {
 				err = errors.Wrap(err, "presign compoundAINim download url")
 				return
 			}
-			r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for compoundAINim %s from yatai service", opt.CompoundAINimRequest.Spec.BentoTag)
+			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for compoundAINim %s from yatai service", opt.DynamoNimRequest.Spec.BentoTag)
 			compoundAINimDownloadURL = compoundAINim_.PresignedDownloadUrl
 		} else {
 			compoundAINimDownloadURL = fmt.Sprintf("%s/api/v1/bento_repositories/%s/bentos/%s/download", yataiConf.Endpoint, compoundAINimRepositoryName, compoundAINimVersion)
@@ -2073,16 +2073,16 @@ func (r *CompoundAINimRequestReconciler) generateImageBuilderPodTemplateSpec(ctx
 		yataiAPITokenSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      yataiAPITokenSecretName,
-				Namespace: opt.CompoundAINimRequest.Namespace,
+				Namespace: opt.DynamoNimRequest.Namespace,
 			},
 			StringData: map[string]string{
 				commonconsts.EnvYataiApiToken: yataiConf.ApiToken,
 			},
 		}
 
-		r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting secret %s in namespace %s", yataiAPITokenSecretName, opt.CompoundAINimRequest.Namespace)
+		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting secret %s in namespace %s", yataiAPITokenSecretName, opt.DynamoNimRequest.Namespace)
 		_yataiAPITokenSecret := &corev1.Secret{}
-		err = r.Get(ctx, types.NamespacedName{Namespace: opt.CompoundAINimRequest.Namespace, Name: yataiAPITokenSecretName}, _yataiAPITokenSecret)
+		err = r.Get(ctx, types.NamespacedName{Namespace: opt.DynamoNimRequest.Namespace, Name: yataiAPITokenSecretName}, _yataiAPITokenSecret)
 		isNotFound := k8serrors.IsNotFound(err)
 		if err != nil && !isNotFound {
 			err = errors.Wrapf(err, "failed to get secret %s", yataiAPITokenSecretName)
@@ -2090,37 +2090,37 @@ func (r *CompoundAINimRequestReconciler) generateImageBuilderPodTemplateSpec(ctx
 		}
 
 		if isNotFound {
-			r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is not found, so creating it in namespace %s", yataiAPITokenSecretName, opt.CompoundAINimRequest.Namespace)
+			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is not found, so creating it in namespace %s", yataiAPITokenSecretName, opt.DynamoNimRequest.Namespace)
 			err = r.Create(ctx, yataiAPITokenSecret)
 			isExists := k8serrors.IsAlreadyExists(err)
 			if err != nil && !isExists {
 				err = errors.Wrapf(err, "failed to create secret %s", yataiAPITokenSecretName)
 				return
 			}
-			r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is created in namespace %s", yataiAPITokenSecretName, opt.CompoundAINimRequest.Namespace)
+			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is created in namespace %s", yataiAPITokenSecretName, opt.DynamoNimRequest.Namespace)
 		} else {
-			r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is found in namespace %s, so updating it", yataiAPITokenSecretName, opt.CompoundAINimRequest.Namespace)
+			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is found in namespace %s, so updating it", yataiAPITokenSecretName, opt.DynamoNimRequest.Namespace)
 			err = r.Update(ctx, yataiAPITokenSecret)
 			if err != nil {
 				err = errors.Wrapf(err, "failed to update secret %s", yataiAPITokenSecretName)
 				return
 			}
-			r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is updated in namespace %s", yataiAPITokenSecretName, opt.CompoundAINimRequest.Namespace)
+			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is updated in namespace %s", yataiAPITokenSecretName, opt.DynamoNimRequest.Namespace)
 		}
 	}
 	internalImages := commonconfig.GetInternalImages()
 	logrus.Infof("Image builder is using the images %v", *internalImages)
 
-	buildEngine := getCompoundAINimImageBuildEngine()
+	buildEngine := getDynamoNimImageBuildEngine()
 
-	privileged := buildEngine != CompoundAINimImageBuildEngineBuildkitRootless
+	privileged := buildEngine != DynamoNimImageBuildEngineBuildkitRootless
 
 	compoundAINimDownloadCommandTemplate, err := template.New("downloadCommand").Parse(`
 set -e
 
 mkdir -p /workspace/buildcontext
-url="{{.CompoundAINimDownloadURL}}"
-echo "Downloading compoundAINim {{.CompoundAINimRepositoryName}}:{{.CompoundAINimVersion}} to /tmp/downloaded.tar..."
+url="{{.DynamoNimDownloadURL}}"
+echo "Downloading compoundAINim {{.DynamoNimRepositoryName}}:{{.DynamoNimVersion}} to /tmp/downloaded.tar..."
 if [[ ${url} == s3://* ]]; then
 	echo "Downloading from s3..."
 	aws s3 cp ${url} /tmp/downloaded.tar
@@ -2128,7 +2128,7 @@ elif [[ ${url} == gs://* ]]; then
 	echo "Downloading from GCS..."
 	gsutil cp ${url} /tmp/downloaded.tar
 else
-	curl --fail -L -H "{{.CompoundAINimDownloadHeader}}" ${url} --output /tmp/downloaded.tar --progress-bar
+	curl --fail -L -H "{{.DynamoNimDownloadHeader}}" ${url} --output /tmp/downloaded.tar --progress-bar
 fi
 cd /workspace/buildcontext
 echo "Extracting compoundAINim tar file..."
@@ -2150,10 +2150,10 @@ echo "Done"
 	var compoundAINimDownloadCommandBuffer bytes.Buffer
 
 	err = compoundAINimDownloadCommandTemplate.Execute(&compoundAINimDownloadCommandBuffer, map[string]interface{}{
-		"CompoundAINimDownloadURL":    compoundAINimDownloadURL,
-		"CompoundAINimDownloadHeader": compoundAINimDownloadHeader,
-		"CompoundAINimRepositoryName": compoundAINimRepositoryName,
-		"CompoundAINimVersion":        compoundAINimVersion,
+		"DynamoNimDownloadURL":    compoundAINimDownloadURL,
+		"DynamoNimDownloadHeader": compoundAINimDownloadHeader,
+		"DynamoNimRepositoryName": compoundAINimRepositoryName,
+		"DynamoNimVersion":        compoundAINimVersion,
 		"Privileged":                  privileged,
 	})
 	if err != nil {
@@ -2174,7 +2174,7 @@ echo "Done"
 		},
 	}
 
-	downloaderContainerEnvFrom := opt.CompoundAINimRequest.Spec.DownloaderContainerEnvFrom
+	downloaderContainerEnvFrom := opt.DynamoNimRequest.Spec.DownloaderContainerEnvFrom
 
 	if yataiAPITokenSecretName != "" {
 		downloaderContainerEnvFrom = append(downloaderContainerEnvFrom, corev1.EnvFromSource{
@@ -2209,9 +2209,9 @@ echo "Done"
 
 	containers := make([]corev1.Container, 0)
 
-	separateModels := isSeparateModels(opt.CompoundAINimRequest)
+	separateModels := isSeparateModels(opt.DynamoNimRequest)
 
-	models := opt.CompoundAINimRequest.Spec.Models
+	models := opt.DynamoNimRequest.Spec.Models
 	modelsSeen := map[string]struct{}{}
 	for _, model := range models {
 		modelsSeen[model.Tag] = struct{}{}
@@ -2242,7 +2242,7 @@ echo "Done"
 			var yataiClient_ **yataiclient.YataiClient
 			var yataiConf_ **commonconfig.YataiConfig
 
-			yataiClient_, yataiConf_, err = r.getYataiClientWithAuth(ctx, opt.CompoundAINimRequest)
+			yataiClient_, yataiConf_, err = r.getYataiClientWithAuth(ctx, opt.DynamoNimRequest)
 
 			if err != nil {
 				err = errors.Wrap(err, "get yatai client")
@@ -2258,23 +2258,23 @@ echo "Done"
 			yataiConf := *yataiConf_
 
 			var model_ *schemasv1.ModelFullSchema
-			r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting model %s from yatai service", model.Tag)
+			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting model %s from yatai service", model.Tag)
 			model_, err = yataiClient.GetModel(ctx, modelRepositoryName, modelVersion)
 			if err != nil {
 				err = errors.Wrap(err, "get model")
 				return
 			}
-			r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Model %s is got from yatai service", model.Tag)
+			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Model %s is got from yatai service", model.Tag)
 
 			if model_.TransmissionStrategy != nil && *model_.TransmissionStrategy == modelschemas.TransmissionStrategyPresignedURL {
 				var model0 *schemasv1.ModelSchema
-				r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for model %s from yatai service", model.Tag)
+				r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for model %s from yatai service", model.Tag)
 				model0, err = yataiClient.PresignModelDownloadURL(ctx, modelRepositoryName, modelVersion)
 				if err != nil {
 					err = errors.Wrap(err, "presign model download url")
 					return
 				}
-				r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Presigned url for model %s is got from yatai service", model.Tag)
+				r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Presigned url for model %s is got from yatai service", model.Tag)
 				modelDownloadURL = model0.PresignedDownloadUrl
 			} else {
 				modelDownloadURL = fmt.Sprintf("%s/api/v1/model_repositories/%s/models/%s/download", yataiConf.Endpoint, modelRepositoryName, modelVersion)
@@ -2365,7 +2365,7 @@ echo "Done"
 	}
 
 	configCmName := "yatai-image-builder-config"
-	r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting configmap %s from namespace %s", configCmName, configNamespace)
+	r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting configmap %s from namespace %s", configCmName, configNamespace)
 	configCm := &corev1.ConfigMap{}
 	err = r.Get(ctx, types.NamespacedName{Name: configCmName, Namespace: configNamespace}, configCm)
 	configCmIsNotFound := k8serrors.IsNotFound(err)
@@ -2376,7 +2376,7 @@ echo "Done"
 	err = nil // nolint: ineffassign
 
 	if !configCmIsNotFound {
-		r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Configmap %s is got from namespace %s", configCmName, configNamespace)
+		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Configmap %s is got from namespace %s", configCmName, configNamespace)
 
 		globalExtraPodMetadata = &dynamoCommon.ExtraPodMetadata{}
 
@@ -2437,15 +2437,15 @@ echo "Done"
 		}
 		logrus.Info("passed in builder args: ", builderArgs)
 	} else {
-		r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Configmap %s is not found in namespace %s", configCmName, configNamespace)
+		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Configmap %s is not found in namespace %s", configCmName, configNamespace)
 	}
 
 	if buildArgs == nil {
 		buildArgs = make([]string, 0)
 	}
 
-	if opt.CompoundAINimRequest.Spec.BuildArgs != nil {
-		buildArgs = append(buildArgs, opt.CompoundAINimRequest.Spec.BuildArgs...)
+	if opt.DynamoNimRequest.Spec.BuildArgs != nil {
+		buildArgs = append(buildArgs, opt.DynamoNimRequest.Spec.BuildArgs...)
 	}
 
 	dockerFilePath := "/workspace/buildcontext/env/docker/Dockerfile"
@@ -2468,7 +2468,7 @@ echo "Done"
 	}
 
 	kubeAnnotations := make(map[string]string)
-	kubeAnnotations[KubeAnnotationCompoundAINimRequestImageBuiderHash] = opt.CompoundAINimRequest.Annotations[KubeAnnotationCompoundAINimRequestImageBuiderHash]
+	kubeAnnotations[KubeAnnotationDynamoNimRequestImageBuiderHash] = opt.DynamoNimRequest.Annotations[KubeAnnotationDynamoNimRequestImageBuiderHash]
 
 	command := []string{
 		"/kaniko/executor",
@@ -2494,7 +2494,7 @@ echo "Done"
 
 	var builderImage string
 	switch buildEngine {
-	case CompoundAINimImageBuildEngineKaniko:
+	case DynamoNimImageBuildEngineKaniko:
 		builderImage = internalImages.Kaniko
 		if isEstargzEnabled() {
 			builderContainerEnvs = append(builderContainerEnvs, corev1.EnvVar{
@@ -2502,16 +2502,16 @@ echo "Done"
 				Value: "1",
 			})
 		}
-	case CompoundAINimImageBuildEngineBuildkit:
+	case DynamoNimImageBuildEngineBuildkit:
 		builderImage = internalImages.Buildkit
-	case CompoundAINimImageBuildEngineBuildkitRootless:
+	case DynamoNimImageBuildEngineBuildkitRootless:
 		builderImage = internalImages.BuildkitRootless
 	default:
 		err = errors.Errorf("unknown compoundAINim image build engine %s", buildEngine)
 		return
 	}
 
-	isBuildkit := buildEngine == CompoundAINimImageBuildEngineBuildkit || buildEngine == CompoundAINimImageBuildEngineBuildkitRootless
+	isBuildkit := buildEngine == DynamoNimImageBuildEngineBuildkit || buildEngine == DynamoNimImageBuildEngineBuildkitRootless
 
 	if isBuildkit {
 		output := fmt.Sprintf("type=image,name=%s,push=true,registry.insecure=%v", inClusterImageName, dockerRegistryInsecure)
@@ -2551,11 +2551,11 @@ echo "Done"
 
 	var builderContainerSecurityContext *corev1.SecurityContext
 
-	if buildEngine == CompoundAINimImageBuildEngineBuildkit {
+	if buildEngine == DynamoNimImageBuildEngineBuildkit {
 		builderContainerSecurityContext = &corev1.SecurityContext{
 			Privileged: ptr.To(true),
 		}
-	} else if buildEngine == CompoundAINimImageBuildEngineBuildkitRootless {
+	} else if buildEngine == DynamoNimImageBuildEngineBuildkitRootless {
 		kubeAnnotations["container.apparmor.security.beta.kubernetes.io/builder"] = "unconfined"
 		builderContainerSecurityContext = &corev1.SecurityContext{
 			SeccompProfile: &corev1.SeccompProfile{
@@ -2581,7 +2581,7 @@ echo "Done"
 
 	// nolint: gosec
 	buildArgsSecretName := "yatai-image-builder-build-args"
-	r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting secret %s from namespace %s", buildArgsSecretName, configNamespace)
+	r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting secret %s from namespace %s", buildArgsSecretName, configNamespace)
 	buildArgsSecret := &corev1.Secret{}
 	err = r.Get(ctx, types.NamespacedName{Name: buildArgsSecretName, Namespace: configNamespace}, buildArgsSecret)
 	buildArgsSecretIsNotFound := k8serrors.IsNotFound(err)
@@ -2591,42 +2591,42 @@ echo "Done"
 	}
 
 	if !buildArgsSecretIsNotFound {
-		r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is got from namespace %s", buildArgsSecretName, configNamespace)
-		if configNamespace != opt.CompoundAINimRequest.Namespace {
-			r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is in namespace %s, but CompoundAINimRequest is in namespace %s, so we need to copy the secret to CompoundAINimRequest namespace", buildArgsSecretName, configNamespace, opt.CompoundAINimRequest.Namespace)
-			r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting secret %s in namespace %s", buildArgsSecretName, opt.CompoundAINimRequest.Namespace)
+		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is got from namespace %s", buildArgsSecretName, configNamespace)
+		if configNamespace != opt.DynamoNimRequest.Namespace {
+			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is in namespace %s, but DynamoNimRequest is in namespace %s, so we need to copy the secret to DynamoNimRequest namespace", buildArgsSecretName, configNamespace, opt.DynamoNimRequest.Namespace)
+			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting secret %s in namespace %s", buildArgsSecretName, opt.DynamoNimRequest.Namespace)
 			_buildArgsSecret := &corev1.Secret{}
-			err = r.Get(ctx, types.NamespacedName{Namespace: opt.CompoundAINimRequest.Namespace, Name: buildArgsSecretName}, _buildArgsSecret)
+			err = r.Get(ctx, types.NamespacedName{Namespace: opt.DynamoNimRequest.Namespace, Name: buildArgsSecretName}, _buildArgsSecret)
 			localBuildArgsSecretIsNotFound := k8serrors.IsNotFound(err)
 			if err != nil && !localBuildArgsSecretIsNotFound {
-				err = errors.Wrapf(err, "failed to get secret %s from namespace %s", buildArgsSecretName, opt.CompoundAINimRequest.Namespace)
+				err = errors.Wrapf(err, "failed to get secret %s from namespace %s", buildArgsSecretName, opt.DynamoNimRequest.Namespace)
 				return
 			}
 			if localBuildArgsSecretIsNotFound {
-				r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Copying secret %s from namespace %s to namespace %s", buildArgsSecretName, configNamespace, opt.CompoundAINimRequest.Namespace)
+				r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Copying secret %s from namespace %s to namespace %s", buildArgsSecretName, configNamespace, opt.DynamoNimRequest.Namespace)
 				err = r.Create(ctx, &corev1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      buildArgsSecretName,
-						Namespace: opt.CompoundAINimRequest.Namespace,
+						Namespace: opt.DynamoNimRequest.Namespace,
 					},
 					Data: buildArgsSecret.Data,
 				})
 				if err != nil {
-					err = errors.Wrapf(err, "failed to create secret %s in namespace %s", buildArgsSecretName, opt.CompoundAINimRequest.Namespace)
+					err = errors.Wrapf(err, "failed to create secret %s in namespace %s", buildArgsSecretName, opt.DynamoNimRequest.Namespace)
 					return
 				}
 			} else {
-				r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is already in namespace %s", buildArgsSecretName, opt.CompoundAINimRequest.Namespace)
-				r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Updating secret %s in namespace %s", buildArgsSecretName, opt.CompoundAINimRequest.Namespace)
+				r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is already in namespace %s", buildArgsSecretName, opt.DynamoNimRequest.Namespace)
+				r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Updating secret %s in namespace %s", buildArgsSecretName, opt.DynamoNimRequest.Namespace)
 				err = r.Update(ctx, &corev1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      buildArgsSecretName,
-						Namespace: opt.CompoundAINimRequest.Namespace,
+						Namespace: opt.DynamoNimRequest.Namespace,
 					},
 					Data: buildArgsSecret.Data,
 				})
 				if err != nil {
-					err = errors.Wrapf(err, "failed to update secret %s in namespace %s", buildArgsSecretName, opt.CompoundAINimRequest.Namespace)
+					err = errors.Wrapf(err, "failed to update secret %s in namespace %s", buildArgsSecretName, opt.DynamoNimRequest.Namespace)
 					return
 				}
 			}
@@ -2653,7 +2653,7 @@ echo "Done"
 			}
 		}
 	} else {
-		r.Recorder.Eventf(opt.CompoundAINimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is not found in namespace %s", buildArgsSecretName, configNamespace)
+		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is not found in namespace %s", buildArgsSecretName, configNamespace)
 	}
 
 	builderContainerArgs := []string{
@@ -2679,8 +2679,8 @@ echo "Done"
 		container.Resources = *globalDefaultImageBuilderContainerResources
 	}
 
-	if opt.CompoundAINimRequest.Spec.ImageBuilderContainerResources != nil {
-		container.Resources = *opt.CompoundAINimRequest.Spec.ImageBuilderContainerResources
+	if opt.DynamoNimRequest.Spec.ImageBuilderContainerResources != nil {
+		container.Resources = *opt.DynamoNimRequest.Spec.ImageBuilderContainerResources
 	}
 
 	containers = append(containers, container)
@@ -2708,12 +2708,12 @@ echo "Done"
 		}
 	}
 
-	if opt.CompoundAINimRequest.Spec.ImageBuilderExtraPodMetadata != nil {
-		for k, v := range opt.CompoundAINimRequest.Spec.ImageBuilderExtraPodMetadata.Annotations {
+	if opt.DynamoNimRequest.Spec.ImageBuilderExtraPodMetadata != nil {
+		for k, v := range opt.DynamoNimRequest.Spec.ImageBuilderExtraPodMetadata.Annotations {
 			pod.Annotations[k] = v
 		}
 
-		for k, v := range opt.CompoundAINimRequest.Spec.ImageBuilderExtraPodMetadata.Labels {
+		for k, v := range opt.DynamoNimRequest.Spec.ImageBuilderExtraPodMetadata.Labels {
 			pod.Labels[k] = v
 		}
 	}
@@ -2728,45 +2728,45 @@ echo "Done"
 		pod.Spec.ServiceAccountName = globalExtraPodSpec.ServiceAccountName
 	}
 
-	if opt.CompoundAINimRequest.Spec.ImageBuilderExtraPodSpec != nil {
-		if opt.CompoundAINimRequest.Spec.ImageBuilderExtraPodSpec.PriorityClassName != "" {
-			pod.Spec.PriorityClassName = opt.CompoundAINimRequest.Spec.ImageBuilderExtraPodSpec.PriorityClassName
+	if opt.DynamoNimRequest.Spec.ImageBuilderExtraPodSpec != nil {
+		if opt.DynamoNimRequest.Spec.ImageBuilderExtraPodSpec.PriorityClassName != "" {
+			pod.Spec.PriorityClassName = opt.DynamoNimRequest.Spec.ImageBuilderExtraPodSpec.PriorityClassName
 		}
 
-		if opt.CompoundAINimRequest.Spec.ImageBuilderExtraPodSpec.SchedulerName != "" {
-			pod.Spec.SchedulerName = opt.CompoundAINimRequest.Spec.ImageBuilderExtraPodSpec.SchedulerName
+		if opt.DynamoNimRequest.Spec.ImageBuilderExtraPodSpec.SchedulerName != "" {
+			pod.Spec.SchedulerName = opt.DynamoNimRequest.Spec.ImageBuilderExtraPodSpec.SchedulerName
 		}
 
-		if opt.CompoundAINimRequest.Spec.ImageBuilderExtraPodSpec.NodeSelector != nil {
-			pod.Spec.NodeSelector = opt.CompoundAINimRequest.Spec.ImageBuilderExtraPodSpec.NodeSelector
+		if opt.DynamoNimRequest.Spec.ImageBuilderExtraPodSpec.NodeSelector != nil {
+			pod.Spec.NodeSelector = opt.DynamoNimRequest.Spec.ImageBuilderExtraPodSpec.NodeSelector
 		}
 
-		if opt.CompoundAINimRequest.Spec.ImageBuilderExtraPodSpec.Affinity != nil {
-			pod.Spec.Affinity = opt.CompoundAINimRequest.Spec.ImageBuilderExtraPodSpec.Affinity
+		if opt.DynamoNimRequest.Spec.ImageBuilderExtraPodSpec.Affinity != nil {
+			pod.Spec.Affinity = opt.DynamoNimRequest.Spec.ImageBuilderExtraPodSpec.Affinity
 		}
 
-		if opt.CompoundAINimRequest.Spec.ImageBuilderExtraPodSpec.Tolerations != nil {
-			pod.Spec.Tolerations = opt.CompoundAINimRequest.Spec.ImageBuilderExtraPodSpec.Tolerations
+		if opt.DynamoNimRequest.Spec.ImageBuilderExtraPodSpec.Tolerations != nil {
+			pod.Spec.Tolerations = opt.DynamoNimRequest.Spec.ImageBuilderExtraPodSpec.Tolerations
 		}
 
-		if opt.CompoundAINimRequest.Spec.ImageBuilderExtraPodSpec.TopologySpreadConstraints != nil {
-			pod.Spec.TopologySpreadConstraints = opt.CompoundAINimRequest.Spec.ImageBuilderExtraPodSpec.TopologySpreadConstraints
+		if opt.DynamoNimRequest.Spec.ImageBuilderExtraPodSpec.TopologySpreadConstraints != nil {
+			pod.Spec.TopologySpreadConstraints = opt.DynamoNimRequest.Spec.ImageBuilderExtraPodSpec.TopologySpreadConstraints
 		}
 
-		if opt.CompoundAINimRequest.Spec.ImageBuilderExtraPodSpec.ServiceAccountName != "" {
-			pod.Spec.ServiceAccountName = opt.CompoundAINimRequest.Spec.ImageBuilderExtraPodSpec.ServiceAccountName
+		if opt.DynamoNimRequest.Spec.ImageBuilderExtraPodSpec.ServiceAccountName != "" {
+			pod.Spec.ServiceAccountName = opt.DynamoNimRequest.Spec.ImageBuilderExtraPodSpec.ServiceAccountName
 		}
 	}
 
-	injectPodAffinity(&pod.Spec, opt.CompoundAINimRequest)
+	injectPodAffinity(&pod.Spec, opt.DynamoNimRequest)
 
 	if pod.Spec.ServiceAccountName == "" {
 		serviceAccounts := &corev1.ServiceAccountList{}
-		err = r.List(ctx, serviceAccounts, client.InNamespace(opt.CompoundAINimRequest.Namespace), client.MatchingLabels{
+		err = r.List(ctx, serviceAccounts, client.InNamespace(opt.DynamoNimRequest.Namespace), client.MatchingLabels{
 			commonconsts.KubeLabelYataiImageBuilderPod: commonconsts.KubeLabelValueTrue,
 		})
 		if err != nil {
-			err = errors.Wrapf(err, "failed to list service accounts in namespace %s", opt.CompoundAINimRequest.Namespace)
+			err = errors.Wrapf(err, "failed to list service accounts in namespace %s", opt.DynamoNimRequest.Namespace)
 			return
 		}
 		if len(serviceAccounts.Items) > 0 {
@@ -2781,7 +2781,7 @@ echo "Done"
 		if globalExtraContainerEnv != nil {
 			env = append(env, globalExtraContainerEnv...)
 		}
-		env = append(env, opt.CompoundAINimRequest.Spec.ImageBuilderExtraContainerEnv...)
+		env = append(env, opt.DynamoNimRequest.Spec.ImageBuilderExtraContainerEnv...)
 		pod.Spec.InitContainers[i].Env = env
 	}
 	for i, c := range pod.Spec.Containers {
@@ -2789,17 +2789,17 @@ echo "Done"
 		if globalExtraContainerEnv != nil {
 			env = append(env, globalExtraContainerEnv...)
 		}
-		env = append(env, opt.CompoundAINimRequest.Spec.ImageBuilderExtraContainerEnv...)
+		env = append(env, opt.DynamoNimRequest.Spec.ImageBuilderExtraContainerEnv...)
 		pod.Spec.Containers[i].Env = env
 	}
 
 	return
 }
 
-func (r *CompoundAINimRequestReconciler) getHashStr(compoundAINimRequest *nvidiacomv1alpha1.CompoundAINimRequest) (string, error) {
+func (r *DynamoNimRequestReconciler) getHashStr(compoundAINimRequest *nvidiacomv1alpha1.DynamoNimRequest) (string, error) {
 	var hash uint64
 	hash, err := hashstructure.Hash(struct {
-		Spec        nvidiacomv1alpha1.CompoundAINimRequestSpec
+		Spec        nvidiacomv1alpha1.DynamoNimRequestSpec
 		Labels      map[string]string
 		Annotations map[string]string
 	}{
@@ -2827,7 +2827,7 @@ const (
 )
 
 //nolint:nakedret
-func (r *CompoundAINimRequestReconciler) doRegisterCompoundComponent() (err error) {
+func (r *DynamoNimRequestReconciler) doRegisterCompoundComponent() (err error) {
 	logs := log.Log.WithValues("func", "doRegisterYataiComponent")
 
 	ctx, cancel := context.WithTimeout(context.TODO(), time.Minute*5)
@@ -2880,7 +2880,7 @@ func (r *CompoundAINimRequestReconciler) doRegisterCompoundComponent() (err erro
 	return err
 }
 
-func (r *CompoundAINimRequestReconciler) registerCompoundComponent() {
+func (r *DynamoNimRequestReconciler) registerCompoundComponent() {
 	logs := log.Log.WithValues("func", "registerYataiComponent")
 	err := r.doRegisterCompoundComponent()
 	if err != nil {
@@ -2896,7 +2896,7 @@ func (r *CompoundAINimRequestReconciler) registerCompoundComponent() {
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *CompoundAINimRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *DynamoNimRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	logs := log.Log.WithValues("func", "SetupWithManager")
 
 	if os.Getenv("DISABLE_YATAI_COMPONENT_REGISTRATION") != trueStr {
@@ -2906,10 +2906,10 @@ func (r *CompoundAINimRequestReconciler) SetupWithManager(mgr ctrl.Manager) erro
 	}
 
 	err := ctrl.NewControllerManagedBy(mgr).
-		For(&nvidiacomv1alpha1.CompoundAINimRequest{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		Owns(&nvidiacomv1alpha1.CompoundAINim{}).
+		For(&nvidiacomv1alpha1.DynamoNimRequest{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Owns(&nvidiacomv1alpha1.DynamoNim{}).
 		Owns(&batchv1.Job{}).
 		WithEventFilter(controller_common.EphemeralDeploymentEventFilter(r.Config)).
 		Complete(r)
-	return errors.Wrap(err, "failed to setup CompoundAINimRequest controller")
+	return errors.Wrap(err, "failed to setup DynamoNimRequest controller")
 }

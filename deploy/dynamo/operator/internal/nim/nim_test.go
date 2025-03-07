@@ -26,30 +26,30 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestGenerateCompoundAINIMDeployments(t *testing.T) {
+func TestGenerateDynamoNIMDeployments(t *testing.T) {
 	type args struct {
-		parentCompoundAIDeployment *v1alpha1.CompoundAIDeployment
-		config                     *CompoundAINIMConfig
+		parentDynamoDeployment *v1alpha1.DynamoDeployment
+		config                     *DynamoNIMConfig
 	}
 	tests := []struct {
 		name    string
 		args    args
-		want    map[string]*v1alpha1.CompoundAINimDeployment
+		want    map[string]*v1alpha1.DynamoNimDeployment
 		wantErr bool
 	}{
 		{
-			name: "Test GenerateCompoundAINIMDeployments http dependency",
+			name: "Test GenerateDynamoNIMDeployments http dependency",
 			args: args{
-				parentCompoundAIDeployment: &v1alpha1.CompoundAIDeployment{
+				parentDynamoDeployment: &v1alpha1.DynamoDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dynamodeployment",
 						Namespace: "default",
 					},
-					Spec: v1alpha1.CompoundAIDeploymentSpec{
-						CompoundAINim: "dynamonim:ac4e234",
+					Spec: v1alpha1.DynamoDeploymentSpec{
+						DynamoNim: "dynamonim:ac4e234",
 					},
 				},
-				config: &CompoundAINIMConfig{
+				config: &DynamoNIMConfig{
 					Services: []ServiceConfig{
 						{
 							Name:         "service1",
@@ -84,14 +84,14 @@ func TestGenerateCompoundAINIMDeployments(t *testing.T) {
 					},
 				},
 			},
-			want: map[string]*v1alpha1.CompoundAINimDeployment{
+			want: map[string]*v1alpha1.DynamoNimDeployment{
 				"service1": {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dynamodeployment-service1",
 						Namespace: "default",
 					},
-					Spec: v1alpha1.CompoundAINimDeploymentSpec{
-						CompoundAINim: "dynamonim",
+					Spec: v1alpha1.DynamoNimDeploymentSpec{
+						DynamoNim: "dynamonim",
 						ServiceName:   "service1",
 						Resources: &compounaiCommon.Resources{
 							Requests: &compounaiCommon.ResourceItem{
@@ -124,27 +124,27 @@ func TestGenerateCompoundAINIMDeployments(t *testing.T) {
 						Name:      "test-dynamodeployment-service2",
 						Namespace: "default",
 					},
-					Spec: v1alpha1.CompoundAINimDeploymentSpec{
+					Spec: v1alpha1.DynamoNimDeploymentSpec{
 						ServiceName:   "service2",
-						CompoundAINim: "dynamonim",
+						DynamoNim: "dynamonim",
 					},
 				},
 			},
 			wantErr: false,
 		},
 		{
-			name: "Test GenerateCompoundAINIMDeployments dynemo dependency",
+			name: "Test GenerateDynamoNIMDeployments dynamo dependency",
 			args: args{
-				parentCompoundAIDeployment: &v1alpha1.CompoundAIDeployment{
+				parentDynamoDeployment: &v1alpha1.DynamoDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dynamodeployment",
 						Namespace: "default",
 					},
-					Spec: v1alpha1.CompoundAIDeploymentSpec{
-						CompoundAINim: "dynamonim:ac4e234",
+					Spec: v1alpha1.DynamoDeploymentSpec{
+						DynamoNim: "dynamonim:ac4e234",
 					},
 				},
-				config: &CompoundAINIMConfig{
+				config: &DynamoNIMConfig{
 					Services: []ServiceConfig{
 						{
 							Name:         "service1",
@@ -181,14 +181,14 @@ func TestGenerateCompoundAINIMDeployments(t *testing.T) {
 					},
 				},
 			},
-			want: map[string]*v1alpha1.CompoundAINimDeployment{
+			want: map[string]*v1alpha1.DynamoNimDeployment{
 				"service1": {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dynamodeployment-service1",
 						Namespace: "default",
 					},
-					Spec: v1alpha1.CompoundAINimDeploymentSpec{
-						CompoundAINim: "dynamonim",
+					Spec: v1alpha1.DynamoNimDeploymentSpec{
+						DynamoNim: "dynamonim",
 						ServiceName:   "service1",
 						Resources: &compounaiCommon.Resources{
 							Requests: &compounaiCommon.ResourceItem{
@@ -221,8 +221,8 @@ func TestGenerateCompoundAINIMDeployments(t *testing.T) {
 						Name:      "test-dynamodeployment-service2",
 						Namespace: "default",
 					},
-					Spec: v1alpha1.CompoundAINimDeploymentSpec{
-						CompoundAINim: "dynamonim",
+					Spec: v1alpha1.DynamoNimDeploymentSpec{
+						DynamoNim: "dynamonim",
 						ServiceName:   "service2",
 					},
 				},
@@ -230,18 +230,18 @@ func TestGenerateCompoundAINIMDeployments(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "Test GenerateCompoundAINIMDeployments dependency not found",
+			name: "Test GenerateDynamoNIMDeployments dependency not found",
 			args: args{
-				parentCompoundAIDeployment: &v1alpha1.CompoundAIDeployment{
+				parentDynamoDeployment: &v1alpha1.DynamoDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dynamodeployment",
 						Namespace: "default",
 					},
-					Spec: v1alpha1.CompoundAIDeploymentSpec{
-						CompoundAINim: "dynamonim:ac4e234",
+					Spec: v1alpha1.DynamoDeploymentSpec{
+						DynamoNim: "dynamonim:ac4e234",
 					},
 				},
-				config: &CompoundAINIMConfig{
+				config: &DynamoNIMConfig{
 					Services: []ServiceConfig{
 						{
 							Name:         "service1",
@@ -284,9 +284,9 @@ func TestGenerateCompoundAINIMDeployments(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
-			got, err := GenerateCompoundAINIMDeployments(tt.args.parentCompoundAIDeployment, tt.args.config)
+			got, err := GenerateDynamoNIMDeployments(tt.args.parentDynamoDeployment, tt.args.config)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("GenerateCompoundAINIMDeployments() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("GenerateDynamoNIMDeployments() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 			g.Expect(got).To(gomega.Equal(tt.want))

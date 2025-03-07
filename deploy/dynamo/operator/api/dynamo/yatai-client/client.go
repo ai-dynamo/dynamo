@@ -29,7 +29,7 @@ import (
 	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/pkg/dynamo/utils"
 )
 
-type CompoundAIAuthHeaders struct {
+type DynamoAuthHeaders struct {
 	OrgId  string
 	UserId string
 }
@@ -37,7 +37,7 @@ type CompoundAIAuthHeaders struct {
 type YataiClient struct {
 	endpoint string
 	apiToken string
-	headers  CompoundAIAuthHeaders
+	headers  DynamoAuthHeaders
 }
 
 func NewYataiClient(endpoint, apiToken string) *YataiClient {
@@ -47,7 +47,7 @@ func NewYataiClient(endpoint, apiToken string) *YataiClient {
 	}
 }
 
-func (c *YataiClient) SetAuth(headers CompoundAIAuthHeaders) {
+func (c *YataiClient) SetAuth(headers DynamoAuthHeaders) {
 	c.headers = headers
 }
 

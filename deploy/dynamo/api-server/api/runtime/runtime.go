@@ -36,7 +36,7 @@ func (r *runtime) StartServer(port int) {
 	database.SetupDB()
 	router := routes.SetupRouter()
 
-	log.Info().Msgf("Starting CompoundAI API server on port %d", port)
+	log.Info().Msgf("Starting Dynamo API server on port %d", port)
 
 	router.Run(fmt.Sprintf("0.0.0.0:%d", port))
 }

@@ -23,8 +23,8 @@ metadata:
 spec:
   group: nvidia.com
   names:
-    kind: CompoundAINimRequest
-    listKind: CompoundAINimRequestList
+    kind: DynamoNimRequest
+    listKind: DynamoNimRequestList
     plural: compoundainimrequests
     singular: compoundainimrequest
   scope: Namespaced

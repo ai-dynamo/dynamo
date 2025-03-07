@@ -79,6 +79,6 @@ func getPvcName(crd metav1.Object, defaultName *string) string {
 	return crd.GetName()
 }
 
-func generateCompoundAINimRequestName(tag string) string {
+func generateDynamoNimRequestName(tag string) string {
 	return strings.Split(tag, ":")[0]
 }

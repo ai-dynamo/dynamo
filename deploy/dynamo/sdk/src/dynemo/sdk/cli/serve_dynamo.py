@@ -26,11 +26,11 @@ import typing as t
 from typing import Any
 
 import click
-from dynemo.sdk import dynemo_context
 
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
+from dynamo.sdk import dynamo_context
 
-logger = logging.getLogger("dynemo.sdk.serve.dynemo")
+logger = logging.getLogger("dynamo.sdk.serve.dynamo")
 logger.setLevel(logging.INFO)
 
 
@@ -65,16 +65,16 @@ def main(
     worker_env: str | None,
     worker_id: int | None,
 ) -> None:
-    """Start a worker for the given service - either Dynemo or regular service"""
+    """Start a worker for the given service - either Dynamo or regular service"""
     from _bentoml_impl.loader import import_service
     from bentoml._internal.container import BentoMLContainer
     from bentoml._internal.context import server_context
     from bentoml._internal.log import configure_server_logging
 
     run_id = generate_run_id()
-    dynemo_context["service_name"] = service_name
-    dynemo_context["runner_map"] = runner_map
-    dynemo_context["worker_id"] = worker_id
+    dynamo_context["service_name"] = service_name
+    dynamo_context["runner_map"] = runner_map
+    dynamo_context["worker_id"] = worker_id
 
     # Import service first to check configuration
     service = import_service(bento_identifier)
@@ -99,15 +99,15 @@ def main(
             t.cast(t.Dict[str, str], json.loads(runner_map))
         )
 
-    # Check if Dynemo is enabled for this service
-    if service.is_dynemo_component():
+    # Check if Dynamo is enabled for this service
+    if service.is_dynamo_component():
         if worker_id is not None:
             server_context.worker_index = worker_id
 
         @dynamo_worker()
         async def worker(runtime: DistributedRuntime):
-            global dynemo_context
-            dynemo_context["runtime"] = runtime
+            global dynamo_context
+            dynamo_context["runtime"] = runtime
             if service_name and service_name != service.name:
                 server_context.service_type = "service"
             else:
@@ -115,8 +115,8 @@ def main(
 
             server_context.service_name = service.name
 
-            # Get Dynemo configuration and create component
-            namespace, component_name = service.dynemo_address()
+            # Get Dynamo configuration and create component
+            namespace, component_name = service.dynamo_address()
             logger.info(
                 f"[{run_id}] Registering component {namespace}/{component_name}"
             )
@@ -132,24 +132,24 @@ def main(
                     dep.set_runtime(runtime)
                     logger.info(f"[{run_id}] Set runtime for dependency: {dep}")
 
-                # Then register all Dynemo endpoints
-                dynemo_endpoints = service.get_dynemo_endpoints()
-                if not dynemo_endpoints:
-                    error_msg = f"[{run_id}] FATAL ERROR: No Dynemo endpoints found in service {service.name}!"
+                # Then register all Dynamo endpoints
+                dynamo_endpoints = service.get_dynamo_endpoints()
+                if not dynamo_endpoints:
+                    error_msg = f"[{run_id}] FATAL ERROR: No Dynamo endpoints found in service {service.name}!"
                     logger.error(error_msg)
                     raise ValueError(error_msg)
 
                 endpoints = []
-                for name, endpoint in dynemo_endpoints.items():
+                for name, endpoint in dynamo_endpoints.items():
                     td_endpoint = component.endpoint(name)
                     logger.info(f"[{run_id}] Registering endpoint '{name}'")
                     endpoints.append(td_endpoint)
                     # Bind an instance of inner to the endpoint
-                dynemo_context["component"] = component
-                dynemo_context["endpoints"] = endpoints
+                dynamo_context["component"] = component
+                dynamo_context["endpoints"] = endpoints
                 class_instance = service.inner()
                 twm = []
-                for name, endpoint in dynemo_endpoints.items():
+                for name, endpoint in dynamo_endpoints.items():
                     bound_method = endpoint.func.__get__(class_instance)
                     # Only pass request type for now, use Any for response
                     # TODO: Handle a dynamo_endpoint not having types
@@ -180,7 +180,7 @@ def main(
                 result = await endpoints[0].serve_endpoint(twm[0])
 
             except Exception as e:
-                logger.error(f"[{run_id}] Error in Dynemo component setup: {str(e)}")
+                logger.error(f"[{run_id}] Error in Dynamo component setup: {str(e)}")
                 raise
 
         asyncio.run(worker())

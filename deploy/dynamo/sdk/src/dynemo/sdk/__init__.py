@@ -17,21 +17,22 @@ from typing import Any
 
 from bentoml import api  # type: ignore
 from bentoml._internal.context import server_context  # type: ignore
-from dynemo.sdk.lib.decorators import async_onstart, dynemo_api, dynemo_endpoint
-from dynemo.sdk.lib.dependency import depends
-from dynemo.sdk.lib.image import DYNEMO_IMAGE
-from dynemo.sdk.lib.service import service
 
-dynemo_context: dict[str, Any] = {}
+from dynamo.sdk.lib.decorators import async_onstart, dynamo_api, dynamo_endpoint
+from dynamo.sdk.lib.dependency import depends
+from dynamo.sdk.lib.image import DYNEMO_IMAGE
+from dynamo.sdk.lib.service import service
+
+dynamo_context: dict[str, Any] = {}
 
 __all__ = [
     "api",
     "server_context",
     "async_onstart",
-    "dynemo_api",
-    "dynemo_endpoint",
+    "dynamo_api",
+    "dynamo_endpoint",
     "depends",
     "DYNEMO_IMAGE",
     "service",
-    "dynemo_context",
+    "dynamo_context",
 ]

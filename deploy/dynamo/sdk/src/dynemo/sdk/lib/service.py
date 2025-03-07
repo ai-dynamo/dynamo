@@ -21,14 +21,15 @@ from typing import Any, Dict, List, Optional, Tuple, TypeVar, Union
 
 from _bentoml_sdk import Service, ServiceConfig
 from _bentoml_sdk.images import Image
-from dynemo.sdk.lib.decorators import DynemoEndpoint
+
+from dynamo.sdk.lib.decorators import DynamoEndpoint
 
 T = TypeVar("T", bound=object)
 
 
 @dataclass
-class DynemoConfig:
-    """Configuration for Dynemo components"""
+class DynamoConfig:
+    """Configuration for Dynamo components"""
 
     enabled: bool = False
     name: str | None = None
@@ -36,7 +37,7 @@ class DynemoConfig:
 
 
 class CompoundService(Service[T]):
-    """A custom service class that extends BentoML's base Service with Dynemo capabilities"""
+    """A custom service class that extends BentoML's base Service with Dynamo capabilities"""
 
     def __init__(
         self,
@@ -44,71 +45,71 @@ class CompoundService(Service[T]):
         inner: type[T],
         image: Optional[Image] = None,
         envs: Optional[list[dict[str, Any]]] = None,
-        dynemo_config: Optional[DynemoConfig] = None,
+        dynamo_config: Optional[DynamoConfig] = None,
     ):
         super().__init__(config=config, inner=inner, image=image, envs=envs or [])
 
-        # Initialize Dynemo configuration
-        self._dynemo_config = (
-            dynemo_config
-            if dynemo_config
-            else DynemoConfig(name=inner.__name__, namespace="default")
+        # Initialize Dynamo configuration
+        self._dynamo_config = (
+            dynamo_config
+            if dynamo_config
+            else DynamoConfig(name=inner.__name__, namespace="default")
         )
-        if self._dynemo_config.name is None:
-            self._dynemo_config.name = inner.__name__
+        if self._dynamo_config.name is None:
+            self._dynamo_config.name = inner.__name__
 
-        # Register Dynemo endpoints
-        self._dynemo_endpoints: Dict[str, DynemoEndpoint] = {}
+        # Register Dynamo endpoints
+        self._dynamo_endpoints: Dict[str, DynamoEndpoint] = {}
         for field in dir(inner):
             value = getattr(inner, field)
-            if isinstance(value, DynemoEndpoint):
-                self._dynemo_endpoints[value.name] = value
+            if isinstance(value, DynamoEndpoint):
+                self._dynamo_endpoints[value.name] = value
 
-    def is_dynemo_component(self) -> bool:
-        """Check if this service is configured as a Dynemo component"""
-        return self._dynemo_config.enabled
+    def is_dynamo_component(self) -> bool:
+        """Check if this service is configured as a Dynamo component"""
+        return self._dynamo_config.enabled
 
-    def dynemo_address(self) -> Tuple[Optional[str], Optional[str]]:
-        """Get the Dynemo address for this component in namespace/name format"""
-        if not self.is_dynemo_component():
-            raise ValueError("Service is not configured as a Dynemo component")
+    def dynamo_address(self) -> Tuple[Optional[str], Optional[str]]:
+        """Get the Dynamo address for this component in namespace/name format"""
+        if not self.is_dynamo_component():
+            raise ValueError("Service is not configured as a Dynamo component")
 
-        # Check if we have a runner map with Dynemo address
+        # Check if we have a runner map with Dynamo address
         runner_map = os.environ.get("BENTOML_RUNNER_MAP")
         if runner_map:
             try:
                 runners = json.loads(runner_map)
                 if self.name in runners:
                     address = runners[self.name]
-                    if address.startswith("dynemo://"):
-                        # Parse dynemo://namespace/name into (namespace, name)
+                    if address.startswith("dynamo://"):
+                        # Parse dynamo://namespace/name into (namespace, name)
                         _, path = address.split("://", 1)
                         namespace, name = path.split("/", 1)
                         print(
-                            f"Resolved Dynemo address from runner map: {namespace}/{name}"
+                            f"Resolved Dynamo address from runner map: {namespace}/{name}"
                         )
                         return (namespace, name)
             except (json.JSONDecodeError, ValueError) as e:
                 raise ValueError(f"Failed to parse BENTOML_RUNNER_MAP: {str(e)}") from e
 
         print(
-            f"Using default Dynemo address: {self._dynemo_config.namespace}/{self._dynemo_config.name}"
+            f"Using default Dynamo address: {self._dynamo_config.namespace}/{self._dynamo_config.name}"
         )
-        return (self._dynemo_config.namespace, self._dynemo_config.name)
+        return (self._dynamo_config.namespace, self._dynamo_config.name)
 
-    def get_dynemo_endpoints(self) -> Dict[str, DynemoEndpoint]:
-        """Get all registered Dynemo endpoints"""
-        return self._dynemo_endpoints
+    def get_dynamo_endpoints(self) -> Dict[str, DynamoEndpoint]:
+        """Get all registered Dynamo endpoints"""
+        return self._dynamo_endpoints
 
-    def get_dynemo_endpoint(self, name: str) -> DynemoEndpoint:
-        """Get a specific Dynemo endpoint by name"""
-        if name not in self._dynemo_endpoints:
-            raise ValueError(f"No Dynemo endpoint found with name: {name}")
-        return self._dynemo_endpoints[name]
+    def get_dynamo_endpoint(self, name: str) -> DynamoEndpoint:
+        """Get a specific Dynamo endpoint by name"""
+        if name not in self._dynamo_endpoints:
+            raise ValueError(f"No Dynamo endpoint found with name: {name}")
+        return self._dynamo_endpoints[name]
 
-    def list_dynemo_endpoints(self) -> List[str]:
-        """List names of all registered Dynemo endpoints"""
-        return list(self._dynemo_endpoints.keys())
+    def list_dynamo_endpoints(self) -> List[str]:
+        """List names of all registered Dynamo endpoints"""
+        return list(self._dynamo_endpoints.keys())
 
     # todo: add another function to bind an instance of the inner to the self within these methods
 
@@ -119,13 +120,13 @@ def service(
     *,
     image: Optional[Image] = None,
     envs: Optional[list[dict[str, Any]]] = None,
-    dynemo: Optional[Union[Dict[str, Any], DynemoConfig]] = None,
+    dynamo: Optional[Union[Dict[str, Any], DynamoConfig]] = None,
     **kwargs: Any,
 ) -> Any:
-    """Enhanced service decorator that supports Dynemo configuration
+    """Enhanced service decorator that supports Dynamo configuration
 
     Args:
-        dynemo: Dynemo configuration, either as a DynemoConfig object or dict with keys:
+        dynamo: Dynamo configuration, either as a DynamoConfig object or dict with keys:
             - enabled: bool (default True)
             - name: str (default: class name)
             - namespace: str (default: "default")
@@ -133,13 +134,13 @@ def service(
     """
     config = kwargs
 
-    # Parse dict into DynemoConfig object
-    dynemo_config: Optional[DynemoConfig] = None
-    if dynemo is not None:
-        if isinstance(dynemo, dict):
-            dynemo_config = DynemoConfig(**dynemo)
+    # Parse dict into DynamoConfig object
+    dynamo_config: Optional[DynamoConfig] = None
+    if dynamo is not None:
+        if isinstance(dynamo, dict):
+            dynamo_config = DynamoConfig(**dynamo)
         else:
-            dynemo_config = dynemo
+            dynamo_config = dynamo
 
     def decorator(inner: type[T]) -> CompoundService[T]:
         if isinstance(inner, Service):
@@ -149,7 +150,7 @@ def service(
             inner=inner,
             image=image,
             envs=envs or [],
-            dynemo_config=dynemo_config,
+            dynamo_config=dynamo_config,
         )
 
     return decorator(inner) if inner is not None else decorator

@@ -36,5 +36,5 @@ type CompoundComponent struct {
 }
 
 func (d *CompoundComponent) GetResourceType() schemas.ResourceType {
-	return schemas.ResourceTypeCompoundAIComponent
+	return schemas.ResourceTypeDynamoComponent
 }

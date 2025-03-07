@@ -14,7 +14,7 @@
 # limitations under the License.
 
 apiVersion: nvidia.com/v1alpha1
-kind: CompoundAIDeployment
+kind: DynamoDeployment
 metadata:
   labels:
     app.kubernetes.io/name: compoundai-kubernetes-operator

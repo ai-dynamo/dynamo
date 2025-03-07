@@ -148,7 +148,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controller.CompoundAINimDeploymentReconciler{
+	if err = (&controller.DynamoNimDeploymentReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("yatai-deployment"),
@@ -156,25 +156,25 @@ func main() {
 		NatsAddr: natsAddr,
 		EtcdAddr: etcdAddr,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "CompoundAINimDeployment")
+		setupLog.Error(err, "unable to create controller", "controller", "DynamoNimDeployment")
 		os.Exit(1)
 	}
-	if err = (&controller.CompoundAINimRequestReconciler{
+	if err = (&controller.DynamoNimRequestReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("yatai-image-builder"),
 		Config:   ctrlConfig,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "CompoundAINimRequest")
+		setupLog.Error(err, "unable to create controller", "controller", "DynamoNimRequest")
 		os.Exit(1)
 	}
-	if err = (&controller.CompoundAIDeploymentReconciler{
+	if err = (&controller.DynamoDeploymentReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("dynamodeployment"),
 		Config:   ctrlConfig,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "CompoundAIDeployment")
+		setupLog.Error(err, "unable to create controller", "controller", "DynamoDeployment")
 		os.Exit(1)
 	}
 	//+kubebuilder:scaffold:builder

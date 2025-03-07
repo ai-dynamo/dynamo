@@ -94,8 +94,8 @@ const (
 
 var ServicePortHTTPNonProxy = commonconsts.BentoServicePort + 1
 
-// CompoundAINimDeploymentReconciler reconciles a CompoundAINimDeployment object
-type CompoundAINimDeploymentReconciler struct {
+// DynamoNimDeploymentReconciler reconciles a DynamoNimDeployment object
+type DynamoNimDeploymentReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
@@ -124,7 +124,7 @@ type CompoundAINimDeploymentReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 // TODO(user): Modify the Reconcile function to compare the state specified by
-// the CompoundAINimDeployment object against the actual cluster state, and then
+// the DynamoNimDeployment object against the actual cluster state, and then
 // perform operations to make the cluster state reflect the state specified by
 // the user.
 //
@@ -132,42 +132,42 @@ type CompoundAINimDeploymentReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.18.2/pkg/reconcile
 //
 //nolint:gocyclo,nakedret
-func (r *CompoundAINimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
+func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	logs := log.FromContext(ctx)
 
-	compoundAINimDeployment := &v1alpha1.CompoundAINimDeployment{}
+	compoundAINimDeployment := &v1alpha1.DynamoNimDeployment{}
 	err = r.Get(ctx, req.NamespacedName, compoundAINimDeployment)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
 			// Object not found, return.  Created objects are automatically garbage collected.
 			// For additional cleanup logic use finalizers.
-			logs.Info("CompoundAINimDeployment resource not found. Ignoring since object must be deleted.")
+			logs.Info("DynamoNimDeployment resource not found. Ignoring since object must be deleted.")
 			err = nil
 			return
 		}
 		// Error reading the object - requeue the request.
-		logs.Error(err, "Failed to get CompoundAINimDeployment.")
+		logs.Error(err, "Failed to get DynamoNimDeployment.")
 		return
 	}
 
 	logs = logs.WithValues("compoundAINimDeployment", compoundAINimDeployment.Name, "namespace", compoundAINimDeployment.Namespace)
 
 	if len(compoundAINimDeployment.Status.Conditions) == 0 {
-		logs.Info("Starting to reconcile CompoundAINimDeployment")
-		logs.Info("Initializing CompoundAINimDeployment status")
-		r.Recorder.Event(compoundAINimDeployment, corev1.EventTypeNormal, "Reconciling", "Starting to reconcile CompoundAINimDeployment")
+		logs.Info("Starting to reconcile DynamoNimDeployment")
+		logs.Info("Initializing DynamoNimDeployment status")
+		r.Recorder.Event(compoundAINimDeployment, corev1.EventTypeNormal, "Reconciling", "Starting to reconcile DynamoNimDeployment")
 		compoundAINimDeployment, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    v1alpha1.CompoundAIDeploymentConditionTypeAvailable,
+				Type:    v1alpha1.DynamoDeploymentConditionTypeAvailable,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
-				Message: "Starting to reconcile CompoundAINimDeployment",
+				Message: "Starting to reconcile DynamoNimDeployment",
 			},
 			metav1.Condition{
-				Type:    v1alpha1.CompoundAIDeploymentConditionTypeCompoundAINimFound,
+				Type:    v1alpha1.DynamoDeploymentConditionTypeDynamoNimFound,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
-				Message: "Starting to reconcile CompoundAINimDeployment",
+				Message: "Starting to reconcile DynamoNimDeployment",
 			},
 		)
 		if err != nil {
@@ -179,14 +179,14 @@ func (r *CompoundAINimDeploymentReconciler) Reconcile(ctx context.Context, req c
 		if err == nil {
 			return
 		}
-		logs.Error(err, "Failed to reconcile CompoundAINimDeployment.")
-		r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "ReconcileError", "Failed to reconcile CompoundAINimDeployment: %v", err)
+		logs.Error(err, "Failed to reconcile DynamoNimDeployment.")
+		r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "ReconcileError", "Failed to reconcile DynamoNimDeployment: %v", err)
 		_, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    v1alpha1.CompoundAIDeploymentConditionTypeAvailable,
+				Type:    v1alpha1.DynamoDeploymentConditionTypeAvailable,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
-				Message: fmt.Sprintf("Failed to reconcile CompoundAINimDeployment: %v", err),
+				Message: fmt.Sprintf("Failed to reconcile DynamoNimDeployment: %v", err),
 			},
 		)
 		if err != nil {
@@ -200,46 +200,46 @@ func (r *CompoundAINimDeploymentReconciler) Reconcile(ctx context.Context, req c
 		return
 	}
 
-	compoundAINimFoundCondition := meta.FindStatusCondition(compoundAINimDeployment.Status.Conditions, v1alpha1.CompoundAIDeploymentConditionTypeCompoundAINimFound)
+	compoundAINimFoundCondition := meta.FindStatusCondition(compoundAINimDeployment.Status.Conditions, v1alpha1.DynamoDeploymentConditionTypeDynamoNimFound)
 	if compoundAINimFoundCondition != nil && compoundAINimFoundCondition.Status == metav1.ConditionUnknown {
-		logs.Info(fmt.Sprintf("Getting Compound AI NIM %s", compoundAINimDeployment.Spec.CompoundAINim))
-		r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetCompoundAINim", "Getting Compound AI NIM %s", compoundAINimDeployment.Spec.CompoundAINim)
+		logs.Info(fmt.Sprintf("Getting Compound AI NIM %s", compoundAINimDeployment.Spec.DynamoNim))
+		r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetDynamoNim", "Getting Compound AI NIM %s", compoundAINimDeployment.Spec.DynamoNim)
 	}
-	compoundAINimRequest := &v1alpha1.CompoundAINimRequest{}
-	compoundAINimCR := &v1alpha1.CompoundAINim{}
+	compoundAINimRequest := &v1alpha1.DynamoNimRequest{}
+	compoundAINimCR := &v1alpha1.DynamoNim{}
 	err = r.Get(ctx, types.NamespacedName{
 		Namespace: compoundAINimDeployment.Namespace,
-		Name:      compoundAINimDeployment.Spec.CompoundAINim,
+		Name:      compoundAINimDeployment.Spec.DynamoNim,
 	}, compoundAINimCR)
 	compoundAINimIsNotFound := k8serrors.IsNotFound(err)
 	if err != nil && !compoundAINimIsNotFound {
-		err = errors.Wrapf(err, "get CompoundAINim %s/%s", compoundAINimDeployment.Namespace, compoundAINimDeployment.Spec.CompoundAINim)
+		err = errors.Wrapf(err, "get DynamoNim %s/%s", compoundAINimDeployment.Namespace, compoundAINimDeployment.Spec.DynamoNim)
 		return
 	}
 	if compoundAINimIsNotFound {
 		if compoundAINimFoundCondition != nil && compoundAINimFoundCondition.Status == metav1.ConditionUnknown {
-			logs.Info(fmt.Sprintf("CompoundAINim %s not found", compoundAINimDeployment.Spec.CompoundAINim))
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetCompoundAINim", "CompoundAINim %s not found", compoundAINimDeployment.Spec.CompoundAINim)
+			logs.Info(fmt.Sprintf("DynamoNim %s not found", compoundAINimDeployment.Spec.DynamoNim))
+			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetDynamoNim", "DynamoNim %s not found", compoundAINimDeployment.Spec.DynamoNim)
 		}
 		compoundAINimDeployment, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    v1alpha1.CompoundAIDeploymentConditionTypeCompoundAINimFound,
+				Type:    v1alpha1.DynamoDeploymentConditionTypeDynamoNimFound,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
-				Message: "CompoundAINim not found",
+				Message: "DynamoNim not found",
 			},
 		)
 		if err != nil {
 			return
 		}
-		compoundAINimRequestFoundCondition := meta.FindStatusCondition(compoundAINimDeployment.Status.Conditions, v1alpha1.CompoundAIDeploymentConditionTypeCompoundAINimRequestFound)
+		compoundAINimRequestFoundCondition := meta.FindStatusCondition(compoundAINimDeployment.Status.Conditions, v1alpha1.DynamoDeploymentConditionTypeDynamoNimRequestFound)
 		if compoundAINimRequestFoundCondition == nil || compoundAINimRequestFoundCondition.Status != metav1.ConditionUnknown {
 			compoundAINimDeployment, err = r.setStatusConditions(ctx, req,
 				metav1.Condition{
-					Type:    v1alpha1.CompoundAIDeploymentConditionTypeCompoundAINimRequestFound,
+					Type:    v1alpha1.DynamoDeploymentConditionTypeDynamoNimRequestFound,
 					Status:  metav1.ConditionUnknown,
 					Reason:  "Reconciling",
-					Message: "CompoundAINim not found",
+					Message: "DynamoNim not found",
 				},
 			)
 			if err != nil {
@@ -247,23 +247,23 @@ func (r *CompoundAINimDeploymentReconciler) Reconcile(ctx context.Context, req c
 			}
 		}
 		if compoundAINimRequestFoundCondition != nil && compoundAINimRequestFoundCondition.Status == metav1.ConditionUnknown {
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetCompoundAINimRequest", "Getting CompoundAINimRequest %s", compoundAINimDeployment.Spec.CompoundAINim)
+			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetDynamoNimRequest", "Getting DynamoNimRequest %s", compoundAINimDeployment.Spec.DynamoNim)
 		}
 		err = r.Get(ctx, types.NamespacedName{
 			Namespace: compoundAINimDeployment.Namespace,
-			Name:      compoundAINimDeployment.Spec.CompoundAINim,
+			Name:      compoundAINimDeployment.Spec.DynamoNim,
 		}, compoundAINimRequest)
 		if err != nil {
-			err = errors.Wrapf(err, "get CompoundAINimRequest %s/%s", compoundAINimDeployment.Namespace, compoundAINimDeployment.Spec.CompoundAINim)
+			err = errors.Wrapf(err, "get DynamoNimRequest %s/%s", compoundAINimDeployment.Namespace, compoundAINimDeployment.Spec.DynamoNim)
 			compoundAINimDeployment, err = r.setStatusConditions(ctx, req,
 				metav1.Condition{
-					Type:    v1alpha1.CompoundAIDeploymentConditionTypeCompoundAINimFound,
+					Type:    v1alpha1.DynamoDeploymentConditionTypeDynamoNimFound,
 					Status:  metav1.ConditionFalse,
 					Reason:  "Reconciling",
 					Message: err.Error(),
 				},
 				metav1.Condition{
-					Type:    v1alpha1.CompoundAIDeploymentConditionTypeCompoundAINimRequestFound,
+					Type:    v1alpha1.DynamoDeploymentConditionTypeDynamoNimRequestFound,
 					Status:  metav1.ConditionFalse,
 					Reason:  "Reconciling",
 					Message: err.Error(),
@@ -274,33 +274,33 @@ func (r *CompoundAINimDeploymentReconciler) Reconcile(ctx context.Context, req c
 			}
 		}
 		if compoundAINimRequestFoundCondition != nil && compoundAINimRequestFoundCondition.Status == metav1.ConditionUnknown {
-			logs.Info(fmt.Sprintf("CompoundAINimRequest %s found", compoundAINimDeployment.Spec.CompoundAINim))
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetCompoundAINimRequest", "CompoundAINimRequest %s is found and waiting for its compoundAINim to be provided", compoundAINimDeployment.Spec.CompoundAINim)
+			logs.Info(fmt.Sprintf("DynamoNimRequest %s found", compoundAINimDeployment.Spec.DynamoNim))
+			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetDynamoNimRequest", "DynamoNimRequest %s is found and waiting for its compoundAINim to be provided", compoundAINimDeployment.Spec.DynamoNim)
 		}
 		compoundAINimDeployment, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    v1alpha1.CompoundAIDeploymentConditionTypeCompoundAINimRequestFound,
+				Type:    v1alpha1.DynamoDeploymentConditionTypeDynamoNimRequestFound,
 				Status:  metav1.ConditionTrue,
 				Reason:  "Reconciling",
-				Message: "CompoundAINim not found",
+				Message: "DynamoNim not found",
 			},
 		)
 		if err != nil {
 			return
 		}
-		compoundAINimRequestAvailableCondition := meta.FindStatusCondition(compoundAINimRequest.Status.Conditions, v1alpha1.CompoundAIDeploymentConditionTypeAvailable)
+		compoundAINimRequestAvailableCondition := meta.FindStatusCondition(compoundAINimRequest.Status.Conditions, v1alpha1.DynamoDeploymentConditionTypeAvailable)
 		if compoundAINimRequestAvailableCondition != nil && compoundAINimRequestAvailableCondition.Status == metav1.ConditionFalse {
-			err = errors.Errorf("CompoundAINimRequest %s/%s is not available: %s", compoundAINimRequest.Namespace, compoundAINimRequest.Name, compoundAINimRequestAvailableCondition.Message)
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "GetCompoundAINimRequest", err.Error())
+			err = errors.Errorf("DynamoNimRequest %s/%s is not available: %s", compoundAINimRequest.Namespace, compoundAINimRequest.Name, compoundAINimRequestAvailableCondition.Message)
+			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "GetDynamoNimRequest", err.Error())
 			_, err_ := r.setStatusConditions(ctx, req,
 				metav1.Condition{
-					Type:    v1alpha1.CompoundAIDeploymentConditionTypeCompoundAINimFound,
+					Type:    v1alpha1.DynamoDeploymentConditionTypeDynamoNimFound,
 					Status:  metav1.ConditionFalse,
 					Reason:  "Reconciling",
 					Message: err.Error(),
 				},
 				metav1.Condition{
-					Type:    v1alpha1.CompoundAIDeploymentConditionTypeAvailable,
+					Type:    v1alpha1.DynamoDeploymentConditionTypeAvailable,
 					Status:  metav1.ConditionFalse,
 					Reason:  "Reconciling",
 					Message: err.Error(),
@@ -315,15 +315,15 @@ func (r *CompoundAINimDeploymentReconciler) Reconcile(ctx context.Context, req c
 		return
 	} else {
 		if compoundAINimFoundCondition != nil && compoundAINimFoundCondition.Status != metav1.ConditionTrue {
-			logs.Info(fmt.Sprintf("CompoundAINim %s found", compoundAINimDeployment.Spec.CompoundAINim))
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetCompoundAINim", "CompoundAINim %s is found", compoundAINimDeployment.Spec.CompoundAINim)
+			logs.Info(fmt.Sprintf("DynamoNim %s found", compoundAINimDeployment.Spec.DynamoNim))
+			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetDynamoNim", "DynamoNim %s is found", compoundAINimDeployment.Spec.DynamoNim)
 		}
 		compoundAINimDeployment, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    v1alpha1.CompoundAIDeploymentConditionTypeCompoundAINimFound,
+				Type:    v1alpha1.DynamoDeploymentConditionTypeDynamoNimFound,
 				Status:  metav1.ConditionTrue,
 				Reason:  "Reconciling",
-				Message: "CompoundAINim found",
+				Message: "DynamoNim found",
 			},
 		)
 		if err != nil {
@@ -395,7 +395,7 @@ func (r *CompoundAINimDeploymentReconciler) Reconcile(ctx context.Context, req c
 	if yataiClient != nil && clusterName != nil {
 		yataiClient_ := *yataiClient
 		clusterName_ := *clusterName
-		compoundAINimRepositoryName, compoundAINimVersion := getCompoundAINimRepositoryNameAndCompoundAINimVersion(compoundAINimCR)
+		compoundAINimRepositoryName, compoundAINimVersion := getDynamoNimRepositoryNameAndDynamoNimVersion(compoundAINimCR)
 		_, err = yataiClient_.GetBento(ctx, compoundAINimRepositoryName, compoundAINimVersion)
 
 		compoundAINimIsNotFound := isNotFoundError(err)
@@ -405,7 +405,7 @@ func (r *CompoundAINimDeploymentReconciler) Reconcile(ctx context.Context, req c
 		if compoundAINimIsNotFound {
 			compoundAINimDeployment, err = r.setStatusConditions(ctx, req,
 				metav1.Condition{
-					Type:    v1alpha1.CompoundAIDeploymentConditionTypeAvailable,
+					Type:    v1alpha1.DynamoDeploymentConditionTypeAvailable,
 					Status:  metav1.ConditionTrue,
 					Reason:  "Reconciling",
 					Message: "Remote compoundAINim from Yatai is not found",
@@ -525,7 +525,7 @@ func (r *CompoundAINimDeploymentReconciler) Reconcile(ctx context.Context, req c
 	r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "Update", "All resources updated!")
 	compoundAINimDeployment, err = r.setStatusConditions(ctx, req,
 		metav1.Condition{
-			Type:    v1alpha1.CompoundAIDeploymentConditionTypeAvailable,
+			Type:    v1alpha1.DynamoDeploymentConditionTypeAvailable,
 			Status:  metav1.ConditionTrue,
 			Reason:  "Reconciling",
 			Message: "Reconciling",
@@ -542,7 +542,7 @@ func isNotFoundError(err error) bool {
 	return strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "could not find") || strings.Contains(errMsg, "404")
 }
 
-func (r *CompoundAINimDeploymentReconciler) reconcilePVC(ctx context.Context, crd *v1alpha1.CompoundAINimDeployment) (*corev1.PersistentVolumeClaim, error) {
+func (r *DynamoNimDeploymentReconciler) reconcilePVC(ctx context.Context, crd *v1alpha1.DynamoNimDeployment) (*corev1.PersistentVolumeClaim, error) {
 	logger := log.FromContext(ctx)
 	if crd.Spec.PVC == nil {
 		return nil, nil
@@ -577,11 +577,11 @@ func (r *CompoundAINimDeploymentReconciler) reconcilePVC(ctx context.Context, cr
 	return pvc, nil
 }
 
-func (r *CompoundAINimDeploymentReconciler) setStatusConditions(ctx context.Context, req ctrl.Request, conditions ...metav1.Condition) (compoundAINimDeployment *v1alpha1.CompoundAINimDeployment, err error) {
-	compoundAINimDeployment = &v1alpha1.CompoundAINimDeployment{}
+func (r *DynamoNimDeploymentReconciler) setStatusConditions(ctx context.Context, req ctrl.Request, conditions ...metav1.Condition) (compoundAINimDeployment *v1alpha1.DynamoNimDeployment, err error) {
+	compoundAINimDeployment = &v1alpha1.DynamoNimDeployment{}
 	for i := 0; i < 3; i++ {
 		if err = r.Get(ctx, req.NamespacedName, compoundAINimDeployment); err != nil {
-			err = errors.Wrap(err, "Failed to re-fetch CompoundAINimDeployment")
+			err = errors.Wrap(err, "Failed to re-fetch DynamoNimDeployment")
 			return
 		}
 		for _, condition := range conditions {
@@ -594,11 +594,11 @@ func (r *CompoundAINimDeploymentReconciler) setStatusConditions(ctx context.Cont
 		}
 	}
 	if err != nil {
-		err = errors.Wrap(err, "Failed to update CompoundAINimDeployment status")
+		err = errors.Wrap(err, "Failed to update DynamoNimDeployment status")
 		return
 	}
 	if err = r.Get(ctx, req.NamespacedName, compoundAINimDeployment); err != nil {
-		err = errors.Wrap(err, "Failed to re-fetch CompoundAINimDeployment")
+		err = errors.Wrap(err, "Failed to re-fetch DynamoNimDeployment")
 		return
 	}
 	return
@@ -607,7 +607,7 @@ func (r *CompoundAINimDeploymentReconciler) setStatusConditions(ctx context.Cont
 var cachedYataiConf *commonconfig.YataiConfig
 
 //nolint:nakedret
-func (r *CompoundAINimDeploymentReconciler) getYataiClient(ctx context.Context) (yataiClient **yataiclient.YataiClient, clusterName *string, err error) {
+func (r *DynamoNimDeploymentReconciler) getYataiClient(ctx context.Context) (yataiClient **yataiclient.YataiClient, clusterName *string, err error) {
 	restConfig := config.GetConfigOrDie()
 	clientset, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
@@ -651,7 +651,7 @@ func (r *CompoundAINimDeploymentReconciler) getYataiClient(ctx context.Context) 
 	return
 }
 
-func (r *CompoundAINimDeploymentReconciler) getYataiClientWithAuth(ctx context.Context, compoundAINimDeployment *v1alpha1.CompoundAINimDeployment) (**yataiclient.YataiClient, *string, error) {
+func (r *DynamoNimDeploymentReconciler) getYataiClientWithAuth(ctx context.Context, compoundAINimDeployment *v1alpha1.DynamoNimDeployment) (**yataiclient.YataiClient, *string, error) {
 	orgId, ok := compoundAINimDeployment.Labels[commonconsts.NgcOrganizationHeaderName]
 	if !ok {
 		orgId = commonconsts.DefaultOrgId
@@ -662,7 +662,7 @@ func (r *CompoundAINimDeploymentReconciler) getYataiClientWithAuth(ctx context.C
 		userId = commonconsts.DefaultUserId
 	}
 
-	auth := yataiclient.CompoundAIAuthHeaders{
+	auth := yataiclient.DynamoAuthHeaders{
 		OrgId:  orgId,
 		UserId: userId,
 	}
@@ -678,13 +678,13 @@ func (r *CompoundAINimDeploymentReconciler) getYataiClientWithAuth(ctx context.C
 
 type createOrUpdateOrDeleteDeploymentsOption struct {
 	yataiClient             **yataiclient.YataiClient
-	compoundAINimDeployment *v1alpha1.CompoundAINimDeployment
-	compoundAINim           *v1alpha1.CompoundAINim
+	compoundAINimDeployment *v1alpha1.DynamoNimDeployment
+	compoundAINim           *v1alpha1.DynamoNim
 	clusterName             *string
 }
 
 //nolint:nakedret
-func (r *CompoundAINimDeploymentReconciler) createOrUpdateOrDeleteDeployments(ctx context.Context, opt createOrUpdateOrDeleteDeploymentsOption) (modified bool, err error) {
+func (r *DynamoNimDeploymentReconciler) createOrUpdateOrDeleteDeployments(ctx context.Context, opt createOrUpdateOrDeleteDeploymentsOption) (modified bool, err error) {
 	containsStealingTrafficDebugModeEnabled := checkIfContainsStealingTrafficDebugModeEnabled(opt.compoundAINimDeployment)
 	modified, err = r.createOrUpdateDeployment(ctx, createOrUpdateDeploymentOption{
 		createOrUpdateOrDeleteDeploymentsOption: opt,
@@ -734,7 +734,7 @@ type createOrUpdateDeploymentOption struct {
 }
 
 //nolint:nakedret
-func (r *CompoundAINimDeploymentReconciler) createOrUpdateDeployment(ctx context.Context, opt createOrUpdateDeploymentOption) (modified bool, err error) {
+func (r *DynamoNimDeploymentReconciler) createOrUpdateDeployment(ctx context.Context, opt createOrUpdateDeploymentOption) (modified bool, err error) {
 	logs := log.FromContext(ctx)
 
 	deployment, err := r.generateDeployment(ctx, generateDeploymentOption{
@@ -825,7 +825,7 @@ func (r *CompoundAINimDeploymentReconciler) createOrUpdateDeployment(ctx context
 }
 
 //nolint:nakedret
-func (r *CompoundAINimDeploymentReconciler) createOrUpdateHPA(ctx context.Context, compoundAINimDeployment *v1alpha1.CompoundAINimDeployment, compoundAINim *v1alpha1.CompoundAINim) (modified bool, err error) {
+func (r *DynamoNimDeploymentReconciler) createOrUpdateHPA(ctx context.Context, compoundAINimDeployment *v1alpha1.DynamoNimDeployment, compoundAINim *v1alpha1.DynamoNim) (modified bool, err error) {
 	logs := log.FromContext(ctx)
 
 	hpa, err := r.generateHPA(compoundAINimDeployment, compoundAINim)
@@ -905,7 +905,7 @@ func (r *CompoundAINimDeploymentReconciler) createOrUpdateHPA(ctx context.Contex
 	return
 }
 
-func getResourceAnnotations(compoundAINimDeployment *v1alpha1.CompoundAINimDeployment) map[string]string {
+func getResourceAnnotations(compoundAINimDeployment *v1alpha1.DynamoNimDeployment) map[string]string {
 	resourceAnnotations := compoundAINimDeployment.Spec.Annotations
 	if resourceAnnotations == nil {
 		resourceAnnotations = map[string]string{}
@@ -938,17 +938,17 @@ func checkIfIsDebugPodReceiveProductionTrafficEnabled(annotations map[string]str
 	return annotations[KubeAnnotationYataiEnableDebugPodReceiveProductionTraffic] == commonconsts.KubeLabelValueTrue
 }
 
-func checkIfContainsStealingTrafficDebugModeEnabled(compoundAINimDeployment *v1alpha1.CompoundAINimDeployment) bool {
+func checkIfContainsStealingTrafficDebugModeEnabled(compoundAINimDeployment *v1alpha1.DynamoNimDeployment) bool {
 	return checkIfIsStealingTrafficDebugModeEnabled(compoundAINimDeployment.Spec.Annotations)
 }
 
 type createOrUpdateOrDeleteServicesOption struct {
-	compoundAINimDeployment *v1alpha1.CompoundAINimDeployment
-	compoundAINim           *v1alpha1.CompoundAINim
+	compoundAINimDeployment *v1alpha1.DynamoNimDeployment
+	compoundAINim           *v1alpha1.DynamoNim
 }
 
 //nolint:nakedret
-func (r *CompoundAINimDeploymentReconciler) createOrUpdateOrDeleteServices(ctx context.Context, opt createOrUpdateOrDeleteServicesOption) (modified bool, err error) {
+func (r *DynamoNimDeploymentReconciler) createOrUpdateOrDeleteServices(ctx context.Context, opt createOrUpdateOrDeleteServicesOption) (modified bool, err error) {
 	resourceAnnotations := getResourceAnnotations(opt.compoundAINimDeployment)
 	isDebugPodReceiveProductionTrafficEnabled := checkIfIsDebugPodReceiveProductionTrafficEnabled(resourceAnnotations)
 	containsStealingTrafficDebugModeEnabled := checkIfContainsStealingTrafficDebugModeEnabled(opt.compoundAINimDeployment)
@@ -1032,8 +1032,8 @@ func (r *CompoundAINimDeploymentReconciler) createOrUpdateOrDeleteServices(ctx c
 }
 
 type createOrUpdateServiceOption struct {
-	compoundAINimDeployment                 *v1alpha1.CompoundAINimDeployment
-	compoundAINim                           *v1alpha1.CompoundAINim
+	compoundAINimDeployment                 *v1alpha1.DynamoNimDeployment
+	compoundAINim                           *v1alpha1.DynamoNim
 	isStealingTrafficDebugModeEnabled       bool
 	isDebugPodReceiveProductionTraffic      bool
 	containsStealingTrafficDebugModeEnabled bool
@@ -1041,7 +1041,7 @@ type createOrUpdateServiceOption struct {
 }
 
 //nolint:nakedret
-func (r *CompoundAINimDeploymentReconciler) createOrUpdateService(ctx context.Context, opt createOrUpdateServiceOption) (modified bool, err error) {
+func (r *DynamoNimDeploymentReconciler) createOrUpdateService(ctx context.Context, opt createOrUpdateServiceOption) (modified bool, err error) {
 	logs := log.FromContext(ctx)
 
 	// nolint: gosimple
@@ -1129,7 +1129,7 @@ func (r *CompoundAINimDeploymentReconciler) createOrUpdateService(ctx context.Co
 	return
 }
 
-func (r *CompoundAINimDeploymentReconciler) createOrUpdateVirtualService(ctx context.Context, compoundAINimDeployment *v1alpha1.CompoundAINimDeployment) (bool, error) {
+func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context.Context, compoundAINimDeployment *v1alpha1.DynamoNimDeployment) (bool, error) {
 	log := log.FromContext(ctx)
 	log.Info("Starting createOrUpdateVirtualService")
 	vsName := compoundAINimDeployment.Name
@@ -1216,12 +1216,12 @@ func (r *CompoundAINimDeploymentReconciler) createOrUpdateVirtualService(ctx con
 
 type createOrUpdateIngressOption struct {
 	yataiClient             **yataiclient.YataiClient
-	compoundAINimDeployment *v1alpha1.CompoundAINimDeployment
-	compoundAINim           *v1alpha1.CompoundAINim
+	compoundAINimDeployment *v1alpha1.DynamoNimDeployment
+	compoundAINim           *v1alpha1.DynamoNim
 }
 
 //nolint:nakedret
-func (r *CompoundAINimDeploymentReconciler) createOrUpdateIngresses(ctx context.Context, opt createOrUpdateIngressOption) (modified bool, err error) {
+func (r *DynamoNimDeploymentReconciler) createOrUpdateIngresses(ctx context.Context, opt createOrUpdateIngressOption) (modified bool, err error) {
 	logs := log.FromContext(ctx)
 
 	compoundAINimDeployment := opt.compoundAINimDeployment
@@ -1348,14 +1348,14 @@ func (r *CompoundAINimDeploymentReconciler) createOrUpdateIngresses(ctx context.
 	return
 }
 
-func (r *CompoundAINimDeploymentReconciler) getKubeName(compoundAINimDeployment *v1alpha1.CompoundAINimDeployment, _ *v1alpha1.CompoundAINim, debug bool) string {
+func (r *DynamoNimDeploymentReconciler) getKubeName(compoundAINimDeployment *v1alpha1.DynamoNimDeployment, _ *v1alpha1.DynamoNim, debug bool) string {
 	if debug {
 		return fmt.Sprintf("%s-d", compoundAINimDeployment.Name)
 	}
 	return compoundAINimDeployment.Name
 }
 
-func (r *CompoundAINimDeploymentReconciler) getServiceName(compoundAINimDeployment *v1alpha1.CompoundAINimDeployment, _ *v1alpha1.CompoundAINim, debug bool) string {
+func (r *DynamoNimDeploymentReconciler) getServiceName(compoundAINimDeployment *v1alpha1.DynamoNimDeployment, _ *v1alpha1.DynamoNim, debug bool) string {
 	var kubeName string
 	if debug {
 		kubeName = fmt.Sprintf("%s-d", compoundAINimDeployment.Name)
@@ -1365,11 +1365,11 @@ func (r *CompoundAINimDeploymentReconciler) getServiceName(compoundAINimDeployme
 	return kubeName
 }
 
-func (r *CompoundAINimDeploymentReconciler) getGenericServiceName(compoundAINimDeployment *v1alpha1.CompoundAINimDeployment, compoundAINim *v1alpha1.CompoundAINim) string {
+func (r *DynamoNimDeploymentReconciler) getGenericServiceName(compoundAINimDeployment *v1alpha1.DynamoNimDeployment, compoundAINim *v1alpha1.DynamoNim) string {
 	return r.getKubeName(compoundAINimDeployment, compoundAINim, false)
 }
 
-func (r *CompoundAINimDeploymentReconciler) getKubeLabels(compoundAINimDeployment *v1alpha1.CompoundAINimDeployment, compoundAINim *v1alpha1.CompoundAINim) map[string]string {
+func (r *DynamoNimDeploymentReconciler) getKubeLabels(compoundAINimDeployment *v1alpha1.DynamoNimDeployment, compoundAINim *v1alpha1.DynamoNim) map[string]string {
 	compoundAINimRepositoryName, _, compoundAINimVersion := xstrings.Partition(compoundAINim.Spec.Tag, ":")
 	labels := map[string]string{
 		commonconsts.KubeLabelYataiBentoDeployment:           compoundAINimDeployment.Name,
@@ -1382,8 +1382,8 @@ func (r *CompoundAINimDeploymentReconciler) getKubeLabels(compoundAINimDeploymen
 	return labels
 }
 
-func (r *CompoundAINimDeploymentReconciler) getKubeAnnotations(compoundAINimDeployment *v1alpha1.CompoundAINimDeployment, compoundAINim *v1alpha1.CompoundAINim) map[string]string {
-	compoundAINimRepositoryName, compoundAINimVersion := getCompoundAINimRepositoryNameAndCompoundAINimVersion(compoundAINim)
+func (r *DynamoNimDeploymentReconciler) getKubeAnnotations(compoundAINimDeployment *v1alpha1.DynamoNimDeployment, compoundAINim *v1alpha1.DynamoNim) map[string]string {
+	compoundAINimRepositoryName, compoundAINimVersion := getDynamoNimRepositoryNameAndDynamoNimVersion(compoundAINim)
 	annotations := map[string]string{
 		commonconsts.KubeAnnotationBentoRepository: compoundAINimRepositoryName,
 		commonconsts.KubeAnnotationBentoVersion:    compoundAINimVersion,
@@ -1401,8 +1401,8 @@ func (r *CompoundAINimDeploymentReconciler) getKubeAnnotations(compoundAINimDepl
 }
 
 type generateDeploymentOption struct {
-	compoundAINimDeployment                 *v1alpha1.CompoundAINimDeployment
-	compoundAINim                           *v1alpha1.CompoundAINim
+	compoundAINimDeployment                 *v1alpha1.DynamoNimDeployment
+	compoundAINim                           *v1alpha1.DynamoNim
 	yataiClient                             **yataiclient.YataiClient
 	clusterName                             *string
 	isStealingTrafficDebugModeEnabled       bool
@@ -1410,7 +1410,7 @@ type generateDeploymentOption struct {
 }
 
 //nolint:nakedret
-func (r *CompoundAINimDeploymentReconciler) generateDeployment(ctx context.Context, opt generateDeploymentOption) (kubeDeployment *appsv1.Deployment, err error) {
+func (r *DynamoNimDeploymentReconciler) generateDeployment(ctx context.Context, opt generateDeploymentOption) (kubeDeployment *appsv1.Deployment, err error) {
 	kubeNs := opt.compoundAINimDeployment.Namespace
 
 	// nolint: gosimple
@@ -1504,7 +1504,7 @@ func (r *CompoundAINimDeploymentReconciler) generateDeployment(ctx context.Conte
 	return
 }
 
-func (r *CompoundAINimDeploymentReconciler) generateHPA(compoundAINimDeployment *v1alpha1.CompoundAINimDeployment, compoundAINim *v1alpha1.CompoundAINim) (*autoscalingv2.HorizontalPodAutoscaler, error) {
+func (r *DynamoNimDeploymentReconciler) generateHPA(compoundAINimDeployment *v1alpha1.DynamoNimDeployment, compoundAINim *v1alpha1.DynamoNim) (*autoscalingv2.HorizontalPodAutoscaler, error) {
 	labels := r.getKubeLabels(compoundAINimDeployment, compoundAINim)
 
 	annotations := r.getKubeAnnotations(compoundAINimDeployment, compoundAINim)
@@ -1567,7 +1567,7 @@ func (r *CompoundAINimDeploymentReconciler) generateHPA(compoundAINimDeployment 
 	return kubeHpa, err
 }
 
-func (r *CompoundAINimDeploymentReconciler) getHPA(ctx context.Context, hpa *autoscalingv2.HorizontalPodAutoscaler) (client.Object, error) {
+func (r *DynamoNimDeploymentReconciler) getHPA(ctx context.Context, hpa *autoscalingv2.HorizontalPodAutoscaler) (client.Object, error) {
 	name, ns := hpa.Name, hpa.Namespace
 	obj := &autoscalingv2.HorizontalPodAutoscaler{}
 	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, obj)
@@ -1581,15 +1581,15 @@ func (r *CompoundAINimDeploymentReconciler) getHPA(ctx context.Context, hpa *aut
 	return obj, err
 }
 
-func getCompoundAINimRepositoryNameAndCompoundAINimVersion(compoundAINim *v1alpha1.CompoundAINim) (repositoryName string, version string) {
+func getDynamoNimRepositoryNameAndDynamoNimVersion(compoundAINim *v1alpha1.DynamoNim) (repositoryName string, version string) {
 	repositoryName, _, version = xstrings.Partition(compoundAINim.Spec.Tag, ":")
 
 	return
 }
 
 type generatePodTemplateSpecOption struct {
-	compoundAINimDeployment                 *v1alpha1.CompoundAINimDeployment
-	compoundAINim                           *v1alpha1.CompoundAINim
+	compoundAINimDeployment                 *v1alpha1.DynamoNimDeployment
+	compoundAINim                           *v1alpha1.DynamoNim
 	yataiClient                             **yataiclient.YataiClient
 	clusterName                             *string
 	isStealingTrafficDebugModeEnabled       bool
@@ -1597,8 +1597,8 @@ type generatePodTemplateSpecOption struct {
 }
 
 //nolint:gocyclo,nakedret
-func (r *CompoundAINimDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generatePodTemplateSpecOption) (podTemplateSpec *corev1.PodTemplateSpec, err error) {
-	compoundAINimRepositoryName, _ := getCompoundAINimRepositoryNameAndCompoundAINimVersion(opt.compoundAINim)
+func (r *DynamoNimDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generatePodTemplateSpecOption) (podTemplateSpec *corev1.PodTemplateSpec, err error) {
+	compoundAINimRepositoryName, _ := getDynamoNimRepositoryNameAndDynamoNimVersion(opt.compoundAINim)
 	podLabels := r.getKubeLabels(opt.compoundAINimDeployment, opt.compoundAINim)
 	if opt.isStealingTrafficDebugModeEnabled {
 		podLabels[commonconsts.KubeLabelYataiBentoDeploymentTargetType] = DeploymentTargetTypeDebug
@@ -2499,8 +2499,8 @@ func getResourcesConfig(resources *dynamoCommon.Resources) (corev1.ResourceRequi
 }
 
 type generateServiceOption struct {
-	compoundAINimDeployment                 *v1alpha1.CompoundAINimDeployment
-	compoundAINim                           *v1alpha1.CompoundAINim
+	compoundAINimDeployment                 *v1alpha1.DynamoNimDeployment
+	compoundAINim                           *v1alpha1.DynamoNim
 	isStealingTrafficDebugModeEnabled       bool
 	isDebugPodReceiveProductionTraffic      bool
 	containsStealingTrafficDebugModeEnabled bool
@@ -2508,7 +2508,7 @@ type generateServiceOption struct {
 }
 
 //nolint:nakedret
-func (r *CompoundAINimDeploymentReconciler) generateService(opt generateServiceOption) (kubeService *corev1.Service, err error) {
+func (r *DynamoNimDeploymentReconciler) generateService(opt generateServiceOption) (kubeService *corev1.Service, err error) {
 	var kubeName string
 	if opt.isGenericService {
 		kubeName = r.getGenericServiceName(opt.compoundAINimDeployment, opt.compoundAINim)
@@ -2577,13 +2577,13 @@ func (r *CompoundAINimDeploymentReconciler) generateService(opt generateServiceO
 	return
 }
 
-func (r *CompoundAINimDeploymentReconciler) generateIngressHost(ctx context.Context, compoundAINimDeployment *v1alpha1.CompoundAINimDeployment) (string, error) {
+func (r *DynamoNimDeploymentReconciler) generateIngressHost(ctx context.Context, compoundAINimDeployment *v1alpha1.DynamoNimDeployment) (string, error) {
 	return r.generateDefaultHostname(ctx, compoundAINimDeployment)
 }
 
 var cachedDomainSuffix *string
 
-func (r *CompoundAINimDeploymentReconciler) generateDefaultHostname(ctx context.Context, compoundAINimDeployment *v1alpha1.CompoundAINimDeployment) (string, error) {
+func (r *DynamoNimDeploymentReconciler) generateDefaultHostname(ctx context.Context, compoundAINimDeployment *v1alpha1.DynamoNimDeployment) (string, error) {
 	var domainSuffix string
 
 	if cachedDomainSuffix != nil {
@@ -2628,7 +2628,7 @@ type IngressConfig struct {
 var cachedIngressConfig *IngressConfig
 
 //nolint:nakedret
-func (r *CompoundAINimDeploymentReconciler) GetIngressConfig(ctx context.Context) (ingressConfig *IngressConfig, err error) {
+func (r *DynamoNimDeploymentReconciler) GetIngressConfig(ctx context.Context) (ingressConfig *IngressConfig, err error) {
 	if cachedIngressConfig != nil {
 		ingressConfig = cachedIngressConfig
 		return
@@ -2714,13 +2714,13 @@ func (r *CompoundAINimDeploymentReconciler) GetIngressConfig(ctx context.Context
 
 type generateIngressesOption struct {
 	yataiClient             **yataiclient.YataiClient
-	compoundAINimDeployment *v1alpha1.CompoundAINimDeployment
-	compoundAINim           *v1alpha1.CompoundAINim
+	compoundAINimDeployment *v1alpha1.DynamoNimDeployment
+	compoundAINim           *v1alpha1.DynamoNim
 }
 
 //nolint:nakedret
-func (r *CompoundAINimDeploymentReconciler) generateIngresses(ctx context.Context, opt generateIngressesOption) (ingresses []*networkingv1.Ingress, err error) {
-	compoundAINimRepositoryName, compoundAINimVersion := getCompoundAINimRepositoryNameAndCompoundAINimVersion(opt.compoundAINim)
+func (r *DynamoNimDeploymentReconciler) generateIngresses(ctx context.Context, opt generateIngressesOption) (ingresses []*networkingv1.Ingress, err error) {
+	compoundAINimRepositoryName, compoundAINimVersion := getDynamoNimRepositoryNameAndDynamoNimVersion(opt.compoundAINim)
 	compoundAINimDeployment := opt.compoundAINimDeployment
 	compoundAINim := opt.compoundAINim
 
@@ -2799,7 +2799,7 @@ more_set_headers "X-Yatai-Bento: %s";
 		return
 	}
 
-	// override default tls if CompoundAINimDeployment defines its own tls section
+	// override default tls if DynamoNimDeployment defines its own tls section
 	if opt.compoundAINimDeployment.Spec.Ingress.TLS != nil && opt.compoundAINimDeployment.Spec.Ingress.TLS.SecretName != "" {
 		tls = make([]networkingv1.IngressTLS, 0, 1)
 		tls = append(tls, networkingv1.IngressTLS{
@@ -2857,9 +2857,9 @@ more_set_headers "X-Yatai-Bento: %s";
 	return ings, err
 }
 
-var cachedCompoundAINimDeploymentNamespaces *[]string
+var cachedDynamoNimDeploymentNamespaces *[]string
 
-func (r *CompoundAINimDeploymentReconciler) doCleanUpAbandonedRunnerServices() error {
+func (r *DynamoNimDeploymentReconciler) doCleanUpAbandonedRunnerServices() error {
 	logs := log.Log.WithValues("func", "doCleanUpAbandonedRunnerServices")
 	logs.Info("start cleaning up abandoned runner services")
 	ctx, cancel := context.WithTimeout(context.TODO(), time.Minute*10)
@@ -2867,8 +2867,8 @@ func (r *CompoundAINimDeploymentReconciler) doCleanUpAbandonedRunnerServices() e
 
 	var compoundAINimDeploymentNamespaces []string
 
-	if cachedCompoundAINimDeploymentNamespaces != nil {
-		compoundAINimDeploymentNamespaces = *cachedCompoundAINimDeploymentNamespaces
+	if cachedDynamoNimDeploymentNamespaces != nil {
+		compoundAINimDeploymentNamespaces = *cachedDynamoNimDeploymentNamespaces
 	} else {
 		restConfig := config.GetConfigOrDie()
 		clientset, err := kubernetes.NewForConfig(restConfig)
@@ -2885,7 +2885,7 @@ func (r *CompoundAINimDeploymentReconciler) doCleanUpAbandonedRunnerServices() e
 			return err
 		}
 
-		cachedCompoundAINimDeploymentNamespaces = &compoundAINimDeploymentNamespaces
+		cachedDynamoNimDeploymentNamespaces = &compoundAINimDeploymentNamespaces
 	}
 
 	for _, compoundAINimDeploymentNamespace := range compoundAINimDeploymentNamespaces {
@@ -2927,7 +2927,7 @@ func (r *CompoundAINimDeploymentReconciler) doCleanUpAbandonedRunnerServices() e
 	return nil
 }
 
-func (r *CompoundAINimDeploymentReconciler) cleanUpAbandonedRunnerServices() {
+func (r *DynamoNimDeploymentReconciler) cleanUpAbandonedRunnerServices() {
 	logs := log.Log.WithValues("func", "cleanUpAbandonedRunnerServices")
 	err := r.doCleanUpAbandonedRunnerServices()
 	if err != nil {
@@ -2943,7 +2943,7 @@ func (r *CompoundAINimDeploymentReconciler) cleanUpAbandonedRunnerServices() {
 }
 
 //nolint:nakedret
-func (r *CompoundAINimDeploymentReconciler) doRegisterCompoundComponent() (err error) {
+func (r *DynamoNimDeploymentReconciler) doRegisterCompoundComponent() (err error) {
 	logs := log.Log.WithValues("func", "doRegisterYataiComponent")
 
 	ctx, cancel := context.WithTimeout(context.TODO(), time.Minute*5)
@@ -2991,7 +2991,7 @@ func (r *CompoundAINimDeploymentReconciler) doRegisterCompoundComponent() (err e
 	return err
 }
 
-func (r *CompoundAINimDeploymentReconciler) registerCompoundComponent() {
+func (r *DynamoNimDeploymentReconciler) registerCompoundComponent() {
 	logs := log.Log.WithValues("func", "registerYataiComponent")
 	err := r.doRegisterCompoundComponent()
 	if err != nil {
@@ -3007,7 +3007,7 @@ func (r *CompoundAINimDeploymentReconciler) registerCompoundComponent() {
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *CompoundAINimDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *DynamoNimDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	logs := log.Log.WithValues("func", "SetupWithManager")
 
 	if os.Getenv("DISABLE_CLEANUP_ABANDONED_RUNNER_SERVICES") != commonconsts.KubeLabelValueTrue {
@@ -3023,72 +3023,72 @@ func (r *CompoundAINimDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) e
 	}
 
 	m := ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.CompoundAINimDeployment{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		For(&v1alpha1.DynamoNimDeployment{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&appsv1.Deployment{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1beta1.VirtualService{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		Watches(&v1alpha1.CompoundAINimRequest{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, compoundAINimRequest client.Object) []reconcile.Request {
+		Watches(&v1alpha1.DynamoNimRequest{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, compoundAINimRequest client.Object) []reconcile.Request {
 			reqs := make([]reconcile.Request, 0)
-			logs := log.Log.WithValues("func", "Watches", "kind", "CompoundAINimRequest", "name", compoundAINimRequest.GetName(), "namespace", compoundAINimRequest.GetNamespace())
-			logs.Info("Triggering reconciliation for CompoundAINimRequest", "CompoundAINimRequestName", compoundAINimRequest.GetName(), "Namespace", compoundAINimRequest.GetNamespace())
-			compoundAINim := &v1alpha1.CompoundAINim{}
+			logs := log.Log.WithValues("func", "Watches", "kind", "DynamoNimRequest", "name", compoundAINimRequest.GetName(), "namespace", compoundAINimRequest.GetNamespace())
+			logs.Info("Triggering reconciliation for DynamoNimRequest", "DynamoNimRequestName", compoundAINimRequest.GetName(), "Namespace", compoundAINimRequest.GetNamespace())
+			compoundAINim := &v1alpha1.DynamoNim{}
 			err := r.Get(context.Background(), types.NamespacedName{
 				Name:      compoundAINimRequest.GetName(),
 				Namespace: compoundAINimRequest.GetNamespace(),
 			}, compoundAINim)
 			compoundAINimIsNotFound := k8serrors.IsNotFound(err)
 			if err != nil && !compoundAINimIsNotFound {
-				logs.Info("Failed to get CompoundAINim", "name", compoundAINimRequest.GetName(), "namespace", compoundAINimRequest.GetNamespace(), "error", err)
+				logs.Info("Failed to get DynamoNim", "name", compoundAINimRequest.GetName(), "namespace", compoundAINimRequest.GetNamespace(), "error", err)
 				return reqs
 			}
 			if !compoundAINimIsNotFound {
-				logs.Info("CompoundAINim found, skipping enqueue as it's already present", "CompoundAINimName", compoundAINimRequest.GetName())
+				logs.Info("DynamoNim found, skipping enqueue as it's already present", "DynamoNimName", compoundAINimRequest.GetName())
 				return reqs
 			}
-			compoundAINimDeployments := &v1alpha1.CompoundAINimDeploymentList{}
+			compoundAINimDeployments := &v1alpha1.DynamoNimDeploymentList{}
 			err = r.List(context.Background(), compoundAINimDeployments, &client.ListOptions{
 				Namespace: compoundAINimRequest.GetNamespace(),
 			})
 			if err != nil {
-				logs.Info("Failed to list CompoundAINimDeployments", "Namespace", compoundAINimRequest.GetNamespace(), "error", err)
+				logs.Info("Failed to list DynamoNimDeployments", "Namespace", compoundAINimRequest.GetNamespace(), "error", err)
 				return reqs
 			}
 			for _, compoundAINimDeployment := range compoundAINimDeployments.Items {
 				compoundAINimDeployment := compoundAINimDeployment
-				if compoundAINimDeployment.Spec.CompoundAINim == compoundAINimRequest.GetName() {
+				if compoundAINimDeployment.Spec.DynamoNim == compoundAINimRequest.GetName() {
 					reqs = append(reqs, reconcile.Request{
 						NamespacedName: client.ObjectKeyFromObject(&compoundAINimDeployment),
 					})
 				}
 			}
-			// Log the list of CompoundAINimDeployments being enqueued for reconciliation
-			logs.Info("Enqueuing CompoundAINimDeployments for reconciliation", "ReconcileRequests", reqs)
+			// Log the list of DynamoNimDeployments being enqueued for reconciliation
+			logs.Info("Enqueuing DynamoNimDeployments for reconciliation", "ReconcileRequests", reqs)
 			return reqs
 		})).WithEventFilter(controller_common.EphemeralDeploymentEventFilter(r.Config)).
-		Watches(&v1alpha1.CompoundAINim{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, compoundAINim client.Object) []reconcile.Request {
-			logs := log.Log.WithValues("func", "Watches", "kind", "CompoundAINim", "name", compoundAINim.GetName(), "namespace", compoundAINim.GetNamespace())
-			logs.Info("Triggering reconciliation for CompoundAINim", "CompoundAINimName", compoundAINim.GetName(), "Namespace", compoundAINim.GetNamespace())
-			compoundAINimDeployments := &v1alpha1.CompoundAINimDeploymentList{}
+		Watches(&v1alpha1.DynamoNim{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, compoundAINim client.Object) []reconcile.Request {
+			logs := log.Log.WithValues("func", "Watches", "kind", "DynamoNim", "name", compoundAINim.GetName(), "namespace", compoundAINim.GetNamespace())
+			logs.Info("Triggering reconciliation for DynamoNim", "DynamoNimName", compoundAINim.GetName(), "Namespace", compoundAINim.GetNamespace())
+			compoundAINimDeployments := &v1alpha1.DynamoNimDeploymentList{}
 			err := r.List(context.Background(), compoundAINimDeployments, &client.ListOptions{
 				Namespace: compoundAINim.GetNamespace(),
 			})
 			if err != nil {
-				logs.Info("Failed to list CompoundAINimDeployments", "Namespace", compoundAINim.GetNamespace(), "error", err)
+				logs.Info("Failed to list DynamoNimDeployments", "Namespace", compoundAINim.GetNamespace(), "error", err)
 				return []reconcile.Request{}
 			}
 			reqs := make([]reconcile.Request, 0)
 			for _, compoundAINimDeployment := range compoundAINimDeployments.Items {
 				compoundAINimDeployment := compoundAINimDeployment
-				if compoundAINimDeployment.Spec.CompoundAINim == compoundAINim.GetName() {
+				if compoundAINimDeployment.Spec.DynamoNim == compoundAINim.GetName() {
 					reqs = append(reqs, reconcile.Request{
 						NamespacedName: client.ObjectKeyFromObject(&compoundAINimDeployment),
 					})
 				}
 			}
-			// Log the list of CompoundAINimDeployments being enqueued for reconciliation
-			logs.Info("Enqueuing CompoundAINimDeployments for reconciliation", "ReconcileRequests", reqs)
+			// Log the list of DynamoNimDeployments being enqueued for reconciliation
+			logs.Info("Enqueuing DynamoNimDeployments for reconciliation", "ReconcileRequests", reqs)
 			return reqs
 		}))
 

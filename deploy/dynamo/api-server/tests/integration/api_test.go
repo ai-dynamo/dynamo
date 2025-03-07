@@ -48,7 +48,7 @@ const (
 )
 
 var apiServerUrl = fmt.Sprintf("http://localhost:%d", port)
-var client = CompoundAIClient{
+var client = DynamoClient{
 	Url:     apiServerUrl,
 	Headers: http.Header{},
 }
@@ -89,7 +89,7 @@ func (s *ApiServerSuite) waitUntilReady() {
 	for {
 		resp, err := http.Get(url)
 		if err == nil && resp.StatusCode == http.StatusOK {
-			log.Info().Msg("CompoundAI API server is running")
+			log.Info().Msg("Dynamo API server is running")
 			return // Server is ready
 		}
 		log.Info().Msgf("Waiting 500ms before checking /healthz again")

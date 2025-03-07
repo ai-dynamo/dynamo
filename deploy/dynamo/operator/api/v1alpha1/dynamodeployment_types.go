@@ -24,20 +24,20 @@ import (
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
-// CompoundAIDeploymentSpec defines the desired state of CompoundAIDeployment.
-type CompoundAIDeploymentSpec struct {
+// DynamoDeploymentSpec defines the desired state of DynamoDeployment.
+type DynamoDeploymentSpec struct {
 	// required
-	CompoundAINim string `json:"compoundAINim"`
+	DynamoNim string `json:"compoundAINim"`
 	// optional
-	// key is the name of the service defined in CompoundAINim
-	// value is the CompoundAINimDeployment override for that service
-	// if not set, the CompoundAINimDeployment will be used as is
+	// key is the name of the service defined in DynamoNim
+	// value is the DynamoNimDeployment override for that service
+	// if not set, the DynamoNimDeployment will be used as is
 	// +kubebuilder:validation:Optional
-	Services map[string]*CompoundAINimDeployment `json:"services,omitempty"`
+	Services map[string]*DynamoNimDeployment `json:"services,omitempty"`
 }
 
-// CompoundAIDeploymentStatus defines the observed state of CompoundAIDeployment.
-type CompoundAIDeploymentStatus struct {
+// DynamoDeploymentStatus defines the observed state of DynamoDeployment.
+type DynamoDeploymentStatus struct {
 	State      string             `json:"state,omitempty"`
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
@@ -45,28 +45,28 @@ type CompoundAIDeploymentStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 
-// CompoundAIDeployment is the Schema for the compoundaideployments API.
-type CompoundAIDeployment struct {
+// DynamoDeployment is the Schema for the compoundaideployments API.
+type DynamoDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   CompoundAIDeploymentSpec   `json:"spec,omitempty"`
-	Status CompoundAIDeploymentStatus `json:"status,omitempty"`
+	Spec   DynamoDeploymentSpec   `json:"spec,omitempty"`
+	Status DynamoDeploymentStatus `json:"status,omitempty"`
 }
 
-func (s *CompoundAIDeployment) SetState(state string) {
+func (s *DynamoDeployment) SetState(state string) {
 	s.Status.State = state
 }
 
 // +kubebuilder:object:root=true
 
-// CompoundAIDeploymentList contains a list of CompoundAIDeployment.
-type CompoundAIDeploymentList struct {
+// DynamoDeploymentList contains a list of DynamoDeployment.
+type DynamoDeploymentList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []CompoundAIDeployment `json:"items"`
+	Items           []DynamoDeployment `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&CompoundAIDeployment{}, &CompoundAIDeploymentList{})
+	SchemeBuilder.Register(&DynamoDeployment{}, &DynamoDeploymentList{})
 }

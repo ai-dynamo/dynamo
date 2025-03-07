@@ -170,7 +170,7 @@ Build: `cargo build --release --features python`
 If the Python engine wants to receive and returns strings - it will do the prompt templating and tokenization itself - run it like this:
 
 ```
-dynemo-run out=pystr:/home/user/my_python_engine.py --name <model-name>
+dynamo-run out=pystr:/home/user/my_python_engine.py --name <model-name>
 ```
 
 - The `request` parameter is a map, an OpenAI compatible create chat completion request: https://platform.openai.com/docs/api-reference/chat/create
@@ -201,11 +201,11 @@ async def generate(request):
     yield {"id":"1","choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"stop"}],"created":1841762283,"model":"Llama-3.2-1B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
 ```
 
-### Dynemo does the pre-processing
+### Dynamo does the pre-processing
 
 If the Python engine wants to receive and return tokens - the prompt templating and tokenization is already done - run it like this:
 ```
-dynemo-run out=pytok:/home/user/my_python_engine.py --model-path <hf-repo-checkout>
+dynamo-run out=pytok:/home/user/my_python_engine.py --model-path <hf-repo-checkout>
 ```
 
 - The request parameter is a map that looks like this:

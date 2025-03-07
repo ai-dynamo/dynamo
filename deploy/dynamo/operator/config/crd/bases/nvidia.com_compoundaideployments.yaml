@@ -23,8 +23,8 @@ metadata:
 spec:
   group: nvidia.com
   names:
-    kind: CompoundAIDeployment
-    listKind: CompoundAIDeploymentList
+    kind: DynamoDeployment
+    listKind: DynamoDeploymentList
     plural: compoundaideployments
     singular: compoundaideployment
   scope: Namespaced

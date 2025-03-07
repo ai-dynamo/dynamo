@@ -79,11 +79,11 @@ type ServiceConfig struct {
 	Config       Config              `yaml:"config"`
 }
 
-func RetrieveCompoundAINimDownloadURL(ctx context.Context, compoundAIDeployment *v1alpha1.CompoundAIDeployment, secretGetter SecretGetter, recorder EventRecorder) (*string, *string, error) {
+func RetrieveDynamoNimDownloadURL(ctx context.Context, compoundAIDeployment *v1alpha1.DynamoDeployment, secretGetter SecretGetter, recorder EventRecorder) (*string, *string, error) {
 	compoundAINimDownloadURL := ""
 	compoundAINimApiToken := ""
 	var compoundAINim *schemasv1.BentoFullSchema
-	compoundAINimRepositoryName, _, compoundAINimVersion := xstrings.Partition(compoundAIDeployment.Spec.CompoundAINim, ":")
+	compoundAINimRepositoryName, _, compoundAINimVersion := xstrings.Partition(compoundAIDeployment.Spec.DynamoNim, ":")
 
 	var err error
 	var yataiClient_ **yataiclient.YataiClient
@@ -103,23 +103,23 @@ func RetrieveCompoundAINimDownloadURL(ctx context.Context, compoundAIDeployment 
 	yataiClient := *yataiClient_
 	yataiConf := *yataiConf_
 
-	recorder.Eventf(compoundAIDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting compoundAINim %s from yatai service", compoundAIDeployment.Spec.CompoundAINim)
+	recorder.Eventf(compoundAIDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting compoundAINim %s from yatai service", compoundAIDeployment.Spec.DynamoNim)
 	compoundAINim, err = yataiClient.GetBento(ctx, compoundAINimRepositoryName, compoundAINimVersion)
 	if err != nil {
 		err = errors.Wrap(err, "get compoundAINim")
 		return nil, nil, err
 	}
-	recorder.Eventf(compoundAIDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got compoundAINim %s from yatai service", compoundAIDeployment.Spec.CompoundAINim)
+	recorder.Eventf(compoundAIDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got compoundAINim %s from yatai service", compoundAIDeployment.Spec.DynamoNim)
 
 	if compoundAINim.TransmissionStrategy != nil && *compoundAINim.TransmissionStrategy == modelschemas.TransmissionStrategyPresignedURL {
 		var compoundAINim_ *schemasv1.BentoSchema
-		recorder.Eventf(compoundAIDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for compoundAINim %s from yatai service", compoundAIDeployment.Spec.CompoundAINim)
+		recorder.Eventf(compoundAIDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for compoundAINim %s from yatai service", compoundAIDeployment.Spec.DynamoNim)
 		compoundAINim_, err = yataiClient.PresignBentoDownloadURL(ctx, compoundAINimRepositoryName, compoundAINimVersion)
 		if err != nil {
 			err = errors.Wrap(err, "presign compoundAINim download url")
 			return nil, nil, err
 		}
-		recorder.Eventf(compoundAIDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for compoundAINim %s from yatai service", compoundAIDeployment.Spec.CompoundAINim)
+		recorder.Eventf(compoundAIDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for compoundAINim %s from yatai service", compoundAIDeployment.Spec.DynamoNim)
 		compoundAINimDownloadURL = compoundAINim_.PresignedDownloadUrl
 	} else {
 		compoundAINimDownloadURL = fmt.Sprintf("%s/api/v1/bento_repositories/%s/bentos/%s/download", yataiConf.Endpoint, compoundAINimRepositoryName, compoundAINimVersion)
@@ -130,7 +130,7 @@ func RetrieveCompoundAINimDownloadURL(ctx context.Context, compoundAIDeployment 
 }
 
 // ServicesConfig represents the top-level YAML structure of a compoundAINim yaml file stored in a compoundAINim tar file
-type CompoundAINIMConfig struct {
+type DynamoNIMConfig struct {
 	Services []ServiceConfig `yaml:"services"`
 }
 
@@ -138,7 +138,7 @@ type EventRecorder interface {
 	Eventf(obj runtime.Object, eventtype string, reason string, message string, args ...interface{})
 }
 
-func RetrieveCompoundAINIMConfigurationFile(ctx context.Context, url string, yataiApiToken string) (*bytes.Buffer, error) {
+func RetrieveDynamoNIMConfigurationFile(ctx context.Context, url string, yataiApiToken string) (*bytes.Buffer, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -173,7 +173,7 @@ func RetrieveCompoundAINIMConfigurationFile(ctx context.Context, url string, yat
 	return yamlContent, nil
 }
 
-func GetYataiClientWithAuth(ctx context.Context, compoundAINimRequest *v1alpha1.CompoundAINimRequest, secretGetter SecretGetter) (**yataiclient.YataiClient, **commonconfig.YataiConfig, error) {
+func GetYataiClientWithAuth(ctx context.Context, compoundAINimRequest *v1alpha1.DynamoNimRequest, secretGetter SecretGetter) (**yataiclient.YataiClient, **commonconfig.YataiConfig, error) {
 	orgId, ok := compoundAINimRequest.Labels[commonconsts.NgcOrganizationHeaderName]
 	if !ok {
 		orgId = commonconsts.DefaultOrgId
@@ -184,7 +184,7 @@ func GetYataiClientWithAuth(ctx context.Context, compoundAINimRequest *v1alpha1.
 		userId = commonconsts.DefaultUserId
 	}
 
-	auth := yataiclient.CompoundAIAuthHeaders{
+	auth := yataiclient.DynamoAuthHeaders{
 		OrgId:  orgId,
 		UserId: userId,
 	}
@@ -227,35 +227,35 @@ func GetYataiClient(ctx context.Context, secretGetter SecretGetter) (yataiClient
 	return
 }
 
-func ParseCompoundAINIMConfig(ctx context.Context, yamlContent *bytes.Buffer) (*CompoundAINIMConfig, error) {
-	var config CompoundAINIMConfig
+func ParseDynamoNIMConfig(ctx context.Context, yamlContent *bytes.Buffer) (*DynamoNIMConfig, error) {
+	var config DynamoNIMConfig
 	logger := log.FromContext(ctx)
 	logger.Info("trying to parse compoundAINim config", "yamlContent", yamlContent.String())
 	err := yaml.Unmarshal(yamlContent.Bytes(), &config)
 	return &config, err
 }
 
-func GetCompoundAINIMConfig(ctx context.Context, compoundAIDeployment *v1alpha1.CompoundAIDeployment, secretGetter SecretGetter, recorder EventRecorder) (*CompoundAINIMConfig, error) {
-	compoundAINimDownloadURL, compoundAINimApiToken, err := RetrieveCompoundAINimDownloadURL(ctx, compoundAIDeployment, secretGetter, recorder)
+func GetDynamoNIMConfig(ctx context.Context, compoundAIDeployment *v1alpha1.DynamoDeployment, secretGetter SecretGetter, recorder EventRecorder) (*DynamoNIMConfig, error) {
+	compoundAINimDownloadURL, compoundAINimApiToken, err := RetrieveDynamoNimDownloadURL(ctx, compoundAIDeployment, secretGetter, recorder)
 	if err != nil {
 		return nil, err
 	}
-	yamlContent, err := RetrieveCompoundAINIMConfigurationFile(ctx, *compoundAINimDownloadURL, *compoundAINimApiToken)
+	yamlContent, err := RetrieveDynamoNIMConfigurationFile(ctx, *compoundAINimDownloadURL, *compoundAINimApiToken)
 	if err != nil {
 		return nil, err
 	}
-	return ParseCompoundAINIMConfig(ctx, yamlContent)
+	return ParseDynamoNIMConfig(ctx, yamlContent)
 }
 
-// generate CompoundAINIMDeployment from config
-func GenerateCompoundAINIMDeployments(parentCompoundAIDeployment *v1alpha1.CompoundAIDeployment, config *CompoundAINIMConfig) (map[string]*v1alpha1.CompoundAINimDeployment, error) {
+// generate DynamoNIMDeployment from config
+func GenerateDynamoNIMDeployments(parentDynamoDeployment *v1alpha1.DynamoDeployment, config *DynamoNIMConfig) (map[string]*v1alpha1.DynamoNimDeployment, error) {
 	novaServices := make(map[string]string)
-	deployments := make(map[string]*v1alpha1.CompoundAINimDeployment)
+	deployments := make(map[string]*v1alpha1.DynamoNimDeployment)
 	for _, service := range config.Services {
-		deployment := &v1alpha1.CompoundAINimDeployment{}
-		deployment.Name = fmt.Sprintf("%s-%s", parentCompoundAIDeployment.Name, strings.ToLower(service.Name))
-		deployment.Namespace = parentCompoundAIDeployment.Namespace
-		deployment.Spec.CompoundAINim = strings.Split(parentCompoundAIDeployment.Spec.CompoundAINim, ":")[0]
+		deployment := &v1alpha1.DynamoNimDeployment{}
+		deployment.Name = fmt.Sprintf("%s-%s", parentDynamoDeployment.Name, strings.ToLower(service.Name))
+		deployment.Namespace = parentDynamoDeployment.Namespace
+		deployment.Spec.DynamoNim = strings.Split(parentDynamoDeployment.Spec.DynamoNim, ":")[0]
 		deployment.Spec.ServiceName = service.Name
 		if service.Config.Nova != nil && service.Config.Nova.Enabled {
 			novaServices[service.Name] = fmt.Sprintf("%s/%s", service.Config.Nova.Name, service.Config.Nova.Namespace)

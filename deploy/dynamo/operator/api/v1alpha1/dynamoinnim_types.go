@@ -26,8 +26,8 @@ import (
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
-// CompoundAINimSpec defines the desired state of CompoundAINim
-type CompoundAINimSpec struct {
+// DynamoNimSpec defines the desired state of DynamoNim
+type DynamoNimSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
@@ -53,8 +53,8 @@ type BentoModel struct {
 	Size        *resource.Quantity `json:"size,omitempty"`
 }
 
-// CompoundAINimStatus defines the observed state of CompoundAINim
-type CompoundAINimStatus struct {
+// DynamoNimStatus defines the observed state of DynamoNim
+type DynamoNimStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 	Ready bool `json:"ready"`
@@ -63,24 +63,24 @@ type CompoundAINimStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 
-// CompoundAINim is the Schema for the compoundainims API
-type CompoundAINim struct {
+// DynamoNim is the Schema for the compoundainims API
+type DynamoNim struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   CompoundAINimSpec   `json:"spec,omitempty"`
-	Status CompoundAINimStatus `json:"status,omitempty"`
+	Spec   DynamoNimSpec   `json:"spec,omitempty"`
+	Status DynamoNimStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// CompoundAINimList contains a list of CompoundAINim
-type CompoundAINimList struct {
+// DynamoNimList contains a list of DynamoNim
+type DynamoNimList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []CompoundAINim `json:"items"`
+	Items           []DynamoNim `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&CompoundAINim{}, &CompoundAINimList{})
+	SchemeBuilder.Register(&DynamoNim{}, &DynamoNimList{})
 }

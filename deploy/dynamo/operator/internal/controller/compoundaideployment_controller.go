@@ -45,8 +45,8 @@ const (
 	PendingState = "pending"
 )
 
-// CompoundAIDeploymentReconciler reconciles a CompoundAIDeployment object
-type CompoundAIDeploymentReconciler struct {
+// DynamoDeploymentReconciler reconciles a DynamoDeployment object
+type DynamoDeploymentReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Config   commonController.Config
@@ -60,20 +60,20 @@ type CompoundAIDeploymentReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 // TODO(user): Modify the Reconcile function to compare the state specified by
-// the CompoundAIDeployment object against the actual cluster state, and then
+// the DynamoDeployment object against the actual cluster state, and then
 // perform operations to make the cluster state reflect the state specified by
 // the user.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.1/pkg/reconcile
-func (r *CompoundAIDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	var err error
 	reason := "undefined"
 	readyStatus := metav1.ConditionFalse
 	// retrieve the CRD
-	compoundAIDeployment := &nvidiacomv1alpha1.CompoundAIDeployment{}
+	compoundAIDeployment := &nvidiacomv1alpha1.DynamoDeployment{}
 	if err = r.Get(ctx, req.NamespacedName, compoundAIDeployment); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -105,62 +105,62 @@ func (r *CompoundAIDeploymentReconciler) Reconcile(ctx context.Context, req ctrl
 		logger.Info("Reconciliation done")
 	}()
 
-	// fetch the CompoundAINIMConfig
-	compoundAINIMConfig, err := nim.GetCompoundAINIMConfig(ctx, compoundAIDeployment, r.getSecret, r.Recorder)
+	// fetch the DynamoNIMConfig
+	compoundAINIMConfig, err := nim.GetDynamoNIMConfig(ctx, compoundAIDeployment, r.getSecret, r.Recorder)
 	if err != nil {
-		reason = "failed_to_get_the_CompoundAINIMConfig"
+		reason = "failed_to_get_the_DynamoNIMConfig"
 		return ctrl.Result{}, err
 	}
 
-	// generate the CompoundAINimDeployments from the config
-	compoundAINimDeployments, err := nim.GenerateCompoundAINIMDeployments(compoundAIDeployment, compoundAINIMConfig)
+	// generate the DynamoNimDeployments from the config
+	compoundAINimDeployments, err := nim.GenerateDynamoNIMDeployments(compoundAIDeployment, compoundAINIMConfig)
 	if err != nil {
-		reason = "failed_to_generate_the_CompoundAINimDeployments"
+		reason = "failed_to_generate_the_DynamoNimDeployments"
 		return ctrl.Result{}, err
 	}
 
-	// merge the CompoundAINimDeployments with the CompoundAINimDeployments from the CRD
+	// merge the DynamoNimDeployments with the DynamoNimDeployments from the CRD
 	for serviceName, deployment := range compoundAINimDeployments {
 		if _, ok := compoundAIDeployment.Spec.Services[serviceName]; ok {
 			err := mergo.Merge(deployment, compoundAIDeployment.Spec.Services[serviceName], mergo.WithOverride)
 			if err != nil {
-				reason = "failed_to_merge_the_CompoundAINimDeployments"
+				reason = "failed_to_merge_the_DynamoNimDeployments"
 				return ctrl.Result{}, err
 			}
 		}
 	}
 
 	// reconcile the compoundAINimRequest
-	compoundAINimRequest := &nvidiacomv1alpha1.CompoundAINimRequest{
+	compoundAINimRequest := &nvidiacomv1alpha1.DynamoNimRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      generateCompoundAINimRequestName(compoundAIDeployment.Spec.CompoundAINim),
+			Name:      generateDynamoNimRequestName(compoundAIDeployment.Spec.DynamoNim),
 			Namespace: compoundAIDeployment.Namespace,
 		},
-		Spec: nvidiacomv1alpha1.CompoundAINimRequestSpec{
-			BentoTag: compoundAIDeployment.Spec.CompoundAINim,
+		Spec: nvidiacomv1alpha1.DynamoNimRequestSpec{
+			BentoTag: compoundAIDeployment.Spec.DynamoNim,
 		},
 	}
 	if err := ctrl.SetControllerReference(compoundAIDeployment, compoundAINimRequest, r.Scheme); err != nil {
-		reason = "failed_to_set_the_controller_reference_for_the_CompoundAINimRequest"
+		reason = "failed_to_set_the_controller_reference_for_the_DynamoNimRequest"
 		return ctrl.Result{}, err
 	}
 	_, err = commonController.SyncResource(ctx, r.Client, compoundAINimRequest, types.NamespacedName{Name: compoundAINimRequest.Name, Namespace: compoundAINimRequest.Namespace}, true)
 	if err != nil {
-		reason = "failed_to_sync_the_CompoundAINimRequest"
+		reason = "failed_to_sync_the_DynamoNimRequest"
 		return ctrl.Result{}, err
 	}
 
 	allAreReady := true
-	// reconcile the CompoundAINimDeployments
+	// reconcile the DynamoNimDeployments
 	for serviceName, compoundAINimDeployment := range compoundAINimDeployments {
-		logger.Info("Reconciling the CompoundAINimDeployment", "serviceName", serviceName, "compoundAINimDeployment", compoundAINimDeployment)
+		logger.Info("Reconciling the DynamoNimDeployment", "serviceName", serviceName, "compoundAINimDeployment", compoundAINimDeployment)
 		if err := ctrl.SetControllerReference(compoundAIDeployment, compoundAINimDeployment, r.Scheme); err != nil {
-			reason = "failed_to_set_the_controller_reference_for_the_CompoundAINimDeployment"
+			reason = "failed_to_set_the_controller_reference_for_the_DynamoNimDeployment"
 			return ctrl.Result{}, err
 		}
 		compoundAINimDeployment, err = commonController.SyncResource(ctx, r.Client, compoundAINimDeployment, types.NamespacedName{Name: compoundAINimDeployment.Name, Namespace: compoundAINimDeployment.Namespace}, true)
 		if err != nil {
-			reason = "failed_to_sync_the_CompoundAINimDeployment"
+			reason = "failed_to_sync_the_DynamoNimDeployment"
 			return ctrl.Result{}, err
 		}
 		if !compoundAINimDeployment.Status.IsReady() {
@@ -178,18 +178,18 @@ func (r *CompoundAIDeploymentReconciler) Reconcile(ctx context.Context, req ctrl
 
 }
 
-func (r *CompoundAIDeploymentReconciler) getSecret(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
+func (r *DynamoDeploymentReconciler) getSecret(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
 	secret := &corev1.Secret{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, secret)
 	return secret, errors.Wrap(err, "get secret")
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *CompoundAIDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *DynamoDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&nvidiacomv1alpha1.CompoundAIDeployment{}).
+		For(&nvidiacomv1alpha1.DynamoDeployment{}).
 		Named("dynamodeployment").
-		Owns(&nvidiacomv1alpha1.CompoundAINimDeployment{}, builder.WithPredicates(predicate.Funcs{
+		Owns(&nvidiacomv1alpha1.DynamoNimDeployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },

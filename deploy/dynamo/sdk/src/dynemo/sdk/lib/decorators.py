@@ -23,13 +23,13 @@ import bentoml
 from pydantic import BaseModel
 
 
-class DynemoEndpoint:
-    """Decorator class for Dynemo endpoints"""
+class DynamoEndpoint:
+    """Decorator class for Dynamo endpoints"""
 
     def __init__(self, func: t.Callable, name: str | None = None):
         self.func = func
         self.name = name or func.__name__
-        self.is_dynemo_endpoint = True
+        self.is_dynamo_endpoint = True
 
         # Extract request type from hints
         hints = get_type_hints(func)
@@ -58,31 +58,31 @@ class DynemoEndpoint:
         return await self.func(*args, **kwargs)
 
 
-def dynemo_endpoint(
+def dynamo_endpoint(
     name: str | None = None,
-) -> t.Callable[[t.Callable], DynemoEndpoint]:
-    """Decorator for Dynemo endpoints.
+) -> t.Callable[[t.Callable], DynamoEndpoint]:
+    """Decorator for Dynamo endpoints.
 
     Args:
         name: Optional name for the endpoint. Defaults to function name.
 
     Example:
-        @dynemo_endpoint()
+        @dynamo_endpoint()
         def my_endpoint(self, input: str) -> str:
             return input
 
-        @dynemo_endpoint(name="custom_name")
+        @dynamo_endpoint(name="custom_name")
         def another_endpoint(self, input: str) -> str:
             return input
     """
 
-    def decorator(func: t.Callable) -> DynemoEndpoint:
-        return DynemoEndpoint(func, name)
+    def decorator(func: t.Callable) -> DynamoEndpoint:
+        return DynamoEndpoint(func, name)
 
     return decorator
 
 
-def dynemo_api(func: t.Callable) -> t.Callable:
+def dynamo_api(func: t.Callable) -> t.Callable:
     """Decorator for BentoML API endpoints.
 
     Args:

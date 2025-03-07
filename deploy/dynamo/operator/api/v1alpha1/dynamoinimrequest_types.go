@@ -25,19 +25,19 @@ import (
 )
 
 const (
-	CompoundAINimRequestConditionTypeModelsSeeding          = "ModelsSeeding"
-	CompoundAINimRequestConditionTypeImageBuilding          = "ImageBuilding"
-	CompoundAINimRequestConditionTypeImageExists            = "ImageExists"
-	CompoundAINimRequestConditionTypeImageExistsChecked     = "ImageExistsChecked"
-	CompoundAINimRequestConditionTypeModelsExists           = "ModelsExists"
-	CompoundAINimRequestConditionTypeCompoundAINimAvailable = "CompoundAINimAvailable"
+	DynamoNimRequestConditionTypeModelsSeeding          = "ModelsSeeding"
+	DynamoNimRequestConditionTypeImageBuilding          = "ImageBuilding"
+	DynamoNimRequestConditionTypeImageExists            = "ImageExists"
+	DynamoNimRequestConditionTypeImageExistsChecked     = "ImageExistsChecked"
+	DynamoNimRequestConditionTypeModelsExists           = "ModelsExists"
+	DynamoNimRequestConditionTypeDynamoNimAvailable = "DynamoNimAvailable"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
-// CompoundAINimRequestSpec defines the desired state of CompoundAINimRequest
-type CompoundAINimRequestSpec struct {
+// DynamoNimRequestSpec defines the desired state of DynamoNimRequest
+type DynamoNimRequestSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
@@ -75,8 +75,8 @@ type CompoundAINimRequestSpec struct {
 	DownloaderContainerEnvFrom []corev1.EnvFromSource `json:"downloaderContainerEnvFrom,omitempty"`
 }
 
-// CompoundAINimRequestStatus defines the observed state of CompoundAINimRequest
-type CompoundAINimRequestStatus struct {
+// DynamoNimRequestStatus defines the observed state of DynamoNimRequest
+type DynamoNimRequestStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 	Conditions []metav1.Condition `json:"conditions"`
@@ -92,24 +92,24 @@ type CompoundAINimRequestStatus struct {
 //+kubebuilder:printcolumn:name="Bento-Available",type="string",JSONPath=".status.conditions[?(@.type=='BentoAvailable')].status",description="Bento Available"
 //+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
-// CompoundAINimRequest is the Schema for the dynamonimrequests API
-type CompoundAINimRequest struct {
+// DynamoNimRequest is the Schema for the dynamonimrequests API
+type DynamoNimRequest struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   CompoundAINimRequestSpec   `json:"spec,omitempty"`
-	Status CompoundAINimRequestStatus `json:"status,omitempty"`
+	Spec   DynamoNimRequestSpec   `json:"spec,omitempty"`
+	Status DynamoNimRequestStatus `json:"status,omitempty"`
 }
 
 //+kubebuilder:object:root=true
 
-// CompoundAINimRequestList contains a list of CompoundAINimRequest
-type CompoundAINimRequestList struct {
+// DynamoNimRequestList contains a list of DynamoNimRequest
+type DynamoNimRequestList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []CompoundAINimRequest `json:"items"`
+	Items           []DynamoNimRequest `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&CompoundAINimRequest{}, &CompoundAINimRequestList{})
+	SchemeBuilder.Register(&DynamoNimRequest{}, &DynamoNimRequestList{})
 }

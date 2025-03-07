@@ -13,7 +13,7 @@ resources:
     namespaced: true
   controller: true
   domain: nvidia.com
-  kind: CompoundAINimDeployment
+  kind: DynamoNimDeployment
   path: github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/v1alpha1
   version: v1alpha1
 - api:
@@ -21,14 +21,14 @@ resources:
     namespaced: true
   controller: true
   domain: nvidia.com
-  kind: CompoundAINimRequest
+  kind: DynamoNimRequest
   path: github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
     namespaced: true
   domain: nvidia.com
-  kind: CompoundAINim
+  kind: DynamoNim
   path: github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/v1alpha1
   version: v1alpha1
 - api:
@@ -36,7 +36,7 @@ resources:
     namespaced: true
   controller: true
   domain: nvidia.com
-  kind: CompoundAIDeployment
+  kind: DynamoDeployment
   path: github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/v1alpha1
   version: v1alpha1
 version: "3"

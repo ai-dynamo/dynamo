@@ -14,31 +14,31 @@
 #  limitations under the License.
 
 [project]
-name = "dynemo-sdk"
+name = "dynamo-sdk"
 version = "0.1.0"
 description = "Distributed Inference Framework - SDK"
 readme = "README.md"
 authors = [
-    { name = "NVIDIA Inc.", email = "sw-dl-dynemo@nvidia.com" },
+    { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
 ]
 dependencies = [
     # TODO: currently compatible with bentoml==1.4.1,
     # v1.4.2 has removed normalize_identifier which is used in dynamo
-    # "dynemo=={dynemo_version}",
+    # "dynamo=={dynamo_version}",
     "bentoml==1.4.1",
     "types-psutil==7.0.0.20250218",
 ]
 
 [project.scripts]
-dynemo-sdk = "dynemo.sdk.cli.cli:cli"
+dynamo-sdk = "dynamo.sdk.cli.cli:cli"
 
 [tool.setuptools]
-namespace-packages = ["dynemo"]
-package-dir = {"dynemo.sdk" = "src/dynemo/sdk"}
+namespace-packages = ["dynamo"]
+package-dir = {"dynamo.sdk" = "src/dynamo/sdk"}
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/dynemo"]
+packages = ["src/dynamo"]

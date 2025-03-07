@@ -18,30 +18,31 @@ from typing import Any, Dict, Optional, TypeVar
 
 from _bentoml_sdk.service import Service
 from _bentoml_sdk.service.dependency import Dependency
-from dynemo.sdk.lib.service import CompoundService
+
+from dynamo.sdk.lib.service import CompoundService
 
 T = TypeVar("T")
 
 
-class DynemoClient:
-    """Client for calling Dynemo endpoints with streaming support"""
+class DynamoClient:
+    """Client for calling Dynamo endpoints with streaming support"""
 
     def __init__(self, service: CompoundService[Any]):
         self._service = service
-        self._endpoints = service.get_dynemo_endpoints()
-        self._dynemo_clients: Dict[str, Any] = {}
+        self._endpoints = service.get_dynamo_endpoints()
+        self._dynamo_clients: Dict[str, Any] = {}
         self._runtime = None
 
     def __getattr__(self, name: str) -> Any:
         if name not in self._endpoints:
             raise AttributeError(
-                f"No Dynemo endpoint '{name}' found on service '{self._service.name}'. "
+                f"No Dynamo endpoint '{name}' found on service '{self._service.name}'. "
                 f"Available endpoints: {list(self._endpoints.keys())}"
             )
 
         # For streaming endpoints, create/cache the stream function
-        if name not in self._dynemo_clients:
-            namespace, component_name = self._service.dynemo_address()
+        if name not in self._dynamo_clients:
+            namespace, component_name = self._service.dynamo_address()
 
             # Create async generator function that uses Queue for streaming
             async def get_stream(*args, **kwargs):
@@ -114,13 +115,13 @@ class DynemoClient:
                     except Exception:
                         raise
 
-            self._dynemo_clients[name] = get_stream
+            self._dynamo_clients[name] = get_stream
 
-        return self._dynemo_clients[name]
+        return self._dynamo_clients[name]
 
 
-class DynemoDependency(Dependency[T]):
-    """Enhanced dependency that supports Dynemo endpoints"""
+class DynamoDependency(Dependency[T]):
+    """Enhanced dependency that supports Dynamo endpoints"""
 
     def __init__(
         self,
@@ -130,7 +131,7 @@ class DynemoDependency(Dependency[T]):
         cluster: str | None = None,
     ):
         super().__init__(on, url=url, deployment=deployment, cluster=cluster)
-        self._dynemo_client: Optional[DynemoClient] = None
+        self._dynamo_client: Optional[DynamoClient] = None
         self._runtime = None
 
     # offers an escape hatch to get the endpoint directly
@@ -142,7 +143,7 @@ class DynemoDependency(Dependency[T]):
         ...
         await dep.get_endpoint("generate") # equivalent to the following
         router_client = (
-            await runtime.namespace("dynemo-init")
+            await runtime.namespace("dynamo-init")
             .component("router")
             .endpoint("generate")
             .client()
@@ -152,13 +153,13 @@ class DynemoDependency(Dependency[T]):
         # TODO: Read the runtime from the tdist since it is not stored in global
         if self._runtime is None:
             print(
-                "Get Endpoint: Runtime not set for DynemoDependency. Cannot get endpoint."
+                "Get Endpoint: Runtime not set for DynamoDependency. Cannot get endpoint."
             )
-            raise ValueError("Runtime not set for DynemoDependency")
+            raise ValueError("Runtime not set for DynamoDependency")
 
-        address = self.on.dynemo_address()
+        address = self.on.dynamo_address()
         comp_ns, comp_name = address
-        print("Get Endpoint: Dynemo ADDRESS: ", address)
+        print("Get Endpoint: Dynamo ADDRESS: ", address)
         return (
             await self._runtime.namespace(comp_ns)
             .component(comp_name)
@@ -167,19 +168,19 @@ class DynemoDependency(Dependency[T]):
         )
 
     def set_runtime(self, runtime: Any) -> None:
-        """Set the Dynemo runtime for this dependency"""
+        """Set the Dynamo runtime for this dependency"""
         self._runtime = runtime
-        if self._dynemo_client:
-            self._dynemo_client._runtime = runtime
+        if self._dynamo_client:
+            self._dynamo_client._runtime = runtime
 
     def get(self, *args: Any, **kwargs: Any) -> T | Any:
-        # If this is a Dynemo-enabled service, return the Dynemo client
-        if isinstance(self.on, CompoundService) and self.on.is_dynemo_component():
-            if self._dynemo_client is None:
-                self._dynemo_client = DynemoClient(self.on)
+        # If this is a Dynamo-enabled service, return the Dynamo client
+        if isinstance(self.on, CompoundService) and self.on.is_dynamo_component():
+            if self._dynamo_client is None:
+                self._dynamo_client = DynamoClient(self.on)
                 if self._runtime:
-                    self._dynemo_client._runtime = self._runtime
-            return self._dynemo_client
+                    self._dynamo_client._runtime = self._runtime
+            return self._dynamo_client
 
         # Otherwise fall back to normal BentoML dependency resolution
         return super().get(*args, **kwargs)
@@ -191,11 +192,11 @@ def depends(
     url: str | None = None,
     deployment: str | None = None,
     cluster: str | None = None,
-) -> DynemoDependency[T]:
-    """Create a dependency that's Dynemo-aware.
+) -> DynamoDependency[T]:
+    """Create a dependency that's Dynamo-aware.
 
-    If the dependency is on a Dynemo-enabled service, this will return a client
-    that can call Dynemo endpoints. Otherwise behaves like normal BentoML dependency.
+    If the dependency is on a Dynamo-enabled service, this will return a client
+    that can call Dynamo endpoints. Otherwise behaves like normal BentoML dependency.
 
     Args:
         on: The service to depend on
@@ -204,8 +205,8 @@ def depends(
         cluster: Cluster name
 
     Raises:
-        AttributeError: When trying to call a non-existent Dynemo endpoint
+        AttributeError: When trying to call a non-existent Dynamo endpoint
     """
     if on is not None and not isinstance(on, Service):
         raise TypeError("depends() expects a class decorated with @service()")
-    return DynemoDependency(on, url=url, deployment=deployment, cluster=cluster)
+    return DynamoDependency(on, url=url, deployment=deployment, cluster=cluster)

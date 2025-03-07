@@ -13,13 +13,13 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-# wrapper over bento images to handle Dynemo base image
+# wrapper over bento images to handle Dynamo base image
 
 import os
 
 import bentoml
 
-# TODO: "dynemo:latest-vllm" image will not be available to image builder in k8s
+# TODO: "dynamo:latest-vllm" image will not be available to image builder in k8s
 # so We'd consider publishing the base image for releases to public nvcr.io registry.
-image_name = os.getenv("DYNEMO_IMAGE", "dynemo:latest-vllm")
+image_name = os.getenv("DYNEMO_IMAGE", "dynamo:latest-vllm")
 DYNEMO_IMAGE = bentoml.images.PythonImage(base_image=image_name)

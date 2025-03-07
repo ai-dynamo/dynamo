@@ -235,7 +235,7 @@ func getDMSPortAndHost() (string, string, error) {
  * 2. If the resulting string exceeds the 63-character limit imposed by RFC 1123, it truncates
  *    the string to 63 characters.
  *
- * @param {string} tag - The original CompoundAI Nim tag that needs to be converted.
+ * @param {string} tag - The original Dynamo Nim tag that needs to be converted.
  * @returns {string} - A string that complies with the RFC 1123 DNS label format.
  *
  * Example:

@@ -24,23 +24,23 @@ import (
 )
 
 const (
-	CompoundAIDeploymentConditionTypeAvailable                 = "Available"
-	CompoundAIDeploymentConditionTypeCompoundAINimFound        = "CompoundAINimFound"
-	CompoundAIDeploymentConditionTypeCompoundAINimRequestFound = "CompoundAINimRequestFound"
+	DynamoDeploymentConditionTypeAvailable                 = "Available"
+	DynamoDeploymentConditionTypeDynamoNimFound        = "DynamoNimFound"
+	DynamoDeploymentConditionTypeDynamoNimRequestFound = "DynamoNimRequestFound"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
-// CompoundAINimDeploymentSpec defines the desired state of CompoundAINimDeployment
-type CompoundAINimDeploymentSpec struct {
+// DynamoNimDeploymentSpec defines the desired state of DynamoNimDeployment
+type DynamoNimDeploymentSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 
-	CompoundAINim string `json:"compoundAINim"`
+	DynamoNim string `json:"compoundAINim"`
 
 	// contains the name of the service
 	ServiceName string `json:"serviceName,omitempty"`
@@ -88,8 +88,8 @@ type IngressSpec struct {
 	TLS               *IngressTLSSpec   `json:"tls,omitempty"`
 }
 
-// CompoundAINimDeploymentStatus defines the observed state of CompoundAINimDeployment
-type CompoundAINimDeploymentStatus struct {
+// DynamoNimDeploymentStatus defines the observed state of DynamoNimDeployment
+type DynamoNimDeploymentStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 	Conditions []metav1.Condition `json:"conditions"`
@@ -105,31 +105,31 @@ type CompoundAINimDeploymentStatus struct {
 //+kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Available"
 //+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
-// CompoundAINimDeployment is the Schema for the dynamonimdeployments API
-type CompoundAINimDeployment struct {
+// DynamoNimDeployment is the Schema for the dynamonimdeployments API
+type DynamoNimDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   CompoundAINimDeploymentSpec   `json:"spec,omitempty"`
-	Status CompoundAINimDeploymentStatus `json:"status,omitempty"`
+	Spec   DynamoNimDeploymentSpec   `json:"spec,omitempty"`
+	Status DynamoNimDeploymentStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// CompoundAINimDeploymentList contains a list of CompoundAINimDeployment
-type CompoundAINimDeploymentList struct {
+// DynamoNimDeploymentList contains a list of DynamoNimDeployment
+type DynamoNimDeploymentList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []CompoundAINimDeployment `json:"items"`
+	Items           []DynamoNimDeployment `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&CompoundAINimDeployment{}, &CompoundAINimDeploymentList{})
+	SchemeBuilder.Register(&DynamoNimDeployment{}, &DynamoNimDeploymentList{})
 }
 
-func (s *CompoundAINimDeploymentStatus) IsReady() bool {
+func (s *DynamoNimDeploymentStatus) IsReady() bool {
 	for _, condition := range s.Conditions {
-		if condition.Type == CompoundAIDeploymentConditionTypeAvailable && condition.Status == metav1.ConditionTrue {
+		if condition.Type == DynamoDeploymentConditionTypeAvailable && condition.Status == metav1.ConditionTrue {
 			return true
 		}
 	}

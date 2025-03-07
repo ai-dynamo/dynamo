@@ -32,15 +32,15 @@ import (
 )
 
 /**
-	This file exposes a series of helper functions to utilize the CompoundAI API server
+	This file exposes a series of helper functions to utilize the Dynamo API server
 **/
 
-type CompoundAIClient struct {
+type DynamoClient struct {
 	Url     string
 	Headers http.Header
 }
 
-func (c *CompoundAIClient) CreateCluster(t *testing.T, s schemas.CreateClusterSchema) (*http.Response, *schemas.ClusterFullSchema) {
+func (c *DynamoClient) CreateCluster(t *testing.T, s schemas.CreateClusterSchema) (*http.Response, *schemas.ClusterFullSchema) {
 	// Marshal the request body
 	body, err := json.Marshal(s)
 	if err != nil {
@@ -88,7 +88,7 @@ func (c *CompoundAIClient) CreateCluster(t *testing.T, s schemas.CreateClusterSc
 	return resp, &clusterFullSchema
 }
 
-func (c *CompoundAIClient) UpdateCluster(t *testing.T, name string, s schemas.UpdateClusterSchema) (*http.Response, *schemas.ClusterFullSchema) {
+func (c *DynamoClient) UpdateCluster(t *testing.T, name string, s schemas.UpdateClusterSchema) (*http.Response, *schemas.ClusterFullSchema) {
 	body, err := json.Marshal(s)
 	if err != nil {
 		t.Fatalf("Failed to marshal JSON: %v", err)
@@ -145,7 +145,7 @@ func encodeListQuerySchema(query schemas.ListQuerySchema) string {
 	return params.Encode()
 }
 
-func (c *CompoundAIClient) GetCluster(t *testing.T, name string) (*http.Response, *schemas.ClusterFullSchema) {
+func (c *DynamoClient) GetCluster(t *testing.T, name string) (*http.Response, *schemas.ClusterFullSchema) {
 	req, err := http.NewRequest(http.MethodGet, c.Url+"/api/v1/clusters/"+name, nil)
 	if err != nil {
 		t.Fatalf("Failed to create HTTP request: %v", err)
@@ -186,7 +186,7 @@ func (c *CompoundAIClient) GetCluster(t *testing.T, name string) (*http.Response
 	return resp, &clusterFullSchema
 }
 
-func (c *CompoundAIClient) GetClusterList(t *testing.T, s schemas.ListQuerySchema) (*http.Response, *schemas.ClusterListSchema) {
+func (c *DynamoClient) GetClusterList(t *testing.T, s schemas.ListQuerySchema) (*http.Response, *schemas.ClusterListSchema) {
 	form := encodeListQuerySchema(s)
 	req, err := http.NewRequest(http.MethodGet, c.Url+"/api/v1/clusters?"+form, nil)
 	if err != nil {
@@ -224,7 +224,7 @@ func (c *CompoundAIClient) GetClusterList(t *testing.T, s schemas.ListQuerySchem
 	return resp, &clusterListSchema
 }
 
-func (c *CompoundAIClient) CreateDeployment(t *testing.T, clusterName string, s schemas.CreateDeploymentSchema) (*http.Response, *schemas.DeploymentSchema) {
+func (c *DynamoClient) CreateDeployment(t *testing.T, clusterName string, s schemas.CreateDeploymentSchema) (*http.Response, *schemas.DeploymentSchema) {
 	body, err := json.Marshal(s)
 	if err != nil {
 		t.Fatalf("Failed to marshal JSON: %v", err)
@@ -266,7 +266,7 @@ func (c *CompoundAIClient) CreateDeployment(t *testing.T, clusterName string, s 
 	return resp, &deploymentSchema
 }
 
-func (c *CompoundAIClient) UpdateDeployment(t *testing.T, clusterName, namespace string, deploymentName string, s schemas.UpdateDeploymentSchema) (*http.Response, *schemas.DeploymentSchema) {
+func (c *DynamoClient) UpdateDeployment(t *testing.T, clusterName, namespace string, deploymentName string, s schemas.UpdateDeploymentSchema) (*http.Response, *schemas.DeploymentSchema) {
 	body, err := json.Marshal(s)
 	if err != nil {
 		t.Fatalf("Failed to marshal JSON: %v", err)
@@ -312,7 +312,7 @@ func (c *CompoundAIClient) UpdateDeployment(t *testing.T, clusterName, namespace
 	return resp, &deploymentSchema
 }
 
-func (c *CompoundAIClient) GetDeployment(t *testing.T, clusterName, namespace, deploymentName string) (*http.Response, *schemas.DeploymentSchema) {
+func (c *DynamoClient) GetDeployment(t *testing.T, clusterName, namespace, deploymentName string) (*http.Response, *schemas.DeploymentSchema) {
 	req, err := http.NewRequest(http.MethodGet, c.Url+"/api/v1/clusters/"+clusterName+"/namespaces/"+namespace+"/deployments/"+deploymentName, nil)
 	if err != nil {
 		t.Fatalf("Failed to create HTTP request: %v", err)
@@ -351,7 +351,7 @@ func (c *CompoundAIClient) GetDeployment(t *testing.T, clusterName, namespace, d
 	return resp, &deploymentSchema
 }
 
-func (c *CompoundAIClient) SyncDeploymentStatus(t *testing.T, clusterName, namespace, deploymentName string) (*http.Response, any) {
+func (c *DynamoClient) SyncDeploymentStatus(t *testing.T, clusterName, namespace, deploymentName string) (*http.Response, any) {
 	req, err := http.NewRequest(http.MethodPost, c.Url+"/api/v1/clusters/"+clusterName+"/namespaces/"+namespace+"/deployments/"+deploymentName+"/sync_status", nil)
 	if err != nil {
 		t.Fatalf("Failed to create HTTP request: %v", err)
@@ -386,7 +386,7 @@ func (c *CompoundAIClient) SyncDeploymentStatus(t *testing.T, clusterName, names
 	return resp, statusResponse
 }
 
-func (c *CompoundAIClient) TerminateDeployment(t *testing.T, clusterName, namespace, deploymentName string) (*http.Response, *schemas.DeploymentSchema) {
+func (c *DynamoClient) TerminateDeployment(t *testing.T, clusterName, namespace, deploymentName string) (*http.Response, *schemas.DeploymentSchema) {
 	req, err := http.NewRequest(http.MethodPost, c.Url+"/api/v1/clusters/"+clusterName+"/namespaces/"+namespace+"/deployments/"+deploymentName+"/terminate", nil)
 	if err != nil {
 		t.Fatalf("Failed to create HTTP request: %v", err)
@@ -422,7 +422,7 @@ func (c *CompoundAIClient) TerminateDeployment(t *testing.T, clusterName, namesp
 	return resp, &terminateResponse
 }
 
-func (c *CompoundAIClient) DeleteDeployment(t *testing.T, clusterName, namespace, deploymentName string) (*http.Response, any) {
+func (c *DynamoClient) DeleteDeployment(t *testing.T, clusterName, namespace, deploymentName string) (*http.Response, any) {
 	req, err := http.NewRequest(http.MethodDelete, c.Url+"/api/v1/clusters/"+clusterName+"/namespaces/"+namespace+"/deployments/"+deploymentName, nil)
 	if err != nil {
 		t.Fatalf("Failed to create HTTP request: %v", err)
@@ -457,7 +457,7 @@ func (c *CompoundAIClient) DeleteDeployment(t *testing.T, clusterName, namespace
 	return resp, deleteResponse
 }
 
-func (c *CompoundAIClient) GetDeploymentList(t *testing.T, queryParams schemas.ListQuerySchema) (*http.Response, *schemas.DeploymentListSchema) {
+func (c *DynamoClient) GetDeploymentList(t *testing.T, queryParams schemas.ListQuerySchema) (*http.Response, *schemas.DeploymentListSchema) {
 	query := url.Values{}
 	query.Add("q", queryParams.Q)
 	if queryParams.Start > 0 {
@@ -504,7 +504,7 @@ func (c *CompoundAIClient) GetDeploymentList(t *testing.T, queryParams schemas.L
 	return resp, &deploymentListSchema
 }
 
-func (c *CompoundAIClient) GetClusterDeploymentList(t *testing.T, clusterName string, queryParams schemas.ListQuerySchema) (*http.Response, *schemas.DeploymentListSchema) {
+func (c *DynamoClient) GetClusterDeploymentList(t *testing.T, clusterName string, queryParams schemas.ListQuerySchema) (*http.Response, *schemas.DeploymentListSchema) {
 	query := url.Values{}
 	query.Add("q", queryParams.Q)
 	if queryParams.Start > 0 {
@@ -551,7 +551,7 @@ func (c *CompoundAIClient) GetClusterDeploymentList(t *testing.T, clusterName st
 	return resp, &deploymentListSchema
 }
 
-func (c *CompoundAIClient) GetDeploymentRevision(t *testing.T, clusterName, namespace, deploymentName, revisionUid string) (*http.Response, *schemas.DeploymentRevisionSchema) {
+func (c *DynamoClient) GetDeploymentRevision(t *testing.T, clusterName, namespace, deploymentName, revisionUid string) (*http.Response, *schemas.DeploymentRevisionSchema) {
 	req, err := http.NewRequest(http.MethodGet, c.Url+"/api/v1/clusters/"+clusterName+"/namespaces/"+namespace+"/deployments/"+deploymentName+"/revisions/"+revisionUid, nil)
 	if err != nil {
 		t.Fatalf("Failed to create HTTP request: %v", err)
@@ -586,7 +586,7 @@ func (c *CompoundAIClient) GetDeploymentRevision(t *testing.T, clusterName, name
 	return resp, &deploymentRevisionSchema
 }
 
-func (c *CompoundAIClient) GetDeploymentRevisionList(t *testing.T, clusterName, namespace, deploymentName string, queryParams schemas.ListQuerySchema) (*http.Response, *schemas.DeploymentRevisionListSchema) {
+func (c *DynamoClient) GetDeploymentRevisionList(t *testing.T, clusterName, namespace, deploymentName string, queryParams schemas.ListQuerySchema) (*http.Response, *schemas.DeploymentRevisionListSchema) {
 	query := url.Values{}
 	query.Add("q", queryParams.Q)
 	if queryParams.Start > 0 {
@@ -635,7 +635,7 @@ func (c *CompoundAIClient) GetDeploymentRevisionList(t *testing.T, clusterName, 
 
 // V2 Client Functions
 
-func (c *CompoundAIClient) CreateDeploymentV2(t *testing.T, clusterName string, s schemasv2.CreateDeploymentSchema) (*http.Response, *schemasv2.DeploymentSchema) {
+func (c *DynamoClient) CreateDeploymentV2(t *testing.T, clusterName string, s schemasv2.CreateDeploymentSchema) (*http.Response, *schemasv2.DeploymentSchema) {
 	body, err := json.Marshal(s)
 	if err != nil {
 		t.Fatalf("Failed to marshal JSON: %v", err)
@@ -677,7 +677,7 @@ func (c *CompoundAIClient) CreateDeploymentV2(t *testing.T, clusterName string, 
 	return resp, &deploymentSchema
 }
 
-func (c *CompoundAIClient) UpdateDeploymentV2(t *testing.T, clusterName, deploymentName string, s schemasv2.UpdateDeploymentSchema) (*http.Response, *schemasv2.DeploymentSchema) {
+func (c *DynamoClient) UpdateDeploymentV2(t *testing.T, clusterName, deploymentName string, s schemasv2.UpdateDeploymentSchema) (*http.Response, *schemasv2.DeploymentSchema) {
 	body, err := json.Marshal(s)
 	if err != nil {
 		t.Fatalf("Failed to marshal JSON: %v", err)
@@ -723,7 +723,7 @@ func (c *CompoundAIClient) UpdateDeploymentV2(t *testing.T, clusterName, deploym
 	return resp, &deploymentSchema
 }
 
-func (c *CompoundAIClient) GetDeploymentV2(t *testing.T, clusterName, deploymentName string) (*http.Response, *schemasv2.DeploymentSchema) {
+func (c *DynamoClient) GetDeploymentV2(t *testing.T, clusterName, deploymentName string) (*http.Response, *schemasv2.DeploymentSchema) {
 	req, err := http.NewRequest(http.MethodGet, c.Url+"/api/v2/deployments/"+deploymentName+"?cluster="+clusterName, nil)
 	if err != nil {
 		t.Fatalf("Failed to create HTTP request: %v", err)
@@ -762,7 +762,7 @@ func (c *CompoundAIClient) GetDeploymentV2(t *testing.T, clusterName, deployment
 	return resp, &deploymentSchema
 }
 
-func (c *CompoundAIClient) TerminateDeploymentV2(t *testing.T, clusterName, deploymentName string) (*http.Response, *schemasv2.DeploymentSchema) {
+func (c *DynamoClient) TerminateDeploymentV2(t *testing.T, clusterName, deploymentName string) (*http.Response, *schemasv2.DeploymentSchema) {
 	req, err := http.NewRequest(http.MethodPost, c.Url+"/api/v2/deployments/"+deploymentName+"/terminate"+"?cluster="+clusterName, nil)
 	if err != nil {
 		t.Fatalf("Failed to create HTTP request: %v", err)
@@ -798,7 +798,7 @@ func (c *CompoundAIClient) TerminateDeploymentV2(t *testing.T, clusterName, depl
 	return resp, &terminateResponse
 }
 
-func (c *CompoundAIClient) DeleteDeploymentV2(t *testing.T, clusterName, deploymentName string) (*http.Response, *schemasv2.DeploymentSchema) {
+func (c *DynamoClient) DeleteDeploymentV2(t *testing.T, clusterName, deploymentName string) (*http.Response, *schemasv2.DeploymentSchema) {
 	req, err := http.NewRequest(http.MethodDelete, c.Url+"/api/v2/deployments/"+deploymentName+"?cluster="+clusterName, nil)
 	if err != nil {
 		t.Fatalf("Failed to create HTTP request: %v", err)
