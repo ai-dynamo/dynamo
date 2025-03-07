@@ -15,11 +15,10 @@
 
 import asyncio
 
-import pytest
-
 from dynamo._core import DistributedRuntime
 
-pytestmark = pytest.mark.pre_merge
+# Todo add support for launching etcd
+# pytestmark = pytest.mark.pre_merge
 
 
 async def test_simple_put_get():
