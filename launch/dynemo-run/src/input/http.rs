@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use triton_distributed_llm::{
+use dynemo_llm::{
     backend::Backend,
     http::service::{discovery, service_v2},
     model_type::ModelType,
@@ -27,7 +27,7 @@ use triton_distributed_llm::{
         Annotated,
     },
 };
-use triton_distributed_runtime::{
+use dynemo_runtime::{
     pipeline::{ManyOut, Operator, ServiceBackend, ServiceFrontend, SingleIn, Source},
     DistributedRuntime, Runtime,
 };

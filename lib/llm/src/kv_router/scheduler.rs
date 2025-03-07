@@ -13,6 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use dynemo_runtime::component::Namespace;
+use dynemo_runtime::traits::events::EventPublisher;
 use serde::{Deserialize, Serialize};
 use std::borrow::BorrowMut;
 use std::cmp::min;
@@ -21,7 +23,13 @@ use crate::kv_router::indexer::OverlapScores;
 pub use crate::kv_router::protocols::{ForwardPassMetrics, KV_BLOCK_SIZE};
 use crate::kv_router::scoring::ProcessedEndpoints;
 
-#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KVHitRateEvent {
+    pub worker_id: i64,
+    pub isl_blocks: usize,
+    pub overlap_blocks: usize,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum KvSchedulerError {
     #[error("no endpoints aviailable to route work")]
@@ -93,6 +101,7 @@ pub struct KvScheduler {
 impl KvScheduler {
     pub async fn start(
         endpoints_rx: tokio::sync::mpsc::Receiver<ProcessedEndpoints>,
+        ns: Namespace,
     ) -> Result<Self, KvSchedulerError> {
         let mut endpoints_rx = endpoints_rx;
 
@@ -103,6 +112,20 @@ impl KvScheduler {
                 return Err(KvSchedulerError::SubscriberShutdown);
             }
         };
+
+        // Channel to asynchronously publish metric events on
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<KVHitRateEvent>();
+
+        // Publisher task
+        tokio::spawn(async move {
+            let mut event_rx = event_rx;
+            let subject = "kv-hit-rate";
+            while let Some(event) = event_rx.recv().await {
+                if let Err(e) = ns.publish(subject, &event).await {
+                    tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
+                }
+            }
+        });
 
         // Channel to accept new scheduling requests
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(16);
@@ -146,7 +169,7 @@ impl KvScheduler {
                 };
                 tracing::debug!("selected");
                 loop {
-                    match select_worker(endpoints.borrow_mut(), &request) {
+                    match select_worker(endpoints.borrow_mut(), &request, &event_tx) {
                         Ok(worker_id) => {
                             request.respond(worker_id);
                             continue 'outer;
@@ -175,7 +198,6 @@ impl KvScheduler {
         Ok(KvScheduler { request_tx })
     }
 
-    #[allow(dead_code)]
     pub async fn schedule(
         &self,
         overlap: OverlapScores,
@@ -205,6 +227,7 @@ impl KvScheduler {
 pub fn select_worker(
     workers: &mut ProcessedEndpoints,
     request: &SchedulingRequest,
+    event_tx: &tokio::sync::mpsc::UnboundedSender<KVHitRateEvent>,
 ) -> Result<i64, KvSchedulerError> {
     // balance mode prioritizes balancing load across workers
     let balance_threshold: f64 = 0.1;
@@ -268,6 +291,23 @@ pub fn select_worker(
 
         workers.endpoints[best_index].data.request_active_slots += 1;
         workers.endpoints[best_index].data.kv_active_blocks += total_blocks as u64;
+
+        // Optimization - pass this to a channel for emitting events, async task, etc. to avoid blocking the scheduler
+        let best_worker_id = workers.endpoints[best_index].worker_id();
+        let isl_blocks = request.isl_tokens / KV_BLOCK_SIZE;
+        let overlap_blocks = request
+            .overlap
+            .scores
+            .get(&best_worker_id)
+            .copied()
+            .unwrap_or(0);
+        if let Err(e) = event_tx.send(KVHitRateEvent {
+            worker_id: best_worker_id,
+            isl_blocks,
+            overlap_blocks: overlap_blocks as usize,
+        }) {
+            tracing::warn!("Failed to send KV hit rate event: {:?}", e);
+        }
     }
 
     match best_index {

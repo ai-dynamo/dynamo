@@ -19,6 +19,8 @@ use std::{
 };
 
 use async_zmq::{SinkExt, StreamExt};
+use dynemo_runtime::protocols::annotated::Annotated;
+use dynemo_runtime::CancellationToken;
 use pyo3::{
     prelude::*,
     types::{IntoPyDict, PyBytes, PyString},
@@ -26,8 +28,6 @@ use pyo3::{
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 use tokio::{io::AsyncBufReadExt, sync::mpsc::error::SendError};
-use triton_distributed_runtime::protocols::annotated::Annotated;
-use triton_distributed_runtime::CancellationToken;
 
 use crate::engines::MultiNodeConfig;
 use crate::protocols::common::llm_backend::LLMEngineOutput;

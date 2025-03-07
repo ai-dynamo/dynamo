@@ -13,5 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from triton_distributed._core import KvMetricsPublisher as KvMetricsPublisher
-from triton_distributed._core import KvRouter as KvRouter
+from dynemo._core import KvIndexer as KvIndexer
+from dynemo._core import KvMetricsAggregator as KvMetricsAggregator
+from dynemo._core import KvMetricsPublisher as KvMetricsPublisher
+from dynemo._core import KvRouter as KvRouter

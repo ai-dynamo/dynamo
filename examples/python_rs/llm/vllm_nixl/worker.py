@@ -33,11 +33,7 @@ from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 
-from triton_distributed.runtime import (
-    DistributedRuntime,
-    triton_endpoint,
-    triton_worker,
-)
+from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
 
 class RequestHandler:
@@ -83,11 +79,11 @@ class RequestHandler:
     def get_remote_prefill_request_callback(self):
         async def callback(request: RemotePrefillRequest):
             json_request = msgspec.json.encode(request).decode("utf-8")
-            self.prefill_client.generate(json_request)
+            self.prefill_client.round_robin(json_request)
 
         return callback
 
-    @triton_endpoint(ChatCompletionRequest, ChatCompletionStreamResponse)
+    @dynemo_endpoint(ChatCompletionRequest, ChatCompletionStreamResponse)
     async def generate(self, request):
         if not self.initialized:
             await self.init()
@@ -113,7 +109,7 @@ class RequestHandler:
             yield response
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     component = runtime.namespace("test-nixl").component("vllm")
     await component.create_service()

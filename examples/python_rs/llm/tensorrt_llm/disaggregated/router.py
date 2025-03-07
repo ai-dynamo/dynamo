@@ -26,11 +26,7 @@ from common.protocol import (
 from tensorrt_llm.logger import logger
 from tensorrt_llm.serve.openai_protocol import CompletionRequest, DisaggregatedParams
 
-from triton_distributed.runtime import (
-    DistributedRuntime,
-    triton_endpoint,
-    triton_worker,
-)
+from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
 
 logger.set_level("debug")
 
@@ -73,7 +69,7 @@ class Router:
     # Disagg params should be in under the choices field in the response object.
     # This is the case for completions but not for chat.
 
-    @triton_endpoint(CompletionRequest, DisaggCompletionStreamResponse)
+    @dynemo_endpoint(CompletionRequest, DisaggCompletionStreamResponse)
     async def generate_completion(self, request):
         # These settings are needed to satisfy request checks.
         request.skip_special_tokens = False
@@ -106,7 +102,7 @@ class Router:
             )
             yield json.loads(gen_resp_obj.model_dump_json(exclude_unset=True))
 
-    @triton_endpoint(DisaggChatCompletionRequest, DisaggChatCompletionStreamResponse)
+    @dynemo_endpoint(DisaggChatCompletionRequest, DisaggChatCompletionStreamResponse)
     async def generate_chat(self, request):
         # These settings are needed to satisfy request checks.
         request.skip_special_tokens = False
@@ -140,35 +136,35 @@ class Router:
             yield json.loads(gen_resp_obj.model_dump_json(exclude_unset=True))
 
 
-@triton_worker()
+@dynemo_worker()
 async def worker(runtime: DistributedRuntime):
     """
     Instantiate a `backend` component and serve the `generate` endpoint
     A `Component` can serve multiple endpoints
     """
-    component = runtime.namespace("triton-init").component("router")
+    component = runtime.namespace("dynemo").component("router")
     await component.create_service()
 
     ctx_completion_client = (
-        await runtime.namespace("triton-init")
+        await runtime.namespace("dynemo")
         .component("tensorrt-llm-ctx")
         .endpoint("completions")
         .client()
     )
     gen_completion_client = (
-        await runtime.namespace("triton-init")
+        await runtime.namespace("dynemo")
         .component("tensorrt-llm-gen")
         .endpoint("completions")
         .client()
     )
     ctx_chat_client = (
-        await runtime.namespace("triton-init")
+        await runtime.namespace("dynemo")
         .component("tensorrt-llm-ctx")
         .endpoint("chat/completions")
         .client()
     )
     gen_chat_client = (
-        await runtime.namespace("triton-init")
+        await runtime.namespace("dynemo")
         .component("tensorrt-llm-gen")
         .endpoint("chat/completions")
         .client()

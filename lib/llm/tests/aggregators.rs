@@ -13,12 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use futures::StreamExt;
-use triton_distributed_llm::protocols::{
+use dynemo_llm::protocols::{
     codec::{create_message_stream, Message, SseCodecError},
     openai::{chat_completions::NvCreateChatCompletionResponse, completions::CompletionResponse},
     ContentProvider, DataStream,
 };
+use futures::StreamExt;
 
 const CMPL_ROOT_PATH: &str = "tests/data/replays/meta/llama-3.1-8b-instruct/completions";
 const CHAT_ROOT_PATH: &str = "tests/data/replays/meta/llama-3.1-8b-instruct/chat_completions";

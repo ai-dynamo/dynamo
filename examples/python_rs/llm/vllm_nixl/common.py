@@ -22,7 +22,7 @@ from vllm.distributed.device_communicators.nixl import NixlMetadata
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
 
-from triton_distributed.runtime import DistributedRuntime
+from dynemo.runtime import DistributedRuntime
 
 METADATA_DIR = "/tmp/nixl"
 

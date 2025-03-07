@@ -23,8 +23,8 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-triton-distributed-runtime = { workspace = true}
-triton-distributed-llm = { workspace = true}
+dynemo-runtime = { workspace = true}
+dynemo-llm = { workspace = true}
 
 serde = { workspace = true }
 serde_json = { workspace = true }

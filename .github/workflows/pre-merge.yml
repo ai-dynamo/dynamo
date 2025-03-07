@@ -22,25 +22,6 @@ on:
 
 jobs:
 
-  # icp_validation:
-  #   runs-on: ubuntu-latest
-  #   container:
-  #     image: ghcr.io/triton-inference-server/triton3/python_ci:0.1.9
-  #     env:
-  #       BUILD_NUMBER: ${{ github.job }}
-  #       CUDA_VISIBLE_DEVICES: -1
-  #       PATH: /opt/tritonserver/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/ucx/bin:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/mpi/bin:/usr/local/sbin
-  #     volumes:
-  #     - ${{ github.workspace }}:/workspace
-  #   permissions:
-  #     contents: read
-  #     packages: read
-  #   steps:
-  #   - uses: actions/checkout@v4
-  #   - run: ./icp/protos/gen_python.sh
-  #   - run: pytest --verbose icp
-  #     timeout-minutes: 3
-
   pre-commit:
     runs-on: ubuntu-latest
     permissions:
@@ -52,41 +33,3 @@ jobs:
       timeout-minutes: 3
 
 
-
-  # providers_validation:
-  #   runs-on: ubuntu-latest
-  #   container:
-  #     image: ghcr.io/triton-inference-server/triton3/python_ci:0.1.9
-  #     env:
-  #       BUILD_NUMBER: ${{ github.job }}
-  #       CUDA_VISIBLE_DEVICES: -1
-  #       PATH: /opt/tritonserver/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/ucx/bin:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/mpi/bin:/usr/local/sbin
-  #       PROTO_OUT: /python/icp/protos
-  #     volumes:
-  #     - ${{ github.workspace }}:/workspace
-  #   permissions:
-  #     contents: read
-  #     packages: read
-  #   steps:
-  #   - uses: actions/checkout@v4
-  #   - run: pytest --verbose providers
-
-  # worker_validation:
-  #   runs-on: ubuntu-latest
-  #   container:
-  #     image: ghcr.io/triton-inference-server/triton3/python_ci:0.1.9
-  #     env:
-  #       BUILD_NUMBER: ${{ github.job }}
-  #       CUDA_VISIBLE_DEVICES: -1
-  #       PATH: /opt/tritonserver/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/ucx/bin:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/mpi/bin:/usr/local/sbin
-  #       PROTO_OUT: /python/icp/protos
-  #     volumes:
-  #     - ${{ github.workspace }}:/workspace
-  #   permissions:
-  #     contents: read
-  #     packages: read
-  #   steps:
-  #   - uses: actions/checkout@v4
-  #   - run: ./icp/protos/gen_python.sh
-  #   - run: pytest -p no:warnings --verbose worker/python/tests
-  #     timeout-minutes: 2

@@ -17,8 +17,8 @@ use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 
-use triton_distributed_runtime::engine::ResponseStream;
-use triton_distributed_runtime::{
+use dynemo_runtime::engine::ResponseStream;
+use dynemo_runtime::{
     pipeline::{
         async_trait, AsyncEngine, Data, Event, ManyOut, Operator, ServiceBackend, ServiceEngine,
         ServiceFrontend, SingleIn, *,

@@ -14,13 +14,14 @@
 // limitations under the License.
 
 use anyhow::Result;
+use dynemo_runtime::{component::Component, component::Namespace, DistributedRuntime};
 use futures::stream::StreamExt;
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 use tracing;
-use triton_distributed_runtime::{component::Component, DistributedRuntime};
 
 pub mod indexer;
+pub mod metrics_aggregator;
 pub mod protocols;
 pub mod publisher;
 pub mod scheduler;
@@ -56,15 +57,19 @@ impl KvRouter {
         let nats_client = runtime.nats_client();
         let service_name = backend.service_name();
         let kv_subject = backend.event_subject(KV_EVENT_SUBJECT);
+        let namespace = runtime.namespace(backend.namespace())?;
+
+        tracing::info!("Component Namespace {}", backend.namespace());
         tracing::info!("Component Service Name {}", service_name);
         tracing::info!("KV Subject {}", kv_subject);
-        Self::new(nats_client, service_name, kv_subject).await
+        Self::new(nats_client, service_name, kv_subject, namespace).await
     }
 
     pub async fn new(
-        nats_client: triton_distributed_runtime::transports::nats::Client,
+        nats_client: dynemo_runtime::transports::nats::Client,
         service_name: String,
         kv_subject: String,
+        namespace: Namespace,
     ) -> Result<Arc<Self>> {
         let cancellation_token = CancellationToken::new();
         let (ep_tx, ep_rx) = tokio::sync::mpsc::channel(128);
@@ -77,7 +82,7 @@ impl KvRouter {
         ));
 
         let indexer = KvIndexer::new(cancellation_token.clone());
-        let scheduler = KvScheduler::start(ep_rx).await?;
+        let scheduler = KvScheduler::start(ep_rx, namespace).await?;
 
         tracing::debug!("subscribing to kv events: {}", kv_subject);
         let mut kv_events_rx = nats_client.client().subscribe(kv_subject).await?;
@@ -135,7 +140,7 @@ impl KvRouter {
 }
 
 async fn collect_endpoints(
-    nats_client: triton_distributed_runtime::transports::nats::Client,
+    nats_client: dynemo_runtime::transports::nats::Client,
     service_name: String,
     ep_tx: tokio::sync::mpsc::Sender<ProcessedEndpoints>,
     cancel: CancellationToken,

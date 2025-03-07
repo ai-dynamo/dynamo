@@ -91,6 +91,11 @@ pub enum Output {
     #[cfg(feature = "trtllm")]
     /// Run inference using trtllm
     TrtLLM,
+
+    /// Run inference using a user supplied python file that accepts and return
+    /// strings (meaning it does it's own pre-processing).
+    #[cfg(feature = "python")]
+    PythonStr(String),
 }
 
 impl TryFrom<&str> for Output {
@@ -121,6 +126,14 @@ impl TryFrom<&str> for Output {
                 Ok(Output::Endpoint(path.to_string()))
             }
 
+            #[cfg(feature = "python")]
+            python_str_gen if python_str_gen.starts_with(crate::PYTHON_STR_SCHEME) => {
+                let path = python_str_gen
+                    .strip_prefix(crate::PYTHON_STR_SCHEME)
+                    .unwrap();
+                Ok(Output::PythonStr(path.to_string()))
+            }
+
             e => Err(anyhow::anyhow!("Invalid out= option '{e}'")),
         }
     }
@@ -148,6 +161,9 @@ impl fmt::Display for Output {
             Output::EchoCore => "echo_core",
 
             Output::Endpoint(path) => path,
+
+            #[cfg(feature = "python")]
+            Output::PythonStr(path) => path,
         };
         write!(f, "{s}")
     }

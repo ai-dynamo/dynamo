@@ -22,13 +22,14 @@ homepage = "https://github.com/dynemo-ai/dynemo"
 license = "Apache-2.0"
 
 [features]
-mistralrs = ["triton-distributed-llm/mistralrs"]
-sglang = ["triton-distributed-llm/sglang", "dep:netlink-packet-route", "dep:rtnetlink"]
-vllm = ["triton-distributed-llm/vllm", "dep:netlink-packet-route", "dep:rtnetlink"]
-llamacpp = ["triton-distributed-llm/llamacpp"]
-trtllm = ["triton-distributed-llm/trtllm"]
-cuda = ["triton-distributed-llm/cuda"]
-metal = ["triton-distributed-llm/metal"]
+mistralrs = ["dynemo-llm/mistralrs"]
+sglang = ["dynemo-llm/sglang", "dep:netlink-packet-route", "dep:rtnetlink"]
+vllm = ["dynemo-llm/vllm", "dep:netlink-packet-route", "dep:rtnetlink"]
+llamacpp = ["dynemo-llm/llamacpp"]
+trtllm = ["dynemo-llm/trtllm"]
+python = ["dynemo-llm/python"]
+cuda = ["dynemo-llm/cuda"]
+metal = ["dynemo-llm/metal"]
 
 [dependencies]
 anyhow = "1"
@@ -48,5 +49,5 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec", "net"] }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
-triton-distributed-runtime = { path = "../../lib/runtime" }
-triton-distributed-llm = { path = "../../lib/llm" }
+dynemo-runtime = { path = "../../lib/runtime" }
+dynemo-llm = { path = "../../lib/llm" }

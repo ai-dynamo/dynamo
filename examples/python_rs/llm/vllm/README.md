@@ -57,13 +57,13 @@ The example is designed to run in a containerized environment using Triton Distr
 
 Run the server logging (with debug level logging):
 ```bash
-TRD_LOG=DEBUG http
+DYN_LOG=DEBUG http
 ```
 By default the server will run on port 8080.
 
 Add model to the server:
 ```bash
-llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B triton-init.vllm.generate
+llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynemo.vllm.generate
 ```
 
 ##### Example Output
@@ -71,7 +71,7 @@ llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B triton-init
 +------------+------------------------------------------+-----------+-----------+----------+
 | MODEL TYPE | MODEL NAME                               | NAMESPACE | COMPONENT | ENDPOINT |
 +------------+------------------------------------------+-----------+-----------+----------+
-| chat       | deepseek-ai/DeepSeek-R1-Distill-Llama-8B | triton-init | vllm      | generate |
+| chat       | deepseek-ai/DeepSeek-R1-Distill-Llama-8B | dynemo | vllm      | generate |
 +------------+------------------------------------------+-----------+-----------+----------+
 ```
 
@@ -83,7 +83,7 @@ In a separate terminal run the vllm worker:
 
 ```bash
 # Activate virtual environment
-source /opt/triton/venv/bin/activate
+source /opt/dynemo/venv/bin/activate
 
 # Launch worker
 cd /workspace/examples/python_rs/llm/vllm
@@ -116,7 +116,7 @@ This deployment option splits the model serving across prefill and decode worker
 **Terminal 1 - Prefill Worker:**
 ```bash
 # Activate virtual environment
-source /opt/triton/venv/bin/activate
+source /opt/dynemo/venv/bin/activate
 
 # Launch prefill worker
 cd /workspace/examples/python_rs/llm/vllm
@@ -126,7 +126,7 @@ VLLM_WORKER_MULTIPROC_METHOD=spawn CUDA_VISIBLE_DEVICES=0 python3 -m disaggregat
     --enforce-eager \
     --tensor-parallel-size 1 \
     --kv-transfer-config \
-    '{"kv_connector":"TritonNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}'
+    '{"kv_connector":"DynemoNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}'
 ```
 
 ##### Example Output
@@ -142,7 +142,7 @@ INFO 03-02 05:59:47 llm_engine.py:476] init engine (profile, create kv cache, wa
 **Terminal 2 - Decode Worker:**
 ```bash
 # Activate virtual environment
-source /opt/triton/venv/bin/activate
+source /opt/dynemo/venv/bin/activate
 
 # Launch decode worker
 cd /workspace/examples/python_rs/llm/vllm
@@ -152,7 +152,7 @@ VLLM_WORKER_MULTIPROC_METHOD=spawn CUDA_VISIBLE_DEVICES=1,2 python3 -m disaggreg
     --enforce-eager \
     --tensor-parallel-size 2 \
     --kv-transfer-config \
-    '{"kv_connector":"TritonNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2}'
+    '{"kv_connector":"DynemoNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2}'
 ```
 
 The disaggregated deployment utilizes separate GPUs for prefill and decode operations, allowing for optimized resource allocation and improved performance. For more details on the disaggregated deployment, please refer to the [vLLM documentation](https://docs.vllm.ai/en/latest/features/disagg_prefill.html).
@@ -254,7 +254,7 @@ tmux ls | grep 'v-' | cut -d: -f1 | xargs -I{} tmux kill-session -t {}
 **Terminal 1 - Router:**
 ```bash
 # Activate virtual environment
-source /opt/triton/venv/bin/activate
+source /opt/dynemo/venv/bin/activate
 
 # Launch prefill worker
 cd /workspace/examples/python_rs/llm/vllm
@@ -270,7 +270,7 @@ You can choose only the prefix strategy for now:
 **Terminal 2 - Processor:**
 ```bash
 # Activate virtual environment
-source /opt/triton/venv/bin/activate
+source /opt/dynemo/venv/bin/activate
 
 # Processor must take the same args as the worker
 # This is temporary until we communicate the ModelDeploymentCard over etcd
@@ -286,7 +286,7 @@ RUST_LOG=info python3 -m kv_router.processor \
 **Terminal 3 and 4 - Workers:**
 ```bash
 # Activate virtual environment
-source /opt/triton/venv/bin/activate
+source /opt/dynemo/venv/bin/activate
 
 # Launch Worker 1 and Worker 2 with same command
 cd /workspace/examples/python_rs/llm/vllm
@@ -304,7 +304,7 @@ Note: block-size must be 64, otherwise Router won't work (accepts only 64 tokens
 **Terminal 5 - Client:**
 Don't forget to add the model to the server:
 ```bash
-llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B triton-init.process.chat/completions
+llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynemo.process.chat/completions
 ```
 
 ```bash
@@ -351,7 +351,7 @@ Run following commands in 4 terminals:
 **Terminal 1 - vLLM Worker:**
 ```bash
 # Activate virtual environment
-source /opt/triton/venv/bin/activate
+source /opt/dynemo/venv/bin/activate
 cd /workspace/examples/python_rs/llm/vllm
 
 RUST_LOG=info python3 -m preprocessor.worker --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
@@ -361,7 +361,7 @@ RUST_LOG=info python3 -m preprocessor.worker --model deepseek-ai/DeepSeek-R1-Dis
 
 ```bash
 # Activate virtual environment
-source /opt/triton/venv/bin/activate
+source /opt/dynemo/venv/bin/activate
 cd /workspace/examples/python_rs/llm/vllm
 
 RUST_LOG=info python3 -m preprocessor.processor --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
@@ -371,13 +371,13 @@ RUST_LOG=info python3 -m preprocessor.processor --model deepseek-ai/DeepSeek-R1-
 
 Run the server logging (with debug level logging):
 ```bash
-TRD_LOG=DEBUG http
+DYN_LOG=DEBUG http
 ```
 By default the server will run on port 8080.
 
 Add model to the server:
 ```bash
-llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B triton-init.preprocessor.generate
+llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B dynemo.preprocessor.generate
 ```
 
 **Terminal 4 - client**

@@ -16,12 +16,9 @@
 #[cfg(feature = "integration")]
 mod integration {
 
-    pub const DEFAULT_NAMESPACE: &str = "triton-init";
+    pub const DEFAULT_NAMESPACE: &str = "dynemo";
 
-    use futures::StreamExt;
-    use std::{sync::Arc, time::Duration};
-    use tokio::time::Instant;
-    use triton_distributed_runtime::{
+    use dynemo_runtime::{
         logging,
         pipeline::{
             async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
@@ -30,6 +27,9 @@ mod integration {
         protocols::annotated::Annotated,
         DistributedRuntime, ErrorContext, Result, Runtime, Worker,
     };
+    use futures::StreamExt;
+    use std::{sync::Arc, time::Duration};
+    use tokio::time::Instant;
 
     #[test]
     fn main() -> Result<()> {
@@ -100,11 +100,11 @@ mod integration {
 
     async fn client(runtime: DistributedRuntime) -> Result<()> {
         // get the run duration from env
-        let run_duration = std::env::var("TRD_SOAK_RUN_DURATION").unwrap_or("1m".to_string());
+        let run_duration = std::env::var("DYN_SOAK_RUN_DURATION").unwrap_or("1m".to_string());
         let run_duration =
             humantime::parse_duration(&run_duration).unwrap_or(Duration::from_secs(60));
 
-        let batch_load = std::env::var("TRD_SOAK_BATCH_LOAD").unwrap_or("10000".to_string());
+        let batch_load = std::env::var("DYN_SOAK_BATCH_LOAD").unwrap_or("10000".to_string());
         let batch_load: usize = batch_load.parse().unwrap_or(10000);
 
         let client = runtime

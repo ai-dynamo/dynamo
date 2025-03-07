@@ -22,15 +22,15 @@ from pydantic import BaseModel, ValidationError
 
 # List all the classes in the _core module for re-export
 # import * causes "unable to detect undefined names"
-from triton_distributed._core import Backend as Backend
-from triton_distributed._core import Client as Client
-from triton_distributed._core import DistributedRuntime as DistributedRuntime
-from triton_distributed._core import KvRouter as KvRouter
-from triton_distributed._core import ModelDeploymentCard as ModelDeploymentCard
-from triton_distributed._core import OAIChatPreprocessor as OAIChatPreprocessor
+from dynemo._core import Backend as Backend
+from dynemo._core import Client as Client
+from dynemo._core import DistributedRuntime as DistributedRuntime
+from dynemo._core import KvRouter as KvRouter
+from dynemo._core import ModelDeploymentCard as ModelDeploymentCard
+from dynemo._core import OAIChatPreprocessor as OAIChatPreprocessor
 
 
-def triton_worker():
+def dynemo_worker():
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
@@ -59,7 +59,7 @@ def triton_worker():
     return decorator
 
 
-def triton_endpoint(
+def dynemo_endpoint(
     request_model: Union[Type[BaseModel], Type[Any]], response_model: Type[BaseModel]
 ) -> Callable:
     def decorator(
