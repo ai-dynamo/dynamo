@@ -36,6 +36,7 @@ var BackendService = backendService{}
 
 // InitBackendService initializes the backend service with the provided URL
 func InitBackendService(backendURL string) {
+	log.Debug().Msgf("Initializing backend service with URL: %s", backendURL)
 	BackendService = backendService{backendURL: backendURL}
 }
 

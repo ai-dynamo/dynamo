@@ -55,6 +55,8 @@ var client = DynamoClient{
 
 type ApiServerSuite struct {
 	suite.Suite
+	mockBackend *fixtures.MockBackendServer
+	mockDb      *fixtures.MockDbServer
 }
 
 func TestApiServerSuite(t *testing.T) {
@@ -70,6 +72,11 @@ func (s *ApiServerSuite) SetupSuite() {
 	}
 	log.Info().Msgf("Created Postgres Container")
 
+	// Create mock backend servers
+	s.mockBackend = fixtures.CreateMockBackendServer(s.T())
+	backendURL := env.GetBackendUrl()
+	services.InitBackendService(backendURL)
+
 	// Setup server
 	go func() {
 		// Mute all logs for this goroutine
@@ -80,6 +87,7 @@ func (s *ApiServerSuite) SetupSuite() {
 	s.waitUntilReady()
 	log.Info().Msgf("API Server Ready")
 
+	// Mock K8s service
 	services.K8sService = &fixtures.MockedK8sService{}
 	log.Info().Msgf("Mocked K8s Service")
 }
@@ -99,6 +107,9 @@ func (s *ApiServerSuite) waitUntilReady() {
 
 // run once, after test suite methods
 func (s *ApiServerSuite) TearDownSuite() {
+	if s.mockBackend != nil {
+        s.mockBackend.Close()
+    }
 	testContainers.TearDownPostgresContainer()
 }
 
@@ -203,11 +214,6 @@ func (s *ApiServerSuite) TestUpdateCluster() {
 }
 
 func (s *ApiServerSuite) TestCreateDeployment() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
@@ -225,12 +231,7 @@ func (s *ApiServerSuite) TestCreateDeployment() {
 	assert.Equal(s.T(), deployment.Targets[0].Version, deploymentSchema.LatestRevision.Targets[0].DynamoNimVersion.Version)
 }
 
-func (s *ApiServerSuite) TestCreateDeploymentWithNDSErrorDoesNotChangeDB() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
+func (s *ApiServerSuite) TestCreateDeploymentErrorDoesNotChangeDB() {
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
@@ -241,7 +242,7 @@ func (s *ApiServerSuite) TestCreateDeploymentWithNDSErrorDoesNotChangeDB() {
 		s.T().Fatalf("Could not fetch deployment entities snapshot: %s", err.Error())
 	}
 
-	nds.Throws(true)
+	s.mockBackend.Throws(true)
 
 	deployment := fixtures.DefaultCreateDeploymentSchema()
 	resp, _ = client.CreateDeployment(s.T(), cluster.Name, deployment)
@@ -258,22 +259,12 @@ func (s *ApiServerSuite) TestCreateDeploymentWithNDSErrorDoesNotChangeDB() {
 }
 
 func (s *ApiServerSuite) TestCreateDeploymentUnknownClusterFails() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
 	deployment := fixtures.DefaultCreateDeploymentSchema()
 	resp, _ := client.CreateDeployment(s.T(), "unknown", deployment)
 	assert.Equal(s.T(), http.StatusNotFound, resp.StatusCode, "Expected status code 400")
 }
 
 func (s *ApiServerSuite) TestUpdateDeployment() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
 	// Create cluster
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
@@ -328,12 +319,7 @@ func (s *ApiServerSuite) TestUpdateDeployment() {
 	assert.Equal(s.T(), updateDeployment.Targets[0].Version, deploymentSchema.LatestRevision.Targets[0].DynamoNimVersion.Version)
 }
 
-func (s *ApiServerSuite) TestUpdateDeploymentWithNDSErrorDoesNotChangeDB() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
+func (s *ApiServerSuite) TestUpdateDeploymentErrorDoesNotChangeDB() {
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
@@ -348,7 +334,7 @@ func (s *ApiServerSuite) TestUpdateDeploymentWithNDSErrorDoesNotChangeDB() {
 		s.T().Fatalf("Could not fetch deployment entities snapshot: %s", err.Error())
 	}
 
-	nds.Throws(true)
+	s.mockBackend.Throws(true)
 
 	updateDeployment := fixtures.DefaultUpdateDeploymentSchema()
 	resp, _ = client.UpdateDeployment(s.T(), cluster.Name, deployment.KubeNamespace, deployment.Name, updateDeployment)
@@ -365,11 +351,6 @@ func (s *ApiServerSuite) TestUpdateDeploymentWithNDSErrorDoesNotChangeDB() {
 }
 
 func (s *ApiServerSuite) TestUpdateDeploymentWithoutDeployment() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
 	// Create cluster
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
@@ -416,22 +397,12 @@ func (s *ApiServerSuite) TestUpdateDeploymentWithoutDeployment() {
 }
 
 func (s *ApiServerSuite) TestUpdateDeploymentUnknownClusterFails() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
 	updateDeployment := fixtures.DefaultUpdateDeploymentSchema()
 	resp, _ := client.UpdateDeployment(s.T(), "unknown", "default", "unknown", updateDeployment)
 	assert.Equal(s.T(), http.StatusNotFound, resp.StatusCode, "Expected status code 404")
 }
 
 func (s *ApiServerSuite) TestUpdateDeploymentUnknownDeploymentFails() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
 	// Create cluster
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
@@ -443,11 +414,6 @@ func (s *ApiServerSuite) TestUpdateDeploymentUnknownDeploymentFails() {
 }
 
 func (s *ApiServerSuite) TestTerminateDeployment() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
@@ -491,11 +457,6 @@ func (s *ApiServerSuite) TestTerminateNonExistingDeployment() {
 }
 
 func (s *ApiServerSuite) TestTerminateNonIncorrectDeployment() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
@@ -515,11 +476,6 @@ func (s *ApiServerSuite) TestTerminateNonIncorrectDeployment() {
 }
 
 func (s *ApiServerSuite) TestDeleteDeactivatedDeployment() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
@@ -548,11 +504,6 @@ func (s *ApiServerSuite) TestDeleteDeactivatedDeployment() {
 }
 
 func (s *ApiServerSuite) TestDeleteActiveDeploymentFails() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
@@ -566,12 +517,7 @@ func (s *ApiServerSuite) TestDeleteActiveDeploymentFails() {
 	assert.Equal(s.T(), http.StatusInternalServerError, resp.StatusCode)
 }
 
-func (s *ApiServerSuite) TestUpdateDeploymentWithDMSErrorDoesNotChangeDB() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
+func (s *ApiServerSuite) TestUpdateDeploymenErrorDoesNotChangeDB() {
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
@@ -585,7 +531,7 @@ func (s *ApiServerSuite) TestUpdateDeploymentWithDMSErrorDoesNotChangeDB() {
 	if err != nil {
 		s.T().Fatalf("Failed to get snapshot %s", err.Error())
 	}
-	dms.Throws(true)
+	s.mockBackend.Throws(true)
 
 	// Attempt to update the deployment
 	updateDeployment := fixtures.DefaultUpdateDeploymentSchema()
@@ -602,12 +548,7 @@ func (s *ApiServerSuite) TestUpdateDeploymentWithDMSErrorDoesNotChangeDB() {
 	assert.True(s.T(), compareDeploymentTargets(t1, t2))
 }
 
-func (s *ApiServerSuite) TestTerminateDeploymentWithDMSErrorDoesNotChangeDB() {
-	dms := fixtures.CreateMockDMSServer(s.T()) // Does not throw error initially
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
+func (s *ApiServerSuite) TestTerminateDeploymentErrorDoesNotChangeDB() {
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
@@ -621,7 +562,7 @@ func (s *ApiServerSuite) TestTerminateDeploymentWithDMSErrorDoesNotChangeDB() {
 	if err != nil {
 		s.T().Fatalf("Failed to get snapshot %s", err.Error())
 	}
-	dms.Throws(true)
+	s.mockBackend.Throws(true)
 
 	// Attempt to terminate the deployment
 	resp, _ = client.TerminateDeployment(s.T(), cluster.Name, deployment.KubeNamespace, deployment.Name)
@@ -639,11 +580,6 @@ func (s *ApiServerSuite) TestTerminateDeploymentWithDMSErrorDoesNotChangeDB() {
 }
 
 func (s *ApiServerSuite) TestGetDeploymentRevisions() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
@@ -670,11 +606,6 @@ func (s *ApiServerSuite) TestGetDeploymentRevisions() {
 }
 
 func (s *ApiServerSuite) TestGetDeploymentRevisionsDifferentDeployments() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
@@ -699,11 +630,6 @@ func (s *ApiServerSuite) TestGetDeploymentRevisionsDifferentDeployments() {
 }
 
 func (s *ApiServerSuite) TestGetDeploymentRevisionsList() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
@@ -726,10 +652,6 @@ func (s *ApiServerSuite) TestGetDeploymentRevisionsList() {
 
 func (s *ApiServerSuite) TestOrganizationLevelScopeForClusterWhenCreatingDeployment() {
 	env.ApplicationScope = env.OrganizationScope
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
 
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
@@ -747,10 +669,6 @@ func (s *ApiServerSuite) TestOrganizationLevelScopeForClusterWhenCreatingDeploym
 
 func (s *ApiServerSuite) TestOrganizationLevelScopeForClusterWhenUpdatingDeployment() {
 	env.ApplicationScope = env.OrganizationScope
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
 
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
@@ -768,10 +686,6 @@ func (s *ApiServerSuite) TestOrganizationLevelScopeForClusterWhenUpdatingDeploym
 
 func (s *ApiServerSuite) TestOrganizationLevelScopeForClusterWhenTerminatingDeployment() {
 	env.ApplicationScope = env.OrganizationScope
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
 
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
@@ -789,10 +703,6 @@ func (s *ApiServerSuite) TestOrganizationLevelScopeForClusterWhenTerminatingDepl
 
 func (s *ApiServerSuite) TestOrganizationLevelScopeForClusterWhenDeletingDeployment() {
 	env.ApplicationScope = env.OrganizationScope
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
 
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
@@ -814,10 +724,6 @@ func (s *ApiServerSuite) TestOrganizationLevelScopeForClusterWhenDeletingDeploym
 
 func (s *ApiServerSuite) TestOrganizationLevelScopeForClusterWhenListingDeploymentRevisions() {
 	env.ApplicationScope = env.OrganizationScope
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
 
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
@@ -840,10 +746,6 @@ func (s *ApiServerSuite) TestOrganizationLevelScopeForClusterWhenListingDeployme
 
 func (s *ApiServerSuite) TestOrganizationLevelScopeForGetClusterDeployments() {
 	env.ApplicationScope = env.OrganizationScope
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
 
 	client.Headers.Set(consts.NgcOrganizationHeaderName, "org-1")
 	cluster := fixtures.DefaultCreateClusterSchema()
@@ -871,10 +773,6 @@ func (s *ApiServerSuite) TestOrganizationLevelScopeForGetClusterDeployments() {
 
 func (s *ApiServerSuite) TestOrganizationLevelScopeForGetDeployments() {
 	env.ApplicationScope = env.OrganizationScope
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
 
 	client.Headers.Set(consts.NgcOrganizationHeaderName, "org-1")
 	cluster := fixtures.DefaultCreateClusterSchema()
@@ -902,17 +800,12 @@ func (s *ApiServerSuite) TestOrganizationLevelScopeForGetDeployments() {
 
 func (s *ApiServerSuite) TestUserLevelScopeForClusterWhenCreatingDeployment() {
 	env.ApplicationScope = env.UserScope
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
 
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
 
 	deployment := fixtures.DefaultCreateDeploymentSchema()
-	deployment.Name = "dep1"
 	resp, _ = client.CreateDeployment(s.T(), cluster.Name, deployment)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
 
@@ -929,10 +822,6 @@ func (s *ApiServerSuite) TestUserLevelScopeForClusterWhenCreatingDeployment() {
 
 func (s *ApiServerSuite) TestUserLevelScopeForClusterWhenUpdatingDeployment() {
 	env.ApplicationScope = env.UserScope
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
 
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
@@ -950,10 +839,6 @@ func (s *ApiServerSuite) TestUserLevelScopeForClusterWhenUpdatingDeployment() {
 
 func (s *ApiServerSuite) TestUserLevelScopeForClusterWhenTerminatingDeployment() {
 	env.ApplicationScope = env.UserScope
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
 
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
@@ -970,10 +855,6 @@ func (s *ApiServerSuite) TestUserLevelScopeForClusterWhenTerminatingDeployment()
 
 func (s *ApiServerSuite) TestUserLevelScopeForClusterWhenDeletingDeployment() {
 	env.ApplicationScope = env.UserScope
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
 
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
@@ -993,10 +874,6 @@ func (s *ApiServerSuite) TestUserLevelScopeForClusterWhenDeletingDeployment() {
 
 func (s *ApiServerSuite) TestUserLevelScopeForClusterWhenListingDeploymentRevisions() {
 	env.ApplicationScope = env.UserScope
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
 
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
@@ -1019,10 +896,6 @@ func (s *ApiServerSuite) TestUserLevelScopeForClusterWhenListingDeploymentRevisi
 
 func (s *ApiServerSuite) TestUserLevelScopeForGetClusterDeployments() {
 	env.ApplicationScope = env.UserScope
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
 
 	client.Headers.Set(consts.NgcUserHeaderName, "user-1")
 	cluster := fixtures.DefaultCreateClusterSchema()
@@ -1048,10 +921,6 @@ func (s *ApiServerSuite) TestUserLevelScopeForGetClusterDeployments() {
 
 func (s *ApiServerSuite) TestUserLevelScopeForGetDeployments() {
 	env.ApplicationScope = env.UserScope
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
 
 	client.Headers.Set(consts.NgcUserHeaderName, "user-1")
 	cluster := fixtures.DefaultCreateClusterSchema()
@@ -1077,10 +946,6 @@ func (s *ApiServerSuite) TestUserLevelScopeForGetDeployments() {
 
 func (s *ApiServerSuite) TestOrganizationLevelScopeForListClusters() {
 	env.ApplicationScope = env.OrganizationScope
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
 
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
@@ -1098,11 +963,6 @@ func (s *ApiServerSuite) TestOrganizationLevelScopeForListClusters() {
 
 // V2 API Tests
 func (s *ApiServerSuite) TestCreateDeploymentV2() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
@@ -1121,11 +981,6 @@ func (s *ApiServerSuite) TestCreateDeploymentV2() {
 }
 
 func (s *ApiServerSuite) TestUpdateDeploymentV2() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
 	// Create cluster
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
@@ -1163,11 +1018,6 @@ func (s *ApiServerSuite) TestUpdateDeploymentV2() {
 }
 
 func (s *ApiServerSuite) TestTerminateDeploymentV2() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
@@ -1206,11 +1056,6 @@ func (s *ApiServerSuite) TestTerminateDeploymentV2() {
 }
 
 func (s *ApiServerSuite) TestDeleteDeactivatedDeploymentV2() {
-	dms := fixtures.CreateMockDMSServer(s.T())
-	defer dms.Close()
-	nds := fixtures.CreateMockNDSServer(s.T())
-	defer nds.Close()
-
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)

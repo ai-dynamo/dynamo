@@ -37,7 +37,7 @@ type DynamoNimVersionAssociate struct {
 	DynamoNimVersionTag string `json:"dynamo_nim_version_tag"`
 }
 
-type DmsAssociate struct {
+type K8sAssociate struct {
 	KubeRequestId    string
 	KubeDeploymentId string
 }
