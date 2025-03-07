@@ -1,5 +1,6 @@
 // block_copy.cu
 #include <cuda_runtime.h>
+#include <stdint.h>
 #include <stdio.h>
 
 // Error checking macro
@@ -12,7 +13,10 @@
     }                                                                                               \
   } while (0)
 
-// CRITICAL FIX: Ensure proper bounds checking in the kernel
+// Number of elements to process per thread
+#define ELEMENTS_PER_THREAD 4
+
+// Optimized kernel that processes multiple elements per thread
 __global__ void
 copy_blocks_kernel(
     const void* src_data, void* dst_data, const int* src_block_ids, const int* dst_block_ids, int num_blocks,
@@ -21,7 +25,7 @@ copy_blocks_kernel(
     size_t dst_block_stride, size_t dst_pos_stride, size_t dst_head_stride)
 {
   // Get global thread index
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
   // Calculate total elements per block
   int elements_per_block = block_size * heads_per_rank * head_size;
@@ -29,56 +33,81 @@ copy_blocks_kernel(
   // Total elements to process
   int total_elements = elements_per_block * num_blocks * kv_size;
 
-  // Check if this thread is within bounds
-  if (idx >= total_elements) {
-    return;
-  }
+  // Calculate the starting element index for this thread
+  int start_element = thread_idx * ELEMENTS_PER_THREAD;
 
-  // Calculate which element we're processing
-  // FIX: Ensure proper division
-  int combined_idx = idx / elements_per_block;
-  int element_offset = idx % elements_per_block;
+  // Process multiple elements per thread
+  for (int e = 0; e < ELEMENTS_PER_THREAD; e++) {
+    // Current element index
+    int elem_idx = start_element + e;
 
-  // Split combined_idx into rank and block
-  int rank = combined_idx / num_blocks;       // KV rank (0 or 1)
-  int block_idx = combined_idx % num_blocks;  // Block index in the mapping list
+    // Check if this element is within bounds
+    if (elem_idx >= total_elements) {
+      return;  // No more elements to process
+    }
 
-  // CRITICAL FIX: Bounds check on block indices
-  if (block_idx < 0 || block_idx >= num_blocks) {
-    return;  // Out of bounds
-  }
+    // Calculate which element we're processing
+    int combined_idx = elem_idx / elements_per_block;
+    int element_offset = elem_idx % elements_per_block;
 
-  // Get source and destination block IDs
-  int src_block_id = src_block_ids[block_idx];
-  int dst_block_id = dst_block_ids[block_idx];
+    // Split combined_idx into rank and block
+    int rank = combined_idx / num_blocks;       // KV rank (0 or 1)
+    int block_idx = combined_idx % num_blocks;  // Block index in the mapping list
 
-  // Calculate position indices
-  int pos = element_offset / (heads_per_rank * head_size);
-  int remaining = element_offset % (heads_per_rank * head_size);
-  int head = remaining / head_size;
-  int head_offset = remaining % head_size;
+    // Bounds check on block indices
+    if (block_idx < 0 || block_idx >= num_blocks) {
+      continue;  // Skip this element
+    }
 
-  // CRITICAL FIX: Ensure bounds checks on all indices
-  if (pos >= block_size || head >= heads_per_rank || head_offset >= head_size) {
-    return;  // Out of bounds
-  }
+    // Get source and destination block IDs
+    int src_block_id = src_block_ids[block_idx];
+    int dst_block_id = dst_block_ids[block_idx];
 
-  // Calculate source offset using provided strides
-  size_t src_offset = rank * src_tp_stride + src_block_id * src_block_stride + pos * src_pos_stride +
-                      head * src_head_stride + head_offset;
+    // Calculate position indices
+    int pos = element_offset / (heads_per_rank * head_size);
+    int remaining = element_offset % (heads_per_rank * head_size);
+    int head = remaining / head_size;
+    int head_offset = remaining % head_size;
 
-  // Calculate destination offset
-  size_t dst_offset = rank * dst_tp_stride + dst_block_id * dst_block_stride + pos * dst_pos_stride +
-                      head * dst_head_stride + head_offset;
+    // Bounds check on all indices
+    if (pos >= block_size || head >= heads_per_rank || head_offset >= head_size) {
+      continue;  // Skip this element
+    }
 
-  // Convert to byte pointers
-  const char* src_bytes = (const char*)src_data + src_offset * elem_size;
-  char* dst_bytes = (char*)dst_data + dst_offset * elem_size;
+    // Calculate source offset using provided strides
+    size_t src_offset = rank * src_tp_stride + src_block_id * src_block_stride + pos * src_pos_stride +
+                        head * src_head_stride + head_offset;
 
-  // Copy element using proper size
-  // FIX: Use memcpy for safety
-  for (int i = 0; i < elem_size; i++) {
-    dst_bytes[i] = src_bytes[i];
+    // Calculate destination offset
+    size_t dst_offset = rank * dst_tp_stride + dst_block_id * dst_block_stride + pos * dst_pos_stride +
+                        head * dst_head_stride + head_offset;
+
+    // Perform type-optimized copy based on element size
+    if (elem_size == 2) {
+      // For 16-bit elements (half/bfloat16/uint16)
+      const uint16_t* src_ptr = (const uint16_t*)src_data + src_offset;
+      uint16_t* dst_ptr = (uint16_t*)dst_data + dst_offset;
+      *dst_ptr = *src_ptr;
+    } else if (elem_size == 4) {
+      // For 32-bit elements (float/int32)
+      const uint32_t* src_ptr = (const uint32_t*)src_data + src_offset;
+      uint32_t* dst_ptr = (uint32_t*)dst_data + dst_offset;
+      *dst_ptr = *src_ptr;
+    } else if (elem_size == 8) {
+      // For 64-bit elements (double/int64)
+      const uint64_t* src_ptr = (const uint64_t*)src_data + src_offset;
+      uint64_t* dst_ptr = (uint64_t*)dst_data + dst_offset;
+      *dst_ptr = *src_ptr;
+    } else {
+      // For other element sizes, copy byte by byte
+      const char* src_bytes = (const char*)src_data + src_offset * elem_size;
+      char* dst_bytes = (char*)dst_data + dst_offset * elem_size;
+
+      // Copy element using proper size
+      for (int i = 0; i < elem_size; i++) {
+        dst_bytes[i] = src_bytes[i];
+      }
+    }
   }
 }
 
@@ -91,7 +120,7 @@ copy_blocks(
     size_t src_head_stride, size_t dst_tp_stride, size_t dst_block_stride, size_t dst_pos_stride,
     size_t dst_head_stride)
 {
-  // CRITICAL FIX: Validate inputs
+  // Validate inputs
   if (src_data == NULL || dst_data == NULL) {
     fprintf(stderr, "NULL data pointers\n");
     return cudaErrorInvalidValue;
@@ -118,20 +147,23 @@ copy_blocks(
   int* d_src_blocks = NULL;
   int* d_dst_blocks = NULL;
 
+  // TODO: Create class/struct with preallocated memory for block_ids and two cuda events
   CUDA_CHECK(cudaMalloc(&d_src_blocks, num_src_blocks * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&d_dst_blocks, num_dst_blocks * sizeof(int)));
 
   CUDA_CHECK(cudaMemcpy(d_src_blocks, src_block_ids, num_src_blocks * sizeof(int), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_dst_blocks, dst_block_ids, num_dst_blocks * sizeof(int), cudaMemcpyHostToDevice));
 
-  // Calculate grid dimensions
+  // Calculate grid dimensions with ELEMENTS_PER_THREAD adjustment
   int elements_per_block = block_size * heads_per_rank * head_size;
   int total_elements = elements_per_block * num_src_blocks * kv_size;
 
+  // Adjust grid size to account for multiple elements per thread
+  int total_threads = (total_elements + ELEMENTS_PER_THREAD - 1) / ELEMENTS_PER_THREAD;
   int cuda_block_size = 256;
-  int grid_size = (total_elements + cuda_block_size - 1) / cuda_block_size;
+  int grid_size = (total_threads + cuda_block_size - 1) / cuda_block_size;
 
-  // CRITICAL FIX: Validate grid size
+  // Validate grid size
   if (grid_size <= 0) {
     fprintf(stderr, "Invalid grid size: %d\n", grid_size);
     cudaFree(d_src_blocks);
@@ -139,8 +171,9 @@ copy_blocks(
     return cudaErrorInvalidValue;
   }
 
-  // CRITICAL FIX: Print debug information for troubleshooting
-  printf("Starting kernel: blocks=%d, threads=%d, total=%d\n", grid_size, cuda_block_size, total_elements);
+  // Print debug information
+  printf("Starting kernel: blocks=%d, threads=%d, total elements=%d\n", grid_size, cuda_block_size, total_elements);
+  printf("Elements per thread: %d, Total threads: %d\n", ELEMENTS_PER_THREAD, total_threads);
   printf(
       "Dimensions: tp=%d, blocks=%d, size=%d, heads=%d, headsize=%d, elemsize=%d\n", kv_size, num_src_blocks,
       block_size, heads_per_rank, head_size, elem_size);
@@ -151,7 +184,7 @@ copy_blocks(
       elem_size, src_tp_stride, src_block_stride, src_pos_stride, src_head_stride, dst_tp_stride, dst_block_stride,
       dst_pos_stride, dst_head_stride);
 
-  // CRITICAL FIX: Check for kernel errors immediately
+  // Check for kernel errors immediately
   cudaError_t kernel_error = cudaGetLastError();
   if (kernel_error != cudaSuccess) {
     fprintf(stderr, "Kernel execution error: %s\n", cudaGetErrorString(kernel_error));
@@ -169,4 +202,67 @@ copy_blocks(
 
   printf("Kernel execution completed successfully\n");
   return cudaSuccess;
+}
+
+
+// TODO: Refactor the driver code to take pointers for the device block_id arrays
+// TODO: Maintain a blocking driver, but then also provide a non-blocking driver
+//
+// We will have N copies of the BlockCopyControl struct which we will put in a reusable
+// pool. Acquiring a BlockCopyControl will let you perform a copy for a kv attention layer.
+//
+// From rust or python we'll execute this on a thread allowed to block. We'll await the
+// cuda event for completion and report the return code on the driver.
+//
+// TODO: decide whether or not we need a pool of streams or use a single stream.
+//
+// We should be able to decouple this from the forward pass. The only condition is that
+// a new forward pass can not start until the last copy has completed.
+//
+// To that end, we might want to tie this copy kernel to the stream used for the forward pass.
+struct BlockCopyControl {
+  int* d_src_blocks;
+  int* d_dst_blocks;
+  cudaEvent_t start_event;
+  cudaEvent_t stop_event;
+
+  BlockCopyControl(int num_blocks);
+  ~BlockCopyControl();
+};
+
+BlockCopyControl::BlockCopyControl(int num_blocks)
+{
+  cudaError_t status;
+  status = cudaMalloc(&d_src_blocks, num_blocks * sizeof(int));
+  if (status != cudaSuccess) {
+    fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(status));
+    return;
+  }
+
+  status = cudaMalloc(&d_dst_blocks, num_blocks * sizeof(int));
+  if (status != cudaSuccess) {
+    fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(status));
+    cudaFree(d_src_blocks);
+    return;
+  }
+
+  status = cudaEventCreate(&start_event);
+  if (status != cudaSuccess) {
+    fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(status));
+    cudaFree(d_src_blocks);
+    cudaFree(d_dst_blocks);
+  }
+
+  status = cudaEventCreate(&stop_event);
+  if (status != cudaSuccess) {
+    fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(status));
+    cudaFree(d_src_blocks);
+    cudaFree(d_dst_blocks);
+  }
+}
+
+BlockCopyControl::~BlockCopyControl()
+{
+  cudaFree(d_src_blocks);
+  cudaFree(d_dst_blocks);
 }
