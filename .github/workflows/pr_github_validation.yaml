@@ -48,7 +48,7 @@ jobs:
       - name: Decide on cache
         id: which_cache
         env:
-          DEFAULT_CACHE_LOCATION: ghcr.io/dynemo-ai/dynamo:latest-${{ matrix.framework }}
+          DEFAULT_CACHE_LOCATION: ghcr.io/dynemo-ai/dynemo:latest-${{ matrix.framework }}
         run: |
           set +e
           docker manifest inspect ${{ env.IMAGE_TAG }}
