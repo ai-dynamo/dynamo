@@ -96,8 +96,8 @@ By default the server will run on port 8080.
 
 Add model to the server:
 ```bash
-llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynemo.tensorrt-llm.chat/completions
-llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynemo.tensorrt-llm.completions
+llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.tensorrt-llm.chat/completions
+llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.tensorrt-llm.completions
 ```
 
 #### 2. Workers
@@ -220,8 +220,8 @@ By default the server will run on port 8080.
 
 Add model to the server:
 ```bash
-llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynemo.router.chat/completions
-llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynemo.router.completions
+llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.router.chat/completions
+llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.router.completions
 ```
 
 #### 2. Workers

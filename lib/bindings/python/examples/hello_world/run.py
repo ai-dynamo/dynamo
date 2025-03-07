@@ -21,7 +21,7 @@ import uvloop
 from client import init as client_init
 from server import init as server_init
 
-from dynemo.runtime import DistributedRuntime, dynemo_worker
+from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 
 def random_string(length=10):
@@ -29,7 +29,7 @@ def random_string(length=10):
     return "".join(random.choices(chars, k=length))
 
 
-@dynemo_worker()
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     ns = random_string()
     task = asyncio.create_task(server_init(runtime, ns))

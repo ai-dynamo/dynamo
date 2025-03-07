@@ -13,10 +13,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! # Dynemo LLM Protocols
+//! # Dynamo LLM Protocols
 //!
 //! This module contains the protocols, i.e. messages formats, used to exchange requests and responses
-//! both publicly via the HTTP API and internally between Dynemo components.
+//! both publicly via the HTTP API and internally between Dynamo components.
 //!
 
 use futures::{Stream, StreamExt};
@@ -33,10 +33,10 @@ pub type DataStream<T> = Pin<Box<dyn Stream<Item = T> + Send + Sync>>;
 
 // TODO: This is an awkward dependency that we need to address
 // Originally, all the Annotated/SSE Codec bits where in the LLM protocol module; however, [Annotated]
-// has become the common response envelope for dynemo-distributed.
+// has become the common response envelope for dynamo.
 // We may want to move the original Annotated back here and has a Infallible conversion to the the
-// ResponseEnvelop in dynemo-distributed.
-pub use dynemo_runtime::protocols::annotated::Annotated;
+// ResponseEnvelop in dynamo.
+pub use dynamo_runtime::protocols::annotated::Annotated;
 
 /// The LLM responses have multiple different fields and nests of objects to get to the actual
 /// text completion returned. This trait can be applied to the `choice` level objects to extract

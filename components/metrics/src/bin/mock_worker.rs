@@ -13,8 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use dynemo_llm::kv_router::protocols::ForwardPassMetrics;
-use dynemo_runtime::{
+use dynamo_llm::kv_router::protocols::ForwardPassMetrics;
+use dynamo_runtime::{
     logging,
     pipeline::{
         async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
@@ -69,7 +69,7 @@ async fn backend(runtime: DistributedRuntime) -> Result<()> {
     // we must first create a service, then we can attach one more more endpoints
 
     runtime
-        .namespace("dynemo")?
+        .namespace("dynamo")?
         .component("backend")?
         .service_builder()
         .create()

@@ -1,6 +1,6 @@
-# Dynemo service runner
+# Dynamo service runner
 
-`dynemo-run` is a tool for exploring the dynemo components.
+`dynamo-run` is a tool for exploring the dynamo components.
 
 ## Setup
 
@@ -36,11 +36,11 @@ For example one of these should be fast and good quality on almost any machine: 
 
 *Text interface*
 
-`./target/release/dynemo-run Llama-3.2-1B-Instruct-Q4_K_M.gguf` or path to a Hugging Face repo checkout instead of the GGUF.
+`./target/release/dynamo-run Llama-3.2-1B-Instruct-Q4_K_M.gguf` or path to a Hugging Face repo checkout instead of the GGUF.
 
 *HTTP interface*
 
-`./target/release/dynemo-run in=http --model-path Llama-3.2-1B-Instruct-Q4_K_M.gguf`
+`./target/release/dynamo-run in=http --model-path Llama-3.2-1B-Instruct-Q4_K_M.gguf`
 
 List the models: `curl localhost:8080/v1/models`
 
@@ -53,19 +53,19 @@ curl -d '{"model": "Llama-3.2-1B-Instruct-Q4_K_M", "max_tokens": 2049, "messages
 
 Node 1:
 ```
-dynemo-run in=http out=dyn://llama3B_pool
+dynamo-run in=http out=dyn://llama3B_pool
 ```
 
 Node 2:
 ```
-dynemo-run in=dyn://llama3B_pool out=mistralrs ~/llm_models/Llama-3.2-3B-Instruct
+dynamo-run in=dyn://llama3B_pool out=mistralrs ~/llm_models/Llama-3.2-3B-Instruct
 ```
 
 This will use etcd to auto-discover the model and NATS to talk to it. You can run multiple workers on the same endpoint and it will pick one at random each time.
 
 The `ns/backend/mistralrs` are purely symbolic, pick anything as long as it has three parts, and it matches the other node.
 
-Run `dynemo-run --help` for more options.
+Run `dynamo-run --help` for more options.
 
 ## sglang
 
@@ -91,26 +91,26 @@ Any example above using `out=sglang` will work, but our sglang backend is also m
 
 Node 1:
 ```
-dynemo-run in=http out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 0 --dist-init-addr 10.217.98.122:9876
+dynamo-run in=http out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 0 --dist-init-addr 10.217.98.122:9876
 ```
 
 Node 2:
 ```
-dynemo-run in=none out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 1 --dist-init-addr 10.217.98.122:9876
+dynamo-run in=none out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 1 --dist-init-addr 10.217.98.122:9876
 ```
 
 ## llama_cpp
 
 - `cargo build --release --features llamacpp,cuda`
 
-- `dynemo-run out=llama_cpp --model-path ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf --model-config ~/llm_models/Llama-3.2-3B-Instruct/`
+- `dynamo-run out=llama_cpp --model-path ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf --model-config ~/llm_models/Llama-3.2-3B-Instruct/`
 
 The extra `--model-config` flag is because:
 - llama_cpp only runs GGUF
 - We send it tokens, meaning we do the tokenization ourself, so we need a tokenizer
 - We don't yet read it out of the GGUF (TODO), so we need an HF repo with `tokenizer.json` et al
 
-If the build step also builds llama_cpp libraries into `target/release` ("libllama.so", "libggml.so", "libggml-base.so", "libggml-cpu.so", "libggml-cuda.so"), then `dynemo-run` will need to find those at runtime. Set `LD_LIBRARY_PATH`, and be sure to deploy them alongside the `dynemo-run` binary.
+If the build step also builds llama_cpp libraries into `target/release` ("libllama.so", "libggml.so", "libggml-base.so", "libggml-cpu.so", "libggml-cuda.so"), then `dynamo-run` will need to find those at runtime. Set `LD_LIBRARY_PATH`, and be sure to deploy them alongside the `dynamo-run` binary.
 
 ## vllm
 
@@ -135,25 +135,25 @@ cargo build --release --features vllm
 
 Run (still inside that virtualenv) - HF repo:
 ```
-./target/release/dynemo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct/
+./target/release/dynamo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct/
 
 ```
 
 Run (still inside that virtualenv) - GGUF:
 ```
-./target/release/dynemo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf --model-config ~/llm_models/Llama-3.2-3B-Instruct/
+./target/release/dynamo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf --model-config ~/llm_models/Llama-3.2-3B-Instruct/
 ```
 
 + Multi-node:
 
 Node 1:
 ```
-dynemo-run in=text out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --tensor-parallel-size 8 --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 0
+dynamo-run in=text out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --tensor-parallel-size 8 --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 0
 ```
 
 Node 2:
 ```
-dynemo-run in=none out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 1
+dynamo-run in=none out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 1
 ```
 
 ## python
@@ -169,7 +169,7 @@ async def generate(request):
 The file is loaded once at startup and kept in memory.
 
 - Build: `cargo build --release --features python`
-- Run: `dynemo-run out=pystr:/home/user/my_python_engine.py --name <model-name>`
+- Run: `dynamo-run out=pystr:/home/user/my_python_engine.py --name <model-name>`
 
 Example engine:
 ```
@@ -205,7 +205,7 @@ cargo build --release --features trtllm
 
 Run:
 ```
-dynemo-run in=text out=trtllm --model-path /app/trtllm_engine/ --model-config ~/llm_models/Llama-3.2-3B-Instruct/
+dynamo-run in=text out=trtllm --model-path /app/trtllm_engine/ --model-config ~/llm_models/Llama-3.2-3B-Instruct/
 ```
 
 Note that TRT-LLM uses it's own `.engine` format for weights. Repo models must be converted like so:
@@ -223,7 +223,7 @@ python convert_checkpoint.py --model_dir /tmp/model/ --output_dir ./converted --
 trtllm-build --checkpoint_dir ./converted --output_dir ./final/trtllm_engine --use_paged_context_fmha enable --gemm_plugin auto
 ```
 
-The `--model-path` you give to `dynemo-run` must contain the `config.json` (TRT-LLM's , not the model's) and `rank0.engine` (plus other ranks if relevant).
+The `--model-path` you give to `dynamo-run` must contain the `config.json` (TRT-LLM's , not the model's) and `rank0.engine` (plus other ranks if relevant).
 
 + Execute
 TRT-LLM is a C++ library that must have been previously built and installed. It needs a lot of memory to compile. Gitlab builds a container you can try:

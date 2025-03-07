@@ -23,8 +23,8 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-dynemo-runtime = { workspace = true}
-dynemo-llm = { workspace = true}
+dynamo-runtime = { workspace = true}
+dynamo-llm = { workspace = true}
 
 serde = { workspace = true }
 serde_json = { workspace = true }

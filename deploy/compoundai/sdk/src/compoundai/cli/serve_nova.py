@@ -27,7 +27,7 @@ from typing import Any
 
 import click
 
-from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
+from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
 logger = logging.getLogger("compoundai.serve.nova")
 
@@ -103,7 +103,7 @@ def main(
             server_context.worker_index = worker_id
         class_instance = service.inner()
 
-        @dynemo_worker()
+        @dynamo_worker()
         async def worker(runtime: DistributedRuntime):
             if service_name and service_name != service.name:
                 server_context.service_type = "service"
@@ -158,12 +158,12 @@ def main(
                     # Bind an instance of inner to the endpoint
                     bound_method = endpoint.func.__get__(class_instance)
                     # Only pass request type for now, use Any for response
-                    # TODO: Handle a dynemo_endpoint not having types
+                    # TODO: Handle a dynamo_endpoint not having types
                     # TODO: Handle multiple endpoints in a single component
-                    dynemo_wrapped_method = dynemo_endpoint(endpoint.request_type, Any)(
+                    dynamo_wrapped_method = dynamo_endpoint(endpoint.request_type, Any)(
                         bound_method
                     )
-                    result = await td_endpoint.serve_endpoint(dynemo_wrapped_method)
+                    result = await td_endpoint.serve_endpoint(dynamo_wrapped_method)
                     # WARNING: unreachable code :( because serve blocks
                     logger.info(f"[{run_id}] Result: {result}")
                     logger.info(f"[{run_id}] Registered endpoint '{name}'")

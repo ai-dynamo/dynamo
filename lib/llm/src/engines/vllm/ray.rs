@@ -24,7 +24,7 @@ use tokio::select;
 use tokio::time;
 use tracing;
 
-use dynemo_runtime::CancellationToken;
+use dynamo_runtime::CancellationToken;
 
 /// Default is 16 seconds, we make it a bit shorter
 const RAY_STOP_TIMEOUT_SECS: u32 = 10;

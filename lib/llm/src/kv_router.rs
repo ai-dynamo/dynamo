@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use anyhow::Result;
-use dynemo_runtime::{component::Component, component::Namespace, DistributedRuntime};
+use dynamo_runtime::{component::Component, component::Namespace, DistributedRuntime};
 use futures::stream::StreamExt;
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -66,7 +66,7 @@ impl KvRouter {
     }
 
     pub async fn new(
-        nats_client: dynemo_runtime::transports::nats::Client,
+        nats_client: dynamo.runtime::transports::nats::Client,
         service_name: String,
         kv_subject: String,
         namespace: Namespace,
@@ -140,7 +140,7 @@ impl KvRouter {
 }
 
 async fn collect_endpoints(
-    nats_client: dynemo_runtime::transports::nats::Client,
+    nats_client: dynamo.runtime::transports::nats::Client,
     service_name: String,
     ep_tx: tokio::sync::mpsc::Sender<ProcessedEndpoints>,
     cancel: CancellationToken,

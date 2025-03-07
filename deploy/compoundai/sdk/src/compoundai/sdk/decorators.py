@@ -50,7 +50,7 @@ class NovaEndpoint:
             if isinstance(args[1], (str, dict)):
                 args[1] = self.request_type.parse_obj(args[1])  # type: ignore
 
-        # Convert Pydantic model to dict before passing to dynemo
+        # Convert Pydantic model to dict before passing to dynamo
         if len(args) > 1 and isinstance(args[1], BaseModel):
             args = list(args)  # type: ignore
             args[1] = args[1].model_dump()  # type: ignore

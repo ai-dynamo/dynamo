@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-pub use dynemo_runtime::{
+pub use dynamo_runtime::{
     error,
     pipeline::{
         async_trait, AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream,

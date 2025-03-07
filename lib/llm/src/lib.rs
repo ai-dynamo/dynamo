@@ -13,9 +13,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! # Dynemo LLM
+//! # Dynamo LLM
 //!
-//! The `dynemo-llm` crate is a Rust library that provides a set of traits and types for building
+//! The `dynamo.llm` crate is a Rust library that provides a set of traits and types for building
 //! distributed LLM inference solutions.
 
 pub mod backend;

@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use dynemo_llm::protocols::{
+use dynamo_llm::protocols::{
     codec::{create_message_stream, Message, SseCodecError},
     openai::{chat_completions::NvCreateChatCompletionResponse, completions::CompletionResponse},
     ContentProvider, DataStream,

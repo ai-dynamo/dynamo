@@ -14,7 +14,7 @@
 # limitations under the License.
 
 [package]
-name = "dynemo-run"
+name = "dynamo-run"
 version = "0.1.0"
 edition = "2021"
 authors = ["NVIDIA"]
@@ -22,14 +22,14 @@ homepage = "https://github.com/dynemo-ai/dynemo"
 license = "Apache-2.0"
 
 [features]
-mistralrs = ["dynemo-llm/mistralrs"]
-sglang = ["dynemo-llm/sglang", "dep:netlink-packet-route", "dep:rtnetlink"]
-vllm = ["dynemo-llm/vllm", "dep:netlink-packet-route", "dep:rtnetlink"]
-llamacpp = ["dynemo-llm/llamacpp"]
-trtllm = ["dynemo-llm/trtllm"]
-python = ["dynemo-llm/python"]
-cuda = ["dynemo-llm/cuda"]
-metal = ["dynemo-llm/metal"]
+mistralrs = ["dynamo.llm/mistralrs"]
+sglang = ["dynamo.llm/sglang", "dep:netlink-packet-route", "dep:rtnetlink"]
+vllm = ["dynamo.llm/vllm", "dep:netlink-packet-route", "dep:rtnetlink"]
+llamacpp = ["dynamo.llm/llamacpp"]
+trtllm = ["dynamo.llm/trtllm"]
+python = ["dynamo.llm/python"]
+cuda = ["dynamo.llm/cuda"]
+metal = ["dynamo.llm/metal"]
 
 [dependencies]
 anyhow = "1"
@@ -49,5 +49,5 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec", "net"] }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
-dynemo-runtime = { path = "../../lib/runtime" }
-dynemo-llm = { path = "../../lib/llm" }
+dynamo-runtime = { path = "../../lib/runtime" }
+dynamo.llm = { path = "../../lib/llm" }

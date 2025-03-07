@@ -19,7 +19,7 @@ import asyncio
 import uvloop
 from protocol import Request, Response
 
-from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
+from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
 uvloop.install()
 
@@ -29,19 +29,19 @@ class RequestHandler:
     Request handler for the generate endpoint
     """
 
-    @dynemo_endpoint(Request, Response)
+    @dynamo_endpoint(Request, Response)
     async def generate(self, request):
         for char in request.data:
             yield char
 
 
-@dynemo_worker()
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     """
     Instantiate a `backend` component and serve the `generate` endpoint
     A `Component` can serve multiple endpoints
     """
-    component = runtime.namespace("dynemo").component("backend")
+    component = runtime.namespace("dynamo").component("backend")
     await component.create_service()
 
     endpoint = component.endpoint("generate")

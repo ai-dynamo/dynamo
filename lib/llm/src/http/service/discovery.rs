@@ -18,7 +18,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::Receiver;
 
-use dynemo_runtime::{
+use dynamo_runtime::{
     protocols::{self, annotated::Annotated},
     raise,
     transports::etcd::{KeyValue, WatchEvent},

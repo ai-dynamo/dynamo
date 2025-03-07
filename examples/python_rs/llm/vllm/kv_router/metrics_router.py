@@ -20,8 +20,8 @@ import uvloop
 from common.protocol import Request, Response
 from vllm.logger import logger as vllm_logger
 
-from dynemo.llm import KvRouter
-from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
+from dynamo.llm import KvRouter
+from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
 
 class Router:
@@ -37,7 +37,7 @@ class Router:
         self.router = router
         self.workers_client = workers_client
 
-    @dynemo_endpoint(Request, Response)
+    @dynamo_endpoint(Request, Response)
     async def generate(self, request):
         lora_id = 0
         worker_id = None
@@ -69,7 +69,7 @@ class Router:
             resp = resp.data() if hasattr(resp, "data") else resp
             yield resp
 
-    @dynemo_endpoint(Request, Response)
+    @dynamo_endpoint(Request, Response)
     async def mock_generate(self, request):
         print(f"Received request: {request}")
         yield "Hello, World!"
@@ -78,10 +78,10 @@ class Router:
 ROUTE_SELF = True
 
 
-@dynemo_worker()
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     workers_client = (
-        await runtime.namespace("dynemo")
+        await runtime.namespace("dynamo")
         .component("vllm")
         .endpoint("generate")
         .client()
@@ -98,7 +98,7 @@ async def worker(runtime: DistributedRuntime):
     # simply be ignored, but before that, we will make sure that the services
     # of the same namespace::component are created via KvMetricsPublisher,
     # if it is also used to create endpoints.
-    kv_listener = runtime.namespace("dynemo").component("vllm")
+    kv_listener = runtime.namespace("dynamo").component("vllm")
     await kv_listener.create_service()
     router = KvRouter(runtime, kv_listener)
     # i.e. below will cause panic
@@ -107,7 +107,7 @@ async def worker(runtime: DistributedRuntime):
     #     Router(router, workers_client).mock_generate
     # )
 
-    router_component = runtime.namespace("dynemo").component("frontend")
+    router_component = runtime.namespace("dynamo").component("frontend")
     await router_component.create_service()
 
     endpoint = router_component.endpoint("generate")

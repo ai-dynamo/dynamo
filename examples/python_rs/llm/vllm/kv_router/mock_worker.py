@@ -22,11 +22,11 @@ import uvloop
 from common.protocol import Request, Response
 from vllm.logger import logger as vllm_logger
 
-from dynemo.llm import KvMetricsPublisher
-from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
+from dynamo.llm import KvMetricsPublisher
+from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
 
-class DynemoResult:
+class DynamoResult:
     OK = 0
     ERR = 1
 
@@ -39,17 +39,17 @@ class MockEngine:
     def __init__(self, metrics_publisher, worker_id):
         self.worker_id = worker_id
         # KV events
-        self.lib = ctypes.CDLL("/opt/dynemo/llm_binding/lib/libdynemo_llm_capi.so")
-        self.lib.dynemo_llm_init.argtypes = [c_char_p, c_char_p, c_int64]
-        self.lib.dynemo_llm_init.restype = c_uint32
-        result = self.lib.dynemo_llm_init("dynemo".encode(), "vllm".encode(), worker_id)
-        if result == DynemoResult.OK:
+        self.lib = ctypes.CDLL("/opt/dynamo/llm_binding/lib/libdynamo.llm_capi.so")
+        self.lib.dynamo.llm_init.argtypes = [c_char_p, c_char_p, c_int64]
+        self.lib.dynamo.llm_init.restype = c_uint32
+        result = self.lib.dynamo.llm_init("dynamo".encode(), "vllm".encode(), worker_id)
+        if result == DynamoResult.OK:
             vllm_logger.info(
                 "KVCacheEventManager initialized successfully. Ready to publish KV Cache Events"
             )
         else:
             vllm_logger.info("KVCacheEventManager initialization failed!")
-        self.lib.dynemo_kv_event_publish_stored.argtypes = [
+        self.lib.dynamo_kv_event_publish_stored.argtypes = [
             ctypes.c_uint64,  # event_id
             ctypes.POINTER(ctypes.c_uint32),  # token_ids
             ctypes.POINTER(ctypes.c_size_t),  # num_block_tokens
@@ -58,18 +58,18 @@ class MockEngine:
             ctypes.POINTER(ctypes.c_uint64),  # parent_hash
             ctypes.c_uint64,  # lora_id
         ]
-        self.lib.dynemo_kv_event_publish_stored.restype = (
+        self.lib.dynamo_kv_event_publish_stored.restype = (
             ctypes.c_uint32
-        )  # dynemo_llm_result_t
+        )  # dynamo.llm_result_t
 
-        self.lib.dynemo_kv_event_publish_removed.argtypes = [
+        self.lib.dynamo_kv_event_publish_removed.argtypes = [
             ctypes.c_uint64,  # event_id
             ctypes.POINTER(ctypes.c_uint64),  # block_ids
             ctypes.c_size_t,  # num_blocks
         ]
-        self.lib.dynemo_kv_event_publish_removed.restype = (
+        self.lib.dynamo_kv_event_publish_removed.restype = (
             ctypes.c_uint32
-        )  # dynemo_llm_result_t
+        )  # dynamo.llm_result_t
 
         # KV metrics
         self.metrics_publisher = metrics_publisher
@@ -89,7 +89,7 @@ class MockEngine:
         self.event_id_counter = 0
         self.tokens = [3] * 64
 
-    @dynemo_endpoint(Request, Response)
+    @dynamo_endpoint(Request, Response)
     async def generate(self, request):
         print(f"Received request: {request}")
         self.request_active_slots = min(
@@ -111,7 +111,7 @@ class MockEngine:
             if self.event_id_counter > 0
             else None
         )
-        result = self.lib.dynemo_kv_event_publish_stored(
+        result = self.lib.dynamo_kv_event_publish_stored(
             self.event_id_counter,  # uint64_t event_id
             (ctypes.c_uint32 * len(self.tokens))(
                 *self.tokens
@@ -126,7 +126,7 @@ class MockEngine:
         )
         self.event_id_counter += 1
 
-        if result == DynemoResult.OK:
+        if result == DynamoResult.OK:
             vllm_logger.debug(f"Store - Published KV Event: {self.event_id_counter}")
         else:
             vllm_logger.debug(
@@ -146,13 +146,13 @@ class MockEngine:
             )
 
 
-@dynemo_worker()
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     """
     Instantiate a `backend` component and serve the `generate` endpoint
     A `Component` can serve multiple endpoints
     """
-    component = runtime.namespace("dynemo").component("vllm")
+    component = runtime.namespace("dynamo").component("vllm")
     metrics_publisher = KvMetricsPublisher()
     await metrics_publisher.create_service(component)
 

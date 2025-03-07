@@ -15,7 +15,7 @@
 
 use crate::kv_router::{indexer::RouterEvent, protocols::*, KV_EVENT_SUBJECT};
 use async_trait::async_trait;
-use dynemo_runtime::{
+use dynamo_runtime::{
     component::Component,
     pipeline::{
         network::Ingress, AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream,

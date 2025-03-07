@@ -23,7 +23,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-dynemo-runtime = { workspace = true }
+dynamo-runtime = { workspace = true }
 
 # third-party
 futures = { workspace = true }

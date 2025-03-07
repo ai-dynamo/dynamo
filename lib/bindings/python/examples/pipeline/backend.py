@@ -17,7 +17,7 @@ import asyncio
 
 import uvloop
 
-from dynemo.runtime import DistributedRuntime, dynemo_worker
+from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 uvloop.install()
 
@@ -29,7 +29,7 @@ class RequestHandler:
             yield char
 
 
-@dynemo_worker()
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     component = runtime.namespace("examples/pipeline").component("backend")
     await component.create_service()

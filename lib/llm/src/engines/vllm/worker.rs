@@ -19,8 +19,8 @@ use std::{
 };
 
 use async_zmq::{SinkExt, StreamExt};
-use dynemo_runtime::protocols::annotated::Annotated;
-use dynemo_runtime::CancellationToken;
+use dynamo_runtime::protocols::annotated::Annotated;
+use dynamo_runtime::CancellationToken;
 use pyo3::{
     prelude::*,
     types::{IntoPyDict, PyBytes, PyString},

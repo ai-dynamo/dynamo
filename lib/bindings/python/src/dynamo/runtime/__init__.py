@@ -22,15 +22,15 @@ from pydantic import BaseModel, ValidationError
 
 # List all the classes in the _core module for re-export
 # import * causes "unable to detect undefined names"
-from dynemo._core import Backend as Backend
-from dynemo._core import Client as Client
-from dynemo._core import DistributedRuntime as DistributedRuntime
-from dynemo._core import KvRouter as KvRouter
-from dynemo._core import ModelDeploymentCard as ModelDeploymentCard
-from dynemo._core import OAIChatPreprocessor as OAIChatPreprocessor
+from dynamo._core import Backend as Backend
+from dynamo._core import Client as Client
+from dynamo._core import DistributedRuntime as DistributedRuntime
+from dynamo._core import KvRouter as KvRouter
+from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
+from dynamo._core import OAIChatPreprocessor as OAIChatPreprocessor
 
 
-def dynemo_worker():
+def dynamo_worker():
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
@@ -59,7 +59,7 @@ def dynemo_worker():
     return decorator
 
 
-def dynemo_endpoint(
+def dynamo_endpoint(
     request_model: Union[Type[BaseModel], Type[Any]], response_model: Type[BaseModel]
 ) -> Callable:
     def decorator(

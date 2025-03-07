@@ -13,12 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Dynemo Distributed Logging Module.
+//! Dynamo Distributed Logging Module.
 //!
 //! - Configuration loaded from:
 //!   1. Environment variables (highest priority).
 //!   2. Optional TOML file pointed to by the `DYN_LOGGING_CONFIG_PATH` environment variable.
-//!   3. `/opt/dynemo/etc/logging.toml`.
+//!   3. `/opt/dynamo/etc/logging.toml`.
 //!
 //! Logging can take two forms: `READABLE` or `JSONL`. The default is `READABLE`. `JSONL`
 //! can be enabled by setting the `DYN_LOGGING_JSONL` environment variable to `1`.
@@ -155,7 +155,7 @@ fn load_config() -> LoggingConfig {
     let config_path = std::env::var(CONFIG_PATH_ENV).unwrap_or_else(|_| "".to_string());
     let figment = Figment::new()
         .merge(Serialized::defaults(LoggingConfig::default()))
-        .merge(Toml::file("/opt/dynemo/etc/logging.toml"))
+        .merge(Toml::file("/opt/dynamo/etc/logging.toml"))
         .merge(Toml::file(config_path));
 
     figment.extract().unwrap()

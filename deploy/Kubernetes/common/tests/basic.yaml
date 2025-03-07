@@ -14,10 +14,10 @@
 # limitations under the License.
 
 component:
-  name: test_dynemo_chart
+  name: test_dynamo_chart
 distributed:
   requestPlane:
     etcdUrl: etcd:2379
     natsUrl: nats://nats:4222
 image:
-  name: test_dynemo_image-name
+  name: test_dynamo_image-name

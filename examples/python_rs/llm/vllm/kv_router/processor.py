@@ -34,7 +34,7 @@ from vllm.logger import logger as vllm_logger
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from dynemo.runtime import Client, DistributedRuntime, dynemo_endpoint, dynemo_worker
+from dynamo.runtime import Client, DistributedRuntime, dynamo_endpoint, dynamo_worker
 
 
 class RequestType(Enum):
@@ -157,38 +157,38 @@ class Processor(ProcessMixIn):
                     f"Request type {request_type} not implemented"
                 )
 
-    @dynemo_endpoint(ChatCompletionRequest, ChatCompletionStreamResponse)
+    @dynamo_endpoint(ChatCompletionRequest, ChatCompletionStreamResponse)
     async def generate_chat(self, raw_request):
         async for response in self._generate(raw_request, RequestType.CHAT):
             yield response
 
-    @dynemo_endpoint(CompletionRequest, CompletionStreamResponse)
+    @dynamo_endpoint(CompletionRequest, CompletionStreamResponse)
     async def generate_completions(self, raw_request):
         async for response in self._generate(raw_request, RequestType.COMPLETION):
             yield response
 
 
-@dynemo_worker()
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     """
     Set up clients to the router and workers.
-    Serve the dynemo.process.chat/completions endpoint.
+    Serve the dynamo.process.chat/completions endpoint.
     """
     workers_client = (
-        await runtime.namespace("dynemo")
+        await runtime.namespace("dynamo")
         .component("vllm")
         .endpoint("generate")
         .client()
     )
 
     router_client = (
-        await runtime.namespace("dynemo")
+        await runtime.namespace("dynamo")
         .component("router")
         .endpoint("generate")
         .client()
     )
 
-    preprocess_component = runtime.namespace("dynemo").component("process")
+    preprocess_component = runtime.namespace("dynamo").component("process")
     await preprocess_component.create_service()
 
     chat_endpoint = preprocess_component.endpoint("chat/completions")

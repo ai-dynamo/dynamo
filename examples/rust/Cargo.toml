@@ -33,8 +33,8 @@ repository = "https://github.com/dynemo-ai/dynemo.git"
 
 [workspace.dependencies]
 # local or crates.io
-dynemo-runtime = { path = "../../lib/runtime" }
-dynemo-llm = { path = "../../lib/llm" }
+dynamo-runtime = { path = "../../lib/runtime" }
+dynamo-llm = { path = "../../lib/llm" }
 
 # crates.io
 anyhow = { version = "1" }

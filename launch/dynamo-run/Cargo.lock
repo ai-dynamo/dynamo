@@ -1396,7 +1396,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynemo-llm"
+name = "dynamo-llm"
 version = "0.2.1"
 dependencies = [
  "anyhow",
@@ -1412,7 +1412,7 @@ dependencies = [
  "chrono",
  "cmake",
  "derive_builder",
- "dynemo-runtime",
+ "dynamo-runtime",
  "either",
  "erased-serde",
  "futures",
@@ -1450,7 +1450,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynemo-run"
+name = "dynamo-run"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1459,8 +1459,8 @@ dependencies = [
  "async-trait",
  "clap",
  "dialoguer",
- "dynemo-llm",
- "dynemo-runtime",
+ "dynamo-llm",
+ "dynamo-runtime",
  "futures",
  "futures-util",
  "libc",
@@ -1475,7 +1475,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynemo-runtime"
+name = "dynamo-runtime"
 version = "0.2.1"
 dependencies = [
  "anyhow",

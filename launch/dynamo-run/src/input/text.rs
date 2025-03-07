@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use dynemo_llm::{
+use dynamo_llm::{
     backend::Backend,
     preprocessor::OpenAIPreprocessor,
     types::{
@@ -24,7 +24,7 @@ use dynemo_llm::{
         Annotated,
     },
 };
-use dynemo_runtime::{
+use dynamo_runtime::{
     pipeline::{Context, ManyOut, Operator, ServiceBackend, ServiceFrontend, SingleIn, Source},
     runtime::CancellationToken,
 };

@@ -22,6 +22,6 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
-dynemo-runtime = { workspace = true }
+dynamo-runtime = { workspace = true }
 
 # third-party

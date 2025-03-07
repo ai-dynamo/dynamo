@@ -18,7 +18,7 @@
 //!
 //! In the future, the [Worker] should probably be moved to a procedural macro similar
 //! to the `#[tokio::main]` attribute, where we might annotate an async main function with
-//! `#[dynemo::main]` or similar.
+//! `#[dynamo::main]` or similar.
 //!
 //! The [Worker::execute] method is designed to be called once from main and will block
 //! the calling thread until the application completes or is canceled. The method initialized

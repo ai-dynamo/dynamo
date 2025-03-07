@@ -15,7 +15,7 @@
 
 import asyncio
 
-from dynemo._core import DistributedRuntime
+from dynamo._core import DistributedRuntime
 
 
 async def test_simple_put_get():

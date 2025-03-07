@@ -11,7 +11,7 @@ This directory contains configuration for visualizing metrics from the metrics a
 
 1. Make sure Docker and Docker Compose are installed on your system
 
-2. Start the `components/metrics` application to begin monitoring for metric events from dynemo workers
+2. Start the `components/metrics` application to begin monitoring for metric events from dynamo workers
    and aggregating them on a prometheus metrics endpoint: `http://localhost:9091/metrics`.
 
 3. Start worker(s) that publishes KV Cache metrics.

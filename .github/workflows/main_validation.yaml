@@ -31,7 +31,7 @@ jobs:
     name: Build and Test - ${{ matrix.framework }}
     env:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework }}
-      IMAGE_TAG: ghcr.io/dynemo-ai/dynemo:latest-${{ matrix.framework }}
+      IMAGE_TAG: ghcr.io/dynemo-ai/dynamo:latest-${{ matrix.framework }}
       PYTEST_XML_FILE: pytest_test_report.xml
     steps:
     - name: Checkout repository

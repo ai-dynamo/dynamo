@@ -21,12 +21,12 @@
 if [ $# -gt 2 ]; then
     echo "Usage: $0 [model_name] [endpoint_name]"
     echo "Optional: model_name (default: deepseek-ai/DeepSeek-R1-Distill-Llama-8B)"
-    echo "Optional: endpoint_name (default: dynemo.vllm.generate)"
+    echo "Optional: endpoint_name (default: dynamo.vllm.generate)"
     exit 1
 fi
 
 MODEL_NAME=${1:-"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"}
-ENDPOINT_NAME=${2:-"dynemo.vllm.generate"}
+ENDPOINT_NAME=${2:-"dynamo.vllm.generate"}
 SESSION_NAME="vllm_disagg"
 WORKDIR="$(dirname $0)/.."
 INIT_CMD="cd $WORKDIR"

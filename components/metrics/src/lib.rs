@@ -20,11 +20,11 @@ use prometheus::{register_counter_vec, register_gauge_vec};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
-use dynemo_llm::kv_router::protocols::ForwardPassMetrics;
-use dynemo_llm::kv_router::scheduler::Endpoint;
-use dynemo_llm::kv_router::scoring::ProcessedEndpoints;
+use dynamo_llm::kv_router::protocols::ForwardPassMetrics;
+use dynamo_llm::kv_router::scheduler::Endpoint;
+use dynamo_llm::kv_router::scoring::ProcessedEndpoints;
 
-use dynemo_runtime::{distributed::Component, service::EndpointInfo, utils::Duration, Result};
+use dynamo_runtime::{distributed::Component, service::EndpointInfo, utils::Duration, Result};
 
 /// Configuration for LLM worker load capacity metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]

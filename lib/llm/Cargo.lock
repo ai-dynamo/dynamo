@@ -1409,7 +1409,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynemo-llm"
+name = "dynamo_llm"
 version = "0.2.1"
 dependencies = [
  "anyhow",
@@ -1425,7 +1425,7 @@ dependencies = [
  "chrono",
  "cmake",
  "derive_builder",
- "dynemo-runtime",
+ "dynamo-runtime",
  "either",
  "erased-serde",
  "futures",
@@ -1470,7 +1470,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynemo-runtime"
+name = "dynamo-runtime"
 version = "0.2.1"
 dependencies = [
  "anyhow",

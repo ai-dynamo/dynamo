@@ -33,7 +33,7 @@ All of the commands below are run inside the same container.
 
 ## Run deployment
 
-Add model to dynemo and start http server.
+Add model to dynamo and start http server.
 
 In terminal 0:
 ```
@@ -65,7 +65,7 @@ CUDA_VISIBLE_DEVICES=0 python prefill_worker.py \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
     --kv-transfer-config \
-    '{"kv_connector":"DynemoNixlConnector"}'
+    '{"kv_connector":"DynamoNixlConnector"}'
 ```
 
 In terminal 2:
@@ -78,7 +78,7 @@ CUDA_VISIBLE_DEVICES=1,2 python3 worker.py \
     --enforce-eager \
     --tensor-parallel-size 2 \
     --kv-transfer-config \
-    '{"kv_connector":"DynemoNixlConnector"}'
+    '{"kv_connector":"DynamoNixlConnector"}'
 ```
 
 
@@ -157,7 +157,7 @@ rm -r /tmp/nixl
 - [x] Zero copy
 - [x] Conditional remote prefill
 - [x] Manual example with tp > 1
-- [x] Run on dynemo distributed runtime
+- [x] Run on dynamo distributed runtime
 - [x] add oai http endpoint
 - [x] Sample only on decode, do note return remote prefill response
 - [x] Check if all transfers finished before moving to decode

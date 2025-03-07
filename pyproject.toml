@@ -14,7 +14,7 @@
 # limitations under the License.
 
 [project]
-name = "dynemo"
+name = "dynamo"
 version = "0.2.1"
 description = "Distributed Inference Framework"
 readme = "README.md"
@@ -30,11 +30,11 @@ dependencies = [
 ]
 
 [tool.maturin]
-module-name = "dynemo._core"
+module-name = "dynamo._core"
 # Point to the Rust crate directory
 manifest-path = "lib/bindings/python/Cargo.toml"
 # Include all Python packages
-python-packages = ["dynemo"]
+python-packages = ["dynamo"]
 # Specify the Python source directory
 python-source = "lib/bindings/python/src"
 
@@ -73,7 +73,7 @@ line_length = 88
 balanced_wrapping = true
 indent = "    "
 skip = ["build"]
-known_first_party = ["dynemo"]
+known_first_party = ["dynamo"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

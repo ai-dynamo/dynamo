@@ -81,8 +81,8 @@ impl RuntimeConfig {
     pub(crate) fn figment() -> Figment {
         Figment::new()
             .merge(Serialized::defaults(RuntimeConfig::default()))
-            .merge(Toml::file("/opt/dynemo/defaults/runtime.toml"))
-            .merge(Toml::file("/opt/dynemo/etc/runtime.toml"))
+            .merge(Toml::file("/opt/dynamo/defaults/runtime.toml"))
+            .merge(Toml::file("/opt/dynamo/etc/runtime.toml"))
             .merge(Env::prefixed("DYN_RUNTIME_").filter_map(|k| {
                 let full_key = format!("DYN_RUNTIME_{}", k.as_str());
                 // filters out empty environment variables
@@ -97,8 +97,8 @@ impl RuntimeConfig {
     /// Configuration is priorities in the following order, where the last has the lowest priority:
     /// 1. Environment variables (top priority)
     ///     TO DO: Add documentation for configuration files. Paths should be configurable.
-    /// 2. /opt/dynemo/etc/runtime.toml
-    /// 3. /opt/dynemo/defaults/runtime.toml (lowest priority)
+    /// 2. /opt/dynamo/etc/runtime.toml
+    /// 3. /opt/dynamo/defaults/runtime.toml (lowest priority)
     ///
     /// Environment variables are prefixed with `DYN_RUNTIME_`
     pub fn from_settings() -> Result<RuntimeConfig> {

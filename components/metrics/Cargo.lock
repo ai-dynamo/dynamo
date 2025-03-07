@@ -1005,7 +1005,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynemo-llm"
+name = "dynamo-llm"
 version = "0.2.1"
 dependencies = [
  "anyhow",
@@ -1020,7 +1020,7 @@ dependencies = [
  "chrono",
  "cmake",
  "derive_builder",
- "dynemo-runtime",
+ "dynamo-runtime",
  "either",
  "erased-serde",
  "futures",
@@ -1054,7 +1054,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynemo-runtime"
+name = "dynamo-runtime"
 version = "0.2.1"
 dependencies = [
  "anyhow",
@@ -2201,8 +2201,8 @@ version = "0.1.0"
 dependencies = [
  "axum 0.6.20",
  "clap",
- "dynemo-llm",
- "dynemo-runtime",
+ "dynamo-llm",
+ "dynamo-runtime",
  "futures",
  "opentelemetry",
  "opentelemetry-prometheus",

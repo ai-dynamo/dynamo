@@ -13,8 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use dynemo_runtime::component::Namespace;
-use dynemo_runtime::traits::events::EventPublisher;
+use dynamo_runtime::component::Namespace;
+use dynamo_runtime::traits::events::EventPublisher;
 use serde::{Deserialize, Serialize};
 use std::borrow::BorrowMut;
 use std::cmp::min;

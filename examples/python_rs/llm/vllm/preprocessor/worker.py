@@ -28,12 +28,12 @@ from vllm.entrypoints.openai.api_server import (
 )
 from vllm.outputs import CompletionOutput
 
-from dynemo.runtime import (
+from dynamo.runtime import (
     Backend,
     DistributedRuntime,
     ModelDeploymentCard,
-    dynemo_endpoint,
-    dynemo_worker,
+    dynamo_endpoint,
+    dynamo_worker,
 )
 
 finish_reason_map = {
@@ -107,7 +107,7 @@ class VllmEngine(AsyncContextDecorator):
         }
         return SamplingParams(**sampling_params)
 
-    @dynemo_endpoint(Any, CompletionOutput)
+    @dynamo_endpoint(Any, CompletionOutput)
     async def generate(self, request):
         state = DeltaState()
         request_id = str(uuid.uuid4())
@@ -122,13 +122,13 @@ class VllmEngine(AsyncContextDecorator):
                 yield self.to_backend_output(choice, delta_token_ids)
 
 
-@dynemo_worker()
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime, engine_args: NvAsyncEngineArgs):
     """
     Instantiate a `backend` component and serve the `generate` endpoint
     A `Component` can serve multiple endpoints
     """
-    component = runtime.namespace("dynemo").component("backend")
+    component = runtime.namespace("dynamo").component("backend")
     await component.create_service()
 
     endpoint = component.endpoint("generate")

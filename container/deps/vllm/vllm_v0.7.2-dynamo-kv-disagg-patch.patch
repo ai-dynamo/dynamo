@@ -1,5 +1,5 @@
 diff --git a/vllm/config.py b/vllm/config.py
-index 9ba49757..3ec4bbab 100644
+index 9ba49757..5e1cf249 100644
 --- a/vllm/config.py
 +++ b/vllm/config.py
 @@ -2620,6 +2620,9 @@ class KVTransferConfig(BaseModel):
@@ -41,7 +41,7 @@ index 9ba49757..3ec4bbab 100644
                  f"and `kv_both`")
  
 -        if self.kv_connector is not None and self.kv_role is None:
-+        if self.kv_connector is not None and self.kv_connector != "DynemoNixlConnector" and self.kv_role is None:
++        if self.kv_connector is not None and self.kv_connector != "DynamoNixlConnector" and self.kv_role is None:
              raise ValueError("Please specify kv_disagg_role when kv_connector "
                               "is set, supported roles are `kv_producer`, "
                               "`kv_consumer`, and `kv_both`")
@@ -54,7 +54,7 @@ index 9ba49757..3ec4bbab 100644
      def need_kv_parallel_group(self) -> bool:
          # for those database-based connector, vLLM does not need to create
          # parallel group, and in that case the kv parallel size will be 1.
-+        if self.kv_connector == "DynemoNixlConnector":
++        if self.kv_connector == "DynamoNixlConnector":
 +            return False
          return self.kv_connector is not None and self.kv_parallel_size > 1
  
@@ -764,7 +764,7 @@ index 00000000..9b938039
 \ No newline at end of file
 diff --git a/vllm/distributed/device_communicators/nixl.py b/vllm/distributed/device_communicators/nixl.py
 new file mode 100644
-index 00000000..523d58d4
+index 00000000..87020367
 --- /dev/null
 +++ b/vllm/distributed/device_communicators/nixl.py
 @@ -0,0 +1,405 @@
@@ -799,7 +799,7 @@ index 00000000..523d58d4
 +    num_blocks: int
 +
 +
-+class DynemoNixlConnector:
++class DynamoNixlConnector:
 +    def __init__(self, vllm_config: VllmConfig, engine_id: str, rank: int):
 +        self.vllm_config = vllm_config
 +        if NixlWrapper is None:
@@ -1559,7 +1559,7 @@ index fe480533..c82fda80 100644
 +    "vllm.distributed.kv_transfer.kv_connector.dynamo_connector",
 +    "DynamoConnector")
 diff --git a/vllm/distributed/kv_transfer/kv_connector/simple_connector.py b/vllm/distributed/kv_transfer/kv_connector/simple_connector.py
-index 2033e976..e0537903 100644
+index 2033e976..ddebb68e 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/simple_connector.py
 +++ b/vllm/distributed/kv_transfer/kv_connector/simple_connector.py
 @@ -8,13 +8,15 @@ MooncakePipe.
@@ -1886,7 +1886,7 @@ index 2033e976..e0537903 100644
 +                world_group.broadcast_object(kv_config_enhanced)
 +
 +            else:
-+                raise NotImplementedError("MooncakeConnector is not supported in Dynemo patch")
++                raise NotImplementedError("MooncakeConnector is not supported in Dynamo patch")
 +        else:
 +            kv_config_enhanced = world_group.broadcast_object()
 +        logger.info("kv_config_enhanced: %s", kv_config_enhanced)
@@ -2175,11 +2175,11 @@ index 40589fb3..da2829cf 100644
          """Receive a tensor (can be None) from the pipeline.
  
          Returns:
-diff --git a/vllm/distributed/kv_transfer/kv_pipe/dynemo_nccl_pipe.py b/vllm/distributed/kv_transfer/kv_pipe/dynemo_nccl_pipe.py
+diff --git a/vllm/distributed/kv_transfer/kv_pipe/dynamo_nccl_pipe.py b/vllm/distributed/kv_transfer/kv_pipe/dynamo_nccl_pipe.py
 new file mode 100644
-index 00000000..58d0d28c
+index 00000000..3ee0fa78
 --- /dev/null
-+++ b/vllm/distributed/kv_transfer/kv_pipe/dynemo_nccl_pipe.py
++++ b/vllm/distributed/kv_transfer/kv_pipe/dynamo_nccl_pipe.py
 @@ -0,0 +1,124 @@
 +import logging
 +import threading
@@ -2195,7 +2195,7 @@ index 00000000..58d0d28c
 +logger = logging.getLogger(__name__)
 +
 +
-+class DynemoNcclDataPlane:
++class DynamoNcclDataPlane:
 +    def __init__(
 +        self,
 +        data_pipe: PyNcclPipe,
@@ -2531,7 +2531,7 @@ index 321902d1..b8937ef8 100644
  
  def ensure_model_parallel_initialized(
 diff --git a/vllm/engine/llm_engine.py b/vllm/engine/llm_engine.py
-index d82d9ad9..cc02b029 100644
+index d82d9ad9..53cace75 100644
 --- a/vllm/engine/llm_engine.py
 +++ b/vllm/engine/llm_engine.py
 @@ -2,13 +2,17 @@
@@ -2614,7 +2614,7 @@ index d82d9ad9..cc02b029 100644
  
 +        self.engine_id = str(uuid.uuid4())
 +        self._nixl_agents_names: Optional[List[str]] = None
-+        if self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.kv_connector == "DynemoNixlConnector":
++        if self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.kv_connector == "DynamoNixlConnector":
 +            self._nixl_agents_names = self._initialize_nixl()
 +
 +        self._request_notif_counter = defaultdict(lambda: -self.parallel_config.tensor_parallel_size)
@@ -2946,7 +2946,7 @@ index 3cf1850e..6b90ece7 100644
 +    kv_active_blocks: int
 +    kv_total_blocks: int
 diff --git a/vllm/engine/multiprocessing/client.py b/vllm/engine/multiprocessing/client.py
-index 85b5f31e..3f8b8fad 100644
+index 85b5f31e..da207947 100644
 --- a/vllm/engine/multiprocessing/client.py
 +++ b/vllm/engine/multiprocessing/client.py
 @@ -8,6 +8,7 @@ from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
@@ -3028,7 +3028,7 @@ index 85b5f31e..3f8b8fad 100644
 +    
 +    @property
 +    def using_nixl_connector(self) -> bool:
-+        return self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.kv_connector == "DynemoNixlConnector"
++        return self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.kv_connector == "DynamoNixlConnector"
 +
      @staticmethod
      def is_unsupported_config(engine_args: AsyncEngineArgs):
@@ -3656,7 +3656,7 @@ index 534b9e60..18675d2f 100644
      @property
      def is_first_multi_step(self) -> bool:
 diff --git a/vllm/worker/model_runner.py b/vllm/worker/model_runner.py
-index 12baecde..489d3b77 100644
+index 12baecde..a3f2c464 100644
 --- a/vllm/worker/model_runner.py
 +++ b/vllm/worker/model_runner.py
 @@ -1824,6 +1824,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
@@ -3664,7 +3664,7 @@ index 12baecde..489d3b77 100644
          if self.vllm_config.kv_transfer_config is None:
              return False
 +        
-+        if self.vllm_config.kv_transfer_config.kv_connector == "DynemoNixlConnector":
++        if self.vllm_config.kv_transfer_config.kv_connector == "DynamoNixlConnector":
 +            return False
  
          prefill_meta = model_input.attn_metadata.prefill_metadata
@@ -3674,13 +3674,13 @@ index 12baecde..489d3b77 100644
          if self.vllm_config.kv_transfer_config is None:
              return False
 +        
-+        if self.vllm_config.kv_transfer_config.kv_connector == "DynemoNixlConnector":
++        if self.vllm_config.kv_transfer_config.kv_connector == "DynamoNixlConnector":
 +            return False
  
          prefill_meta = model_input.attn_metadata.prefill_metadata
  
 diff --git a/vllm/worker/worker.py b/vllm/worker/worker.py
-index 582aa460..e4ed902e 100644
+index 582aa460..36a21d10 100644
 --- a/vllm/worker/worker.py
 +++ b/vllm/worker/worker.py
 @@ -2,7 +2,7 @@
@@ -3696,7 +3696,7 @@ index 582aa460..e4ed902e 100644
  from vllm.worker.pooling_model_runner import PoolingModelRunner
  from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                       WorkerInput)
-+from vllm.distributed.device_communicators.nixl import DynemoNixlConnector
++from vllm.distributed.device_communicators.nixl import DynamoNixlConnector
 +
  
  logger = init_logger(__name__)
@@ -3710,7 +3710,7 @@ index 582aa460..e4ed902e 100644
 +        # TODO ptarasiewicz nixl can also support DRAM
 +        assert self.device_config.device_type == "cuda", "Currently only CUDA is supported for Nixl connector"
 +
-+        self.nixl_connector = DynemoNixlConnector(self.vllm_config, engine_id, self.local_rank) # TODO ptarasiewicz: rank or local_rank?
++        self.nixl_connector = DynamoNixlConnector(self.vllm_config, engine_id, self.local_rank) # TODO ptarasiewicz: rank or local_rank?
 +        assert len(self.cache_engine) == 1, "Only one cache engine is supported for now"
 +        self.nixl_connector.register_kv_caches(self.cache_engine[0].gpu_cache)
 +        return self.nixl_connector.agent_name
@@ -3766,7 +3766,7 @@ index 582aa460..e4ed902e 100644
  
      @torch.inference_mode()
 diff --git a/vllm/worker/worker_base.py b/vllm/worker/worker_base.py
-index 819b81fb..8dfdadde 100644
+index 819b81fb..ff43dadc 100644
 --- a/vllm/worker/worker_base.py
 +++ b/vllm/worker/worker_base.py
 @@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
@@ -3781,7 +3781,7 @@ index 819b81fb..8dfdadde 100644
  from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                             ModelRunnerBase,
                                             ModelRunnerInputBase)
-+from vllm.distributed.device_communicators.nixl import DynemoNixlConnector
++from vllm.distributed.device_communicators.nixl import DynamoNixlConnector
  
  logger = init_logger(__name__)
  
@@ -3789,7 +3789,7 @@ index 819b81fb..8dfdadde 100644
          from vllm.platforms import current_platform
          self.current_platform = current_platform
  
-+        self.nixl_connector: Optional[DynemoNixlConnector] = None
++        self.nixl_connector: Optional[DynamoNixlConnector] = None
 +
      @abstractmethod
      def init_device(self) -> None:
