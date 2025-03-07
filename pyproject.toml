@@ -95,7 +95,11 @@ xfail_strict = true
 log_cli_level = "INFO"
 filterwarnings = [
   "error",
+  "ignore:.*pkg_resources.*:DeprecationWarning",
+  "ignore:.*multipart.*:PendingDeprecationWarning"
 ]
+
+
 # NOTE: Can also manually mark tests with @pytest.mark.asyncio
 asyncio_mode = "auto"
 markers = [
