@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use anyhow::Context;
 use async_trait::async_trait;
 use futures::stream::StreamExt;
 use futures::{Stream, TryStreamExt};
@@ -70,7 +71,7 @@ impl EventSubscriber for Namespace {
         // Transform the subscriber into a stream of deserialized events
         let stream = subscriber.map(move |msg| {
             serde_json::from_slice::<T>(&msg.payload)
-                .map_err(|e| anyhow::anyhow!("Failed to deserialize event: {}", e))
+                .with_context(|| format!("Failed to deserialize event payload: {:?}", msg.payload))
         });
 
         Ok(stream)
