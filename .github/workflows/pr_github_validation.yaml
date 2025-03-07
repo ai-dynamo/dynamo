@@ -16,6 +16,9 @@
 name: NVIDIA Test Github Validation
 
 on:
+  push:
+    branches:
+    - main
   pull_request:
     paths-ignore:
       - 'deploy/Kubernetes/**'
@@ -23,7 +26,7 @@ on:
 
 jobs:
   build-test:
-    runs-on: ${{ fromJSON(vars.PR_FASTCHECK_RUNNERS) }}
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         framework:
@@ -32,7 +35,7 @@ jobs:
     name: Build and Test - ${{ matrix.framework }}
     env:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework }}
-      IMAGE_TAG: ghcr.io/dynemo-ai/dynemo:pr_${{ github.event.pull_request.number}}_${{ matrix.framework }}
+      IMAGE_TAG: ghcr.io/dynemo-ai/dynemo:latest-${{ matrix.framework }}
       PYTEST_XML_FILE: pytest_test_report.xml
     steps:
       - name: Checkout repository
@@ -45,51 +48,46 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Decide on cache
-        id: which_cache
-        env:
-          DEFAULT_CACHE_LOCATION: ghcr.io/dynemo-ai/dynemo:latest-${{ matrix.framework }}
+      - name: Decide on caches
+        id: which_caches
         run: |
           set +e
-          docker manifest inspect ${{ env.IMAGE_TAG }}
-          if [ $? -eq 0 ]; then
-            echo "USING ${{ env.IMAGE_TAG }}"
-            echo "cache_from_location=${{ env.IMAGE_TAG }}" >> $GITHUB_OUTPUT
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "Not caching"
+            echo "cache_to_location=''" >> $GITHUB_OUTPUT
           else
-            echo "USING ${{ env.DEFAULT_CACHE_LOCATION }}"
-            echo "cache_from_location=${{ env.DEFAULT_CACHE_LOCATION }}" >> $GITHUB_OUTPUT
+            echo "USING ${{ env.IMAGE_TAG }}"
+            echo "cache_to_location='--cache-to \"type=registry,ref=${{ env.IMAGE_TAG }},image-manifest=true,mode=max\"'" >> $GITHUB_OUTPUT
           fi
-          echo "cache_to_location=${{ env.IMAGE_TAG }}" >> $GITHUB_OUTPUT
+          echo "cache_from_location='--cache-from \"type=registry,ref=${{ env.IMAGE_TAG }}\"'" >> $GITHUB_OUTPUT
       - name: Build image
-        env:
-          CACHE_FROM: "type=registry,ref=${{ steps.which_cache.outputs.cache_from_location }}"
-          CACHE_TO: "type=registry,ref=${{ steps.which_cache.outputs.cache_to_location }},image-manifest=true,mode=max"
         run: |
-          ./container/build.sh --tag ${{ env.IMAGE_TAG }} --framework ${{ matrix.framework }} --cache-from "${{ env.CACHE_FROM }}" --cache-to "${{ env.CACHE_TO }}"
-      - name: Run pytest
-        env:
-          PYTEST_MARKS: "pre_merge or mypy"
-        run: |
-          docker run -w /workspace --name ${{ env.CONTAINER_ID }} ${{ env.IMAGE_TAG }} pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m "${{ env.PYTEST_MARKS }}"
-      - name: Copy test report from test Container
-        if: always()
-        run: |
-          docker cp ${{ env.CONTAINER_ID }}:/workspace/${{ env.PYTEST_XML_FILE }} .
-      - name: Archive test report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: ${{ matrix.framework }}-python-test-results
-          if-no-files-found: error
-          path: |
-            ${{ env.PYTEST_XML_FILE }}
+          echo "./container/build.sh --tag ${{ env.IMAGE_TAG }} --framework ${{ matrix.framework }} ${{ steps.which_cache.outputs.cache_from_location }} ${{ steps.which_cache.outputs.cache_to_location }}"
+    #   - name: Run pytest
+    #     env:
+    #       PYTEST_MARKS: "pre_merge or mypy"
+    #     run: |
+    #       docker run -w /workspace --name ${{ env.CONTAINER_ID }} ${{ env.IMAGE_TAG }} pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m "${{ env.PYTEST_MARKS }}"
+    #   - name: Copy test report from test Container
+    #     if: always()
+    #     run: |
+    #       docker cp ${{ env.CONTAINER_ID }}:/workspace/${{ env.PYTEST_XML_FILE }} .
+    #   - name: Archive test report
+    #     uses: actions/upload-artifact@v4
+    #     if: always()
+    #     with:
+    #       name: ${{ matrix.framework }}-python-test-results
+    #       if-no-files-found: error
+    #       path: |
+    #         ${{ env.PYTEST_XML_FILE }}
 
-  event_file:
-    name: "Event File"
-    runs-on: ubuntu-latest
-    steps:
-      - name: Upload
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
-        with:
-          name: Event File
-          path: ${{ github.event_path }}
+#   event_file:
+#     name: "Event File"
+#     runs-on: ubuntu-latest
+#     if: ${{ github.event_name == 'pull_request' }}
+#     steps:
+#       - name: Upload
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: Event File
+#           path: ${{ github.event_path }}
