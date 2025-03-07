@@ -29,13 +29,13 @@ with bentoml.importing():
     from common.chat_processor import ChatProcessor, ProcessMixIn
     from common.protocol import MyRequestOutput, Tokens, vLLMGenerateRequest
 
-from compoundai import depends, dynemo_context, dynemo_endpoint, service
+from dynemo.sdk import depends, dynemo_context, dynemo_endpoint, service
 
 
 @service(
     dynemo={
         "enabled": True,
-        "namespace": "triton-init",
+        "namespace": "dynemo",
     },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -109,7 +109,7 @@ class Processor(ProcessMixIn):
             worker_id = worker
             break
         runtime = dynemo_context["runtime"]
-        comp_ns, comp_name = VllmEngine.dynemo_address()
+        comp_ns, comp_name = VllmEngine.dynemo_address()    # type: ignore
         worker_client = (
             await runtime.namespace(comp_ns)
             .component(comp_name)

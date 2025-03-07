@@ -17,7 +17,7 @@ from enum import Enum
 
 import bentoml
 from common.protocol import Tokens
-from compoundai import async_onstart, dynemo_context, dynemo_endpoint, service
+from dynemo.sdk import async_onstart, dynemo_context, dynemo_endpoint, service
 
 with bentoml.importing():
     from dynemo.runtime import KvRouter
@@ -35,7 +35,7 @@ class RoutingStrategy(Enum):
 @service(
     dynemo={
         "enabled": True,
-        "namespace": "triton-init",
+        "namespace": "dynemo",
     },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -54,7 +54,7 @@ class Router:
     @async_onstart
     async def init_engine(self):
         workers_client = (
-            await self.runtime.namespace("triton-init")
+            await self.runtime.namespace("dynemo")
             .component("VllmEngine")
             .endpoint("generate")
             .client()
@@ -74,7 +74,7 @@ class Router:
             )
             await asyncio.sleep(5)
 
-        kv_listener = self.runtime.namespace("triton-init").component(self.model_name)
+        kv_listener = self.runtime.namespace("dynemo").component(self.model_name)
         await kv_listener.create_service()
         self.router = KvRouter(self.runtime, kv_listener)
 

@@ -15,6 +15,7 @@
 
 import asyncio
 import os
+from typing import Optional
 
 import bentoml
 
@@ -24,8 +25,9 @@ with bentoml.importing():
     from vllm.sampling_params import RequestOutputKind
     from common.base_engine import BaseVllmEngine
     from common.protocol import MyRequestOutput, vLLMGenerateRequest
+    from vllm.engine.multiprocessing.client import MQLLMEngineClient
 
-from compoundai import (
+from dynemo.sdk import (
     async_onstart,
     dynemo_context,
     dynemo_endpoint,
@@ -43,7 +45,7 @@ lease_id = None
 @service(
     dynemo={
         "enabled": True,
-        "namespace": "triton-init",
+        "namespace": "dynemo",
     },
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -64,11 +66,12 @@ class VllmEngine(BaseVllmEngine):
         )
         VLLM_WORKER_ID = dynemo_context["endpoints"][0].lease_id()
         os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
-        os.environ["VLLM_KV_NAMESPACE"] = "triton-init"
+        os.environ["VLLM_KV_NAMESPACE"] = "dynemo"
         os.environ["VLLM_KV_COMPONENT"] = "vllm"
         vllm_logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
         os.environ["CUDA_VISIBLE_DEVICES"] = f"{server_context.worker_index - 1}"
         self.metrics_publisher = KvMetricsPublisher()
+        self.engine_client: Optional[MQLLMEngineClient] = None
         super().__init__(self.engine_args)
 
     async def create_metrics_publisher_endpoint(self):
@@ -92,7 +95,7 @@ class VllmEngine(BaseVllmEngine):
         # rust HTTP requires Delta streaming
         sampling_params.output_kind = RequestOutputKind.DELTA
 
-        async for response in self.engine_client.generate(
+        async for response in self.engine_client.generate(           # type: ignore
             request.engine_prompt, sampling_params, request.request_id
         ):
             # MyRequestOutput takes care of serializing the response as

@@ -13,11 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from compoundai import api
-from compoundai.sdk.decorators import dynemo_endpoint
-from compoundai.sdk.dependency import depends
-from compoundai.sdk.service import service
 from pydantic import BaseModel
+
+from dynemo.sdk import api, depends, dynemo_endpoint, service
 
 """
 Pipeline Architecture:

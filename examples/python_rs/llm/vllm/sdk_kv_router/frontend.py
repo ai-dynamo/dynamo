@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from compoundai import DYNEMO_IMAGE, api, depends, service
+from dynemo.sdk import DYNEMO_IMAGE, api, depends, service
 from sdk_kv_router.processor import Processor
 
 

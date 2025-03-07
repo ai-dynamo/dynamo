@@ -21,7 +21,7 @@ Run this example using command below
 
 cd /workspace/examples/python_rs/llm/vllm
 
-compoundai serve sdk_kv_router.frontend:Frontend
+dynemo-sdk serve sdk_kv_router.frontend:Frontend
 ```
 
 
