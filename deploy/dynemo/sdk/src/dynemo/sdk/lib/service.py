@@ -69,7 +69,7 @@ class CompoundService(Service[T]):
         """Check if this service is configured as a Dynemo component"""
         return self._dynemo_config.enabled
 
-    def dynemo_address(self) -> Tuple[str, str]:
+    def dynemo_address(self) -> Tuple[Optional[str], Optional[str]]:
         """Get the Dynemo address for this component in namespace/name format"""
         if not self.is_dynemo_component():
             raise ValueError("Service is not configured as a Dynemo component")
