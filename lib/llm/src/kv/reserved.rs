@@ -153,7 +153,7 @@ impl ReservedBlocks {
 
         map.insert(sequence_hash, Arc::downgrade(&inner));
 
-        return Ok(ReservedBlock::new(inner));
+        Ok(ReservedBlock::new(inner))
     }
 }
 

@@ -15,9 +15,9 @@
 
 /// Utility functions for tensor parallel operations
 use candle_core::{DType, Device, Result, Storage, Tensor};
-use cudarc::driver::{CudaDevice, DevicePtr, DevicePtrMut};
+use cudarc::driver::DevicePtr;
 use std::ffi::{c_ulong, c_void};
-use std::os::raw::{c_float, c_int};
+use std::os::raw::c_int;
 
 pub struct KvLayer {
     data: Tensor,
@@ -77,7 +77,8 @@ impl KvLayer {
 
         // todo - implement a kernel to copy the blocks if either are gpu tensors
         if self.data.device().is_cuda() || dst_layer.data.device().is_cuda() {
-            // todo - implement a kernel to copy the blocks
+            // call the cuda kernel to copy the blocks
+            copy_blocks_between_tensors(&self.data, &dst_layer.data, src_blocks, dst_blocks)?;
         } else {
             for kv in 0..2 {
                 for (src_idx, dst_idx) in src_blocks.iter().zip(dst_blocks.iter()) {
@@ -261,8 +262,8 @@ extern "C" {
 pub fn copy_blocks_between_tensors(
     src_tensor: &Tensor,
     dst_tensor: &Tensor,
-    src_block_ids: &[u32],
-    dst_block_ids: &[u32],
+    src_block_ids: &[usize],
+    dst_block_ids: &[usize],
 ) -> Result<()> {
     // Validation logic (same as before)
     if src_block_ids.len() != dst_block_ids.len() {
@@ -270,6 +271,9 @@ pub fn copy_blocks_between_tensors(
             "Source and destination block ID arrays must have the same length".into(),
         ));
     }
+
+    let src_block_ids: Vec<u32> = src_block_ids.iter().map(|&id| id as u32).collect();
+    let dst_block_ids: Vec<u32> = dst_block_ids.iter().map(|&id| id as u32).collect();
 
     if src_block_ids.is_empty() {
         return Ok(()); // Nothing to do
@@ -325,7 +329,7 @@ pub fn copy_blocks_between_tensors(
     let max_src_id = *src_block_ids.iter().max().unwrap_or(&0);
     let max_dst_id = *dst_block_ids.iter().max().unwrap_or(&0);
 
-    if max_src_id as usize >= src_dims[1] as usize {
+    if max_src_id as usize >= src_dims[1] {
         return Err(candle_core::Error::Msg(format!(
             "Source block ID {} is out of range (max: {})",
             max_src_id,
@@ -333,7 +337,7 @@ pub fn copy_blocks_between_tensors(
         )));
     }
 
-    if max_dst_id as usize >= dst_dims[1] as usize {
+    if max_dst_id as usize >= dst_dims[1] {
         return Err(candle_core::Error::Msg(format!(
             "Destination block ID {} is out of range (max: {})",
             max_dst_id,
@@ -377,10 +381,10 @@ pub fn copy_blocks_between_tensors(
     // Get raw pointers to the tensor data WITHOUT making copies
     let result = unsafe {
         // Get source pointer based on device
-        let src_ptr = get_tensor_ptr(&src_tensor)?;
+        let src_ptr = get_tensor_ptr(src_tensor)?;
 
         // Get destination pointer based on device
-        let dst_ptr = get_tensor_ptr_mut(&dst_tensor)?;
+        let dst_ptr = get_tensor_ptr_mut(dst_tensor)?;
 
         // Call the unified copy_blocks function
         copy_blocks(
@@ -517,7 +521,7 @@ pub unsafe fn get_tensor_ptr_mut(tensor: &Tensor) -> Result<*mut c_void> {
     match &*storage {
         Storage::Cuda(cuda_storage) => {
             let ptr = *cuda_storage.as_cuda_slice::<f32>()?.device_ptr();
-            return Ok(ptr as *mut c_void);
+            Ok(ptr as *mut c_void)
         }
         Storage::Cpu(cpu_storage) => {
             // For CPU storage, get the host memory pointer
@@ -535,7 +539,7 @@ pub unsafe fn get_tensor_ptr_mut(tensor: &Tensor) -> Result<*mut c_void> {
 mod tests {
     use super::*;
     use candle_core::{DType, Device, Result, Storage, Tensor};
-    use cudarc::driver::{CudaDevice, DevicePtr, DevicePtrMut};
+    use cudarc::driver::DevicePtr;
 
     #[test]
     fn test_group_contiguous_blocks() {
@@ -773,7 +777,7 @@ mod tests {
         src_layer.copy_blocks(&src_blocks, &dst_blocks, &mut dst_layer)?;
 
         println!("dst_layer: {:?}", dst_layer.data);
-        println!("dst_layer values: {}", dst_layer.data.to_string());
+        println!("dst_layer values: {}", dst_layer.data);
 
         // Verify the copy worked correctly
         for block_idx in 0..nblocks {
@@ -863,11 +867,11 @@ mod tests {
         // Create source tensor on device with block ID values
         // Each element in block 'n' will have the value 'n'
         let mut src_data = Vec::new();
-        for kv in 0..tp_size {
+        for _kv in 0..tp_size {
             for block_id in 0..src_n_blocks {
-                for pos in 0..block_size {
-                    for head in 0..heads_per_rank {
-                        for i in 0..head_size {
+                for _pos in 0..block_size {
+                    for _head in 0..heads_per_rank {
+                        for _i in 0..head_size {
                             // Use block_id as the value for easy verification
                             src_data.push(block_id as f32);
                         }
@@ -910,7 +914,7 @@ mod tests {
         copy_blocks_between_tensors(&src_tensor, &dst_tensor, &src_blocks, &dst_blocks)?;
         let elapsed = start.elapsed();
 
-        println!("dst_tensor: {}", dst_tensor.to_string());
+        println!("dst_tensor: {}", dst_tensor);
 
         println!("Copy completed in {:?}", elapsed);
 
@@ -929,7 +933,7 @@ mod tests {
                             // Get the value at this position in the destination tensor
                             let value = dst_tensor
                                 .get(kv)?
-                                .get(dst_block as usize)?
+                                .get(dst_block)?
                                 .get(pos)?
                                 .get(head)?
                                 .get(i)?;

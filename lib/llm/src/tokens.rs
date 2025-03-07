@@ -97,7 +97,7 @@ impl PartialTokenBlock {
     pub fn push_token(&mut self, token: Token) -> Option<TokenBlock> {
         self.tokens.0.push(token);
         if self.tokens.0.len() == self.block_size {
-            let block = std::mem::replace(&mut self.tokens, Tokens::default());
+            let block = std::mem::take(&mut self.tokens);
             let block_hash = compute_hash(cast_slice(&block));
             let sequence_hash = compute_hash(bytemuck::cast_slice(&[
                 self.parent_sequence_hash.unwrap_or_default(),
@@ -231,13 +231,13 @@ impl PartialEq<[Token]> for Tokens {
     }
 }
 
-impl<'a> PartialEq<Tokens> for &'a [Token] {
+impl PartialEq<Tokens> for &[Token] {
     fn eq(&self, other: &Tokens) -> bool {
         *self == other.0.as_slice()
     }
 }
 
-impl<'a> PartialEq<Vec<Token>> for &'a Tokens {
+impl PartialEq<Vec<Token>> for &Tokens {
     fn eq(&self, other: &Vec<Token>) -> bool {
         self.0 == *other
     }
@@ -249,7 +249,7 @@ impl<'a> PartialEq<&'a Tokens> for Vec<Token> {
     }
 }
 
-impl<'a> PartialEq<[Token]> for &'a Tokens {
+impl PartialEq<[Token]> for &Tokens {
     fn eq(&self, other: &[Token]) -> bool {
         self.0.as_slice() == other
     }
