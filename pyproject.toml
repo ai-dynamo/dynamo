@@ -134,8 +134,9 @@ check_untyped_defs = true
 
 [[tool.mypy.overrides]]
 # Skip mypy analysis on internal dependencies of vllm
-module = ["vllm.*", "bentoml.*"]
+module = ["vllm.*", "bentoml.*", "fs.*", "_bentoml_sdk.*"]
 follow_imports = "skip"
+ignore_missing_imports = true
 
 # declare namespace packages
 [tool.setuptools]
