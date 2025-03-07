@@ -20,7 +20,6 @@ use derive_builder::Builder;
 use derive_getters::Dissolve;
 use futures::StreamExt;
 use tokio::sync::mpsc;
-use tracing as log;
 use validator::Validate;
 
 use etcd_client::{
@@ -167,9 +166,13 @@ impl Client {
         // Execute the transaction
         let result = self.client.kv_client().txn(txn).await?;
 
-        match result.succeeded() {
-            true => Ok(()),
-            false => Err(error!("failed to create key")),
+        if result.succeeded() {
+            Ok(())
+        } else {
+            for resp in result.op_responses() {
+                tracing::warn!("kv_create etcd op response: {resp:?}");
+            }
+            Err(error!("failed to create key"))
         }
     }
 
@@ -247,7 +250,10 @@ impl Client {
         Ok(get_response.take_kvs())
     }
 
-    pub async fn kv_get_and_watch_prefix(&self, prefix: impl AsRef<str>) -> Result<PrefixWatcher> {
+    pub async fn kv_get_and_watch_prefix(
+        &self,
+        prefix: impl AsRef<str> + std::fmt::Display,
+    ) -> Result<PrefixWatcher> {
         let mut kv_client = self.client.kv_client();
         let mut watch_client = self.client.watch_client();
 
@@ -260,7 +266,7 @@ impl Client {
             .ok_or(error!("missing header; unable to get revision"))?
             .revision();
 
-        log::trace!("start_revision: {}", start_revision);
+        tracing::trace!("{prefix}: start_revision: {start_revision}");
         let start_revision = start_revision + 1;
 
         let (watcher, mut watch_stream) = watch_client
@@ -276,7 +282,7 @@ impl Client {
             .await?;
 
         let kvs = get_response.take_kvs();
-        log::trace!("initial kv count: {:?}", kvs.len());
+        tracing::trace!("initial kv count: {:?}", kvs.len());
 
         let (tx, rx) = mpsc::channel(32);
 
@@ -293,7 +299,10 @@ impl Client {
                     match event.event_type() {
                         etcd_client::EventType::Put => {
                             if let Some(kv) = event.kv() {
-                                if tx.send(WatchEvent::Put(kv.clone())).await.is_err() {
+                                if let Err(err) = tx.send(WatchEvent::Put(kv.clone())).await {
+                                    tracing::error!(
+                                        "kv watcher error forwarding WatchEvent::Put: {err}"
+                                    );
                                     // receiver is closed
                                     break;
                                 }
@@ -311,7 +320,6 @@ impl Client {
                 }
             }
         });
-
         Ok(PrefixWatcher {
             prefix: prefix.as_ref().to_string(),
             watcher,
@@ -327,6 +335,7 @@ pub struct PrefixWatcher {
     rx: mpsc::Receiver<WatchEvent>,
 }
 
+#[derive(Debug)]
 pub enum WatchEvent {
     Put(KeyValue),
     Delete(KeyValue),

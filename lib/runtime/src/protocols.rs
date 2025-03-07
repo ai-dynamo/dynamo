@@ -43,6 +43,8 @@ pub struct Component {
 /// - **name**
 ///
 /// Example format: `"namespace/component/endpoint"`
+///
+/// TODO: There is also an Endpoint in runtime/src/component.rs
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Endpoint {
     pub namespace: String,

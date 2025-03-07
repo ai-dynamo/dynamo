@@ -17,17 +17,10 @@
 use std::{future::Future, pin::Pin};
 
 use dynamo_llm::{
-    backend::ExecutionContext,
-    model_card::model::ModelDeploymentCard,
-    types::{
-        openai::chat_completions::{
-            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-            OpenAIChatCompletionsStreamingEngine,
-        },
-        Annotated,
-    },
+    backend::ExecutionContext, model_card::model::ModelDeploymentCard,
+    types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
-use dynamo_runtime::{component::Client, protocols::Endpoint, DistributedRuntime};
+use dynamo_runtime::protocols::Endpoint;
 
 mod flags;
 pub use flags::Flags;
@@ -53,8 +46,7 @@ const PYTHON_TOK_SCHEME: &str = "pytok:";
 
 pub enum EngineConfig {
     /// An remote networked engine we don't know about yet
-    /// We don't have the pre-processor yet so this is only text requests. Type will change later.
-    Dynamic(Client<NvCreateChatCompletionRequest, Annotated<NvCreateChatCompletionStreamResponse>>),
+    Dynamic(Endpoint),
 
     /// A Full service engine does it's own tokenization and prompt formatting.
     StaticFull {
@@ -148,28 +140,7 @@ pub async fn run(
         }
         Output::Endpoint(path) => {
             let endpoint: Endpoint = path.parse()?;
-
-            // This will attempt to connect to NATS and etcd
-            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
-
-            let client = distributed_runtime
-                .namespace(endpoint.namespace)?
-                .component(endpoint.component)?
-                .endpoint(endpoint.name)
-                .client::<NvCreateChatCompletionRequest, Annotated<NvCreateChatCompletionStreamResponse>>()
-                .await?;
-
-            tracing::info!("Waiting for remote {}...", client.path());
-            tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    return Ok(());
-                }
-                r = client.wait_for_endpoints() => {
-                    r?;
-                }
-            }
-
-            EngineConfig::Dynamic(client)
+            EngineConfig::Dynamic(endpoint)
         }
         #[cfg(feature = "mistralrs")]
         Output::MistralRs => {
@@ -379,7 +350,7 @@ pub async fn run(
             crate::input::http::run(runtime.clone(), flags.http_port, engine_config).await?;
         }
         Input::Text => {
-            crate::input::text::run(cancel_token.clone(), engine_config).await?;
+            crate::input::text::run(runtime.clone(), cancel_token.clone(), engine_config).await?;
         }
         Input::Endpoint(path) => {
             crate::input::endpoint::run(runtime.clone(), path, engine_config).await?;

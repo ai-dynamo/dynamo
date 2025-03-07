@@ -2,11 +2,14 @@
 
 ## Quickstart
 
-To start `metrics`, simply point it at the namespace/component/endpoint trio that
-you're interested in observing metrics from. This will scrape statistics from
-the services associated with that endpoint, do some postprocessing on them,
-and then publish an event with the postprocessed data.
+To start the `metrics` component, simply point it at the `namespace/component/endpoint` trio that
+you're interested in observing metrics from.
 
+This will:
+1. Scrape statistics from the services associated with that `endpoint`, do some postprocessing, and aggregate them.
+2. Listen for `KvHitRateEvent`s on `namespace/kv-hit-rate`, and aggregate them.
+
+For example:
 ```bash
 # For more details, try DYN_LOG=debug
 DYN_LOG=info cargo run --bin metrics -- --namespace dynamo --component backend --endpoint generate
@@ -16,24 +19,16 @@ DYN_LOG=info cargo run --bin metrics -- --namespace dynamo --component backend -
 # ...
 ```
 
-With no matching endpoints running, you should see warnings in the logs:
+With no matching endpoints running to collect stats from, you should see warnings in the logs:
 ```bash
 2025-02-26T18:45:06.474161Z  WARN metrics: No endpoints found matching subject dynamo_backend_720278f8.generate
 ```
 
-To see metrics published to a matching endpoint, you can use the
-[mock_worker example](src/bin/mock_worker.rs) in this directory to launch
-1 or more workers that publish LLM Metrics:
-```bash
-# Can run multiple workers in separate shells
-cargo run --bin mock_worker
-```
-
-After a matching endpoint gets started, you should see the warnings go away
-since the endpoint will automatically get discovered.
+After a matching endpoint gets started, you should see the warnings stop
+when the endpoint gets automatically discovered.
 
 When stats are found from target endpoints, the metrics component will
-aggregate and publish metrics as both events and as updates to a prometheus server:
+aggregate them and publish them to a prometheus server running on `localhost:9091/metrics` by default:
 ```
 2025-02-28T04:05:58.077901Z  INFO metrics: Aggregated metrics: ProcessedEndpoints { endpoints: [Endpoint { name: "worker-7587884888253033398", subject: "dynamo_backend_720278f8.generate-694d951a80e06bb6", data: ForwardPassMetrics { request_active_slots: 58, request_total_slots: 100, kv_active_blocks: 77, kv_total_blocks: 100 } }, Endpoint { name: "worker-7587884888253033401", subject: "dynamo_backend_720278f8.generate-694d951a80e06bb9", data: ForwardPassMetrics { request_active_slots: 71, request_total_slots: 100, kv_active_blocks: 29, kv_total_blocks: 100 } }], worker_ids: [7587884888253033398, 7587884888253033401], load_avg: 53.0, load_std: 24.0 }
 ```
@@ -51,3 +46,20 @@ curl localhost:9091/metrics
 # llm_kv_blocks_total{component="backend",endpoint="generate",worker_id="7587884888253033398"} 100
 # llm_kv_blocks_total{component="backend",endpoint="generate",worker_id="7587884888253033401"} 100
 ```
+
+## Mock Worker
+
+For convenience and debugging, there is a mock worker that registers a mock `StatsHandler`
+with the `endpoint` and publishes mock `KvHitRateEvent`s on `namespace/kv-hit-rate`.
+
+```bash
+# Can run multiple workers in separate shells to see aggregation as well.
+DYN_LOG=info cargo run --bin mock_worker
+```
+
+**NOTE**: When using the mock worker, the data from the stats handler and the
+events will be random and shouldn't be expected to correlate with each other.
+
+## Real Worker
+
+See the KV Routing example in `examples/python_rs/llm/vllm`.

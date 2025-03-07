@@ -2199,6 +2199,7 @@ dependencies = [
 name = "metrics"
 version = "0.1.0"
 dependencies = [
+ "async-nats",
  "axum 0.6.20",
  "clap",
  "dynamo-llm",

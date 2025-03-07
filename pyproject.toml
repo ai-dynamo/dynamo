@@ -105,7 +105,8 @@ asyncio_mode = "auto"
 markers = [
   "pre_merge: marks tests to run before merging",
   "nightly: marks tests to run nightly",
-  "weekly: marks tests to run weekly"
+  "weekly: marks tests to run weekly",
+  "gpu: marks tests to run on GPU"
 ]
 
 # Linting/formatting

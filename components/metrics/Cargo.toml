@@ -28,6 +28,7 @@ dynamo-llm = { path = "../../lib/llm" }
 # workspace - todo
 
 # crates.io
+async-nats = { version = "0.38", features = ["service"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
