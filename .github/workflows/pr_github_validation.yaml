@@ -54,7 +54,7 @@ jobs:
           set +e
           if [ "${{ github.event_name }}" == "pull_request" ]; then
             echo "Not caching"
-            echo "cache_to_location=''" >> $GITHUB_OUTPUT
+            echo "cache_to_location=" >> $GITHUB_OUTPUT
           else
             echo "USING ${{ env.IMAGE_TAG }}"
             echo "cache_to_location=--cache-to \"type=registry,ref=${{ env.IMAGE_TAG }},image-manifest=true,mode=max\"" >> $GITHUB_OUTPUT
