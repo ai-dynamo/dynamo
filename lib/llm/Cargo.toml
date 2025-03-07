@@ -37,6 +37,7 @@ sglang = ["dep:async_zmq"]
 sentencepiece = ["dep:sentencepiece"]
 vllm = ["dep:async_zmq"]
 trtllm = []
+cuda_kv = ["dep:cudarc", "dep:candle-core"]
 
 cuda = ["mistralrs/cuda", "llama-cpp-2/cuda"]
 metal = ["mistralrs/metal", "llama-cpp-2/metal"]
@@ -95,8 +96,10 @@ async-openai = "0.27.2"
 blake3 = "1"
 derive-getters = "0.5"
 regex = "1"
-cudarc = { version = "0.13", features = ["cuda-12060"] }
-candle-core = { version = "0.8.3", features = ["cuda" ] }
+
+# kv_cuda
+cudarc = { version = "0.13", features = ["cuda-12060"], optional = true }
+candle-core = { version = "0.8.3", features = ["cuda"], optional = true }
 
 # protocols
 chrono = { version = "0.4", default-features = false, features = [

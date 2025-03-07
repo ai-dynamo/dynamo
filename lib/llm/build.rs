@@ -13,7 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(not(feature = "trtllm"))]
+#[cfg(not(feature = "cuda_kv"))]
+fn main() {
+    println!("cargo:warning=Building CUDA KV");
+}
+
+#[cfg(feature = "cuda_kv")]
 fn main() {
     use std::{env, path::PathBuf, process::Command};
 
