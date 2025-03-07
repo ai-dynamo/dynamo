@@ -127,6 +127,7 @@ RUN cd /opt/nixl && \
 ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
 ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/:$PYTHONPATH
 ENV UCX_TLS=^cuda_ipc
+ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/x86_64-linux-gnu/plugins
 
 RUN ls -l /usr/local/nixl/
 RUN ls -l /usr/local/nixl/include/
