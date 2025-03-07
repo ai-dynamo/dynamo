@@ -13,8 +13,8 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-from bentoml import api
-from bentoml._internal.context import server_context
+from bentoml import api                                  # type: ignore
+from bentoml._internal.context import server_context     # type: ignore
 
 from dynemo.sdk.lib.decorators import async_onstart, dynemo_api, dynemo_endpoint
 from dynemo.sdk.lib.dependency import depends
