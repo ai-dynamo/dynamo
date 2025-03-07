@@ -43,6 +43,14 @@ pub use opt::{Input, Output};
 /// concatenations.
 const ENDPOINT_SCHEME: &str = "dyn://";
 
+/// How we identify a python string endpoint
+#[cfg(feature = "python")]
+const PYTHON_STR_SCHEME: &str = "pystr:";
+
+/// How we identify a python token endpoint
+#[cfg(feature = "python")]
+const PYTHON_TOK_SCHEME: &str = "pytok:";
+
 pub enum EngineConfig {
     /// An remote networked engine we don't know about yet
     /// We don't have the pre-processor yet so this is only text requests. Type will change later.
@@ -330,6 +338,36 @@ pub async fn run(
             let engine = trtllm::make_engine(model_path.display(), flags.tensor_parallel_size)?;
             EngineConfig::StaticCore {
                 service_name: card.service_name.clone(),
+                engine,
+                card: Box::new(card),
+            }
+        }
+        #[cfg(feature = "python")]
+        Output::PythonStr(path_str) => {
+            use dynemo_llm::engines::python;
+            let Some(model_name) = model_name else {
+                anyhow::bail!("Provide model service name as `--model-name <this>`");
+            };
+            let p = std::path::PathBuf::from(path_str);
+            let engine = python::make_string_engine(cancel_token.clone(), &p).await?;
+            EngineConfig::StaticFull {
+                service_name: model_name,
+                engine,
+            }
+        }
+        #[cfg(feature = "python")]
+        Output::PythonTok(path_str) => {
+            use dynemo_llm::engines::python;
+            let Some(card) = maybe_card.clone() else {
+                anyhow::bail!("Could not find tokenizer. Pass flag --model-path <path>");
+            };
+            let Some(model_name) = model_name else {
+                unreachable!("If we have a card we must have a model name");
+            };
+            let p = std::path::PathBuf::from(path_str);
+            let engine = python::make_token_engine(cancel_token.clone(), &p).await?;
+            EngineConfig::StaticCore {
+                service_name: model_name.clone(),
                 engine,
                 card: Box::new(card),
             }

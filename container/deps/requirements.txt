@@ -31,6 +31,4 @@ sentencepiece
 transformers
 tritonclient==2.53.0
 types-PyYAML
-# TODO: See whether TRT-LLM installs a different version of UCX. Need to revisit and track this dependency.
-ucx-py-cu12
 uvicorn

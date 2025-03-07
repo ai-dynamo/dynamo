@@ -29,3 +29,50 @@ services:
     ports:
       - 2379:2379
       - 2380:2380
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    volumes:
+      - ./metrics/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      # These provide the web console functionality
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    # TODO: Use more explicit networking setup when metrics is containerized
+    #ports:
+    #  - "9090:9090"
+    #networks:
+    #  - monitoring
+    network_mode: "host"
+    profiles: [metrics]
+
+  grafana:
+    image: grafana/grafana-enterprise:latest
+    container_name: grafana
+    volumes:
+      - ./metrics/grafana.json:/etc/grafana/provisioning/dashboards/llm-worker-dashboard.json
+      - ./metrics/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
+      - ./metrics/grafana-dashboard-providers.yml:/etc/grafana/provisioning/dashboards/dashboard-providers.yml
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+      # Default min interval is 5s, but can be configured lower
+      - GF_DASHBOARDS_MIN_REFRESH_INTERVAL=2s
+    restart: unless-stopped
+    # TODO: Use more explicit networking setup when metrics is containerized
+    #ports:
+    #  - "3000:3000"
+    #networks:
+    #  - monitoring
+    network_mode: "host"
+    profiles: [metrics]
+    depends_on:
+      - prometheus
+

@@ -27,6 +27,7 @@ sglang = ["dynemo-llm/sglang", "dep:netlink-packet-route", "dep:rtnetlink"]
 vllm = ["dynemo-llm/vllm", "dep:netlink-packet-route", "dep:rtnetlink"]
 llamacpp = ["dynemo-llm/llamacpp"]
 trtllm = ["dynemo-llm/trtllm"]
+python = ["dynemo-llm/python"]
 cuda = ["dynemo-llm/cuda"]
 metal = ["dynemo-llm/metal"]
 

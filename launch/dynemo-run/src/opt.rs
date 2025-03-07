@@ -91,6 +91,16 @@ pub enum Output {
     #[cfg(feature = "trtllm")]
     /// Run inference using trtllm
     TrtLLM,
+
+    /// Run inference using a user supplied python file that accepts and returns
+    /// strings. It does it's own pre-processing.
+    #[cfg(feature = "python")]
+    PythonStr(String),
+
+    /// Run inference using a user supplied python file that accepts and returns
+    /// tokens. We do the pre-processing.
+    #[cfg(feature = "python")]
+    PythonTok(String),
 }
 
 impl TryFrom<&str> for Output {
@@ -121,6 +131,22 @@ impl TryFrom<&str> for Output {
                 Ok(Output::Endpoint(path.to_string()))
             }
 
+            #[cfg(feature = "python")]
+            python_str_gen if python_str_gen.starts_with(crate::PYTHON_STR_SCHEME) => {
+                let path = python_str_gen
+                    .strip_prefix(crate::PYTHON_STR_SCHEME)
+                    .unwrap();
+                Ok(Output::PythonStr(path.to_string()))
+            }
+
+            #[cfg(feature = "python")]
+            python_tok_gen if python_tok_gen.starts_with(crate::PYTHON_TOK_SCHEME) => {
+                let path = python_tok_gen
+                    .strip_prefix(crate::PYTHON_TOK_SCHEME)
+                    .unwrap();
+                Ok(Output::PythonTok(path.to_string()))
+            }
+
             e => Err(anyhow::anyhow!("Invalid out= option '{e}'")),
         }
     }
@@ -148,6 +174,12 @@ impl fmt::Display for Output {
             Output::EchoCore => "echo_core",
 
             Output::Endpoint(path) => path,
+
+            #[cfg(feature = "python")]
+            Output::PythonStr(path) => path,
+
+            #[cfg(feature = "python")]
+            Output::PythonTok(path) => path,
         };
         write!(f, "{s}")
     }

@@ -14,15 +14,16 @@
 # limitations under the License.
 
 [package]
-name = "count"
+name = "metrics"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
 # local
-dynemo-runtime = { path = "../../../lib/runtime" }
-dynemo-llm = { path = "../../../lib/llm" }
+
+dynemo-runtime = { path = "../../lib/runtime" }
+dynemo-llm = { path = "../../lib/llm" }
 
 # workspace - todo
 
@@ -38,6 +39,7 @@ opentelemetry-prometheus = "0.13"
 prometheus = "0.13"
 rand = "0.8"
 axum = "0.6"
+futures = "0.3"
 
 [dev-dependencies]
 reqwest = { version = "0.11", features = ["blocking"] }
