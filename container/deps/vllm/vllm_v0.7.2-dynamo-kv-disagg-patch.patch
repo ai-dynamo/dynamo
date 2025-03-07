@@ -271,7 +271,7 @@ index c5b3b04f..c72001f7 100644
          self.block_tables: Dict[SeqId, BlockTable] = {}
 diff --git a/vllm/core/event_manager.py b/vllm/core/event_manager.py
 new file mode 100644
-index 00000000..8699ca06
+index 00000000..d3706700
 --- /dev/null
 +++ b/vllm/core/event_manager.py
 @@ -0,0 +1,102 @@
@@ -287,7 +287,7 @@ index 00000000..8699ca06
 +logger = logging.getLogger(__name__)
 +
 +
-+class DynemoResult:
++class DynamoResult:
 +    OK = 0
 +    ERR = 1
 +
@@ -300,12 +300,12 @@ index 00000000..8699ca06
 +
 +        try:
 +            self.lib = ctypes.CDLL(lib_path)
-+            self.lib.dynemo_llm_init.argtypes = [c_char_p, c_char_p, c_int64]
-+            self.lib.dynemo_llm_init.restype = c_uint32
++            self.lib.dynamo_llm_init.argtypes = [c_char_p, c_char_p, c_int64]
++            self.lib.dynamo_llm_init.restype = c_uint32
 +
-+            result = self.lib.dynemo_llm_init(namespace.encode(),
++            result = self.lib.dynamo_llm_init(namespace.encode(),
 +                                              component.encode(), worker_id)
-+            if result == DynemoResult.OK:
++            if result == DynamoResult.OK:
 +                logger.info(
 +                    "KVCacheEventManager initialized successfully. Ready to publish KV Cache Events"
 +                )
@@ -316,7 +316,7 @@ index 00000000..8699ca06
 +            print(f"Failed to load {lib_path}")
 +            raise e
 +
-+        self.lib.dynemo_kv_event_publish_stored.argtypes = [
++        self.lib.dynamo_kv_event_publish_stored.argtypes = [
 +            ctypes.c_uint64,  # event_id
 +            ctypes.POINTER(ctypes.c_uint32),  # token_ids
 +            ctypes.POINTER(ctypes.c_size_t),  # num_block_tokens
@@ -325,14 +325,14 @@ index 00000000..8699ca06
 +            ctypes.POINTER(ctypes.c_uint64),  # parent_hash
 +            ctypes.c_uint64,  # lora_id
 +        ]
-+        self.lib.dynemo_kv_event_publish_stored.restype = ctypes.c_uint32  # dynemo_llm_result_t
++        self.lib.dynamo_kv_event_publish_stored.restype = ctypes.c_uint32  # dynamo_llm_result_t
 +
-+        self.lib.dynemo_kv_event_publish_removed.argtypes = [
++        self.lib.dynamo_kv_event_publish_removed.argtypes = [
 +            ctypes.c_uint64,  # event_id
 +            ctypes.POINTER(ctypes.c_uint64),  # block_ids
 +            ctypes.c_size_t,  # num_blocks
 +        ]
-+        self.lib.dynemo_kv_event_publish_removed.restype = ctypes.c_uint32  # dynemo_llm_result_t
++        self.lib.dynamo_kv_event_publish_removed.restype = ctypes.c_uint32  # dynamo_llm_result_t
 +
 +        self.event_id_counter = 0
 +
@@ -346,7 +346,7 @@ index 00000000..8699ca06
 +                       if parent is not None else None)
 +
 +        # Publish the event
-+        result = self.lib.dynemo_kv_event_publish_stored(
++        result = self.lib.dynamo_kv_event_publish_stored(
 +            self.event_id_counter,  # uint64_t event_id
 +            token_ids_arr,  # const uint32_t *token_ids
 +            num_block_tokens,  # const uintptr_t *num_block_tokens
@@ -356,7 +356,7 @@ index 00000000..8699ca06
 +            0,  # uint64_t lora_id
 +        )
 +
-+        if result == DynemoResult.OK:
++        if result == DynamoResult.OK:
 +            logger.debug(f"Store - Published KV Event: {block.content_hash}")
 +        else:
 +            logger.debug(
@@ -365,13 +365,13 @@ index 00000000..8699ca06
 +        self.event_id_counter += 1
 +
 +    def enqueue_removed_event(self, block_hash: PrefixHash):
-+        result = self.lib.dynemo_kv_event_publish_removed(
++        result = self.lib.dynamo_kv_event_publish_removed(
 +            self.event_id_counter,
 +            (ctypes.c_uint64 * 1)(block_hash),
 +            1,
 +        )
 +
-+        if result == DynemoResult.OK:
++        if result == DynamoResult.OK:
 +            logger.debug(f"Remove - Published KV Event: {block_hash}")
 +        else:
 +            logger.debug(f"Remove - Failed to Publish KV Event: {block_hash}")
@@ -1173,11 +1173,11 @@ index 00000000..523d58d4
 +            else:
 +                self._transfers[req_id] = running_reqs
 +        return done_req_ids
-diff --git a/vllm/distributed/kv_transfer/kv_connector/dynemo_connector.py b/vllm/distributed/kv_transfer/kv_connector/dynemo_connector.py
+diff --git a/vllm/distributed/kv_transfer/kv_connector/dynamo_connector.py b/vllm/distributed/kv_transfer/kv_connector/dynamo_connector.py
 new file mode 100644
-index 00000000..2319867a
+index 00000000..7b3344f8
 --- /dev/null
-+++ b/vllm/distributed/kv_transfer/kv_connector/dynemo_connector.py
++++ b/vllm/distributed/kv_transfer/kv_connector/dynamo_connector.py
 @@ -0,0 +1,350 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""
@@ -1209,7 +1209,7 @@ index 00000000..2319867a
 +logger = init_logger(__name__)
 +
 +
-+class DynemoConnector(KVConnectorBase):
++class DynamoConnector(KVConnectorBase):
 +
 +    def __init__(
 +        self,
@@ -1223,16 +1223,16 @@ index 00000000..2319867a
 +        self.tp_size = config.parallel_config.tensor_parallel_size
 +        self.rank = rank
 +
-+        if self.config.kv_connector != "DynemoNcclConnector":
-+            raise NotImplementedError("Only DynemoNcclConnector is supported by the DynemoConnector class")
++        if self.config.kv_connector != "DynamoNcclConnector":
++            raise NotImplementedError("Only DynamoNcclConnector is supported by the DynamoConnector class")
 +
 +        from vllm.distributed.kv_transfer.kv_pipe.pynccl_pipe import (
 +            PyNcclPipe)
-+        from vllm.distributed.kv_transfer.kv_pipe.dynemo_nccl_pipe import (
-+            DynemoNcclDataPlane)
++        from vllm.distributed.kv_transfer.kv_pipe.dynamo_nccl_pipe import (
++            DynamoNcclDataPlane)
 +        
 +        logger.info(
-+            "Initializing DynemoNcclConnector under kv_transfer_config %s",
++            "Initializing DynamoNcclConnector under kv_transfer_config %s",
 +            self.config)
 +
 +        self.lookup_buffer_size = self.config.kv_buffer_size
@@ -1264,7 +1264,7 @@ index 00000000..2319867a
 +            port_offset=port_offset_base,
 +        )
 +
-+        self.data_plane = DynemoNcclDataPlane(
++        self.data_plane = DynamoNcclDataPlane(
 +            data_pipe=self.data_pipe,
 +            port=self._get_data_plane_port(self.global_kv_rank),
 +        )
@@ -1530,7 +1530,7 @@ index 00000000..2319867a
 +        self.config.kv_consumers_pipeline_parallel_size = kv_config_enhanced["kv_consumers_pipeline_parallel_size"]
 +        self.config.kv_producers_parallel_size = kv_config_enhanced["kv_producers_parallel_size"]
 diff --git a/vllm/distributed/kv_transfer/kv_connector/factory.py b/vllm/distributed/kv_transfer/kv_connector/factory.py
-index fe480533..f4775663 100644
+index fe480533..c82fda80 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/factory.py
 +++ b/vllm/distributed/kv_transfer/kv_connector/factory.py
 @@ -27,13 +27,13 @@ class KVConnectorFactory:
@@ -1555,9 +1555,9 @@ index fe480533..f4775663 100644
      "SimpleConnector")
 +
 +KVConnectorFactory.register_connector(
-+    "DynemoNcclConnector",
-+    "vllm.distributed.kv_transfer.kv_connector.dynemo_connector",
-+    "DynemoConnector")
++    "DynamoNcclConnector",
++    "vllm.distributed.kv_transfer.kv_connector.dynamo_connector",
++    "DynamoConnector")
 diff --git a/vllm/distributed/kv_transfer/kv_connector/simple_connector.py b/vllm/distributed/kv_transfer/kv_connector/simple_connector.py
 index 2033e976..e0537903 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/simple_connector.py
