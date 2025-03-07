@@ -27,6 +27,7 @@ with bentoml.importing():
     from common.protocol import MyRequestOutput, vLLMGenerateRequest
     from vllm.engine.multiprocessing.client import MQLLMEngineClient
 
+from dynemo.llm import KvMetricsPublisher
 from dynemo.sdk import (
     async_onstart,
     dynemo_context,
@@ -34,8 +35,6 @@ from dynemo.sdk import (
     server_context,
     service,
 )
-
-from dynemo.llm import KvMetricsPublisher
 
 lease_id = None
 
@@ -95,7 +94,7 @@ class VllmEngine(BaseVllmEngine):
         # rust HTTP requires Delta streaming
         sampling_params.output_kind = RequestOutputKind.DELTA
 
-        async for response in self.engine_client.generate(           # type: ignore
+        async for response in self.engine_client.generate(  # type: ignore
             request.engine_prompt, sampling_params, request.request_id
         ):
             # MyRequestOutput takes care of serializing the response as

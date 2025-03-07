@@ -109,7 +109,7 @@ class Processor(ProcessMixIn):
             worker_id = worker
             break
         runtime = dynemo_context["runtime"]
-        comp_ns, comp_name = VllmEngine.dynemo_address()    # type: ignore
+        comp_ns, comp_name = VllmEngine.dynemo_address()  # type: ignore
         worker_client = (
             await runtime.namespace(comp_ns)
             .component(comp_name)
