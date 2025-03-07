@@ -34,8 +34,9 @@ def create_bentoml_cli() -> click.Command:
     from bentoml_cli.models import model_command
     from bentoml_cli.secret import secret_command
     from bentoml_cli.utils import BentoMLCommandGroup, get_entry_points
-    from compoundai.cli.serve import serve_command
-    from compoundai.cli.start import start_command
+
+    from dynemo.sdk.cli.serve import serve_command
+    from dynemo.sdk.cli.start import start_command
 
     server_context.service_type = "cli"
 

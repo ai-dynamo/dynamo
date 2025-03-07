@@ -100,10 +100,14 @@ COPY lib/bindings /workspace/lib/bindings
 RUN cd lib/bindings/c && \
 cargo build --release --locked && cargo doc --no-deps
 
+COPY deploy/dynemo/sdk /workspace/deploy/dynemo/sdk
 # Build dynemo wheel
 RUN source /opt/dynemo/venv/bin/activate && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/dynemo*cp312*.whl
+    uv pip install /workspace/dist/dynemo*cp312*.whl && \
+    cd /workspace/deploy/dynemo/sdk && \
+    uv build --wheel --out-dir /workspace/dist && \
+    uv pip install /workspace/dist/dynemo_sdk*any.whl
 
 # Package the bindings
 RUN mkdir -p /opt/dynemo/bindings/wheels && \

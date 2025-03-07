@@ -95,7 +95,11 @@ xfail_strict = true
 log_cli_level = "INFO"
 filterwarnings = [
   "error",
+  "ignore:.*pkg_resources.*:DeprecationWarning",
+  "ignore:.*multipart.*:PendingDeprecationWarning"
 ]
+
+
 # NOTE: Can also manually mark tests with @pytest.mark.asyncio
 asyncio_mode = "auto"
 markers = [
@@ -134,5 +138,10 @@ check_untyped_defs = true
 
 [[tool.mypy.overrides]]
 # Skip mypy analysis on internal dependencies of vllm
-module = ["vllm.*"]
+module = ["vllm.*", "bentoml.*", "fs.*", "_bentoml_sdk.*"]
 follow_imports = "skip"
+ignore_missing_imports = true
+
+# declare namespace packages
+[tool.setuptools]
+namespace-packages = ["dynemo", "dynemo.sdk"]

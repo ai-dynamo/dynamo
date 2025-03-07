@@ -238,7 +238,7 @@ def build_start_command() -> click.Group:
                 )
         else:
             # for >=1.2 bentos
-            from compoundai.cli.serving import serve_http
+            from dynemo.sdk.cli.serving import serve_http
 
             print(f"Starting service {service_name}")
             svc.inject_config()

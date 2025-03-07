@@ -133,7 +133,7 @@ func TestGenerateCompoundAINIMDeployments(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "Test GenerateCompoundAINIMDeployments nova dependency",
+			name: "Test GenerateCompoundAINIMDeployments dynemo dependency",
 			args: args{
 				parentCompoundAIDeployment: &v1alpha1.CompoundAIDeployment{
 					ObjectMeta: metav1.ObjectMeta{
