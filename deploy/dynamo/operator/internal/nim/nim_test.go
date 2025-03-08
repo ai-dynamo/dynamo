@@ -29,7 +29,7 @@ import (
 func TestGenerateDynamoNIMDeployments(t *testing.T) {
 	type args struct {
 		parentDynamoDeployment *v1alpha1.DynamoDeployment
-		config                     *DynamoNIMConfig
+		config                 *DynamoNIMConfig
 	}
 	tests := []struct {
 		name    string
@@ -91,8 +91,8 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						DynamoNim: "dynamonim",
-						ServiceName:   "service1",
+						DynamoNim:   "dynamonim",
+						ServiceName: "service1",
 						Resources: &compounaiCommon.Resources{
 							Requests: &compounaiCommon.ResourceItem{
 								CPU:    "1",
@@ -125,8 +125,8 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						ServiceName:   "service2",
-						DynamoNim: "dynamonim",
+						ServiceName: "service2",
+						DynamoNim:   "dynamonim",
 					},
 				},
 			},
@@ -188,8 +188,8 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						DynamoNim: "dynamonim",
-						ServiceName:   "service1",
+						DynamoNim:   "dynamonim",
+						ServiceName: "service1",
 						Resources: &compounaiCommon.Resources{
 							Requests: &compounaiCommon.ResourceItem{
 								CPU:    "1",
@@ -222,8 +222,8 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						DynamoNim: "dynamonim",
-						ServiceName:   "service2",
+						DynamoNim:   "dynamonim",
+						ServiceName: "service2",
 					},
 				},
 			},

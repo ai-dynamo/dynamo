@@ -21,22 +21,22 @@ import "time"
 
 type DynamoNimVersionSchema struct {
 	ResourceSchema
-	DynamoNimUid          string                         `json:"bento_repository_uid"`
-	Creator                 *UserSchema                    `json:"creator"`
-	Version                 string                         `json:"version"`
-	Description             string                         `json:"description"`
-	ImageBuildStatus        ImageBuildStatus               `json:"image_build_status"`
+	DynamoNimUid            string                       `json:"bento_repository_uid"`
+	Creator                 *UserSchema                  `json:"creator"`
+	Version                 string                       `json:"version"`
+	Description             string                       `json:"description"`
+	ImageBuildStatus        ImageBuildStatus             `json:"image_build_status"`
 	UploadStatus            DynamoNimVersionUploadStatus `json:"upload_status"`
-	UploadStartedAt         *time.Time                     `json:"upload_started_at"`
-	UploadFinishedAt        *time.Time                     `json:"upload_finished_at"`
-	UploadFinishedReason    string                         `json:"upload_finished_reason"`
-	PresignedUploadUrl      string                         `json:"presigned_upload_url"`
-	PresignedDownloadUrl    string                         `json:"presigned_download_url"`
-	PresignedUrlsDeprecated bool                           `json:"presigned_urls_deprecated"`
-	TransmissionStrategy    TransmissionStrategy           `json:"transmission_strategy"`
-	UploadId                string                         `json:"upload_id"`
+	UploadStartedAt         *time.Time                   `json:"upload_started_at"`
+	UploadFinishedAt        *time.Time                   `json:"upload_finished_at"`
+	UploadFinishedReason    string                       `json:"upload_finished_reason"`
+	PresignedUploadUrl      string                       `json:"presigned_upload_url"`
+	PresignedDownloadUrl    string                       `json:"presigned_download_url"`
+	PresignedUrlsDeprecated bool                         `json:"presigned_urls_deprecated"`
+	TransmissionStrategy    TransmissionStrategy         `json:"transmission_strategy"`
+	UploadId                string                       `json:"upload_id"`
 	Manifest                *DynamoNimManifestSchema     `json:"manifest"`
-	BuildAt                 time.Time                      `json:"build_at"`
+	BuildAt                 time.Time                    `json:"build_at"`
 }
 
 type DynamoNimVersionFullSchema struct {

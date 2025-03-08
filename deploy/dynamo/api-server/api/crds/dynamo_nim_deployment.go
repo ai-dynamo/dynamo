@@ -35,9 +35,9 @@ type DynamoNimVersionDeploymentIngressTLSSpec struct {
 }
 
 type DynamoNimVersionDeploymentIngressSpec struct {
-	Enabled     bool                                        `json:"enabled,omitempty"`
-	Annotations map[string]string                           `json:"annotations,omitempty"`
-	Labels      map[string]string                           `json:"labels,omitempty"`
+	Enabled     bool                                      `json:"enabled,omitempty"`
+	Annotations map[string]string                         `json:"annotations,omitempty"`
+	Labels      map[string]string                         `json:"labels,omitempty"`
 	TLS         *DynamoNimVersionDeploymentIngressTLSSpec `json:"tls,omitempty"`
 }
 
@@ -79,5 +79,5 @@ type DynamoNimDeploymentData struct {
 
 type DynamoNimDeploymentConfigurationV1Alpha1 struct {
 	Data    DynamoNimDeploymentData `json:"data"`
-	Version string                    `json:"version"`
+	Version string                  `json:"version"`
 }

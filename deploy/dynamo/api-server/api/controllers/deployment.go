@@ -281,12 +281,12 @@ func (c *deploymentController) updateDeploymentEntities(ctx context.Context, sch
 
 		dynamoNimTag := fmt.Sprintf("%s:%s", createDeploymentTargetSchema.DynamoNim, createDeploymentTargetSchema.Version)
 		deploymentTarget, err := services.DeploymentTargetService.Create(ctx, services.CreateDeploymentTargetOption{
-			CreatorId:             ownership.UserId,
-			DeploymentId:          deployment.ID,
-			DeploymentRevisionId:  deploymentRevision.ID,
-			DynamoNimVersionId:  dynamoNimVersions[dynamoNimTag].Uid,
-			DynamoNimVersionTag: dynamoNimTag,
-			Config:                createDeploymentTargetSchema.Config,
+			CreatorId:            ownership.UserId,
+			DeploymentId:         deployment.ID,
+			DeploymentRevisionId: deploymentRevision.ID,
+			DynamoNimVersionId:   dynamoNimVersions[dynamoNimTag].Uid,
+			DynamoNimVersionTag:  dynamoNimTag,
+			Config:               createDeploymentTargetSchema.Config,
 		})
 		if err != nil {
 			return nil, err
@@ -929,7 +929,7 @@ func (c *deploymentController) buildDeploymentTargetConfiguration(schema *schema
 	// Convert service configuration into CreateDeploymentTargetSchema
 	createDeploymentTarget := &schemas.CreateDeploymentTargetSchema{
 		DynamoNim: dynamoNim,
-		Version:     dynamoNimVersion,
+		Version:   dynamoNimVersion,
 		Config: &schemas.DeploymentTargetConfig{
 			HPAConf: &schemas.DeploymentTargetHPAConf{
 				MinReplicas: &hpaMinReplica,
