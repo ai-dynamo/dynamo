@@ -79,11 +79,11 @@ type ServiceConfig struct {
 	Config       Config              `yaml:"config"`
 }
 
-func RetrieveDynamoNimDownloadURL(ctx context.Context, compoundAIDeployment *v1alpha1.DynamoDeployment, secretGetter SecretGetter, recorder EventRecorder) (*string, *string, error) {
-	compoundAINimDownloadURL := ""
-	compoundAINimApiToken := ""
-	var compoundAINim *schemasv1.BentoFullSchema
-	compoundAINimRepositoryName, _, compoundAINimVersion := xstrings.Partition(compoundAIDeployment.Spec.DynamoNim, ":")
+func RetrieveDynamoNimDownloadURL(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDeployment, secretGetter SecretGetter, recorder EventRecorder) (*string, *string, error) {
+	dynamoNimDownloadURL := ""
+	dynamoNimApiToken := ""
+	var dynamoNim *schemasv1.BentoFullSchema
+	dynamoNimRepositoryName, _, dynamoNimVersion := xstrings.Partition(dynamoDeployment.Spec.DynamoNim, ":")
 
 	var err error
 	var yataiClient_ **yataiclient.YataiClient
@@ -103,33 +103,33 @@ func RetrieveDynamoNimDownloadURL(ctx context.Context, compoundAIDeployment *v1a
 	yataiClient := *yataiClient_
 	yataiConf := *yataiConf_
 
-	recorder.Eventf(compoundAIDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting compoundAINim %s from yatai service", compoundAIDeployment.Spec.DynamoNim)
-	compoundAINim, err = yataiClient.GetBento(ctx, compoundAINimRepositoryName, compoundAINimVersion)
+	recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting dynamoNim %s from yatai service", dynamoDeployment.Spec.DynamoNim)
+	dynamoNim, err = yataiClient.GetBento(ctx, dynamoNimRepositoryName, dynamoNimVersion)
 	if err != nil {
-		err = errors.Wrap(err, "get compoundAINim")
+		err = errors.Wrap(err, "get dynamoNim")
 		return nil, nil, err
 	}
-	recorder.Eventf(compoundAIDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got compoundAINim %s from yatai service", compoundAIDeployment.Spec.DynamoNim)
+	recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got dynamoNim %s from yatai service", dynamoDeployment.Spec.DynamoNim)
 
-	if compoundAINim.TransmissionStrategy != nil && *compoundAINim.TransmissionStrategy == modelschemas.TransmissionStrategyPresignedURL {
-		var compoundAINim_ *schemasv1.BentoSchema
-		recorder.Eventf(compoundAIDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for compoundAINim %s from yatai service", compoundAIDeployment.Spec.DynamoNim)
-		compoundAINim_, err = yataiClient.PresignBentoDownloadURL(ctx, compoundAINimRepositoryName, compoundAINimVersion)
+	if dynamoNim.TransmissionStrategy != nil && *dynamoNim.TransmissionStrategy == modelschemas.TransmissionStrategyPresignedURL {
+		var dynamoNim_ *schemasv1.BentoSchema
+		recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for dynamoNim %s from yatai service", dynamoDeployment.Spec.DynamoNim)
+		dynamoNim_, err = yataiClient.PresignBentoDownloadURL(ctx, dynamoNimRepositoryName, dynamoNimVersion)
 		if err != nil {
-			err = errors.Wrap(err, "presign compoundAINim download url")
+			err = errors.Wrap(err, "presign dynamoNim download url")
 			return nil, nil, err
 		}
-		recorder.Eventf(compoundAIDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for compoundAINim %s from yatai service", compoundAIDeployment.Spec.DynamoNim)
-		compoundAINimDownloadURL = compoundAINim_.PresignedDownloadUrl
+		recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for dynamoNim %s from yatai service", dynamoDeployment.Spec.DynamoNim)
+		dynamoNimDownloadURL = dynamoNim_.PresignedDownloadUrl
 	} else {
-		compoundAINimDownloadURL = fmt.Sprintf("%s/api/v1/bento_repositories/%s/bentos/%s/download", yataiConf.Endpoint, compoundAINimRepositoryName, compoundAINimVersion)
-		compoundAINimApiToken = fmt.Sprintf("%s:%s:$%s", commonconsts.YataiImageBuilderComponentName, yataiConf.ClusterName, commonconsts.EnvYataiApiToken)
+		dynamoNimDownloadURL = fmt.Sprintf("%s/api/v1/bento_repositories/%s/bentos/%s/download", yataiConf.Endpoint, dynamoNimRepositoryName, dynamoNimVersion)
+		dynamoNimApiToken = fmt.Sprintf("%s:%s:$%s", commonconsts.YataiImageBuilderComponentName, yataiConf.ClusterName, commonconsts.EnvYataiApiToken)
 	}
 
-	return &compoundAINimDownloadURL, &compoundAINimApiToken, nil
+	return &dynamoNimDownloadURL, &dynamoNimApiToken, nil
 }
 
-// ServicesConfig represents the top-level YAML structure of a compoundAINim yaml file stored in a compoundAINim tar file
+// ServicesConfig represents the top-level YAML structure of a dynamoNim yaml file stored in a dynamoNim tar file
 type DynamoNIMConfig struct {
 	Services []ServiceConfig `yaml:"services"`
 }
@@ -173,13 +173,13 @@ func RetrieveDynamoNIMConfigurationFile(ctx context.Context, url string, yataiAp
 	return yamlContent, nil
 }
 
-func GetYataiClientWithAuth(ctx context.Context, compoundAINimRequest *v1alpha1.DynamoNimRequest, secretGetter SecretGetter) (**yataiclient.YataiClient, **commonconfig.YataiConfig, error) {
-	orgId, ok := compoundAINimRequest.Labels[commonconsts.NgcOrganizationHeaderName]
+func GetYataiClientWithAuth(ctx context.Context, dynamoNimRequest *v1alpha1.DynamoNimRequest, secretGetter SecretGetter) (**yataiclient.YataiClient, **commonconfig.YataiConfig, error) {
+	orgId, ok := dynamoNimRequest.Labels[commonconsts.NgcOrganizationHeaderName]
 	if !ok {
 		orgId = commonconsts.DefaultOrgId
 	}
 
-	userId, ok := compoundAINimRequest.Labels[commonconsts.NgcUserHeaderName]
+	userId, ok := dynamoNimRequest.Labels[commonconsts.NgcUserHeaderName]
 	if !ok {
 		userId = commonconsts.DefaultUserId
 	}
@@ -230,17 +230,17 @@ func GetYataiClient(ctx context.Context, secretGetter SecretGetter) (yataiClient
 func ParseDynamoNIMConfig(ctx context.Context, yamlContent *bytes.Buffer) (*DynamoNIMConfig, error) {
 	var config DynamoNIMConfig
 	logger := log.FromContext(ctx)
-	logger.Info("trying to parse compoundAINim config", "yamlContent", yamlContent.String())
+	logger.Info("trying to parse dynamoNim config", "yamlContent", yamlContent.String())
 	err := yaml.Unmarshal(yamlContent.Bytes(), &config)
 	return &config, err
 }
 
-func GetDynamoNIMConfig(ctx context.Context, compoundAIDeployment *v1alpha1.DynamoDeployment, secretGetter SecretGetter, recorder EventRecorder) (*DynamoNIMConfig, error) {
-	compoundAINimDownloadURL, compoundAINimApiToken, err := RetrieveDynamoNimDownloadURL(ctx, compoundAIDeployment, secretGetter, recorder)
+func GetDynamoNIMConfig(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDeployment, secretGetter SecretGetter, recorder EventRecorder) (*DynamoNIMConfig, error) {
+	dynamoNimDownloadURL, dynamoNimApiToken, err := RetrieveDynamoNimDownloadURL(ctx, dynamoDeployment, secretGetter, recorder)
 	if err != nil {
 		return nil, err
 	}
-	yamlContent, err := RetrieveDynamoNIMConfigurationFile(ctx, *compoundAINimDownloadURL, *compoundAINimApiToken)
+	yamlContent, err := RetrieveDynamoNIMConfigurationFile(ctx, *dynamoNimDownloadURL, *dynamoNimApiToken)
 	if err != nil {
 		return nil, err
 	}

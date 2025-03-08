@@ -13,12 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoDeployment
+# permissions for end users to view dynamonims.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
 metadata:
   labels:
-    app.kubernetes.io/name: compoundai-kubernetes-operator
+    app.kubernetes.io/name: dynamo-kubernetes-operator
     app.kubernetes.io/managed-by: kustomize
-  name: compoundaideployment-sample
-spec:
-  compoundAINim: frontend:2c4romhs6s33e4w7
+  name: dynamonim-viewer-role
+rules:
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamonims
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamonims/status
+  verbs:
+  - get

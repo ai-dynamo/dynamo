@@ -20,8 +20,8 @@ metadata:
     app.kubernetes.io/name: clusterrole
     app.kubernetes.io/instance: proxy-role
     app.kubernetes.io/component: kube-rbac-proxy
-    app.kubernetes.io/created-by: compoundai-kubernetes-operator
-    app.kubernetes.io/part-of: compoundai-kubernetes-operator
+    app.kubernetes.io/created-by: dynamo-kubernetes-operator
+    app.kubernetes.io/part-of: dynamo-kubernetes-operator
     app.kubernetes.io/managed-by: kustomize
   name: proxy-role
 rules:

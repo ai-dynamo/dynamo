@@ -1,7 +1,7 @@
 ## CAI Workflow
 
 The CAI is in charge of handling deployments and their metadata. Currently, any API calls
-regarding a Compound NIM are proxied to and handled by NDS v1.
+regarding a Dynamo NIM are proxied to and handled by NDS v1.
 
 
 ### Deployments

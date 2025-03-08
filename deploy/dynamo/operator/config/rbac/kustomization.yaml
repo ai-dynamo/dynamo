@@ -35,10 +35,10 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the Project itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
-# - compoundainim_editor_role.yaml
-# - compoundainim_viewer_role.yaml
-# - compoundainimrequest_editor_role.yaml
-# - compoundainimrequest_viewer_role.yaml
-# - compoundainimdeployment_editor_role.yaml
-# - compoundainimdeployment_viewer_role.yaml
+# - dynamonim_editor_role.yaml
+# - dynamonim_viewer_role.yaml
+# - dynamonimrequest_editor_role.yaml
+# - dynamonimrequest_viewer_role.yaml
+# - dynamonimdeployment_editor_role.yaml
+# - dynamonimdeployment_viewer_role.yaml
 

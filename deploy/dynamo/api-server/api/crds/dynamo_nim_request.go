@@ -23,8 +23,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-type CompoundNimRequestData struct {
-	CompoundNimVersionTag string `json:"bentoTag"`
+type DynamoNimRequestData struct {
+	DynamoNimVersionTag string `json:"bentoTag"`
 	DownloadURL           string `json:"downloadUrl,omitempty"`
 
 	ImageBuildTimeout *time.Duration `json:"imageBuildTimeout,omitempty"`
@@ -39,7 +39,7 @@ type CompoundNimRequestData struct {
 	DownloaderContainerEnvFrom []corev1.EnvFromSource `json:"downloaderContainerEnvFrom,omitempty"`
 }
 
-type CompoundNimRequestConfigurationV1Alpha1 struct {
-	Data    CompoundNimRequestData `json:"data,omitempty"`
+type DynamoNimRequestConfigurationV1Alpha1 struct {
+	Data    DynamoNimRequestData `json:"data,omitempty"`
 	Version string                 `json:"version"`
 }

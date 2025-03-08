@@ -220,15 +220,15 @@ func (c *deploymentController) Update(ctx *gin.Context) {
 }
 
 func (c *deploymentController) updateDeploymentEntities(ctx context.Context, schema schemas.UpdateDeploymentSchema, deployment *models.Deployment, ownership *schemas.OwnershipSchema) (*models.Deployment, error) {
-	compoundNimVersions := map[string]*schemas.CompoundNimVersionFullSchema{}
+	dynamoNimVersions := map[string]*schemas.DynamoNimVersionFullSchema{}
 	for _, target := range schema.Targets {
-		compoundNimVersionSchema, err := services.DatastoreService.GetCompoundNimVersion(ctx, target.CompoundNim, target.Version)
+		dynamoNimVersionSchema, err := services.DatastoreService.GetDynamoNimVersion(ctx, target.DynamoNim, target.Version)
 		if err != nil {
 			return nil, err
 		}
-		compoundNimVersions[fmt.Sprintf("%s:%s", target.CompoundNim, target.Version)] = compoundNimVersionSchema
+		dynamoNimVersions[fmt.Sprintf("%s:%s", target.DynamoNim, target.Version)] = dynamoNimVersionSchema
 	}
-	log.Info().Msgf("Found %d Compound NIM versions", len(compoundNimVersions))
+	log.Info().Msgf("Found %d Dynamo NIM versions", len(dynamoNimVersions))
 
 	// Mark previous revisions as inactive...
 	status_ := schemas.DeploymentRevisionStatusActive
@@ -279,13 +279,13 @@ func (c *deploymentController) updateDeploymentEntities(ctx context.Context, sch
 		createDeploymentTargetSchema.Config.KubeResourceVersion = ""
 		createDeploymentTargetSchema.Config.KubeResourceUid = ""
 
-		compoundNimTag := fmt.Sprintf("%s:%s", createDeploymentTargetSchema.CompoundNim, createDeploymentTargetSchema.Version)
+		dynamoNimTag := fmt.Sprintf("%s:%s", createDeploymentTargetSchema.DynamoNim, createDeploymentTargetSchema.Version)
 		deploymentTarget, err := services.DeploymentTargetService.Create(ctx, services.CreateDeploymentTargetOption{
 			CreatorId:             ownership.UserId,
 			DeploymentId:          deployment.ID,
 			DeploymentRevisionId:  deploymentRevision.ID,
-			CompoundNimVersionId:  compoundNimVersions[compoundNimTag].Uid,
-			CompoundNimVersionTag: compoundNimTag,
+			DynamoNimVersionId:  dynamoNimVersions[dynamoNimTag].Uid,
+			DynamoNimVersionTag: dynamoNimTag,
 			Config:                createDeploymentTargetSchema.Config,
 		})
 		if err != nil {
@@ -322,9 +322,9 @@ func (c *deploymentController) updateDeploymentInformation(ctx context.Context, 
 		return nil, err
 	}
 
-	targetSchemaCompoundVersionNims := map[string]*schemas.CreateDeploymentTargetSchema{}
+	targetSchemaDynamoVersionNims := map[string]*schemas.CreateDeploymentTargetSchema{}
 	for _, targetSchema := range schema.Targets {
-		targetSchemaCompoundVersionNims[fmt.Sprintf("%s:%s", targetSchema.CompoundNim, targetSchema.Version)] = targetSchema
+		targetSchemaDynamoVersionNims[fmt.Sprintf("%s:%s", targetSchema.DynamoNim, targetSchema.Version)] = targetSchema
 	}
 
 	var activeDeploymentTargets = make([]*models.DeploymentTarget, 0)
@@ -342,7 +342,7 @@ func (c *deploymentController) updateDeploymentInformation(ctx context.Context, 
 	}
 
 	for _, activeDeploymentTarget := range activeDeploymentTargets {
-		if createDeploymentTargetSchema, ok := targetSchemaCompoundVersionNims[activeDeploymentTarget.CompoundNimVersionTag]; ok {
+		if createDeploymentTargetSchema, ok := targetSchemaDynamoVersionNims[activeDeploymentTarget.DynamoNimVersionTag]; ok {
 			config := activeDeploymentTarget.Config
 			config.KubeResourceUid = createDeploymentTargetSchema.Config.KubeResourceUid
 			config.KubeResourceVersion = createDeploymentTargetSchema.Config.KubeResourceVersion
@@ -536,11 +536,11 @@ func (c *deploymentController) ListClusterDeployments(ctx *gin.Context) {
 	ctx.JSON(200, deploymentListSchema)
 }
 
-func (c *deploymentController) ListCompoundNimDeployments(ctx *gin.Context) {
+func (c *deploymentController) ListDynamoNimDeployments(ctx *gin.Context) {
 	var schema schemas.ListQuerySchema
-	var getCompoundNimSchema schemas.GetCompoundNimSchema
+	var getDynamoNimSchema schemas.GetDynamoNimSchema
 
-	if err := ctx.ShouldBindUri(&getCompoundNimSchema); err != nil {
+	if err := ctx.ShouldBindUri(&getDynamoNimSchema); err != nil {
 		ctx.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
@@ -562,14 +562,14 @@ func (c *deploymentController) ListCompoundNimDeployments(ctx *gin.Context) {
 			Count:  &schema.Count,
 			Search: schema.Search,
 		},
-		CompoundNimName: &getCompoundNimSchema.CompoundNimName,
+		DynamoNimName: &getDynamoNimSchema.DynamoNimName,
 	}
 
 	setListDeploymentOptionsScope(&deploymentOpt, ownership)
 
 	deployments, total, err := services.DeploymentService.List(ctx, deploymentOpt)
 	if err != nil {
-		log.Error().Msgf("Could not find deployments for the compound nim %s with the following opts %+v: %s", getCompoundNimSchema.CompoundNimName, deploymentOpt, err.Error())
+		log.Error().Msgf("Could not find deployments for the dynamo nim %s with the following opts %+v: %s", getDynamoNimSchema.DynamoNimName, deploymentOpt, err.Error())
 		ctx.JSON(500, gin.H{"error": fmt.Sprintf("Could not find deployments %s", err.Error())})
 		return
 	}
@@ -593,11 +593,11 @@ func (c *deploymentController) ListCompoundNimDeployments(ctx *gin.Context) {
 	ctx.JSON(200, deploymentListSchema)
 }
 
-func (c *deploymentController) ListCompoundNimVersionDeployments(ctx *gin.Context) {
+func (c *deploymentController) ListDynamoNimVersionDeployments(ctx *gin.Context) {
 	var schema schemas.ListQuerySchema
-	var getCompoundNimVersionSchema schemas.GetCompoundNimVersionSchema
+	var getDynamoNimVersionSchema schemas.GetDynamoNimVersionSchema
 
-	if err := ctx.ShouldBindUri(&getCompoundNimVersionSchema); err != nil {
+	if err := ctx.ShouldBindUri(&getDynamoNimVersionSchema); err != nil {
 		ctx.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
@@ -619,14 +619,14 @@ func (c *deploymentController) ListCompoundNimVersionDeployments(ctx *gin.Contex
 			Count:  &schema.Count,
 			Search: schema.Search,
 		},
-		CompoundNimTag: getCompoundNimVersionSchema.Tag(),
+		DynamoNimTag: getDynamoNimVersionSchema.Tag(),
 	}
 
 	setListDeploymentOptionsScope(&deploymentOpt, ownership)
 
 	deployments, total, err := services.DeploymentService.List(ctx, deploymentOpt)
 	if err != nil {
-		log.Error().Msgf("Could not find deployments for the compound nim version %s with the following opts %+v: %s", *getCompoundNimVersionSchema.Tag(), deploymentOpt, err.Error())
+		log.Error().Msgf("Could not find deployments for the dynamo nim version %s with the following opts %+v: %s", *getDynamoNimVersionSchema.Tag(), deploymentOpt, err.Error())
 		ctx.JSON(500, gin.H{"error": fmt.Sprintf("Could not find deployments %s", err.Error())})
 		return
 	}
@@ -761,13 +761,13 @@ func (c *deploymentController) CreateV2(ctx *gin.Context) {
 		return
 	}
 
-	compoundNim, compoundNimVersion, err := parseCompoundNimVersion(schema.CompoundNim)
+	dynamoNim, dynamoNimVersion, err := parseDynamoNimVersion(schema.DynamoNim)
 	if err != nil {
 		ctx.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
 
-	createDeploymentTarget, err := c.buildDeploymentTargetConfiguration(&schema.UpdateDeploymentSchema, compoundNim, compoundNimVersion)
+	createDeploymentTarget, err := c.buildDeploymentTargetConfiguration(&schema.UpdateDeploymentSchema, dynamoNim, dynamoNimVersion)
 	if err != nil {
 		log.Error().Msgf("Failed to build createDeploymentTarget schema %s", err.Error())
 		ctx.JSON(400, gin.H{"error": err.Error()})
@@ -777,7 +777,7 @@ func (c *deploymentController) CreateV2(ctx *gin.Context) {
 	// Determine the deployment name
 	deploymentName := schema.Name
 	if deploymentName == "" {
-		deploymentName = fmt.Sprintf("dep-%s-%s--%s", compoundNim, compoundNimVersion, uuid.New().String())
+		deploymentName = fmt.Sprintf("dep-%s-%s--%s", dynamoNim, dynamoNimVersion, uuid.New().String())
 		deploymentName = deploymentName[:63] // Max label length for k8s
 	}
 	fmt.Println("Deployment Name:", deploymentName)
@@ -857,13 +857,13 @@ func (c *deploymentController) UpdateV2(ctx *gin.Context) {
 		kubeNamespace = "dynamo"
 	}
 
-	compoundNim, compoundNimVersion, err := parseCompoundNimVersion(schema.CompoundNim)
+	dynamoNim, dynamoNimVersion, err := parseDynamoNimVersion(schema.DynamoNim)
 	if err != nil {
 		ctx.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
 
-	createDeploymentTarget, err := c.buildDeploymentTargetConfiguration(&schema, compoundNim, compoundNimVersion)
+	createDeploymentTarget, err := c.buildDeploymentTargetConfiguration(&schema, dynamoNim, dynamoNimVersion)
 	if err != nil {
 		log.Error().Msgf("Failed to build createDeploymentTarget schema %s", err.Error())
 		ctx.JSON(400, gin.H{"error": err.Error()})
@@ -899,22 +899,22 @@ func (c *deploymentController) UpdateV2(ctx *gin.Context) {
 	ctx.JSON(200, deploymentSchema)
 }
 
-func parseCompoundNimVersion(compoundNimTag string) (string, string, error) {
-	var compoundNim, compoundNimVersion string
-	compoundNimParts := strings.Split(compoundNimTag, ":")
-	if len(compoundNimParts) == 2 {
-		compoundNim = compoundNimParts[0]
-		compoundNimVersion = compoundNimParts[1]
+func parseDynamoNimVersion(dynamoNimTag string) (string, string, error) {
+	var dynamoNim, dynamoNimVersion string
+	dynamoNimParts := strings.Split(dynamoNimTag, ":")
+	if len(dynamoNimParts) == 2 {
+		dynamoNim = dynamoNimParts[0]
+		dynamoNimVersion = dynamoNimParts[1]
 	} else {
-		return "", "", fmt.Errorf("invalid Compound Nim format, expected 'compoundnim:version'")
+		return "", "", fmt.Errorf("invalid Dynamo Nim format, expected 'dynamonim:version'")
 	}
-	fmt.Println("Compound Nim:", compoundNim)
-	fmt.Println("Compound Nim Version:", compoundNimVersion)
+	fmt.Println("Dynamo Nim:", dynamoNim)
+	fmt.Println("Dynamo Nim Version:", dynamoNimVersion)
 
-	return compoundNim, compoundNimVersion, nil
+	return dynamoNim, dynamoNimVersion, nil
 }
 
-func (c *deploymentController) buildDeploymentTargetConfiguration(schema *schemasv2.UpdateDeploymentSchema, compoundNim, compoundNimVersion string) (*schemas.CreateDeploymentTargetSchema, error) {
+func (c *deploymentController) buildDeploymentTargetConfiguration(schema *schemasv2.UpdateDeploymentSchema, dynamoNim, dynamoNimVersion string) (*schemas.CreateDeploymentTargetSchema, error) {
 	// Extract the first service from Services map
 	var firstServiceSpec schemasv2.ServiceSpec
 	for _, serviceSpec := range schema.Services {
@@ -928,8 +928,8 @@ func (c *deploymentController) buildDeploymentTargetConfiguration(schema *schema
 
 	// Convert service configuration into CreateDeploymentTargetSchema
 	createDeploymentTarget := &schemas.CreateDeploymentTargetSchema{
-		CompoundNim: compoundNim,
-		Version:     compoundNimVersion,
+		DynamoNim: dynamoNim,
+		Version:     dynamoNimVersion,
 		Config: &schemas.DeploymentTargetConfig{
 			HPAConf: &schemas.DeploymentTargetHPAConf{
 				MinReplicas: &hpaMinReplica,

@@ -24,7 +24,7 @@ type DeploymentTarget struct {
 	CreatorAssociate
 	DeploymentAssociate
 	DeploymentRevisionAssociate
-	CompoundNimVersionAssociate
+	DynamoNimVersionAssociate
 	DmsAssociate
 
 	Config *schemas.DeploymentTargetConfig `json:"config"`

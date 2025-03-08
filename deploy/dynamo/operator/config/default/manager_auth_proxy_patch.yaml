@@ -18,7 +18,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: compoundai-controller-manager
+  name: dynamo-controller-manager
   namespace: system
 spec:
   template:
@@ -53,5 +53,5 @@ spec:
         - "--metrics-bind-address=127.0.0.1:8080"
         - "--leader-elect"
         - "--profile=COMPOUND_AI"
-        - "--leader-election-id=compoundai.nko.nvidia.com"
+        - "--leader-election-id=dynamo.nko.nvidia.com"
 

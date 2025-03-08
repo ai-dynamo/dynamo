@@ -128,10 +128,10 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - compoundaideployments
-  - compoundainimdeployments
-  - compoundainimrequests
-  - compoundainims
+  - dynamodeployments
+  - dynamonimdeployments
+  - dynamonimrequests
+  - dynamonims
   verbs:
   - create
   - delete
@@ -143,18 +143,18 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - compoundaideployments/finalizers
-  - compoundainimdeployments/finalizers
-  - compoundainimrequests/finalizers
+  - dynamodeployments/finalizers
+  - dynamonimdeployments/finalizers
+  - dynamonimrequests/finalizers
   verbs:
   - update
 - apiGroups:
   - nvidia.com
   resources:
-  - compoundaideployments/status
-  - compoundainimdeployments/status
-  - compoundainimrequests/status
-  - compoundainims/status
+  - dynamodeployments/status
+  - dynamonimdeployments/status
+  - dynamonimrequests/status
+  - dynamonims/status
   verbs:
   - get
   - patch

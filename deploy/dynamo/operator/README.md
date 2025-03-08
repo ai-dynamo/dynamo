@@ -1,5 +1,5 @@
-# Compound AI Kubernetes Operator
-The NVIDIA Compound AI Kubernetes Operator uses the [operator framework](https://cloud.redhat.com/blog/introducing-the-operator-framework) within Kubernetes to automate the management of all compound AI resources.
+# Dynamo Kubernetes Operator
+The NVIDIA Dynamo Kubernetes Operator uses the [operator framework](https://cloud.redhat.com/blog/introducing-the-operator-framework) within Kubernetes to automate the management of all dynamo resources.
 
 
 ## pre-requisites

@@ -30,15 +30,15 @@ type Autoscaling struct {
 	Behavior    *autoscalingv2beta2.HorizontalPodAutoscalerBehavior `json:"behavior,omitempty"`
 }
 
-type CompoundNimVersionDeploymentIngressTLSSpec struct {
+type DynamoNimVersionDeploymentIngressTLSSpec struct {
 	SecretName string `json:"secretName,omitempty"`
 }
 
-type CompoundNimVersionDeploymentIngressSpec struct {
+type DynamoNimVersionDeploymentIngressSpec struct {
 	Enabled     bool                                        `json:"enabled,omitempty"`
 	Annotations map[string]string                           `json:"annotations,omitempty"`
 	Labels      map[string]string                           `json:"labels,omitempty"`
-	TLS         *CompoundNimVersionDeploymentIngressTLSSpec `json:"tls,omitempty"`
+	TLS         *DynamoNimVersionDeploymentIngressTLSSpec `json:"tls,omitempty"`
 }
 
 type MonitorExporterMountSpec struct {
@@ -55,18 +55,18 @@ type MonitorExporterSpec struct {
 	Mounts           []MonitorExporterMountSpec `json:"mounts,omitempty"`
 }
 
-type CompoundNimDeploymentData struct {
+type DynamoNimDeploymentData struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 
-	CompoundNimVersion string `json:"compoundAINim"`
+	DynamoNimVersion string `json:"dynamoNim"`
 
 	Resources        schemas.Resources                  `json:"resources,omitempty"`
 	Autoscaling      *Autoscaling                       `json:"autoscaling,omitempty"`
 	Envs             []corev1.EnvVar                    `json:"envs,omitempty"`
 	ExternalServices map[string]schemas.ExternalService `json:"externalServices,omitempty"`
 
-	Ingress CompoundNimVersionDeploymentIngressSpec `json:"ingress,omitempty"`
+	Ingress DynamoNimVersionDeploymentIngressSpec `json:"ingress,omitempty"`
 
 	MonitorExporter *MonitorExporterSpec `json:"monitorExporter,omitempty"`
 
@@ -77,7 +77,7 @@ type CompoundNimDeploymentData struct {
 	ReadinessProbe *corev1.Probe `json:"readinessProbe,omitempty"`
 }
 
-type CompoundNimDeploymentConfigurationV1Alpha1 struct {
-	Data    CompoundNimDeploymentData `json:"data"`
+type DynamoNimDeploymentConfigurationV1Alpha1 struct {
+	Data    DynamoNimDeploymentData `json:"data"`
 	Version string                    `json:"version"`
 }

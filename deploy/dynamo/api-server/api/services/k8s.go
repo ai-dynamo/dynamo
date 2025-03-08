@@ -93,7 +93,7 @@ func (s *k8sService) GetK8sClient(kubeConfig string) (kubernetes.Interface, erro
 }
 
 func (s *k8sService) ListPodsByDeployment(ctx context.Context, podLister v1.PodNamespaceLister, deployment *models.Deployment) ([]*apiv1.Pod, error) {
-	selector, err := labels.Parse(fmt.Sprintf("%s = %s", consts.KubeLabelCompoundNimVersionDeployment, deployment.Name))
+	selector, err := labels.Parse(fmt.Sprintf("%s = %s", consts.KubeLabelDynamoNimVersionDeployment, deployment.Name))
 	if err != nil {
 		return nil, err
 	}

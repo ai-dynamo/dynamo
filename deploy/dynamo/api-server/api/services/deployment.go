@@ -70,11 +70,11 @@ type ListDeploymentOption struct {
 	LastUpdaterIds        *[]uint
 	OrganizationIds       *[]string
 	Ids                   *[]uint
-	CompoundNimVersionIds *[]uint
+	DynamoNimVersionIds *[]uint
 	Statuses              *[]schemas.DeploymentStatus
 	Order                 *string
-	CompoundNimName       *string
-	CompoundNimTag        *string
+	DynamoNimName       *string
+	DynamoNimTag        *string
 }
 
 func (s *deploymentService) Create(ctx context.Context, opt CreateDeploymentOption) (*models.Deployment, error) {
@@ -302,14 +302,14 @@ func (s *deploymentService) List(ctx context.Context, opt ListDeploymentOption) 
 
 	query = query.Joins("LEFT JOIN deployment_revision ON deployment_revision.deployment_id = deployment.id AND deployment_revision.status = ?", schemas.DeploymentRevisionStatusActive)
 	joinOnDeploymentTargets := query.Joins("LEFT JOIN deployment_target ON deployment_target.deployment_revision_id = deployment_revision.id")
-	if opt.CompoundNimName != nil {
-		query = joinOnDeploymentTargets.Where("deployment_target.compound_nim_version_tag LIKE ?", *opt.CompoundNimName+":%")
+	if opt.DynamoNimName != nil {
+		query = joinOnDeploymentTargets.Where("deployment_target.dynamo_nim_version_tag LIKE ?", *opt.DynamoNimName+":%")
 	}
-	if opt.CompoundNimTag != nil {
-		query = joinOnDeploymentTargets.Where("deployment_target.compound_nim_version_tag = ?", *opt.CompoundNimTag)
+	if opt.DynamoNimTag != nil {
+		query = joinOnDeploymentTargets.Where("deployment_target.dynamo_nim_version_tag = ?", *opt.DynamoNimTag)
 	}
-	if opt.CompoundNimVersionIds != nil {
-		query = joinOnDeploymentTargets.Where("deployment_target.compound_nim_version_id IN (?)", *opt.CompoundNimVersionIds)
+	if opt.DynamoNimVersionIds != nil {
+		query = joinOnDeploymentTargets.Where("deployment_target.dynamo_nim_version_id IN (?)", *opt.DynamoNimVersionIds)
 	}
 	if opt.ClusterId != nil {
 		query = query.Where("deployment.cluster_id = ?", *opt.ClusterId)
@@ -393,12 +393,12 @@ func (s *deploymentService) getStatusFromK8s(ctx context.Context, d *models.Depl
 	}
 
 	for _, deploymentTarget := range deploymentTargets {
-		compoundNimParts := strings.Split(deploymentTarget.CompoundNimVersionTag, ":")
-		if len(compoundNimParts) != 2 {
-			return defaultStatus, errors.Errorf("Invalid format for CompoundNIM version tag %s. Expected 2 parts got %d", deploymentTarget.CompoundNimVersionTag, len(compoundNimParts))
+		dynamoNimParts := strings.Split(deploymentTarget.DynamoNimVersionTag, ":")
+		if len(dynamoNimParts) != 2 {
+			return defaultStatus, errors.Errorf("Invalid format for DynamoNIM version tag %s. Expected 2 parts got %d", deploymentTarget.DynamoNimVersionTag, len(dynamoNimParts))
 		}
 
-		imageBuilderPodsSelector, err := labels.Parse(fmt.Sprintf("%s=%s,%s=%s", consts.KubeLabelCompoundNim, compoundNimParts[0], consts.KubeLabelCompoundNimVersion, compoundNimParts[1]))
+		imageBuilderPodsSelector, err := labels.Parse(fmt.Sprintf("%s=%s,%s=%s", consts.KubeLabelDynamoNim, dynamoNimParts[0], consts.KubeLabelDynamoNimVersion, dynamoNimParts[1]))
 		if err != nil {
 			return defaultStatus, err
 		}

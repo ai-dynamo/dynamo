@@ -19,14 +19,14 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.4
-  name: compoundainimdeployments.nvidia.com
+  name: dynamonimdeployments.nvidia.com
 spec:
   group: nvidia.com
   names:
     kind: DynamoNimDeployment
     listKind: DynamoNimDeploymentList
-    plural: compoundainimdeployments
-    singular: compoundainimdeployment
+    plural: dynamonimdeployments
+    singular: dynamonimdeployment
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
@@ -389,7 +389,7 @@ spec:
                   minReplicas:
                     type: integer
                 type: object
-              compoundAINim:
+              dynamoNim:
                 type: string
               envFromSecret:
                 type: string
@@ -2783,7 +2783,7 @@ spec:
               serviceName:
                 type: string
             required:
-            - compoundAINim
+            - dynamoNim
             type: object
           status:
             properties:

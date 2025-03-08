@@ -36,7 +36,7 @@ func DefaultUser() *schemas.UserSchema {
 			},
 			Name: "nvidia-user",
 		},
-		FirstName: "Compound",
+		FirstName: "Dynamo",
 		LastName:  "AI",
 		Email:     "dynamo@nvidia.com",
 	}

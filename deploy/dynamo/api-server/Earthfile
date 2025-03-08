@@ -15,7 +15,7 @@ build:
     SAVE ARTIFACT /workspace/server
     SAVE ARTIFACT /workspace/.env
 
-#TODO: mkhadkevich earthly tests fail https://gitlab-master.nvidia.com/aire/microservices/compoundai/-/jobs/144475821
+#TODO: mkhadkevich earthly tests fail https://gitlab-master.nvidia.com/aire/microservices/dynamo/-/jobs/144475821
 #test:
 #    FROM +build
 #    # copy test files
@@ -25,7 +25,7 @@ build:
 docker:
     ARG CI_REGISTRY_IMAGE=my-registry
     ARG CI_COMMIT_SHA=latest
-    ARG IMAGE=compound-api-server
+    ARG IMAGE=dynamo-api-server
     FROM gcr.io/distroless/static:nonroot
     WORKDIR /
     COPY +build/server .

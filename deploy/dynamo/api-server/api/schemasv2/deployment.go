@@ -50,7 +50,7 @@ type CreateDeploymentSchema struct {
 
 type UpdateDeploymentSchema struct {
 	DeploymentConfigSchema
-	CompoundNim string `json:"bento"`
+	DynamoNim string `json:"bento"`
 }
 
 type DeploymentConfigSchema struct {

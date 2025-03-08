@@ -45,7 +45,7 @@ func SetupRouter() *gin.Engine {
 	createClusterRoutes(v1)
 
 	// These routes are proxied to NDS
-	createCompoundNimRoutes(v1)
+	createDynamoNimRoutes(v1)
 	createBentoRepositoriesRoutes(v1)
 
 	createMiscellaneousRoutes(v1)
@@ -82,7 +82,7 @@ func createClusterRoutes(grp *gin.RouterGroup) {
 
 	grp.POST("", controllers.ClusterController.Create)
 
-	compoundComponentRoutes(resourceGrp)
+	dynamoComponentRoutes(resourceGrp)
 	deploymentRoutes(resourceGrp)
 }
 
@@ -190,25 +190,25 @@ func bentoRoutes(grp *gin.RouterGroup) {
 	grp.POST("", controllers.ProxyController.ReverseProxy)
 }
 
-func createCompoundNimRoutes(grp *gin.RouterGroup) {
-	grp = grp.Group("/compound_nims")
+func createDynamoNimRoutes(grp *gin.RouterGroup) {
+	grp = grp.Group("/dynamo_nims")
 
-	resourceGrp := grp.Group("/:compoundNimName")
+	resourceGrp := grp.Group("/:dynamoNimName")
 
 	resourceGrp.GET("", controllers.ProxyController.ReverseProxy)
 
 	resourceGrp.PATCH("", controllers.ProxyController.ReverseProxy)
 
-	resourceGrp.GET("/deployments", controllers.DeploymentController.ListCompoundNimDeployments)
+	resourceGrp.GET("/deployments", controllers.DeploymentController.ListDynamoNimDeployments)
 
 	grp.GET("", controllers.ProxyController.ReverseProxy)
 
 	grp.POST("", controllers.ProxyController.ReverseProxy)
 
-	compoundNimVersionRoutes(resourceGrp)
+	dynamoNimVersionRoutes(resourceGrp)
 }
 
-func compoundNimVersionRoutes(grp *gin.RouterGroup) {
+func dynamoNimVersionRoutes(grp *gin.RouterGroup) {
 	grp = grp.Group("/versions")
 
 	resourceGrp := grp.Group("/:version")
@@ -223,7 +223,7 @@ func compoundNimVersionRoutes(grp *gin.RouterGroup) {
 
 	resourceGrp.GET("/models", controllers.ProxyController.ReverseProxy)
 
-	resourceGrp.GET("/deployments", controllers.DeploymentController.ListCompoundNimVersionDeployments)
+	resourceGrp.GET("/deployments", controllers.DeploymentController.ListDynamoNimVersionDeployments)
 
 	resourceGrp.PATCH("/start_multipart_upload", controllers.ProxyController.ReverseProxy)
 
@@ -282,7 +282,7 @@ func createOrganizationRoutes(grp *gin.RouterGroup) {
 
 	grp.GET("/deployment_creation_json_schema", controllers.DeploymentController.CreationJSONSchema)
 
-	grp.GET("/yatai_components", controllers.CompoundComponentController.ListAll)
+	grp.GET("/yatai_components", controllers.DynamoComponentController.ListAll)
 
 	grp.GET("/orgs", controllers.OrganizationController.List)
 
@@ -293,12 +293,12 @@ func createPublicRoutes(grp *gin.RouterGroup) {
 	grp.GET("/info", controllers.InfoController.GetInfo)
 }
 
-func compoundComponentRoutes(grp *gin.RouterGroup) {
+func dynamoComponentRoutes(grp *gin.RouterGroup) {
 	grp = grp.Group("/yatai_components")
 
-	grp.GET("", controllers.CompoundComponentController.List)
+	grp.GET("", controllers.DynamoComponentController.List)
 
-	grp.POST("", controllers.CompoundComponentController.Register)
+	grp.POST("", controllers.DynamoComponentController.Register)
 }
 
 func injectCurrentOrganization(c *gin.Context) {

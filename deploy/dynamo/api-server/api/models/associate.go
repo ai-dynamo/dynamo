@@ -32,9 +32,9 @@ type DeploymentRevisionAssociate struct {
 	AssociatedDeploymentRevisionCache *DeploymentRevision `gorm:"foreignkey:DeploymentRevisionId;constraint:OnDelete:CASCADE;"`
 }
 
-type CompoundNimVersionAssociate struct {
-	CompoundNimVersionId  string `json:"compound_nim_version_id"`
-	CompoundNimVersionTag string `json:"compound_nim_version_tag"`
+type DynamoNimVersionAssociate struct {
+	DynamoNimVersionId  string `json:"dynamo_nim_version_id"`
+	DynamoNimVersionTag string `json:"dynamo_nim_version_tag"`
 }
 
 type DmsAssociate struct {

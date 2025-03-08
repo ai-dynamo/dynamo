@@ -22,6 +22,6 @@ var ApiVersion string = "nvidia.com/v1alpha1"
 type CustomResourceType string
 
 const (
-	CompoundNimRequest    CustomResourceType = "DynamoNimRequest"
-	CompoundNimDeployment CustomResourceType = "DynamoNimDeployment"
+	DynamoNimRequest    CustomResourceType = "DynamoNimRequest"
+	DynamoNimDeployment CustomResourceType = "DynamoNimDeployment"
 )

@@ -23,18 +23,18 @@ import (
 	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
 )
 
-type CompoundComponent struct {
+type DynamoComponent struct {
 	Resource
 	ClusterAssociate
 
 	Version           string                                   `json:"version"`
 	KubeNamespace     string                                   `json:"kube_namespace"`
 	Description       string                                   `json:"description"`
-	Manifest          *schemas.CompoundComponentManifestSchema `json:"manifest" type:"jsonb"`
+	Manifest          *schemas.DynamoComponentManifestSchema `json:"manifest" type:"jsonb"`
 	LatestInstalledAt *time.Time                               `json:"latest_installed_at"`
 	LatestHeartbeatAt *time.Time                               `json:"latest_heartbeat_at"`
 }
 
-func (d *CompoundComponent) GetResourceType() schemas.ResourceType {
+func (d *DynamoComponent) GetResourceType() schemas.ResourceType {
 	return schemas.ResourceTypeDynamoComponent
 }

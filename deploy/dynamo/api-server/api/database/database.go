@@ -62,7 +62,7 @@ func SetupDB() {
 		db.AutoMigrate(&models.Deployment{})
 		db.AutoMigrate(&models.DeploymentRevision{})
 		db.AutoMigrate(&models.DeploymentTarget{})
-		db.AutoMigrate(&models.CompoundComponent{})
+		db.AutoMigrate(&models.DynamoComponent{})
 
 		db.Exec("CREATE UNIQUE INDEX uk_cluster_orgId_name ON cluster (organization_id, name);")
 		db.Exec("CREATE UNIQUE INDEX uk_deployment_clusterId_name ON deployment (cluster_id, name);")

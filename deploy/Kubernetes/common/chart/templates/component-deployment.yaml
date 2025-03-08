@@ -339,7 +339,7 @@ spec:
         args:
         - uv
         - run
-        - compoundai
+        - dynamo
         - start
         - --service-name
         -  {{ $component_name | quote }}

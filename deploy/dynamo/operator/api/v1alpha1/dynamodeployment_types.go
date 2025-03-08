@@ -27,7 +27,7 @@ import (
 // DynamoDeploymentSpec defines the desired state of DynamoDeployment.
 type DynamoDeploymentSpec struct {
 	// required
-	DynamoNim string `json:"compoundAINim"`
+	DynamoNim string `json:"dynamoNim"`
 	// optional
 	// key is the name of the service defined in DynamoNim
 	// value is the DynamoNimDeployment override for that service
@@ -45,7 +45,7 @@ type DynamoDeploymentStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 
-// DynamoDeployment is the Schema for the compoundaideployments API.
+// DynamoDeployment is the Schema for the dynamodeployments API.
 type DynamoDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

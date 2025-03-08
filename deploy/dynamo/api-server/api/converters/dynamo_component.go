@@ -26,42 +26,42 @@ import (
 	"github.com/pkg/errors"
 )
 
-func ToCompoundComponentSchema(ctx context.Context, compoundComponent *models.CompoundComponent) (*schemas.CompoundComponentSchema, error) {
-	if compoundComponent == nil {
+func ToDynamoComponentSchema(ctx context.Context, dynamoComponent *models.DynamoComponent) (*schemas.DynamoComponentSchema, error) {
+	if dynamoComponent == nil {
 		return nil, nil
 	}
-	ss, err := ToCompoundComponentSchemas(ctx, []*models.CompoundComponent{compoundComponent})
+	ss, err := ToDynamoComponentSchemas(ctx, []*models.DynamoComponent{dynamoComponent})
 	if err != nil {
-		return nil, errors.Wrap(err, "ToCompoundComponentSchemas")
+		return nil, errors.Wrap(err, "ToDynamoComponentSchemas")
 	}
 	return ss[0], nil
 }
 
-func ToCompoundComponentSchemas(ctx context.Context, compoundComponents []*models.CompoundComponent) ([]*schemas.CompoundComponentSchema, error) {
-	resourceSchemasMap := make(map[string]*schemas.ResourceSchema, len(compoundComponents))
-	for _, component := range compoundComponents {
+func ToDynamoComponentSchemas(ctx context.Context, dynamoComponents []*models.DynamoComponent) ([]*schemas.DynamoComponentSchema, error) {
+	resourceSchemasMap := make(map[string]*schemas.ResourceSchema, len(dynamoComponents))
+	for _, component := range dynamoComponents {
 		resourceSchemasMap[component.GetUid()] = ToResourceSchema(&component.Resource, component.GetResourceType())
 	}
 
-	res := make([]*schemas.CompoundComponentSchema, 0, len(compoundComponents))
-	for _, compoundComponent := range compoundComponents {
-		cluster, err := services.ClusterService.Get(ctx, compoundComponent.ClusterId)
+	res := make([]*schemas.DynamoComponentSchema, 0, len(dynamoComponents))
+	for _, dynamoComponent := range dynamoComponents {
+		cluster, err := services.ClusterService.Get(ctx, dynamoComponent.ClusterId)
 		if err != nil {
 			return nil, err
 		}
 		clusterSchema := ToClusterFullSchema(cluster)
-		resourceSchema, ok := resourceSchemasMap[compoundComponent.GetUid()]
+		resourceSchema, ok := resourceSchemasMap[dynamoComponent.GetUid()]
 		if !ok {
-			return nil, errors.Errorf("resource schema not found for CompoundComponent %s", compoundComponent.GetUid())
+			return nil, errors.Errorf("resource schema not found for DynamoComponent %s", dynamoComponent.GetUid())
 		}
-		res = append(res, &schemas.CompoundComponentSchema{
+		res = append(res, &schemas.DynamoComponentSchema{
 			ResourceSchema:    *resourceSchema,
 			Cluster:           clusterSchema,
-			Manifest:          compoundComponent.Manifest,
-			Version:           compoundComponent.Version,
-			KubeNamespace:     compoundComponent.KubeNamespace,
-			LatestHeartbeatAt: compoundComponent.LatestHeartbeatAt,
-			LatestInstalledAt: compoundComponent.LatestInstalledAt,
+			Manifest:          dynamoComponent.Manifest,
+			Version:           dynamoComponent.Version,
+			KubeNamespace:     dynamoComponent.KubeNamespace,
+			LatestHeartbeatAt: dynamoComponent.LatestHeartbeatAt,
+			LatestInstalledAt: dynamoComponent.LatestInstalledAt,
 		})
 	}
 	return res, nil

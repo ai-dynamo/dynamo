@@ -26,12 +26,12 @@ Users/Clients (HTTP)
 ┌─────────────┐
 │  Frontend   │  HTTP API endpoint (/generate)
 └─────────────┘
-      │ dynemo/distributed-runtime
+      │ dynamo/runtime
       ▼
 ┌─────────────┐
 │   Middle    │
 └─────────────┘
-      │ dynemo/distributed-runtime
+      │ dynamo/runtime
       ▼
 ┌─────────────┐
 │  Backend    │
@@ -45,7 +45,7 @@ Users/Clients (HTTP)
 ```bash
 cd /workspace/examples/python_rs/llm/vllm
 
-dynemo-sdk serve sdk_basic_service.basic:Frontend
+dynamo-sdk serve sdk_basic_service.basic:Frontend
 ```
 
 2. Send request to frontend using curl -

@@ -50,14 +50,14 @@ func ToDeploymentTargetSchemas(ctx context.Context, deploymentTargets []*models.
 	for _, deploymentTarget := range deploymentTargets {
 		creatorSchema := mocks.DefaultUser()
 
-		compoundNimParts := strings.Split(deploymentTarget.CompoundNimVersionTag, ":")
-		if len(compoundNimParts) != 2 {
-			return nil, errors.Errorf("Invalid format for CompoundNIM version tag %s. Expected 2 parts got %d", deploymentTarget.CompoundNimVersionTag, len(compoundNimParts))
+		dynamoNimParts := strings.Split(deploymentTarget.DynamoNimVersionTag, ":")
+		if len(dynamoNimParts) != 2 {
+			return nil, errors.Errorf("Invalid format for DynamoNIM version tag %s. Expected 2 parts got %d", deploymentTarget.DynamoNimVersionTag, len(dynamoNimParts))
 		}
 
-		compoundNimVersionFullSchema, err := services.DatastoreService.GetCompoundNimVersion(ctx, compoundNimParts[0], compoundNimParts[1])
+		dynamoNimVersionFullSchema, err := services.DatastoreService.GetDynamoNimVersion(ctx, dynamoNimParts[0], dynamoNimParts[1])
 		if err != nil {
-			compoundNimVersionFullSchema = nil // We shouldn't fail the request if this info is missing
+			dynamoNimVersionFullSchema = nil // We shouldn't fail the request if this info is missing
 		}
 
 		resourceSchema, ok := resourceSchemasMap[deploymentTarget.GetUid()]
@@ -70,7 +70,7 @@ func ToDeploymentTargetSchemas(ctx context.Context, deploymentTargets []*models.
 				Type: "stable",
 			},
 			Creator:            creatorSchema,
-			CompoundNimVersion: compoundNimVersionFullSchema,
+			DynamoNimVersion: dynamoNimVersionFullSchema,
 			Config:             deploymentTarget.Config,
 		})
 	}

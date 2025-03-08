@@ -37,8 +37,8 @@ type CreateDeploymentTargetOption struct {
 	CreatorId             string
 	DeploymentId          uint
 	DeploymentRevisionId  uint
-	CompoundNimVersionId  string
-	CompoundNimVersionTag string
+	DynamoNimVersionId  string
+	DynamoNimVersionTag string
 	Config                *schemas.DeploymentTargetConfig
 }
 
@@ -92,9 +92,9 @@ func (s *deploymentTargetService) Create(ctx context.Context, opt CreateDeployme
 		DeploymentRevisionAssociate: models.DeploymentRevisionAssociate{
 			DeploymentRevisionId: opt.DeploymentRevisionId,
 		},
-		CompoundNimVersionAssociate: models.CompoundNimVersionAssociate{
-			CompoundNimVersionId:  opt.CompoundNimVersionId,
-			CompoundNimVersionTag: opt.CompoundNimVersionTag,
+		DynamoNimVersionAssociate: models.DynamoNimVersionAssociate{
+			DynamoNimVersionId:  opt.DynamoNimVersionId,
+			DynamoNimVersionTag: opt.DynamoNimVersionTag,
 		},
 		Config: opt.Config,
 	}
@@ -208,7 +208,7 @@ func (s *deploymentTargetService) Deploy(ctx context.Context, deploymentTarget *
 func (s *deploymentTargetService) Terminate(ctx context.Context, deploymentTarget *models.DeploymentTarget) (*models.DeploymentTarget, error) {
 	err := DeploymentManagementService.Delete(ctx, deploymentTarget)
 	if err != nil {
-		log.Error().Msgf("Failed to terminate kube resources for deployment target %s\n", deploymentTarget.CompoundNimVersionTag)
+		log.Error().Msgf("Failed to terminate kube resources for deployment target %s\n", deploymentTarget.DynamoNimVersionTag)
 		return nil, err
 	}
 

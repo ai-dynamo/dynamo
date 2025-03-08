@@ -36,7 +36,7 @@ class DynamoConfig:
     namespace: str | None = None
 
 
-class CompoundService(Service[T]):
+class DynamoService(Service[T]):
     """A custom service class that extends BentoML's base Service with Dynamo capabilities"""
 
     def __init__(
@@ -142,10 +142,10 @@ def service(
         else:
             dynamo_config = dynamo
 
-    def decorator(inner: type[T]) -> CompoundService[T]:
+    def decorator(inner: type[T]) -> DynamoService[T]:
         if isinstance(inner, Service):
             raise TypeError("service() decorator can only be applied once")
-        return CompoundService(
+        return DynamoService(
             config=config,
             inner=inner,
             image=image,

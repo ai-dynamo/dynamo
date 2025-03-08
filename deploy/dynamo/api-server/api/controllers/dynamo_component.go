@@ -33,20 +33,20 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-type compoundComponentController struct{}
+type dynamoComponentController struct{}
 
-var CompoundComponentController = compoundComponentController{}
+var DynamoComponentController = dynamoComponentController{}
 
-func (c *compoundComponentController) Register(ctx *gin.Context) {
+func (c *dynamoComponentController) Register(ctx *gin.Context) {
 	var getCluster schemas.GetClusterSchema
-	var registerCompoundComponentSchema schemas.RegisterCompoundComponentSchema
+	var registerDynamoComponentSchema schemas.RegisterDynamoComponentSchema
 
 	if err := ctx.ShouldBindUri(&getCluster); err != nil {
 		ctx.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
 
-	if err := ctx.ShouldBindJSON(&registerCompoundComponentSchema); err != nil {
+	if err := ctx.ShouldBindJSON(&registerDynamoComponentSchema); err != nil {
 		ctx.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
@@ -57,97 +57,97 @@ func (c *compoundComponentController) Register(ctx *gin.Context) {
 	})
 
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to get clusters %s when registering Compound Component: %s", getCluster.ClusterName, err.Error())
+		errMsg := fmt.Sprintf("Failed to get clusters %s when registering Dynamo Component: %s", getCluster.ClusterName, err.Error())
 		log.Error().Msg(errMsg)
 		ctx.JSON(500, gin.H{"error": errMsg})
 		return
 	}
 
-	kubeNamespace := strings.TrimSpace(registerCompoundComponentSchema.KubeNamespace)
+	kubeNamespace := strings.TrimSpace(registerDynamoComponentSchema.KubeNamespace)
 
 	// nolint: ineffassign, staticcheck
 	tx, ctx_, df, err := database.DatabaseUtil.StartTransaction(ctx)
 	defer func() { df(err) }()
 
-	log.Info().Msgf("Registering compound component for %d clusters", len(clusters))
-	var compoundComponent *models.CompoundComponent
+	log.Info().Msgf("Registering dynamo component for %d clusters", len(clusters))
+	var dynamoComponent *models.DynamoComponent
 	for _, cluster := range clusters {
-		compoundComponent, err = services.CompoundComponentService.GetByName(ctx_, cluster.ID, string(registerCompoundComponentSchema.Name))
+		dynamoComponent, err = services.DynamoComponentService.GetByName(ctx_, cluster.ID, string(registerDynamoComponentSchema.Name))
 		isNotFound := errors.Is(err, consts.ErrNotFound)
 		if err != nil && !isNotFound {
-			log.Error().Msgf("Failed to get compoundComponent: %s", err.Error())
-			ctx.JSON(500, gin.H{"error": "failed to get compoundComponent"})
+			log.Error().Msgf("Failed to get dynamoComponent: %s", err.Error())
+			ctx.JSON(500, gin.H{"error": "failed to get dynamoComponent"})
 			return
 		}
 
-		manifest := &schemas.CompoundComponentManifestSchema{
-			SelectorLabels: registerCompoundComponentSchema.SelectorLabels,
+		manifest := &schemas.DynamoComponentManifestSchema{
+			SelectorLabels: registerDynamoComponentSchema.SelectorLabels,
 		}
-		if registerCompoundComponentSchema.Manifest != nil {
-			manifest = registerCompoundComponentSchema.Manifest
+		if registerDynamoComponentSchema.Manifest != nil {
+			manifest = registerDynamoComponentSchema.Manifest
 		}
 
 		if isNotFound {
-			compoundComponent, err = services.CompoundComponentService.Create(ctx_, services.CreateCompoundComponentOption{
+			dynamoComponent, err = services.DynamoComponentService.Create(ctx_, services.CreateDynamoComponentOption{
 				ClusterId:     cluster.ID,
-				Name:          string(registerCompoundComponentSchema.Name),
+				Name:          string(registerDynamoComponentSchema.Name),
 				KubeNamespace: kubeNamespace,
-				Version:       registerCompoundComponentSchema.Version,
+				Version:       registerDynamoComponentSchema.Version,
 				Manifest:      manifest,
 			})
 		} else {
 			now := time.Now()
 			now_ := &now
-			opt := services.UpdateCompoundComponentOption{
+			opt := services.UpdateDynamoComponentOption{
 				LatestHeartbeatAt: &now_,
-				Version:           &registerCompoundComponentSchema.Version,
+				Version:           &registerDynamoComponentSchema.Version,
 				Manifest:          &manifest,
 			}
-			if compoundComponent.Version != registerCompoundComponentSchema.Version {
+			if dynamoComponent.Version != registerDynamoComponentSchema.Version {
 				opt.LatestInstalledAt = &now_
 			}
-			compoundComponent, err = services.CompoundComponentService.Update(ctx_, compoundComponent, opt)
+			dynamoComponent, err = services.DynamoComponentService.Update(ctx_, dynamoComponent, opt)
 		}
 
 		if err != nil {
-			log.Error().Msgf("Failed to register compoundComponent: %s", err.Error())
-			ctx.JSON(500, gin.H{"error": "failed to register compoundComponent"})
+			log.Error().Msgf("Failed to register dynamoComponent: %s", err.Error())
+			ctx.JSON(500, gin.H{"error": "failed to register dynamoComponent"})
 			return
 		}
 	}
 
 	tx.Commit()
-	compoundComponentSchema, err := converters.ToCompoundComponentSchema(ctx, compoundComponent)
+	dynamoComponentSchema, err := converters.ToDynamoComponentSchema(ctx, dynamoComponent)
 	if err != nil {
-		log.Error().Msgf("Failed to convert compound component model to schema: %s", err.Error())
+		log.Error().Msgf("Failed to convert dynamo component model to schema: %s", err.Error())
 		ctx.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	ctx.JSON(200, compoundComponentSchema)
+	ctx.JSON(200, dynamoComponentSchema)
 
 }
 
-func (c *compoundComponentController) ListAll(ctx *gin.Context) {
-	compoundComponents, err := services.CompoundComponentService.List(ctx, services.ListCompoundComponentOption{})
+func (c *dynamoComponentController) ListAll(ctx *gin.Context) {
+	dynamoComponents, err := services.DynamoComponentService.List(ctx, services.ListDynamoComponentOption{})
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to get all compoundComponents: %s", err.Error())
+		errMsg := fmt.Sprintf("Failed to get all dynamoComponents: %s", err.Error())
 		log.Error().Msg(errMsg)
 		ctx.JSON(400, gin.H{"error": errMsg})
 		return
 	}
 
-	compoundComponentSchema, err := converters.ToCompoundComponentSchemas(ctx, compoundComponents)
+	dynamoComponentSchema, err := converters.ToDynamoComponentSchemas(ctx, dynamoComponents)
 	if err != nil {
-		log.Error().Msgf("Failed to convert compound component model to schema: %s", err.Error())
+		log.Error().Msgf("Failed to convert dynamo component model to schema: %s", err.Error())
 		ctx.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	ctx.JSON(200, compoundComponentSchema)
+	ctx.JSON(200, dynamoComponentSchema)
 }
 
-func (c *compoundComponentController) List(ctx *gin.Context) {
+func (c *dynamoComponentController) List(ctx *gin.Context) {
 	var getCluster schemas.GetClusterSchema
 
 	if err := ctx.ShouldBindUri(&getCluster); err != nil {
@@ -161,7 +161,7 @@ func (c *compoundComponentController) List(ctx *gin.Context) {
 	})
 
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to get clusters %s when registering Compound Component: %s", getCluster.ClusterName, err.Error())
+		errMsg := fmt.Sprintf("Failed to get clusters %s when registering Dynamo Component: %s", getCluster.ClusterName, err.Error())
 		log.Error().Msg(errMsg)
 		ctx.JSON(500, gin.H{"error": errMsg})
 		return
@@ -172,23 +172,23 @@ func (c *compoundComponentController) List(ctx *gin.Context) {
 		clusterIds = append(clusterIds, cluster.ID)
 	}
 
-	compoundComponents, err := services.CompoundComponentService.List(ctx, services.ListCompoundComponentOption{
+	dynamoComponents, err := services.DynamoComponentService.List(ctx, services.ListDynamoComponentOption{
 		ClusterIds: &clusterIds,
 	})
 
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to get compoundComponents for the cluster %s: %s", getCluster.ClusterName, err.Error())
+		errMsg := fmt.Sprintf("Failed to get dynamoComponents for the cluster %s: %s", getCluster.ClusterName, err.Error())
 		log.Error().Msg(errMsg)
 		ctx.JSON(500, gin.H{"error": errMsg})
 		return
 	}
 
-	compoundComponentSchema, err := converters.ToCompoundComponentSchemas(ctx, compoundComponents)
+	dynamoComponentSchema, err := converters.ToDynamoComponentSchemas(ctx, dynamoComponents)
 	if err != nil {
-		log.Error().Msgf("Failed to convert compound component model to schema: %s", err.Error())
+		log.Error().Msgf("Failed to convert dynamo component model to schema: %s", err.Error())
 		ctx.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	ctx.JSON(200, compoundComponentSchema)
+	ctx.JSON(200, dynamoComponentSchema)
 }

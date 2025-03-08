@@ -63,7 +63,7 @@ type DynamoNimStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 
-// DynamoNim is the Schema for the compoundainims API
+// DynamoNim is the Schema for the dynamonims API
 type DynamoNim struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

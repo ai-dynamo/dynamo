@@ -222,7 +222,7 @@ func (s *ApiServerSuite) TestCreateDeployment() {
 	assert.Equal(s.T(), deployment.Name, deploymentSchema.Name)
 	assert.Equal(s.T(), schemas.DeploymentStatusNonDeployed, deploymentSchema.Status)
 	assert.Equalf(s.T(), int(1), len(deploymentSchema.LatestRevision.Targets), "expected 1 target")
-	assert.Equal(s.T(), deployment.Targets[0].Version, deploymentSchema.LatestRevision.Targets[0].CompoundNimVersion.Version)
+	assert.Equal(s.T(), deployment.Targets[0].Version, deploymentSchema.LatestRevision.Targets[0].DynamoNimVersion.Version)
 }
 
 func (s *ApiServerSuite) TestCreateDeploymentWithNDSErrorDoesNotChangeDB() {
@@ -287,7 +287,7 @@ func (s *ApiServerSuite) TestUpdateDeployment() {
 	// Update deployment
 	updateTarget := fixtures.DefaultCreateDeploymentTargetSchema()
 	updateTarget.Version = "2025"
-	updateTarget.CompoundNim = "dynamo"
+	updateTarget.DynamoNim = "dynamo"
 
 	updateDeployment := fixtures.DefaultUpdateDeploymentSchema()
 	updatedDescription := "new description"
@@ -325,7 +325,7 @@ func (s *ApiServerSuite) TestUpdateDeployment() {
 	assert.Equal(s.T(), deployment.Name, deploymentSchema.Name)
 	assert.Equal(s.T(), schemas.DeploymentStatusNonDeployed, deploymentSchema.Status)
 	assert.Equalf(s.T(), int(1), len(deploymentSchema.LatestRevision.Targets), "expected 1 target")
-	assert.Equal(s.T(), updateDeployment.Targets[0].Version, deploymentSchema.LatestRevision.Targets[0].CompoundNimVersion.Version)
+	assert.Equal(s.T(), updateDeployment.Targets[0].Version, deploymentSchema.LatestRevision.Targets[0].DynamoNimVersion.Version)
 }
 
 func (s *ApiServerSuite) TestUpdateDeploymentWithNDSErrorDoesNotChangeDB() {
@@ -1148,7 +1148,7 @@ func (s *ApiServerSuite) TestUpdateDeploymentV2() {
 	updateService.ConfigOverrides.Resources.Requests = resourceItem
 
 	updateDeployment := fixtures.DefaultUpdateDeploymentSchemaV2()
-	updateDeployment.CompoundNim = "new:654321"
+	updateDeployment.DynamoNim = "new:654321"
 	updateDeployment.DeploymentConfigSchema.Services = map[string]schemasv2.ServiceSpec{
 		"new-service": updateService,
 	}

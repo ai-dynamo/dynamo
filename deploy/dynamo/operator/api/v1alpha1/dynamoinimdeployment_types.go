@@ -18,7 +18,7 @@
 package v1alpha1
 
 import (
-	compounaiCommon "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/common"
+	dynamoCommon "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/common"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -40,12 +40,12 @@ type DynamoNimDeploymentSpec struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 
-	DynamoNim string `json:"compoundAINim"`
+	DynamoNim string `json:"dynamoNim"`
 
 	// contains the name of the service
 	ServiceName string `json:"serviceName,omitempty"`
 
-	Resources        *compounaiCommon.Resources `json:"resources,omitempty"`
+	Resources        *dynamoCommon.Resources `json:"resources,omitempty"`
 	Autoscaling      *Autoscaling               `json:"autoscaling,omitempty"`
 	Envs             []corev1.EnvVar            `json:"envs,omitempty"`
 	EnvFromSecret    *string                    `json:"envFromSecret,omitempty"`
@@ -55,12 +55,12 @@ type DynamoNimDeploymentSpec struct {
 
 	Ingress IngressSpec `json:"ingress,omitempty"`
 
-	MonitorExporter *compounaiCommon.MonitorExporterSpec `json:"monitorExporter,omitempty"`
+	MonitorExporter *dynamoCommon.MonitorExporterSpec `json:"monitorExporter,omitempty"`
 
 	// +optional
-	ExtraPodMetadata *compounaiCommon.ExtraPodMetadata `json:"extraPodMetadata,omitempty"`
+	ExtraPodMetadata *dynamoCommon.ExtraPodMetadata `json:"extraPodMetadata,omitempty"`
 	// +optional
-	ExtraPodSpec *compounaiCommon.ExtraPodSpec `json:"extraPodSpec,omitempty"`
+	ExtraPodSpec *dynamoCommon.ExtraPodSpec `json:"extraPodSpec,omitempty"`
 
 	LivenessProbe  *corev1.Probe `json:"livenessProbe,omitempty"`
 	ReadinessProbe *corev1.Probe `json:"readinessProbe,omitempty"`

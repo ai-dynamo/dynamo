@@ -72,7 +72,7 @@ type DeploymentTargetConfig struct {
 }
 
 type CreateDeploymentTargetSchema struct {
-	CompoundNim string                  `json:"bento_repository"`
+	DynamoNim string                  `json:"bento_repository"`
 	Version     string                  `json:"bento"`
 	Config      *DeploymentTargetConfig `json:"config"`
 }
@@ -110,7 +110,7 @@ type DeploymentTargetSchema struct {
 	ResourceSchema
 	DeploymentTargetTypeSchema
 	Creator            *UserSchema                   `json:"creator"`
-	CompoundNimVersion *CompoundNimVersionFullSchema `json:"bento"`
+	DynamoNimVersion *DynamoNimVersionFullSchema `json:"bento"`
 	Config             *DeploymentTargetConfig       `json:"config"`
 }
 

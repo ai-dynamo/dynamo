@@ -135,8 +135,8 @@ type DynamoNimDeploymentReconciler struct {
 func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	logs := log.FromContext(ctx)
 
-	compoundAINimDeployment := &v1alpha1.DynamoNimDeployment{}
-	err = r.Get(ctx, req.NamespacedName, compoundAINimDeployment)
+	dynamoNimDeployment := &v1alpha1.DynamoNimDeployment{}
+	err = r.Get(ctx, req.NamespacedName, dynamoNimDeployment)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
 			// Object not found, return.  Created objects are automatically garbage collected.
@@ -150,13 +150,13 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		return
 	}
 
-	logs = logs.WithValues("compoundAINimDeployment", compoundAINimDeployment.Name, "namespace", compoundAINimDeployment.Namespace)
+	logs = logs.WithValues("dynamoNimDeployment", dynamoNimDeployment.Name, "namespace", dynamoNimDeployment.Namespace)
 
-	if len(compoundAINimDeployment.Status.Conditions) == 0 {
+	if len(dynamoNimDeployment.Status.Conditions) == 0 {
 		logs.Info("Starting to reconcile DynamoNimDeployment")
 		logs.Info("Initializing DynamoNimDeployment status")
-		r.Recorder.Event(compoundAINimDeployment, corev1.EventTypeNormal, "Reconciling", "Starting to reconcile DynamoNimDeployment")
-		compoundAINimDeployment, err = r.setStatusConditions(ctx, req,
+		r.Recorder.Event(dynamoNimDeployment, corev1.EventTypeNormal, "Reconciling", "Starting to reconcile DynamoNimDeployment")
+		dynamoNimDeployment, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
 				Type:    v1alpha1.DynamoDeploymentConditionTypeAvailable,
 				Status:  metav1.ConditionUnknown,
@@ -180,7 +180,7 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 			return
 		}
 		logs.Error(err, "Failed to reconcile DynamoNimDeployment.")
-		r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "ReconcileError", "Failed to reconcile DynamoNimDeployment: %v", err)
+		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "ReconcileError", "Failed to reconcile DynamoNimDeployment: %v", err)
 		_, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
 				Type:    v1alpha1.DynamoDeploymentConditionTypeAvailable,
@@ -194,34 +194,34 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 	}()
 
-	yataiClient, clusterName, err := r.getYataiClientWithAuth(ctx, compoundAINimDeployment)
+	yataiClient, clusterName, err := r.getYataiClientWithAuth(ctx, dynamoNimDeployment)
 	if err != nil {
 		err = errors.Wrap(err, "get yatai client with auth")
 		return
 	}
 
-	compoundAINimFoundCondition := meta.FindStatusCondition(compoundAINimDeployment.Status.Conditions, v1alpha1.DynamoDeploymentConditionTypeDynamoNimFound)
-	if compoundAINimFoundCondition != nil && compoundAINimFoundCondition.Status == metav1.ConditionUnknown {
-		logs.Info(fmt.Sprintf("Getting Compound AI NIM %s", compoundAINimDeployment.Spec.DynamoNim))
-		r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetDynamoNim", "Getting Compound AI NIM %s", compoundAINimDeployment.Spec.DynamoNim)
+	dynamoNimFoundCondition := meta.FindStatusCondition(dynamoNimDeployment.Status.Conditions, v1alpha1.DynamoDeploymentConditionTypeDynamoNimFound)
+	if dynamoNimFoundCondition != nil && dynamoNimFoundCondition.Status == metav1.ConditionUnknown {
+		logs.Info(fmt.Sprintf("Getting Dynamo NIM %s", dynamoNimDeployment.Spec.DynamoNim))
+		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "GetDynamoNim", "Getting Dynamo NIM %s", dynamoNimDeployment.Spec.DynamoNim)
 	}
-	compoundAINimRequest := &v1alpha1.DynamoNimRequest{}
-	compoundAINimCR := &v1alpha1.DynamoNim{}
+	dynamoNimRequest := &v1alpha1.DynamoNimRequest{}
+	dynamoNimCR := &v1alpha1.DynamoNim{}
 	err = r.Get(ctx, types.NamespacedName{
-		Namespace: compoundAINimDeployment.Namespace,
-		Name:      compoundAINimDeployment.Spec.DynamoNim,
-	}, compoundAINimCR)
-	compoundAINimIsNotFound := k8serrors.IsNotFound(err)
-	if err != nil && !compoundAINimIsNotFound {
-		err = errors.Wrapf(err, "get DynamoNim %s/%s", compoundAINimDeployment.Namespace, compoundAINimDeployment.Spec.DynamoNim)
+		Namespace: dynamoNimDeployment.Namespace,
+		Name:      dynamoNimDeployment.Spec.DynamoNim,
+	}, dynamoNimCR)
+	dynamoNimIsNotFound := k8serrors.IsNotFound(err)
+	if err != nil && !dynamoNimIsNotFound {
+		err = errors.Wrapf(err, "get DynamoNim %s/%s", dynamoNimDeployment.Namespace, dynamoNimDeployment.Spec.DynamoNim)
 		return
 	}
-	if compoundAINimIsNotFound {
-		if compoundAINimFoundCondition != nil && compoundAINimFoundCondition.Status == metav1.ConditionUnknown {
-			logs.Info(fmt.Sprintf("DynamoNim %s not found", compoundAINimDeployment.Spec.DynamoNim))
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetDynamoNim", "DynamoNim %s not found", compoundAINimDeployment.Spec.DynamoNim)
+	if dynamoNimIsNotFound {
+		if dynamoNimFoundCondition != nil && dynamoNimFoundCondition.Status == metav1.ConditionUnknown {
+			logs.Info(fmt.Sprintf("DynamoNim %s not found", dynamoNimDeployment.Spec.DynamoNim))
+			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "GetDynamoNim", "DynamoNim %s not found", dynamoNimDeployment.Spec.DynamoNim)
 		}
-		compoundAINimDeployment, err = r.setStatusConditions(ctx, req,
+		dynamoNimDeployment, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
 				Type:    v1alpha1.DynamoDeploymentConditionTypeDynamoNimFound,
 				Status:  metav1.ConditionFalse,
@@ -232,9 +232,9 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		if err != nil {
 			return
 		}
-		compoundAINimRequestFoundCondition := meta.FindStatusCondition(compoundAINimDeployment.Status.Conditions, v1alpha1.DynamoDeploymentConditionTypeDynamoNimRequestFound)
-		if compoundAINimRequestFoundCondition == nil || compoundAINimRequestFoundCondition.Status != metav1.ConditionUnknown {
-			compoundAINimDeployment, err = r.setStatusConditions(ctx, req,
+		dynamoNimRequestFoundCondition := meta.FindStatusCondition(dynamoNimDeployment.Status.Conditions, v1alpha1.DynamoDeploymentConditionTypeDynamoNimRequestFound)
+		if dynamoNimRequestFoundCondition == nil || dynamoNimRequestFoundCondition.Status != metav1.ConditionUnknown {
+			dynamoNimDeployment, err = r.setStatusConditions(ctx, req,
 				metav1.Condition{
 					Type:    v1alpha1.DynamoDeploymentConditionTypeDynamoNimRequestFound,
 					Status:  metav1.ConditionUnknown,
@@ -246,16 +246,16 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 				return
 			}
 		}
-		if compoundAINimRequestFoundCondition != nil && compoundAINimRequestFoundCondition.Status == metav1.ConditionUnknown {
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetDynamoNimRequest", "Getting DynamoNimRequest %s", compoundAINimDeployment.Spec.DynamoNim)
+		if dynamoNimRequestFoundCondition != nil && dynamoNimRequestFoundCondition.Status == metav1.ConditionUnknown {
+			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "GetDynamoNimRequest", "Getting DynamoNimRequest %s", dynamoNimDeployment.Spec.DynamoNim)
 		}
 		err = r.Get(ctx, types.NamespacedName{
-			Namespace: compoundAINimDeployment.Namespace,
-			Name:      compoundAINimDeployment.Spec.DynamoNim,
-		}, compoundAINimRequest)
+			Namespace: dynamoNimDeployment.Namespace,
+			Name:      dynamoNimDeployment.Spec.DynamoNim,
+		}, dynamoNimRequest)
 		if err != nil {
-			err = errors.Wrapf(err, "get DynamoNimRequest %s/%s", compoundAINimDeployment.Namespace, compoundAINimDeployment.Spec.DynamoNim)
-			compoundAINimDeployment, err = r.setStatusConditions(ctx, req,
+			err = errors.Wrapf(err, "get DynamoNimRequest %s/%s", dynamoNimDeployment.Namespace, dynamoNimDeployment.Spec.DynamoNim)
+			dynamoNimDeployment, err = r.setStatusConditions(ctx, req,
 				metav1.Condition{
 					Type:    v1alpha1.DynamoDeploymentConditionTypeDynamoNimFound,
 					Status:  metav1.ConditionFalse,
@@ -273,11 +273,11 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 				return
 			}
 		}
-		if compoundAINimRequestFoundCondition != nil && compoundAINimRequestFoundCondition.Status == metav1.ConditionUnknown {
-			logs.Info(fmt.Sprintf("DynamoNimRequest %s found", compoundAINimDeployment.Spec.DynamoNim))
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetDynamoNimRequest", "DynamoNimRequest %s is found and waiting for its compoundAINim to be provided", compoundAINimDeployment.Spec.DynamoNim)
+		if dynamoNimRequestFoundCondition != nil && dynamoNimRequestFoundCondition.Status == metav1.ConditionUnknown {
+			logs.Info(fmt.Sprintf("DynamoNimRequest %s found", dynamoNimDeployment.Spec.DynamoNim))
+			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "GetDynamoNimRequest", "DynamoNimRequest %s is found and waiting for its dynamoNim to be provided", dynamoNimDeployment.Spec.DynamoNim)
 		}
-		compoundAINimDeployment, err = r.setStatusConditions(ctx, req,
+		dynamoNimDeployment, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
 				Type:    v1alpha1.DynamoDeploymentConditionTypeDynamoNimRequestFound,
 				Status:  metav1.ConditionTrue,
@@ -288,10 +288,10 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		if err != nil {
 			return
 		}
-		compoundAINimRequestAvailableCondition := meta.FindStatusCondition(compoundAINimRequest.Status.Conditions, v1alpha1.DynamoDeploymentConditionTypeAvailable)
-		if compoundAINimRequestAvailableCondition != nil && compoundAINimRequestAvailableCondition.Status == metav1.ConditionFalse {
-			err = errors.Errorf("DynamoNimRequest %s/%s is not available: %s", compoundAINimRequest.Namespace, compoundAINimRequest.Name, compoundAINimRequestAvailableCondition.Message)
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "GetDynamoNimRequest", err.Error())
+		dynamoNimRequestAvailableCondition := meta.FindStatusCondition(dynamoNimRequest.Status.Conditions, v1alpha1.DynamoDeploymentConditionTypeAvailable)
+		if dynamoNimRequestAvailableCondition != nil && dynamoNimRequestAvailableCondition.Status == metav1.ConditionFalse {
+			err = errors.Errorf("DynamoNimRequest %s/%s is not available: %s", dynamoNimRequest.Namespace, dynamoNimRequest.Name, dynamoNimRequestAvailableCondition.Message)
+			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "GetDynamoNimRequest", err.Error())
 			_, err_ := r.setStatusConditions(ctx, req,
 				metav1.Condition{
 					Type:    v1alpha1.DynamoDeploymentConditionTypeDynamoNimFound,
@@ -314,11 +314,11 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 		return
 	} else {
-		if compoundAINimFoundCondition != nil && compoundAINimFoundCondition.Status != metav1.ConditionTrue {
-			logs.Info(fmt.Sprintf("DynamoNim %s found", compoundAINimDeployment.Spec.DynamoNim))
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetDynamoNim", "DynamoNim %s is found", compoundAINimDeployment.Spec.DynamoNim)
+		if dynamoNimFoundCondition != nil && dynamoNimFoundCondition.Status != metav1.ConditionTrue {
+			logs.Info(fmt.Sprintf("DynamoNim %s found", dynamoNimDeployment.Spec.DynamoNim))
+			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "GetDynamoNim", "DynamoNim %s is found", dynamoNimDeployment.Spec.DynamoNim)
 		}
-		compoundAINimDeployment, err = r.setStatusConditions(ctx, req,
+		dynamoNimDeployment, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
 				Type:    v1alpha1.DynamoDeploymentConditionTypeDynamoNimFound,
 				Status:  metav1.ConditionTrue,
@@ -334,7 +334,7 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 	modified := false
 
 	// Reconcile PVC
-	_, err = r.reconcilePVC(ctx, compoundAINimDeployment)
+	_, err = r.reconcilePVC(ctx, dynamoNimDeployment)
 	if err != nil {
 		logs.Error(err, "Unable to create PVC", "crd", req.NamespacedName)
 		return ctrl.Result{}, err
@@ -343,8 +343,8 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 	// create or update api-server deployment
 	modified_, err := r.createOrUpdateOrDeleteDeployments(ctx, createOrUpdateOrDeleteDeploymentsOption{
 		yataiClient:             yataiClient,
-		compoundAINimDeployment: compoundAINimDeployment,
-		compoundAINim:           compoundAINimCR,
+		dynamoNimDeployment: dynamoNimDeployment,
+		dynamoNim:           dynamoNimCR,
 		clusterName:             clusterName,
 	})
 	if err != nil {
@@ -356,7 +356,7 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	// create or update api-server hpa
-	modified_, err = r.createOrUpdateHPA(ctx, compoundAINimDeployment, compoundAINimCR)
+	modified_, err = r.createOrUpdateHPA(ctx, dynamoNimDeployment, dynamoNimCR)
 	if err != nil {
 		return
 	}
@@ -367,8 +367,8 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	// create or update api-server service
 	modified_, err = r.createOrUpdateOrDeleteServices(ctx, createOrUpdateOrDeleteServicesOption{
-		compoundAINimDeployment: compoundAINimDeployment,
-		compoundAINim:           compoundAINimCR,
+		dynamoNimDeployment: dynamoNimDeployment,
+		dynamoNim:           dynamoNimCR,
 	})
 	if err != nil {
 		return
@@ -381,8 +381,8 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 	// create or update api-server ingresses
 	modified_, err = r.createOrUpdateIngresses(ctx, createOrUpdateIngressOption{
 		yataiClient:             yataiClient,
-		compoundAINimDeployment: compoundAINimDeployment,
-		compoundAINim:           compoundAINimCR,
+		dynamoNimDeployment: dynamoNimDeployment,
+		dynamoNim:           dynamoNimCR,
 	})
 	if err != nil {
 		return
@@ -395,37 +395,37 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 	if yataiClient != nil && clusterName != nil {
 		yataiClient_ := *yataiClient
 		clusterName_ := *clusterName
-		compoundAINimRepositoryName, compoundAINimVersion := getDynamoNimRepositoryNameAndDynamoNimVersion(compoundAINimCR)
-		_, err = yataiClient_.GetBento(ctx, compoundAINimRepositoryName, compoundAINimVersion)
+		dynamoNimRepositoryName, dynamoNimVersion := getDynamoNimRepositoryNameAndDynamoNimVersion(dynamoNimCR)
+		_, err = yataiClient_.GetBento(ctx, dynamoNimRepositoryName, dynamoNimVersion)
 
-		compoundAINimIsNotFound := isNotFoundError(err)
-		if err != nil && !compoundAINimIsNotFound {
+		dynamoNimIsNotFound := isNotFoundError(err)
+		if err != nil && !dynamoNimIsNotFound {
 			return
 		}
-		if compoundAINimIsNotFound {
-			compoundAINimDeployment, err = r.setStatusConditions(ctx, req,
+		if dynamoNimIsNotFound {
+			dynamoNimDeployment, err = r.setStatusConditions(ctx, req,
 				metav1.Condition{
 					Type:    v1alpha1.DynamoDeploymentConditionTypeAvailable,
 					Status:  metav1.ConditionTrue,
 					Reason:  "Reconciling",
-					Message: "Remote compoundAINim from Yatai is not found",
+					Message: "Remote dynamoNim from Yatai is not found",
 				},
 			)
 			return
 		}
-		r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetYataiDeployment", "Fetching yatai deployment %s", compoundAINimDeployment.Name)
+		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "GetYataiDeployment", "Fetching yatai deployment %s", dynamoNimDeployment.Name)
 		var oldYataiDeployment *schemasv1.DeploymentSchema
-		oldYataiDeployment, err = yataiClient_.GetDeployment(ctx, clusterName_, compoundAINimDeployment.Namespace, compoundAINimDeployment.Name)
+		oldYataiDeployment, err = yataiClient_.GetDeployment(ctx, clusterName_, dynamoNimDeployment.Namespace, dynamoNimDeployment.Name)
 		isNotFound := isNotFoundError(err)
 		if err != nil && !isNotFound {
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "GetYataiDeployment", "Failed to fetch yatai deployment %s: %s", compoundAINimDeployment.Name, err)
+			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "GetYataiDeployment", "Failed to fetch yatai deployment %s: %s", dynamoNimDeployment.Name, err)
 			return
 		}
 		err = nil
 
 		envs := make([]*modelschemas.LabelItemSchema, 0)
 
-		specEnvs := compoundAINimDeployment.Spec.Envs
+		specEnvs := dynamoNimDeployment.Spec.Envs
 
 		for _, env := range specEnvs {
 			envs = append(envs, &modelschemas.LabelItemSchema{
@@ -435,7 +435,7 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 
 		var hpaConf *modelschemas.DeploymentTargetHPAConf
-		hpaConf, err = TransformToOldHPA(compoundAINimDeployment.Spec.Autoscaling)
+		hpaConf, err = TransformToOldHPA(dynamoNimDeployment.Spec.Autoscaling)
 		if err != nil {
 			return
 		}
@@ -444,31 +444,31 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 			DeploymentTargetTypeSchema: schemasv1.DeploymentTargetTypeSchema{
 				Type: modelschemas.DeploymentTargetTypeStable,
 			},
-			BentoRepository: compoundAINimRepositoryName,
-			Bento:           compoundAINimVersion,
+			BentoRepository: dynamoNimRepositoryName,
+			Bento:           dynamoNimVersion,
 			Config: &modelschemas.DeploymentTargetConfig{
-				KubeResourceUid:                        string(compoundAINimDeployment.UID),
-				KubeResourceVersion:                    compoundAINimDeployment.ResourceVersion,
-				Resources:                              compounadaiConversion.ConvertToDeploymentTargetResources(compoundAINimDeployment.Spec.Resources),
+				KubeResourceUid:                        string(dynamoNimDeployment.UID),
+				KubeResourceVersion:                    dynamoNimDeployment.ResourceVersion,
+				Resources:                              compounadaiConversion.ConvertToDeploymentTargetResources(dynamoNimDeployment.Spec.Resources),
 				HPAConf:                                hpaConf,
 				Envs:                                   &envs,
-				EnableIngress:                          &compoundAINimDeployment.Spec.Ingress.Enabled,
-				EnableStealingTrafficDebugMode:         &[]bool{checkIfIsStealingTrafficDebugModeEnabled(compoundAINimDeployment.Spec.Annotations)}[0],
-				EnableDebugMode:                        &[]bool{checkIfIsDebugModeEnabled(compoundAINimDeployment.Spec.Annotations)}[0],
-				EnableDebugPodReceiveProductionTraffic: &[]bool{checkIfIsDebugPodReceiveProductionTrafficEnabled(compoundAINimDeployment.Spec.Annotations)}[0],
+				EnableIngress:                          &dynamoNimDeployment.Spec.Ingress.Enabled,
+				EnableStealingTrafficDebugMode:         &[]bool{checkIfIsStealingTrafficDebugModeEnabled(dynamoNimDeployment.Spec.Annotations)}[0],
+				EnableDebugMode:                        &[]bool{checkIfIsDebugModeEnabled(dynamoNimDeployment.Spec.Annotations)}[0],
+				EnableDebugPodReceiveProductionTraffic: &[]bool{checkIfIsDebugPodReceiveProductionTrafficEnabled(dynamoNimDeployment.Spec.Annotations)}[0],
 				BentoDeploymentOverrides: &modelschemas.ApiServerBentoDeploymentOverrides{
-					MonitorExporter:  compoundAINimDeployment.Spec.MonitorExporter,
-					ExtraPodMetadata: compoundAINimDeployment.Spec.ExtraPodMetadata,
-					ExtraPodSpec:     compoundAINimDeployment.Spec.ExtraPodSpec,
+					MonitorExporter:  dynamoNimDeployment.Spec.MonitorExporter,
+					ExtraPodMetadata: dynamoNimDeployment.Spec.ExtraPodMetadata,
+					ExtraPodSpec:     dynamoNimDeployment.Spec.ExtraPodSpec,
 				},
 				BentoRequestOverrides: &modelschemas.BentoRequestOverrides{
-					ImageBuildTimeout:              compoundAINimRequest.Spec.ImageBuildTimeout,
-					ImageBuilderExtraPodSpec:       compoundAINimRequest.Spec.ImageBuilderExtraPodSpec,
-					ImageBuilderExtraPodMetadata:   compoundAINimRequest.Spec.ImageBuilderExtraPodMetadata,
-					ImageBuilderExtraContainerEnv:  compoundAINimRequest.Spec.ImageBuilderExtraContainerEnv,
-					ImageBuilderContainerResources: compoundAINimRequest.Spec.ImageBuilderContainerResources,
-					DockerConfigJSONSecretName:     compoundAINimRequest.Spec.DockerConfigJSONSecretName,
-					DownloaderContainerEnvFrom:     compoundAINimRequest.Spec.DownloaderContainerEnvFrom,
+					ImageBuildTimeout:              dynamoNimRequest.Spec.ImageBuildTimeout,
+					ImageBuilderExtraPodSpec:       dynamoNimRequest.Spec.ImageBuilderExtraPodSpec,
+					ImageBuilderExtraPodMetadata:   dynamoNimRequest.Spec.ImageBuilderExtraPodMetadata,
+					ImageBuilderExtraContainerEnv:  dynamoNimRequest.Spec.ImageBuilderExtraContainerEnv,
+					ImageBuilderContainerResources: dynamoNimRequest.Spec.ImageBuilderContainerResources,
+					DockerConfigJSONSecretName:     dynamoNimRequest.Spec.DockerConfigJSONSecretName,
+					DownloaderContainerEnvFrom:     dynamoNimRequest.Spec.DownloaderContainerEnvFrom,
 				},
 			},
 		}
@@ -478,17 +478,17 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 			DoNotDeploy: true,
 		}
 		if isNotFound {
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "CreateYataiDeployment", "Creating yatai deployment %s", compoundAINimDeployment.Name)
+			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "CreateYataiDeployment", "Creating yatai deployment %s", dynamoNimDeployment.Name)
 			_, err = yataiClient_.CreateDeployment(ctx, clusterName_, &schemasv1.CreateDeploymentSchema{
-				Name:                   compoundAINimDeployment.Name,
-				KubeNamespace:          compoundAINimDeployment.Namespace,
+				Name:                   dynamoNimDeployment.Name,
+				KubeNamespace:          dynamoNimDeployment.Namespace,
 				UpdateDeploymentSchema: *updateSchema,
 			})
 			if err != nil {
-				r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "CreateYataiDeployment", "Failed to create yatai deployment %s: %s", compoundAINimDeployment.Name, err)
+				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "CreateYataiDeployment", "Failed to create yatai deployment %s: %s", dynamoNimDeployment.Name, err)
 				return
 			}
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "CreateYataiDeployment", "Created yatai deployment %s", compoundAINimDeployment.Name)
+			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "CreateYataiDeployment", "Created yatai deployment %s", dynamoNimDeployment.Name)
 		} else {
 			noChange := false
 			if oldYataiDeployment != nil && oldYataiDeployment.LatestRevision != nil && len(oldYataiDeployment.LatestRevision.Targets) > 0 {
@@ -497,33 +497,33 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 				noChange = reflect.DeepEqual(oldYataiDeployment.LatestRevision.Targets[0].Config, updateSchema.Targets[0].Config)
 			}
 			if noChange {
-				r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "UpdateYataiDeployment", "No change in yatai deployment %s, skipping", compoundAINimDeployment.Name)
+				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateYataiDeployment", "No change in yatai deployment %s, skipping", dynamoNimDeployment.Name)
 			} else {
-				r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "UpdateYataiDeployment", "Updating yatai deployment %s", compoundAINimDeployment.Name)
-				_, err = yataiClient_.UpdateDeployment(ctx, clusterName_, compoundAINimDeployment.Namespace, compoundAINimDeployment.Name, updateSchema)
+				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateYataiDeployment", "Updating yatai deployment %s", dynamoNimDeployment.Name)
+				_, err = yataiClient_.UpdateDeployment(ctx, clusterName_, dynamoNimDeployment.Namespace, dynamoNimDeployment.Name, updateSchema)
 				if err != nil {
-					r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "UpdateYataiDeployment", "Failed to update yatai deployment %s: %s", compoundAINimDeployment.Name, err)
+					r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "UpdateYataiDeployment", "Failed to update yatai deployment %s: %s", dynamoNimDeployment.Name, err)
 					return
 				}
-				r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "UpdateYataiDeployment", "Updated yatai deployment %s", compoundAINimDeployment.Name)
+				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateYataiDeployment", "Updated yatai deployment %s", dynamoNimDeployment.Name)
 			}
 		}
-		r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "SyncYataiDeploymentStatus", "Syncing yatai deployment %s status", compoundAINimDeployment.Name)
-		_, err = yataiClient_.SyncDeploymentStatus(ctx, clusterName_, compoundAINimDeployment.Namespace, compoundAINimDeployment.Name)
+		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "SyncYataiDeploymentStatus", "Syncing yatai deployment %s status", dynamoNimDeployment.Name)
+		_, err = yataiClient_.SyncDeploymentStatus(ctx, clusterName_, dynamoNimDeployment.Namespace, dynamoNimDeployment.Name)
 		if err != nil {
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "SyncYataiDeploymentStatus", "Failed to sync yatai deployment %s status: %s", compoundAINimDeployment.Name, err)
+			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "SyncYataiDeploymentStatus", "Failed to sync yatai deployment %s status: %s", dynamoNimDeployment.Name, err)
 			return
 		}
-		r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "SyncYataiDeploymentStatus", "Synced yatai deployment %s status", compoundAINimDeployment.Name)
+		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "SyncYataiDeploymentStatus", "Synced yatai deployment %s status", dynamoNimDeployment.Name)
 	}
 
 	if !modified {
-		r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "UpdateYataiDeployment", "No changes to yatai deployment %s", compoundAINimDeployment.Name)
+		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateYataiDeployment", "No changes to yatai deployment %s", dynamoNimDeployment.Name)
 	}
 
 	logs.Info("Finished reconciling.")
-	r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "Update", "All resources updated!")
-	compoundAINimDeployment, err = r.setStatusConditions(ctx, req,
+	r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "Update", "All resources updated!")
+	dynamoNimDeployment, err = r.setStatusConditions(ctx, req,
 		metav1.Condition{
 			Type:    v1alpha1.DynamoDeploymentConditionTypeAvailable,
 			Status:  metav1.ConditionTrue,
@@ -577,17 +577,17 @@ func (r *DynamoNimDeploymentReconciler) reconcilePVC(ctx context.Context, crd *v
 	return pvc, nil
 }
 
-func (r *DynamoNimDeploymentReconciler) setStatusConditions(ctx context.Context, req ctrl.Request, conditions ...metav1.Condition) (compoundAINimDeployment *v1alpha1.DynamoNimDeployment, err error) {
-	compoundAINimDeployment = &v1alpha1.DynamoNimDeployment{}
+func (r *DynamoNimDeploymentReconciler) setStatusConditions(ctx context.Context, req ctrl.Request, conditions ...metav1.Condition) (dynamoNimDeployment *v1alpha1.DynamoNimDeployment, err error) {
+	dynamoNimDeployment = &v1alpha1.DynamoNimDeployment{}
 	for i := 0; i < 3; i++ {
-		if err = r.Get(ctx, req.NamespacedName, compoundAINimDeployment); err != nil {
+		if err = r.Get(ctx, req.NamespacedName, dynamoNimDeployment); err != nil {
 			err = errors.Wrap(err, "Failed to re-fetch DynamoNimDeployment")
 			return
 		}
 		for _, condition := range conditions {
-			meta.SetStatusCondition(&compoundAINimDeployment.Status.Conditions, condition)
+			meta.SetStatusCondition(&dynamoNimDeployment.Status.Conditions, condition)
 		}
-		if err = r.Status().Update(ctx, compoundAINimDeployment); err != nil {
+		if err = r.Status().Update(ctx, dynamoNimDeployment); err != nil {
 			time.Sleep(100 * time.Millisecond)
 		} else {
 			break
@@ -597,7 +597,7 @@ func (r *DynamoNimDeploymentReconciler) setStatusConditions(ctx context.Context,
 		err = errors.Wrap(err, "Failed to update DynamoNimDeployment status")
 		return
 	}
-	if err = r.Get(ctx, req.NamespacedName, compoundAINimDeployment); err != nil {
+	if err = r.Get(ctx, req.NamespacedName, dynamoNimDeployment); err != nil {
 		err = errors.Wrap(err, "Failed to re-fetch DynamoNimDeployment")
 		return
 	}
@@ -651,13 +651,13 @@ func (r *DynamoNimDeploymentReconciler) getYataiClient(ctx context.Context) (yat
 	return
 }
 
-func (r *DynamoNimDeploymentReconciler) getYataiClientWithAuth(ctx context.Context, compoundAINimDeployment *v1alpha1.DynamoNimDeployment) (**yataiclient.YataiClient, *string, error) {
-	orgId, ok := compoundAINimDeployment.Labels[commonconsts.NgcOrganizationHeaderName]
+func (r *DynamoNimDeploymentReconciler) getYataiClientWithAuth(ctx context.Context, dynamoNimDeployment *v1alpha1.DynamoNimDeployment) (**yataiclient.YataiClient, *string, error) {
+	orgId, ok := dynamoNimDeployment.Labels[commonconsts.NgcOrganizationHeaderName]
 	if !ok {
 		orgId = commonconsts.DefaultOrgId
 	}
 
-	userId, ok := compoundAINimDeployment.Labels[commonconsts.NgcUserHeaderName]
+	userId, ok := dynamoNimDeployment.Labels[commonconsts.NgcUserHeaderName]
 	if !ok {
 		userId = commonconsts.DefaultUserId
 	}
@@ -678,14 +678,14 @@ func (r *DynamoNimDeploymentReconciler) getYataiClientWithAuth(ctx context.Conte
 
 type createOrUpdateOrDeleteDeploymentsOption struct {
 	yataiClient             **yataiclient.YataiClient
-	compoundAINimDeployment *v1alpha1.DynamoNimDeployment
-	compoundAINim           *v1alpha1.DynamoNim
+	dynamoNimDeployment *v1alpha1.DynamoNimDeployment
+	dynamoNim           *v1alpha1.DynamoNim
 	clusterName             *string
 }
 
 //nolint:nakedret
 func (r *DynamoNimDeploymentReconciler) createOrUpdateOrDeleteDeployments(ctx context.Context, opt createOrUpdateOrDeleteDeploymentsOption) (modified bool, err error) {
-	containsStealingTrafficDebugModeEnabled := checkIfContainsStealingTrafficDebugModeEnabled(opt.compoundAINimDeployment)
+	containsStealingTrafficDebugModeEnabled := checkIfContainsStealingTrafficDebugModeEnabled(opt.dynamoNimDeployment)
 	modified, err = r.createOrUpdateDeployment(ctx, createOrUpdateDeploymentOption{
 		createOrUpdateOrDeleteDeploymentsOption: opt,
 		isStealingTrafficDebugModeEnabled:       false,
@@ -706,9 +706,9 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateOrDeleteDeployments(ctx co
 			return
 		}
 	} else {
-		debugDeploymentName := r.getKubeName(opt.compoundAINimDeployment, opt.compoundAINim, true)
+		debugDeploymentName := r.getKubeName(opt.dynamoNimDeployment, opt.dynamoNim, true)
 		debugDeployment := &appsv1.Deployment{}
-		err = r.Get(ctx, types.NamespacedName{Name: debugDeploymentName, Namespace: opt.compoundAINimDeployment.Namespace}, debugDeployment)
+		err = r.Get(ctx, types.NamespacedName{Name: debugDeploymentName, Namespace: opt.dynamoNimDeployment.Namespace}, debugDeployment)
 		isNotFound := k8serrors.IsNotFound(err)
 		if err != nil && !isNotFound {
 			err = errors.Wrap(err, "get deployment")
@@ -738,8 +738,8 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateDeployment(ctx context.Con
 	logs := log.FromContext(ctx)
 
 	deployment, err := r.generateDeployment(ctx, generateDeploymentOption{
-		compoundAINimDeployment:                 opt.compoundAINimDeployment,
-		compoundAINim:                           opt.compoundAINim,
+		dynamoNimDeployment:                 opt.dynamoNimDeployment,
+		dynamoNim:                           opt.dynamoNim,
 		yataiClient:                             opt.yataiClient,
 		clusterName:                             opt.clusterName,
 		isStealingTrafficDebugModeEnabled:       opt.isStealingTrafficDebugModeEnabled,
@@ -753,13 +753,13 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateDeployment(ctx context.Con
 
 	deploymentNamespacedName := fmt.Sprintf("%s/%s", deployment.Namespace, deployment.Name)
 
-	r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeNormal, "GetDeployment", "Getting Deployment %s", deploymentNamespacedName)
+	r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeNormal, "GetDeployment", "Getting Deployment %s", deploymentNamespacedName)
 
 	oldDeployment := &appsv1.Deployment{}
 	err = r.Get(ctx, types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, oldDeployment)
 	oldDeploymentIsNotFound := k8serrors.IsNotFound(err)
 	if err != nil && !oldDeploymentIsNotFound {
-		r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeWarning, "GetDeployment", "Failed to get Deployment %s: %s", deploymentNamespacedName, err)
+		r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeWarning, "GetDeployment", "Failed to get Deployment %s: %s", deploymentNamespacedName, err)
 		logs.Error(err, "Failed to get Deployment.")
 		return
 	}
@@ -770,19 +770,19 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateDeployment(ctx context.Con
 		err = errors.Wrapf(patch.DefaultAnnotator.SetLastAppliedAnnotation(deployment), "set last applied annotation for deployment %s", deployment.Name)
 		if err != nil {
 			logs.Error(err, "Failed to set last applied annotation.")
-			r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for Deployment %s: %s", deploymentNamespacedName, err)
+			r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for Deployment %s: %s", deploymentNamespacedName, err)
 			return
 		}
 
-		r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeNormal, "CreateDeployment", "Creating a new Deployment %s", deploymentNamespacedName)
+		r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeNormal, "CreateDeployment", "Creating a new Deployment %s", deploymentNamespacedName)
 		err = r.Create(ctx, deployment)
 		if err != nil {
 			logs.Error(err, "Failed to create Deployment.")
-			r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeWarning, "CreateDeployment", "Failed to create Deployment %s: %s", deploymentNamespacedName, err)
+			r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeWarning, "CreateDeployment", "Failed to create Deployment %s: %s", deploymentNamespacedName, err)
 			return
 		}
 		logs.Info("Deployment created.")
-		r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeNormal, "CreateDeployment", "Created Deployment %s", deploymentNamespacedName)
+		r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeNormal, "CreateDeployment", "Created Deployment %s", deploymentNamespacedName)
 		modified = true
 	} else {
 		logs.Info("Deployment found.")
@@ -791,7 +791,7 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateDeployment(ctx context.Con
 		patchResult, err = patch.DefaultPatchMaker.Calculate(oldDeployment, deployment)
 		if err != nil {
 			logs.Error(err, "Failed to calculate patch.")
-			r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeWarning, "CalculatePatch", "Failed to calculate patch for Deployment %s: %s", deploymentNamespacedName, err)
+			r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeWarning, "CalculatePatch", "Failed to calculate patch for Deployment %s: %s", deploymentNamespacedName, err)
 			return
 		}
 
@@ -801,23 +801,23 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateDeployment(ctx context.Con
 			err = errors.Wrapf(patch.DefaultAnnotator.SetLastAppliedAnnotation(deployment), "set last applied annotation for deployment %s", deployment.Name)
 			if err != nil {
 				logs.Error(err, "Failed to set last applied annotation.")
-				r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for Deployment %s: %s", deploymentNamespacedName, err)
+				r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for Deployment %s: %s", deploymentNamespacedName, err)
 				return
 			}
 
-			r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeNormal, "UpdateDeployment", "Updating Deployment %s", deploymentNamespacedName)
+			r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeNormal, "UpdateDeployment", "Updating Deployment %s", deploymentNamespacedName)
 			err = r.Update(ctx, deployment)
 			if err != nil {
 				logs.Error(err, "Failed to update Deployment.")
-				r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeWarning, "UpdateDeployment", "Failed to update Deployment %s: %s", deploymentNamespacedName, err)
+				r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeWarning, "UpdateDeployment", "Failed to update Deployment %s: %s", deploymentNamespacedName, err)
 				return
 			}
 			logs.Info("Deployment updated.")
-			r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeNormal, "UpdateDeployment", "Updated Deployment %s", deploymentNamespacedName)
+			r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeNormal, "UpdateDeployment", "Updated Deployment %s", deploymentNamespacedName)
 			modified = true
 		} else {
 			logs.Info("Deployment spec is the same. Skipping update.")
-			r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeNormal, "UpdateDeployment", "Skipping update Deployment %s", deploymentNamespacedName)
+			r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeNormal, "UpdateDeployment", "Skipping update Deployment %s", deploymentNamespacedName)
 		}
 	}
 
@@ -825,22 +825,22 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateDeployment(ctx context.Con
 }
 
 //nolint:nakedret
-func (r *DynamoNimDeploymentReconciler) createOrUpdateHPA(ctx context.Context, compoundAINimDeployment *v1alpha1.DynamoNimDeployment, compoundAINim *v1alpha1.DynamoNim) (modified bool, err error) {
+func (r *DynamoNimDeploymentReconciler) createOrUpdateHPA(ctx context.Context, dynamoNimDeployment *v1alpha1.DynamoNimDeployment, dynamoNim *v1alpha1.DynamoNim) (modified bool, err error) {
 	logs := log.FromContext(ctx)
 
-	hpa, err := r.generateHPA(compoundAINimDeployment, compoundAINim)
+	hpa, err := r.generateHPA(dynamoNimDeployment, dynamoNim)
 	if err != nil {
 		return
 	}
 	logs = logs.WithValues("namespace", hpa.Namespace, "hpaName", hpa.Name)
 	hpaNamespacedName := fmt.Sprintf("%s/%s", hpa.Namespace, hpa.Name)
 
-	r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetHPA", "Getting HPA %s", hpaNamespacedName)
+	r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "GetHPA", "Getting HPA %s", hpaNamespacedName)
 
 	oldHPA, err := r.getHPA(ctx, hpa)
 	oldHPAIsNotFound := k8serrors.IsNotFound(err)
 	if err != nil && !oldHPAIsNotFound {
-		r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "GetHPA", "Failed to get HPA %s: %s", hpaNamespacedName, err)
+		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "GetHPA", "Failed to get HPA %s: %s", hpaNamespacedName, err)
 		logs.Error(err, "Failed to get HPA.")
 		return
 	}
@@ -851,19 +851,19 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateHPA(ctx context.Context, c
 		err = errors.Wrapf(patch.DefaultAnnotator.SetLastAppliedAnnotation(hpa), "set last applied annotation for hpa %s", hpa.Name)
 		if err != nil {
 			logs.Error(err, "Failed to set last applied annotation.")
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for HPA %s: %s", hpaNamespacedName, err)
+			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for HPA %s: %s", hpaNamespacedName, err)
 			return
 		}
 
-		r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "CreateHPA", "Creating a new HPA %s", hpaNamespacedName)
+		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "CreateHPA", "Creating a new HPA %s", hpaNamespacedName)
 		err = r.Create(ctx, hpa)
 		if err != nil {
 			logs.Error(err, "Failed to create HPA.")
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "CreateHPA", "Failed to create HPA %s: %s", hpaNamespacedName, err)
+			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "CreateHPA", "Failed to create HPA %s: %s", hpaNamespacedName, err)
 			return
 		}
 		logs.Info("HPA created.")
-		r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "CreateHPA", "Created HPA %s", hpaNamespacedName)
+		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "CreateHPA", "Created HPA %s", hpaNamespacedName)
 		modified = true
 	} else {
 		logs.Info("HPA found.")
@@ -872,7 +872,7 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateHPA(ctx context.Context, c
 		patchResult, err = patch.DefaultPatchMaker.Calculate(oldHPA, hpa)
 		if err != nil {
 			logs.Error(err, "Failed to calculate patch.")
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "CalculatePatch", "Failed to calculate patch for HPA %s: %s", hpaNamespacedName, err)
+			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "CalculatePatch", "Failed to calculate patch for HPA %s: %s", hpaNamespacedName, err)
 			return
 		}
 
@@ -882,31 +882,31 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateHPA(ctx context.Context, c
 			err = errors.Wrapf(patch.DefaultAnnotator.SetLastAppliedAnnotation(hpa), "set last applied annotation for hpa %s", hpa.Name)
 			if err != nil {
 				logs.Error(err, "Failed to set last applied annotation.")
-				r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for HPA %s: %s", hpaNamespacedName, err)
+				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for HPA %s: %s", hpaNamespacedName, err)
 				return
 			}
 
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "UpdateHPA", "Updating HPA %s", hpaNamespacedName)
+			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateHPA", "Updating HPA %s", hpaNamespacedName)
 			err = r.Update(ctx, hpa)
 			if err != nil {
 				logs.Error(err, "Failed to update HPA.")
-				r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "UpdateHPA", "Failed to update HPA %s: %s", hpaNamespacedName, err)
+				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "UpdateHPA", "Failed to update HPA %s: %s", hpaNamespacedName, err)
 				return
 			}
 			logs.Info("HPA updated.")
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "UpdateHPA", "Updated HPA %s", hpaNamespacedName)
+			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateHPA", "Updated HPA %s", hpaNamespacedName)
 			modified = true
 		} else {
 			logs.Info("HPA spec is the same. Skipping update.")
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "UpdateHPA", "Skipping update HPA %s", hpaNamespacedName)
+			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateHPA", "Skipping update HPA %s", hpaNamespacedName)
 		}
 	}
 
 	return
 }
 
-func getResourceAnnotations(compoundAINimDeployment *v1alpha1.DynamoNimDeployment) map[string]string {
-	resourceAnnotations := compoundAINimDeployment.Spec.Annotations
+func getResourceAnnotations(dynamoNimDeployment *v1alpha1.DynamoNimDeployment) map[string]string {
+	resourceAnnotations := dynamoNimDeployment.Spec.Annotations
 	if resourceAnnotations == nil {
 		resourceAnnotations = map[string]string{}
 	}
@@ -938,23 +938,23 @@ func checkIfIsDebugPodReceiveProductionTrafficEnabled(annotations map[string]str
 	return annotations[KubeAnnotationYataiEnableDebugPodReceiveProductionTraffic] == commonconsts.KubeLabelValueTrue
 }
 
-func checkIfContainsStealingTrafficDebugModeEnabled(compoundAINimDeployment *v1alpha1.DynamoNimDeployment) bool {
-	return checkIfIsStealingTrafficDebugModeEnabled(compoundAINimDeployment.Spec.Annotations)
+func checkIfContainsStealingTrafficDebugModeEnabled(dynamoNimDeployment *v1alpha1.DynamoNimDeployment) bool {
+	return checkIfIsStealingTrafficDebugModeEnabled(dynamoNimDeployment.Spec.Annotations)
 }
 
 type createOrUpdateOrDeleteServicesOption struct {
-	compoundAINimDeployment *v1alpha1.DynamoNimDeployment
-	compoundAINim           *v1alpha1.DynamoNim
+	dynamoNimDeployment *v1alpha1.DynamoNimDeployment
+	dynamoNim           *v1alpha1.DynamoNim
 }
 
 //nolint:nakedret
 func (r *DynamoNimDeploymentReconciler) createOrUpdateOrDeleteServices(ctx context.Context, opt createOrUpdateOrDeleteServicesOption) (modified bool, err error) {
-	resourceAnnotations := getResourceAnnotations(opt.compoundAINimDeployment)
+	resourceAnnotations := getResourceAnnotations(opt.dynamoNimDeployment)
 	isDebugPodReceiveProductionTrafficEnabled := checkIfIsDebugPodReceiveProductionTrafficEnabled(resourceAnnotations)
-	containsStealingTrafficDebugModeEnabled := checkIfContainsStealingTrafficDebugModeEnabled(opt.compoundAINimDeployment)
+	containsStealingTrafficDebugModeEnabled := checkIfContainsStealingTrafficDebugModeEnabled(opt.dynamoNimDeployment)
 	modified, err = r.createOrUpdateService(ctx, createOrUpdateServiceOption{
-		compoundAINimDeployment:                 opt.compoundAINimDeployment,
-		compoundAINim:                           opt.compoundAINim,
+		dynamoNimDeployment:                 opt.dynamoNimDeployment,
+		dynamoNim:                           opt.dynamoNim,
 		isStealingTrafficDebugModeEnabled:       false,
 		isDebugPodReceiveProductionTraffic:      isDebugPodReceiveProductionTrafficEnabled,
 		containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
@@ -966,8 +966,8 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateOrDeleteServices(ctx conte
 	if containsStealingTrafficDebugModeEnabled {
 		var modified_ bool
 		modified_, err = r.createOrUpdateService(ctx, createOrUpdateServiceOption{
-			compoundAINimDeployment:                 opt.compoundAINimDeployment,
-			compoundAINim:                           opt.compoundAINim,
+			dynamoNimDeployment:                 opt.dynamoNimDeployment,
+			dynamoNim:                           opt.dynamoNim,
 			isStealingTrafficDebugModeEnabled:       false,
 			isDebugPodReceiveProductionTraffic:      isDebugPodReceiveProductionTrafficEnabled,
 			containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
@@ -980,8 +980,8 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateOrDeleteServices(ctx conte
 			modified = true
 		}
 		modified_, err = r.createOrUpdateService(ctx, createOrUpdateServiceOption{
-			compoundAINimDeployment:                 opt.compoundAINimDeployment,
-			compoundAINim:                           opt.compoundAINim,
+			dynamoNimDeployment:                 opt.dynamoNimDeployment,
+			dynamoNim:                           opt.dynamoNim,
 			isStealingTrafficDebugModeEnabled:       true,
 			isDebugPodReceiveProductionTraffic:      isDebugPodReceiveProductionTrafficEnabled,
 			containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
@@ -994,9 +994,9 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateOrDeleteServices(ctx conte
 			modified = true
 		}
 	} else {
-		productionServiceName := r.getServiceName(opt.compoundAINimDeployment, opt.compoundAINim, false)
+		productionServiceName := r.getServiceName(opt.dynamoNimDeployment, opt.dynamoNim, false)
 		svc := &corev1.Service{}
-		err = r.Get(ctx, types.NamespacedName{Name: productionServiceName, Namespace: opt.compoundAINimDeployment.Namespace}, svc)
+		err = r.Get(ctx, types.NamespacedName{Name: productionServiceName, Namespace: opt.dynamoNimDeployment.Namespace}, svc)
 		isNotFound := k8serrors.IsNotFound(err)
 		if err != nil && !isNotFound {
 			err = errors.Wrapf(err, "Failed to get service %s", productionServiceName)
@@ -1010,9 +1010,9 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateOrDeleteServices(ctx conte
 				return
 			}
 		}
-		debugServiceName := r.getServiceName(opt.compoundAINimDeployment, opt.compoundAINim, true)
+		debugServiceName := r.getServiceName(opt.dynamoNimDeployment, opt.dynamoNim, true)
 		svc = &corev1.Service{}
-		err = r.Get(ctx, types.NamespacedName{Name: debugServiceName, Namespace: opt.compoundAINimDeployment.Namespace}, svc)
+		err = r.Get(ctx, types.NamespacedName{Name: debugServiceName, Namespace: opt.dynamoNimDeployment.Namespace}, svc)
 		isNotFound = k8serrors.IsNotFound(err)
 		if err != nil && !isNotFound {
 			err = errors.Wrapf(err, "Failed to get service %s", debugServiceName)
@@ -1032,8 +1032,8 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateOrDeleteServices(ctx conte
 }
 
 type createOrUpdateServiceOption struct {
-	compoundAINimDeployment                 *v1alpha1.DynamoNimDeployment
-	compoundAINim                           *v1alpha1.DynamoNim
+	dynamoNimDeployment                 *v1alpha1.DynamoNimDeployment
+	dynamoNim                           *v1alpha1.DynamoNim
 	isStealingTrafficDebugModeEnabled       bool
 	isDebugPodReceiveProductionTraffic      bool
 	containsStealingTrafficDebugModeEnabled bool
@@ -1054,13 +1054,13 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateService(ctx context.Contex
 
 	serviceNamespacedName := fmt.Sprintf("%s/%s", service.Namespace, service.Name)
 
-	r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeNormal, "GetService", "Getting Service %s", serviceNamespacedName)
+	r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeNormal, "GetService", "Getting Service %s", serviceNamespacedName)
 
 	oldService := &corev1.Service{}
 	err = r.Get(ctx, types.NamespacedName{Name: service.Name, Namespace: service.Namespace}, oldService)
 	oldServiceIsNotFound := k8serrors.IsNotFound(err)
 	if err != nil && !oldServiceIsNotFound {
-		r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeWarning, "GetService", "Failed to get Service %s: %s", serviceNamespacedName, err)
+		r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeWarning, "GetService", "Failed to get Service %s: %s", serviceNamespacedName, err)
 		logs.Error(err, "Failed to get Service.")
 		return
 	}
@@ -1071,19 +1071,19 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateService(ctx context.Contex
 		err = errors.Wrapf(patch.DefaultAnnotator.SetLastAppliedAnnotation(service), "set last applied annotation for service %s", service.Name)
 		if err != nil {
 			logs.Error(err, "Failed to set last applied annotation.")
-			r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for Service %s: %s", serviceNamespacedName, err)
+			r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for Service %s: %s", serviceNamespacedName, err)
 			return
 		}
 
-		r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeNormal, "CreateService", "Creating a new Service %s", serviceNamespacedName)
+		r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeNormal, "CreateService", "Creating a new Service %s", serviceNamespacedName)
 		err = r.Create(ctx, service)
 		if err != nil {
 			logs.Error(err, "Failed to create Service.")
-			r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeWarning, "CreateService", "Failed to create Service %s: %s", serviceNamespacedName, err)
+			r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeWarning, "CreateService", "Failed to create Service %s: %s", serviceNamespacedName, err)
 			return
 		}
 		logs.Info("Service created.")
-		r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeNormal, "CreateService", "Created Service %s", serviceNamespacedName)
+		r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeNormal, "CreateService", "Created Service %s", serviceNamespacedName)
 		modified = true
 	} else {
 		logs.Info("Service found.")
@@ -1092,7 +1092,7 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateService(ctx context.Contex
 		patchResult, err = patch.DefaultPatchMaker.Calculate(oldService, service)
 		if err != nil {
 			logs.Error(err, "Failed to calculate patch.")
-			r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeWarning, "CalculatePatch", "Failed to calculate patch for Service %s: %s", serviceNamespacedName, err)
+			r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeWarning, "CalculatePatch", "Failed to calculate patch for Service %s: %s", serviceNamespacedName, err)
 			return
 		}
 
@@ -1102,44 +1102,44 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateService(ctx context.Contex
 			err = errors.Wrapf(patch.DefaultAnnotator.SetLastAppliedAnnotation(service), "set last applied annotation for service %s", service.Name)
 			if err != nil {
 				logs.Error(err, "Failed to set last applied annotation.")
-				r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for Service %s: %s", serviceNamespacedName, err)
+				r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for Service %s: %s", serviceNamespacedName, err)
 				return
 			}
 
-			r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeNormal, "UpdateService", "Updating Service %s", serviceNamespacedName)
+			r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeNormal, "UpdateService", "Updating Service %s", serviceNamespacedName)
 			oldService.Annotations = service.Annotations
 			oldService.Labels = service.Labels
 			oldService.Spec = service.Spec
 			err = r.Update(ctx, oldService)
 			if err != nil {
 				logs.Error(err, "Failed to update Service.")
-				r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeWarning, "UpdateService", "Failed to update Service %s: %s", serviceNamespacedName, err)
+				r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeWarning, "UpdateService", "Failed to update Service %s: %s", serviceNamespacedName, err)
 				return
 			}
 			logs.Info("Service updated.")
-			r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeNormal, "UpdateService", "Updated Service %s", serviceNamespacedName)
+			r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeNormal, "UpdateService", "Updated Service %s", serviceNamespacedName)
 			modified = true
 		} else {
 			logs = logs.WithValues("oldServiceSelector", oldService.Spec.Selector)
 			logs.Info("Service spec is the same. Skipping update.")
-			r.Recorder.Eventf(opt.compoundAINimDeployment, corev1.EventTypeNormal, "UpdateService", "Skipping update Service %s", serviceNamespacedName)
+			r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeNormal, "UpdateService", "Skipping update Service %s", serviceNamespacedName)
 		}
 	}
 
 	return
 }
 
-func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context.Context, compoundAINimDeployment *v1alpha1.DynamoNimDeployment) (bool, error) {
+func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context.Context, dynamoNimDeployment *v1alpha1.DynamoNimDeployment) (bool, error) {
 	log := log.FromContext(ctx)
 	log.Info("Starting createOrUpdateVirtualService")
-	vsName := compoundAINimDeployment.Name
-	if compoundAINimDeployment.Spec.Ingress.HostPrefix != nil {
-		vsName = *compoundAINimDeployment.Spec.Ingress.HostPrefix + vsName
+	vsName := dynamoNimDeployment.Name
+	if dynamoNimDeployment.Spec.Ingress.HostPrefix != nil {
+		vsName = *dynamoNimDeployment.Spec.Ingress.HostPrefix + vsName
 	}
 	vs := &networkingv1beta1.VirtualService{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      compoundAINimDeployment.Name,
-			Namespace: compoundAINimDeployment.Namespace,
+			Name:      dynamoNimDeployment.Name,
+			Namespace: dynamoNimDeployment.Namespace,
 		},
 		Spec: istioNetworking.VirtualService{
 			Hosts: []string{
@@ -1158,7 +1158,7 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context
 					Route: []*istioNetworking.HTTPRouteDestination{
 						{
 							Destination: &istioNetworking.Destination{
-								Host: fmt.Sprintf("%s.yatai.svc.cluster.local", compoundAINimDeployment.Name),
+								Host: fmt.Sprintf("%s.yatai.svc.cluster.local", dynamoNimDeployment.Name),
 								Port: &istioNetworking.PortSelector{
 									Number: 3000,
 								},
@@ -1179,7 +1179,7 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context
 		return false, err
 	}
 
-	vsEnabled := compoundAINimDeployment.Spec.Ingress.Enabled && compoundAINimDeployment.Spec.Ingress.UseVirtualService != nil && *compoundAINimDeployment.Spec.Ingress.UseVirtualService
+	vsEnabled := dynamoNimDeployment.Spec.Ingress.Enabled && dynamoNimDeployment.Spec.Ingress.UseVirtualService != nil && *dynamoNimDeployment.Spec.Ingress.UseVirtualService
 
 	if err != nil {
 		if vsEnabled {
@@ -1216,32 +1216,32 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context
 
 type createOrUpdateIngressOption struct {
 	yataiClient             **yataiclient.YataiClient
-	compoundAINimDeployment *v1alpha1.DynamoNimDeployment
-	compoundAINim           *v1alpha1.DynamoNim
+	dynamoNimDeployment *v1alpha1.DynamoNimDeployment
+	dynamoNim           *v1alpha1.DynamoNim
 }
 
 //nolint:nakedret
 func (r *DynamoNimDeploymentReconciler) createOrUpdateIngresses(ctx context.Context, opt createOrUpdateIngressOption) (modified bool, err error) {
 	logs := log.FromContext(ctx)
 
-	compoundAINimDeployment := opt.compoundAINimDeployment
-	compoundAINim := opt.compoundAINim
+	dynamoNimDeployment := opt.dynamoNimDeployment
+	dynamoNim := opt.dynamoNim
 
-	modified, err = r.createOrUpdateVirtualService(ctx, compoundAINimDeployment)
+	modified, err = r.createOrUpdateVirtualService(ctx, dynamoNimDeployment)
 	if err != nil {
 		return false, err
 	}
 
 	// generateIngresses generates an ingress and actively waits for the ingress to come online ....
 	// so disabling it for now unless explicitly enabled
-	if !opt.compoundAINimDeployment.Spec.Ingress.Enabled || (opt.compoundAINimDeployment.Spec.Ingress.UseVirtualService != nil && *opt.compoundAINimDeployment.Spec.Ingress.UseVirtualService) {
+	if !opt.dynamoNimDeployment.Spec.Ingress.Enabled || (opt.dynamoNimDeployment.Spec.Ingress.UseVirtualService != nil && *opt.dynamoNimDeployment.Spec.Ingress.UseVirtualService) {
 		return false, nil
 	}
 
 	ingresses, err := r.generateIngresses(ctx, generateIngressesOption{
 		yataiClient:             opt.yataiClient,
-		compoundAINimDeployment: compoundAINimDeployment,
-		compoundAINim:           compoundAINim,
+		dynamoNimDeployment: dynamoNimDeployment,
+		dynamoNim:           dynamoNim,
 	})
 	if err != nil {
 		return
@@ -1251,22 +1251,22 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateIngresses(ctx context.Cont
 		logs := logs.WithValues("namespace", ingress.Namespace, "ingressName", ingress.Name)
 		ingressNamespacedName := fmt.Sprintf("%s/%s", ingress.Namespace, ingress.Name)
 
-		r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetIngress", "Getting Ingress %s", ingressNamespacedName)
+		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "GetIngress", "Getting Ingress %s", ingressNamespacedName)
 
 		oldIngress := &networkingv1.Ingress{}
 		err = r.Get(ctx, types.NamespacedName{Name: ingress.Name, Namespace: ingress.Namespace}, oldIngress)
 		oldIngressIsNotFound := k8serrors.IsNotFound(err)
 		if err != nil && !oldIngressIsNotFound {
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "GetIngress", "Failed to get Ingress %s: %s", ingressNamespacedName, err)
+			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "GetIngress", "Failed to get Ingress %s: %s", ingressNamespacedName, err)
 			logs.Error(err, "Failed to get Ingress.")
 			return
 		}
 		err = nil
 
 		if oldIngressIsNotFound {
-			if !compoundAINimDeployment.Spec.Ingress.Enabled {
+			if !dynamoNimDeployment.Spec.Ingress.Enabled {
 				logs.Info("Ingress not enabled. Skipping.")
-				r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GetIngress", "Skipping Ingress %s", ingressNamespacedName)
+				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "GetIngress", "Skipping Ingress %s", ingressNamespacedName)
 				continue
 			}
 
@@ -1275,34 +1275,34 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateIngresses(ctx context.Cont
 			err = errors.Wrapf(patch.DefaultAnnotator.SetLastAppliedAnnotation(ingress), "set last applied annotation for ingress %s", ingress.Name)
 			if err != nil {
 				logs.Error(err, "Failed to set last applied annotation.")
-				r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for Ingress %s: %s", ingressNamespacedName, err)
+				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for Ingress %s: %s", ingressNamespacedName, err)
 				return
 			}
 
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "CreateIngress", "Creating a new Ingress %s", ingressNamespacedName)
+			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "CreateIngress", "Creating a new Ingress %s", ingressNamespacedName)
 			err = r.Create(ctx, ingress)
 			if err != nil {
 				logs.Error(err, "Failed to create Ingress.")
-				r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "CreateIngress", "Failed to create Ingress %s: %s", ingressNamespacedName, err)
+				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "CreateIngress", "Failed to create Ingress %s: %s", ingressNamespacedName, err)
 				return
 			}
 			logs.Info("Ingress created.")
-			r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "CreateIngress", "Created Ingress %s", ingressNamespacedName)
+			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "CreateIngress", "Created Ingress %s", ingressNamespacedName)
 			modified = true
 		} else {
 			logs.Info("Ingress found.")
 
-			if !compoundAINimDeployment.Spec.Ingress.Enabled {
+			if !dynamoNimDeployment.Spec.Ingress.Enabled {
 				logs.Info("Ingress not enabled. Deleting.")
-				r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "DeleteIngress", "Deleting Ingress %s", ingressNamespacedName)
+				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "DeleteIngress", "Deleting Ingress %s", ingressNamespacedName)
 				err = r.Delete(ctx, ingress)
 				if err != nil {
 					logs.Error(err, "Failed to delete Ingress.")
-					r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "DeleteIngress", "Failed to delete Ingress %s: %s", ingressNamespacedName, err)
+					r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "DeleteIngress", "Failed to delete Ingress %s: %s", ingressNamespacedName, err)
 					return
 				}
 				logs.Info("Ingress deleted.")
-				r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "DeleteIngress", "Deleted Ingress %s", ingressNamespacedName)
+				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "DeleteIngress", "Deleted Ingress %s", ingressNamespacedName)
 				modified = true
 				continue
 			}
@@ -1314,7 +1314,7 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateIngresses(ctx context.Cont
 			patchResult, err = patch.DefaultPatchMaker.Calculate(oldIngress, ingress)
 			if err != nil {
 				logs.Error(err, "Failed to calculate patch.")
-				r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "CalculatePatch", "Failed to calculate patch for Ingress %s: %s", ingressNamespacedName, err)
+				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "CalculatePatch", "Failed to calculate patch for Ingress %s: %s", ingressNamespacedName, err)
 				return
 			}
 
@@ -1324,23 +1324,23 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateIngresses(ctx context.Cont
 				err = errors.Wrapf(patch.DefaultAnnotator.SetLastAppliedAnnotation(ingress), "set last applied annotation for ingress %s", ingress.Name)
 				if err != nil {
 					logs.Error(err, "Failed to set last applied annotation.")
-					r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for Ingress %s: %s", ingressNamespacedName, err)
+					r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for Ingress %s: %s", ingressNamespacedName, err)
 					return
 				}
 
-				r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "UpdateIngress", "Updating Ingress %s", ingressNamespacedName)
+				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateIngress", "Updating Ingress %s", ingressNamespacedName)
 				err = r.Update(ctx, ingress)
 				if err != nil {
 					logs.Error(err, "Failed to update Ingress.")
-					r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "UpdateIngress", "Failed to update Ingress %s: %s", ingressNamespacedName, err)
+					r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "UpdateIngress", "Failed to update Ingress %s: %s", ingressNamespacedName, err)
 					return
 				}
 				logs.Info("Ingress updated.")
-				r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "UpdateIngress", "Updated Ingress %s", ingressNamespacedName)
+				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateIngress", "Updated Ingress %s", ingressNamespacedName)
 				modified = true
 			} else {
 				logs.Info("Ingress spec is the same. Skipping update.")
-				r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "UpdateIngress", "Skipping update Ingress %s", ingressNamespacedName)
+				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateIngress", "Skipping update Ingress %s", ingressNamespacedName)
 			}
 		}
 	}
@@ -1348,33 +1348,33 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateIngresses(ctx context.Cont
 	return
 }
 
-func (r *DynamoNimDeploymentReconciler) getKubeName(compoundAINimDeployment *v1alpha1.DynamoNimDeployment, _ *v1alpha1.DynamoNim, debug bool) string {
+func (r *DynamoNimDeploymentReconciler) getKubeName(dynamoNimDeployment *v1alpha1.DynamoNimDeployment, _ *v1alpha1.DynamoNim, debug bool) string {
 	if debug {
-		return fmt.Sprintf("%s-d", compoundAINimDeployment.Name)
+		return fmt.Sprintf("%s-d", dynamoNimDeployment.Name)
 	}
-	return compoundAINimDeployment.Name
+	return dynamoNimDeployment.Name
 }
 
-func (r *DynamoNimDeploymentReconciler) getServiceName(compoundAINimDeployment *v1alpha1.DynamoNimDeployment, _ *v1alpha1.DynamoNim, debug bool) string {
+func (r *DynamoNimDeploymentReconciler) getServiceName(dynamoNimDeployment *v1alpha1.DynamoNimDeployment, _ *v1alpha1.DynamoNim, debug bool) string {
 	var kubeName string
 	if debug {
-		kubeName = fmt.Sprintf("%s-d", compoundAINimDeployment.Name)
+		kubeName = fmt.Sprintf("%s-d", dynamoNimDeployment.Name)
 	} else {
-		kubeName = fmt.Sprintf("%s-p", compoundAINimDeployment.Name)
+		kubeName = fmt.Sprintf("%s-p", dynamoNimDeployment.Name)
 	}
 	return kubeName
 }
 
-func (r *DynamoNimDeploymentReconciler) getGenericServiceName(compoundAINimDeployment *v1alpha1.DynamoNimDeployment, compoundAINim *v1alpha1.DynamoNim) string {
-	return r.getKubeName(compoundAINimDeployment, compoundAINim, false)
+func (r *DynamoNimDeploymentReconciler) getGenericServiceName(dynamoNimDeployment *v1alpha1.DynamoNimDeployment, dynamoNim *v1alpha1.DynamoNim) string {
+	return r.getKubeName(dynamoNimDeployment, dynamoNim, false)
 }
 
-func (r *DynamoNimDeploymentReconciler) getKubeLabels(compoundAINimDeployment *v1alpha1.DynamoNimDeployment, compoundAINim *v1alpha1.DynamoNim) map[string]string {
-	compoundAINimRepositoryName, _, compoundAINimVersion := xstrings.Partition(compoundAINim.Spec.Tag, ":")
+func (r *DynamoNimDeploymentReconciler) getKubeLabels(dynamoNimDeployment *v1alpha1.DynamoNimDeployment, dynamoNim *v1alpha1.DynamoNim) map[string]string {
+	dynamoNimRepositoryName, _, dynamoNimVersion := xstrings.Partition(dynamoNim.Spec.Tag, ":")
 	labels := map[string]string{
-		commonconsts.KubeLabelYataiBentoDeployment:           compoundAINimDeployment.Name,
-		commonconsts.KubeLabelBentoRepository:                compoundAINimRepositoryName,
-		commonconsts.KubeLabelBentoVersion:                   compoundAINimVersion,
+		commonconsts.KubeLabelYataiBentoDeployment:           dynamoNimDeployment.Name,
+		commonconsts.KubeLabelBentoRepository:                dynamoNimRepositoryName,
+		commonconsts.KubeLabelBentoVersion:                   dynamoNimVersion,
 		commonconsts.KubeLabelYataiBentoDeploymentTargetType: DeploymentTargetTypeProduction,
 		commonconsts.KubeLabelCreator:                        "yatai-deployment",
 	}
@@ -1382,15 +1382,15 @@ func (r *DynamoNimDeploymentReconciler) getKubeLabels(compoundAINimDeployment *v
 	return labels
 }
 
-func (r *DynamoNimDeploymentReconciler) getKubeAnnotations(compoundAINimDeployment *v1alpha1.DynamoNimDeployment, compoundAINim *v1alpha1.DynamoNim) map[string]string {
-	compoundAINimRepositoryName, compoundAINimVersion := getDynamoNimRepositoryNameAndDynamoNimVersion(compoundAINim)
+func (r *DynamoNimDeploymentReconciler) getKubeAnnotations(dynamoNimDeployment *v1alpha1.DynamoNimDeployment, dynamoNim *v1alpha1.DynamoNim) map[string]string {
+	dynamoNimRepositoryName, dynamoNimVersion := getDynamoNimRepositoryNameAndDynamoNimVersion(dynamoNim)
 	annotations := map[string]string{
-		commonconsts.KubeAnnotationBentoRepository: compoundAINimRepositoryName,
-		commonconsts.KubeAnnotationBentoVersion:    compoundAINimVersion,
+		commonconsts.KubeAnnotationBentoRepository: dynamoNimRepositoryName,
+		commonconsts.KubeAnnotationBentoVersion:    dynamoNimVersion,
 	}
 	var extraAnnotations map[string]string
-	if compoundAINimDeployment.Spec.ExtraPodMetadata != nil {
-		extraAnnotations = compoundAINimDeployment.Spec.ExtraPodMetadata.Annotations
+	if dynamoNimDeployment.Spec.ExtraPodMetadata != nil {
+		extraAnnotations = dynamoNimDeployment.Spec.ExtraPodMetadata.Annotations
 	} else {
 		extraAnnotations = map[string]string{}
 	}
@@ -1401,8 +1401,8 @@ func (r *DynamoNimDeploymentReconciler) getKubeAnnotations(compoundAINimDeployme
 }
 
 type generateDeploymentOption struct {
-	compoundAINimDeployment                 *v1alpha1.DynamoNimDeployment
-	compoundAINim                           *v1alpha1.DynamoNim
+	dynamoNimDeployment                 *v1alpha1.DynamoNimDeployment
+	dynamoNim                           *v1alpha1.DynamoNim
 	yataiClient                             **yataiclient.YataiClient
 	clusterName                             *string
 	isStealingTrafficDebugModeEnabled       bool
@@ -1411,7 +1411,7 @@ type generateDeploymentOption struct {
 
 //nolint:nakedret
 func (r *DynamoNimDeploymentReconciler) generateDeployment(ctx context.Context, opt generateDeploymentOption) (kubeDeployment *appsv1.Deployment, err error) {
-	kubeNs := opt.compoundAINimDeployment.Namespace
+	kubeNs := opt.dynamoNimDeployment.Namespace
 
 	// nolint: gosimple
 	podTemplateSpec, err := r.generatePodTemplateSpec(ctx, generatePodTemplateSpecOption(opt))
@@ -1419,11 +1419,11 @@ func (r *DynamoNimDeploymentReconciler) generateDeployment(ctx context.Context, 
 		return
 	}
 
-	labels := r.getKubeLabels(opt.compoundAINimDeployment, opt.compoundAINim)
+	labels := r.getKubeLabels(opt.dynamoNimDeployment, opt.dynamoNim)
 
-	annotations := r.getKubeAnnotations(opt.compoundAINimDeployment, opt.compoundAINim)
+	annotations := r.getKubeAnnotations(opt.dynamoNimDeployment, opt.dynamoNim)
 
-	kubeName := r.getKubeName(opt.compoundAINimDeployment, opt.compoundAINim, opt.isStealingTrafficDebugModeEnabled)
+	kubeName := r.getKubeName(opt.dynamoNimDeployment, opt.dynamoNim, opt.isStealingTrafficDebugModeEnabled)
 
 	defaultMaxSurge := intstr.FromString("25%")
 	defaultMaxUnavailable := intstr.FromString("25%")
@@ -1436,7 +1436,7 @@ func (r *DynamoNimDeploymentReconciler) generateDeployment(ctx context.Context, 
 		},
 	}
 
-	resourceAnnotations := getResourceAnnotations(opt.compoundAINimDeployment)
+	resourceAnnotations := getResourceAnnotations(opt.dynamoNimDeployment)
 	strategyStr := resourceAnnotations[KubeAnnotationDeploymentStrategy]
 	if strategyStr != "" {
 		strategyType := modelschemas.DeploymentStrategy(strategyStr)
@@ -1496,7 +1496,7 @@ func (r *DynamoNimDeploymentReconciler) generateDeployment(ctx context.Context, 
 		},
 	}
 
-	err = ctrl.SetControllerReference(opt.compoundAINimDeployment, kubeDeployment, r.Scheme)
+	err = ctrl.SetControllerReference(opt.dynamoNimDeployment, kubeDeployment, r.Scheme)
 	if err != nil {
 		err = errors.Wrapf(err, "set deployment %s controller reference", kubeDeployment.Name)
 	}
@@ -1504,16 +1504,16 @@ func (r *DynamoNimDeploymentReconciler) generateDeployment(ctx context.Context, 
 	return
 }
 
-func (r *DynamoNimDeploymentReconciler) generateHPA(compoundAINimDeployment *v1alpha1.DynamoNimDeployment, compoundAINim *v1alpha1.DynamoNim) (*autoscalingv2.HorizontalPodAutoscaler, error) {
-	labels := r.getKubeLabels(compoundAINimDeployment, compoundAINim)
+func (r *DynamoNimDeploymentReconciler) generateHPA(dynamoNimDeployment *v1alpha1.DynamoNimDeployment, dynamoNim *v1alpha1.DynamoNim) (*autoscalingv2.HorizontalPodAutoscaler, error) {
+	labels := r.getKubeLabels(dynamoNimDeployment, dynamoNim)
 
-	annotations := r.getKubeAnnotations(compoundAINimDeployment, compoundAINim)
+	annotations := r.getKubeAnnotations(dynamoNimDeployment, dynamoNim)
 
-	kubeName := r.getKubeName(compoundAINimDeployment, compoundAINim, false)
+	kubeName := r.getKubeName(dynamoNimDeployment, dynamoNim, false)
 
-	kubeNs := compoundAINimDeployment.Namespace
+	kubeNs := dynamoNimDeployment.Namespace
 
-	hpaConf := compoundAINimDeployment.Spec.Autoscaling
+	hpaConf := dynamoNimDeployment.Spec.Autoscaling
 
 	if hpaConf == nil {
 		hpaConf = &v1alpha1.Autoscaling{
@@ -1559,7 +1559,7 @@ func (r *DynamoNimDeploymentReconciler) generateHPA(compoundAINimDeployment *v1a
 		}
 	}
 
-	err := ctrl.SetControllerReference(compoundAINimDeployment, kubeHpa, r.Scheme)
+	err := ctrl.SetControllerReference(dynamoNimDeployment, kubeHpa, r.Scheme)
 	if err != nil {
 		return nil, errors.Wrapf(err, "set hpa %s controller reference", kubeName)
 	}
@@ -1581,15 +1581,15 @@ func (r *DynamoNimDeploymentReconciler) getHPA(ctx context.Context, hpa *autosca
 	return obj, err
 }
 
-func getDynamoNimRepositoryNameAndDynamoNimVersion(compoundAINim *v1alpha1.DynamoNim) (repositoryName string, version string) {
-	repositoryName, _, version = xstrings.Partition(compoundAINim.Spec.Tag, ":")
+func getDynamoNimRepositoryNameAndDynamoNimVersion(dynamoNim *v1alpha1.DynamoNim) (repositoryName string, version string) {
+	repositoryName, _, version = xstrings.Partition(dynamoNim.Spec.Tag, ":")
 
 	return
 }
 
 type generatePodTemplateSpecOption struct {
-	compoundAINimDeployment                 *v1alpha1.DynamoNimDeployment
-	compoundAINim                           *v1alpha1.DynamoNim
+	dynamoNimDeployment                 *v1alpha1.DynamoNimDeployment
+	dynamoNim                           *v1alpha1.DynamoNim
 	yataiClient                             **yataiclient.YataiClient
 	clusterName                             *string
 	isStealingTrafficDebugModeEnabled       bool
@@ -1598,20 +1598,20 @@ type generatePodTemplateSpecOption struct {
 
 //nolint:gocyclo,nakedret
 func (r *DynamoNimDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generatePodTemplateSpecOption) (podTemplateSpec *corev1.PodTemplateSpec, err error) {
-	compoundAINimRepositoryName, _ := getDynamoNimRepositoryNameAndDynamoNimVersion(opt.compoundAINim)
-	podLabels := r.getKubeLabels(opt.compoundAINimDeployment, opt.compoundAINim)
+	dynamoNimRepositoryName, _ := getDynamoNimRepositoryNameAndDynamoNimVersion(opt.dynamoNim)
+	podLabels := r.getKubeLabels(opt.dynamoNimDeployment, opt.dynamoNim)
 	if opt.isStealingTrafficDebugModeEnabled {
 		podLabels[commonconsts.KubeLabelYataiBentoDeploymentTargetType] = DeploymentTargetTypeDebug
 	}
 
-	podAnnotations := r.getKubeAnnotations(opt.compoundAINimDeployment, opt.compoundAINim)
+	podAnnotations := r.getKubeAnnotations(opt.dynamoNimDeployment, opt.dynamoNim)
 
-	kubeName := r.getKubeName(opt.compoundAINimDeployment, opt.compoundAINim, opt.isStealingTrafficDebugModeEnabled)
+	kubeName := r.getKubeName(opt.dynamoNimDeployment, opt.dynamoNim, opt.isStealingTrafficDebugModeEnabled)
 
 	containerPort := commonconsts.BentoServicePort
 	lastPort := containerPort + 1
 
-	monitorExporter := opt.compoundAINimDeployment.Spec.MonitorExporter
+	monitorExporter := opt.dynamoNimDeployment.Spec.MonitorExporter
 	needMonitorContainer := monitorExporter != nil && monitorExporter.Enabled
 
 	lastPort++
@@ -1620,8 +1620,8 @@ func (r *DynamoNimDeploymentReconciler) generatePodTemplateSpec(ctx context.Cont
 	var envs []corev1.EnvVar
 	envsSeen := make(map[string]struct{})
 
-	resourceAnnotations := opt.compoundAINimDeployment.Spec.Annotations
-	specEnvs := opt.compoundAINimDeployment.Spec.Envs
+	resourceAnnotations := opt.dynamoNimDeployment.Spec.Annotations
+	specEnvs := opt.dynamoNimDeployment.Spec.Envs
 
 	if resourceAnnotations == nil {
 		resourceAnnotations = make(map[string]string)
@@ -1658,15 +1658,15 @@ func (r *DynamoNimDeploymentReconciler) generatePodTemplateSpec(ctx context.Cont
 		},
 		{
 			Name:  commonconsts.EnvYataiDeploymentUID,
-			Value: string(opt.compoundAINimDeployment.UID),
+			Value: string(opt.dynamoNimDeployment.UID),
 		},
 		{
 			Name:  commonconsts.EnvYataiBentoDeploymentName,
-			Value: opt.compoundAINimDeployment.Name,
+			Value: opt.dynamoNimDeployment.Name,
 		},
 		{
 			Name:  commonconsts.EnvYataiBentoDeploymentNamespace,
-			Value: opt.compoundAINimDeployment.Namespace,
+			Value: opt.dynamoNimDeployment.Namespace,
 		},
 	}
 
@@ -1771,8 +1771,8 @@ monitoring.options.insecure=true`
 		},
 	}
 
-	if opt.compoundAINimDeployment.Spec.LivenessProbe != nil {
-		livenessProbe = opt.compoundAINimDeployment.Spec.LivenessProbe
+	if opt.dynamoNimDeployment.Spec.LivenessProbe != nil {
+		livenessProbe = opt.dynamoNimDeployment.Spec.LivenessProbe
 	}
 
 	readinessProbe := &corev1.Probe{
@@ -1787,8 +1787,8 @@ monitoring.options.insecure=true`
 		},
 	}
 
-	if opt.compoundAINimDeployment.Spec.ReadinessProbe != nil {
-		readinessProbe = opt.compoundAINimDeployment.Spec.ReadinessProbe
+	if opt.dynamoNimDeployment.Spec.ReadinessProbe != nil {
+		readinessProbe = opt.dynamoNimDeployment.Spec.ReadinessProbe
 	}
 
 	volumes := make([]corev1.Volume, 0)
@@ -1798,21 +1798,21 @@ monitoring.options.insecure=true`
 
 	args = append(args, "uv", "run", "dynamo", "start")
 
-	if opt.compoundAINimDeployment.Spec.ServiceName != "" {
-		args = append(args, []string{"--service-name", opt.compoundAINimDeployment.Spec.ServiceName}...)
+	if opt.dynamoNimDeployment.Spec.ServiceName != "" {
+		args = append(args, []string{"--service-name", opt.dynamoNimDeployment.Spec.ServiceName}...)
 	}
 
-	if len(opt.compoundAINimDeployment.Spec.ExternalServices) > 0 {
-		serviceSuffix := fmt.Sprintf("%s.svc.cluster.local:3000", opt.compoundAINimDeployment.Namespace)
-		keys := make([]string, 0, len(opt.compoundAINimDeployment.Spec.ExternalServices))
+	if len(opt.dynamoNimDeployment.Spec.ExternalServices) > 0 {
+		serviceSuffix := fmt.Sprintf("%s.svc.cluster.local:3000", opt.dynamoNimDeployment.Namespace)
+		keys := make([]string, 0, len(opt.dynamoNimDeployment.Spec.ExternalServices))
 
-		for key := range opt.compoundAINimDeployment.Spec.ExternalServices {
+		for key := range opt.dynamoNimDeployment.Spec.ExternalServices {
 			keys = append(keys, key)
 		}
 
 		sort.Strings(keys)
 		for _, key := range keys {
-			service := opt.compoundAINimDeployment.Spec.ExternalServices[key]
+			service := opt.dynamoNimDeployment.Spec.ExternalServices[key]
 
 			// Check if DeploymentSelectorKey is not "name"
 			if service.DeploymentSelectorKey == "name" {
@@ -1827,7 +1827,7 @@ monitoring.options.insecure=true`
 		}
 	}
 
-	yataiResources := opt.compoundAINimDeployment.Spec.Resources
+	yataiResources := opt.dynamoNimDeployment.Spec.Resources
 
 	resources, err := getResourcesConfig(yataiResources)
 	if err != nil {
@@ -1854,22 +1854,22 @@ monitoring.options.insecure=true`
 		Name:      KubeValueNameSharedMemory,
 		MountPath: "/dev/shm",
 	})
-	if opt.compoundAINimDeployment.Spec.PVC != nil {
+	if opt.dynamoNimDeployment.Spec.PVC != nil {
 		volumes = append(volumes, corev1.Volume{
-			Name: getPvcName(opt.compoundAINimDeployment, opt.compoundAINimDeployment.Spec.PVC.Name),
+			Name: getPvcName(opt.dynamoNimDeployment, opt.dynamoNimDeployment.Spec.PVC.Name),
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: getPvcName(opt.compoundAINimDeployment, opt.compoundAINimDeployment.Spec.PVC.Name),
+					ClaimName: getPvcName(opt.dynamoNimDeployment, opt.dynamoNimDeployment.Spec.PVC.Name),
 				},
 			},
 		})
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      getPvcName(opt.compoundAINimDeployment, opt.compoundAINimDeployment.Spec.PVC.Name),
-			MountPath: *opt.compoundAINimDeployment.Spec.PVC.MountPoint,
+			Name:      getPvcName(opt.dynamoNimDeployment, opt.dynamoNimDeployment.Spec.PVC.Name),
+			MountPath: *opt.dynamoNimDeployment.Spec.PVC.MountPoint,
 		})
 	}
 
-	imageName := opt.compoundAINim.Spec.Image
+	imageName := opt.dynamoNim.Spec.Image
 
 	var securityContext *corev1.SecurityContext
 	var mainContainerSecurityContext *corev1.SecurityContext
@@ -1917,12 +1917,12 @@ monitoring.options.insecure=true`
 		SecurityContext: mainContainerSecurityContext,
 	}
 
-	if opt.compoundAINimDeployment.Spec.EnvFromSecret != nil {
+	if opt.dynamoNimDeployment.Spec.EnvFromSecret != nil {
 		container.EnvFrom = []corev1.EnvFromSource{
 			{
 				SecretRef: &corev1.SecretEnvSource{
 					LocalObjectReference: corev1.LocalObjectReference{
-						Name: *opt.compoundAINimDeployment.Spec.EnvFromSecret,
+						Name: *opt.dynamoNimDeployment.Spec.EnvFromSecret,
 					},
 				},
 			},
@@ -2007,7 +2007,7 @@ monitoring.options.insecure=true`
 			},
 			{
 				Name:  "OLD_METRICS_PREFIX",
-				Value: fmt.Sprintf("BENTOML_%s_", strings.ReplaceAll(compoundAINimRepositoryName, "-", ":")),
+				Value: fmt.Sprintf("BENTOML_%s_", strings.ReplaceAll(dynamoNimRepositoryName, "-", ":")),
 			},
 			{
 				Name:  "NEW_METRICS_PREFIX",
@@ -2069,23 +2069,23 @@ monitoring.options.insecure=true`
 	}
 	var envoyConfigContent string
 	if opt.isStealingTrafficDebugModeEnabled {
-		productionServiceName := r.getServiceName(opt.compoundAINimDeployment, opt.compoundAINim, false)
+		productionServiceName := r.getServiceName(opt.dynamoNimDeployment, opt.dynamoNim, false)
 		envoyConfigContent, err = envoy.GenerateEnvoyConfigurationContent(envoy.CreateEnvoyConfig{
 			ListenPort:              proxyPort,
 			DebugHeaderName:         HeaderNameDebug,
 			DebugHeaderValue:        commonconsts.KubeLabelValueTrue,
 			DebugServerAddress:      "localhost",
 			DebugServerPort:         containerPort,
-			ProductionServerAddress: fmt.Sprintf("%s.%s.svc.cluster.local", productionServiceName, opt.compoundAINimDeployment.Namespace),
+			ProductionServerAddress: fmt.Sprintf("%s.%s.svc.cluster.local", productionServiceName, opt.dynamoNimDeployment.Namespace),
 			ProductionServerPort:    ServicePortHTTPNonProxy,
 		})
 	} else {
-		debugServiceName := r.getServiceName(opt.compoundAINimDeployment, opt.compoundAINim, true)
+		debugServiceName := r.getServiceName(opt.dynamoNimDeployment, opt.dynamoNim, true)
 		envoyConfigContent, err = envoy.GenerateEnvoyConfigurationContent(envoy.CreateEnvoyConfig{
 			ListenPort:              proxyPort,
 			DebugHeaderName:         HeaderNameDebug,
 			DebugHeaderValue:        commonconsts.KubeLabelValueTrue,
-			DebugServerAddress:      fmt.Sprintf("%s.%s.svc.cluster.local", debugServiceName, opt.compoundAINimDeployment.Namespace),
+			DebugServerAddress:      fmt.Sprintf("%s.%s.svc.cluster.local", debugServiceName, opt.dynamoNimDeployment.Namespace),
 			DebugServerPort:         ServicePortHTTPNonProxy,
 			ProductionServerAddress: "localhost",
 			ProductionServerPort:    containerPort,
@@ -2099,13 +2099,13 @@ monitoring.options.insecure=true`
 	envoyConfigConfigMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      envoyConfigConfigMapName,
-			Namespace: opt.compoundAINimDeployment.Namespace,
+			Namespace: opt.dynamoNimDeployment.Namespace,
 		},
 		Data: map[string]string{
 			"envoy.yaml": envoyConfigContent,
 		},
 	}
-	err = ctrl.SetControllerReference(opt.compoundAINimDeployment, envoyConfigConfigMap, r.Scheme)
+	err = ctrl.SetControllerReference(opt.dynamoNimDeployment, envoyConfigConfigMap, r.Scheme)
 	if err != nil {
 		err = errors.Wrapf(err, "failed to set controller reference for envoy config config map")
 		return nil, err
@@ -2336,9 +2336,9 @@ monitoring.options.insecure=true`
 		Volumes:    volumes,
 	}
 
-	podSpec.ImagePullSecrets = opt.compoundAINim.Spec.ImagePullSecrets
+	podSpec.ImagePullSecrets = opt.dynamoNim.Spec.ImagePullSecrets
 
-	extraPodMetadata := opt.compoundAINimDeployment.Spec.ExtraPodMetadata
+	extraPodMetadata := opt.dynamoNimDeployment.Spec.ExtraPodMetadata
 
 	if extraPodMetadata != nil {
 		for k, v := range extraPodMetadata.Annotations {
@@ -2350,7 +2350,7 @@ monitoring.options.insecure=true`
 		}
 	}
 
-	extraPodSpec := opt.compoundAINimDeployment.Spec.ExtraPodSpec
+	extraPodSpec := opt.dynamoNimDeployment.Spec.ExtraPodSpec
 
 	if extraPodSpec != nil {
 		podSpec.SchedulerName = extraPodSpec.SchedulerName
@@ -2364,11 +2364,11 @@ monitoring.options.insecure=true`
 
 	if podSpec.ServiceAccountName == "" {
 		serviceAccounts := &corev1.ServiceAccountList{}
-		err = r.List(ctx, serviceAccounts, client.InNamespace(opt.compoundAINimDeployment.Namespace), client.MatchingLabels{
+		err = r.List(ctx, serviceAccounts, client.InNamespace(opt.dynamoNimDeployment.Namespace), client.MatchingLabels{
 			commonconsts.KubeLabelBentoDeploymentPod: commonconsts.KubeLabelValueTrue,
 		})
 		if err != nil {
-			err = errors.Wrapf(err, "failed to list service accounts in namespace %s", opt.compoundAINimDeployment.Namespace)
+			err = errors.Wrapf(err, "failed to list service accounts in namespace %s", opt.dynamoNimDeployment.Namespace)
 			return
 		}
 		if len(serviceAccounts.Items) > 0 {
@@ -2499,8 +2499,8 @@ func getResourcesConfig(resources *dynamoCommon.Resources) (corev1.ResourceRequi
 }
 
 type generateServiceOption struct {
-	compoundAINimDeployment                 *v1alpha1.DynamoNimDeployment
-	compoundAINim                           *v1alpha1.DynamoNim
+	dynamoNimDeployment                 *v1alpha1.DynamoNimDeployment
+	dynamoNim                           *v1alpha1.DynamoNim
 	isStealingTrafficDebugModeEnabled       bool
 	isDebugPodReceiveProductionTraffic      bool
 	containsStealingTrafficDebugModeEnabled bool
@@ -2511,12 +2511,12 @@ type generateServiceOption struct {
 func (r *DynamoNimDeploymentReconciler) generateService(opt generateServiceOption) (kubeService *corev1.Service, err error) {
 	var kubeName string
 	if opt.isGenericService {
-		kubeName = r.getGenericServiceName(opt.compoundAINimDeployment, opt.compoundAINim)
+		kubeName = r.getGenericServiceName(opt.dynamoNimDeployment, opt.dynamoNim)
 	} else {
-		kubeName = r.getServiceName(opt.compoundAINimDeployment, opt.compoundAINim, opt.isStealingTrafficDebugModeEnabled)
+		kubeName = r.getServiceName(opt.dynamoNimDeployment, opt.dynamoNim, opt.isStealingTrafficDebugModeEnabled)
 	}
 
-	labels := r.getKubeLabels(opt.compoundAINimDeployment, opt.compoundAINim)
+	labels := r.getKubeLabels(opt.dynamoNimDeployment, opt.dynamoNim)
 
 	selector := make(map[string]string)
 
@@ -2554,9 +2554,9 @@ func (r *DynamoNimDeploymentReconciler) generateService(opt generateServiceOptio
 		},
 	}
 
-	annotations := r.getKubeAnnotations(opt.compoundAINimDeployment, opt.compoundAINim)
+	annotations := r.getKubeAnnotations(opt.dynamoNimDeployment, opt.dynamoNim)
 
-	kubeNs := opt.compoundAINimDeployment.Namespace
+	kubeNs := opt.dynamoNimDeployment.Namespace
 
 	kubeService = &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -2568,7 +2568,7 @@ func (r *DynamoNimDeploymentReconciler) generateService(opt generateServiceOptio
 		Spec: spec,
 	}
 
-	err = ctrl.SetControllerReference(opt.compoundAINimDeployment, kubeService, r.Scheme)
+	err = ctrl.SetControllerReference(opt.dynamoNimDeployment, kubeService, r.Scheme)
 	if err != nil {
 		err = errors.Wrapf(err, "set controller reference for service %s", kubeService.Name)
 		return
@@ -2577,13 +2577,13 @@ func (r *DynamoNimDeploymentReconciler) generateService(opt generateServiceOptio
 	return
 }
 
-func (r *DynamoNimDeploymentReconciler) generateIngressHost(ctx context.Context, compoundAINimDeployment *v1alpha1.DynamoNimDeployment) (string, error) {
-	return r.generateDefaultHostname(ctx, compoundAINimDeployment)
+func (r *DynamoNimDeploymentReconciler) generateIngressHost(ctx context.Context, dynamoNimDeployment *v1alpha1.DynamoNimDeployment) (string, error) {
+	return r.generateDefaultHostname(ctx, dynamoNimDeployment)
 }
 
 var cachedDomainSuffix *string
 
-func (r *DynamoNimDeploymentReconciler) generateDefaultHostname(ctx context.Context, compoundAINimDeployment *v1alpha1.DynamoNimDeployment) (string, error) {
+func (r *DynamoNimDeploymentReconciler) generateDefaultHostname(ctx context.Context, dynamoNimDeployment *v1alpha1.DynamoNimDeployment) (string, error) {
 	var domainSuffix string
 
 	if cachedDomainSuffix != nil {
@@ -2605,7 +2605,7 @@ func (r *DynamoNimDeploymentReconciler) generateDefaultHostname(ctx context.Cont
 
 		cachedDomainSuffix = &domainSuffix
 	}
-	return fmt.Sprintf("%s-%s.%s", compoundAINimDeployment.Name, compoundAINimDeployment.Namespace, domainSuffix), nil
+	return fmt.Sprintf("%s-%s.%s", dynamoNimDeployment.Name, dynamoNimDeployment.Namespace, domainSuffix), nil
 }
 
 type TLSModeOpt string
@@ -2714,29 +2714,29 @@ func (r *DynamoNimDeploymentReconciler) GetIngressConfig(ctx context.Context) (i
 
 type generateIngressesOption struct {
 	yataiClient             **yataiclient.YataiClient
-	compoundAINimDeployment *v1alpha1.DynamoNimDeployment
-	compoundAINim           *v1alpha1.DynamoNim
+	dynamoNimDeployment *v1alpha1.DynamoNimDeployment
+	dynamoNim           *v1alpha1.DynamoNim
 }
 
 //nolint:nakedret
 func (r *DynamoNimDeploymentReconciler) generateIngresses(ctx context.Context, opt generateIngressesOption) (ingresses []*networkingv1.Ingress, err error) {
-	compoundAINimRepositoryName, compoundAINimVersion := getDynamoNimRepositoryNameAndDynamoNimVersion(opt.compoundAINim)
-	compoundAINimDeployment := opt.compoundAINimDeployment
-	compoundAINim := opt.compoundAINim
+	dynamoNimRepositoryName, dynamoNimVersion := getDynamoNimRepositoryNameAndDynamoNimVersion(opt.dynamoNim)
+	dynamoNimDeployment := opt.dynamoNimDeployment
+	dynamoNim := opt.dynamoNim
 
-	kubeName := r.getKubeName(compoundAINimDeployment, compoundAINim, false)
+	kubeName := r.getKubeName(dynamoNimDeployment, dynamoNim, false)
 
-	r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GenerateIngressHost", "Generating hostname for ingress")
-	internalHost, err := r.generateIngressHost(ctx, compoundAINimDeployment)
+	r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "GenerateIngressHost", "Generating hostname for ingress")
+	internalHost, err := r.generateIngressHost(ctx, dynamoNimDeployment)
 	if err != nil {
-		r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeWarning, "GenerateIngressHost", "Failed to generate hostname for ingress: %v", err)
+		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "GenerateIngressHost", "Failed to generate hostname for ingress: %v", err)
 		return
 	}
-	r.Recorder.Eventf(compoundAINimDeployment, corev1.EventTypeNormal, "GenerateIngressHost", "Generated hostname for ingress: %s", internalHost)
+	r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "GenerateIngressHost", "Generated hostname for ingress: %s", internalHost)
 
-	annotations := r.getKubeAnnotations(compoundAINimDeployment, compoundAINim)
+	annotations := r.getKubeAnnotations(dynamoNimDeployment, dynamoNim)
 
-	tag := fmt.Sprintf("%s:%s", compoundAINimRepositoryName, compoundAINimVersion)
+	tag := fmt.Sprintf("%s:%s", dynamoNimRepositoryName, dynamoNimVersion)
 	orgName := "unknown"
 
 	annotations["nginx.ingress.kubernetes.io/configuration-snippet"] = fmt.Sprintf(`
@@ -2747,9 +2747,9 @@ more_set_headers "X-Yatai-Bento: %s";
 
 	annotations["nginx.ingress.kubernetes.io/ssl-redirect"] = "false"
 
-	labels := r.getKubeLabels(compoundAINimDeployment, compoundAINim)
+	labels := r.getKubeLabels(dynamoNimDeployment, dynamoNim)
 
-	kubeNs := compoundAINimDeployment.Namespace
+	kubeNs := dynamoNimDeployment.Namespace
 
 	ingressConfig, err := r.GetIngressConfig(ctx)
 	if err != nil {
@@ -2768,11 +2768,11 @@ more_set_headers "X-Yatai-Bento: %s";
 		annotations[k] = v
 	}
 
-	for k, v := range opt.compoundAINimDeployment.Spec.Ingress.Annotations {
+	for k, v := range opt.dynamoNimDeployment.Spec.Ingress.Annotations {
 		annotations[k] = v
 	}
 
-	for k, v := range opt.compoundAINimDeployment.Spec.Ingress.Labels {
+	for k, v := range opt.dynamoNimDeployment.Spec.Ingress.Labels {
 		labels[k] = v
 	}
 
@@ -2800,15 +2800,15 @@ more_set_headers "X-Yatai-Bento: %s";
 	}
 
 	// override default tls if DynamoNimDeployment defines its own tls section
-	if opt.compoundAINimDeployment.Spec.Ingress.TLS != nil && opt.compoundAINimDeployment.Spec.Ingress.TLS.SecretName != "" {
+	if opt.dynamoNimDeployment.Spec.Ingress.TLS != nil && opt.dynamoNimDeployment.Spec.Ingress.TLS.SecretName != "" {
 		tls = make([]networkingv1.IngressTLS, 0, 1)
 		tls = append(tls, networkingv1.IngressTLS{
 			Hosts:      []string{internalHost},
-			SecretName: opt.compoundAINimDeployment.Spec.Ingress.TLS.SecretName,
+			SecretName: opt.dynamoNimDeployment.Spec.Ingress.TLS.SecretName,
 		})
 	}
 
-	serviceName := r.getGenericServiceName(compoundAINimDeployment, compoundAINim)
+	serviceName := r.getGenericServiceName(dynamoNimDeployment, dynamoNim)
 
 	interIng := &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
@@ -2846,7 +2846,7 @@ more_set_headers "X-Yatai-Bento: %s";
 		},
 	}
 
-	err = ctrl.SetControllerReference(compoundAINimDeployment, interIng, r.Scheme)
+	err = ctrl.SetControllerReference(dynamoNimDeployment, interIng, r.Scheme)
 	if err != nil {
 		err = errors.Wrapf(err, "set ingress %s controller reference", interIng.Name)
 		return
@@ -2865,10 +2865,10 @@ func (r *DynamoNimDeploymentReconciler) doCleanUpAbandonedRunnerServices() error
 	ctx, cancel := context.WithTimeout(context.TODO(), time.Minute*10)
 	defer cancel()
 
-	var compoundAINimDeploymentNamespaces []string
+	var dynamoNimDeploymentNamespaces []string
 
 	if cachedDynamoNimDeploymentNamespaces != nil {
-		compoundAINimDeploymentNamespaces = *cachedDynamoNimDeploymentNamespaces
+		dynamoNimDeploymentNamespaces = *cachedDynamoNimDeploymentNamespaces
 	} else {
 		restConfig := config.GetConfigOrDie()
 		clientset, err := kubernetes.NewForConfig(restConfig)
@@ -2876,23 +2876,23 @@ func (r *DynamoNimDeploymentReconciler) doCleanUpAbandonedRunnerServices() error
 			return errors.Wrapf(err, "create kubernetes clientset")
 		}
 
-		compoundAINimDeploymentNamespaces, err = commonconfig.GetBentoDeploymentNamespaces(ctx, func(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
+		dynamoNimDeploymentNamespaces, err = commonconfig.GetBentoDeploymentNamespaces(ctx, func(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
 			secret, err := clientset.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
 			return secret, errors.Wrap(err, "get secret")
 		})
 		if err != nil {
-			err = errors.Wrapf(err, "get compoundAINim deployment namespaces")
+			err = errors.Wrapf(err, "get dynamoNim deployment namespaces")
 			return err
 		}
 
-		cachedDynamoNimDeploymentNamespaces = &compoundAINimDeploymentNamespaces
+		cachedDynamoNimDeploymentNamespaces = &dynamoNimDeploymentNamespaces
 	}
 
-	for _, compoundAINimDeploymentNamespace := range compoundAINimDeploymentNamespaces {
+	for _, dynamoNimDeploymentNamespace := range dynamoNimDeploymentNamespaces {
 		serviceList := &corev1.ServiceList{}
 		serviceListOpts := []client.ListOption{
 			client.HasLabels{commonconsts.KubeLabelYataiBentoDeploymentRunner},
-			client.InNamespace(compoundAINimDeploymentNamespace),
+			client.InNamespace(dynamoNimDeploymentNamespace),
 		}
 		err := r.List(ctx, serviceList, serviceListOpts...)
 		if err != nil {
@@ -2943,7 +2943,7 @@ func (r *DynamoNimDeploymentReconciler) cleanUpAbandonedRunnerServices() {
 }
 
 //nolint:nakedret
-func (r *DynamoNimDeploymentReconciler) doRegisterCompoundComponent() (err error) {
+func (r *DynamoNimDeploymentReconciler) doRegisterDynamoComponent() (err error) {
 	logs := log.Log.WithValues("func", "doRegisterYataiComponent")
 
 	ctx, cancel := context.WithTimeout(context.TODO(), time.Minute*5)
@@ -2991,15 +2991,15 @@ func (r *DynamoNimDeploymentReconciler) doRegisterCompoundComponent() (err error
 	return err
 }
 
-func (r *DynamoNimDeploymentReconciler) registerCompoundComponent() {
+func (r *DynamoNimDeploymentReconciler) registerDynamoComponent() {
 	logs := log.Log.WithValues("func", "registerYataiComponent")
-	err := r.doRegisterCompoundComponent()
+	err := r.doRegisterDynamoComponent()
 	if err != nil {
 		logs.Error(err, "registerYataiComponent")
 	}
 	ticker := time.NewTicker(time.Minute * 5)
 	for range ticker.C {
-		err := r.doRegisterCompoundComponent()
+		err := r.doRegisterDynamoComponent()
 		if err != nil {
 			logs.Error(err, "registerYataiComponent")
 		}
@@ -3017,7 +3017,7 @@ func (r *DynamoNimDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error
 	}
 
 	if os.Getenv("DISABLE_YATAI_COMPONENT_REGISTRATION") != commonconsts.KubeLabelValueTrue {
-		go r.registerCompoundComponent()
+		go r.registerDynamoComponent()
 	} else {
 		logs.Info("yatai component registration is disabled")
 	}
@@ -3029,37 +3029,37 @@ func (r *DynamoNimDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error
 		Owns(&networkingv1beta1.VirtualService{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		Watches(&v1alpha1.DynamoNimRequest{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, compoundAINimRequest client.Object) []reconcile.Request {
+		Watches(&v1alpha1.DynamoNimRequest{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, dynamoNimRequest client.Object) []reconcile.Request {
 			reqs := make([]reconcile.Request, 0)
-			logs := log.Log.WithValues("func", "Watches", "kind", "DynamoNimRequest", "name", compoundAINimRequest.GetName(), "namespace", compoundAINimRequest.GetNamespace())
-			logs.Info("Triggering reconciliation for DynamoNimRequest", "DynamoNimRequestName", compoundAINimRequest.GetName(), "Namespace", compoundAINimRequest.GetNamespace())
-			compoundAINim := &v1alpha1.DynamoNim{}
+			logs := log.Log.WithValues("func", "Watches", "kind", "DynamoNimRequest", "name", dynamoNimRequest.GetName(), "namespace", dynamoNimRequest.GetNamespace())
+			logs.Info("Triggering reconciliation for DynamoNimRequest", "DynamoNimRequestName", dynamoNimRequest.GetName(), "Namespace", dynamoNimRequest.GetNamespace())
+			dynamoNim := &v1alpha1.DynamoNim{}
 			err := r.Get(context.Background(), types.NamespacedName{
-				Name:      compoundAINimRequest.GetName(),
-				Namespace: compoundAINimRequest.GetNamespace(),
-			}, compoundAINim)
-			compoundAINimIsNotFound := k8serrors.IsNotFound(err)
-			if err != nil && !compoundAINimIsNotFound {
-				logs.Info("Failed to get DynamoNim", "name", compoundAINimRequest.GetName(), "namespace", compoundAINimRequest.GetNamespace(), "error", err)
+				Name:      dynamoNimRequest.GetName(),
+				Namespace: dynamoNimRequest.GetNamespace(),
+			}, dynamoNim)
+			dynamoNimIsNotFound := k8serrors.IsNotFound(err)
+			if err != nil && !dynamoNimIsNotFound {
+				logs.Info("Failed to get DynamoNim", "name", dynamoNimRequest.GetName(), "namespace", dynamoNimRequest.GetNamespace(), "error", err)
 				return reqs
 			}
-			if !compoundAINimIsNotFound {
-				logs.Info("DynamoNim found, skipping enqueue as it's already present", "DynamoNimName", compoundAINimRequest.GetName())
+			if !dynamoNimIsNotFound {
+				logs.Info("DynamoNim found, skipping enqueue as it's already present", "DynamoNimName", dynamoNimRequest.GetName())
 				return reqs
 			}
-			compoundAINimDeployments := &v1alpha1.DynamoNimDeploymentList{}
-			err = r.List(context.Background(), compoundAINimDeployments, &client.ListOptions{
-				Namespace: compoundAINimRequest.GetNamespace(),
+			dynamoNimDeployments := &v1alpha1.DynamoNimDeploymentList{}
+			err = r.List(context.Background(), dynamoNimDeployments, &client.ListOptions{
+				Namespace: dynamoNimRequest.GetNamespace(),
 			})
 			if err != nil {
-				logs.Info("Failed to list DynamoNimDeployments", "Namespace", compoundAINimRequest.GetNamespace(), "error", err)
+				logs.Info("Failed to list DynamoNimDeployments", "Namespace", dynamoNimRequest.GetNamespace(), "error", err)
 				return reqs
 			}
-			for _, compoundAINimDeployment := range compoundAINimDeployments.Items {
-				compoundAINimDeployment := compoundAINimDeployment
-				if compoundAINimDeployment.Spec.DynamoNim == compoundAINimRequest.GetName() {
+			for _, dynamoNimDeployment := range dynamoNimDeployments.Items {
+				dynamoNimDeployment := dynamoNimDeployment
+				if dynamoNimDeployment.Spec.DynamoNim == dynamoNimRequest.GetName() {
 					reqs = append(reqs, reconcile.Request{
-						NamespacedName: client.ObjectKeyFromObject(&compoundAINimDeployment),
+						NamespacedName: client.ObjectKeyFromObject(&dynamoNimDeployment),
 					})
 				}
 			}
@@ -3067,23 +3067,23 @@ func (r *DynamoNimDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error
 			logs.Info("Enqueuing DynamoNimDeployments for reconciliation", "ReconcileRequests", reqs)
 			return reqs
 		})).WithEventFilter(controller_common.EphemeralDeploymentEventFilter(r.Config)).
-		Watches(&v1alpha1.DynamoNim{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, compoundAINim client.Object) []reconcile.Request {
-			logs := log.Log.WithValues("func", "Watches", "kind", "DynamoNim", "name", compoundAINim.GetName(), "namespace", compoundAINim.GetNamespace())
-			logs.Info("Triggering reconciliation for DynamoNim", "DynamoNimName", compoundAINim.GetName(), "Namespace", compoundAINim.GetNamespace())
-			compoundAINimDeployments := &v1alpha1.DynamoNimDeploymentList{}
-			err := r.List(context.Background(), compoundAINimDeployments, &client.ListOptions{
-				Namespace: compoundAINim.GetNamespace(),
+		Watches(&v1alpha1.DynamoNim{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, dynamoNim client.Object) []reconcile.Request {
+			logs := log.Log.WithValues("func", "Watches", "kind", "DynamoNim", "name", dynamoNim.GetName(), "namespace", dynamoNim.GetNamespace())
+			logs.Info("Triggering reconciliation for DynamoNim", "DynamoNimName", dynamoNim.GetName(), "Namespace", dynamoNim.GetNamespace())
+			dynamoNimDeployments := &v1alpha1.DynamoNimDeploymentList{}
+			err := r.List(context.Background(), dynamoNimDeployments, &client.ListOptions{
+				Namespace: dynamoNim.GetNamespace(),
 			})
 			if err != nil {
-				logs.Info("Failed to list DynamoNimDeployments", "Namespace", compoundAINim.GetNamespace(), "error", err)
+				logs.Info("Failed to list DynamoNimDeployments", "Namespace", dynamoNim.GetNamespace(), "error", err)
 				return []reconcile.Request{}
 			}
 			reqs := make([]reconcile.Request, 0)
-			for _, compoundAINimDeployment := range compoundAINimDeployments.Items {
-				compoundAINimDeployment := compoundAINimDeployment
-				if compoundAINimDeployment.Spec.DynamoNim == compoundAINim.GetName() {
+			for _, dynamoNimDeployment := range dynamoNimDeployments.Items {
+				dynamoNimDeployment := dynamoNimDeployment
+				if dynamoNimDeployment.Spec.DynamoNim == dynamoNim.GetName() {
 					reqs = append(reqs, reconcile.Request{
-						NamespacedName: client.ObjectKeyFromObject(&compoundAINimDeployment),
+						NamespacedName: client.ObjectKeyFromObject(&dynamoNimDeployment),
 					})
 				}
 			}

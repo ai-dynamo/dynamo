@@ -13,12 +13,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoNimDeployment
+# permissions for end users to edit dynamonimdeployments.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
 metadata:
   labels:
-    app.kubernetes.io/name: compoundai-kubernetes-operator
+    app.kubernetes.io/name: dynamo-kubernetes-operator
     app.kubernetes.io/managed-by: kustomize
-  name: compoundainimdeployment-sample
-spec:
-  # TODO(user): Add fields here
+  name: dynamonimdeployment-editor-role
+rules:
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamonimdeployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamonimdeployments/status
+  verbs:
+  - get

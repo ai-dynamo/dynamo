@@ -73,8 +73,8 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	reason := "undefined"
 	readyStatus := metav1.ConditionFalse
 	// retrieve the CRD
-	compoundAIDeployment := &nvidiacomv1alpha1.DynamoDeployment{}
-	if err = r.Get(ctx, req.NamespacedName, compoundAIDeployment); err != nil {
+	dynamoDeployment := &nvidiacomv1alpha1.DynamoDeployment{}
+	if err = r.Get(ctx, req.NamespacedName, dynamoDeployment); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if err != nil {
@@ -85,11 +85,11 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	defer func() {
 		message := ""
 		if err != nil {
-			compoundAIDeployment.SetState(FailedState)
+			dynamoDeployment.SetState(FailedState)
 			message = err.Error()
 		}
 		// update the CRD status condition
-		compoundAIDeployment.Status.Conditions = []metav1.Condition{
+		dynamoDeployment.Status.Conditions = []metav1.Condition{
 			{
 				Type:               "Ready",
 				Status:             readyStatus,
@@ -98,7 +98,7 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				LastTransitionTime: metav1.Now(),
 			},
 		}
-		err = r.Status().Update(ctx, compoundAIDeployment)
+		err = r.Status().Update(ctx, dynamoDeployment)
 		if err != nil {
 			logger.Error(err, "Unable to update the CRD status", "crd", req.NamespacedName)
 		}
@@ -106,23 +106,23 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}()
 
 	// fetch the DynamoNIMConfig
-	compoundAINIMConfig, err := nim.GetDynamoNIMConfig(ctx, compoundAIDeployment, r.getSecret, r.Recorder)
+	dynamoNIMConfig, err := nim.GetDynamoNIMConfig(ctx, dynamoDeployment, r.getSecret, r.Recorder)
 	if err != nil {
 		reason = "failed_to_get_the_DynamoNIMConfig"
 		return ctrl.Result{}, err
 	}
 
 	// generate the DynamoNimDeployments from the config
-	compoundAINimDeployments, err := nim.GenerateDynamoNIMDeployments(compoundAIDeployment, compoundAINIMConfig)
+	dynamoNimDeployments, err := nim.GenerateDynamoNIMDeployments(dynamoDeployment, dynamoNIMConfig)
 	if err != nil {
 		reason = "failed_to_generate_the_DynamoNimDeployments"
 		return ctrl.Result{}, err
 	}
 
 	// merge the DynamoNimDeployments with the DynamoNimDeployments from the CRD
-	for serviceName, deployment := range compoundAINimDeployments {
-		if _, ok := compoundAIDeployment.Spec.Services[serviceName]; ok {
-			err := mergo.Merge(deployment, compoundAIDeployment.Spec.Services[serviceName], mergo.WithOverride)
+	for serviceName, deployment := range dynamoNimDeployments {
+		if _, ok := dynamoDeployment.Spec.Services[serviceName]; ok {
+			err := mergo.Merge(deployment, dynamoDeployment.Spec.Services[serviceName], mergo.WithOverride)
 			if err != nil {
 				reason = "failed_to_merge_the_DynamoNimDeployments"
 				return ctrl.Result{}, err
@@ -130,21 +130,21 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
-	// reconcile the compoundAINimRequest
-	compoundAINimRequest := &nvidiacomv1alpha1.DynamoNimRequest{
+	// reconcile the dynamoNimRequest
+	dynamoNimRequest := &nvidiacomv1alpha1.DynamoNimRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      generateDynamoNimRequestName(compoundAIDeployment.Spec.DynamoNim),
-			Namespace: compoundAIDeployment.Namespace,
+			Name:      generateDynamoNimRequestName(dynamoDeployment.Spec.DynamoNim),
+			Namespace: dynamoDeployment.Namespace,
 		},
 		Spec: nvidiacomv1alpha1.DynamoNimRequestSpec{
-			BentoTag: compoundAIDeployment.Spec.DynamoNim,
+			BentoTag: dynamoDeployment.Spec.DynamoNim,
 		},
 	}
-	if err := ctrl.SetControllerReference(compoundAIDeployment, compoundAINimRequest, r.Scheme); err != nil {
+	if err := ctrl.SetControllerReference(dynamoDeployment, dynamoNimRequest, r.Scheme); err != nil {
 		reason = "failed_to_set_the_controller_reference_for_the_DynamoNimRequest"
 		return ctrl.Result{}, err
 	}
-	_, err = commonController.SyncResource(ctx, r.Client, compoundAINimRequest, types.NamespacedName{Name: compoundAINimRequest.Name, Namespace: compoundAINimRequest.Namespace}, true)
+	_, err = commonController.SyncResource(ctx, r.Client, dynamoNimRequest, types.NamespacedName{Name: dynamoNimRequest.Name, Namespace: dynamoNimRequest.Namespace}, true)
 	if err != nil {
 		reason = "failed_to_sync_the_DynamoNimRequest"
 		return ctrl.Result{}, err
@@ -152,26 +152,26 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	allAreReady := true
 	// reconcile the DynamoNimDeployments
-	for serviceName, compoundAINimDeployment := range compoundAINimDeployments {
-		logger.Info("Reconciling the DynamoNimDeployment", "serviceName", serviceName, "compoundAINimDeployment", compoundAINimDeployment)
-		if err := ctrl.SetControllerReference(compoundAIDeployment, compoundAINimDeployment, r.Scheme); err != nil {
+	for serviceName, dynamoNimDeployment := range dynamoNimDeployments {
+		logger.Info("Reconciling the DynamoNimDeployment", "serviceName", serviceName, "dynamoNimDeployment", dynamoNimDeployment)
+		if err := ctrl.SetControllerReference(dynamoDeployment, dynamoNimDeployment, r.Scheme); err != nil {
 			reason = "failed_to_set_the_controller_reference_for_the_DynamoNimDeployment"
 			return ctrl.Result{}, err
 		}
-		compoundAINimDeployment, err = commonController.SyncResource(ctx, r.Client, compoundAINimDeployment, types.NamespacedName{Name: compoundAINimDeployment.Name, Namespace: compoundAINimDeployment.Namespace}, true)
+		dynamoNimDeployment, err = commonController.SyncResource(ctx, r.Client, dynamoNimDeployment, types.NamespacedName{Name: dynamoNimDeployment.Name, Namespace: dynamoNimDeployment.Namespace}, true)
 		if err != nil {
 			reason = "failed_to_sync_the_DynamoNimDeployment"
 			return ctrl.Result{}, err
 		}
-		if !compoundAINimDeployment.Status.IsReady() {
+		if !dynamoNimDeployment.Status.IsReady() {
 			allAreReady = false
 		}
 	}
 	if allAreReady {
-		compoundAIDeployment.SetState(ReadyState)
+		dynamoDeployment.SetState(ReadyState)
 		readyStatus = metav1.ConditionTrue
 	} else {
-		compoundAIDeployment.SetState(PendingState)
+		dynamoDeployment.SetState(PendingState)
 	}
 
 	return ctrl.Result{}, nil

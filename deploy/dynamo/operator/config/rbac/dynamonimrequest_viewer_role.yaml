@@ -13,19 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# permissions for end users to view compoundainimdeployments.
+# permissions for end users to view dynamonimrequests.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   labels:
-    app.kubernetes.io/name: compoundai-kubernetes-operator
+    app.kubernetes.io/name: dynamo-kubernetes-operator
     app.kubernetes.io/managed-by: kustomize
-  name: compoundainimdeployment-viewer-role
+  name: dynamonimrequest-viewer-role
 rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - compoundainimdeployments
+  - dynamonimrequests
   verbs:
   - get
   - list
@@ -33,6 +33,6 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - compoundainimdeployments/status
+  - dynamonimrequests/status
   verbs:
   - get

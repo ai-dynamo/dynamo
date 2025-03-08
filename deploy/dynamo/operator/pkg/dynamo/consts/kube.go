@@ -124,10 +124,10 @@ const (
 	KubeSecretNameYataiCommonEnv = "yatai-common-env"
 
 	KubeSecretNameYataiImageBuilderSharedEnv = "yatai-image-builder-shared-env"
-	KubeSecretNameYataiDeploymentSharedEnv   = "compoundai-deployment-shared-env"
+	KubeSecretNameYataiDeploymentSharedEnv   = "dynamo-deployment-shared-env"
 
 	KubeSecretNameYataiImageBuilderEnv = "yatai-image-builder-env"
-	KubeSecretNameYataiDeploymentEnv   = "compoundai-deployment-env"
+	KubeSecretNameYataiDeploymentEnv   = "dynamo-deployment-env"
 )
 
 var KubeListEverything = metav1.ListOptions{

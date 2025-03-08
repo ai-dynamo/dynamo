@@ -19,14 +19,14 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.4
-  name: compoundainimrequests.nvidia.com
+  name: dynamonimrequests.nvidia.com
 spec:
   group: nvidia.com
   names:
     kind: DynamoNimRequest
     listKind: DynamoNimRequestList
-    plural: compoundainimrequests
-    singular: compoundainimrequest
+    plural: dynamonimrequests
+    singular: dynamonimrequest
   scope: Namespaced
   versions:
   - additionalPrinterColumns:

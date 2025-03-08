@@ -20,8 +20,8 @@ metadata:
     app.kubernetes.io/name: rolebinding
     app.kubernetes.io/instance: leader-election-rolebinding
     app.kubernetes.io/component: rbac
-    app.kubernetes.io/created-by: compoundai-kubernetes-operator
-    app.kubernetes.io/part-of: compoundai-kubernetes-operator
+    app.kubernetes.io/created-by: dynamo-kubernetes-operator
+    app.kubernetes.io/part-of: dynamo-kubernetes-operator
     app.kubernetes.io/managed-by: kustomize
   name: leader-election-rolebinding
 roleRef:

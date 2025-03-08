@@ -39,7 +39,7 @@ test:
 docker:
     ARG CI_REGISTRY_IMAGE=my-registry
     ARG CI_COMMIT_SHA=latest
-    ARG IMAGE_SUFFIX=compoundai-operator
+    ARG IMAGE_SUFFIX=dynamo-operator
     FROM urm.nvidia.com/sw-gpu-ucs-hardened-docker/distroless/go:v3.1.3-amd64
     WORKDIR /
     COPY +build/manager .

@@ -31,7 +31,7 @@ issues:
       linters:
         - dupl
         - lll
-    - path: "pkg/compoundai/*"
+    - path: "pkg/dynamo/*"
       linters:
         - lll
         - nakedret

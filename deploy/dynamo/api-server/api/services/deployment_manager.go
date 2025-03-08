@@ -86,9 +86,9 @@ func (s *deploymentManagementService) Create(ctx context.Context, deploymentTarg
 		}
 	}()
 
-	compoundNimDeployment, compoundNimRequest := s.transformToDMSRequestsV1alpha1(deployment, deploymentTarget, ownership)
+	dynamoNimDeployment, dynamoNimRequest := s.transformToDMSRequestsV1alpha1(deployment, deploymentTarget, ownership)
 
-	body, err := sendRequest(compoundNimDeployment, url, http.MethodPost)
+	body, err := sendRequest(dynamoNimDeployment, url, http.MethodPost)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +100,7 @@ func (s *deploymentManagementService) Create(ctx context.Context, deploymentTarg
 	}
 	deploymentTarget.KubeDeploymentId = result.Id
 
-	body, err = sendRequest(compoundNimRequest, url, http.MethodPost)
+	body, err = sendRequest(dynamoNimRequest, url, http.MethodPost)
 	if err != nil {
 		return nil, err
 	}
@@ -140,18 +140,18 @@ func (s *deploymentManagementService) Delete(ctx context.Context, deploymentTarg
 	return nil
 }
 
-func (s *deploymentManagementService) transformToDMSRequestsV1alpha1(deployment *models.Deployment, deploymentTarget *models.DeploymentTarget, ownership *schemas.OwnershipSchema) (compoundNimDeployment DMSCreateRequest, compoundNimRequest DMSCreateRequest) {
-	translatedTag := s.translateCompoundNimVersionTagToRFC1123(deploymentTarget.CompoundNimVersionTag)
+func (s *deploymentManagementService) transformToDMSRequestsV1alpha1(deployment *models.Deployment, deploymentTarget *models.DeploymentTarget, ownership *schemas.OwnershipSchema) (dynamoNimDeployment DMSCreateRequest, dynamoNimRequest DMSCreateRequest) {
+	translatedTag := s.translateDynamoNimVersionTagToRFC1123(deploymentTarget.DynamoNimVersionTag)
 
 	livenessProbe, readinessProbe := createProbeSpecs(deploymentTarget.Config.DeploymentOverrides)
 
-	compoundNimDeployment = DMSCreateRequest{
+	dynamoNimDeployment = DMSCreateRequest{
 		Name:         deployment.Name,
 		Namespace:    deployment.KubeNamespace,
-		ResourceType: crds.CompoundNimDeployment,
-		Configuration: crds.CompoundNimDeploymentConfigurationV1Alpha1{
-			Data: crds.CompoundNimDeploymentData{
-				CompoundNimVersion: translatedTag,
+		ResourceType: crds.DynamoNimDeployment,
+		Configuration: crds.DynamoNimDeploymentConfigurationV1Alpha1{
+			Data: crds.DynamoNimDeploymentData{
+				DynamoNimVersion: translatedTag,
 				Resources:          *deploymentTarget.Config.Resources,
 				ExternalServices:   deploymentTarget.Config.ExternalServices,
 				LivenessProbe:      livenessProbe,
@@ -165,13 +165,13 @@ func (s *deploymentManagementService) transformToDMSRequestsV1alpha1(deployment 
 		},
 	}
 
-	compoundNimRequest = DMSCreateRequest{
+	dynamoNimRequest = DMSCreateRequest{
 		Name:         translatedTag,
 		Namespace:    deployment.KubeNamespace,
-		ResourceType: crds.CompoundNimRequest,
-		Configuration: crds.CompoundNimRequestConfigurationV1Alpha1{
-			Data: crds.CompoundNimRequestData{
-				CompoundNimVersionTag: deploymentTarget.CompoundNimVersionTag,
+		ResourceType: crds.DynamoNimRequest,
+		Configuration: crds.DynamoNimRequestConfigurationV1Alpha1{
+			Data: crds.DynamoNimRequestData{
+				DynamoNimVersionTag: deploymentTarget.DynamoNimVersionTag,
 			},
 			Version: crds.ApiVersion,
 		},
@@ -192,7 +192,7 @@ func createProbeSpecs(deploymentOverrides *schemas.DeploymentOverrides) (livenes
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path: "/livez",
-					Port: intstr.FromString(consts.CompoundNimContainerPortName),
+					Port: intstr.FromString(consts.DynamoNimContainerPortName),
 				},
 			},
 		}
@@ -204,7 +204,7 @@ func createProbeSpecs(deploymentOverrides *schemas.DeploymentOverrides) (livenes
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path: "/readyz",
-					Port: intstr.FromString(consts.CompoundNimContainerPortName),
+					Port: intstr.FromString(consts.DynamoNimContainerPortName),
 				},
 			},
 		}
@@ -228,7 +228,7 @@ func getDMSPortAndHost() (string, string, error) {
 }
 
 /**
- * Translates a Compound NIM Version tag to a valid RFC 1123 DNS label.
+ * Translates a Dynamo NIM Version tag to a valid RFC 1123 DNS label.
  *
  * This function makes the following modifications to the input string:
  * 1. Replaces all ":" characters with "--" because colons are not permitted in DNS labels.
@@ -242,7 +242,7 @@ func getDMSPortAndHost() (string, string, error) {
  *   Input: "nim:latest"
  *   Output: "nim--latest"
  */
-func (s *deploymentManagementService) translateCompoundNimVersionTagToRFC1123(tag string) string {
+func (s *deploymentManagementService) translateDynamoNimVersionTagToRFC1123(tag string) string {
 	translated := strings.ReplaceAll(tag, ":", "--")
 
 	// If the length exceeds 63 characters, truncate it

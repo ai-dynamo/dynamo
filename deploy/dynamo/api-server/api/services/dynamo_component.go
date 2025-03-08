@@ -32,11 +32,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-type compoundComponentService struct{}
+type dynamoComponentService struct{}
 
-var CompoundComponentService = compoundComponentService{}
+var DynamoComponentService = dynamoComponentService{}
 
-type CreateCompoundComponentOption struct {
+type CreateDynamoComponentOption struct {
 	CreatorId      uint
 	OrganizationId uint
 	ClusterId      uint
@@ -44,18 +44,18 @@ type CreateCompoundComponentOption struct {
 	Description    string
 	Version        string
 	KubeNamespace  string
-	Manifest       *schemas.CompoundComponentManifestSchema
+	Manifest       *schemas.DynamoComponentManifestSchema
 }
 
-type UpdateCompoundComponentOption struct {
+type UpdateDynamoComponentOption struct {
 	Description       *string
 	Version           *string
 	LatestInstalledAt **time.Time
 	LatestHeartbeatAt **time.Time
-	Manifest          **schemas.CompoundComponentManifestSchema
+	Manifest          **schemas.DynamoComponentManifestSchema
 }
 
-func (s *compoundComponentService) Create(ctx context.Context, opt CreateCompoundComponentOption) (*models.CompoundComponent, error) {
+func (s *dynamoComponentService) Create(ctx context.Context, opt CreateDynamoComponentOption) (*models.DynamoComponent, error) {
 	errs := validation.IsDNS1035Label(opt.Name)
 	if len(errs) > 0 {
 		return nil, errors.New(strings.Join(errs, ";"))
@@ -68,7 +68,7 @@ func (s *compoundComponentService) Create(ctx context.Context, opt CreateCompoun
 
 	now := time.Now()
 
-	compoundComponent := models.CompoundComponent{
+	dynamoComponent := models.DynamoComponent{
 		Resource: models.Resource{
 			Name: opt.Name,
 		},
@@ -82,15 +82,15 @@ func (s *compoundComponentService) Create(ctx context.Context, opt CreateCompoun
 		LatestInstalledAt: &now,
 		LatestHeartbeatAt: &now,
 	}
-	err := s.getDB(ctx).Create(&compoundComponent).Error
+	err := s.getDB(ctx).Create(&dynamoComponent).Error
 	if err != nil {
 		return nil, err
 	}
 
-	return &compoundComponent, err
+	return &dynamoComponent, err
 }
 
-func (s *compoundComponentService) Update(ctx context.Context, b *models.CompoundComponent, opt UpdateCompoundComponentOption) (*models.CompoundComponent, error) {
+func (s *dynamoComponentService) Update(ctx context.Context, b *models.DynamoComponent, opt UpdateDynamoComponentOption) (*models.DynamoComponent, error) {
 	var err error
 	updaters := make(map[string]interface{})
 	if opt.Description != nil {
@@ -150,59 +150,59 @@ func (s *compoundComponentService) Update(ctx context.Context, b *models.Compoun
 	return b, err
 }
 
-func (s *compoundComponentService) Get(ctx context.Context, id uint) (*models.CompoundComponent, error) {
-	var compoundComponent models.CompoundComponent
-	err := s.getDB(ctx).Preload(clause.Associations).Where("id = ?", id).First(&compoundComponent).Error
+func (s *dynamoComponentService) Get(ctx context.Context, id uint) (*models.DynamoComponent, error) {
+	var dynamoComponent models.DynamoComponent
+	err := s.getDB(ctx).Preload(clause.Associations).Where("id = ?", id).First(&dynamoComponent).Error
 	if err != nil {
 		return nil, err
 	}
-	if compoundComponent.ID == 0 {
+	if dynamoComponent.ID == 0 {
 		return nil, consts.ErrNotFound
 	}
-	return &compoundComponent, nil
+	return &dynamoComponent, nil
 }
 
-func (s *compoundComponentService) GetByUid(ctx context.Context, uid string) (*models.CompoundComponent, error) {
-	var compoundComponent models.CompoundComponent
-	err := s.getDB(ctx).Preload(clause.Associations).Where("uid = ?", uid).First(&compoundComponent).Error
+func (s *dynamoComponentService) GetByUid(ctx context.Context, uid string) (*models.DynamoComponent, error) {
+	var dynamoComponent models.DynamoComponent
+	err := s.getDB(ctx).Preload(clause.Associations).Where("uid = ?", uid).First(&dynamoComponent).Error
 	if err != nil {
 		return nil, err
 	}
-	if compoundComponent.ID == 0 {
+	if dynamoComponent.ID == 0 {
 		return nil, consts.ErrNotFound
 	}
-	return &compoundComponent, nil
+	return &dynamoComponent, nil
 }
 
-func (s *compoundComponentService) GetByName(ctx context.Context, clusterId uint, name string) (*models.CompoundComponent, error) {
-	var compoundComponent models.CompoundComponent
-	err := s.getDB(ctx).Where("cluster_id = ?", clusterId).Where("name = ?", name).First(&compoundComponent).Error
+func (s *dynamoComponentService) GetByName(ctx context.Context, clusterId uint, name string) (*models.DynamoComponent, error) {
+	var dynamoComponent models.DynamoComponent
+	err := s.getDB(ctx).Where("cluster_id = ?", clusterId).Where("name = ?", name).First(&dynamoComponent).Error
 	if err != nil {
-		return nil, errors.Wrapf(err, "get compoundComponent %s", name)
+		return nil, errors.Wrapf(err, "get dynamoComponent %s", name)
 	}
-	if compoundComponent.ID == 0 {
+	if dynamoComponent.ID == 0 {
 		return nil, consts.ErrNotFound
 	}
-	return &compoundComponent, nil
+	return &dynamoComponent, nil
 }
 
-func (s *compoundComponentService) ListByUids(ctx context.Context, uids []string) ([]*models.CompoundComponent, error) {
-	compoundComponents := make([]*models.CompoundComponent, 0, len(uids))
+func (s *dynamoComponentService) ListByUids(ctx context.Context, uids []string) ([]*models.DynamoComponent, error) {
+	dynamoComponents := make([]*models.DynamoComponent, 0, len(uids))
 	if len(uids) == 0 {
-		return compoundComponents, nil
+		return dynamoComponents, nil
 	}
-	err := s.getDB(ctx).Preload(clause.Associations).Where("uid in (?)", uids).Find(&compoundComponents).Error
-	return compoundComponents, err
+	err := s.getDB(ctx).Preload(clause.Associations).Where("uid in (?)", uids).Find(&dynamoComponents).Error
+	return dynamoComponents, err
 }
 
-type ListCompoundComponentOption struct {
+type ListDynamoComponentOption struct {
 	Ids            *[]uint `json:"ids"`
 	ClusterId      *uint   `json:"cluster_id"`
 	ClusterIds     *[]uint `json:"cluster_ids"`
 	OrganizationId *uint   `json:"organization_id"`
 }
 
-func (s *compoundComponentService) List(ctx context.Context, opt ListCompoundComponentOption) ([]*models.CompoundComponent, error) {
+func (s *dynamoComponentService) List(ctx context.Context, opt ListDynamoComponentOption) ([]*models.DynamoComponent, error) {
 	query := s.getDB(ctx).Preload(clause.Associations)
 	if opt.OrganizationId != nil {
 		query = query.Where("organization_id = ?", *opt.OrganizationId)
@@ -217,15 +217,15 @@ func (s *compoundComponentService) List(ctx context.Context, opt ListCompoundCom
 		query = query.Where("id in (?)", *opt.Ids)
 	}
 
-	compoundComponents := make([]*models.CompoundComponent, 0)
-	err := query.Find(&compoundComponents).Error
+	dynamoComponents := make([]*models.DynamoComponent, 0)
+	err := query.Find(&dynamoComponents).Error
 	if err != nil {
 		return nil, err
 	}
-	return compoundComponents, err
+	return dynamoComponents, err
 }
 
-func (s *compoundComponentService) getDB(ctx context.Context) *gorm.DB {
-	db := database.DatabaseUtil.GetDBSession(ctx).Model(&models.CompoundComponent{})
+func (s *dynamoComponentService) getDB(ctx context.Context) *gorm.DB {
+	db := database.DatabaseUtil.GetDBSession(ctx).Model(&models.DynamoComponent{})
 	return db
 }

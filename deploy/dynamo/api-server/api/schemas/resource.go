@@ -26,7 +26,7 @@ type ResourceSchema struct {
 	BaseSchema
 	Name         string            `json:"name"`
 	Labels       []LabelItemSchema `json:"labels"`
-	ResourceType ResourceType      `json:"resource_type" enum:"user,organization,cluster,compound_nim,compound_nim_version,deployment,deployment_revision,model_repository,model,api_token"`
+	ResourceType ResourceType      `json:"resource_type" enum:"user,organization,cluster,dynamo_nim,dynamo_nim_version,deployment,deployment_revision,model_repository,model,api_token"`
 }
 
 func (r ResourceSchema) GetType() ResourceType {

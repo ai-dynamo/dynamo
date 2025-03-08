@@ -19,14 +19,14 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.4
-  name: compoundainims.nvidia.com
+  name: dynamonims.nvidia.com
 spec:
   group: nvidia.com
   names:
     kind: DynamoNim
     listKind: DynamoNimList
-    plural: compoundainims
-    singular: compoundainim
+    plural: dynamonims
+    singular: dynamonim
   scope: Namespaced
   versions:
   - name: v1alpha1

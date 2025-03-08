@@ -15,7 +15,7 @@
 
 from pydantic import BaseModel
 
-from dynemo.sdk import api, depends, dynemo_endpoint, service
+from dynamo.sdk import api, depends, dynamo_endpoint, service
 
 """
 Pipeline Architecture:
@@ -60,9 +60,10 @@ class Backend:
     def __init__(self) -> None:
         print("Starting backend")
 
-    @dynemo_endpoint()
+    @dynamo_endpoint()
     async def generate(self, req: RequestType):
         """Generate tokens."""
+        print("here2")
         req_text = req.text
         print(f"Backend received: {req_text}")
         text = f"{req_text}-back"
@@ -73,7 +74,7 @@ class Backend:
 @service(
     resources={"cpu": "2"},
     traffic={"timeout": 30},
-    dynemo={"enabled": True, "namespace": "inference"},
+    dynamo={"enabled": True, "namespace": "inference"},
 )
 class Middle:
     backend = depends(Backend)
@@ -81,13 +82,14 @@ class Middle:
     def __init__(self) -> None:
         print("Starting middle")
 
-    @dynemo_endpoint()
+    @dynamo_endpoint()
     async def generate(self, req: RequestType):
         """Forward requests to backend."""
         req_text = req.text
         print(f"Middle received: {req_text}")
         text = f"{req_text}-mid"
         next_request = RequestType(text=text).model_dump_json()
+        print("here5")
         async for response in self.backend.generate(next_request):
             print(f"Middle received response: {response}")
             yield f"Middle: {response}"

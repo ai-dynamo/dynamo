@@ -18,9 +18,9 @@
 package consts
 
 const (
-	KubeLabelCompoundNim                  = "yatai.ai/bento-repository"
-	KubeLabelCompoundNimVersion           = "yatai.ai/bento"
-	KubeLabelCompoundNimVersionDeployment = "yatai.ai/bento-deployment"
+	KubeLabelDynamoNim                  = "yatai.ai/bento-repository"
+	KubeLabelDynamoNimVersion           = "yatai.ai/bento"
+	KubeLabelDynamoNimVersionDeployment = "yatai.ai/bento-deployment"
 
 	KubeImageBuilderMainContainer = "builder"
 )

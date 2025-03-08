@@ -55,7 +55,7 @@ func CreateMockNDSServer(t *testing.T) *MockNDSServer {
 		urlParts := strings.Split(r.URL.String(), "/")
 		n := len(urlParts)
 
-		response := schemas.CompoundNimVersionSchema{
+		response := schemas.DynamoNimVersionSchema{
 			ResourceSchema: schemas.ResourceSchema{
 				BaseSchema: schemas.BaseSchema{
 					Uid: "123456",

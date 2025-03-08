@@ -34,5 +34,5 @@ var (
 	NgcOrganizationHeaderName   = "Nv-Ngc-Org"
 	NgcUserHeaderName           = "Nv-Actor-Id"
 
-	CompoundNimContainerPortName = "http"
+	DynamoNimContainerPortName = "http"
 )

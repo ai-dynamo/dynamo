@@ -17,8 +17,8 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoNimRequest
 metadata:
   labels:
-    app.kubernetes.io/name: compoundai-kubernetes-operator
+    app.kubernetes.io/name: dynamo-kubernetes-operator
     app.kubernetes.io/managed-by: kustomize
-  name: compoundainimrequest-sample
+  name: dynamonimrequest-sample
 spec:
   # TODO(user): Add fields here

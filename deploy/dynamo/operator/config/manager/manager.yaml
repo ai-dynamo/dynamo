@@ -17,15 +17,15 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: compoundai-controller-manager
+  name: dynamo-controller-manager
   namespace: system
   labels:
     control-plane: controller-manager
     app.kubernetes.io/name: deployment
-    app.kubernetes.io/instance: compoundai-controller-manager
+    app.kubernetes.io/instance: dynamo-controller-manager
     app.kubernetes.io/component: manager
-    app.kubernetes.io/created-by: compoundai-kubernetes-operator
-    app.kubernetes.io/part-of: compoundai-kubernetes-operator
+    app.kubernetes.io/created-by: dynamo-kubernetes-operator
+    app.kubernetes.io/part-of: dynamo-kubernetes-operator
     app.kubernetes.io/managed-by: kustomize
 spec:
   selector:
@@ -77,7 +77,7 @@ spec:
         name: manager
         envFrom:
         - secretRef:
-            name: compoundai-deployment-env
+            name: dynamo-deployment-env
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

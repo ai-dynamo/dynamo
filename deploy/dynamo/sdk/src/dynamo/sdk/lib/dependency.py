@@ -19,7 +19,7 @@ from typing import Any, Dict, Optional, TypeVar
 from _bentoml_sdk.service import Service
 from _bentoml_sdk.service.dependency import Dependency
 
-from dynamo.sdk.lib.service import CompoundService
+from dynamo.sdk.lib.service import DynamoService
 
 T = TypeVar("T")
 
@@ -27,7 +27,7 @@ T = TypeVar("T")
 class DynamoClient:
     """Client for calling Dynamo endpoints with streaming support"""
 
-    def __init__(self, service: CompoundService[Any]):
+    def __init__(self, service: DynamoService[Any]):
         self._service = service
         self._endpoints = service.get_dynamo_endpoints()
         self._dynamo_clients: Dict[str, Any] = {}
@@ -61,8 +61,9 @@ class DynamoClient:
 
                             # TODO: Potentially model dump for a user here so they can pass around Pydantic models
                             stream = await client.generate(*args, **kwargs)
-
+                            print("here8", stream, flush=True)
                             async for item in stream:
+                                print(item, flush=True)
                                 data = item.data()
                                 print(f"Item data: {data}")
                                 await queue.put(data)
@@ -89,8 +90,9 @@ class DynamoClient:
                             )
 
                             stream = await client.generate(*args, **kwargs)
-
+                            print(stream, flush=True)
                             async for item in stream:
+                                print(item, flush=True)
                                 data = item.data()
                                 print(f"Item data: {data}")
                                 await queue.put(data)
@@ -175,7 +177,7 @@ class DynamoDependency(Dependency[T]):
 
     def get(self, *args: Any, **kwargs: Any) -> T | Any:
         # If this is a Dynamo-enabled service, return the Dynamo client
-        if isinstance(self.on, CompoundService) and self.on.is_dynamo_component():
+        if isinstance(self.on, DynamoService) and self.on.is_dynamo_component():
             if self._dynamo_client is None:
                 self._dynamo_client = DynamoClient(self.on)
                 if self._runtime:
