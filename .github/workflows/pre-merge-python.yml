@@ -35,7 +35,7 @@ jobs:
     name: Build and Test - ${{ matrix.framework }}
     env:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework }}
-      IMAGE_TAG: ghcr.io/dynemo-ai/dynemo:latest-${{ matrix.framework }}
+      IMAGE_TAG: ghcr.io/ai-dynamo/dynamo:latest-${{ matrix.framework }}
       PYTEST_XML_FILE: pytest_test_report.xml
     steps:
       - name: Checkout repository
@@ -48,33 +48,24 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Set IMAGE_TAG based on Event
-        id: set_image_tag
-        run: |
-          if [ "${{ github.event_name }}" == "pull_request" ]; then
-            echo "IMAGE_TAG=ghcr.io/dynemo-ai/dynemo:pr_${{ github.event.pull_request.number }}_${{ matrix.framework }}" >> $GITHUB_ENV
-          fi
       - name: Decide on cache
-        id: which_cache
+        id: which_caches
         env:
-          CACHE_LOCATION: ghcr.io/dynemo-ai/dynemo:latest-${{ matrix.framework }}
+          CACHE_LOCATION: ghcr.io/ai-dynamo/dynamo:latest-${{ matrix.framework }}
         run: |
           set +e
           if [ "${{ github.event_name }}" == "pull_request" ]; then
-              docker manifest inspect ${{ env.IMAGE_TAG }}
-              if [ $? -eq 0 ]; then
-                echo "USING ${{ env.IMAGE_TAG }}"
-                echo "CACHE_LOCATION=${{ env.IMAGE_TAG }}" >> $GITHUB_ENV
-              fi
+
+            echo "Not pushing to container image cache"
+            echo "cache_to_location=" >> $GITHUB_OUTPUT
+          else
+            echo "Pushing ${{ env.IMAGE_TAG }} to container image cache"
+            echo "cache_to_location=--cache-to \"type=registry,ref=${{ env.IMAGE_TAG }},image-manifest=true,mode=max\"" >> $GITHUB_OUTPUT
           fi
-          echo "cache_from_location=${{ env.CACHE_LOCATION }}" >> $GITHUB_OUTPUT
-          echo "cache_to_location=${{ env.IMAGE_TAG }}" >> $GITHUB_OUTPUT
+          echo "cache_from_location=--cache-from \"type=registry,ref=${{ env.IMAGE_TAG }}\"" >> $GITHUB_OUTPUT
       - name: Build image
-        env:
-          CACHE_FROM: "type=registry,ref=${{ steps.which_cache.outputs.cache_from_location }}"
-          CACHE_TO: "type=registry,ref=${{ steps.which_cache.outputs.cache_to_location }},image-manifest=true,mode=max"
         run: |
-          ./container/build.sh --tag ${{ env.IMAGE_TAG }} --framework ${{ matrix.framework }} --cache-from "${{ env.CACHE_FROM }}" --cache-to "${{ env.CACHE_TO }}"
+          ./container/build.sh --tag ${{ env.IMAGE_TAG }} --framework ${{ matrix.framework }} ${{ steps.which_caches.outputs.cache_from_location }} ${{ steps.which_caches.outputs.cache_to_location }}
       - name: Run pytest
         env:
           PYTEST_MARKS: "pre_merge or mypy"
