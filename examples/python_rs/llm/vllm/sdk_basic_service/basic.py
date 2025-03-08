@@ -26,12 +26,12 @@ Users/Clients (HTTP)
 ┌─────────────┐
 │  Frontend   │  HTTP API endpoint (/generate)
 └─────────────┘
-      │ dynemo/distributed-runtime
+      │ dynamo/runtime
       ▼
 ┌─────────────┐
 │   Middle    │
 └─────────────┘
-      │ dynemo/distributed-runtime
+      │ dynamo/runtime
       ▼
 ┌─────────────┐
 │  Backend    │
@@ -50,7 +50,7 @@ class ResponseType(BaseModel):
 @service(
     resources={"cpu": "2"},
     traffic={"timeout": 30},
-    dynemo={
+    dynamo={
         "enabled": True,
         "namespace": "inference",
     },
