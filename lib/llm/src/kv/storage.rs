@@ -22,6 +22,7 @@ use std::os::raw::c_int;
 pub struct KvLayer {
     data: Tensor,
     tp_size: usize,
+    block_dim_idx: usize,
 }
 
 impl KvLayer {
@@ -35,7 +36,11 @@ impl KvLayer {
         device: Device,
     ) -> Result<Self> {
         let data = Tensor::zeros((2, nblocks, block_size, n_heads, head_size), dtype, &device)?;
-        Ok(Self { data, tp_size })
+        Ok(Self {
+            data,
+            tp_size,
+            block_dim_idx: 1,
+        })
     }
 
     pub fn nblocks(&self) -> usize {
@@ -75,10 +80,23 @@ impl KvLayer {
             )));
         }
 
+        if self.block_dim_idx != dst_layer.block_dim_idx {
+            return Err(candle_core::Error::Msg(format!(
+                "Block dimension index mismatch: {} != {}",
+                self.block_dim_idx, dst_layer.block_dim_idx
+            )));
+        }
+
         // todo - implement a kernel to copy the blocks if either are gpu tensors
         if self.data.device().is_cuda() || dst_layer.data.device().is_cuda() {
             // call the cuda kernel to copy the blocks
-            copy_blocks_between_layers(&self.data, &dst_layer.data, src_blocks, dst_blocks)?;
+            copy_blocks_between_layers(
+                &self.data,
+                &dst_layer.data,
+                src_blocks,
+                dst_blocks,
+                self.block_dim_idx,
+            )?;
         } else {
             for kv in 0..2 {
                 for (src_idx, dst_idx) in src_blocks.iter().zip(dst_blocks.iter()) {
@@ -199,6 +217,62 @@ pub fn transform_blocks_inplace_v2(source: &Tensor, tp_size: usize) -> Result<Te
     Ok(result)
 }
 
+/// Accepts an arbitrary shape and reshapes it to be 3d on the block dimension, e.g.
+///
+/// Let `X` be the block dimension.
+/// (a, b, X, c, d, e) becomes (a*b, X, c*d*e)
+/// (X, a, b, c, d) becomes (1, X, a*b*c*d)
+/// (a, X, b, c) becomes (a, X, b*c)
+pub fn reshape_to_3d_on_block_dim(source: &Tensor, block_dim: usize) -> Result<Tensor> {
+    let shape = source.shape().dims();
+    let ndim = source.rank();
+
+    // Ensure block_dim is valid
+    if block_dim >= ndim {
+        return Err(candle_core::Error::Msg(format!(
+            "Block dimension {} is out of bounds for tensor with {} dimensions",
+            block_dim, ndim
+        )));
+    }
+
+    // Handle different cases based on block_dim position
+    if block_dim == 0 {
+        // Case: (X, a, b, c, d) becomes (1, X, a*b*c*d)
+        let prefix_dim = 1;
+        let block_size = shape[block_dim];
+        let suffix_dim: usize = shape.iter().skip(block_dim + 1).product();
+
+        // First ensure tensor is contiguous
+        let contiguous = source.contiguous()?;
+
+        // Reshape to 3D
+        contiguous.reshape((prefix_dim, block_size, suffix_dim))
+    } else if block_dim == ndim - 1 {
+        // Special case when block dim is the last dimension
+        // (a, b, c, X) becomes (a*b*c, X, 1)
+        let prefix_dim: usize = shape.iter().take(block_dim).product();
+        let block_size = shape[block_dim];
+        let suffix_dim = 1;
+
+        // First ensure tensor is contiguous
+        let contiguous = source.contiguous()?;
+
+        // Reshape to 3D
+        contiguous.reshape((prefix_dim, block_size, suffix_dim))
+    } else {
+        // General case: (a, b, X, c, d, e) becomes (a*b, X, c*d*e)
+        let prefix_dim: usize = shape.iter().take(block_dim).product();
+        let block_size = shape[block_dim];
+        let suffix_dim: usize = shape.iter().skip(block_dim + 1).product();
+
+        // First ensure tensor is contiguous
+        let contiguous = source.contiguous()?;
+
+        // Reshape to 3D
+        contiguous.reshape((prefix_dim, block_size, suffix_dim))
+    }
+}
+
 /// Create a pinned memory tensor
 pub fn create_pinned_tensor<S: Into<candle_core::Shape>>(shape: S, dtype: DType) -> Result<Tensor> {
     let shape = shape.into();
@@ -233,28 +307,17 @@ pub fn create_pinned_tensor<S: Into<candle_core::Shape>>(shape: S, dtype: DType)
 }
 
 extern "C" {
-    fn copy_blocks(
+    fn copy_blocks_3d(
         src_data: *const c_void,
         dst_data: *mut c_void,
-        src_block_ids: *const c_int,
-        num_src_blocks: c_int,
-        dst_block_ids: *const c_int,
-        num_dst_blocks: c_int,
-        src_n_blocks: c_int,
-        dst_n_blocks: c_int,
-        tp_size: c_int,
-        block_size: c_int,
-        heads_per_rank: c_int,
-        head_size: c_int,
+        h_src_block_ids: *const c_int,
+        h_dst_block_ids: *const c_int,
+        num_block_pairs: c_int,
+        prefix_dim: c_int,
+        src_blocks: c_int,
+        dst_blocks: c_int,
+        suffix_dim: c_int,
         elem_size: c_int,
-        src_tp_stride: c_ulong,
-        src_block_stride: c_ulong,
-        src_pos_stride: c_ulong,
-        src_head_stride: c_ulong,
-        dst_tp_stride: c_ulong,
-        dst_block_stride: c_ulong,
-        dst_pos_stride: c_ulong,
-        dst_head_stride: c_ulong,
     ) -> c_int;
 }
 /// Copy blocks between tensors - works with any combination of
@@ -264,6 +327,7 @@ pub fn copy_blocks_between_layers(
     dst_tensor: &Tensor,
     src_block_ids: &[usize],
     dst_block_ids: &[usize],
+    block_dim: usize,
 ) -> Result<()> {
     // Validation logic (same as before)
     if src_block_ids.len() != dst_block_ids.len() {
@@ -272,12 +336,27 @@ pub fn copy_blocks_between_layers(
         ));
     }
 
-    let src_block_ids: Vec<u32> = src_block_ids.iter().map(|&id| id as u32).collect();
-    let dst_block_ids: Vec<u32> = dst_block_ids.iter().map(|&id| id as u32).collect();
+    if src_tensor.rank() != dst_tensor.rank() {
+        return Err(candle_core::Error::Msg(
+            "Source and destination tensors must have the same rank".into(),
+        ));
+    }
 
+    if block_dim >= src_tensor.rank() {
+        return Err(candle_core::Error::Msg(
+            "Block dimension is out of bounds".into(),
+        ));
+    }
     if src_block_ids.is_empty() {
         return Ok(()); // Nothing to do
     }
+
+    // reshape the tensors to match the 3d tensor copy kernel
+    let src_tensor = reshape_to_3d_on_block_dim(src_tensor, block_dim)?;
+    let dst_tensor = reshape_to_3d_on_block_dim(dst_tensor, block_dim)?;
+
+    let src_block_ids: Vec<u32> = src_block_ids.iter().map(|&id| id as u32).collect();
+    let dst_block_ids: Vec<u32> = dst_block_ids.iter().map(|&id| id as u32).collect();
 
     // Check that at least one tensor is on a CUDA device
     let is_src_cuda = src_tensor.device().is_cuda();
@@ -289,32 +368,18 @@ pub fn copy_blocks_between_layers(
         ));
     }
 
-    // Get tensor dimensions
+    // Get dimensions from the tensors
     let src_dims = src_tensor.dims();
     let dst_dims = dst_tensor.dims();
 
-    if src_dims.len() != 5 || dst_dims.len() != 5 {
-        return Err(candle_core::Error::Msg(
-            "Both tensors must have 5 dimensions [tp_size, n_blocks, block_size, heads_per_rank, head_size]".into()
-        ));
-    }
-
-    // Extract dimensions
-    let tp_size = src_dims[0] as i32;
-    let src_n_blocks = src_dims[1] as i32;
-    let block_size = src_dims[2] as i32;
-    let heads_per_rank = src_dims[3] as i32;
-    let head_size = src_dims[4] as i32;
-
-    let dst_tp_size = dst_dims[0] as i32;
-    let dst_n_blocks = dst_dims[1] as i32;
+    // Extract dimensions for the 3D tensor format
+    let prefix_dim = src_dims[0] as i32; // First dimension
+    let src_n_blocks = src_dims[1] as i32; // Number of blocks in source
+    let dst_n_blocks = dst_dims[1] as i32; // Number of blocks in destination
+    let suffix_dim = src_dims[2] as i32; // Last dimension (combined dimensions)
 
     // Validate dimension compatibility
-    if tp_size != dst_tp_size
-        || src_dims[2] != dst_dims[2]
-        || src_dims[3] != dst_dims[3]
-        || src_dims[4] != dst_dims[4]
-    {
+    if src_dims[0] != dst_dims[0] || src_dims[2] != dst_dims[2] {
         return Err(candle_core::Error::Msg(format!(
             "Incompatible tensor dimensions: src={:?}, dst={:?}",
             src_dims, dst_dims
@@ -352,63 +417,26 @@ pub fn copy_blocks_between_layers(
         println!("WARNING: Ensure that any CPU tensor used with copy_blocks is allocated with pinned memory");
     }
 
-    // Calculate strides for both tensors (handles non-contiguous memory)
-    let src_layout = src_tensor.layout();
-    let dst_layout = dst_tensor.layout();
-
-    // Get strides for each dimension
-    let src_strides = src_layout.stride();
-    let dst_strides = dst_layout.stride();
-
-    // Make sure we have all the strides we need
-    if src_strides.len() != 5 || dst_strides.len() != 5 {
-        return Err(candle_core::Error::Msg(
-            "Could not get strides for tensors - expected 5 dimensions".into(),
-        ));
-    }
-
-    // Convert to the stride values we need
-    let src_tp_stride = src_strides[0] as u64;
-    let src_block_stride = src_strides[1] as u64;
-    let src_pos_stride = src_strides[2] as u64;
-    let src_head_stride = src_strides[3] as u64;
-
-    let dst_tp_stride = dst_strides[0] as u64;
-    let dst_block_stride = dst_strides[1] as u64;
-    let dst_pos_stride = dst_strides[2] as u64;
-    let dst_head_stride = dst_strides[3] as u64;
-
     // Get raw pointers to the tensor data WITHOUT making copies
     let result = unsafe {
         // Get source pointer based on device
-        let src_ptr = get_tensor_ptr(src_tensor)?;
+        let src_ptr = get_tensor_ptr(&src_tensor)?;
 
         // Get destination pointer based on device
-        let dst_ptr = get_tensor_ptr_mut(dst_tensor)?;
+        let dst_ptr = get_tensor_ptr_mut(&dst_tensor)?;
 
-        // Call the unified copy_blocks function
-        copy_blocks(
+        // Call the 3D tensor copy blocks function
+        copy_blocks_3d(
             src_ptr,
             dst_ptr,
             src_blocks_i32.as_ptr(),
-            src_blocks_i32.len() as i32,
             dst_blocks_i32.as_ptr(),
-            dst_blocks_i32.len() as i32,
+            src_blocks_i32.len() as i32,
+            prefix_dim,
             src_n_blocks,
             dst_n_blocks,
-            tp_size,
-            block_size,
-            heads_per_rank,
-            head_size,
+            suffix_dim,
             src_tensor.dtype().size_in_bytes() as i32,
-            src_tp_stride,
-            src_block_stride,
-            src_pos_stride,
-            src_head_stride,
-            dst_tp_stride,
-            dst_block_stride,
-            dst_pos_stride,
-            dst_head_stride,
         )
     };
 
@@ -855,7 +883,7 @@ mod tests {
         };
 
         // Define tensor dimensions
-        let tp_size = 2; // 2 for key and value
+        let kv_size = 2; // 2 for key and value
         let src_n_blocks = 10; // Source has 10 blocks
         let dst_n_blocks = 20; // Destination has 20 blocks
         let block_size = 2;
@@ -867,7 +895,7 @@ mod tests {
         // Create source tensor on device with block ID values
         // Each element in block 'n' will have the value 'n'
         let mut src_data = Vec::new();
-        for _kv in 0..tp_size {
+        for _kv in 0..kv_size {
             for block_id in 0..src_n_blocks {
                 for _pos in 0..block_size {
                     for _head in 0..heads_per_rank {
@@ -880,13 +908,13 @@ mod tests {
             }
         }
 
-        let src_shape = (tp_size, src_n_blocks, block_size, heads_per_rank, head_size);
+        let src_shape = (kv_size, src_n_blocks, block_size, heads_per_rank, head_size);
         let src_tensor = Tensor::from_vec(src_data, src_shape, &device)?;
 
         println!("Allocating destination tensor with pinned memory...");
 
         // Allocate pinned memory for destination tensor
-        let total_dst_elements = tp_size * dst_n_blocks * block_size * heads_per_rank * head_size;
+        let total_dst_elements = kv_size * dst_n_blocks * block_size * heads_per_rank * head_size;
         let mut pinned_mem =
             unsafe { cuda_device.alloc_pinned::<f32>(total_dst_elements).unwrap() };
 
@@ -897,7 +925,7 @@ mod tests {
         }
 
         // Create a tensor that directly references the pinned memory (NO COPY!)
-        let dst_shape = (tp_size, dst_n_blocks, block_size, heads_per_rank, head_size);
+        let dst_shape = (kv_size, dst_n_blocks, block_size, heads_per_rank, head_size);
         let dst_tensor = unsafe {
             let slice = std::slice::from_raw_parts(pinned_mem.as_ptr(), total_dst_elements);
             Tensor::from_slice(slice, dst_shape, &Device::Cpu)?
@@ -911,7 +939,7 @@ mod tests {
 
         // Time the operation
         let start = Instant::now();
-        copy_blocks_between_layers(&src_tensor, &dst_tensor, &src_blocks, &dst_blocks)?;
+        copy_blocks_between_layers(&src_tensor, &dst_tensor, &src_blocks, &dst_blocks, 1)?;
         let elapsed = start.elapsed();
 
         println!("dst_tensor: {}", dst_tensor);
@@ -942,8 +970,8 @@ mod tests {
                             let value_f32 = value.to_scalar::<f32>()?;
                             assert_eq!(
                                 value_f32, src_block as f32,
-                                "Value mismatch at dst_block={}, pos={}, head={}, i={}, expected={}",
-                                dst_block, pos, head, i, src_block
+                                "Value mismatch at kv={}, dst_block={}, pos={}, head={}, i={}, expected={}",
+                                kv, dst_block, pos, head, i, src_block
                             );
                         }
                     }
@@ -951,62 +979,55 @@ mod tests {
             }
         }
 
-        // unsafe {
-        //     let dst_data = std::slice::from_raw_parts(pinned_mem.as_ptr(), total_dst_elements);
-
-        //     // Calculate elements per block
-        //     let elements_per_block = block_size * heads_per_rank * head_size;
-
-        //     // Check each destination block
-        //     for (src_id, dst_id) in src_blocks.iter().zip(dst_blocks.iter()) {
-        //         // For each KV dimension (0 and 1)
-        //         for kv in 0..tp_size {
-        //             let base_offset = kv * dst_n_blocks * elements_per_block
-        //                 + *dst_id as usize * elements_per_block;
-
-        //             // Check first element of the block
-        //             let value = dst_data[base_offset];
-        //             assert_eq!(
-        //                 value, *src_id as f32,
-        //                 "Value mismatch at KV={}, dst_block={}, expected={}",
-        //                 kv, dst_id, src_id
-        //             );
-
-        //             // Check a random element in the middle of the block
-        //             let random_offset = base_offset +
-        //                                2 * heads_per_rank * head_size + // position 2
-        //                                3 * head_size +                  // head 3
-        //                                5; // element 5
-
-        //             // Make sure it's in range
-        //             if random_offset < dst_data.len() {
-        //                 let value = dst_data[random_offset];
-        //                 assert_eq!(
-        //                     value, *src_id as f32,
-        //                     "Value mismatch at KV={}, dst_block={}, pos=2, head=3, elm=5, expected={}",
-        //                     kv, dst_id, src_id
-        //                 );
-        //             }
-        //         }
-        //     }
-
-        //     // Also verify that untouched blocks still have zeros
-        //     let untouched_blocks = vec![1, 3, 5, 7, 9]; // These aren't in the dst_blocks list
-
-        //     for &block_id in &untouched_blocks {
-        //         let base_offset = 0 * dst_n_blocks * elements_per_block + // KV=0
-        //                          block_id as usize * elements_per_block; // block_id
-
-        //         let value = dst_data[base_offset];
-        //         assert_eq!(
-        //             value, 0.0,
-        //             "Untouched block {} should still be zero",
-        //             block_id
-        //         );
-        //     }
-        // }
-
         println!("All tests passed successfully!");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_reshape_to_3d_on_block_dim_comprehensive() -> Result<()> {
+        use super::reshape_to_3d_on_block_dim;
+
+        // Set up the device - first try CUDA, fall back to CPU
+        let device = match Device::cuda_if_available(0) {
+            Ok(dev) => dev,
+            Err(_) => Device::Cpu,
+        };
+
+        // Test case 1: Block dimension in the middle
+        // (a, b, X, c, d, e) becomes (a*b, X, c*d*e)
+        let tensor1 = Tensor::zeros((2, 3, 4, 5, 6, 7), DType::F32, &device)?;
+        let reshaped1 = reshape_to_3d_on_block_dim(&tensor1, 2)?;
+        assert_eq!(reshaped1.shape().dims(), &[2 * 3, 4, 5 * 6 * 7]);
+
+        // Test case 2: Block dimension at the beginning
+        // (X, a, b, c, d) becomes (1, X, a*b*c*d)
+        let tensor2 = Tensor::zeros((4, 3, 2, 5), DType::F32, &device)?;
+        let reshaped2 = reshape_to_3d_on_block_dim(&tensor2, 0)?;
+        assert_eq!(reshaped2.shape().dims(), &[1, 4, 3 * 2 * 5]);
+
+        // Test case 3: Block dimension at the end
+        // (a, b, c, X) becomes (a*b*c, X, 1)
+        let tensor3 = Tensor::zeros((2, 3, 4, 5), DType::F32, &device)?;
+        let reshaped3 = reshape_to_3d_on_block_dim(&tensor3, 3)?;
+        assert_eq!(reshaped3.shape().dims(), &[2 * 3 * 4, 5, 1]);
+
+        // Test case 4: Block dimension with single dimensions
+        // (1, X, 1) becomes (1, X, 1)
+        let tensor4 = Tensor::zeros((1, 4, 1), DType::F32, &device)?;
+        let reshaped4 = reshape_to_3d_on_block_dim(&tensor4, 1)?;
+        assert_eq!(reshaped4.shape().dims(), &[1, 4, 1]);
+
+        // Test case 5: Single dimension tensor
+        // (X) becomes (1, X, 1)
+        let tensor5 = Tensor::zeros((5,), DType::F32, &device)?;
+        let reshaped5 = reshape_to_3d_on_block_dim(&tensor5, 0)?;
+        assert_eq!(reshaped5.shape().dims(), &[1, 5, 1]);
+
+        // Test case 6: Error case - block_dim out of bounds
+        let tensor6 = Tensor::zeros((2, 3), DType::F32, &device)?;
+        let result6 = reshape_to_3d_on_block_dim(&tensor6, 2);
+        assert!(result6.is_err());
 
         Ok(())
     }
