@@ -106,7 +106,7 @@ ENV VLLM_GENERATE_WORKERS=${VLLM_FRAMEWORK:+1}
 ENV VLLM_BASELINE_TP_SIZE=${VLLM_FRAMEWORK:+1}
 ENV VLLM_CONTEXT_TP_SIZE=${VLLM_FRAMEWORK:+1}
 ENV VLLM_GENERATE_TP_SIZE=${VLLM_FRAMEWORK:+1}
-ENV VLLM_KV_CAPI_PATH="/opt/dynamo/llm_binding/lib/libdynamo_llm_capi.so"
+ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
 ENV PYTHONUNBUFFERED=1
 
 # Install NATS - pointing toward NATS github instead of binaries.nats.dev due to server instability
