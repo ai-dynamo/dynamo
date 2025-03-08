@@ -33,7 +33,7 @@ proposed change so that the Dynamo team can provide feedback.
   with Dynamo's overall architecture.
 
 - The Dynamo project is spread across multiple GitHub Repositories.
-  The Dyna team will provide guidance about how and where your enhancement
+  The Dynamo team will provide guidance about how and where your enhancement
   should be implemented.
 
 - Testing is a critical part of any Dynamo
