@@ -178,7 +178,7 @@ get_options() {
     fi
 
     if [ -z "$IMAGE" ]; then
-        IMAGE="triton-distributed:latest-${FRAMEWORK,,}"
+        IMAGE="dynamo:latest-${FRAMEWORK,,}"
         if [ ! -z ${TARGET} ]; then
             IMAGE="${IMAGE}-${TARGET}"
         fi

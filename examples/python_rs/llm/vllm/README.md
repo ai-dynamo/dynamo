@@ -15,9 +15,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# vLLM Integration with Triton Distributed
+# vLLM Integration with Dynamo
 
-This example demonstrates how to use Triton Distributed to serve large language models with the vLLM engine, enabling efficient model serving with both monolithic and disaggregated deployment options.
+This example demonstrates how to use Dynamo to serve large language models with the vLLM engine, enabling efficient model serving with both monolithic and disaggregated deployment options.
 
 ## Prerequisites
 
@@ -38,7 +38,7 @@ Start required services (etcd and NATS):
 
 ## Building the Environment
 
-The example is designed to run in a containerized environment using Triton Distributed, vLLM, and associated dependencies. To build the container:
+The example is designed to run in a containerized environment using Dynamo, vLLM, and associated dependencies. To build the container:
 
 ```bash
 # Build image
