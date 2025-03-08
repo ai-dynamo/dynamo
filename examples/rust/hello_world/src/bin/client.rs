@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use dynemo_runtime::{
+use dynamo_runtime::{
     logging, protocols::annotated::Annotated, stream::StreamExt, DistributedRuntime, Result,
     Runtime, Worker,
 };

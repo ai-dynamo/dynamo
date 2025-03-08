@@ -1,5 +1,5 @@
 ---
-source: dynemo-llm/tests/openai_completions.rs
+source: dynamo.llm/tests/openai_completions.rs
 description: "should have prompt, model, and top_p fields"
 expression: sample.request
 ---

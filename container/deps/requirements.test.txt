@@ -21,3 +21,5 @@ pytest-cov
 pytest-md-report
 pytest-mypy
 pytest-timeout
+# add types library stub for PyYAML
+types-PyYAML

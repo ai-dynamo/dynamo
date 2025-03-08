@@ -17,16 +17,16 @@ import asyncio
 
 from protocol import Request
 
-from dynemo.runtime import DistributedRuntime, dynemo_worker
+from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 
-@dynemo_worker()
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     """
     Instantiate a `backend` client and call the `generate` endpoint
     """
     # get endpoint
-    endpoint = runtime.namespace("dynemo").component("backend").endpoint("generate")
+    endpoint = runtime.namespace("dynamo").component("backend").endpoint("generate")
 
     # create client
     client = await endpoint.client()

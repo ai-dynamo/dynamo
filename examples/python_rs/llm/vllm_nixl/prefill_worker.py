@@ -29,7 +29,7 @@ from vllm.inputs.data import TokensPrompt
 from vllm.logger import logger as vllm_logger
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 
-from dynemo.runtime import DistributedRuntime, dynemo_worker
+from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 
 class RequestHandler:
@@ -70,15 +70,15 @@ class RequestHandler:
             yield
 
 
-@dynemo_worker()
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     # TODO: we don't need it now, but will need it after the queue is integrated to the runtime
-    component = runtime.namespace("dynemo-init").component("prefill")
+    component = runtime.namespace("dynamo-init").component("prefill")
     await component.create_service()
 
     async with build_async_engine_client_from_engine_args(engine_args) as engine_client:
         metadata = engine_client.nixl_metadata
-        metadata_store = NixlMetadataStore("dynemo-init", runtime)
+        metadata_store = NixlMetadataStore("dynamo-init", runtime)
         await metadata_store.put(metadata.engine_id, metadata)
 
         # TODO: move this to prefill_queue.py

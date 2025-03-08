@@ -26,7 +26,7 @@ from common.protocol import (
 from tensorrt_llm.logger import logger
 from tensorrt_llm.serve.openai_protocol import CompletionRequest, DisaggregatedParams
 
-from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
+from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
 logger.set_level("debug")
 
@@ -69,7 +69,7 @@ class Router:
     # Disagg params should be in under the choices field in the response object.
     # This is the case for completions but not for chat.
 
-    @dynemo_endpoint(CompletionRequest, DisaggCompletionStreamResponse)
+    @dynamo_endpoint(CompletionRequest, DisaggCompletionStreamResponse)
     async def generate_completion(self, request):
         # These settings are needed to satisfy request checks.
         request.skip_special_tokens = False
@@ -102,7 +102,7 @@ class Router:
             )
             yield json.loads(gen_resp_obj.model_dump_json(exclude_unset=True))
 
-    @dynemo_endpoint(DisaggChatCompletionRequest, DisaggChatCompletionStreamResponse)
+    @dynamo_endpoint(DisaggChatCompletionRequest, DisaggChatCompletionStreamResponse)
     async def generate_chat(self, request):
         # These settings are needed to satisfy request checks.
         request.skip_special_tokens = False
@@ -136,35 +136,35 @@ class Router:
             yield json.loads(gen_resp_obj.model_dump_json(exclude_unset=True))
 
 
-@dynemo_worker()
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     """
     Instantiate a `backend` component and serve the `generate` endpoint
     A `Component` can serve multiple endpoints
     """
-    component = runtime.namespace("dynemo").component("router")
+    component = runtime.namespace("dynamo").component("router")
     await component.create_service()
 
     ctx_completion_client = (
-        await runtime.namespace("dynemo")
+        await runtime.namespace("dynamo")
         .component("tensorrt-llm-ctx")
         .endpoint("completions")
         .client()
     )
     gen_completion_client = (
-        await runtime.namespace("dynemo")
+        await runtime.namespace("dynamo")
         .component("tensorrt-llm-gen")
         .endpoint("completions")
         .client()
     )
     ctx_chat_client = (
-        await runtime.namespace("dynemo")
+        await runtime.namespace("dynamo")
         .component("tensorrt-llm-ctx")
         .endpoint("chat/completions")
         .client()
     )
     gen_chat_client = (
-        await runtime.namespace("dynemo")
+        await runtime.namespace("dynamo")
         .component("tensorrt-llm-gen")
         .endpoint("chat/completions")
         .client()

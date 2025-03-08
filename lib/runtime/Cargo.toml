@@ -14,7 +14,7 @@
 # limitations under the License.
 
 [package]
-name = "dynemo-runtime"
+name = "dynamo-runtime"
 description = "Distributed Inference Framework"
 readme = "README.md"
 version = "0.2.1" # TODO: Centralize Version Automation
@@ -23,7 +23,7 @@ authors = ["NVIDIA"]
 license = "Apache-2.0"
 homepage = "https://github.com/dynemo-ai/dynemo"
 repository = "https://github.com/dynemo-ai/dynemo.git"
-keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynemo"]
+keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 
 [features]
 default = []

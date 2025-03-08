@@ -957,7 +957,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynemo-llm"
+name = "dynamo-llm"
 version = "0.2.1"
 dependencies = [
  "anyhow",
@@ -972,7 +972,7 @@ dependencies = [
  "chrono",
  "cmake",
  "derive_builder",
- "dynemo-runtime",
+ "dynamo-runtime",
  "either",
  "erased-serde",
  "futures",
@@ -984,6 +984,8 @@ dependencies = [
  "minijinja-contrib",
  "prometheus",
  "pyo3",
+ "pyo3-async-runtimes",
+ "pythonize",
  "regex",
  "semver",
  "serde",
@@ -1006,11 +1008,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynemo-py3"
+name = "dynamo-py3"
 version = "0.2.1"
 dependencies = [
- "dynemo-llm",
- "dynemo-runtime",
+ "dynamo-llm",
+ "dynamo-runtime",
  "futures",
  "once_cell",
  "pyo3",
@@ -1026,7 +1028,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynemo-runtime"
+name = "dynamo-runtime"
 version = "0.2.1"
 dependencies = [
  "anyhow",

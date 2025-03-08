@@ -19,8 +19,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use dynemo_runtime::pipeline::error as pipeline_error;
-use dynemo_runtime::CancellationToken;
+use dynamo_runtime::pipeline::error as pipeline_error;
+use dynamo_runtime::CancellationToken;
 
 use crate::backend::ExecutionContext;
 use crate::engines::MultiNodeConfig;

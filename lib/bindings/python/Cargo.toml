@@ -14,7 +14,7 @@
 # limitations under the License.
 
 [package]
-name = "dynemo-py3"
+name = "dynamo-py3"
 version = "0.2.1"
 edition = "2021"
 authors = ["NVIDIA"]
@@ -30,8 +30,9 @@ crate-type = ["cdylib"]
 
 
 [dependencies]
-dynemo-llm = { path = "../../llm" }
-dynemo-runtime = { path = "../../runtime" }
+
+dynamo-llm = { path = "../../llm", features = ["python"] }
+dynamo-runtime = { path = "../../runtime" }
 
 futures = "0.3"
 once_cell = "1.20.3"

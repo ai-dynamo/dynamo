@@ -48,7 +48,7 @@ use crate::types::{
     Annotated,
 };
 
-use dynemo_runtime::pipeline::{AsyncEngineContext, Context};
+use dynamo_runtime::pipeline::{AsyncEngineContext, Context};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ErrorResponse {
@@ -91,7 +91,7 @@ impl ErrorResponse {
         )
     }
 
-    /// The OAI endpoints call an [`dynemo_runtime::engine::AsyncEngine`] which are specialized to return
+    /// The OAI endpoints call an [`dynamo.runtime::engine::AsyncEngine`] which are specialized to return
     /// an [`anyhow::Error`]. This method will convert the [`anyhow::Error`] into an [`HttpError`].
     /// If successful, it will return the [`HttpError`] as an [`ErrorResponse::internal_server_error`]
     /// with the details of the error.
@@ -516,7 +516,7 @@ pub fn list_models_router(
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     // TODO: Why do we have this endpoint?
-    let custom_path = path.unwrap_or("/dynemo/alpha/list-models".to_string());
+    let custom_path = path.unwrap_or("/dynamo/alpha/list-models".to_string());
     let doc_for_custom = RouteDoc::new(axum::http::Method::GET, &custom_path);
 
     // Standard OpenAI compatible list models endpoint

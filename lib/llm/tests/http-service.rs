@@ -15,20 +15,20 @@
 
 use anyhow::Error;
 use async_stream::stream;
-use dynemo_llm::http::service::{
+use dynamo_llm::http::service::{
     error::HttpError,
     metrics::{Endpoint, RequestType, Status},
     service_v2::HttpService,
     Metrics,
 };
-use dynemo_llm::protocols::{
+use dynamo_llm::protocols::{
     openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{CompletionRequest, CompletionResponse},
     },
     Annotated,
 };
-use dynemo_runtime::{
+use dynamo_runtime::{
     pipeline::{
         async_trait, AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
     },

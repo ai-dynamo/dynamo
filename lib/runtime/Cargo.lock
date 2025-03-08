@@ -696,7 +696,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynemo-runtime"
+name = "dynamo-runtime"
 version = "0.2.1"
 dependencies = [
  "anyhow",

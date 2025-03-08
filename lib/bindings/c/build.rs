@@ -22,7 +22,7 @@ fn main() {
     let header_path = Path::new(&crate_dir)
         .join("include")
         .join("nvidia")
-        .join("dynemo_llm")
+        .join("dynamo_llm")
         .join("llm_engine.h");
 
     cbindgen::generate(crate_dir)

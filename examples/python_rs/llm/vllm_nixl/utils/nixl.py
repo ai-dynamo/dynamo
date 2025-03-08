@@ -20,7 +20,7 @@ from contextlib import contextmanager
 import msgspec
 from vllm.distributed.device_communicators.nixl import NixlMetadata
 
-from dynemo.runtime import DistributedRuntime
+from dynamo.runtime import DistributedRuntime
 
 METADATA_DIR = "/tmp/nixl"
 

@@ -19,27 +19,27 @@ import asyncio
 import uvloop
 from preprocessor.common import parse_vllm_args
 
-from dynemo.runtime import (
+from dynamo.runtime import (
     DistributedRuntime,
     ModelDeploymentCard,
     OAIChatPreprocessor,
-    dynemo_worker,
+    dynamo_worker,
 )
 
 uvloop.install()
 
 
-@dynemo_worker()
+@dynamo_worker()
 async def preprocessor(runtime: DistributedRuntime, model_name: str, model_path: str):
     # create model deployment card
     mdc = await ModelDeploymentCard.from_local_path(model_path, model_name)
     # create preprocessor endpoint
-    component = runtime.namespace("dynemo").component("preprocessor")
+    component = runtime.namespace("dynamo").component("preprocessor")
     await component.create_service()
     endpoint = component.endpoint("generate")
 
     # create backend endpoint
-    backend = runtime.namespace("dynemo").component("backend").endpoint("generate")
+    backend = runtime.namespace("dynamo").component("backend").endpoint("generate")
 
     # start preprocessor service with next backend
     chat = OAIChatPreprocessor(mdc, endpoint, next=backend)

@@ -63,7 +63,7 @@ TENSORRTLLM_BASE_IMAGE_TAG=${TENSORRTLLM_BASE_VERSION}-trtllm-python-py3
 # used in the base image above.
 TENSORRTLLM_BACKEND_REPO_TAG=triton-llm/v0.17.0
 # Set this as 1 to rebuild and replace trtllm backend bits in the container.
-# This will allow building triton distributed container image with custom
+# This will allow building Dynamo container image with custom
 # trt-llm backend repo branch.
 TENSORRTLLM_BACKEND_REBUILD=0
 # Set this as 1 to skip cloning the trt-llm backend repo. If cloning is skipped, trt-llm
@@ -247,7 +247,7 @@ get_options() {
     fi
 
     if [ -z "$TAG" ]; then
-        TAG="--tag triton-distributed:${VERSION}-${FRAMEWORK,,}"
+        TAG="--tag dynamo:${VERSION}-${FRAMEWORK,,}"
         if [ ! -z ${TARGET} ]; then
             TAG="${TAG}-${TARGET}"
         fi
@@ -265,7 +265,7 @@ get_options() {
 
 show_image_options() {
     echo ""
-    echo "Building Triton Distributed Image: '${TAG}'"
+    echo "Building Dynamo Image: '${TAG}'"
     echo ""
     echo "   Base: '${BASE_IMAGE}'"
     echo "   Base_Image_Tag: '${BASE_IMAGE_TAG}'"
@@ -340,7 +340,7 @@ if [ ! -z ${HF_TOKEN} ]; then
     BUILD_ARGS+=" --build-arg HF_TOKEN=${HF_TOKEN} "
 fi
 
-LATEST_TAG="--tag triton-distributed:latest-${FRAMEWORK,,}"
+LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
 if [ ! -z ${TARGET} ]; then
     LATEST_TAG="${LATEST_TAG}-${TARGET}"
 fi

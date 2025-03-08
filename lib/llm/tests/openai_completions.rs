@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use async_openai::types::CreateCompletionRequestArgs;
-use dynemo_llm::protocols::openai::{self, completions::CompletionRequest};
+use dynamo_llm::protocols::openai::{self, completions::CompletionRequest};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

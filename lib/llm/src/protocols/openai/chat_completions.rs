@@ -17,7 +17,7 @@ use super::nvext::NvExt;
 use super::nvext::NvExtProvider;
 use super::OpenAISamplingOptionsProvider;
 use super::OpenAIStopConditionsProvider;
-use dynemo_runtime::protocols::annotated::AnnotationsProvider;
+use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 

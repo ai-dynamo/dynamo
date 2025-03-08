@@ -17,12 +17,12 @@ import asyncio
 
 import uvloop
 
-from dynemo.runtime import DistributedRuntime, dynemo_worker
+from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 
-@dynemo_worker()
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
-    await init(runtime, "dynemo")
+    await init(runtime, "dynamo")
 
 
 async def init(runtime: DistributedRuntime, ns: str):

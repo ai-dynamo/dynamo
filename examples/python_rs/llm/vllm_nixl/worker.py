@@ -31,8 +31,8 @@ from vllm.logger import logger as vllm_logger
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
-from dynemo.llm import DisaggregatedRouter, KvMetricsPublisher
-from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
+from dynamo.llm import DisaggregatedRouter, KvMetricsPublisher
+from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
 
 class RequestHandler:
@@ -79,7 +79,7 @@ class RequestHandler:
 
         return callback
 
-    @dynemo_endpoint(vLLMGenerateRequest, MyRequestOutput)
+    @dynamo_endpoint(vLLMGenerateRequest, MyRequestOutput)
     async def generate(self, request):
         # TODO: consider prefix hit when deciding prefill locally or remotely
         if self.disaggregated_router is not None:
@@ -122,15 +122,15 @@ class RequestHandler:
             ).model_dump_json()
 
 
-@dynemo_worker()
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
-    component = runtime.namespace("dynemo-init").component("vllm")
+    component = runtime.namespace("dynamo-init").component("vllm")
     await component.create_service()
 
     endpoint = component.endpoint("generate")
 
     prefill_client = (
-        await runtime.namespace("dynemo-init")
+        await runtime.namespace("dynamo-init")
         .component("prefill")
         .endpoint("generate")
         .client()
@@ -141,7 +141,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
     vllm_logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
 
-    VLLM_KV_NAMESPACE = "dynemo-init"
+    VLLM_KV_NAMESPACE = "dynamo-init"
     os.environ["VLLM_KV_NAMESPACE"] = str(VLLM_KV_NAMESPACE)
 
     VLLM_KV_COMPONENT = "vllm"
@@ -177,7 +177,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
         # This should be replaced with etcd
         if engine_args.remote_prefill:
             metadata = engine_client.nixl_metadata
-            metadata_store = NixlMetadataStore("dynemo-init", runtime)
+            metadata_store = NixlMetadataStore("dynamo-init", runtime)
             await metadata_store.put(metadata.engine_id, metadata)
 
             await asyncio.gather(

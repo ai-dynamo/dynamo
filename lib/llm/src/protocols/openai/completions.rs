@@ -31,7 +31,7 @@ use super::{
     CompletionUsage, ContentProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
 };
 
-use dynemo_runtime::protocols::annotated::AnnotationsProvider;
+use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct CompletionRequest {

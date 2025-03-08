@@ -15,9 +15,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Triton Distributed Python Bindings
+# Dynamo Python Bindings
 
-Python bindings for the Triton distributed runtime system, enabling distributed computing capabilities for machine learning workloads.
+Python bindings for the Dynamo runtime system, enabling distributed computing capabilities for machine learning workloads.
 
 ## 🚀 Quick Start
 
@@ -41,7 +41,7 @@ source .venv/bin/activate
 uv pip install maturin
 ```
 
-4. Build and install dynemo wheel
+4. Build and install dynamo wheel
 ```
 maturin develop --uv
 ```
@@ -56,7 +56,7 @@ See [README.md](/lib/runtime/README.md).
 
 1. Start 3 separate shells, and activate the virtual environment in each
 ```
-cd python-wheels/triton-distributed
+cd python-wheels/dynamo
 source .venv/bin/activate
 ```
 

@@ -34,7 +34,7 @@ use futures::stream::{self, StreamExt};
 use tracing as log;
 
 use crate::model_card::model::{ModelDeploymentCard, TokenizerKind};
-use dynemo_runtime::{
+use dynamo_runtime::{
     pipeline::{
         async_trait, AsyncEngineContextProvider, ManyOut, Operator, ResponseStream,
         ServerStreamingEngine, SingleIn,
@@ -435,7 +435,7 @@ impl Decoder {
                         // return only new bytes after pre_append .. offset+seq.len()
                         // example: seq = "ox", token = "boxes", return "b"
                         // note: this changes when we start jailing tokens for partial matches
-                        // on the suffix of teh jail with prefixes of the stop sequences
+                        // on the suffix of the jail with prefixes of the stop sequences
                         //
                         // we might have returned a partial match, if so, then offset < pre_append
                         // in that case, we return the empty string

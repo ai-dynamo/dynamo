@@ -115,7 +115,6 @@ ENV CPATH=/usr/local/ompi/include:$CPATH
 ENV PATH=/usr/local/ompi/bin:$PATH
 ENV PKG_CONFIG_PATH=/usr/local/ompi/lib/pkgconfig:$PKG_CONFIG_PATH
 
-
 COPY --from=nixl . /opt/nixl
 
 RUN cd /opt/nixl && \
@@ -127,6 +126,8 @@ RUN cd /opt/nixl && \
 
 ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
 ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/:$PYTHONPATH
+ENV UCX_TLS=^cuda_ipc
+ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/x86_64-linux-gnu/plugins
 
 RUN ls -l /usr/local/nixl/
 RUN ls -l /usr/local/nixl/include/
@@ -150,17 +151,21 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 
 # Install uv and create virtualenv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN mkdir /opt/dynemo && \
-    uv venv /opt/dynemo/venv --python 3.12
+RUN mkdir /opt/dynamo && \
+    uv venv /opt/dynamo/venv --python 3.12
 
 # Activate virtual environment
-ENV VIRTUAL_ENV=/opt/dynemo/venv
+ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+# Common dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
 
 # Install patched vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
 ARG VLLM_REF="v0.7.2"
-ARG VLLM_PATCH="vllm_${VLLM_REF}-dynemo-kv-disagg-patch.patch"
+ARG VLLM_PATCH="vllm_${VLLM_REF}-dynamo-kv-disagg-patch.patch"
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     bash /tmp/deps/vllm/install.sh --patch /tmp/deps/vllm/${VLLM_PATCH} --ref ${VLLM_REF} --install-cmd "uv pip install --editable" --use-precompiled --installation-dir /opt/vllm
 
@@ -225,25 +230,29 @@ COPY lib/bindings /workspace/lib/bindings
 RUN cd lib/bindings/c && \
     cargo build --release --locked && cargo doc --no-deps
 
-# Build dynemo wheel
-RUN source /opt/dynemo/venv/bin/activate && \
+COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
+# Build dynamo wheel
+RUN source /opt/dynamo/venv/bin/activate && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/dynemo*cp312*.whl
+    uv pip install /workspace/dist/dynamo*cp312*.whl && \
+    cd /workspace/deploy/dynamo/sdk && \
+    uv build --wheel --out-dir /workspace/dist && \
+    uv pip install /workspace/dist/dynamo_sdk*any.whl
 
 # Package the bindings
-RUN mkdir -p /opt/dynemo/bindings/wheels && \
-    mkdir /opt/dynemo/bindings/lib && \
-    cp dist/dynemo*cp312*.whl /opt/dynemo/bindings/wheels/. && \
-    cp lib/bindings/c/target/release/libdynemo_llm_capi.so /opt/dynemo/bindings/lib/. && \
-    cp -r lib/bindings/c/include /opt/dynemo/bindings/.
+RUN mkdir -p /opt/dynamo/bindings/wheels && \
+    mkdir /opt/dynamo/bindings/lib && \
+    cp dist/dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
+    cp lib/bindings/c/target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
+    cp -r lib/bindings/c/include /opt/dynamo/bindings/.
 
-# Tell vllm to use the Dynemo LLM C API for KV Cache Routing
-ENV VLLM_KV_CAPI_PATH="/opt/dynemo/bindings/lib/libdynemo_llm_capi.so"
+# Tell vllm to use the Dynamo LLM C API for KV Cache Routing
+ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
 
 # FIXME: Copy more specific folders in for dev/debug after directory restructure
 COPY . /workspace
 
-# FIXME: May want a modification with dynemo-distributed banner on entry
+# FIXME: May want a modification with dynamo banner on entry
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
 CMD []
@@ -261,10 +270,10 @@ RUN apt update -y && \
     echo "set -g mouse on" >> /root/.tmux.conf
 
 # Set environment variables
-ENV VIRTUAL_ENV=/opt/dynemo/venv
+ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV RAPIDS_LIBUCX_PREFER_SYSTEM_LIBRARY=true
-ENV VLLM_KV_CAPI_PATH="/opt/dynemo/bindings/lib/libdynemo_llm_capi.so"
+ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
 
 # Copy binaries
 COPY --from=dev /usr/local/bin/http /usr/local/bin/http
@@ -291,7 +300,7 @@ COPY examples/python_rs/llm/vllm_nixl /workspace/examples/python_rs/llm/vllm_nix
 
 WORKDIR /workspace
 
-# FIXME: May want a modification with dynemo-distributed banner on entry
+# FIXME: May want a modification with dynamo banner on entry
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
 CMD []

@@ -49,11 +49,11 @@ All of the commands below are run inside the same container.
 
 ## Run deployment
 
-Add model to dynemo and start http server.
+Add model to dynamo and start http server.
 
 
 ```
-llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynemo-init.process.chat/completions
+llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo-init.process.chat/completions
 TRT_LOG=DEBUG http --port 8181
 ```
 
@@ -133,7 +133,7 @@ cd /workspace/examples/python_rs/llm/vllm_nixl
 CUDA_VISIBLE_DEVICES=0 python prefill_worker.py \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
-    --kv-transfer-config '{"kv_connector":"DynemoNixlConnector"}' \
+    --kv-transfer-config '{"kv_connector":"dynamoNixlConnector"}' \
     --enable-prefix-caching \
     --block-size 64 \
     --max-num-batched-tokens 16384 \
@@ -146,7 +146,7 @@ CUDA_VISIBLE_DEVICES=1,2 python3 worker.py \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
     --tensor-parallel-size 2 \
-    --kv-transfer-config '{"kv_connector":"DynemoNixlConnector"}' \
+    --kv-transfer-config '{"kv_connector":"dynamoNixlConnector"}' \
     --enable-prefix-caching \
     --block-size 64 \
     --max-num-batched-tokens 16384 \
@@ -155,7 +155,7 @@ CUDA_VISIBLE_DEVICES=1,2 python3 worker.py \
 
 Alternatively, we also provide a script to launch all workers in one go:
 ```
-# this TODO: change to dynemo-deploy functionality
+# this TODO: change to dynamo-deploy functionality
 ./start_single_node.sh
 # Usage [--model <model>] [--p_tensor_parallel_size <size>] [--d_tensor_parallel_size <size>] [--max_model_len <len>] [--max_num_batched_tokens <tokens>] [--max_num_seqs <seqs>] [--gpu_memory_utilization <utilization>] [--enable_chunked_prefill <True/False>] [--num_p <p>] [--num_d <d>]
 ```
@@ -243,7 +243,7 @@ rm -r /tmp/nixl
 - [x] Zero copy
 - [x] Conditional remote prefill
 - [x] Manual example with tp > 1
-- [x] Run on dynemo distributed runtime
+- [x] Run on dynamo distributed runtime
 - [x] add oai http endpoint
 - [x] Sample only on decode, do note return remote prefill response
 - [x] Check if all transfers finished before moving to decode

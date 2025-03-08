@@ -44,7 +44,7 @@ from tensorrt_llm.llmapi.disagg_utils import (
 from tensorrt_llm.logger import logger
 from tensorrt_llm.serve.openai_protocol import CompletionRequest
 
-from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
+from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
 logger.set_level("debug")
 
@@ -85,7 +85,7 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
         engine_config.extra_args["_mpi_session"] = self._mpi_session
         super().__init__(engine_config)
 
-    @dynemo_endpoint(DisaggChatCompletionRequest, DisaggChatCompletionStreamResponse)
+    @dynamo_endpoint(DisaggChatCompletionRequest, DisaggChatCompletionStreamResponse)
     async def generate_chat(self, request):
         if self._llm_engine is None:
             raise RuntimeError("Engine not initialized")
@@ -164,7 +164,7 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
 
         self._ongoing_request_count -= 1
 
-    @dynemo_endpoint(CompletionRequest, DisaggCompletionStreamResponse)
+    @dynamo_endpoint(CompletionRequest, DisaggCompletionStreamResponse)
     async def generate_completions(self, request):
         if self._llm_engine is None:
             raise RuntimeError("Engine not initialized")
@@ -211,7 +211,7 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
         self._ongoing_request_count -= 1
 
 
-@dynemo_worker()
+@dynamo_worker()
 async def worker(
     runtime: DistributedRuntime,
     engine_config: LLMAPIConfig,
@@ -226,7 +226,7 @@ async def worker(
     server_type = disagg_config.server_configs[instance_idx].type
     logger.info(f"Starting {server_type} server")
 
-    component = runtime.namespace("dynemo").component(f"tensorrt-llm-{server_type}")
+    component = runtime.namespace("dynamo").component(f"tensorrt-llm-{server_type}")
     await component.create_service()
 
     completions_endpoint = component.endpoint("completions")

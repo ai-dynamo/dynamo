@@ -43,6 +43,8 @@ pub struct Component {
 /// - **name**
 ///
 /// Example format: `"namespace/component/endpoint"`
+///
+/// TODO: There is also an Endpoint in runtime/src/component.rs
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Endpoint {
     pub namespace: String,
@@ -95,7 +97,7 @@ impl From<&str> for Endpoint {
     ///
     /// # Examples
     /// ```ignore
-    /// use dynemo_runtime:protocols::Endpoint;
+    /// use dynamo_runtime:protocols::Endpoint;
     ///
     /// let endpoint = Endpoint::from("namespace/component/endpoint");
     /// assert_eq!(endpoint.namespace, "namespace");
@@ -150,7 +152,7 @@ impl FromStr for Endpoint {
     /// # Examples
     /// ```ignore
     /// use std::str::FromStr;
-    /// use dynemo_runtime:protocols::Endpoint;
+    /// use dynamo_runtime:protocols::Endpoint;
     ///
     /// let endpoint: Endpoint = "namespace/component/endpoint".parse().unwrap();
     /// assert_eq!(endpoint.namespace, "namespace");

@@ -15,7 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_NAMESPACE: &str = "dynemo";
+pub const DEFAULT_NAMESPACE: &str = "dynamo";
 
 #[derive(Serialize, Deserialize)]
 // Dummy Stats object to demonstrate how to attach a custom stats handler

@@ -22,7 +22,7 @@ homepage = "https://github.com/dynemo-ai/dynemo"
 repository = "https://github.com/dynemo-ai/dynemo.git"
 
 [package]
-name = "dynemo-llm"
+name = "dynamo-llm"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -35,6 +35,7 @@ llamacpp = ["dep:llama-cpp-2"]
 sglang = ["dep:async_zmq"]
 sentencepiece = ["dep:sentencepiece"]
 vllm = ["dep:async_zmq"]
+python = ["dep:pyo3-async-runtimes", "dep:pythonize"]
 trtllm = []
 
 cuda = ["mistralrs/cuda", "llama-cpp-2/cuda"]
@@ -43,7 +44,7 @@ vulkan = ["llama-cpp-2/vulkan"]
 
 [workspace.dependencies]
 # local or crates.io
-dynemo-runtime = { version = "0.2.0", path = "../runtime" }
+dynamo-runtime = { version = "0.2.0", path = "../runtime" }
 
 # crates.io
 anyhow = { version = "1" }
@@ -66,7 +67,7 @@ strum = { version = "0.27", features = ["derive"] }
 [dependencies]
 
 # repo
-dynemo-runtime = { workspace = true }
+dynamo-runtime = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
@@ -89,6 +90,12 @@ strum = { workspace = true }
 async-openai = "0.27.2"
 blake3 = "1"
 regex = "1"
+pyo3 = { version = "0.23.3", default-features = false, features = [
+  "macros",
+  "experimental-async",
+  "experimental-inspect",
+  "py-clone",
+] }
 
 # protocols
 chrono = { version = "0.4", default-features = false, features = [
@@ -113,12 +120,6 @@ mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs.git", rev = "5e6
 # sglang
 async_zmq = { version = "0.4.0", optional = true }
 libc = "0.2"
-pyo3 = { version = "0.23.3", default-features = false, features = [
-  "macros",
-  "experimental-async",
-  "experimental-inspect",
-  "py-clone",
-] }
 serde-pickle = "1.2.0"
 
 # llamacpp
@@ -128,6 +129,8 @@ llama-cpp-2 = { version = "0.1.86", optional = true }
 tokenizers = { version = "0.21.0", default-features = false, features = [
   "onig",
   "esaxx_fast",
+  # Waiting for release: https://github.com/huggingface/tokenizers/issues/1736
+  # "rustls-tls",
 ] }
 sentencepiece = { version = "0.11.2", optional = true }
 
@@ -146,6 +149,16 @@ semver = { version = "1", features = ["serde"] }
 
 # trtllm
 serde_repr = "0.1"
+
+# python
+pyo3-async-runtimes = { version = "0.23.0", optional = true, default-features = false, features = [
+  "attributes",
+  "testing",
+  "tokio-runtime",
+  "unstable-streams",
+] }
+pythonize = { version = "0.23", optional = true }
+
 
 [dev-dependencies]
 proptest = "1.5.0"
