@@ -7,7 +7,7 @@ jobs:
   copyright-checks:
       runs-on: ubuntu-24.04
       container:
-        image: ghcr.io/ai-dynamo/dynamo/helm-tester:0.1.1
+        image: ghcr.io/${{ github.repository }}/helm-tester:0.1.1
         options: --tty
         volumes:
         - ${{ github.workspace }}:/workspace
