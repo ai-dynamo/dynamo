@@ -63,7 +63,6 @@ class Backend:
     @dynamo_endpoint()
     async def generate(self, req: RequestType):
         """Generate tokens."""
-        print("here2")
         req_text = req.text
         print(f"Backend received: {req_text}")
         text = f"{req_text}-back"
@@ -89,7 +88,6 @@ class Middle:
         print(f"Middle received: {req_text}")
         text = f"{req_text}-mid"
         next_request = RequestType(text=text).model_dump_json()
-        print("here5")
         async for response in self.backend.generate(next_request):
             print(f"Middle received response: {response}")
             yield f"Middle: {response}"
