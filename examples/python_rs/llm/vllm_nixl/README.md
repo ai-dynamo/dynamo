@@ -21,7 +21,7 @@ limitations under the License.
 
 Start required services (etcd and NATS):
 
-   Option A: Using [Docker Compose](/runtime/rust/docker-compose.yml) (Recommended)
+   Option A: Using [Docker Compose](/deploy/docker-compose.yml) (Recommended)
    ```bash
    docker-compose up -d
    ```
