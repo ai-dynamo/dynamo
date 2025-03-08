@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use dynamo_llm::engines::python::PythonServerStreamingEngine;
 use dynamo_runtime::CancellationToken;
-pub use dynemo_runtime::{
+pub use dynamo_runtime::{
     pipeline::{async_trait, AsyncEngine, Data, ManyOut, SingleIn},
     protocols::annotated::Annotated,
     Error, Result,
