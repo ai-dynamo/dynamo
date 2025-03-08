@@ -22,6 +22,7 @@ from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
 from utils.protocol import MyRequestOutput, vLLMGenerateRequest
 from utils.vllm import parse_vllm_args
+from disagg_router import PyDisaggregatedRouter 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.multiprocessing.client import EngineClient
 from vllm.entrypoints.openai.api_server import (
@@ -31,7 +32,7 @@ from vllm.logger import logger as vllm_logger
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
-from dynamo.llm import DisaggregatedRouter, KvMetricsPublisher
+from dynamo.llm import KvMetricsPublisher
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
 
@@ -42,7 +43,7 @@ class RequestHandler:
         engine_client: EngineClient,
         prefill_client,
         do_remote_prefill: bool,
-        disaggregated_router: DisaggregatedRouter = None,
+        disaggregated_router: PyDisaggregatedRouter = None,
     ):
         self.model_name = model_name
         self.client = engine_client
@@ -155,16 +156,16 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
             if engine_args.served_model_name is not None
             else "vllm"
         )
-        disaggregated_router = DisaggregatedRouter(
+        disaggregated_router = PyDisaggregatedRouter(
             runtime,
             served_model_name,
-            100,  # note: this max_local_prefill_length will be updated by etcd
+            custom_disagg_router=engine_args.custom_disagg_router,
+            max_local_prefill_length=engine_args.max_local_prefill_length,
+            max_remote_prefill_cache_hit_ratio=engine_args.max_remote_prefill_cache_hit_ratio,
         )
 
         engine_client.set_metrics_publisher(metrics_publisher)
 
-        print("--------------------------------")
-        print(f"VLLM_WORKER_ID: {os.environ['VLLM_WORKER_ID']}")
         # Initially send dummy metrics to kick start,
         # vLLM will not update stat until forward pass is triggered
         metrics_publisher.publish(
@@ -174,50 +175,38 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
             1024,
         )
 
-        # This should be replaced with etcd
-        if engine_args.remote_prefill:
-            metadata = engine_client.nixl_metadata
-            metadata_store = NixlMetadataStore("dynamo-init", runtime)
-            await metadata_store.put(metadata.engine_id, metadata)
+        metadata = engine_client.nixl_metadata
+        metadata_store = NixlMetadataStore("dynamo-init", runtime)
+        await metadata_store.put(metadata.engine_id, metadata)
 
-            await asyncio.gather(
-                endpoint.serve_endpoint(
-                    RequestHandler(
-                        model_name=served_model_name,
-                        engine_client=engine_client,
-                        prefill_client=prefill_client,
-                        do_remote_prefill=True,
-                        disaggregated_router=disaggregated_router,
-                    ).generate
-                ),
-                metrics_publisher.create_endpoint(component),
-            )
-        else:
-            await endpoint.serve_endpoint(
+        await asyncio.gather(
+            endpoint.serve_endpoint(
                 RequestHandler(
                     model_name=served_model_name,
                     engine_client=engine_client,
                     prefill_client=prefill_client,
-                    do_remote_prefill=False,
+                    do_remote_prefill=True,
+                    disaggregated_router=disaggregated_router,
                 ).generate
-            )
+            ),
+            metrics_publisher.create_endpoint(component),
+        )
 
 
 if __name__ == "__main__":
     uvloop.install()
     engine_args = parse_vllm_args()
 
-    if engine_args.remote_prefill:
-        if engine_args.enable_chunked_prefill is not False:
-            print("Chunked prefill is not supported yet, setting to False")
-            engine_args.enable_chunked_prefill = False
+    if engine_args.enable_chunked_prefill is not False:
+        print("Chunked prefill is not supported yet, setting to False")
+        engine_args.enable_chunked_prefill = False
 
-        if engine_args.preemption_mode != "swap":
-            print("Preemption mode is not supported yet, setting to swap")
-            engine_args.preemption_mode = "swap"
+    if engine_args.preemption_mode != "swap":
+        print("Preemption mode is not supported yet, setting to swap")
+        engine_args.preemption_mode = "swap"
 
-        if engine_args.pipeline_parallel_size != 1:
-            print("Pipeline parallel size is not supported yet, setting to 1")
-            engine_args.pipeline_parallel_size = 1
+    if engine_args.pipeline_parallel_size != 1:
+        print("Pipeline parallel size is not supported yet, setting to 1")
+        engine_args.pipeline_parallel_size = 1
 
     asyncio.run(worker(engine_args))

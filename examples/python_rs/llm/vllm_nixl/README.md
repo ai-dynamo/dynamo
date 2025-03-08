@@ -104,7 +104,12 @@ CUDA_VISIBLE_DEVICES=1,2 python3 routerless/worker.py \
 
 Router-based deployment use kv router to schedule the request to the best decode worker and disaggregated router to decide whether to prefill locally or remotely. The remote prefill requests will be sent to a global prefill queue to balance the prefill load. 
 
-To launch disaggregated vllm deployment, there are three major components:
+For router deployment, the client should hit the endpoint of the processor,
+```
+llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo-init.process.chat/completions
+```
+
+To launch disaggregated vllm deployment, there are four major components:
 1. Processor
 2. KV Router
 3. Disaggregated Router
@@ -117,7 +122,7 @@ To launch disaggregated vllm deployment, there are three major components:
 # This is temporary until we communicate the ModelDeploymentCard over etcd
 # Currently only block-size=64 is supported
 cd /workspace/examples/python_rs/llm/vllm_nixl
-RUST_LOG=info python3 processor.py \
+RUST_LOG=info python3 router/processor.py \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enable-prefix-caching \
@@ -131,9 +136,18 @@ The KV Router is a component that aggregates KV Events from all the workers and 
 
 To launch the KV Router, run the following command:
 ```
-RUST_LOG=info python3 router.py \
+RUST_LOG=info python3 router/kv_router.py \
     --routing-strategy prefix \
     --model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+    --min-workers 1
+```
+
+There is also a custom router that uses a cost function defined in python to make routing decisions. To launch the custom router, run the following command:
+```
+RUST_LOG=info python3 router/kv_router.py \
+    --routing-strategy prefix \
+    --model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+    --custom-router \
     --min-workers 1
 ```
 
@@ -147,29 +161,44 @@ The disaggregated router determines whether a request should be send to a
 remote prefill engine or a local prefill engine for prefilling based on the
 prefill length. When prefilling locally, the vllm scheduler will prioritize
 prefill request and pause any ongoing decode requests.
-For now, we use a simple heuristic to route to prefill engine
-if prefill length (including prefix catch hit) is greater than a threshold.
-This threshold can by dynamically adjusted at runtime through etcd.
 
-To check the current threshold (this will print out all kv pairs in etcd):
-```
-curl -s -L http://localhost:2379/v3/kv/range -X POST   -d '{"key":"AA==", "range_end":"AA=="}' |   jq -r '.kvs[] | "KEY: \(.key | @base64d)\nVALUE: \(.value | @base64d)\n---"'
-```
+There are two types of disaggregated router implementations:
+* Rust native: provide a simple heuristic to route to prefill engine
+  if prefill length (including prefix catch hit) is greater than a threshold.
+  This threshold can by dynamically adjusted at runtime through etcd.
+  
+  To check the current threshold (this will print out all kv pairs in etcd):
+  ```
+  curl -s -L http://localhost:2379/v3/kv/range -X POST   -d '{"key":"AA==", "range_end":"AA=="}' |   jq -r '.kvs[] | "KEY: \(.key | @base64d)\nVALUE: \(.value | @base64d)\n---"'
+  ```
 
-To update the threshold:
-```
-ETCDCTL_API=3 etcdctl --endpoints=http://localhost:2379 put 'public/components/disagg_router/models/chat/<vllm.served_model_name(default to "vllm")>' '{"max_local_prefill_length": <new_threshold>}'
-```
+  To update the threshold:
+  ```
+  ETCDCTL_API=3 etcdctl --endpoints=http://localhost:2379 put 'public/components/disagg_router/models/chat/<vllm.served_model_name(default to "vllm")>' '{"max_local_prefill_length": <new_threshold>}'
+  ```
+
+* Python customized: provide a python implementation that can be easily customized.
+  However, it does not support dynamic threshold adjustment through etcd.
+  It is recommended to use the custom disaggregated router together with the custom
+  kv router as the rust kv router does not report kv cache hit ratio.
+  To use the python disaggregated router, add the following commands when launching
+  the decode worker:
+  ```
+  python worker.py \
+    --custom-disagg-router \
+    --max-local-prefill-length <length> \
+    --max-remote-prefill-cache-hit-ratio <ratio>
+  ```
 
 #### Workers
 
 ```
 # start prefill worker in Terminal 1
 cd /workspace/examples/python_rs/llm/vllm_nixl
-CUDA_VISIBLE_DEVICES=0 python prefill_worker.py \
+CUDA_VISIBLE_DEVICES=0 python3 router/prefill_worker.py \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
-    --kv-transfer-config '{"kv_connector":"dynamoNixlConnector"}' \
+    --kv-transfer-config '{"kv_connector":"DynamoNixlConnector"}' \
     --enable-prefix-caching \
     --block-size 64 \
     --max-num-batched-tokens 16384 \
@@ -177,19 +206,19 @@ CUDA_VISIBLE_DEVICES=0 python prefill_worker.py \
 
 # start decode worker in Terminal 2
 cd /workspace/examples/python_rs/llm/vllm_nixl
-CUDA_VISIBLE_DEVICES=1,2 python3 worker.py \
+CUDA_VISIBLE_DEVICES=1,2 python3 router/worker.py \
     --remote-prefill \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
     --tensor-parallel-size 2 \
-    --kv-transfer-config '{"kv_connector":"dynamoNixlConnector"}' \
+    --kv-transfer-config '{"kv_connector":"DynamoNixlConnector"}' \
     --enable-prefix-caching \
     --block-size 64 \
     --max-num-batched-tokens 16384 \
     --max-model-len 16384
 ```
 
-Alternatively, we also provide a script to launch all workers in one go:
+Alternatively, we also provide a script to launch all workers in one go (with the python customized router):
 ```
 # this TODO: change to dynamo-deploy functionality
 ./start_single_node.sh
@@ -256,7 +285,6 @@ Kill all python processes and clean up metadata files:
 
 ```
 pkill -9 -f python
-rm -r /tmp/nixl
 ```
 
 ## TODOs, limitations, known issues
