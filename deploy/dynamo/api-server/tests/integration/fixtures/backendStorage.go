@@ -20,7 +20,6 @@ package fixtures
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -151,7 +150,6 @@ func (m *MockBackendServer) Throws(throws bool) {
 
 // handleGetDynamoNimVersion handles GET requests for Dynamo NIM versions
 func (m *MockBackendServer) handleGetDynamoNimVersion(c *gin.Context) {
-	fmt.Println("handleGetDynamoNimVersion")
 	m.mutex.Lock()
 	throwsError := m.throwsError
 	m.mutex.Unlock()

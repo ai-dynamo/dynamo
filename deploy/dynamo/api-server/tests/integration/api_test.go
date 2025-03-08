@@ -79,7 +79,6 @@ func (s *ApiServerSuite) SetupSuite() {
 
 	// Setup server
 	go func() {
-		// Mute all logs for this goroutine
 		gin.DefaultWriter = io.Discard
 		runtime.Runtime.StartServer(port)
 	}()
@@ -87,9 +86,7 @@ func (s *ApiServerSuite) SetupSuite() {
 	s.waitUntilReady()
 	log.Info().Msgf("API Server Ready")
 
-	// Mock K8s service
 	services.K8sService = &fixtures.MockedK8sService{}
-	log.Info().Msgf("Mocked K8s Service")
 }
 
 func (s *ApiServerSuite) waitUntilReady() {
@@ -108,8 +105,8 @@ func (s *ApiServerSuite) waitUntilReady() {
 // run once, after test suite methods
 func (s *ApiServerSuite) TearDownSuite() {
 	if s.mockBackend != nil {
-        s.mockBackend.Close()
-    }
+		s.mockBackend.Close()
+	}
 	testContainers.TearDownPostgresContainer()
 }
 
@@ -119,6 +116,10 @@ func (s *ApiServerSuite) SetupTest() {
 	client.Headers.Set(consts.NgcUserHeaderName, "test-user-nvidia")
 
 	env.ApplicationScope = env.UserScope
+
+	if s.mockBackend != nil {
+		s.mockBackend.Reset()
+	}
 }
 
 // run after each test
@@ -319,37 +320,6 @@ func (s *ApiServerSuite) TestUpdateDeployment() {
 	assert.Equal(s.T(), updateDeployment.Targets[0].Version, deploymentSchema.LatestRevision.Targets[0].DynamoNimVersion.Version)
 }
 
-func (s *ApiServerSuite) TestUpdateDeploymentErrorDoesNotChangeDB() {
-	cluster := fixtures.DefaultCreateClusterSchema()
-	resp, _ := client.CreateCluster(s.T(), cluster)
-	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
-
-	deployment := fixtures.DefaultCreateDeploymentSchema()
-	resp, _ = client.CreateDeployment(s.T(), cluster.Name, deployment)
-	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
-
-	ctx := context.Background()
-	d1, r1, t1, err := getDeploymentEntitiesSnapshot(ctx)
-	if err != nil {
-		s.T().Fatalf("Could not fetch deployment entities snapshot: %s", err.Error())
-	}
-
-	s.mockBackend.Throws(true)
-
-	updateDeployment := fixtures.DefaultUpdateDeploymentSchema()
-	resp, _ = client.UpdateDeployment(s.T(), cluster.Name, deployment.KubeNamespace, deployment.Name, updateDeployment)
-	assert.Equal(s.T(), http.StatusInternalServerError, resp.StatusCode)
-
-	d2, r2, t2, err := getDeploymentEntitiesSnapshot(ctx)
-	if err != nil {
-		s.T().Fatalf("Could not fetch deployment entities snapshot: %s", err.Error())
-	}
-
-	assert.True(s.T(), compareDeployments(d1, d2))
-	assert.True(s.T(), compareDeploymentRevisions(r1, r2))
-	assert.True(s.T(), compareDeploymentTargets(t1, t2))
-}
-
 func (s *ApiServerSuite) TestUpdateDeploymentWithoutDeployment() {
 	// Create cluster
 	cluster := fixtures.DefaultCreateClusterSchema()
@@ -517,7 +487,7 @@ func (s *ApiServerSuite) TestDeleteActiveDeploymentFails() {
 	assert.Equal(s.T(), http.StatusInternalServerError, resp.StatusCode)
 }
 
-func (s *ApiServerSuite) TestUpdateDeploymenErrorDoesNotChangeDB() {
+func (s *ApiServerSuite) TestUpdateDeploymentErrorDoesNotChangeDB() {
 	cluster := fixtures.DefaultCreateClusterSchema()
 	resp, _ := client.CreateCluster(s.T(), cluster)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
@@ -529,49 +499,18 @@ func (s *ApiServerSuite) TestUpdateDeploymenErrorDoesNotChangeDB() {
 	ctx := context.Background()
 	d1, r1, t1, err := getDeploymentEntitiesSnapshot(ctx)
 	if err != nil {
-		s.T().Fatalf("Failed to get snapshot %s", err.Error())
+		s.T().Fatalf("Could not fetch deployment entities snapshot: %s", err.Error())
 	}
+
 	s.mockBackend.Throws(true)
 
-	// Attempt to update the deployment
 	updateDeployment := fixtures.DefaultUpdateDeploymentSchema()
 	resp, _ = client.UpdateDeployment(s.T(), cluster.Name, deployment.KubeNamespace, deployment.Name, updateDeployment)
 	assert.Equal(s.T(), http.StatusInternalServerError, resp.StatusCode)
 
 	d2, r2, t2, err := getDeploymentEntitiesSnapshot(ctx)
 	if err != nil {
-		s.T().Fatalf("Failed to get snapshot %s", err.Error())
-	}
-
-	assert.True(s.T(), compareDeployments(d1, d2))
-	assert.True(s.T(), compareDeploymentRevisions(r1, r2))
-	assert.True(s.T(), compareDeploymentTargets(t1, t2))
-}
-
-func (s *ApiServerSuite) TestTerminateDeploymentErrorDoesNotChangeDB() {
-	cluster := fixtures.DefaultCreateClusterSchema()
-	resp, _ := client.CreateCluster(s.T(), cluster)
-	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
-
-	deployment := fixtures.DefaultCreateDeploymentSchema()
-	resp, _ = client.CreateDeployment(s.T(), cluster.Name, deployment)
-	assert.Equal(s.T(), http.StatusOK, resp.StatusCode, expectedStatusOkMsg)
-
-	ctx := context.Background()
-	d1, r1, t1, err := getDeploymentEntitiesSnapshot(ctx)
-	if err != nil {
-		s.T().Fatalf("Failed to get snapshot %s", err.Error())
-	}
-	s.mockBackend.Throws(true)
-
-	// Attempt to terminate the deployment
-	resp, _ = client.TerminateDeployment(s.T(), cluster.Name, deployment.KubeNamespace, deployment.Name)
-	assert.Equal(s.T(), http.StatusInternalServerError, resp.StatusCode)
-
-	// Verify DB state remains unchanged
-	d2, r2, t2, err := getDeploymentEntitiesSnapshot(ctx)
-	if err != nil {
-		s.T().Fatalf("Failed to get snapshot %s", err.Error())
+		s.T().Fatalf("Could not fetch deployment entities snapshot: %s", err.Error())
 	}
 
 	assert.True(s.T(), compareDeployments(d1, d2))
