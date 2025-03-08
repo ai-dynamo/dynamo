@@ -41,7 +41,7 @@ use std::sync::Arc;
 // Import from our library
 use metrics::{
     collect_endpoints, extract_metrics, postprocess_metrics, LLMWorkerLoadCapacityConfig,
-    PrometheusMetricsServer,
+    MetricsMode, PrometheusMetricsServer,
 };
 
 /// CLI arguments for the metrics application
@@ -63,6 +63,26 @@ struct Args {
     /// Polling interval in seconds (minimum 1 second)
     #[arg(long, default_value = "2")]
     poll_interval: u64,
+
+    /// Port to run the Prometheus metrics server on (default: 9091)
+    #[arg(long, default_value = "9091")]
+    metrics_port: u16,
+
+    /// Push metrics to a Prometheus Pushgateway instead of running a server
+    #[arg(long)]
+    push: bool,
+
+    /// Pushgateway URL (required if --push is set)
+    #[arg(
+        long,
+        required_if_eq("push", "true"),
+        default_value = "http://localhost:9091"
+    )]
+    push_url: String,
+
+    /// Push interval in seconds (minimum 1 second, default: 2)
+    #[arg(long, default_value = "2")]
+    push_interval: u64,
 }
 
 fn get_config(args: &Args) -> Result<LLMWorkerLoadCapacityConfig> {
@@ -76,6 +96,10 @@ fn get_config(args: &Args) -> Result<LLMWorkerLoadCapacityConfig> {
 
     if args.poll_interval < 1 {
         return Err(error!("Polling interval must be at least 1 second"));
+    }
+
+    if args.push && args.push_interval < 1 {
+        return Err(error!("Push interval must be at least 1 second"));
     }
 
     Ok(LLMWorkerLoadCapacityConfig {
@@ -116,14 +140,24 @@ async fn app(runtime: Runtime) -> Result<()> {
     let token = drt.primary_lease().child_token();
     let event_name = format!("l2c.{}.{}", config.component_name, config.endpoint_name);
 
-    // TODO: Make metrics host/port configurable
-    // Initialize Prometheus metrics and start server
+    // Initialize Prometheus metrics with the selected mode
     let metrics_server = PrometheusMetricsServer::new()?;
-    // Metrics will be updated concurrently, so protect it with a mutex:
-    // - Main loop: Collect and process ForwardPassMetrics at an interval from endpoint stats handlers
-    // - Subscription task: Collect and process KVHitRateEvent metrics from the KV router as they are published
     let metrics_server = Arc::new(tokio::sync::Mutex::new(metrics_server));
-    metrics_server.lock().await.start(9091);
+
+    // Start metrics collection in the selected mode
+    let metrics_mode = if args.push {
+        MetricsMode::Pushgateway {
+            url: args.push_url,
+            job: "dynamo_push_metrics".to_string(),
+            interval: args.push_interval,
+        }
+    } else {
+        MetricsMode::Server {
+            port: args.metrics_port,
+        }
+    };
+
+    metrics_server.lock().await.start(metrics_mode)?;
 
     // Subscribe to KV hit rate events
     let kv_hit_rate_subject = KV_HIT_RATE_SUBJECT;
