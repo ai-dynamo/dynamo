@@ -61,11 +61,8 @@ class DynamoClient:
 
                             # TODO: Potentially model dump for a user here so they can pass around Pydantic models
                             stream = await client.generate(*args, **kwargs)
-                            print("here8", stream, flush=True)
                             async for item in stream:
-                                print(item, flush=True)
                                 data = item.data()
-                                print(f"Item data: {data}")
                                 await queue.put(data)
                             await queue.put(None)
                         except Exception:
@@ -90,11 +87,8 @@ class DynamoClient:
                             )
 
                             stream = await client.generate(*args, **kwargs)
-                            print(stream, flush=True)
                             async for item in stream:
-                                print(item, flush=True)
                                 data = item.data()
-                                print(f"Item data: {data}")
                                 await queue.put(data)
                             await queue.put(None)
                         except Exception:
