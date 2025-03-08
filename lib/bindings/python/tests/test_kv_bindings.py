@@ -29,8 +29,6 @@ from dynemo.runtime import DistributedRuntime
 
 pytestmark = pytest.mark.pre_merge
 
-runtime = None
-
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_and_teardown():
@@ -50,12 +48,13 @@ def setup_and_teardown():
     etcd.wait()
 
 
-async def test_event_handler():
-    global runtime
-    if runtime is None:
-        loop = asyncio.get_running_loop()
-        runtime = DistributedRuntime(loop)
+@pytest.fixture(scope="module")
+async def distributed_runtime():
+    loop = asyncio.get_running_loop()
+    return DistributedRuntime(loop)
 
+
+async def test_event_handler(distributed_runtime):
     namespace = "kv_test"
     component = "event"
 
@@ -64,7 +63,7 @@ async def test_event_handler():
     event_publisher = EventPublisher(namespace, component, worker_id)
 
     # indexer
-    kv_listener = runtime.namespace(namespace).component(component)
+    kv_listener = distributed_runtime.namespace(namespace).component(component)
     await kv_listener.create_service()
     indexer = KvIndexer(kv_listener)
 
@@ -160,15 +159,10 @@ class EventPublisher:
         assert result == DynemoResult.OK
 
 
-async def test_metrics_aggregator():
-    global runtime
-    if runtime is None:
-        loop = asyncio.get_running_loop()
-        runtime = DistributedRuntime(loop)
-
+async def test_metrics_aggregator(distributed_runtime):
     namespace = "kv_test"
     component = "metrics"
-    kv_listener = runtime.namespace(namespace).component(component)
+    kv_listener = distributed_runtime.namespace(namespace).component(component)
     await kv_listener.create_service()
 
     # aggregator
@@ -185,8 +179,8 @@ async def test_metrics_aggregator():
         "kv_total_blocks": 777,
     }
 
-    # need 'create_taskk' to put publisher task in the background
-    asyncio.create_task(metrics_publisher(kv_listener, expected_metrics))
+    # need 'create_task' to put publisher task in the background
+    asyncio.create_task(metrics_publisher_task(kv_listener, expected_metrics))
 
     # needs time for publisher to spawn up
     for i in range(10):
@@ -205,7 +199,7 @@ async def test_metrics_aggregator():
         assert endpoint.kv_total_blocks == expected_metrics["kv_total_blocks"]
 
 
-async def metrics_publisher(kv_listener, expected_metrics):
+async def metrics_publisher_task(kv_listener, expected_metrics):
     metrics_publisher = KvMetricsPublisher()
     metrics_publisher.publish(
         expected_metrics["request_active_slots"],
