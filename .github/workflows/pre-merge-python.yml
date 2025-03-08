@@ -50,8 +50,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Decide on cache
         id: which_caches
-        env:
-          CACHE_LOCATION: ghcr.io/ai-dynamo/dynamo:latest-${{ matrix.framework }}
         run: |
           set +e
           if [ "${{ github.event_name }}" == "pull_request" ]; then
