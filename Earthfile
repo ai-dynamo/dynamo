@@ -26,17 +26,17 @@ golang-base:
 
 ############### ALL TARGETS ##############################
 all-test:
-    BUILD ./deploy/dynemo/operator+test
-#    BUILD ./deploy/dynemo/api-server+test  #TODO: mkhadkevich earthly tests fail https://gitlab-master.nvidia.com/aire/microservices/compoundai/-/jobs/144475821
+    BUILD ./deploy/dynamo/operator+test
+#    BUILD ./deploy/dynamo/api-server+test  #TODO: mkhadkevich earthly tests fail https://gitlab-master.nvidia.com/aire/microservices/compoundai/-/jobs/144475821
 
 all-docker:
     ARG CI_REGISTRY_IMAGE=my-registry
     ARG CI_COMMIT_SHA=latest
-    BUILD ./deploy/dynemo/operator+docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
-    BUILD ./deploy/dynemo/api-server+docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
+    BUILD ./deploy/dynamo/operator+docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
+    BUILD ./deploy/dynamo/api-server+docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
 
 all-lint:
-    BUILD ./deploy/dynemo/operator+lint
+    BUILD ./deploy/dynamo/operator+lint
 
 all:
     BUILD +all-test

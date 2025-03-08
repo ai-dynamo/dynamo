@@ -13,9 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from sdk_kv_router.processor import Processor
-
 from dynemo.sdk import DYNEMO_IMAGE, api, depends, service
+from sdk_kv_router.processor import Processor
 
 
 @service(traffic={"timeout": 10000}, image=DYNEMO_IMAGE)
