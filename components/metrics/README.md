@@ -110,7 +110,8 @@ events will be random and shouldn't be expected to correlate with each other.
 See the KV Routing example in `examples/python_rs/llm/vllm`.
 
 Start the `metrics` component with the corresponding namespace/component/endpoint that the
-KV Routing example is using, for example:
+KV Routing example is using (NOTE: `load_metrics` endpoint is currently a hard-coded value
+internally for the ForwardPassMetrics StatsHandler), for example:
 ```
 DYN_LOG=info cargo run --bin metrics -- --namespace dynamo --component vllm --endpoint load_metrics
 ```
