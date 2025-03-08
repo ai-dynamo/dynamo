@@ -26,7 +26,7 @@ RequestHandler = Callable[[JsonLike], AsyncGenerator[JsonLike, None]]
 
 class DistributedRuntime:
     """
-    The runtime object for dynemo applications
+    The runtime object for dynamo applications
     """
 
     ...

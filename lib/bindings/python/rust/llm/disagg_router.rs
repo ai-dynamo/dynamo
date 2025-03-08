@@ -21,7 +21,7 @@ use tokio::runtime::Runtime;
 
 #[pyclass]
 pub struct DisaggregatedRouter {
-    inner: Arc<dynemo_llm::disagg_router::DisaggregatedRouter>,
+    inner: Arc<dynamo_llm::disagg_router::DisaggregatedRouter>,
 }
 
 #[pymethods]
@@ -44,7 +44,7 @@ impl DisaggregatedRouter {
         })?;
 
         let router = runtime.block_on(async {
-            dynemo_llm::disagg_router::DisaggregatedRouter::new_with_etcd_and_default(
+            dynamo_llm::disagg_router::DisaggregatedRouter::new_with_etcd_and_default(
                 drt_arc,
                 model_name,
                 default_max_local_prefill_length,

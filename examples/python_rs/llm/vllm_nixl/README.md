@@ -23,7 +23,7 @@ Start required services (etcd and NATS):
 
    Option A: Using [Docker Compose](/deploy/docker-compose.yml) (Recommended)
    ```bash
-   docker-compose up -d
+   docker compose -f deploy/docker-compose.yml up -d
    ```
 
    Option B: Manual Setup
@@ -51,22 +51,58 @@ All of the commands below are run inside the same container.
 
 Add model to dynamo and start http server.
 
-
 ```
-llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo-init.process.chat/completions
 TRT_LOG=DEBUG http --port 8181
 ```
 
-### Monolithic Deployment
+### Router-less Deployment
+
+Router-less deployment without kv router and disaggregated router. 
+
+For router-less deployment, the client should directly hit the vllm.generate endpoint,
+```
+llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo-init.vllm.generate
+```
+
+#### Monolithic 
 
 ```
 cd /workspace/examples/python_rs/llm/vllm_nixl
-CUDA_VISIBLE_DEVICES=0 python3 worker.py \
+CUDA_VISIBLE_DEVICES=0 python3 routerless/worker.py \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager
 ```
 
-### Disaggregated Deployment
+#### Disaggregated
+
+In disaggregated router-less deployment, the decode worker will directly send requests to a random prefill worker. All the requests will be sent to prefill worker(s) for remote prefill.
+
+In terminal 1:
+
+```
+cd /workspace/examples/python_rs/llm/vllm_nixl
+CUDA_VISIBLE_DEVICES=0 python routerless/prefill_worker.py \
+    --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+    --enforce-eager \
+    --kv-transfer-config \
+    '{"kv_connector":"DynamoNixlConnector"}'
+```
+
+In terminal 2:
+```
+cd /workspace/examples/python_rs/llm/vllm_nixl
+CUDA_VISIBLE_DEVICES=1,2 python3 routerless/worker.py \
+    --remote-prefill \
+    --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+    --enforce-eager \
+    --tensor-parallel-size 2 \
+    --kv-transfer-config \
+    '{"kv_connector":"DynamoNixlConnector"}'
+```
+
+### Router-based Deployment
+
+Router-based deployment use kv router to schedule the request to the best decode worker and disaggregated router to decide whether to prefill locally or remotely. The remote prefill requests will be sent to a global prefill queue to balance the prefill load. 
 
 To launch disaggregated vllm deployment, there are three major components:
 1. Processor
@@ -160,6 +196,8 @@ Alternatively, we also provide a script to launch all workers in one go:
 # Usage [--model <model>] [--p_tensor_parallel_size <size>] [--d_tensor_parallel_size <size>] [--max_model_len <len>] [--max_num_batched_tokens <tokens>] [--max_num_seqs <seqs>] [--gpu_memory_utilization <utilization>] [--enable_chunked_prefill <True/False>] [--num_p <p>] [--num_d <d>]
 ```
 
+### Common Issues
+
 If torch GLOO backend is complaining about file name too long, set
 ```
 export GLOO_SOCKET_IFNAME=lo
@@ -169,7 +207,7 @@ export GLOO_SOCKET_IFNAME=lo
 
 In another terminal:
 ```
-# around 200 tokens isl
+# this test request has around 200 tokens isl
 curl localhost:8181/v1/chat/completions   -H "Content-Type: application/json"   -d '{
     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "messages": [
