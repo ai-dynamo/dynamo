@@ -136,6 +136,7 @@ async fn backend(runtime: DistributedRuntime) -> Result<()> {
 
     // make the ingress discoverable via a component service
     // we must first create a service, then we can attach one more more endpoints
+    namespace
         .component("backend")?
         .service_builder()
         .create()
