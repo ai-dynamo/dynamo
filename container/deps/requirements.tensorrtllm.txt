@@ -16,6 +16,5 @@
 fastapi==0.111.0
 openai==1.39.0
 pydantic==2.7.1
-transformers==4.45.2
+transformers==4.48.3
 triton==3.1.0
-
