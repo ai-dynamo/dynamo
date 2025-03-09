@@ -63,7 +63,8 @@ By default the server will run on port 8080.
 
 Add model to the server:
 ```bash
-llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo.vllm.generate
+llmctl http add chat deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo.vllm.chat/completions
+llmctl http add completions deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo.vllm.completions
 ```
 
 ##### Example Output
