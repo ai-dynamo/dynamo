@@ -18,11 +18,11 @@ import asyncio
 import os
 
 import uvloop
+from disagg_router import PyDisaggregatedRouter
 from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
 from utils.protocol import MyRequestOutput, vLLMGenerateRequest
 from utils.vllm import parse_vllm_args
-from disagg_router import PyDisaggregatedRouter 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.multiprocessing.client import EngineClient
 from vllm.entrypoints.openai.api_server import (

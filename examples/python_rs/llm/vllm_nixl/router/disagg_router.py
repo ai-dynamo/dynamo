@@ -16,9 +16,10 @@
 
 from dynamo.llm import DisaggregatedRouter
 
-class PyDisaggregatedRouter():
+
+class PyDisaggregatedRouter:
     def __init__(
-        self, 
+        self,
         runtime,
         served_model_name,
         custom_disagg_router=False,

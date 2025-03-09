@@ -24,8 +24,8 @@ def parse_vllm_args() -> AsyncEngineArgs:
         "--remote-prefill", action="store_true", help="Enable remote prefill"
     )
     parser.add_argument(
-        "--conditional-disagg", 
-        action="store_true", 
+        "--conditional-disagg",
+        action="store_true",
         help="Use disaggregated router to decide whether to prefill locally or remotely",
     )
     parser.add_argument(
@@ -53,5 +53,7 @@ def parse_vllm_args() -> AsyncEngineArgs:
     engine_args.conditional_disagg = args.conditional_disagg
     engine_args.custom_disagg_router = args.custom_disagg_router
     engine_args.max_local_prefill_length = args.max_local_prefill_length
-    engine_args.max_remote_prefill_cache_hit_ratio = args.max_remote_prefill_cache_hit_ratio
+    engine_args.max_remote_prefill_cache_hit_ratio = (
+        args.max_remote_prefill_cache_hit_ratio
+    )
     return engine_args

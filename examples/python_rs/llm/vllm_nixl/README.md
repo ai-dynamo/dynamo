@@ -57,14 +57,14 @@ TRT_LOG=DEBUG http --port 8181
 
 ### Router-less Deployment
 
-Router-less deployment without kv router and disaggregated router. 
+Router-less deployment without kv router and disaggregated router.
 
 For router-less deployment, the client should directly hit the vllm.generate endpoint,
 ```
 llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo-init.vllm.generate
 ```
 
-#### Monolithic 
+#### Monolithic
 
 ```
 cd /workspace/examples/python_rs/llm/vllm_nixl
@@ -104,7 +104,7 @@ CUDA_VISIBLE_DEVICES=1,2 python3 routerless/worker.py \
 
 ### Router-based Deployment
 
-Router-based deployment use kv router to schedule the request to the best decode worker and disaggregated router to decide whether to prefill locally or remotely. The remote prefill requests will be sent to a global prefill queue to balance the prefill load. 
+Router-based deployment use kv router to schedule the request to the best decode worker and disaggregated router to decide whether to prefill locally or remotely. The remote prefill requests will be sent to a global prefill queue to balance the prefill load.
 
 For router deployment, the client should hit the endpoint of the processor,
 ```
@@ -168,7 +168,7 @@ There are two types of disaggregated router implementations:
 * Rust native: provide a simple heuristic to route to prefill engine
   if prefill length (including prefix catch hit) is greater than a threshold.
   This threshold can by dynamically adjusted at runtime through etcd.
-  
+
   To check the current threshold (this will print out all kv pairs in etcd):
   ```
   curl -s -L http://localhost:2379/v3/kv/range -X POST   -d '{"key":"AA==", "range_end":"AA=="}' |   jq -r '.kvs[] | "KEY: \(.key | @base64d)\nVALUE: \(.value | @base64d)\n---"'

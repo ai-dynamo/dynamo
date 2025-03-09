@@ -171,7 +171,7 @@ async def worker(runtime: DistributedRuntime, args: Namespace):
     await router_component.create_service()
 
     endpoint = router_component.endpoint("generate")
-    
+
     if args.custom_router:
         indexer = KvIndexer(kv_listener)
         metrics_aggregator = KvMetricsAggregator(kv_listener)

@@ -17,6 +17,7 @@ from enum import Enum
 
 import bentoml
 from common.protocol import Tokens
+
 from dynemo.sdk import async_onstart, dynemo_context, dynemo_endpoint, service
 
 with bentoml.importing():
