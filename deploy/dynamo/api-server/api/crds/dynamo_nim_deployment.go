@@ -18,7 +18,7 @@
 package crds
 
 import (
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
 	autoscalingv2beta2 "k8s.io/api/autoscaling/v2beta2"
 	corev1 "k8s.io/api/core/v1"
 )

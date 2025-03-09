@@ -25,7 +25,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/test/utils"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/test/utils"
 )
 
 const namespace = "dynamo-kubernetes-operator-system"

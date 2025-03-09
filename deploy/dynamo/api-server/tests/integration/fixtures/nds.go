@@ -26,8 +26,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/common/env"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/env"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
 )
 
 type MockNDSServer struct {

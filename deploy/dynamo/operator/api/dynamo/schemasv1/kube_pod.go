@@ -21,7 +21,7 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/modelschemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/modelschemas"
 )
 
 type KubePodStatusSchema struct {

@@ -17,7 +17,7 @@
 
 package main
 
-import "github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/runtime"
+import "github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/runtime"
 
 const (
 	port = 8181

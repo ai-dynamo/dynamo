@@ -17,8 +17,8 @@ Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo 
 /deploy/Kubernetes/ @whoisj @hutm @biswapanda
 
 # CI/CD
-/.github/ @dynemo-ai/Devops @nnshah1
-CODEOWNERS @dynemo-ai/Devops @nnshah1
+/.github/ @ai-dynamo/Devops @nnshah1
+CODEOWNERS @ai-dynamo/Devops @nnshah1
 
 # Legal
 /LICENSE @nv-anants @nvda-mesharma @glos-nv @dmitry-tokarev-nv

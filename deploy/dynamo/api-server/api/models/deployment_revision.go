@@ -18,7 +18,7 @@
 package models
 
 import (
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
 )
 
 type DeploymentRevision struct {

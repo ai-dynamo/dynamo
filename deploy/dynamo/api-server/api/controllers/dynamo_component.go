@@ -23,12 +23,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/common/consts"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/converters"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/database"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/models"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/services"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/consts"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/converters"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/database"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/models"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/services"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog/log"
 )

@@ -26,20 +26,20 @@ import (
 	"strings"
 
 	"emperror.dev/errors"
-	compounaiCommon "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/common"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/modelschemas"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/schemasv1"
-	yataiclient "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/yatai-client"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/v1alpha1"
-	commonconfig "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/pkg/dynamo/config"
-	commonconsts "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/pkg/dynamo/consts"
+	compounaiCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/modelschemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemasv1"
+	yataiclient "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/yatai-client"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
+	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/config"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/consts"
 	"github.com/huandu/xstrings"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/internal/archive"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/archive"
 	"gopkg.in/yaml.v2"
 )
 
