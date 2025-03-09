@@ -18,8 +18,8 @@ version = "0.2.1"
 edition = "2021"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
-homepage = "https://github.com/ai-dynamo-ai/dynamo"
-repository = "https://github.com/ai-dynamo-ai/dynamo.git"
+homepage = "https://github.com/ai-dynamo/dynamo"
+repository = "https://github.com/ai-dynamo/dynamo.git"
 
 [package]
 name = "dynamo-llm"
