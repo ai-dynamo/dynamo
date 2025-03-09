@@ -94,7 +94,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
 
         request_handler = RequestHandler(engine_client, metadata_store)
 
-        # TODO: integrate prefill_queue to an triton_distributed endpoint
+        # TODO: integrate prefill_queue to a dynamo endpoint
         async with PrefillQueue.get_instance(
             nats_server=prefill_queue_nats_server,
             stream_name=prefill_queue_stream_name,

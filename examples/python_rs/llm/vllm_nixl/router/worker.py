@@ -70,7 +70,7 @@ class RequestHandler:
         print("RequestHandler initialized")
 
     def get_remote_prefill_request_callback(self):
-        # TODO: integrate prefill_queue to an triton_distributed endpoint
+        # TODO: integrate prefill_queue to dynamo endpoint
         async def callback(request: RemotePrefillRequest):
             async with PrefillQueue.get_instance(
                 nats_server=self._prefill_queue_nats_server,
