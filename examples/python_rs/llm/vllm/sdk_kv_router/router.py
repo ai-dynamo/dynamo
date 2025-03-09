@@ -51,6 +51,7 @@ class Router:
         self.routing_strategy = RoutingStrategy.PREFIX
         self.runtime = dynamo_context["runtime"]
         self.min_workers = 1
+        self.kv_block_size = 64
 
     @async_onstart
     async def init_engine(self):
@@ -77,7 +78,7 @@ class Router:
 
         kv_listener = self.runtime.namespace("dynamo").component(self.model_name)
         await kv_listener.create_service()
-        self.router = KvRouter(self.runtime, kv_listener)
+        self.router = KvRouter(self.runtime, kv_listener, self.kv_block_size)
 
     @dynamo_endpoint()
     async def generate(self, request: Tokens):

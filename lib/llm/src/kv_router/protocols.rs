@@ -15,13 +15,6 @@
 
 use serde::{Deserialize, Serialize};
 
-// Currently hard-coding the block size to be 64 tokens, and
-// assuming the LLM framework aligns with this size.
-// The KV publisher and subscriber conveys hash values of the tokens,
-// for performance reason, therefore the block size needs to be consistent
-// so that the computed hash value is the same on both sizes.
-pub const KV_BLOCK_SIZE: usize = 64;
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ForwardPassMetrics {
     pub request_active_slots: u64,

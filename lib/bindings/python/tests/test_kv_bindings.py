@@ -54,20 +54,27 @@ async def distributed_runtime():
     return DistributedRuntime(loop)
 
 
+# TODO Figure out how to test with different kv_block_size
+# Right now I get an error in EventPublisher init when I run this test
+# back to back. It occurs when calling dynamo_llm_init and I think is related to the
+# OnceCell initializations not being reset.
+# The test works individually if I run it with 32, then 11, then 64.
+# @pytest.mark.parametrize("kv_block_size", [11, 32, 64])
 async def test_event_handler(distributed_runtime):
+    kv_block_size = 32
     namespace = "kv_test"
     component = "event"
 
     # publisher
     worker_id = 233
-    event_publisher = EventPublisher(namespace, component, worker_id)
+    event_publisher = EventPublisher(namespace, component, worker_id, kv_block_size)
 
     # indexer
     kv_listener = distributed_runtime.namespace(namespace).component(component)
     await kv_listener.create_service()
-    indexer = KvIndexer(kv_listener)
+    indexer = KvIndexer(kv_listener, kv_block_size)
 
-    test_token = [3] * 64
+    test_token = [3] * kv_block_size
     lora_id = 0  # lora_id is not used in the indexer
     scores = await indexer.find_matches_for_request(test_token, lora_id)
     assert not scores.scores
@@ -86,6 +93,8 @@ async def test_event_handler(distributed_runtime):
     scores = await indexer.find_matches_for_request(test_token, lora_id)
     assert not scores.scores
 
+    event_publisher.shutdown()
+
 
 # KV events
 class DynamoResult:
@@ -94,18 +103,21 @@ class DynamoResult:
 
 
 class EventPublisher:
-    def __init__(self, namespace: str, component: str, worker_id: int):
+    def __init__(
+        self, namespace: str, component: str, worker_id: int, kv_block_size: int
+    ):
         self.event_id_counter = 0
         self.block_ids: List[int] = []
 
         # load event publisher library
         self.lib = ctypes.CDLL(os.environ["VLLM_KV_CAPI_PATH"])
-        self.lib.dynamo_llm_init.argtypes = [c_char_p, c_char_p, c_int64]
+        self.lib.dynamo_llm_init.argtypes = [c_char_p, c_char_p, c_int64, c_uint32]
         self.lib.dynamo_llm_init.restype = c_uint32
         result = self.lib.dynamo_llm_init(
-            namespace.encode(), component.encode(), worker_id
+            namespace.encode(), component.encode(), worker_id, kv_block_size
         )
         assert result == DynamoResult.OK
+
         self.lib.dynamo_kv_event_publish_stored.argtypes = [
             ctypes.c_uint64,  # event_id
             ctypes.POINTER(ctypes.c_uint32),  # token_ids
@@ -156,6 +168,10 @@ class EventPublisher:
         )
         self.event_id_counter += 1
 
+        assert result == DynamoResult.OK
+
+    def shutdown(self):
+        result = self.lib.dynamo_llm_shutdown()
         assert result == DynamoResult.OK
 
 
