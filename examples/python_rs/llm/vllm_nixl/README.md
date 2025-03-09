@@ -84,6 +84,7 @@ cd /workspace/examples/python_rs/llm/vllm_nixl
 CUDA_VISIBLE_DEVICES=0 python routerless/prefill_worker.py \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
+    --block-size 64 \
     --kv-transfer-config \
     '{"kv_connector":"DynamoNixlConnector"}'
 ```
@@ -95,6 +96,7 @@ CUDA_VISIBLE_DEVICES=1,2 python3 routerless/worker.py \
     --remote-prefill \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
+    --block-size 64 \
     --tensor-parallel-size 2 \
     --kv-transfer-config \
     '{"kv_connector":"DynamoNixlConnector"}'
@@ -194,23 +196,23 @@ There are two types of disaggregated router implementations:
 
 ```
 # start prefill worker in Terminal 1
+# Note: prefix caching is not supported in the prefill for now
 cd /workspace/examples/python_rs/llm/vllm_nixl
 CUDA_VISIBLE_DEVICES=0 python3 router/prefill_worker.py \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
     --kv-transfer-config '{"kv_connector":"DynamoNixlConnector"}' \
-    --enable-prefix-caching \
     --block-size 64 \
     --max-num-batched-tokens 16384 \
     --max-model-len 16384
 
 # start decode worker in Terminal 2
 cd /workspace/examples/python_rs/llm/vllm_nixl
-CUDA_VISIBLE_DEVICES=1,2 python3 router/worker.py \
+CUDA_VISIBLE_DEVICES=1 python3 router/worker.py \
     --remote-prefill \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
-    --tensor-parallel-size 2 \
+    --tensor-parallel-size 1 \
     --kv-transfer-config '{"kv_connector":"DynamoNixlConnector"}' \
     --enable-prefix-caching \
     --block-size 64 \
