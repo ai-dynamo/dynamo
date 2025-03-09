@@ -99,7 +99,7 @@ PREFILL_CMD="VLLM_WORKER_MULTIPROC_METHOD=spawn CUDA_VISIBLE_DEVICES=0 \
     --max-model-len 1000 \
     --tensor-parallel-size 1 \
     --kv-transfer-config \
-    '{\"kv_connector\":\"TritonNcclConnector\",\"kv_role\":\"kv_producer\",\"kv_rank\":0,\"kv_parallel_size\":2}'"
+    '{\"kv_connector\":\"DynamoNcclConnector\",\"kv_role\":\"kv_producer\",\"kv_rank\":0,\"kv_parallel_size\":2}'"
 
 tmux select-pane -t 2
 tmux send-keys "$INIT_CMD && $PREFILL_CMD" C-m
@@ -115,7 +115,7 @@ DECODE_CMD="VLLM_WORKER_MULTIPROC_METHOD=spawn CUDA_VISIBLE_DEVICES=1 \
     --max-model-len 1000 \
     --tensor-parallel-size 1 \
     --kv-transfer-config \
-    '{\"kv_connector\":\"TritonNcclConnector\",\"kv_role\":\"kv_consumer\",\"kv_rank\":1,\"kv_parallel_size\":2}'"
+    '{\"kv_connector\":\"DynamoNcclConnector\",\"kv_role\":\"kv_consumer\",\"kv_rank\":1,\"kv_parallel_size\":2}'"
 
 tmux select-pane -t 3
 tmux send-keys "$INIT_CMD && $DECODE_CMD" C-m
