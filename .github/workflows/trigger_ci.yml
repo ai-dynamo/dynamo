@@ -51,7 +51,7 @@ jobs:
             - 'container/deps/requirements.vllm.txt'
             - 'container/deps/vllm/**'
           sdk:
-            - 'deploy/compoundai/**'
+            - 'deploy/dynamo/**'
     - name: Check if Validation Workflow has run
       id: check_workflow
       uses: actions/github-script@v6
