@@ -36,9 +36,9 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	nvidiacomv1alpha1 "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/v1alpha1"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/internal/controller"
-	commonController "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/internal/controller_common"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller"
+	commonController "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
 	//+kubebuilder:scaffold:imports
 )

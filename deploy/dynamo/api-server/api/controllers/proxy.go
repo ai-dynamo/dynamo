@@ -21,7 +21,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/common/env"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/env"
 	"github.com/gin-gonic/gin"
 )
 

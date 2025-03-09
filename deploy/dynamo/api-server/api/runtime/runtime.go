@@ -20,9 +20,9 @@ package runtime
 import (
 	"fmt"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/common/env"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/database"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/routes"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/env"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/database"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/routes"
 	"github.com/rs/zerolog/log"
 )
 

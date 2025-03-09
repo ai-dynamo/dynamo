@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/common/utils"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/utils"
 )
 
 var (

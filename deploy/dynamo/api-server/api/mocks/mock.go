@@ -20,7 +20,7 @@ package mocks
 import (
 	"time"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
 )
 
 var mockedUid = "nvid1a11-1234-5678-9abc-def012345678"

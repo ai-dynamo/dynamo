@@ -29,13 +29,13 @@ with bentoml.importing():
     from common.chat_processor import ChatProcessor, ProcessMixIn
     from common.protocol import MyRequestOutput, Tokens, vLLMGenerateRequest
 
-from dynemo.sdk import depends, dynemo_context, dynemo_endpoint, service
+from dynamo.sdk import depends, dynamo_context, dynamo_endpoint, service
 
 
 @service(
-    dynemo={
+    dynamo={
         "enabled": True,
-        "namespace": "dynemo",
+        "namespace": "dynamo",
     },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -92,7 +92,7 @@ class Processor(ProcessMixIn):
                 metrics=output.metrics,
             )
 
-    @dynemo_endpoint()
+    @dynamo_endpoint()
     async def generate(self, raw_request: ChatCompletionRequest):
         request_id = str(uuid.uuid4())
         (
@@ -108,8 +108,8 @@ class Processor(ProcessMixIn):
         ):
             worker_id = worker
             break
-        runtime = dynemo_context["runtime"]
-        comp_ns, comp_name = VllmEngine.dynemo_address()  # type: ignore
+        runtime = dynamo_context["runtime"]
+        comp_ns, comp_name = VllmEngine.dynamo_address()  # type: ignore
         worker_client = (
             await runtime.namespace(comp_ns)
             .component(comp_name)

@@ -24,7 +24,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/models"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/models"
 	"k8s.io/client-go/informers"
 	informerAppsV1 "k8s.io/client-go/informers/apps/v1"
 	informerCoreV1 "k8s.io/client-go/informers/core/v1"

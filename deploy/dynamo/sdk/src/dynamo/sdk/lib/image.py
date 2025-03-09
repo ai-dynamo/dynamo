@@ -21,5 +21,5 @@ import bentoml
 
 # TODO: "dynamo:latest-vllm" image will not be available to image builder in k8s
 # so We'd consider publishing the base image for releases to public nvcr.io registry.
-image_name = os.getenv("DYNEMO_IMAGE", "dynamo:latest-vllm")
-DYNEMO_IMAGE = bentoml.images.PythonImage(base_image=image_name)
+image_name = os.getenv("DYNAMO_IMAGE", "dynamo:latest-vllm")
+DYNAMO_IMAGE = bentoml.images.PythonImage(base_image=image_name)

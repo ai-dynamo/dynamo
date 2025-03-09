@@ -20,8 +20,8 @@ package nim
 import (
 	"testing"
 
-	compounaiCommon "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/common"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/v1alpha1"
+	compounaiCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 	"github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
