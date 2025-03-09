@@ -27,6 +27,7 @@ dependencies = [
     "pytest>=8.3.4",
     "pydantic>=2.10.6",
     "uvloop>=0.21.0",
+    "nats-py>=2.6.0",
 ]
 
 [tool.maturin]
