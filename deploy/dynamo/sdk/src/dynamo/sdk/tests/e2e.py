@@ -133,16 +133,13 @@ class Frontend:
         print("Starting frontend")
         self.config = ServiceConfig.get_instance()
 
-        # Get required configuration (new dict pattern)
-        self.model = self.config.require("Frontend", "model")
+        # # Get required configuration (new dict pattern)
+        # self.model = self.config.require("Frontend", "model")
+
+        frontend_config = FrontendConfig(**self.config.get("Frontend", {}))
         
-        # Get optional configurations with defaults (new dict pattern)
-        self.temperature = self.config.get("Frontend", {}).get("temperature", 0.7)
-        self.max_tokens = self.config.get("Frontend", {}).get("max_tokens", 1024)
-        self.stream = self.config.get("Frontend", {}).get("stream", True)
-        
-        print(f"Frontend initialized with model={self.model}, "
-              f"temp={self.temperature}, max_tokens={self.max_tokens}")
+        print(f"Frontend initialized with model={frontend_config.model}, "
+              f"temp={frontend_config.temperature}, max_tokens={frontend_config.max_tokens}")
         
         # Get all configs for a service (new dict pattern)
         all_frontend_configs = self.config.get("Frontend", {})
@@ -161,3 +158,9 @@ class Frontend:
         print(f"Frontend sending: {type(txt)}")
         async for response in self.middle.generate(txt.model_dump_json()):
             yield f"Frontend: {response}"
+
+class FrontendConfig(BaseModel):
+    model: str
+    temperature: float = 0.7
+    max_tokens: int = 1024
+    stream: bool = True

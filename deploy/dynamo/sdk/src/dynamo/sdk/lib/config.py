@@ -2,49 +2,42 @@ from typing import Any, Dict
 import json
 import os
 
-class ServiceConfig:
-    """Configuration store that can be passed between services"""
+class ServiceConfig(dict):
+    """Configuration store that inherits from dict for simpler access patterns"""
     
     _instance = None
     
     @classmethod
     def get_instance(cls):
         if cls._instance is None:
-            cls._instance = ServiceConfig()
+            cls._instance = cls._load_from_env()
         return cls._instance
     
-    def __init__(self):
-        # Load from environment variable if present
-        self.configs = {}
+    @classmethod
+    def _load_from_env(cls):
+        """Load config from environment variable"""
+        configs = {}
         env_config = os.environ.get("DYNAMO_SERVICE_CONFIG")
         if env_config:
             try:
-                self.configs = json.loads(env_config)
+                configs = json.loads(env_config)
             except json.JSONDecodeError:
-                print(f"Failed to parse DYNAMO_SERVICE_CONFIG: {env_config}")
+                print(f"Failed to parse DYNAMO_SERVICE_CONFIG")
+        return cls(configs)  # Initialize dict subclass with configs
     
-    def get_config(self, service_name: str, key: str, default: Any = None) -> Any:
-        """Get config for a specific service and key"""
-        service_config = self.configs.get(service_name, {})
-        return service_config.get(key, default)
-    
-    def require_config(self, service_name: str, key: str) -> Any:
-        """Get config value, raising error if not found"""
-        value = self.get_config(service_name, key)
-        if value is None:
+    def require(self, service_name, key):
+        """Require a config value, raising error if not found"""
+        if service_name not in self or key not in self[service_name]:
             raise ValueError(f"{service_name}.{key} must be specified in configuration")
-        return value
+        return self[service_name][key]
     
-    def get_service_config(self, service_name: str) -> Dict[str, Any]:
-        """Get all configs for a specific service"""
-        return self.configs.get(service_name, {})
-        
-    def as_args(self, service_name: str, prefix: str = "") -> list[str]:
-        """Extract configs as CLI args for a service, optionally with a prefix filter"""
+    def as_args(self, service_name, prefix=""):
+        """Extract configs as CLI args for a service, with optional prefix filtering"""
+        if service_name not in self:
+            return []
+            
         args = []
-        config = self.get_service_config(service_name)
-        
-        for key, value in config.items():
+        for key, value in self[service_name].items():
             if prefix and not key.startswith(prefix):
                 continue
                 
@@ -53,11 +46,9 @@ class ServiceConfig:
             
             # Convert to CLI format
             if isinstance(value, bool):
-                # Boolean flags
                 if value:
                     args.append(f"--{arg_key}")
             else:
-                # Regular arguments
                 args.extend([f"--{arg_key}", str(value)])
         
         return args
