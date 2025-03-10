@@ -13,9 +13,9 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-import base58
 import uuid
 
+import base58
 from sqlmodel import Field as SQLField
 from sqlmodel import UniqueConstraint
 
@@ -37,8 +37,10 @@ def get_random_id(prefix: str) -> str:
     u = uuid.uuid4()
     return f"{prefix}-{base58.b58encode(u.bytes).decode('ascii')}"
 
+
 def new_compound_entity_id() -> str:
     return get_random_id("compound")
+
 
 class CompoundNimVersion(CompoundNimVersionBase, table=True):
     """A row in the compoundai nim table."""

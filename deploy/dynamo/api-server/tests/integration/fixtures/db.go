@@ -27,20 +27,20 @@
  
 	 "github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
  )
- 
+
  type MockDbServer struct {
 	 server *httptest.Server
 	 throws *bool
  }
- 
+
  func (s *MockDbServer) Close() {
 	 s.server.Close()
  }
- 
+
  func (s *MockDbServer) Throws(throws bool) {
 	 s.throws = &throws
  }
- 
+
  func CreateMockDbServer(t *testing.T) *MockDbServer {
 	 throws := false
 	 mockServer := MockDbServer{}
@@ -62,18 +62,18 @@
 			 },
 			 Version: urlParts[n-1],
 		 }
- 
+
 		 jsonResponse, err := json.Marshal(response)
 		 if err != nil {
 			 t.Fatalf("Failed to marshal JSON %s", err.Error())
 		 }
- 
+
 		 w.WriteHeader(http.StatusOK)
 		 w.Write(jsonResponse)
 	 }))
- 
+
 	 os.Setenv("API_DATABASE_URL", server.URL)
- 
+
 	 mockServer.server = server
 	 return &mockServer
  }

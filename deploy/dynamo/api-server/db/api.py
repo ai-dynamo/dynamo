@@ -13,12 +13,14 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-from datetime import datetime, timezone
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Annotated, List, Optional
 
+from db import get_session, s3_storage
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, responses
+from model import CompoundNim, CompoundNimVersion
 from pydantic import ValidationError
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -32,8 +34,8 @@ from components import (
     CompoundNimUploadStatus,
     CompoundNimVersionFullSchema,
     CompoundNimVersionSchema,
-    CompoundNimVersionWithNimSchema,
     CompoundNimVersionsWithNimListSchema,
+    CompoundNimVersionWithNimSchema,
     CreateCompoundNimRequest,
     CreateCompoundNimVersionRequest,
     ImageBuildStatus,
@@ -44,8 +46,6 @@ from components import (
     UpdateCompoundNimVersionRequest,
     UserSchema,
 )
-from model import CompoundNim, CompoundNimVersion
-from db import get_session, s3_storage
 
 API_TAG_MODELS = "compoundai"
 
@@ -57,6 +57,7 @@ SORTABLE_COLUMNS = {
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
 
 @router.get(
     "/api/v1/auth/current",
@@ -71,7 +72,10 @@ async def login(
     request: Request,
 ):
     return UserSchema(
-        name="compoundai", email="compoundai@nvidia.com", first_name="compound", last_name="ai"
+        name="compoundai",
+        email="compoundai@nvidia.com",
+        first_name="compound",
+        last_name="ai",
     )
 
 
@@ -156,7 +160,9 @@ async def get_compound_nim(
         resource_type=ResourceType.CompoundNim,
         labels=[],
         description=compound_nim.description,
-        latest_bento=None if not latest_compound_nim_versions else latest_compound_nim_versions[0],
+        latest_bento=None
+        if not latest_compound_nim_versions
+        else latest_compound_nim_versions[0],
         latest_bentos=latest_compound_nim_versions,
         n_bentos=len(compound_nims),
     )
@@ -234,7 +240,9 @@ async def create_compound_nim(
     include_in_schema=False,
 )
 async def get_compound_nim_list(
-    *, session: AsyncSession = Depends(get_session), query_params: ListQuerySchema = Depends()
+    *,
+    session: AsyncSession = Depends(get_session),
+    query_params: ListQuerySchema = Depends(),
 ):
     try:
         total_statement = select(func.count(col(CompoundNim.id)))
@@ -260,7 +268,9 @@ async def get_compound_nim_list(
         result = await session.exec(statement)
         compound_nims = list(result.all())
 
-        compound_nim_schemas = await convert_compound_nim_model_to_schema(session, compound_nims)
+        compound_nim_schemas = await convert_compound_nim_model_to_schema(
+            session, compound_nims
+        )
 
         compound_nims_with_deployments = [
             CompoundNimSchemaWithDeploymentsSchema(
@@ -280,7 +290,10 @@ async def get_compound_nim_list(
 
 
 async def compound_nim_version_handler(
-    *, session: AsyncSession = Depends(get_session), compound_nim_name: str, version: str
+    *,
+    session: AsyncSession = Depends(get_session),
+    compound_nim_name: str,
+    version: str,
 ) -> tuple[CompoundNimVersion, CompoundNim]:
     statement = select(CompoundNimVersion, CompoundNim).where(
         CompoundNimVersion.compound_nim_id == CompoundNim.id,
@@ -318,17 +331,22 @@ GetCompoundNimVersion = Depends(compound_nim_version_handler)
 )
 async def get_compound_nim_version(
     *,
-    compound_nim_entities: tuple[CompoundNimVersion, CompoundNim] = GetCompoundNimVersion,
+    compound_nim_entities: tuple[
+        CompoundNimVersion, CompoundNim
+    ] = GetCompoundNimVersion,
     session: AsyncSession = Depends(get_session),
 ):
     compound_nim_version, compound_nim = compound_nim_entities
     compound_nim_version_schemas = await convert_compound_nim_version_model_to_schema(
         session, [compound_nim_version], compound_nim
     )
-    compound_nim_schemas = await convert_compound_nim_model_to_schema(session, [compound_nim])
+    compound_nim_schemas = await convert_compound_nim_model_to_schema(
+        session, [compound_nim]
+    )
 
     full_schema = CompoundNimVersionFullSchema(
-        **compound_nim_version_schemas[0].model_dump(), repository=compound_nim_schemas[0]
+        **compound_nim_version_schemas[0].model_dump(),
+        repository=compound_nim_schemas[0],
     )
     return full_schema
 
@@ -382,10 +400,14 @@ async def create_compound_nim_version(
         logger.error("Something went wrong with adding the Compound NIM")
         raise HTTPException(status_code=500, detail=str(e))
 
-    logger.debug(f"Commiting {compound_nim.name}:{db_compound_nim_version.version} to database")
+    logger.debug(
+        f"Commiting {compound_nim.name}:{db_compound_nim_version.version} to database"
+    )
     await session.commit()
 
-    schema = await convert_compound_nim_version_model_to_schema(session, [db_compound_nim_version])
+    schema = await convert_compound_nim_version_model_to_schema(
+        session, [db_compound_nim_version]
+    )
     return schema[0]
 
 
@@ -404,7 +426,9 @@ async def get_compound_nim_versions(
     session: AsyncSession = Depends(get_session),
     query_params: ListQuerySchema = Depends(),
 ):
-    compound_nim_schemas = await convert_compound_nim_model_to_schema(session, [compound_nim])
+    compound_nim_schemas = await convert_compound_nim_model_to_schema(
+        session, [compound_nim]
+    )
     compound_nim_schema = compound_nim_schemas[0]
 
     total_statement = (
@@ -428,7 +452,9 @@ async def get_compound_nim_versions(
     )
 
     items = [
-        CompoundNimVersionWithNimSchema(**version.model_dump(), repository=compound_nim_schema)
+        CompoundNimVersionWithNimSchema(
+            **version.model_dump(), repository=compound_nim_schema
+        )
         for version in compound_nim_version_schemas
     ]
 
@@ -448,7 +474,9 @@ async def get_compound_nim_versions(
 )
 async def update_compound_nim_version(
     *,
-    compound_nim_entities: tuple[CompoundNimVersion, CompoundNim] = GetCompoundNimVersion,
+    compound_nim_entities: tuple[
+        CompoundNimVersion, CompoundNim
+    ] = GetCompoundNimVersion,
     request: UpdateCompoundNimVersionRequest,
     session: AsyncSession = Depends(get_session),
 ):
@@ -466,7 +494,9 @@ async def update_compound_nim_version(
     logger.debug("Updating compound Compound NIM")
     await session.commit()
 
-    schema = await convert_compound_nim_version_model_to_schema(session, [compound_nim_version])
+    schema = await convert_compound_nim_version_model_to_schema(
+        session, [compound_nim_version]
+    )
     return schema[0]
 
 
@@ -481,16 +511,18 @@ async def update_compound_nim_version(
 )
 async def upload_compound_nim_version(
     *,
-    compound_nim_entities: tuple[CompoundNimVersion, CompoundNim] = GetCompoundNimVersion,
+    compound_nim_entities: tuple[
+        CompoundNimVersion, CompoundNim
+    ] = GetCompoundNimVersion,
     file: Annotated[bytes, Body()],
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(get_session),
 ):
     compound_nim_version, compound_nim = compound_nim_entities
     object_name = f"{compound_nim.name}/{compound_nim_version.version}"
 
     try:
         s3_storage.upload_file(file, object_name)
-        
+
         compound_nim_version.upload_status = CompoundNimUploadStatus.Success
         compound_nim_version.upload_finished_at = datetime.now(timezone.utc)
         session.add(compound_nim_version)
@@ -517,7 +549,9 @@ def generate_file_path(version) -> str:
 )
 async def download_compound_nim_version(
     *,
-    compound_nim_entities: tuple[CompoundNimVersion, CompoundNim] = GetCompoundNimVersion
+    compound_nim_entities: tuple[
+        CompoundNimVersion, CompoundNim
+    ] = GetCompoundNimVersion,
 ):
     compound_nim_version, compound_nim = compound_nim_entities
     object_name = f"{compound_nim.name}/{compound_nim_version.version}"
@@ -543,7 +577,9 @@ async def download_compound_nim_version(
 )
 async def start_compound_nim_version_upload(
     *,
-    compound_nim_entities: tuple[CompoundNimVersion, CompoundNim] = GetCompoundNimVersion,
+    compound_nim_entities: tuple[
+        CompoundNimVersion, CompoundNim
+    ] = GetCompoundNimVersion,
     session: AsyncSession = Depends(get_session),
 ):
     compound_nim_version, _ = compound_nim_entities
@@ -560,7 +596,9 @@ async def start_compound_nim_version_upload(
     logger.debug("Setting Compound NIM upload status to Uploading.")
     await session.commit()
 
-    schema = await convert_compound_nim_version_model_to_schema(session, [compound_nim_version])
+    schema = await convert_compound_nim_version_model_to_schema(
+        session, [compound_nim_version]
+    )
     return schema[0]
 
 
@@ -594,8 +632,10 @@ async def convert_compound_nim_model_to_schema(
 
             result = await session.exec(statement)
             compound_nim_versions = list(result.all())
-            compound_nim_version_schemas = await convert_compound_nim_version_model_to_schema(
-                session, compound_nim_versions, entity
+            compound_nim_version_schemas = (
+                await convert_compound_nim_version_model_to_schema(
+                    session, compound_nim_versions, entity
+                )
             )
 
             compound_nim_schemas.append(
@@ -622,7 +662,9 @@ async def convert_compound_nim_model_to_schema(
                 )
             )
         except SQLAlchemyError as e:
-            logger.error("Something went wrong with getting associated Compound NIM versions")
+            logger.error(
+                "Something went wrong with getting associated Compound NIM versions"
+            )
             raise HTTPException(status_code=500, detail=str(e))
 
     return compound_nim_schemas
@@ -636,7 +678,9 @@ async def convert_compound_nim_version_model_to_schema(
     compound_nim_version_schemas = []
     for entity in entities:
         if not compound_nim:
-            statement = select(CompoundNim).where(CompoundNim.id == entity.compound_nim_id)
+            statement = select(CompoundNim).where(
+                CompoundNim.id == entity.compound_nim_id
+            )
             results = await session.exec(statement)
             compound_nim = results.first()
 

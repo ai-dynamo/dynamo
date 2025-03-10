@@ -12,10 +12,3 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-
-fastapi==0.115.4
-pydantic==2.9.0
-boto3==1.37.1
-sqlmodel==0.0.22
-botocore==1.37.1
-base58==2.1.1

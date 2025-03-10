@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlmodel import Field as SQLField
 from sqlmodel import SQLModel
 
+
 class TimeCreatedUpdated(SQLModel):
     created_at: datetime = SQLField(default_factory=datetime.utcnow, nullable=False)
     updated_at: datetime = SQLField(default_factory=datetime.utcnow, nullable=False)

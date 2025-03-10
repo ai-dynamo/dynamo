@@ -13,15 +13,15 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-import boto3
-from botocore.exceptions import ClientError
 import logging
 import os
 from typing import AsyncGenerator
 
+import boto3
+from botocore.exceptions import ClientError
 from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlmodel import SQLModel
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,7 @@ DB_URL_PARTS = ["DB_USER", "DB_PASSWORD", "DB_HOST", "DB_NAME"]
 POSTGRES_DB_URL_FORMAT = (
     "postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 )
+
 
 def get_db_url_from_env():
     database_url = os.getenv("DATABASE_URL", None)
@@ -44,21 +45,26 @@ def get_db_url_from_env():
         return POSTGRES_DB_URL_FORMAT.format(**db_creds)
     return None
 
+
 database_url = get_db_url_from_env()
 connect_args = {}
 if not database_url:  # default to sqlite in-memory
     sqlite_file_name = "database.db"
     database_url = f"sqlite+aiosqlite:///{sqlite_file_name}"
     connect_args = {"check_same_thread": False}
-    logger.warning("WARNING: Using SQLite in-memory database, no data persistence")  # noqa: T201
+    logger.warning(
+        "WARNING: Using SQLite in-memory database, no data persistence"
+    )  # noqa: T201
 
 os.environ["API_DATABASE_URL"] = database_url
 engine = create_engine(database_url, echo=True)
 async_engine = create_async_engine(database_url, echo=True)
 
+
 def get_session():
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     return SessionLocal()
+
 
 async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
     async_session = sessionmaker(
@@ -67,16 +73,20 @@ async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
     async with async_session() as session:
         yield session
 
+
 def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
+
 
 async def create_db_and_tables_async():
     async with async_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
+
 ### S3 storage
 
 COMPOUNDAI_CONTAINER_NAME = "COMPOUNDAI_CONTAINER_NAME"
+
 
 def get_s3_client():
     s3_key = os.getenv("S3_ACCESS_KEY_ID")
@@ -86,8 +96,13 @@ def get_s3_client():
         raise ValueError(
             "S3_ENDPOINT_URL, S3_ACCESS_KEY_ID, and S3_SECRET_ACCESS_KEY are required to download from S3"
         )
-    return boto3.client("s3", aws_access_key_id=s3_key, aws_secret_access_key=s3_secret,
-                        endpoint_url=s3_url)
+    return boto3.client(
+        "s3",
+        aws_access_key_id=s3_key,
+        aws_secret_access_key=s3_secret,
+        endpoint_url=s3_url,
+    )
+
 
 class S3Storage:
     def __init__(self):
@@ -103,17 +118,22 @@ class S3Storage:
 
     def upload_file(self, file_data, object_name):
         try:
-            self.s3_client.put_object(Bucket=self.bucket_name, Key=object_name, Body=file_data)
+            self.s3_client.put_object(
+                Bucket=self.bucket_name, Key=object_name, Body=file_data
+            )
         except ClientError as e:
             logger.error(f"Error uploading file to S3: {e}")
             raise
 
     def download_file(self, object_name):
         try:
-            response = self.s3_client.get_object(Bucket=self.bucket_name, Key=object_name)
-            return response['Body'].read()
+            response = self.s3_client.get_object(
+                Bucket=self.bucket_name, Key=object_name
+            )
+            return response["Body"].read()
         except ClientError as e:
             logger.error(f"Error downloading file from S3: {e}")
             raise
+
 
 s3_storage = S3Storage()
