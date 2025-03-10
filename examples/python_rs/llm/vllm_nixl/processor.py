@@ -63,6 +63,15 @@ class Processor(ProcessMixIn):
         self.router_client = router_client
         self.workers_client = workers_client
 
+        self.random_router = engine_args.random_router
+        self.round_robin_router = engine_args.round_robin_router
+        self.kv_router = engine_args.kv_router
+        if sum([self.random_router, self.round_robin_router, self.kv_router]) != 1:
+            raise ValueError(
+                "Exactly one router type must be enabled. Please set only one of "
+                "random_router, round_robin_router, or kv_router to True."
+            )
+
     def _create_tokenizer(self, engine_args: AsyncEngineArgs) -> AnyTokenizer:
         """Create a TokenizerGroup using engine arguments similar to VLLM's approach"""
         model_path = engine_args.model
@@ -91,17 +100,36 @@ class Processor(ProcessMixIn):
             engine_prompt,
             sampling_params,
         ) = await self._parse_raw_request(raw_request)
-        worker_id_generator: AsyncIterator = await self.router_client.generate(
-            Tokens(tokens=engine_prompt["prompt_token_ids"]).model_dump_json()
-        )
 
-        worker_id = (
-            await worker_id_generator.__anext__()
-        )  # only one worker id is returned
-        worker_id = worker_id.data()
-        vllm_logger.info(f"Worker ID: {worker_id}")
+        if self.kv_router:
+            worker_id_generator: AsyncIterator = await self.router_client.generate(
+                Tokens(tokens=engine_prompt["prompt_token_ids"]).model_dump_json()
+            )
 
-        if worker_id == "":
+            worker_id = (
+                await worker_id_generator.__anext__()
+            )  # only one worker id is returned
+            worker_id = worker_id.data()
+            vllm_logger.info(f"Worker ID: {worker_id}")
+
+            if worker_id == "":
+                engine_generator = await self.workers_client.random(
+                    vLLMGenerateRequest(
+                        engine_prompt=engine_prompt,
+                        sampling_params=sampling_params,
+                        request_id=request_id,
+                    ).model_dump_json()
+                )
+            else:
+                engine_generator = await self.workers_client.direct(
+                    vLLMGenerateRequest(
+                        engine_prompt=engine_prompt,
+                        sampling_params=sampling_params,
+                        request_id=request_id,
+                    ).model_dump_json(),
+                    int(worker_id),
+                )
+        elif self.random_router:
             engine_generator = await self.workers_client.random(
                 vLLMGenerateRequest(
                     engine_prompt=engine_prompt,
@@ -109,14 +137,13 @@ class Processor(ProcessMixIn):
                     request_id=request_id,
                 ).model_dump_json()
             )
-        else:
-            engine_generator = await self.workers_client.direct(
+        elif self.round_robin_router:
+            engine_generator = await self.workers_client.round_robin(
                 vLLMGenerateRequest(
                     engine_prompt=engine_prompt,
                     sampling_params=sampling_params,
                     request_id=request_id,
-                ).model_dump_json(),
-                int(worker_id),
+                ).model_dump_json()
             )
 
         output = self._generate_responses(engine_generator, request_type)

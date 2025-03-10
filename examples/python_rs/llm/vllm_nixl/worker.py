@@ -54,10 +54,6 @@ class RequestHandler:
             do_remote_prefill  # remote prefill is still controlled by the router
         )
         self.disaggregated_router = disaggregated_router
-        if do_remote_prefill:
-            assert (
-                disaggregated_router is not None
-            ), "Disaggregated router is required for remote prefill"
 
         self._prefill_queue_nats_server = os.getenv(
             "NATS_SERVER", "nats://localhost:4222"
@@ -90,6 +86,7 @@ class RequestHandler:
         else:
             # always prefill remotely if no disaggregated router is provided
             disagg_router_decision = True
+
         if self.do_remote_prefill and disagg_router_decision:
             remote_prefill_params = RemotePrefillParams(
                 is_remote_prefill=True,
@@ -130,25 +127,29 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
 
     endpoint = component.endpoint("generate")
 
-    prefill_client = (
-        await runtime.namespace("dynamo-init")
-        .component("prefill")
-        .endpoint("generate")
-        .client()
-    )
+    if engine_args.remote_prefill:
+        prefill_client = (
+            await runtime.namespace("dynamo-init")
+            .component("prefill")
+            .endpoint("generate")
+            .client()
+        )
+    else:
+        prefill_client = None
 
-    # TODO: do we need these env vars?
-    VLLM_WORKER_ID = endpoint.lease_id()
-    os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
-    vllm_logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
+    if engine_args.kv_router:
+        # TODO: do we need these env vars?
+        VLLM_WORKER_ID = endpoint.lease_id()
+        os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
+        vllm_logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
 
-    VLLM_KV_NAMESPACE = "dynamo-init"
-    os.environ["VLLM_KV_NAMESPACE"] = str(VLLM_KV_NAMESPACE)
+        VLLM_KV_NAMESPACE = "dynamo-init"
+        os.environ["VLLM_KV_NAMESPACE"] = str(VLLM_KV_NAMESPACE)
 
-    VLLM_KV_COMPONENT = "vllm"
-    os.environ["VLLM_KV_COMPONENT"] = str(VLLM_KV_COMPONENT)
+        VLLM_KV_COMPONENT = "vllm"
+        os.environ["VLLM_KV_COMPONENT"] = str(VLLM_KV_COMPONENT)
 
-    metrics_publisher = KvMetricsPublisher()
+        metrics_publisher = KvMetricsPublisher()
 
     async with build_async_engine_client_from_engine_args(engine_args) as engine_client:
         served_model_name = (
@@ -156,57 +157,66 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
             if engine_args.served_model_name is not None
             else "vllm"
         )
-        disaggregated_router = PyDisaggregatedRouter(
-            runtime,
-            served_model_name,
-            custom_disagg_router=engine_args.custom_disagg_router,
-            max_local_prefill_length=engine_args.max_local_prefill_length,
-            max_remote_prefill_cache_hit_ratio=engine_args.max_remote_prefill_cache_hit_ratio,
-        )
 
-        engine_client.set_metrics_publisher(metrics_publisher)
+        if engine_args.kv_router:
+            engine_client.set_metrics_publisher(metrics_publisher)
 
-        # Initially send dummy metrics to kick start,
-        # vLLM will not update stat until forward pass is triggered
-        metrics_publisher.publish(
-            0,
-            1024,
-            0,
-            1024,
-        )
+            # Initially send dummy metrics to kick start,
+            # vLLM will not update stat until forward pass is triggered
+            metrics_publisher.publish(
+                0,
+                1024,
+                0,
+                1024,
+            )
 
-        metadata = engine_client.nixl_metadata
-        metadata_store = NixlMetadataStore("dynamo-init", runtime)
-        await metadata_store.put(metadata.engine_id, metadata)
+        if engine_args.remote_prefill:
+            metadata = engine_client.nixl_metadata
+            metadata_store = NixlMetadataStore("dynamo-init", runtime)
+            await metadata_store.put(metadata.engine_id, metadata)
 
-        await asyncio.gather(
+        if engine_args.conditional_disagg:
+            disaggregated_router = PyDisaggregatedRouter(
+                runtime,
+                served_model_name,
+                custom_disagg_router=engine_args.custom_disagg_router,
+                max_local_prefill_length=engine_args.max_local_prefill_length,
+                max_remote_prefill_cache_hit_ratio=engine_args.max_remote_prefill_cache_hit_ratio,
+            )
+        else:
+            disaggregated_router = None
+
+        endpoints = [
             endpoint.serve_endpoint(
                 RequestHandler(
                     model_name=served_model_name,
                     engine_client=engine_client,
                     prefill_client=prefill_client,
-                    do_remote_prefill=True,
+                    do_remote_prefill=engine_args.remote_prefill,
                     disaggregated_router=disaggregated_router,
                 ).generate
-            ),
-            metrics_publisher.create_endpoint(component),
-        )
+            )
+        ]
+        if engine_args.kv_router:
+            endpoints.append(metrics_publisher.create_endpoint(component))
+        await asyncio.gather(*endpoints)
 
 
 if __name__ == "__main__":
     uvloop.install()
     engine_args = parse_vllm_args()
 
-    if engine_args.enable_chunked_prefill is not False:
-        print("Chunked prefill is not supported yet, setting to False")
-        engine_args.enable_chunked_prefill = False
+    if engine_args.remote_prefill:
+        if engine_args.enable_chunked_prefill is not False:
+            print("Chunked prefill is not supported yet, setting to False")
+            engine_args.enable_chunked_prefill = False
 
-    if engine_args.preemption_mode != "swap":
-        print("Preemption mode is not supported yet, setting to swap")
-        engine_args.preemption_mode = "swap"
+        if engine_args.preemption_mode != "swap":
+            print("Preemption mode is not supported yet, setting to swap")
+            engine_args.preemption_mode = "swap"
 
-    if engine_args.pipeline_parallel_size != 1:
-        print("Pipeline parallel size is not supported yet, setting to 1")
-        engine_args.pipeline_parallel_size = 1
+        if engine_args.pipeline_parallel_size != 1:
+            print("Pipeline parallel size is not supported yet, setting to 1")
+            engine_args.pipeline_parallel_size = 1
 
     asyncio.run(worker(engine_args))
