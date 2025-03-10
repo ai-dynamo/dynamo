@@ -24,7 +24,7 @@
 	 "os"
 	 "strings"
 	 "testing"
- 
+
 	 "github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
  )
 
@@ -52,7 +52,7 @@
 		 }
 		 urlParts := strings.Split(r.URL.String(), "/")
 		 n := len(urlParts)
- 
+
 		 response := schemas.DynamoNimVersionSchema{
 			 ResourceSchema: schemas.ResourceSchema{
 				 BaseSchema: schemas.BaseSchema{
