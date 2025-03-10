@@ -95,7 +95,7 @@ class Middle:
 
         try:
             os.environ["VLLM_LOG_LEVEL"] = "DEBUG"
-            # Get VLLM args
+            # Get VLLM args using new pattern
             vllm_args = config.as_args("Middle", prefix="vllm_")
             print(f"VLLM args to parse: {vllm_args}")
             
@@ -133,24 +133,25 @@ class Frontend:
         print("Starting frontend")
         self.config = ServiceConfig.get_instance()
 
-        # Get required configuration
-        self.model = self.config.require_config("Frontend", "model")
+        # Get required configuration (new dict pattern)
+        self.model = self.config.require("Frontend", "model")
         
-        # Get optional configurations with defaults
-        self.temperature = self.config.get_config("Frontend", "temperature", 0.7)
-        self.max_tokens = self.config.get_config("Frontend", "max_tokens", 1024)
-        self.stream = self.config.get_config("Frontend", "stream", True)
+        # Get optional configurations with defaults (new dict pattern)
+        self.temperature = self.config.get("Frontend", {}).get("temperature", 0.7)
+        self.max_tokens = self.config.get("Frontend", {}).get("max_tokens", 1024)
+        self.stream = self.config.get("Frontend", {}).get("stream", True)
         
         print(f"Frontend initialized with model={self.model}, "
               f"temp={self.temperature}, max_tokens={self.max_tokens}")
         
-        # You can get all configs for debugging
-        all_frontend_configs = self.config.get_service_config("Frontend")
+        # Get all configs for a service (new dict pattern)
+        all_frontend_configs = self.config.get("Frontend", {})
         print(f"All Frontend configs: {all_frontend_configs}")
         
-        # You can also check if other services have specific configs
-        if self.config.get_config("Middle", "special_mode") == "fast":
+        # Check other service configs (new dict pattern)
+        if self.config.get("Middle", {}).get("special_mode") == "fast":
             print("Using Middle service in fast mode")
+
     @api
     async def generate(self, text):
         """Stream results from the pipeline."""
