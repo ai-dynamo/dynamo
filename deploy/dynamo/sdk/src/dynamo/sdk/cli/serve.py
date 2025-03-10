@@ -15,8 +15,8 @@
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import os
 import sys
 import typing as t
@@ -66,7 +66,6 @@ def build_serve_command() -> click.Group:
     from bentoml_cli.env_manager import env_manager
     from bentoml_cli.utils import AliasCommand, BentoMLCommandGroup
 
-    
     @click.group(name="serve", cls=BentoMLCommandGroup)
     def cli():
         pass
@@ -76,8 +75,8 @@ def build_serve_command() -> click.Group:
             ignore_unknown_options=True,
             allow_extra_args=True,
         ),
-        aliases=["serve-http"], 
-        cls=AliasCommand
+        aliases=["serve-http"],
+        cls=AliasCommand,
     )
     @click.argument("bento", type=click.STRING, default=".")
     @click.option(
@@ -277,16 +276,16 @@ def build_serve_command() -> click.Group:
 
         # Process service-specific options
         service_configs = {}
-        
+
         for arg in ctx.args:
-            if arg.startswith('--') and '=' in arg:
+            if arg.startswith("--") and "=" in arg:
                 # Remove leading dashes
-                param = arg[2:] 
-                key_path, value = param.split('=', 1)
-                
-                if '.' in key_path:
-                    service, key = key_path.split('.', 1)
-                    
+                param = arg[2:]
+                key_path, value = param.split("=", 1)
+
+                if "." in key_path:
+                    service, key = key_path.split(".", 1)
+
                     # Try to parse value as appropriate type
                     try:
                         # Try as JSON for complex types
@@ -295,19 +294,22 @@ def build_serve_command() -> click.Group:
                         # Handle basic types
                         if value.isdigit():
                             value = int(value)
-                        elif value.replace('.', '', 1).isdigit() and value.count('.') <= 1:
+                        elif (
+                            value.replace(".", "", 1).isdigit()
+                            and value.count(".") <= 1
+                        ):
                             value = float(value)
-                        elif value.lower() in ('true', 'false'):
-                            value = value.lower() == 'true'
-                    
+                        elif value.lower() in ("true", "false"):
+                            value = value.lower() == "true"
+
                     if service not in service_configs:
                         service_configs[service] = {}
                     service_configs[service][key] = value
-        
+
         # Set environment variable with service configuration
         if service_configs:
             os.environ["DYNAMO_SERVICE_CONFIG"] = json.dumps(service_configs)
-        
+
         configure_server_logging()
         if working_dir is None:
             if os.path.isdir(os.path.expanduser(bento)):

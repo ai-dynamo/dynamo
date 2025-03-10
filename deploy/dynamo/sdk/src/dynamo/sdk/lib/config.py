@@ -13,21 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict
 import json
 import os
 
+
 class ServiceConfig(dict):
     """Configuration store that inherits from dict for simpler access patterns"""
-    
+
     _instance = None
-    
+
     @classmethod
     def get_instance(cls):
         if cls._instance is None:
             cls._instance = cls._load_from_env()
         return cls._instance
-    
+
     @classmethod
     def _load_from_env(cls):
         """Load config from environment variable"""
@@ -37,33 +37,33 @@ class ServiceConfig(dict):
             try:
                 configs = json.loads(env_config)
             except json.JSONDecodeError:
-                print(f"Failed to parse DYNAMO_SERVICE_CONFIG")
+                print("Failed to parse DYNAMO_SERVICE_CONFIG")
         return cls(configs)  # Initialize dict subclass with configs
-    
+
     def require(self, service_name, key):
         """Require a config value, raising error if not found"""
         if service_name not in self or key not in self[service_name]:
             raise ValueError(f"{service_name}.{key} must be specified in configuration")
         return self[service_name][key]
-    
+
     def as_args(self, service_name, prefix=""):
         """Extract configs as CLI args for a service, with optional prefix filtering"""
         if service_name not in self:
             return []
-            
+
         args = []
         for key, value in self[service_name].items():
             if prefix and not key.startswith(prefix):
                 continue
-                
+
             # Strip prefix if needed
-            arg_key = key[len(prefix):] if prefix and key.startswith(prefix) else key
-            
+            arg_key = key[len(prefix) :] if prefix and key.startswith(prefix) else key
+
             # Convert to CLI format
             if isinstance(value, bool):
                 if value:
                     args.append(f"--{arg_key}")
             else:
                 args.extend([f"--{arg_key}", str(value)])
-        
+
         return args

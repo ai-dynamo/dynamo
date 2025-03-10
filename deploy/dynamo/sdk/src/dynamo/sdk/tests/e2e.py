@@ -17,6 +17,7 @@
 # changes made to CLI, SDK, etc
 
 import os
+
 from pydantic import BaseModel
 
 from dynamo.sdk import api, depends, dynamo_endpoint, service
@@ -86,25 +87,25 @@ class Middle:
     def __init__(self) -> None:
         print("Starting middle")
         config = ServiceConfig.get_instance()
-        # loading a small model via VLLM that is not used 
-        import sys
+        # loading a small model via VLLM that is not used
+
         from vllm.engine.arg_utils import AsyncEngineArgs
-        from vllm.utils import FlexibleArgumentParser
         from vllm.engine.async_llm_engine import AsyncLLMEngine
+        from vllm.utils import FlexibleArgumentParser
 
         try:
             os.environ["VLLM_LOG_LEVEL"] = "DEBUG"
             # Get VLLM args using new pattern
             vllm_args = config.as_args("Middle", prefix="vllm_")
             print(f"VLLM args to parse: {vllm_args}")
-            
+
             # Create and use parser
             parser = FlexibleArgumentParser()
             parser = AsyncEngineArgs.add_cli_args(parser)
-            args = parser.parse_args(vllm_args) 
+            args = parser.parse_args(vllm_args)
             self.engine_args = AsyncEngineArgs.from_cli_args(args)
             self.engine = AsyncLLMEngine.from_engine_args(self.engine_args)
-        
+
         except ImportError:
             print("VLLM imports not available, skipping engine arg parsing")
         except Exception as e:
@@ -113,7 +114,6 @@ class Middle:
     @dynamo_endpoint()
     async def generate(self, req: RequestType):
         """Forward requests to backend."""
-        from vllm.sampling_params import SamplingParams
 
         req_text = req.text
         print(f"Middle received: {req_text}")
@@ -133,14 +133,16 @@ class Frontend:
         self.config = ServiceConfig.get_instance()
 
         frontend_config = FrontendConfig(**self.config.get("Frontend", {}))
-        
-        print(f"Frontend initialized with model={frontend_config.model}, "
-              f"temp={frontend_config.temperature}, max_tokens={frontend_config.max_tokens}")
-        
+
+        print(
+            f"Frontend initialized with model={frontend_config.model}, "
+            f"temp={frontend_config.temperature}, max_tokens={frontend_config.max_tokens}"
+        )
+
         # Get all configs for a service (new dict pattern)
         all_frontend_configs = self.config.get("Frontend", {})
         print(f"All Frontend configs: {all_frontend_configs}")
-        
+
         # Check other service configs (new dict pattern)
         if self.config.get("Middle", {}).get("special_mode") == "fast":
             print("Using Middle service in fast mode")
@@ -154,6 +156,7 @@ class Frontend:
         print(f"Frontend sending: {type(txt)}")
         async for response in self.middle.generate(txt.model_dump_json()):
             yield f"Frontend: {response}"
+
 
 class FrontendConfig(BaseModel):
     model: str
