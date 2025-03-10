@@ -67,7 +67,7 @@ func DefaultDeploymentConfigSchema() schemasv2.DeploymentConfigSchema {
 func DefaultUpdateDeploymentSchemaV2() schemasv2.UpdateDeploymentSchema {
 	return schemasv2.UpdateDeploymentSchema{
 		DeploymentConfigSchema: DefaultDeploymentConfigSchema(),
-		DynamoNim:            "nvidia:123456",
+		DynamoNim:              "nvidia:123456",
 	}
 }
 

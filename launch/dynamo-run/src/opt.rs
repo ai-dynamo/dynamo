@@ -17,6 +17,7 @@ use std::fmt;
 
 use crate::ENDPOINT_SCHEME;
 
+#[derive(PartialEq)]
 pub enum Input {
     /// Run an OpenAI compatible HTTP server
     Http,

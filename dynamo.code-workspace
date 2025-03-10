@@ -7,6 +7,7 @@
     "settings": {
         "rust-analyzer.linkedProjects": [
             "components/metrics/Cargo.toml",
+            "launch/dynamo-run/Cargo.toml",
             "lib/llm/Cargo.toml",
             "lib/runtime/Cargo.toml",
             "lib/bindings/python/Cargo.toml",
