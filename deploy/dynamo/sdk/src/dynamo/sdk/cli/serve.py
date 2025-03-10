@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import collections
 import json
 import logging
 import os
@@ -62,7 +63,7 @@ def deprecated_option(*param_decls: str, **attrs: t.Any):
 
 
 def _try_service_args(args: list[str]) -> t.Dict[str, t.Any] | None:
-    service_configs = {}
+    service_configs = collections.defaultdict(dict)
     for arg in args:
         if arg.startswith("--") and "=" in arg:
             # Remove leading dashes
@@ -85,8 +86,6 @@ def _try_service_args(args: list[str]) -> t.Dict[str, t.Any] | None:
                     elif value.lower() in ("true", "false"):
                         value = value.lower() == "true"
 
-                if service not in service_configs:
-                    service_configs[service] = {}
                 service_configs[service][key] = value
     return service_configs
 
