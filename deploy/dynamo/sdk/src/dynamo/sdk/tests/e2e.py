@@ -86,12 +86,11 @@ class Middle:
     def __init__(self) -> None:
         print("Starting middle")
         config = ServiceConfig.get_instance()
-        # loading a small model via VLLM that is not used to test the arg parsing
+        # loading a small model via VLLM that is not used 
         import sys
         from vllm.engine.arg_utils import AsyncEngineArgs
         from vllm.utils import FlexibleArgumentParser
         from vllm.engine.async_llm_engine import AsyncLLMEngine
-
 
         try:
             os.environ["VLLM_LOG_LEVEL"] = "DEBUG"
@@ -99,10 +98,10 @@ class Middle:
             vllm_args = config.as_args("Middle", prefix="vllm_")
             print(f"VLLM args to parse: {vllm_args}")
             
-            # Create and use parser - MUCH SIMPLER!
+            # Create and use parser
             parser = FlexibleArgumentParser()
             parser = AsyncEngineArgs.add_cli_args(parser)
-            args = parser.parse_args(vllm_args)  # Pass args directly here!
+            args = parser.parse_args(vllm_args) 
             self.engine_args = AsyncEngineArgs.from_cli_args(args)
             self.engine = AsyncLLMEngine.from_engine_args(self.engine_args)
         
@@ -132,9 +131,6 @@ class Frontend:
     def __init__(self) -> None:
         print("Starting frontend")
         self.config = ServiceConfig.get_instance()
-
-        # # Get required configuration (new dict pattern)
-        # self.model = self.config.require("Frontend", "model")
 
         frontend_config = FrontendConfig(**self.config.get("Frontend", {}))
         
