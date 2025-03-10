@@ -278,3 +278,34 @@ sudo docker run --gpus all -it -v /home/user:/outside-home gitlab-master.nvidia.
 ```
 
 Copy the trt-llm engine, the model's `.json` files (for the model deployment card) and the `nio` binary built for the correct glibc (container is Ubuntu 22.04 currently) into that container.
+
+## Echo Engines
+
+Dynamo includes two echo engines for testing and debugging purposes:
+
+### echo_core
+
+The `echo_core` engine accepts pre-processed requests and echoes the tokens back as the response. This is useful for testing pre-processing functionality as the response will include the full prompt template.
+
+```
+dynamo-run in=http out=echo_core --model-path <hf-repo-checkout>
+```
+
+### echo_full
+
+The `echo_full` engine accepts un-processed requests and echoes the prompt back as the response.
+
+```
+dynamo-run in=http out=echo_full
+```
+
+### Configuration
+
+Both echo engines use a configurable delay between tokens to simulate generation speed. You can adjust this using the `DYN_TOKEN_ECHO_DELAY_MS` environment variable:
+
+```
+# Set token echo delay to 1ms (1000 tokens per second)
+DYN_TOKEN_ECHO_DELAY_MS=1 dynamo-run in=http out=echo_full
+```
+
+The default delay is 10ms, which produces approximately 100 tokens per second.
