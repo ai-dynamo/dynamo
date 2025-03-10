@@ -73,8 +73,8 @@ type DeploymentTargetConfig struct {
 
 type CreateDeploymentTargetSchema struct {
 	DynamoNim string                  `json:"bento_repository"`
-	Version     string                  `json:"bento"`
-	Config      *DeploymentTargetConfig `json:"config"`
+	Version   string                  `json:"bento"`
+	Config    *DeploymentTargetConfig `json:"config"`
 }
 
 func (c *DeploymentTargetConfig) Scan(value interface{}) error {
@@ -109,9 +109,9 @@ type DeploymentTargetTypeSchema struct {
 type DeploymentTargetSchema struct {
 	ResourceSchema
 	DeploymentTargetTypeSchema
-	Creator            *UserSchema                   `json:"creator"`
+	Creator          *UserSchema                 `json:"creator"`
 	DynamoNimVersion *DynamoNimVersionFullSchema `json:"bento"`
-	Config             *DeploymentTargetConfig       `json:"config"`
+	Config           *DeploymentTargetConfig     `json:"config"`
 }
 
 type DeploymentTargetListSchema struct {

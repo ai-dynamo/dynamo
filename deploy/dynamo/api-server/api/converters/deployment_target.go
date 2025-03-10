@@ -69,9 +69,9 @@ func ToDeploymentTargetSchemas(ctx context.Context, deploymentTargets []*models.
 			DeploymentTargetTypeSchema: schemas.DeploymentTargetTypeSchema{
 				Type: "stable",
 			},
-			Creator:            creatorSchema,
+			Creator:          creatorSchema,
 			DynamoNimVersion: dynamoNimVersionFullSchema,
-			Config:             deploymentTarget.Config,
+			Config:           deploymentTarget.Config,
 		})
 	}
 	return res, nil
