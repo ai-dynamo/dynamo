@@ -118,5 +118,15 @@ def parse_tensorrt_llm_args() -> Tuple[Any, Tuple[Dict[str, Any], Dict[str, Any]
         help="Path to the llmapi disaggregated config file",
         default=None,
     )
+    parser.add_argument(
+        "--publish-kv-cache-events",
+        action="store_true",
+        help="Publish KV cache events from TensorRT-LLM. Currently, only supported for context worker in Disaggregated mode.",
+    )
+    parser.add_argument(
+        "--publish-stats",
+        action="store_true",
+        help="Publish stats from TensorRT-LLM. Currently, only supported for context worker in Disaggregated mode.",
+    )
     args = parser.parse_args()
     return (args, _init_engine_args(args.engine_args))

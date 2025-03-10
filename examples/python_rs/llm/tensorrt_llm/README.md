@@ -242,7 +242,7 @@ For example, 2 TP2 generation servers are 2 servers but 4 workers/mpi executor.
 cd /workspace/examples/python_rs/llm/tensorrt_llm/
 mpirun --allow-run-as-root --oversubscribe -n WORLD_SIZE python3 -m disaggregated.worker --engine_args llm_api_config.yaml -c disaggregated/llmapi_disaggregated_configs/single_node_config.yaml 1>disagg_workers.log 2>&1 &
 ```
-If using the provided [single_node_config.yaml](disaggregated/llmapi_disaggregated_configs/single_node_config.yaml), WORLD_SIZE should be 3 as it has 2 context servers(TP=1) and 1 generation server(TP=1).
+If using the provided [single_node_config.yaml](disaggregated/llmapi_disaggregated_configs/single_node_config.yaml), WORLD_SIZE should be 2 as it has 1 context servers(TP=1) and 1 generation server(TP=1).
 
 2. **Launch the router**
 
@@ -250,6 +250,8 @@ If using the provided [single_node_config.yaml](disaggregated/llmapi_disaggregat
 cd /workspace/examples/python_rs/llm/tensorrt_llm/
 python3 -m disaggregated.router 1>router.log 2>&1 &
 ```
+
+Note: For KV cache aware routing, please refer to the [KV Aware Routing](./docs/kv_aware_routing.md) section.
 
 3. **Send Requests**
 Follow the instructions in the [Monolithic Deployment](#3-client) section to send requests to the router.
