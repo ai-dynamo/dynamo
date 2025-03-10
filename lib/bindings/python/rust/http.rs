@@ -22,11 +22,10 @@ use crate::{engine::*, to_pyerr, CancellationToken};
 pub use dynamo_llm::http::service::{error as http_error, service_v2};
 
 pub use dynamo_runtime::{
+    error,
     pipeline::{async_trait, AsyncEngine, Data, ManyOut, SingleIn},
     protocols::annotated::Annotated,
-    Error,
-    error,
-    Result,
+    Error, Result,
 };
 
 #[pyclass]

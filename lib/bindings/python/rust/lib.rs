@@ -35,8 +35,8 @@ use dynamo_runtime::{
 use dynamo_llm::{self as llm_rs};
 
 mod engine;
-mod llm;
 mod http;
+mod llm;
 
 type JsonServerStreamingIngress =
     Ingress<SingleIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
