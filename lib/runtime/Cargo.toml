@@ -17,7 +17,7 @@
 name = "dynamo-runtime"
 description = "Distributed Inference Framework"
 readme = "README.md"
-version = "0.2.1" # TODO: Centralize Version Automation
+version = "0.1.0" # TODO: Centralize Version Automation
 edition = "2021"
 authors = ["NVIDIA"]
 license = "Apache-2.0"

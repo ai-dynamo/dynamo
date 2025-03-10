@@ -152,10 +152,10 @@ func (s *deploymentManagementService) transformToDMSRequestsV1alpha1(deployment 
 		Configuration: crds.DynamoNimDeploymentConfigurationV1Alpha1{
 			Data: crds.DynamoNimDeploymentData{
 				DynamoNimVersion: translatedTag,
-				Resources:          *deploymentTarget.Config.Resources,
-				ExternalServices:   deploymentTarget.Config.ExternalServices,
-				LivenessProbe:      livenessProbe,
-				ReadinessProbe:     readinessProbe,
+				Resources:        *deploymentTarget.Config.Resources,
+				ExternalServices: deploymentTarget.Config.ExternalServices,
+				LivenessProbe:    livenessProbe,
+				ReadinessProbe:   readinessProbe,
 			},
 			Version: crds.ApiVersion,
 		},

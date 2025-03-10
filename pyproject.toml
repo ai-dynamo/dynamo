@@ -14,8 +14,8 @@
 # limitations under the License.
 
 [project]
-name = "dynamo"
-version = "0.2.1"
+name = "ai-dynamo"
+version = "0.1.0"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -96,6 +96,7 @@ xfail_strict = true
 log_cli_level = "INFO"
 filterwarnings = [
   "error",
+  "ignore:.*cuda*:DeprecationWarning", # Need this to avoid deprecation warnings from CUDA in tensorrt_llm.
   "ignore:.*pkg_resources.*:DeprecationWarning",
   "ignore:.*multipart.*:PendingDeprecationWarning"
 ]

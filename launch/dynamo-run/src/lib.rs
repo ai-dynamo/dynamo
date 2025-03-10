@@ -36,6 +36,10 @@ pub use opt::{Input, Output};
 /// concatenations.
 const ENDPOINT_SCHEME: &str = "dyn://";
 
+/// When `in=text` the user doesn't need to know the model name, and doesn't need to provide it on
+/// the command line. Hence it's optional, and defaults to this.
+const INVISIBLE_MODEL_NAME: &str = "dynamo-run";
+
 /// How we identify a python string endpoint
 #[cfg(feature = "python")]
 const PYTHON_STR_SCHEME: &str = "pystr:";
@@ -81,12 +85,21 @@ pub async fn run(
         .or(flags.model_path_flag)
         .and_then(|p| p.canonicalize().ok());
     // Serve the model under the name provided, or the name of the GGUF file or HF repo.
-    let model_name = flags.model_name.or_else(|| {
-        model_path
-            .as_ref()
-            .and_then(|p| p.iter().last())
-            .map(|n| n.to_string_lossy().into_owned())
-    });
+    let model_name = flags
+        .model_name
+        .or_else(|| {
+            model_path
+                .as_ref()
+                .and_then(|p| p.iter().last())
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+        .or_else(|| {
+            if in_opt == Input::Text {
+                Some(INVISIBLE_MODEL_NAME.to_string())
+            } else {
+                None
+            }
+        });
     // Load the model deployment card, if any
     // Only used by some engines, so without those feature flags it's unused.
     #[allow(unused_variables)]

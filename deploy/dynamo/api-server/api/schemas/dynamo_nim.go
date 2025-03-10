@@ -19,13 +19,13 @@ package schemas
 
 type DynamoNimSchema struct {
 	ResourceSchema
-	Creator                   *UserSchema                 `json:"creator"`
-	Organization              *OrganizationSchema         `json:"organization"`
+	Creator                 *UserSchema               `json:"creator"`
+	Organization            *OrganizationSchema       `json:"organization"`
 	LatestDynamoNimVersion  *DynamoNimVersionSchema   `json:"latest_bento"`
-	NDynamoNimVersions      uint                        `json:"n_bentos"`
-	NDeployments              uint                        `json:"n_deployments"`
+	NDynamoNimVersions      uint                      `json:"n_bentos"`
+	NDeployments            uint                      `json:"n_deployments"`
 	LatestDynamoNimVersions []*DynamoNimVersionSchema `json:"latest_bentos"`
-	Description               string                      `json:"description"`
+	Description             string                    `json:"description"`
 }
 
 type GetDynamoNimSchema struct {
