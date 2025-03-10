@@ -34,10 +34,10 @@ import (
 	"time"
 
 	"emperror.dev/errors"
-	"github.com/apparentlymart/go-shquot/shquot"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
 	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/config"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/consts"
+	"github.com/apparentlymart/go-shquot/shquot"
 	"github.com/ettle/strcase"
 	"github.com/huandu/xstrings"
 	"github.com/mitchellh/hashstructure/v2"
