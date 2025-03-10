@@ -173,13 +173,21 @@ async def worker(runtime: DistributedRuntime, args: Namespace):
     endpoint = router_component.endpoint("generate")
 
     if args.custom_router:
-        indexer = KvIndexer(kv_listener)
+        # @REVIEWER - I'm not currently checking if block size matches that of the engine
+        # If they don't match things will silently fail
+        # The preferred solution would be for the KV Indexer to read from the MDC in etcd and not bother the user at all
+        # The second solution would be to do KvIndexer(kv_listener, MDC.block_size)
+        # as this ensures block size matches that of the engine
+        # In this case we need to do some sort of handshake or check in case a user just puts in a random block size
+
+        indexer = KvIndexer(kv_listener, args.block_size)
         metrics_aggregator = KvMetricsAggregator(kv_listener)
         await endpoint.serve_endpoint(
             CustomRouter(indexer, metrics_aggregator).generate
         )
     else:
-        router = KvRouter(runtime, kv_listener)
+        # TODO Read block_size from MDC
+        router = KvRouter(runtime, kv_listener, args.block_size)
         await endpoint.serve_endpoint(Router(router, args.routing_strategy).generate)
 
 
@@ -207,6 +215,11 @@ if __name__ == "__main__":
         type=str,
         default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         help="Model that is being served",
+    )
+    parser.add_argument(
+        "--block-size",
+        type=int,
+        help="KV block size",
     )
     parser.add_argument(
         "--custom-router",

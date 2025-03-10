@@ -25,7 +25,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/services"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/services"
 )
 
 type MockDMSServer struct {

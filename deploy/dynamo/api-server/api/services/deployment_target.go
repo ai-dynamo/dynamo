@@ -21,10 +21,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/common/consts"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/database"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/models"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/consts"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/database"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/models"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
 	"github.com/rs/zerolog/log"
 	"gorm.io/gorm"
 )

@@ -26,7 +26,7 @@ RequestHandler = Callable[[JsonLike], AsyncGenerator[JsonLike, None]]
 
 class DistributedRuntime:
     """
-    The runtime object for dynemo applications
+    The runtime object for dynamo applications
     """
 
     ...
@@ -170,6 +170,54 @@ class KvRouter:
         """
         Return the worker id that should handle the given token ids,
         exception will be raised if there is no worker available.
+        """
+        ...
+
+class DisaggregatedRouter:
+    """
+    A router that determines whether to perform prefill locally or remotely based on
+    sequence length thresholds.
+    """
+
+    def __init__(self, drt: DistributedRuntime, model_name: str, default_max_local_prefill_length: int) -> None:
+        """
+        Create a `DisaggregatedRouter` object.
+
+        Args:
+            drt: The distributed runtime instance
+            model_name: Name of the model
+            default_max_local_prefill_length: Default maximum sequence length that can be processed locally
+        """
+        ...
+
+    def prefill_remote(self, prefill_length: int, prefix_hit_length: int) -> bool:
+        """
+        Determine if prefill should be performed remotely based on sequence lengths.
+
+        Args:
+            prefill_length: Total length of the sequence to prefill
+            prefix_hit_length: Length of the prefix that was already processed
+
+        Returns:
+            True if prefill should be performed remotely, False otherwise
+        """
+        ...
+
+    def update_value(self, max_local_prefill_length: int) -> None:
+        """
+        Update the maximum local prefill length threshold.
+
+        Args:
+            max_local_prefill_length: New maximum sequence length that can be processed locally
+        """
+        ...
+
+    def get_model_name(self) -> str:
+        """
+        Get the name of the model associated with this router.
+
+        Returns:
+            The model name as a string
         """
         ...
 

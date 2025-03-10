@@ -17,10 +17,11 @@ from enum import Enum
 
 import bentoml
 from common.protocol import Tokens
-from dynemo.sdk import async_onstart, dynemo_context, dynemo_endpoint, service
+
+from dynamo.sdk import async_onstart, dynamo_context, dynamo_endpoint, service
 
 with bentoml.importing():
-    from dynemo.runtime import KvRouter
+    from dynamo.runtime import KvRouter
 
 
 WorkerId = str
@@ -33,9 +34,9 @@ class RoutingStrategy(Enum):
 
 
 @service(
-    dynemo={
+    dynamo={
         "enabled": True,
-        "namespace": "dynemo",
+        "namespace": "dynamo",
     },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -48,13 +49,14 @@ class Router:
     def __init__(self):
         self.model_name = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
         self.routing_strategy = RoutingStrategy.PREFIX
-        self.runtime = dynemo_context["runtime"]
+        self.runtime = dynamo_context["runtime"]
         self.min_workers = 1
+        self.kv_block_size = 64
 
     @async_onstart
     async def init_engine(self):
         workers_client = (
-            await self.runtime.namespace("dynemo")
+            await self.runtime.namespace("dynamo")
             .component("VllmEngine")
             .endpoint("generate")
             .client()
@@ -74,11 +76,11 @@ class Router:
             )
             await asyncio.sleep(5)
 
-        kv_listener = self.runtime.namespace("dynemo").component(self.model_name)
+        kv_listener = self.runtime.namespace("dynamo").component(self.model_name)
         await kv_listener.create_service()
-        self.router = KvRouter(self.runtime, kv_listener)
+        self.router = KvRouter(self.runtime, kv_listener, self.kv_block_size)
 
-    @dynemo_endpoint()
+    @dynamo_endpoint()
     async def generate(self, request: Tokens):
         lora_id = 0
         worker_id = ""

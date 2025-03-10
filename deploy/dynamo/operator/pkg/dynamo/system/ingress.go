@@ -37,7 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/pkg/dynamo/consts"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/consts"
 )
 
 type IngressConfig struct {

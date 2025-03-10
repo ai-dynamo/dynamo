@@ -13,11 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dynemo.sdk import DYNEMO_IMAGE, api, depends, service
 from sdk_kv_router.processor import Processor
 
+from dynamo.sdk import DYNAMO_IMAGE, api, depends, service
 
-@service(traffic={"timeout": 10000}, image=DYNEMO_IMAGE)
+
+@service(traffic={"timeout": 10000}, image=DYNAMO_IMAGE)
 class Frontend:
     processor = depends(Processor)
 

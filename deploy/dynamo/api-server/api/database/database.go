@@ -24,8 +24,8 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/common/utils"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/models"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/utils"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/models"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"

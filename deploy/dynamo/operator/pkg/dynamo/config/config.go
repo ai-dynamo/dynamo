@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/pkg/dynamo/consts"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/consts"
 )
 
 func GetYataiSystemNamespaceFromEnv() string {

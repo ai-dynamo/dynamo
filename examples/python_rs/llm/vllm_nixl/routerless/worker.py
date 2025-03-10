@@ -19,7 +19,8 @@ import json
 
 import msgspec
 import uvloop
-from common import NixlMetadataStore, parse_vllm_args
+from utils.nixl import NixlMetadataStore
+from utils.vllm import parse_vllm_args
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.multiprocessing.client import EngineClient
 from vllm.entrypoints.openai.api_server import (
@@ -111,13 +112,13 @@ class RequestHandler:
 
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
-    component = runtime.namespace("test-nixl").component("vllm")
+    component = runtime.namespace("dynamo-init").component("vllm")
     await component.create_service()
 
     endpoint = component.endpoint("generate")
 
     prefill_client = (
-        await runtime.namespace("test-nixl")
+        await runtime.namespace("dynamo-init")
         .component("prefill")
         .endpoint("generate")
         .client()
@@ -128,7 +129,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
 
         if engine_args.remote_prefill:
             metadata = engine_client.nixl_metadata
-            metadata_store = NixlMetadataStore("test-nixl", runtime)
+            metadata_store = NixlMetadataStore("dynamo-init", runtime)
             await metadata_store.put(metadata.engine_id, metadata)
 
             await endpoint.serve_endpoint(

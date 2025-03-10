@@ -20,7 +20,7 @@ limitations under the License.
 <h4> A Datacenter Scale Distributed Inference Serving Framework </h4>
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![GitHub Release](https://img.shields.io/github/v/release/dynemo-ai/dynamo)](https://github.com/dynemo-ai/dynemo/releases/latest)
+[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
 
 
 Dynamo is a flexible, component based, data center scale

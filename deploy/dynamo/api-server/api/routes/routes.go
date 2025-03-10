@@ -23,10 +23,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog/log"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/common/consts"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/controllers"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/mocks"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/consts"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/controllers"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/mocks"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
 )
 
 func SetupRouter() *gin.Engine {

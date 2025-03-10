@@ -1,8 +1,8 @@
-module github.com/dynemo-ai/dynemo/deploy/dynamo/api-server
+module github.com/ai-dynamo/dynamo/deploy/dynamo/api-server
 
 go 1.23.1
 
-replace github.com/dynemo-ai/dynemo/deploy/dynamo/operator => ../operator
+replace github.com/ai-dynamo/dynamo/deploy/dynamo/operator => ../operator
 
 require (
 	github.com/ghodss/yaml v1.0.0

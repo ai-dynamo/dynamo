@@ -20,7 +20,7 @@ use std::borrow::BorrowMut;
 use std::cmp::min;
 
 use crate::kv_router::indexer::OverlapScores;
-pub use crate::kv_router::protocols::{ForwardPassMetrics, KV_BLOCK_SIZE};
+pub use crate::kv_router::protocols::ForwardPassMetrics;
 use crate::kv_router::scoring::ProcessedEndpoints;
 use crate::kv_router::KV_HIT_RATE_SUBJECT;
 
@@ -73,6 +73,15 @@ impl Endpoint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlexibleService {
+    pub name: String,
+    pub id: String,
+    pub version: String,
+    pub started: String,
+    pub endpoints: Vec<FlexibleEndpoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Service {
     pub name: String,
     pub id: String,
@@ -103,6 +112,7 @@ impl KvScheduler {
     pub async fn start(
         endpoints_rx: tokio::sync::mpsc::Receiver<ProcessedEndpoints>,
         ns: Namespace,
+        kv_block_size: usize,
     ) -> Result<Self, KvSchedulerError> {
         let mut endpoints_rx = endpoints_rx;
 
@@ -169,7 +179,8 @@ impl KvScheduler {
                 };
                 tracing::debug!("selected");
                 loop {
-                    match select_worker(endpoints.borrow_mut(), &request, &event_tx) {
+                    match select_worker(endpoints.borrow_mut(), &request, &event_tx, kv_block_size)
+                    {
                         Ok(worker_id) => {
                             request.respond(worker_id);
                             continue 'outer;
@@ -228,6 +239,7 @@ pub fn select_worker(
     workers: &mut ProcessedEndpoints,
     request: &SchedulingRequest,
     event_tx: &tokio::sync::mpsc::UnboundedSender<KVHitRateEvent>,
+    kv_block_size: usize,
 ) -> Result<i64, KvSchedulerError> {
     // balance mode prioritizes balancing load across workers
     let balance_threshold: f64 = 0.1;
@@ -240,7 +252,7 @@ pub fn select_worker(
     // Compute each worker's score
     let mut best_index = None;
     let mut best_cost = f64::INFINITY;
-
+    // [FIXME] REMOVE ONLY FOR TESTING
     if workers.endpoints.is_empty() {
         return Err(KvSchedulerError::NoEndpoints);
     }
@@ -259,7 +271,7 @@ pub fn select_worker(
         // [FIXME] multiple endpoints of the same worker cause out of bound error
         let worker_id = workers.worker_ids[i];
         let overlap_score = request.overlap.scores.get(&worker_id).map_or(0, |x| *x);
-        let overlap_score = overlap_score as usize * KV_BLOCK_SIZE;
+        let overlap_score = overlap_score as usize * kv_block_size;
 
         let new_tokens = request.isl_tokens.saturating_sub(overlap_score);
         let normalized_new_tokens = new_tokens as f64 / request.isl_tokens as f64;
@@ -287,14 +299,14 @@ pub fn select_worker(
     }
 
     if let Some(best_index) = best_index {
-        let total_blocks = min(request.isl_tokens / KV_BLOCK_SIZE, 1);
+        let total_blocks = min(request.isl_tokens / kv_block_size, 1);
 
         workers.endpoints[best_index].data.request_active_slots += 1;
         workers.endpoints[best_index].data.kv_active_blocks += total_blocks as u64;
 
         // Optimization - pass this to a channel for emitting events, async task, etc. to avoid blocking the scheduler
         let best_worker_id = workers.endpoints[best_index].worker_id();
-        let isl_blocks = request.isl_tokens / KV_BLOCK_SIZE;
+        let isl_blocks = request.isl_tokens / kv_block_size;
         let overlap_blocks = request
             .overlap
             .scores

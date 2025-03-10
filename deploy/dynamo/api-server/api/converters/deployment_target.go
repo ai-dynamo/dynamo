@@ -22,10 +22,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/mocks"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/models"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/services"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/mocks"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/models"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/services"
 	"github.com/pkg/errors"
 )
 

@@ -21,12 +21,12 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/modelschemas"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/schemasv1"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/modelschemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemasv1"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/pkg/dynamo/consts"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/pkg/dynamo/reqcli"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/pkg/dynamo/utils"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/consts"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/reqcli"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/utils"
 )
 
 type DynamoAuthHeaders struct {

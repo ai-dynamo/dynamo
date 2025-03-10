@@ -21,8 +21,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/common/consts"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/models"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/consts"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/models"
 
 	"github.com/rs/zerolog/log"
 	apiv1 "k8s.io/api/core/v1"

@@ -54,6 +54,7 @@ impl KvRouter {
     pub async fn from_runtime(
         runtime: DistributedRuntime,
         backend: Component,
+        kv_block_size: usize,
     ) -> Result<Arc<Self>> {
         let nats_client = runtime.nats_client();
         let service_name = backend.service_name();
@@ -63,7 +64,14 @@ impl KvRouter {
         tracing::info!("Component Namespace {}", backend.namespace());
         tracing::info!("Component Service Name {}", service_name);
         tracing::info!("KV Subject {}", kv_subject);
-        Self::new(nats_client, service_name, kv_subject, namespace).await
+        Self::new(
+            nats_client,
+            service_name,
+            kv_subject,
+            namespace,
+            kv_block_size,
+        )
+        .await
     }
 
     pub async fn new(
@@ -71,6 +79,7 @@ impl KvRouter {
         service_name: String,
         kv_subject: String,
         namespace: Namespace,
+        kv_block_size: usize,
     ) -> Result<Arc<Self>> {
         let cancellation_token = CancellationToken::new();
         let (ep_tx, ep_rx) = tokio::sync::mpsc::channel(128);
@@ -82,8 +91,8 @@ impl KvRouter {
             cancellation_token.clone(),
         ));
 
-        let indexer = KvIndexer::new(cancellation_token.clone());
-        let scheduler = KvScheduler::start(ep_rx, namespace).await?;
+        let indexer = KvIndexer::new(cancellation_token.clone(), kv_block_size);
+        let scheduler = KvScheduler::start(ep_rx, namespace, kv_block_size).await?;
 
         tracing::debug!("subscribing to kv events: {}", kv_subject);
         let mut kv_events_rx = nats_client.client().subscribe(kv_subject).await?;
