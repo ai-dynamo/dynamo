@@ -3,12 +3,9 @@ import time
 import uuid
 
 import uvloop
-from dynamo.runtime import (
-    DistributedRuntime,
-    HttpAsyncEngine,
-    HttpService,
-    triton_worker,
-)
+
+from dynamo.llm import HttpAsyncEngine, HttpService
+from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 
 class MockEngine:
@@ -45,7 +42,7 @@ class MockEngine:
         return generator()
 
 
-@triton_worker()
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     model: str = "mock_model"
     served_model_name: str = "mock_model"

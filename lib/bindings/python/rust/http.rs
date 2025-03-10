@@ -19,12 +19,13 @@ use pyo3::{exceptions::PyException, prelude::*};
 
 use crate::{engine::*, to_pyerr, CancellationToken};
 
-pub use triton_distributed_llm::http::service::{error, service_v2};
+pub use dynamo_llm::http::service::{error as http_error, service_v2};
 
-pub use triton_distributed_runtime::{
+pub use dynamo_runtime::{
     pipeline::{async_trait, AsyncEngine, Data, ManyOut, SingleIn},
     protocols::annotated::Annotated,
     Error,
+    error,
     Result,
 };
 
@@ -169,7 +170,7 @@ where
                             .into_value(py)
                             .extract::<PyRef<HttpError>>(py)
                         {
-                            Err(error::HttpError {
+                            Err(http_error::HttpError {
                                 code: http_error_instance.code,
                                 message: http_error_instance.message.clone(),
                             })?
