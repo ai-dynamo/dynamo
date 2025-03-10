@@ -19,6 +19,7 @@
 from pydantic import BaseModel
 
 from dynamo.sdk import api, depends, dynamo_endpoint, service
+from dynamo.sdk.lib.config import ServiceConfig
 
 """
 Pipeline Architecture:
@@ -102,7 +103,26 @@ class Frontend:
 
     def __init__(self) -> None:
         print("Starting frontend")
+        self.config = ServiceConfig.get_instance()
 
+        # Get required configuration
+        self.model = self.config.require_config("Frontend", "model")
+        
+        # Get optional configurations with defaults
+        self.temperature = self.config.get_config("Frontend", "temperature", 0.7)
+        self.max_tokens = self.config.get_config("Frontend", "max_tokens", 1024)
+        self.stream = self.config.get_config("Frontend", "stream", True)
+        
+        print(f"Frontend initialized with model={self.model}, "
+              f"temp={self.temperature}, max_tokens={self.max_tokens}")
+        
+        # You can get all configs for debugging
+        all_frontend_configs = self.config.get_service_config("Frontend")
+        print(f"All Frontend configs: {all_frontend_configs}")
+        
+        # You can also check if other services have specific configs
+        if self.config.get_config("Middle", "special_mode") == "fast":
+            print("Using Middle service in fast mode")
     @api
     async def generate(self, text):
         """Stream results from the pipeline."""
