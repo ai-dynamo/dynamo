@@ -25,10 +25,10 @@ type DynamoNimApiSchema struct {
 }
 
 type DynamoNimManifestSchema struct {
-	Service           string                          `json:"service"`
-	DynamoAiVersion string                          `json:"bentoml_version"`
-	Apis              map[string]DynamoNimApiSchema `json:"apis"`
-	SizeBytes         uint                            `json:"size_bytes"`
+	Service         string                        `json:"service"`
+	DynamoAiVersion string                        `json:"bentoml_version"`
+	Apis            map[string]DynamoNimApiSchema `json:"apis"`
+	SizeBytes       uint                          `json:"size_bytes"`
 }
 
 type TransmissionStrategy string
