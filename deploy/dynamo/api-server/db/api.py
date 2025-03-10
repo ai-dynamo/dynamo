@@ -28,6 +28,8 @@ from sqlmodel import asc, col, desc, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from components import (
+    CreateDynamoNimRequest,
+    CreateDynamoNimVersionRequest,
     DynamoNimSchema,
     DynamoNimSchemaWithDeploymentsListSchema,
     DynamoNimSchemaWithDeploymentsSchema,
@@ -36,8 +38,6 @@ from components import (
     DynamoNimVersionSchema,
     DynamoNimVersionsWithNimListSchema,
     DynamoNimVersionWithNimSchema,
-    CreateDynamoNimRequest,
-    CreateDynamoNimVersionRequest,
     ImageBuildStatus,
     ListQuerySchema,
     OrganizationSchema,
@@ -331,18 +331,14 @@ GetDynamoNimVersion = Depends(dynamo_nim_version_handler)
 )
 async def get_dynamo_nim_version(
     *,
-    dynamo_nim_entities: tuple[
-        DynamoNimVersion, DynamoNim
-    ] = GetDynamoNimVersion,
+    dynamo_nim_entities: tuple[DynamoNimVersion, DynamoNim] = GetDynamoNimVersion,
     session: AsyncSession = Depends(get_session),
 ):
     dynamo_nim_version, dynamo_nim = dynamo_nim_entities
     dynamo_nim_version_schemas = await convert_dynamo_nim_version_model_to_schema(
         session, [dynamo_nim_version], dynamo_nim
     )
-    dynamo_nim_schemas = await convert_dynamo_nim_model_to_schema(
-        session, [dynamo_nim]
-    )
+    dynamo_nim_schemas = await convert_dynamo_nim_model_to_schema(session, [dynamo_nim])
 
     full_schema = DynamoNimVersionFullSchema(
         **dynamo_nim_version_schemas[0].model_dump(),
@@ -426,9 +422,7 @@ async def get_dynamo_nim_versions(
     session: AsyncSession = Depends(get_session),
     query_params: ListQuerySchema = Depends(),
 ):
-    dynamo_nim_schemas = await convert_dynamo_nim_model_to_schema(
-        session, [dynamo_nim]
-    )
+    dynamo_nim_schemas = await convert_dynamo_nim_model_to_schema(session, [dynamo_nim])
     dynamo_nim_schema = dynamo_nim_schemas[0]
 
     total_statement = (
@@ -474,9 +468,7 @@ async def get_dynamo_nim_versions(
 )
 async def update_dynamo_nim_version(
     *,
-    dynamo_nim_entities: tuple[
-        DynamoNimVersion, DynamoNim
-    ] = GetDynamoNimVersion,
+    dynamo_nim_entities: tuple[DynamoNimVersion, DynamoNim] = GetDynamoNimVersion,
     request: UpdateDynamoNimVersionRequest,
     session: AsyncSession = Depends(get_session),
 ):
@@ -511,9 +503,7 @@ async def update_dynamo_nim_version(
 )
 async def upload_dynamo_nim_version(
     *,
-    dynamo_nim_entities: tuple[
-        DynamoNimVersion, DynamoNim
-    ] = GetDynamoNimVersion,
+    dynamo_nim_entities: tuple[DynamoNimVersion, DynamoNim] = GetDynamoNimVersion,
     file: Annotated[bytes, Body()],
     session: AsyncSession = Depends(get_session),
 ):
@@ -549,9 +539,7 @@ def generate_file_path(version) -> str:
 )
 async def download_dynamo_nim_version(
     *,
-    dynamo_nim_entities: tuple[
-        DynamoNimVersion, DynamoNim
-    ] = GetDynamoNimVersion,
+    dynamo_nim_entities: tuple[DynamoNimVersion, DynamoNim] = GetDynamoNimVersion,
 ):
     dynamo_nim_version, dynamo_nim = dynamo_nim_entities
     object_name = f"{dynamo_nim.name}/{dynamo_nim_version.version}"
@@ -577,9 +565,7 @@ async def download_dynamo_nim_version(
 )
 async def start_dynamo_nim_version_upload(
     *,
-    dynamo_nim_entities: tuple[
-        DynamoNimVersion, DynamoNim
-    ] = GetDynamoNimVersion,
+    dynamo_nim_entities: tuple[DynamoNimVersion, DynamoNim] = GetDynamoNimVersion,
     session: AsyncSession = Depends(get_session),
 ):
     dynamo_nim_version, _ = dynamo_nim_entities
@@ -678,9 +664,7 @@ async def convert_dynamo_nim_version_model_to_schema(
     dynamo_nim_version_schemas = []
     for entity in entities:
         if not dynamo_nim:
-            statement = select(DynamoNim).where(
-                DynamoNim.id == entity.dynamo_nim_id
-            )
+            statement = select(DynamoNim).where(DynamoNim.id == entity.dynamo_nim_id)
             results = await session.exec(statement)
             dynamo_nim = results.first()
 
