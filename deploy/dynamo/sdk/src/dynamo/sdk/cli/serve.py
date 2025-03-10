@@ -61,6 +61,36 @@ def deprecated_option(*param_decls: str, **attrs: t.Any):
     return decorator
 
 
+def _try_service_args(args: list[str]) -> dict[str, t.Any]:
+    service_configs = {}
+    for arg in args:
+        if arg.startswith("--") and "=" in arg:
+            # Remove leading dashes
+            param = arg[2:]
+            key_path, value = param.split("=", 1)
+
+            if "." in key_path:
+                service, key = key_path.split(".", 1)
+
+                # Different parsing logic for different types
+                try:
+                    # Try as JSON for complex types
+                    value = json.loads(value)
+                except json.JSONDecodeError:
+                    # Handle basic types
+                    if value.isdigit():
+                        value = int(value)
+                    elif value.replace(".", "", 1).isdigit() and value.count(".") <= 1:
+                        value = float(value)
+                    elif value.lower() in ("true", "false"):
+                        value = value.lower() == "true"
+
+                if service not in service_configs:
+                    service_configs[service] = {}
+                service_configs[service][key] = value
+    return service_configs
+
+
 def build_serve_command() -> click.Group:
     from bentoml._internal.log import configure_server_logging
     from bentoml_cli.env_manager import env_manager
@@ -275,36 +305,7 @@ def build_serve_command() -> click.Group:
         from bentoml._internal.service.loader import load
 
         # Process service-specific options
-        service_configs = {}
-
-        for arg in ctx.args:
-            if arg.startswith("--") and "=" in arg:
-                # Remove leading dashes
-                param = arg[2:]
-                key_path, value = param.split("=", 1)
-
-                if "." in key_path:
-                    service, key = key_path.split(".", 1)
-
-                    # Try to parse value as appropriate type
-                    try:
-                        # Try as JSON for complex types
-                        value = json.loads(value)
-                    except json.JSONDecodeError:
-                        # Handle basic types
-                        if value.isdigit():
-                            value = int(value)
-                        elif (
-                            value.replace(".", "", 1).isdigit()
-                            and value.count(".") <= 1
-                        ):
-                            value = float(value)
-                        elif value.lower() in ("true", "false"):
-                            value = value.lower() == "true"
-
-                    if service not in service_configs:
-                        service_configs[service] = {}
-                    service_configs[service][key] = value
+        service_configs = _try_service_args(ctx.args)
 
         # Set environment variable with service configuration
         if service_configs:
