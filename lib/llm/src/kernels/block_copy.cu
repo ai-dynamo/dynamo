@@ -223,10 +223,26 @@ copy_blocks_launcher_3d(
 extern "C" cudaError_t
 copy_blocks_3d(
     const void* src_data, void* dst_data, const int* h_src_block_ids, const int* h_dst_block_ids, int num_block_pairs,
-    int prefix_dim, int src_blocks, int dst_blocks, int suffix_dim, int elem_size, size_t src_prefix_stride,
-    size_t src_block_stride, size_t src_suffix_stride, size_t dst_prefix_stride, size_t dst_block_stride,
-    size_t dst_suffix_stride)
+    int prefix_dim, int src_blocks, int dst_blocks, int suffix_dim, int elem_size)
 {
+  // Calculate row-major strides internally
+  size_t src_suffix_stride = elem_size;
+  size_t dst_suffix_stride = elem_size;
+
+  size_t src_block_stride = suffix_dim * src_suffix_stride;
+  size_t dst_block_stride = suffix_dim * dst_suffix_stride;
+
+  size_t src_prefix_stride = src_blocks * src_block_stride;
+  size_t dst_prefix_stride = dst_blocks * dst_block_stride;
+
+  // Optional debug output
+  printf(
+      "Tensor dims: prefix=%d, src_blocks=%d, dst_blocks=%d, suffix=%d, elem_size=%d\n", prefix_dim, src_blocks,
+      dst_blocks, suffix_dim, elem_size);
+  printf(
+      "Calculated strides: src_prefix=%zu, src_block=%zu, src_suffix=%zu\n", src_prefix_stride, src_block_stride,
+      src_suffix_stride);
+
   // Allocate device memory for block IDs
   int* d_src_blocks_ids = NULL;
   int* d_dst_blocks_ids = NULL;

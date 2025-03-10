@@ -1,1034 +1,1000 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+use cudarc::driver::{CudaContext, CudaDevice, CudaSlice, DevicePtr, PinnedHostSlice};
+use dynemo_runtime::{raise, Result};
+use ndarray::IxDyn;
+use std::any::Any;
+use std::ffi::c_void;
+use std::sync::Arc;
 
-/// Utility functions for tensor parallel operations
-use candle_core::{DType, Device, Result, Storage, Tensor};
-use cudarc::driver::DevicePtr;
-use std::ffi::{c_ulong, c_void};
-use std::os::raw::c_int;
-
-pub struct KvLayer {
-    data: Tensor,
-    tp_size: usize,
-    block_dim_idx: usize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageType {
+    Device(usize),
+    Pinned,
+    Host,
 }
 
-impl KvLayer {
-    pub fn new(
-        tp_size: usize,
-        nblocks: usize,
-        block_size: usize,
-        n_heads: usize,
-        head_size: usize,
-        dtype: DType,
-        device: Device,
-    ) -> Result<Self> {
-        let data = Tensor::zeros((2, nblocks, block_size, n_heads, head_size), dtype, &device)?;
+pub trait Storage: std::fmt::Debug {
+    /// Get memory pointer as a u64 for direct indexing
+    fn get_pointer(&self) -> u64;
+
+    /// Get element size in bytes
+    fn element_size(&self) -> usize;
+
+    /// Get the number of bytes in the storage
+    fn storage_size(&self) -> usize;
+
+    /// Get the storage type of the tensor
+    fn storage_type(&self) -> StorageType;
+
+    /// Create a view of the tensor
+    fn view<const D: usize>(&self, shape: [usize; D]) -> Result<TensorView<'_, Self, D>, String>
+    where
+        Self: Sized,
+    {
+        TensorView::new(self, shape)
+    }
+}
+
+// pub struct OwnedStorage {
+//     storage: Arc<dyn Storage>,
+// }
+
+// impl Storage for OwnedStorage {
+//     fn get_pointer(&self) -> u64 {
+//         self.storage.get_pointer()
+//     }
+
+//     fn element_size(&self) -> usize {
+//         self.storage.element_size()
+//     }
+
+//     fn storage_size(&self) -> usize {
+//         self.storage.storage_size()
+//     }
+
+//     fn storage_type(&self) -> StorageType {
+//         self.storage.storage_type()
+//     }
+// }
+
+pub struct DeviceStorageOwned {
+    elements: usize,
+    bytes_per_element: usize,
+    cuda_device: Arc<CudaDevice>,
+    cuda_slice: Arc<CudaSlice<u8>>,
+}
+
+impl DeviceStorageOwned {
+    pub fn new(shape: &[usize], bytes_per_element: usize, device: usize) -> Result<Self> {
+        let cuda_device = CudaDevice::new(device)?;
+        let elements = shape.iter().product::<usize>();
+        let bytes = elements * bytes_per_element;
+        let cuda_slice = cuda_device.alloc_zeros::<u8>(bytes)?;
+
         Ok(Self {
-            data,
-            tp_size,
-            block_dim_idx: 1,
+            elements,
+            bytes_per_element,
+            cuda_device,
+            cuda_slice: Arc::new(cuda_slice),
         })
     }
 
-    pub fn nblocks(&self) -> usize {
-        self.data.dim(1).unwrap()
+    pub fn device_ptr(&self) -> *const c_void {
+        let ptr = self.cuda_slice.device_ptr();
+        (*ptr) as *const c_void
     }
 
-    pub fn block_size(&self) -> usize {
-        self.data.dim(2).unwrap()
+    pub fn context(&self) -> Arc<CudaContext> {
+        self.cuda_device.context().clone()
+    }
+}
+
+impl Storage for DeviceStorageOwned {
+    fn get_pointer(&self) -> u64 {
+        self.device_ptr() as u64
     }
 
-    pub fn n_heads(&self) -> usize {
-        self.data.dim(3).unwrap()
+    fn element_size(&self) -> usize {
+        self.bytes_per_element
     }
 
-    pub fn head_size(&self) -> usize {
-        self.data.dim(4).unwrap()
+    fn storage_size(&self) -> usize {
+        self.elements * self.bytes_per_element
     }
 
-    pub fn copy_blocks(
-        &self,
-        src_blocks: &[usize],
-        dst_blocks: &[usize],
-        dst_layer: &mut Self,
-    ) -> Result<()> {
-        if self.tp_size != dst_layer.tp_size {
-            return Err(candle_core::Error::Msg(format!(
-                "TP size mismatch: {} != {}",
-                self.tp_size, dst_layer.tp_size
-            )));
+    fn storage_type(&self) -> StorageType {
+        StorageType::Device(self.cuda_device.ordinal())
+    }
+}
+
+impl std::fmt::Debug for DeviceStorageOwned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Storage")
+            .field("storage_type", &self.storage_type())
+            .field("element_size", &self.element_size())
+            .field("storage_size", &self.storage_size())
+            .finish()
+    }
+}
+
+pub struct PinnedHostStorage {
+    elements: usize,
+    bytes_per_element: usize,
+    blob: PinnedHostSlice<u8>,
+}
+
+impl PinnedHostStorage {
+    pub fn new(
+        shape: &[usize],
+        bytes_per_element: usize,
+        context: Arc<CudaContext>,
+    ) -> Result<Self> {
+        let elements = shape.iter().product::<usize>();
+        let bytes = elements * bytes_per_element;
+        let blob = unsafe { context.alloc_pinned::<u8>(bytes)? };
+        // memset to 0
+        unsafe { std::ptr::write_bytes(&mut blob.as_ptr() as *mut _, 0, bytes) };
+        Ok(Self {
+            elements,
+            bytes_per_element,
+            blob,
+        })
+    }
+}
+
+impl Storage for PinnedHostStorage {
+    fn get_pointer(&self) -> u64 {
+        match self.blob.as_ptr() {
+            Ok(ptr) => ptr as u64,
+            Err(_) => 0, // Return 0 for error case
         }
+    }
 
-        if src_blocks.len() != dst_blocks.len() {
-            return Err(candle_core::Error::Msg(format!(
-                "Block length mismatch: {} != {}",
-                src_blocks.len(),
-                dst_blocks.len()
-            )));
-        }
+    fn element_size(&self) -> usize {
+        self.bytes_per_element
+    }
 
-        if self.block_dim_idx != dst_layer.block_dim_idx {
-            return Err(candle_core::Error::Msg(format!(
-                "Block dimension index mismatch: {} != {}",
-                self.block_dim_idx, dst_layer.block_dim_idx
-            )));
-        }
+    fn storage_size(&self) -> usize {
+        self.elements * self.bytes_per_element
+    }
 
-        // todo - implement a kernel to copy the blocks if either are gpu tensors
-        if self.data.device().is_cuda() || dst_layer.data.device().is_cuda() {
-            // call the cuda kernel to copy the blocks
-            copy_blocks_between_layers(
-                &self.data,
-                &dst_layer.data,
-                src_blocks,
-                dst_blocks,
-                self.block_dim_idx,
-            )?;
-        } else {
-            for kv in 0..2 {
-                for (src_idx, dst_idx) in src_blocks.iter().zip(dst_blocks.iter()) {
-                    let src_block = self.data.get(kv)?.get(*src_idx)?;
-                    let dst_block = dst_layer.data.get(kv)?.get(*dst_idx)?;
+    fn storage_type(&self) -> StorageType {
+        StorageType::Pinned
+    }
+}
 
-                    // Fix: Use a proper dimension value instead of a slice
-                    dst_block.slice_set(&src_block, 0, 0)?;
-                }
+impl std::fmt::Debug for PinnedHostStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Storage")
+            .field("storage_type", &self.storage_type())
+            .field("element_size", &self.element_size())
+            .field("storage_size", &self.storage_size())
+            .finish()
+    }
+}
+
+/// A view into tensor data with statically-known dimension count
+#[derive(Clone)]
+pub struct TensorView<'a, T: Storage, const D: usize> {
+    /// The underlying tensor storage
+    storage: &'a T,
+    /// Shape of the view (dimensions)
+    shape: [usize; D],
+    /// Strides for each dimension (in elements, not bytes)
+    strides: [usize; D],
+    /// Strides for each dimension (in bytes)
+    byte_strides: [usize; D],
+    /// Offset from the start of the storage, in bytes
+    offset: usize,
+    /// Element size in bytes
+    element_size: usize,
+    /// Total elements in this view
+    total_elements: usize,
+}
+
+impl<'a, T: Storage, const D: usize> TensorView<'a, T, D> {
+    /// Create a new tensor view from storage and shape
+    pub fn new(storage: &'a T, shape: [usize; D]) -> Result<Self, String> {
+        // Get element size from storage
+        let element_size = storage.element_size();
+
+        // Calculate row-major strides (in elements)
+        let mut strides = [0; D];
+        let mut byte_strides = [0; D];
+
+        if D > 0 {
+            strides[D - 1] = 1; // Rightmost dimension is contiguous (elements)
+            byte_strides[D - 1] = element_size; // Rightmost dimension in bytes
+
+            // Calculate remaining strides
+            for i in (0..D - 1).rev() {
+                strides[i] = strides[i + 1] * shape[i + 1];
+                byte_strides[i] = strides[i] * element_size;
             }
         }
 
-        Ok(())
-    }
+        // Calculate total elements
+        let total_elements = shape.iter().product();
 
-    /// Split the data into tp_size parts
-    /// The target tp_size greater than and evenly divisible by the current tp_size
-    pub fn tp_split(&self, tp_size: usize) -> Result<Tensor> {
-        if tp_size <= self.tp_size {
-            return Err(candle_core::Error::Msg(format!(
-                "Target tp_size ({}) must be greater than current tp_size ({})",
-                tp_size, self.tp_size
-            )));
+        // Validate that the view fits within the storage
+        let storage_elements = storage.storage_size() / element_size;
+        if total_elements > storage_elements {
+            return Err(format!(
+                "Shape {:?} requires {} elements, but storage only has {} elements",
+                shape, total_elements, storage_elements
+            ));
         }
-        if tp_size % self.tp_size != 0 {
-            return Err(candle_core::Error::Msg(format!(
-                "Target tp_size ({}) must be evenly divisible by current tp_size ({})",
-                tp_size, self.tp_size
-            )));
+
+        Ok(Self {
+            storage,
+            shape,
+            strides,
+            byte_strides,
+            offset: 0,
+            element_size,
+            total_elements,
+        })
+    }
+
+    /// Create a new tensor view with custom strides
+    pub fn with_strides(
+        storage: &'a T,
+        shape: [usize; D],
+        strides: [usize; D],
+        offset: usize,
+    ) -> Result<Self, String> {
+        // Get element size from storage
+        let element_size = storage.element_size();
+
+        // Calculate byte strides
+        let mut byte_strides = [0; D];
+        for i in 0..D {
+            byte_strides[i] = strides[i] * element_size;
         }
-        let data = transform_blocks_inplace_v2(&self.data, tp_size)?;
-        Ok(data)
-    }
 
-    pub fn required_memory(
-        nblocks: usize,
-        block_size: usize,
-        n_heads: usize,
-        head_size: usize,
-        dtype: DType,
-    ) -> usize {
-        let n_elements = 2 * nblocks * block_size * n_heads * head_size;
-        n_elements * dtype.size_in_bytes()
-    }
-}
+        // Calculate total elements
+        let total_elements = shape.iter().product();
 
-/// Groups contiguous block indices into separate vectors
-///
-/// For example: [0, 1, 2, 3, 7, 9] -> [[0, 1, 2, 3], [7], [9]]
-pub fn group_contiguous_blocks(blocks: &[usize]) -> Vec<Vec<usize>> {
-    if blocks.is_empty() {
-        return vec![];
-    }
-
-    let mut result = Vec::new();
-    let mut current_group = vec![blocks[0]];
-
-    for i in 1..blocks.len() {
-        if blocks[i] == blocks[i - 1] + 1 {
-            // Block is contiguous with previous
-            current_group.push(blocks[i]);
+        // Validate that the view fits within the storage
+        // Calculate the maximum offset this view will access
+        let max_offset = if D > 0 {
+            offset + Self::calculate_max_offset(&shape, &byte_strides)
         } else {
-            // Block starts a new group
-            result.push(current_group);
-            current_group = vec![blocks[i]];
+            offset
+        };
+
+        if max_offset > storage.storage_size() {
+            return Err(format!(
+                "View would access up to byte offset {}, but storage size is only {} bytes",
+                max_offset,
+                storage.storage_size()
+            ));
         }
+
+        Ok(Self {
+            storage,
+            shape,
+            strides,
+            byte_strides,
+            offset,
+            element_size,
+            total_elements,
+        })
     }
 
-    // Add the last group
-    result.push(current_group);
+    /// Calculate the maximum byte offset that will be accessed by this view
+    fn calculate_max_offset(shape: &[usize; D], byte_strides: &[usize; D]) -> usize {
+        let mut max_offset = 0;
 
-    result
-}
-
-/// Performs a simplified in-place transformation for tensor parallelism
-///
-/// Takes a tensor of shape [n_blocks, block_size, n_heads, head_size] and returns
-/// a tensor of shape [tp_size, n_blocks, block_size, n_heads/tp_size, head_size]
-///
-/// This uses reshape + transpose operations for maximum efficiency and minimal
-/// memory overhead. The tensor transformation happens directly on the GPU without
-/// unnecessary copying.
-pub fn transform_blocks_inplace_v2(source: &Tensor, tp_size: usize) -> Result<Tensor> {
-    // Get the dimensions of the source tensor
-    let kv_dim = source.dim(0)?;
-    assert_eq!(kv_dim, 2);
-
-    let n_blocks = source.dim(1)?;
-    let block_size = source.dim(2)?;
-    let n_heads = source.dim(3)?;
-    let head_size = source.dim(4)?;
-
-    // Check that n_heads is divisible by tp_size
-    if n_heads % tp_size != 0 {
-        return Err(candle_core::Error::Msg(format!(
-            "Number of heads ({}) must be divisible by tp_size ({})",
-            n_heads, tp_size
-        )));
-    }
-
-    // Calculate heads per rank
-    let heads_per_rank = n_heads / tp_size;
-
-    // First, ensure the tensor is contiguous for reshape
-    let contiguous_source = source.contiguous()?;
-
-    // Reshape to split the heads dimension
-    // [n_blocks, block_size, n_heads, head_size] ->
-    // [n_blocks, block_size, tp_size, heads_per_rank, head_size]
-    let reshaped =
-        contiguous_source.reshape((2, n_blocks, block_size, tp_size, heads_per_rank, head_size))?;
-
-    // Now permute to move tp_size to the first dimension
-    // [n_blocks, block_size, tp_size, heads_per_rank, head_size] ->
-    // [tp_size, n_blocks, block_size, heads_per_rank, head_size]
-    let result = reshaped.permute((3, 0, 1, 2, 4, 5))?;
-
-    Ok(result)
-}
-
-/// Accepts an arbitrary shape and reshapes it to be 3d on the block dimension, e.g.
-///
-/// Let `X` be the block dimension.
-/// (a, b, X, c, d, e) becomes (a*b, X, c*d*e)
-/// (X, a, b, c, d) becomes (1, X, a*b*c*d)
-/// (a, X, b, c) becomes (a, X, b*c)
-pub fn reshape_to_3d_on_block_dim(source: &Tensor, block_dim: usize) -> Result<Tensor> {
-    let shape = source.shape().dims();
-    let ndim = source.rank();
-
-    // Ensure block_dim is valid
-    if block_dim >= ndim {
-        return Err(candle_core::Error::Msg(format!(
-            "Block dimension {} is out of bounds for tensor with {} dimensions",
-            block_dim, ndim
-        )));
-    }
-
-    // Handle different cases based on block_dim position
-    if block_dim == 0 {
-        // Case: (X, a, b, c, d) becomes (1, X, a*b*c*d)
-        let prefix_dim = 1;
-        let block_size = shape[block_dim];
-        let suffix_dim: usize = shape.iter().skip(block_dim + 1).product();
-
-        // First ensure tensor is contiguous
-        let contiguous = source.contiguous()?;
-
-        // Reshape to 3D
-        contiguous.reshape((prefix_dim, block_size, suffix_dim))
-    } else if block_dim == ndim - 1 {
-        // Special case when block dim is the last dimension
-        // (a, b, c, X) becomes (a*b*c, X, 1)
-        let prefix_dim: usize = shape.iter().take(block_dim).product();
-        let block_size = shape[block_dim];
-        let suffix_dim = 1;
-
-        // First ensure tensor is contiguous
-        let contiguous = source.contiguous()?;
-
-        // Reshape to 3D
-        contiguous.reshape((prefix_dim, block_size, suffix_dim))
-    } else {
-        // General case: (a, b, X, c, d, e) becomes (a*b, X, c*d*e)
-        let prefix_dim: usize = shape.iter().take(block_dim).product();
-        let block_size = shape[block_dim];
-        let suffix_dim: usize = shape.iter().skip(block_dim + 1).product();
-
-        // First ensure tensor is contiguous
-        let contiguous = source.contiguous()?;
-
-        // Reshape to 3D
-        contiguous.reshape((prefix_dim, block_size, suffix_dim))
-    }
-}
-
-/// Create a pinned memory tensor
-pub fn create_pinned_tensor<S: Into<candle_core::Shape>>(shape: S, dtype: DType) -> Result<Tensor> {
-    let shape = shape.into();
-    let dimensions = shape.dims();
-
-    let cuda_device = match Device::cuda_if_available(0) {
-        Ok(dev) => match dev {
-            Device::Cuda(cuda_dev) => cuda_dev,
-            _ => unreachable!(),
-        },
-        Err(e) => return Err(e),
-    };
-
-    // compute the number of elements in the tensor
-    let num_elements = dimensions.iter().product::<usize>();
-    let num_bytes = num_elements * dtype.size_in_bytes();
-
-    // Allocate pinned memory
-    let data = unsafe {
-        let pinned_slice = cuda_device.alloc_pinned::<u8>(num_bytes).map_err(|e| {
-            candle_core::Error::Msg(format!("Failed to allocate pinned memory: {}", e))
-        })?;
-        let data = Vec::from(std::slice::from_raw_parts(
-            pinned_slice.as_ptr(),
-            num_elements,
-        ));
-        data
-    };
-
-    // Create a tensor from this pinned memory
-    Tensor::from_vec(data, dimensions, &Device::Cpu)
-}
-
-extern "C" {
-    fn copy_blocks_3d(
-        src_data: *const c_void,
-        dst_data: *mut c_void,
-        h_src_block_ids: *const c_int,
-        h_dst_block_ids: *const c_int,
-        num_block_pairs: c_int,
-        prefix_dim: c_int,
-        src_blocks: c_int,
-        dst_blocks: c_int,
-        suffix_dim: c_int,
-        elem_size: c_int,
-    ) -> c_int;
-}
-/// Copy blocks between tensors - works with any combination of
-/// device/host tensors as long as host memory is pinned
-pub fn copy_blocks_between_layers(
-    src_tensor: &Tensor,
-    dst_tensor: &Tensor,
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
-    block_dim: usize,
-) -> Result<()> {
-    // Validation logic (same as before)
-    if src_block_ids.len() != dst_block_ids.len() {
-        return Err(candle_core::Error::Msg(
-            "Source and destination block ID arrays must have the same length".into(),
-        ));
-    }
-
-    if src_tensor.rank() != dst_tensor.rank() {
-        return Err(candle_core::Error::Msg(
-            "Source and destination tensors must have the same rank".into(),
-        ));
-    }
-
-    if block_dim >= src_tensor.rank() {
-        return Err(candle_core::Error::Msg(
-            "Block dimension is out of bounds".into(),
-        ));
-    }
-    if src_block_ids.is_empty() {
-        return Ok(()); // Nothing to do
-    }
-
-    // reshape the tensors to match the 3d tensor copy kernel
-    let src_tensor = reshape_to_3d_on_block_dim(src_tensor, block_dim)?;
-    let dst_tensor = reshape_to_3d_on_block_dim(dst_tensor, block_dim)?;
-
-    let src_block_ids: Vec<u32> = src_block_ids.iter().map(|&id| id as u32).collect();
-    let dst_block_ids: Vec<u32> = dst_block_ids.iter().map(|&id| id as u32).collect();
-
-    // Check that at least one tensor is on a CUDA device
-    let is_src_cuda = src_tensor.device().is_cuda();
-    let is_dst_cuda = dst_tensor.device().is_cuda();
-
-    if !is_src_cuda && !is_dst_cuda {
-        return Err(candle_core::Error::Msg(
-            "At least one tensor must be on a CUDA device".into(),
-        ));
-    }
-
-    // Get dimensions from the tensors
-    let src_dims = src_tensor.dims();
-    let dst_dims = dst_tensor.dims();
-
-    // Extract dimensions for the 3D tensor format
-    let prefix_dim = src_dims[0] as i32; // First dimension
-    let src_n_blocks = src_dims[1] as i32; // Number of blocks in source
-    let dst_n_blocks = dst_dims[1] as i32; // Number of blocks in destination
-    let suffix_dim = src_dims[2] as i32; // Last dimension (combined dimensions)
-
-    // Validate dimension compatibility
-    if src_dims[0] != dst_dims[0] || src_dims[2] != dst_dims[2] {
-        return Err(candle_core::Error::Msg(format!(
-            "Incompatible tensor dimensions: src={:?}, dst={:?}",
-            src_dims, dst_dims
-        )));
-    }
-
-    // Convert block IDs to i32
-    let src_blocks_i32: Vec<i32> = src_block_ids.iter().map(|&id| id as i32).collect();
-    let dst_blocks_i32: Vec<i32> = dst_block_ids.iter().map(|&id| id as i32).collect();
-
-    // Validate block indices
-    let max_src_id = *src_block_ids.iter().max().unwrap_or(&0);
-    let max_dst_id = *dst_block_ids.iter().max().unwrap_or(&0);
-
-    if max_src_id as usize >= src_dims[1] {
-        return Err(candle_core::Error::Msg(format!(
-            "Source block ID {} is out of range (max: {})",
-            max_src_id,
-            src_dims[1] - 1
-        )));
-    }
-
-    if max_dst_id as usize >= dst_dims[1] {
-        return Err(candle_core::Error::Msg(format!(
-            "Destination block ID {} is out of range (max: {})",
-            max_dst_id,
-            dst_dims[1] - 1
-        )));
-    }
-
-    // Check for host memory being pinned - we can't directly check this in Candle,
-    // so we'll add a warning
-    if (is_src_cuda && !is_dst_cuda) || (!is_src_cuda && is_dst_cuda) {
-        // If one tensor is on CPU and one is on GPU, warn about pinned memory
-        println!("WARNING: Ensure that any CPU tensor used with copy_blocks is allocated with pinned memory");
-    }
-
-    // Get raw pointers to the tensor data WITHOUT making copies
-    let result = unsafe {
-        // Get source pointer based on device
-        let src_ptr = get_tensor_ptr(&src_tensor)?;
-
-        // Get destination pointer based on device
-        let dst_ptr = get_tensor_ptr_mut(&dst_tensor)?;
-
-        // Call the 3D tensor copy blocks function
-        copy_blocks_3d(
-            src_ptr,
-            dst_ptr,
-            src_blocks_i32.as_ptr(),
-            dst_blocks_i32.as_ptr(),
-            src_blocks_i32.len() as i32,
-            prefix_dim,
-            src_n_blocks,
-            dst_n_blocks,
-            suffix_dim,
-            src_tensor.dtype().size_in_bytes() as i32,
-        )
-    };
-
-    if result != 0 {
-        return Err(candle_core::Error::Msg(format!(
-            "CUDA error while copying blocks: {}",
-            result
-        )));
-    }
-
-    Ok(())
-}
-
-/// Returns the raw device pointer to the start of a tensor.
-///
-/// # Arguments
-///
-/// * `tensor` - The tensor to get the pointer for
-///
-/// # Returns
-///
-/// * `Result<*const c_void>` - Raw pointer to the start of the tensor's memory
-///   - For CUDA tensors: returns the device pointer
-///   - For CPU tensors: returns the host memory pointer
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - The tensor's storage type is unsupported
-/// - Cannot retrieve the pointer from storage
-pub fn get_tensor_ptr(tensor: &Tensor) -> Result<*const c_void> {
-    let (storage, _layout) = tensor.storage_and_layout();
-
-    // Get pointer based on storage type
-    match &*storage {
-        Storage::Cuda(cuda_storage) => {
-            // For CUDA storage, get the device pointer
-            let slice = cuda_storage.as_cuda_slice::<f32>()?;
-            let ptr = *slice.device_ptr() as *const c_void;
-            Ok(ptr)
+        // Calculate the maximum offset by positioning at the furthest element
+        for i in 0..D {
+            if shape[i] > 0 {
+                max_offset += (shape[i] - 1) * byte_strides[i];
+            }
         }
-        Storage::Cpu(cpu_storage) => {
-            // For CPU storage, get the host memory pointer
-            let slice = cpu_storage.as_slice::<f32>()?;
-            let ptr = slice.as_ptr() as *const c_void;
-            Ok(ptr)
+
+        max_offset
+    }
+
+    /// Get the shape of the tensor view
+    pub fn shape(&self) -> &[usize; D] {
+        &self.shape
+    }
+
+    /// Get the strides of the tensor view (in elements)
+    pub fn strides(&self) -> &[usize; D] {
+        &self.strides
+    }
+
+    /// Get the byte strides of the tensor view
+    pub fn byte_strides(&self) -> &[usize; D] {
+        &self.byte_strides
+    }
+
+    /// Get the element size in bytes
+    pub fn element_size(&self) -> usize {
+        self.element_size
+    }
+
+    /// Calculate flat index from multi-dimensional indices (in elements)
+    pub fn flat_index(&self, indices: &[usize; D]) -> Result<usize, String> {
+        // Validate indices
+        for i in 0..D {
+            if indices[i] >= self.shape[i] {
+                return Err(format!(
+                    "Index {} out of bounds for dimension {} with size {}",
+                    indices[i], i, self.shape[i]
+                ));
+            }
         }
-        _ => Err(candle_core::Error::Msg(
-            "Unsupported storage type - only CPU and CUDA tensors are supported".into(),
-        )),
+
+        // Calculate flat index
+        let mut flat_idx = 0;
+        for i in 0..D {
+            flat_idx += indices[i] * self.strides[i];
+        }
+
+        Ok(flat_idx)
+    }
+
+    /// Calculate byte offset for indices
+    pub fn byte_offset(&self, indices: &[usize; D]) -> Result<usize, String> {
+        // Validate indices
+        for i in 0..D {
+            if indices[i] >= self.shape[i] {
+                return Err(format!(
+                    "Index {} out of bounds for dimension {} with size {}",
+                    indices[i], i, self.shape[i]
+                ));
+            }
+        }
+
+        // Calculate byte offset directly using byte_strides
+        let mut offset = self.offset;
+        for i in 0..D {
+            offset += indices[i] * self.byte_strides[i];
+        }
+
+        Ok(offset)
+    }
+
+    /// Get the absolute memory address for indices
+    pub fn address(&self, indices: &[usize; D]) -> Result<u64, String> {
+        let byte_offset = self.byte_offset(indices)?;
+        Ok(self.storage.get_pointer() + byte_offset as u64)
+    }
+
+    /// Check if the tensor has a standard row-major contiguous layout
+    pub fn is_contiguous(&self) -> bool {
+        if D == 0 {
+            return true;
+        }
+
+        let mut expected_stride = 1;
+        let mut expected_byte_stride = self.element_size;
+
+        for i in (0..D).rev() {
+            if self.strides[i] != expected_stride || self.byte_strides[i] != expected_byte_stride {
+                return false;
+            }
+            expected_stride *= self.shape[i];
+            expected_byte_stride *= self.shape[i];
+        }
+
+        true
+    }
+
+    /// Get the total number of elements in the view
+    pub fn num_elements(&self) -> usize {
+        self.total_elements
+    }
+
+    /// Get the total size in bytes
+    pub fn size_in_bytes(&self) -> usize {
+        self.total_elements * self.element_size
+    }
+
+    /// Create a sliced view of this tensor along a dimension
+    pub fn slice(&self, dim: usize, start: usize, end: Option<usize>) -> Result<Self, String> {
+        if dim >= D {
+            return Err(format!(
+                "Dimension {} out of bounds for tensor with {} dimensions",
+                dim, D
+            ));
+        }
+
+        let end_idx = end.unwrap_or(self.shape[dim]);
+        if end_idx > self.shape[dim] {
+            return Err(format!(
+                "End index {} out of bounds for dimension {} with size {}",
+                end_idx, dim, self.shape[dim]
+            ));
+        }
+        if start >= end_idx {
+            return Err(format!(
+                "Invalid slice range: start={}, end={}",
+                start, end_idx
+            ));
+        }
+
+        // Create a new shape array with the sliced dimension
+        let mut new_shape = self.shape;
+        new_shape[dim] = end_idx - start;
+
+        // Calculate the offset for the start of the slice (in bytes)
+        let new_offset = self.offset + start * self.byte_strides[dim];
+
+        // Create a new view with the same strides but updated shape and offset
+        Ok(Self {
+            storage: self.storage,
+            shape: new_shape,
+            strides: self.strides,
+            byte_strides: self.byte_strides,
+            offset: new_offset,
+            element_size: self.element_size,
+            total_elements: new_shape.iter().product(),
+        })
+    }
+
+    pub fn as_ndarray_view<'b, DT>(&'b self) -> Result<ndarray::ArrayView<'b, DT, IxDyn>>
+    where
+        DT: bytemuck::Pod,
+    {
+        match self.storage.storage_type() {
+            StorageType::Device(_) => raise!("Cannot convert device tensor to ndarray"),
+            StorageType::Host | StorageType::Pinned => {}
+        };
+
+        // validate DT matches bytes per element
+        if std::mem::size_of::<DT>() != self.element_size {
+            return Err(anyhow::anyhow!(
+                "Type size mismatch: {} vs {}",
+                std::mem::size_of::<DT>(),
+                self.element_size
+            ));
+        }
+
+        if !self.is_contiguous() {
+            raise!("Cannot convert non-contiguous tensor to ndarray");
+        }
+        // create a slice from the raw pointer
+        let ptr = self.storage.get_pointer() as *const DT;
+        let size = self.shape.iter().product::<usize>();
+
+        // Create a slice from the raw pointer
+        let slice = unsafe { std::slice::from_raw_parts::<DT>(ptr, size) };
+
+        // Create an ndarray view from the slice
+        // Convert our shape array to ndarray's Dim type
+        let dim = ndarray::IxDyn(&self.shape);
+        let array = ndarray::ArrayView::from_shape(dim, slice)?;
+        Ok(array)
+    }
+
+    /// Returns the storage type of the underlying tensor
+    pub fn storage_type(&self) -> StorageType {
+        self.storage.storage_type()
     }
 }
 
-/// Returns the raw device pointer and strides for a tensor.
-/// This is useful for operations that need direct memory access with proper striding.
-///
-/// # Arguments
-///
-/// * `tensor` - The tensor to get pointer and strides for
-///
-/// # Returns
-///
-/// * `Result<(*const c_void, Vec<usize>)>` - Tuple containing:
-///   - Raw pointer to the start of the tensor's memory
-///   - Vector of strides for each dimension
-pub fn get_tensor_ptr_and_strides(tensor: &Tensor) -> Result<(*const c_void, Vec<usize>)> {
-    let (storage, layout) = tensor.storage_and_layout();
-    let strides = layout.stride().to_vec();
-
-    // Get pointer based on storage type
-    let ptr = match &*storage {
-        Storage::Cuda(cuda_storage) => {
-            let slice = cuda_storage.as_cuda_slice::<f32>()?;
-            *slice.device_ptr() as *const c_void
-        }
-        Storage::Cpu(cpu_storage) => {
-            let slice = cpu_storage.as_slice::<f32>()?;
-            slice.as_ptr() as *const c_void
-        }
-        _ => {
-            return Err(candle_core::Error::Msg(
-                "Unsupported storage type - only CPU and CUDA tensors are supported".into(),
-            ))
-        }
-    };
-
-    Ok((ptr, strides))
+impl<'a, T: Storage, const D: usize> std::fmt::Debug for TensorView<'a, T, D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TensorView")
+            .field("shape", &self.shape)
+            .field("strides", &self.strides)
+            .field("byte_strides", &self.byte_strides)
+            .field("offset", &self.offset)
+            .field("element_size", &self.element_size)
+            .field("total_elements", &self.total_elements)
+            .field("storage_type", &self.storage.storage_type())
+            .finish()
+    }
 }
 
-/// Returns a mutable raw device pointer to the start of a tensor.
-/// Use with caution as this allows direct modification of tensor data.
-///
-/// # Arguments
-///
-/// * `tensor` - The tensor to get the mutable pointer for
-///
-/// # Returns
-///
-/// * `Result<*mut c_void>` - Mutable raw pointer to the start of the tensor's memory
-///
-/// # Safety
-///
-/// This function is unsafe because it returns a mutable pointer that allows
-/// direct modification of the tensor's memory, potentially leading to data races
-/// and undefined behavior if not used correctly.
-pub unsafe fn get_tensor_ptr_mut(tensor: &Tensor) -> Result<*mut c_void> {
-    let (storage, _layout) = tensor.storage_and_layout();
+// Indexing helpers with updated byte stride handling
+pub mod tensor_indexing {
+    /// Converts a flat index to multidimensional indices for a given shape
+    pub fn unflatten_index<const D: usize>(flat_idx: usize, shape: &[usize; D]) -> [usize; D] {
+        let mut indices = [0; D];
+        let mut remaining = flat_idx;
 
-    // Get pointer based on storage type
-    match &*storage {
-        Storage::Cuda(cuda_storage) => {
-            let ptr = *cuda_storage.as_cuda_slice::<f32>()?.device_ptr();
-            Ok(ptr as *mut c_void)
+        // Calculate strides for the shape
+        let mut strides = [0; D];
+
+        if D > 0 {
+            strides[D - 1] = 1;
+            for i in (0..D - 1).rev() {
+                strides[i] = strides[i + 1] * shape[i + 1];
+            }
         }
-        Storage::Cpu(cpu_storage) => {
-            // For CPU storage, get the host memory pointer
-            let slice = cpu_storage.as_slice::<f32>()?;
-            let ptr = slice.as_ptr() as *mut c_void;
-            Ok(ptr)
+
+        // Calculate indices
+        for i in 0..D {
+            indices[i] = remaining / strides[i];
+            remaining %= strides[i];
         }
-        _ => Err(candle_core::Error::Msg(
-            "Unsupported storage type - only CPU and CUDA tensors are supported".into(),
-        )),
+
+        indices
+    }
+
+    /// Calculates row-major strides for a given shape (element strides, not byte strides)
+    pub fn calculate_strides<const D: usize>(shape: &[usize; D]) -> [usize; D] {
+        let mut strides = [0; D];
+
+        if D > 0 {
+            strides[D - 1] = 1; // Rightmost dimension is contiguous
+            for i in (0..D - 1).rev() {
+                strides[i] = strides[i + 1] * shape[i + 1];
+            }
+        }
+
+        strides
+    }
+
+    /// Calculates row-major byte strides for a given shape and element size
+    pub fn calculate_byte_strides<const D: usize>(
+        shape: &[usize; D],
+        element_size: usize,
+    ) -> [usize; D] {
+        let mut byte_strides = [0; D];
+
+        if D > 0 {
+            byte_strides[D - 1] = element_size; // Rightmost dimension is contiguous
+            for i in (0..D - 1).rev() {
+                byte_strides[i] = byte_strides[i + 1] * shape[i + 1];
+            }
+        }
+
+        byte_strides
+    }
+}
+
+/// Storage that wraps external device memory with metadata provided externally
+/// This is unsafe as it trusts that the provided device pointer and sizes are valid
+#[derive(Debug)]
+pub struct DeviceStorageFromAny {
+    /// The original object that owns the memory (e.g., a PyObject)
+    source: Arc<dyn Any + Send + Sync>,
+    /// Device pointer to the data
+    device_ptr: u64,
+    /// Number of elements
+    elements: usize,
+    /// Size of each element in bytes
+    bytes_per_element: usize,
+    /// CUDA device ordinal
+    device_id: usize,
+}
+
+impl DeviceStorageFromAny {
+    /// Create a new DeviceStorageFromAny wrapper
+    ///
+    /// # Safety
+    ///
+    /// This is unsafe because it trusts that:
+    /// 1. The device_ptr is a valid CUDA device pointer
+    /// 2. The device_ptr points to at least elements * bytes_per_element bytes of valid memory
+    /// 3. The memory remains valid for the lifetime of this object
+    /// 4. The device_id corresponds to the device where the memory is allocated
+    pub fn new(
+        source: Arc<dyn Any + Send + Sync>,
+        device_ptr: u64,
+        elements: usize,
+        bytes_per_element: usize,
+        device_id: usize,
+    ) -> Self {
+        Self {
+            source,
+            device_ptr,
+            elements,
+            bytes_per_element,
+            device_id,
+        }
+    }
+
+    /// Get the original source object as Any
+    pub fn source(&self) -> &Arc<dyn Any + Send + Sync> {
+        &self.source
+    }
+
+    /// Try to downcast the source to a specific type
+    pub fn downcast_source<T: 'static + Send + Sync>(&self) -> Option<&T> {
+        self.source.downcast_ref::<T>()
+    }
+}
+
+impl Storage for DeviceStorageFromAny {
+    fn get_pointer(&self) -> u64 {
+        self.device_ptr
+    }
+
+    fn element_size(&self) -> usize {
+        self.bytes_per_element
+    }
+
+    fn storage_size(&self) -> usize {
+        self.elements * self.bytes_per_element
+    }
+
+    fn storage_type(&self) -> StorageType {
+        StorageType::Device(self.device_id)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{DType, Device, Result, Storage, Tensor};
-    use cudarc::driver::DevicePtr;
+
+    // Mock implementation of Storage for testing
+    #[derive(Debug)]
+    struct MockTensor {
+        data_ptr: u64,
+        elements: usize,
+        element_size_bytes: usize,
+    }
+
+    impl Storage for MockTensor {
+        fn get_pointer(&self) -> u64 {
+            self.data_ptr
+        }
+
+        fn element_size(&self) -> usize {
+            self.element_size_bytes
+        }
+
+        fn storage_size(&self) -> usize {
+            self.elements * self.element_size_bytes
+        }
+
+        fn storage_type(&self) -> StorageType {
+            StorageType::Host
+        }
+    }
 
     #[test]
-    fn test_group_contiguous_blocks() {
-        use super::group_contiguous_blocks;
+    fn test_tensor_view_creation() {
+        // Create a mock tensor with sufficient storage
+        let mock_tensor = MockTensor {
+            data_ptr: 0x1000,
+            elements: 24,
+            element_size_bytes: 4,
+        };
 
-        // Test empty input
-        assert_eq!(group_contiguous_blocks(&[]), Vec::<Vec<usize>>::new());
+        // Create a 3D tensor view
+        let shape = [2, 3, 4];
+        let view = TensorView::<_, 3>::new(&mock_tensor, shape).unwrap();
 
-        // Test single element
-        assert_eq!(group_contiguous_blocks(&[5]), vec![vec![5]]);
+        // Verify shape and strides
+        assert_eq!(view.shape(), &[2, 3, 4]);
+        assert_eq!(view.strides(), &[12, 4, 1]);
+        assert_eq!(view.byte_strides(), &[48, 16, 4]);
+        assert_eq!(view.num_elements(), 24);
+        assert_eq!(view.size_in_bytes(), 96);
+        assert!(view.is_contiguous());
+    }
 
-        // Test all contiguous
+    #[test]
+    fn test_tensor_view_indexing() {
+        // Create a mock tensor
+        let mock_tensor = MockTensor {
+            data_ptr: 0x1000,
+            elements: 24,
+            element_size_bytes: 4,
+        };
+
+        // Create a 3D tensor view
+        let shape = [2, 3, 4];
+        let view = TensorView::<_, 3>::new(&mock_tensor, shape).unwrap();
+
+        // Test flat index calculations
+        assert_eq!(view.flat_index(&[0, 0, 0]).unwrap(), 0);
+        assert_eq!(view.flat_index(&[0, 0, 1]).unwrap(), 1);
+        assert_eq!(view.flat_index(&[0, 1, 0]).unwrap(), 4);
+        assert_eq!(view.flat_index(&[1, 0, 0]).unwrap(), 12);
+        assert_eq!(view.flat_index(&[1, 2, 3]).unwrap(), 23);
+
+        // Test byte offset calculations
+        assert_eq!(view.byte_offset(&[0, 0, 0]).unwrap(), 0);
+        assert_eq!(view.byte_offset(&[0, 0, 1]).unwrap(), 4);
+        assert_eq!(view.byte_offset(&[0, 1, 0]).unwrap(), 16);
+        assert_eq!(view.byte_offset(&[1, 0, 0]).unwrap(), 48);
+
+        // Test absolute address calculations
+        assert_eq!(view.address(&[0, 0, 0]).unwrap(), 0x1000);
+        assert_eq!(view.address(&[0, 0, 1]).unwrap(), 0x1004);
+        assert_eq!(view.address(&[1, 2, 3]).unwrap(), 0x1000 + 23 * 4);
+    }
+
+    #[test]
+    fn test_tensor_view_slicing() {
+        // Create a mock tensor
+        let mock_tensor = MockTensor {
+            data_ptr: 0x1000,
+            elements: 24,
+            element_size_bytes: 4,
+        };
+
+        // Create a 3D tensor view
+        let shape = [2, 3, 4];
+        let view = TensorView::<_, 3>::new(&mock_tensor, shape).unwrap();
+
+        // Create a slice along dimension 1 (the middle dimension)
+        let sliced = view.slice(1, 1, Some(3)).unwrap();
+
+        // Verify the slice properties
+        assert_eq!(sliced.shape(), &[2, 2, 4]); // Dimension 1 reduced from 3 to 2
+        assert_eq!(sliced.strides(), &[12, 4, 1]); // Strides remain the same
+        assert_eq!(sliced.byte_strides(), &[48, 16, 4]); // Byte strides remain the same
+        assert_eq!(sliced.offset, 16); // Offset is now 4 elements (16 bytes)
+
+        // Test addressing in the slice
+        assert_eq!(sliced.address(&[0, 0, 0]).unwrap(), 0x1000 + 16);
         assert_eq!(
-            group_contiguous_blocks(&[0, 1, 2, 3]),
-            vec![vec![0, 1, 2, 3]]
+            sliced.address(&[1, 1, 3]).unwrap(),
+            0x1000 + 16 + 48 + 16 + 12
+        );
+    }
+
+    #[test]
+    fn test_is_contiguous() {
+        // Create a mock tensor with more elements to accommodate our test cases
+        let mock_tensor = MockTensor {
+            data_ptr: 0x1000,
+            elements: 28, // Increased from 24 to fit our custom strides
+            element_size_bytes: 4,
+        };
+
+        // Create a standard contiguous view
+        let shape = [2, 3, 4];
+        let contiguous_view = TensorView::<_, 3>::new(&mock_tensor, shape).unwrap();
+        assert!(contiguous_view.is_contiguous());
+
+        // Create a non-contiguous view with custom strides
+        let custom_strides = [16, 4, 1]; // Not matching the expected [12, 4, 1]
+        let non_contiguous =
+            TensorView::<_, 3>::with_strides(&mock_tensor, shape, custom_strides, 0).unwrap();
+        assert!(!non_contiguous.is_contiguous());
+    }
+
+    #[test]
+    fn test_tensor_views_with_custom_strides() {
+        // Create a mock tensor with 24 elements
+        let mock_tensor = MockTensor {
+            data_ptr: 0x1000,
+            elements: 24,
+            element_size_bytes: 4,
+        };
+
+        // Total storage: 24 elements * 4 bytes = 96 bytes
+        let shape = [2, 3, 4];
+
+        // CASE 1: Standard contiguous view
+        let contiguous_view = TensorView::<_, 3>::new(&mock_tensor, shape).unwrap();
+        assert!(contiguous_view.is_contiguous());
+        assert_eq!(contiguous_view.strides(), &[12, 4, 1]);
+        assert_eq!(contiguous_view.byte_strides(), &[48, 16, 4]);
+
+        // CASE 2: Non-contiguous but within bounds
+        let smaller_shape = [2, 2, 4]; // 16 elements instead of 24
+
+        // These are the contiguous strides for shape [2, 3, 4] but NOT for [2, 2, 4]
+        // For shape [2, 2, 4], contiguous strides would be [8, 4, 1]
+        let non_contiguous_strides = [12, 4, 1];
+
+        let non_contiguous = TensorView::<_, 3>::with_strides(
+            &mock_tensor,
+            smaller_shape,
+            non_contiguous_strides,
+            0,
+        )
+        .unwrap();
+
+        // It should NOT be contiguous since the strides don't match the shape
+        assert_eq!(non_contiguous.is_contiguous(), false);
+        assert_eq!(non_contiguous.strides(), &[12, 4, 1]);
+        assert_eq!(non_contiguous.byte_strides(), &[48, 16, 4]);
+
+        // Test accessing the last element to confirm it's within bounds
+        let last_index = [1, 1, 3];
+        let byte_offset = non_contiguous.byte_offset(&last_index).unwrap();
+        assert_eq!(byte_offset, (1 * 12 + 1 * 4 + 3 * 1) * 4);
+        assert!(
+            byte_offset < mock_tensor.storage_size(),
+            "Byte offset {} should be less than storage size {}",
+            byte_offset,
+            mock_tensor.storage_size()
         );
 
-        // Test multiple groups
-        assert_eq!(
-            group_contiguous_blocks(&[0, 1, 2, 3, 7, 9]),
-            vec![vec![0, 1, 2, 3], vec![7], vec![9]]
+        // CASE 3: Non-contiguous that exceeds bounds
+        // Using strides that will exceed the tensor's storage
+        // 1*16 + 2*4 + 3*1 = 16 + 8 + 3 = 27 elements, which is beyond our 24 elements
+        let invalid_custom_strides = [16, 4, 1];
+        let result =
+            TensorView::<_, 3>::with_strides(&mock_tensor, shape, invalid_custom_strides, 0);
+
+        // Verify we get the expected error
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err();
+        assert!(
+            error_msg.contains("would access up to byte offset 108"),
+            "Expected error about exceeding storage, got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_tensor_view_with_offset() {
+        // Create a mock tensor with 40 elements
+        let mock_tensor = MockTensor {
+            data_ptr: 0x1000,
+            elements: 40,
+            element_size_bytes: 4,
+        };
+
+        // Shape is smaller than the full tensor to allow for offset
+        let shape = [2, 3, 4]; // 24 elements total
+
+        // Create a view with an offset of 4 elements (16 bytes)
+        let offset_view =
+            TensorView::<_, 3>::with_strides(&mock_tensor, shape, [12, 4, 1], 16).unwrap();
+
+        // The view should still be contiguous
+        assert!(offset_view.is_contiguous());
+
+        // Check offset is preserved
+        assert_eq!(offset_view.offset, 16);
+
+        // Test accessing the first element
+        let first_byte_offset = offset_view.byte_offset(&[0, 0, 0]).unwrap();
+        assert_eq!(first_byte_offset, 16); // Should be at the offset
+
+        // Test accessing the last element
+        let last_byte_offset = offset_view.byte_offset(&[1, 2, 3]).unwrap();
+        assert_eq!(last_byte_offset, 16 + (1 * 12 + 2 * 4 + 3 * 1) * 4);
+
+        // Creating a view with an offset that would exceed the tensor size should fail
+        let result = TensorView::<_, 3>::with_strides(
+            &mock_tensor,
+            shape,
+            [12, 4, 1],
+            80, // 40 elements - 24 + a bit more
         );
 
-        // Test all separate
-        assert_eq!(
-            group_contiguous_blocks(&[2, 5, 8]),
-            vec![vec![2], vec![5], vec![8]]
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err();
+        assert!(
+            error_msg.contains("would access up to byte offset"),
+            "Expected error about exceeding storage, got: {}",
+            error_msg
         );
     }
 
     #[test]
-    fn test_transform_blocks_inplace_v2() -> Result<()> {
-        use super::transform_blocks_inplace_v2;
+    fn test_ndarray_view_with_real_data() {
+        use std::sync::{Arc, Mutex};
 
-        // Set up the device - first try CUDA, fall back to CPU
-        let device = match Device::cuda_if_available(0) {
-            Ok(dev) => dev,
-            Err(_) => {
-                println!("CUDA not available, falling back to CPU");
-                Device::Cpu
-            }
-        };
-
-        println!("Using device: {:?}", device);
-
-        // Define tensor dimensions
-        let n_blocks = 4; // Small number of blocks for easy testing
-        let block_size = 2; // Small block size for easy testing
-        let n_heads = 8; // Number of heads
-        let head_size = 4; // Head size (small for testing)
-        let tp_size = 2; // Tensor parallel size
-        let heads_per_rank = n_heads / tp_size;
-
-        // Create tensor with sequential values for easy validation
-        let total_elements = 2 * n_blocks * block_size * n_heads * head_size;
-        let mut data = Vec::with_capacity(total_elements);
-        for i in 0..total_elements {
-            data.push(i as f32);
+        // Create a mock tensor with real memory for testing
+        #[derive(Debug)]
+        struct RealDataMock {
+            // Using Vec<u8> to store the raw bytes
+            data: Arc<Mutex<Vec<u8>>>,
+            element_size_bytes: usize,
         }
 
-        // Create the tensor on the selected device
-        let source =
-            Tensor::from_vec(data, (2, n_blocks, block_size, n_heads, head_size), &device)?;
-
-        match source.device() {
-            Device::Cpu => {
-                println!("Source tensor shape: {:?}", source.shape());
+        impl Storage for RealDataMock {
+            fn get_pointer(&self) -> u64 {
+                // Get the raw pointer to the start of our vector's data
+                self.data.lock().unwrap().as_ptr() as u64
             }
-            Device::Cuda(_) => {
-                println!("Source tensor shape: {:?}", source.shape());
-                let (storage, layout) = source.storage_and_layout();
-                println!("Storage: {:?}", storage);
-                println!("Layout: {:?}", layout);
-                match &*storage {
-                    Storage::Cuda(storage) => {
-                        println!("Cuda storage: {:?}", storage);
-                        let slice = storage.as_cuda_slice::<f32>()?;
-                        let ptr = *slice.device_ptr();
-                        println!("Ptr: {:?}", ptr);
-                    }
-                    _ => {
-                        println!("Other storage: {:?}", storage);
-                    }
+
+            fn element_size(&self) -> usize {
+                self.element_size_bytes
+            }
+
+            fn storage_size(&self) -> usize {
+                self.data.lock().unwrap().len()
+            }
+
+            fn storage_type(&self) -> StorageType {
+                StorageType::Host
+            }
+        }
+
+        impl RealDataMock {
+            fn new(num_elements: usize, element_size: usize) -> Self {
+                // Create a zeroed buffer of the right size
+                let buffer = vec![0u8; num_elements * element_size];
+                Self {
+                    data: Arc::new(Mutex::new(buffer)),
+                    element_size_bytes: element_size,
                 }
             }
-            _ => {
-                println!("Source tensor shape: {:?}", source.shape());
-            }
-        }
 
-        // Print the source tensor shape
-        println!("Source tensor shape: {:?}", source.shape());
+            // Helper to set a specific element's value
+            fn set_element_value(&self, index: usize, value: u32) {
+                let mut data = self.data.lock().unwrap();
+                let bytes = value.to_ne_bytes();
+                let offset = index * self.element_size_bytes;
 
-        // Perform the in-place transformation
-        let start_time = std::time::Instant::now();
-        let result_tensor = transform_blocks_inplace_v2(&source, tp_size)?;
-        let elapsed = start_time.elapsed();
-
-        println!("In-place transformation completed in {:?}", elapsed);
-        println!("Result tensor shape: {:?}", result_tensor.shape());
-
-        // Verify the results - shape should be [tp_size, n_blocks, block_size, heads_per_rank, head_size]
-        assert_eq!(result_tensor.dim(0)?, tp_size);
-        assert_eq!(result_tensor.dim(1)?, 2);
-        assert_eq!(result_tensor.dim(2)?, n_blocks);
-        assert_eq!(result_tensor.dim(3)?, block_size);
-        assert_eq!(result_tensor.dim(4)?, heads_per_rank);
-        assert_eq!(result_tensor.dim(5)?, head_size);
-
-        // Move tensors to CPU for validation
-        let cpu_source = if source.device().is_cuda() {
-            source.to_device(&Device::Cpu)?
-        } else {
-            source.clone()
-        };
-
-        let cpu_result = if result_tensor.device().is_cuda() {
-            result_tensor.to_device(&Device::Cpu)?
-        } else {
-            result_tensor.clone()
-        };
-
-        // Validate values - check a few selected positions
-        // For each rank, test a few values to ensure they were correctly transformed
-        for rank in 0..tp_size {
-            // For each block in the source tensor
-            for block_idx in 0..n_blocks {
-                // Check the first position, first head, first element
-                let position = 0;
-                let head = 0;
-                let element = 0;
-
-                // Compute the expected value from source
-                // The heads are now split by rank
-                let src_head = rank * heads_per_rank + head;
-                let expected = cpu_source
-                    .get(0)?
-                    .get(block_idx)?
-                    .get(position)?
-                    .get(src_head)?
-                    .get(element)?
-                    .to_scalar::<f32>()?;
-
-                // Get the actual value from the result tensor
-                // Shape is [tp_size, n_blocks, block_size, heads_per_rank, head_size]
-                let actual = cpu_result
-                    .get(rank)?
-                    .get(0)?
-                    .get(block_idx)?
-                    .get(position)?
-                    .get(head)?
-                    .get(element)?
-                    .to_scalar::<f32>()?;
-
-                // Compare values
-                assert_eq!(
-                    expected, actual,
-                    "Value mismatch at rank {}, block_idx {}, position {}, head {}, element {}",
-                    rank, block_idx, position, head, element
-                );
-            }
-        }
-
-        // Print some values for visual verification
-        println!("\nSample values from result tensor:");
-        for rank in 0..tp_size {
-            println!("Rank {}:", rank);
-            for block_idx in 0..1 {
-                // Just print the first block
-                println!("  Block {}:", block_idx);
-                for position in 0..1 {
-                    // Just print the first position
-                    println!("    Position {}:", position);
-                    for head in 0..2 {
-                        // Print a couple of heads
-                        let head_values = cpu_result
-                            .get(rank)?
-                            .get(0)?
-                            .get(block_idx)?
-                            .get(position)?
-                            .get(head)?
-                            .to_vec1::<f32>()?;
-                        println!("      Head {}: {:?}", head, head_values);
-                    }
+                for i in 0..std::mem::size_of::<u32>() {
+                    data[offset + i] = bytes[i];
                 }
             }
         }
 
-        println!("Transform blocks inplace v2 verification passed!");
+        // Create a mock tensor with u32 elements (4 bytes each)
+        let shape = [2, 3, 4]; // 24 elements total
+        let num_elements = shape.iter().product();
+        let element_size = std::mem::size_of::<u32>();
 
-        Ok(())
-    }
+        let mock_tensor = RealDataMock::new(num_elements, element_size);
 
-    #[test]
-    fn test_copy_blocks() -> Result<()> {
-        let tp_size = 1;
-        let nblocks = 10;
-        let block_size = 4;
-        let n_heads = 2;
-        let head_size = 8;
-        let dtype = DType::F32;
-        let device = Device::Cpu;
+        // Create a tensor view
+        let view = TensorView::<_, 3>::new(&mock_tensor, shape).unwrap();
 
-        // Create source layer filled with ones
-        let mut src_layer = KvLayer::new(
-            tp_size,
-            nblocks,
-            block_size,
-            n_heads,
-            head_size,
-            dtype,
-            device.clone(),
-        )?;
-        let ones = Tensor::ones((2, nblocks, block_size, n_heads, head_size), dtype, &device)?;
-        src_layer.data = ones;
+        // Create an ndarray view
+        let ndarray_view = view.as_ndarray_view::<u32>().unwrap();
 
-        // Create destination layer filled with zeros
-        let mut dst_layer = KvLayer::new(
-            tp_size, nblocks, block_size, n_heads, head_size, dtype, device,
-        )?;
-
-        // Copy every even block from src to dst
-        let mut src_blocks = Vec::new();
-        let mut dst_blocks = Vec::new();
-        for i in 0..(nblocks / 2) {
-            let block_idx = i * 2; // 0, 2, 4, 6, 8
-            src_blocks.push(block_idx);
-            dst_blocks.push(block_idx);
+        // Verify all elements are zero (initial state)
+        for &value in ndarray_view.iter() {
+            assert_eq!(value, 0, "Expected all initial values to be 0");
         }
 
-        println!("src_blocks: {:?}", src_blocks);
-        println!("dst_blocks: {:?}", dst_blocks);
+        // Create a mutable clone of the data to work with
+        let data_arc = mock_tensor.data.clone();
 
-        // Perform the copy
-        src_layer.copy_blocks(&src_blocks, &dst_blocks, &mut dst_layer)?;
-
-        println!("dst_layer: {:?}", dst_layer.data);
-        println!("dst_layer values: {}", dst_layer.data);
-
-        // Verify the copy worked correctly
-        for block_idx in 0..nblocks {
-            let expected_value = if src_blocks.contains(&block_idx) {
-                1.0f32
-            } else {
-                0.0f32
-            };
-
-            // Check a sample position in each block
-            let position = 0;
-            let head = 0;
-            let element = 0;
-
-            // Check both K and V tensors (index 0 and 1)
-            for kv in 0..2 {
-                let actual = dst_layer
-                    .data
-                    .get(kv)?
-                    .get(block_idx)?
-                    .get(position)?
-                    .get(head)?
-                    .get(element)?
-                    .to_scalar::<f32>()?;
-
-                assert_eq!(
-                    expected_value, actual,
-                    "Value mismatch at kv {}, block_idx {}, expected {} but got {}",
-                    kv, block_idx, expected_value, actual
-                );
-            }
-        }
-
-        // Print some values for visual verification
-        println!("\nSample values from destination tensor after copy:");
-        for block_idx in 0..nblocks {
-            let position = 0;
-            let head = 0;
-            let element = 0;
-            let k_value = dst_layer
-                .data
-                .get(0)?
-                .get(block_idx)?
-                .get(position)?
-                .get(head)?
-                .get(element)?
-                .to_scalar::<f32>()?;
-
-            let v_value = dst_layer
-                .data
-                .get(1)?
-                .get(block_idx)?
-                .get(position)?
-                .get(head)?
-                .get(element)?
-                .to_scalar::<f32>()?;
-
-            println!("  Block {}: K={}, V={}", block_idx, k_value, v_value);
-        }
-
-        println!("KvLayer copy_blocks verification passed!");
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_block_copy_kernel_zero_copy() -> Result<()> {
-        use std::time::Instant;
-
-        // Setup CUDA device
-        let device = Device::cuda_if_available(0)?;
-        let cuda_device = match &device {
-            Device::Cuda(dev) => dev,
-            _ => panic!("Expected CUDA device"),
-        };
-
-        // Define tensor dimensions
-        let kv_size = 2; // 2 for key and value
-        let src_n_blocks = 10; // Source has 10 blocks
-        let dst_n_blocks = 20; // Destination has 20 blocks
-        let block_size = 2;
-        let heads_per_rank = 4;
-        let head_size = 8;
-
-        println!("Allocating source tensor on device...");
-
-        // Create source tensor on device with block ID values
-        // Each element in block 'n' will have the value 'n'
-        let mut src_data = Vec::new();
-        for _kv in 0..kv_size {
-            for block_id in 0..src_n_blocks {
-                for _pos in 0..block_size {
-                    for _head in 0..heads_per_rank {
-                        for _i in 0..head_size {
-                            // Use block_id as the value for easy verification
-                            src_data.push(block_id as f32);
-                        }
-                    }
+        // Set all elements to 42 by modifying the underlying storage
+        {
+            let mut data = data_arc.lock().unwrap();
+            for i in 0..num_elements {
+                let offset = i * element_size;
+                let bytes = 42u32.to_ne_bytes();
+                for j in 0..element_size {
+                    data[offset + j] = bytes[j];
                 }
             }
         }
 
-        let src_shape = (kv_size, src_n_blocks, block_size, heads_per_rank, head_size);
-        let src_tensor = Tensor::from_vec(src_data, src_shape, &device)?;
+        // Create a new ndarray view to see the changes
+        let updated_view = view.as_ndarray_view::<u32>().unwrap();
 
-        println!("Allocating destination tensor with pinned memory...");
-
-        // Allocate pinned memory for destination tensor
-        let total_dst_elements = kv_size * dst_n_blocks * block_size * heads_per_rank * head_size;
-        let mut pinned_mem =
-            unsafe { cuda_device.alloc_pinned::<f32>(total_dst_elements).unwrap() };
-
-        // Initialize pinned memory to zeros
-        unsafe {
-            let slice = std::slice::from_raw_parts_mut(pinned_mem.as_mut_ptr(), total_dst_elements);
-            slice.fill(0.0);
+        // Verify all elements are now 42
+        for &value in updated_view.iter() {
+            assert_eq!(value, 42, "Expected all values to be 42 after update");
         }
 
-        // Create a tensor that directly references the pinned memory (NO COPY!)
-        let dst_shape = (kv_size, dst_n_blocks, block_size, heads_per_rank, head_size);
-        let dst_tensor = unsafe {
-            let slice = std::slice::from_raw_parts(pinned_mem.as_ptr(), total_dst_elements);
-            Tensor::from_slice(slice, dst_shape, &Device::Cpu)?
-        };
-
-        // Define block mapping
-        let src_blocks = vec![1, 3, 5, 7, 9]; // Source blocks
-        let dst_blocks = vec![0, 1, 2, 3, 4]; // Destination blocks
-
-        println!("Performing block copy (device to host)...");
-
-        // Time the operation
-        let start = Instant::now();
-        copy_blocks_between_layers(&src_tensor, &dst_tensor, &src_blocks, &dst_blocks, 1)?;
-        let elapsed = start.elapsed();
-
-        println!("dst_tensor: {}", dst_tensor);
-
-        println!("Copy completed in {:?}", elapsed);
-
-        // Verify results directly from pinned memory to avoid any copying
-        println!("Verifying results...");
-
-        // validate the dst_tensor
-        // Validate only the blocks that were transferred
-        for (idx, &dst_block) in dst_blocks.iter().enumerate() {
-            let src_block = src_blocks[idx];
-
-            for kv in 0..2 {
-                for pos in 0..block_size {
-                    for head in 0..heads_per_rank {
-                        for i in 0..head_size {
-                            // Get the value at this position in the destination tensor
-                            let value = dst_tensor
-                                .get(kv)?
-                                .get(dst_block)?
-                                .get(pos)?
-                                .get(head)?
-                                .get(i)?;
-
-                            // The value should match the source block ID
-                            let value_f32 = value.to_scalar::<f32>()?;
-                            assert_eq!(
-                                value_f32, src_block as f32,
-                                "Value mismatch at kv={}, dst_block={}, pos={}, head={}, i={}, expected={}",
-                                kv, dst_block, pos, head, i, src_block
-                            );
-                        }
-                    }
-                }
-            }
+        // See that ndarray_view is also updated
+        for &value in ndarray_view.iter() {
+            assert_eq!(value, 42, "Expected all values to be 42 after update");
         }
 
-        println!("All tests passed successfully!");
+        // Change just the first element back to 0
+        mock_tensor.set_element_value(0, 0);
 
-        Ok(())
-    }
+        // Create another ndarray view to see the effect of our change
+        let final_view = view.as_ndarray_view::<u32>().unwrap();
 
-    #[test]
-    fn test_reshape_to_3d_on_block_dim_comprehensive() -> Result<()> {
-        use super::reshape_to_3d_on_block_dim;
+        // The first element should be 0, others should remain 42
+        assert_eq!(final_view[[0, 0, 0]], 0, "First element should be 0");
+        assert_eq!(updated_view[[0, 0, 0]], 0, "First element should be 0");
+        assert_eq!(ndarray_view[[0, 0, 0]], 0, "First element should be 0");
 
-        // Set up the device - first try CUDA, fall back to CPU
-        let device = match Device::cuda_if_available(0) {
-            Ok(dev) => dev,
-            Err(_) => Device::Cpu,
-        };
+        // Check some of the other elements to ensure they're still 42
+        assert_eq!(
+            final_view[[0, 0, 1]],
+            42,
+            "Element [0,0,1] should still be 42"
+        );
+        assert_eq!(final_view[[1, 2, 3]], 42, "Last element should still be 42");
 
-        // Test case 1: Block dimension in the middle
-        // (a, b, X, c, d, e) becomes (a*b, X, c*d*e)
-        let tensor1 = Tensor::zeros((2, 3, 4, 5, 6, 7), DType::F32, &device)?;
-        let reshaped1 = reshape_to_3d_on_block_dim(&tensor1, 2)?;
-        assert_eq!(reshaped1.shape().dims(), &[2 * 3, 4, 5 * 6 * 7]);
+        // Count the number of zeros (should be exactly 1)
+        let zero_count = final_view.iter().filter(|&&x| x == 0).count();
+        assert_eq!(zero_count, 1, "There should be exactly one zero element");
 
-        // Test case 2: Block dimension at the beginning
-        // (X, a, b, c, d) becomes (1, X, a*b*c*d)
-        let tensor2 = Tensor::zeros((4, 3, 2, 5), DType::F32, &device)?;
-        let reshaped2 = reshape_to_3d_on_block_dim(&tensor2, 0)?;
-        assert_eq!(reshaped2.shape().dims(), &[1, 4, 3 * 2 * 5]);
-
-        // Test case 3: Block dimension at the end
-        // (a, b, c, X) becomes (a*b*c, X, 1)
-        let tensor3 = Tensor::zeros((2, 3, 4, 5), DType::F32, &device)?;
-        let reshaped3 = reshape_to_3d_on_block_dim(&tensor3, 3)?;
-        assert_eq!(reshaped3.shape().dims(), &[2 * 3 * 4, 5, 1]);
-
-        // Test case 4: Block dimension with single dimensions
-        // (1, X, 1) becomes (1, X, 1)
-        let tensor4 = Tensor::zeros((1, 4, 1), DType::F32, &device)?;
-        let reshaped4 = reshape_to_3d_on_block_dim(&tensor4, 1)?;
-        assert_eq!(reshaped4.shape().dims(), &[1, 4, 1]);
-
-        // Test case 5: Single dimension tensor
-        // (X) becomes (1, X, 1)
-        let tensor5 = Tensor::zeros((5,), DType::F32, &device)?;
-        let reshaped5 = reshape_to_3d_on_block_dim(&tensor5, 0)?;
-        assert_eq!(reshaped5.shape().dims(), &[1, 5, 1]);
-
-        // Test case 6: Error case - block_dim out of bounds
-        let tensor6 = Tensor::zeros((2, 3), DType::F32, &device)?;
-        let result6 = reshape_to_3d_on_block_dim(&tensor6, 2);
-        assert!(result6.is_err());
-
-        Ok(())
+        // Count the number of 42s (should be num_elements - 1)
+        let forty_two_count = final_view.iter().filter(|&&x| x == 42).count();
+        assert_eq!(
+            forty_two_count,
+            num_elements - 1,
+            "All other elements should be 42"
+        );
     }
 }

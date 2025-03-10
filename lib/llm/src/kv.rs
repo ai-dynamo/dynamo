@@ -13,13 +13,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod layer;
 pub mod manager;
 pub mod reserved;
 pub mod reuse;
 pub mod sequence;
-
-#[cfg(feature = "cuda_kv")]
 pub mod storage;
+
+// #[cfg(feature = "cuda_kv")]
+// pub mod storage;
 
 use reserved::*;
 
