@@ -1,4 +1,4 @@
-# deploy DYNEMO pipeline on Kubernetes
+# deploy Dynamo pipeline on Kubernetes
 
 This is a proof of concept for a Helm chart to deploy services defined in a bento.yaml configuration.
 
