@@ -28,12 +28,13 @@ pub(crate) struct KvRouter {
 impl KvRouter {
     #[new]
     // [FXIME] 'drt' can be obtained from 'component'
-    fn new(drt: DistributedRuntime, component: Component) -> PyResult<Self> {
+    fn new(drt: DistributedRuntime, component: Component, kv_block_size: usize) -> PyResult<Self> {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async {
             let inner = llm_rs::kv_router::KvRouter::from_runtime(
                 drt.inner.clone(),
                 component.inner.clone(),
+                kv_block_size,
             )
             .await
             .map_err(to_pyerr)?;
@@ -138,7 +139,7 @@ pub(crate) struct KvIndexer {
 #[pymethods]
 impl KvIndexer {
     #[new]
-    fn new(component: Component) -> PyResult<Self> {
+    fn new(component: Component, kv_block_size: usize) -> PyResult<Self> {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async {
             let kv_subject = component
@@ -147,6 +148,7 @@ impl KvIndexer {
             let inner: Arc<llm_rs::kv_router::indexer::KvIndexer> =
                 llm_rs::kv_router::indexer::KvIndexer::new(
                     component.inner.drt().runtime().child_token(),
+                    kv_block_size,
                 )
                 .into();
             let mut kv_events_rx = component

@@ -36,16 +36,16 @@ import (
 
 	"emperror.dev/errors"
 	"github.com/cisco-open/k8s-objectmatcher/patch"
-	dynamoCommon "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/common"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/modelschemas"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/schemasv1"
-	yataiclient "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/yatai-client"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/v1alpha1"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/internal/controller_common"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/internal/envoy"
-	commonconfig "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/pkg/dynamo/config"
-	commonconsts "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/pkg/dynamo/consts"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/pkg/dynamo/system"
+	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/modelschemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemasv1"
+	yataiclient "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/yatai-client"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/envoy"
+	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/config"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/consts"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/system"
 	"github.com/huandu/xstrings"
 	"github.com/jinzhu/copier"
 	"github.com/prometheus/common/version"
@@ -70,7 +70,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	compounadaiConversion "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/conversion"
+	compounadaiConversion "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/conversion"
 )
 
 const (

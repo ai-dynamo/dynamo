@@ -63,7 +63,8 @@ By default the server will run on port 8080.
 
 Add model to the server:
 ```bash
-llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo.vllm.generate
+llmctl http add chat deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo.vllm.chat/completions
+llmctl http add completions deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo.vllm.completions
 ```
 
 ##### Example Output
@@ -261,7 +262,8 @@ cd /workspace/examples/python_rs/llm/vllm
 RUST_LOG=info python3 -m kv_router.router \
     --routing-strategy prefix \
     --model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-    --min-workers 1
+    --min-workers 1 \
+    --block-size 64
 ```
 
 You can choose only the prefix strategy for now:

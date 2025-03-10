@@ -17,7 +17,7 @@
 
 package fixtures
 
-import "github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
+import "github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
 
 func DefaultCreateClusterSchema() schemas.CreateClusterSchema {
 	return schemas.CreateClusterSchema{

@@ -13,62 +13,119 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import asyncio
-import uuid
+import json
+from typing import AsyncGenerator, AsyncIterator
 
 import uvloop
-from common.base_engine import BaseVllmEngine
-from common.chat_processor import ProcessMixIn
 from common.parser import parse_vllm_args
+from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.openai.api_server import (
+    build_async_engine_client_from_engine_args,
+)
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
+    ChatCompletionResponse,
     ChatCompletionStreamResponse,
+    CompletionRequest,
+    CompletionResponse,
+    CompletionStreamResponse,
+    ErrorResponse,
 )
-from vllm.logger import logger as vllm_logger
+from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
+from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
 
-class VllmEngine(BaseVllmEngine, ProcessMixIn):
-    """
-    Request handler for the generate endpoint
-    """
+class VllmEngine:
+    def __init__(
+        self, engine_client: AsyncIterator[EngineClient], model_config: ModelConfig
+    ):
+        self.engine_client = engine_client
+        self.model_config = model_config
 
-    def __init__(self, engine_args: AsyncEngineArgs):
-        super().__init__(engine_args)
+        # Ensure served_model_name matches the openai model name
+        # Use --served-model-name to explicitly set this or it will fallback to --model
+        models = OpenAIServingModels(
+            engine_client=engine_client,
+            model_config=model_config,
+            base_model_paths=[
+                BaseModelPath(
+                    name=model_config.served_model_name,
+                    model_path=model_config.model,
+                )
+            ],
+        )
+
+        self.chat_serving = OpenAIServingChat(
+            engine_client=self.engine_client,
+            model_config=self.model_config,
+            models=models,
+            response_role="assistant",
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+        )
+        self.completion_serving = OpenAIServingCompletion(
+            engine_client=self.engine_client,
+            model_config=self.model_config,
+            models=models,
+            request_logger=None,
+        )
 
     @dynamo_endpoint(ChatCompletionRequest, ChatCompletionStreamResponse)
-    async def generate(self, raw_request):
-        if self.engine_client is None:
-            await self.initialize()
+    async def generate_chat(self, request):
+        result = await self.chat_serving.create_chat_completion(request)
 
-        vllm_logger.debug(f"Got raw request: {raw_request}")
-        (
-            request,
-            conversation,
-            _,
-            engine_prompt,
-            sampling_params,
-        ) = await self._parse_raw_request(raw_request)
-        request_id = str(uuid.uuid4())
+        if isinstance(result, AsyncGenerator):
+            async for raw_response in result:
+                if raw_response.startswith("data: [DONE]"):
+                    break
+                response = json.loads(raw_response.lstrip("data: "))
+                yield response
 
-        vllm_logger.debug(
-            f"Running generate with engine_prompt: {engine_prompt}, sampling_params: {sampling_params}, request_id: {request_id}"
-        )
-        if self.engine_client is None:
-            raise RuntimeError("Engine client not initialized")
-        else:
-            generator = self.engine_client.generate(
-                engine_prompt, sampling_params, request_id
+        # We should always be streaming so should never get here
+        elif isinstance(result, ChatCompletionResponse):
+            raise RuntimeError("ChatCompletionResponse support not implemented")
+
+        elif isinstance(result, ErrorResponse):
+            error = result.dict()
+            raise RuntimeError(
+                f"Error {error['code']}: {error['message']} "
+                f"(type: {error['type']}, param: {error['param']})"
             )
 
-        async for response in await self._stream_response(
-            request, generator, request_id, conversation
-        ):
-            vllm_logger.debug(f"Generated response: {response}")
-            yield response
+        else:
+            raise TypeError(f"Unexpected response type: {type(result)}")
+
+    @dynamo_endpoint(CompletionRequest, CompletionStreamResponse)
+    async def generate_completions(self, request):
+        result = await self.completion_serving.create_completion(request)
+
+        if isinstance(result, AsyncGenerator):
+            async for raw_response in result:
+                if raw_response.startswith("data: [DONE]"):
+                    break
+                response = json.loads(raw_response.lstrip("data: "))
+                yield response
+
+        # We should always be streaming so should never get here
+        elif isinstance(result, CompletionResponse):
+            raise RuntimeError("CompletionResponse support not implemented")
+
+        elif isinstance(result, ErrorResponse):
+            error = result.dict()
+            raise RuntimeError(
+                f"Error {error['code']}: {error['message']} "
+                f"(type: {error['type']}, param: {error['param']})"
+            )
+
+        else:
+            raise TypeError(f"Unexpected response type: {type(result)}")
 
 
 @dynamo_worker()
@@ -80,10 +137,17 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     component = runtime.namespace("dynamo").component("vllm")
     await component.create_service()
 
-    endpoint = component.endpoint("generate")
+    chat_endpoint = component.endpoint("chat/completions")
+    completions_endpoint = component.endpoint("completions")
 
-    async with VllmEngine(engine_args) as engine:
-        await endpoint.serve_endpoint(engine.generate)
+    async with build_async_engine_client_from_engine_args(engine_args) as engine_client:
+        model_config = await engine_client.get_model_config()
+        engine = VllmEngine(engine_client, model_config)
+
+        await asyncio.gather(
+            chat_endpoint.serve_endpoint(engine.generate_chat),
+            completions_endpoint.serve_endpoint(engine.generate_completions),
+        )
 
 
 if __name__ == "__main__":

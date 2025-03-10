@@ -18,7 +18,7 @@ name = "dynamo-run"
 version = "0.1.0"
 edition = "2021"
 authors = ["NVIDIA"]
-homepage = "https://github.com/dynemo-ai/dynemo"
+homepage = "https://github.com/ai-dynamo/dynamo"
 license = "Apache-2.0"
 
 [features]

@@ -20,10 +20,10 @@ package controllers
 import (
 	"context"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/common/consts"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/converters"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/mocks"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/consts"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/converters"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/mocks"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
 	"github.com/gin-gonic/gin"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"

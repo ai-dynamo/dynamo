@@ -18,7 +18,7 @@
 package controllers
 
 import (
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/mocks"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/mocks"
 	"github.com/gin-gonic/gin"
 )
 

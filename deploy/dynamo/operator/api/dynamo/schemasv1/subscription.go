@@ -17,7 +17,7 @@
 
 package schemasv1
 
-import "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/modelschemas"
+import "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/modelschemas"
 
 type SubscriptionAction string
 

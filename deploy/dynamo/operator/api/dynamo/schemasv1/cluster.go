@@ -18,7 +18,7 @@
 package schemasv1
 
 import (
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/modelschemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/modelschemas"
 )
 
 type ClusterSchema struct {

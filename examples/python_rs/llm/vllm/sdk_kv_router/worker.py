@@ -27,11 +27,11 @@ with bentoml.importing():
     from common.protocol import MyRequestOutput, vLLMGenerateRequest
     from vllm.engine.multiprocessing.client import MQLLMEngineClient
 
-from dynemo.llm import KvMetricsPublisher
-from dynemo.sdk import (
+from dynamo.llm import KvMetricsPublisher
+from dynamo.sdk import (
     async_onstart,
-    dynemo_context,
-    dynemo_endpoint,
+    dynamo_context,
+    dynamo_endpoint,
     server_context,
     service,
 )
@@ -42,9 +42,9 @@ lease_id = None
 
 
 @service(
-    dynemo={
+    dynamo={
         "enabled": True,
-        "namespace": "dynemo",
+        "namespace": "dynamo",
     },
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -63,9 +63,9 @@ class VllmEngine(BaseVllmEngine):
             block_size=64,
             max_model_len=16384,
         )
-        VLLM_WORKER_ID = dynemo_context["endpoints"][0].lease_id()
+        VLLM_WORKER_ID = dynamo_context["endpoints"][0].lease_id()
         os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
-        os.environ["VLLM_KV_NAMESPACE"] = "dynemo"
+        os.environ["VLLM_KV_NAMESPACE"] = "dynamo"
         os.environ["VLLM_KV_COMPONENT"] = "vllm"
         vllm_logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
         os.environ["CUDA_VISIBLE_DEVICES"] = f"{server_context.worker_index - 1}"
@@ -74,7 +74,7 @@ class VllmEngine(BaseVllmEngine):
         super().__init__(self.engine_args)
 
     async def create_metrics_publisher_endpoint(self):
-        component = dynemo_context["component"]
+        component = dynamo_context["component"]
         await self.metrics_publisher.create_endpoint(component)
 
     @async_onstart
@@ -88,7 +88,7 @@ class VllmEngine(BaseVllmEngine):
         task = asyncio.create_task(self.create_metrics_publisher_endpoint())
         task.add_done_callback(lambda _: print("metrics publisher endpoint created"))
 
-    @dynemo_endpoint()
+    @dynamo_endpoint()
     async def generate(self, request: vLLMGenerateRequest):
         sampling_params = request.sampling_params
         # rust HTTP requires Delta streaming

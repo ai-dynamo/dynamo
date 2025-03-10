@@ -247,7 +247,7 @@ index 1ca9e49d..b1591c0c 100644
  
          # Reuse the cached content hash
 diff --git a/vllm/core/block_manager.py b/vllm/core/block_manager.py
-index c5b3b04f..c72001f7 100644
+index c5b3b04f..12cd4dc9 100644
 --- a/vllm/core/block_manager.py
 +++ b/vllm/core/block_manager.py
 @@ -10,7 +10,10 @@ from vllm.core.block.interfaces import Block
@@ -269,7 +269,7 @@ index c5b3b04f..c72001f7 100644
          block_size: int,
          num_gpu_blocks: int,
          num_cpu_blocks: int,
-@@ -91,11 +95,28 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
+@@ -91,11 +95,29 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
  
          self.watermark_blocks = int(watermark * num_gpu_blocks)
  
@@ -285,7 +285,8 @@ index c5b3b04f..c72001f7 100644
 +                namespace=VLLM_KV_NAMESPACE,
 +                component=VLLM_KV_COMPONENT,
 +                worker_id=VLLM_WORKER_ID,
-+                lib_path=VLLM_KV_CAPI_PATH)
++                lib_path=VLLM_KV_CAPI_PATH,
++                kv_block_size=block_size)
 +        else:
 +            self.event_manager = None
 +
@@ -300,10 +301,10 @@ index c5b3b04f..c72001f7 100644
          self.block_tables: Dict[SeqId, BlockTable] = {}
 diff --git a/vllm/core/event_manager.py b/vllm/core/event_manager.py
 new file mode 100644
-index 00000000..d3706700
+index 00000000..a27af580
 --- /dev/null
 +++ b/vllm/core/event_manager.py
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,108 @@
 +# SPDX-License-Identifier: Apache-2.0
 +import ctypes
 +import logging
@@ -324,16 +325,22 @@ index 00000000..d3706700
 +class KVCacheEventManager:
 +
 +    def __init__(self, namespace: str, component: str, worker_id: int,
-+                 lib_path: str):
++                 lib_path: str, kv_block_size: int):
 +        self.lib = None
 +
 +        try:
 +            self.lib = ctypes.CDLL(lib_path)
-+            self.lib.dynamo_llm_init.argtypes = [c_char_p, c_char_p, c_int64]
++            self.lib.dynamo_llm_init.argtypes = [
++                c_char_p,
++                c_char_p,
++                c_int64,
++                c_uint32,
++            ]
 +            self.lib.dynamo_llm_init.restype = c_uint32
 +
-+            result = self.lib.dynamo_llm_init(namespace.encode(),
-+                                              component.encode(), worker_id)
++            result = self.lib.dynamo_llm_init(
++                namespace.encode(), component.encode(), worker_id, kv_block_size
++            )
 +            if result == DynamoResult.OK:
 +                logger.info(
 +                    "KVCacheEventManager initialized successfully. Ready to publish KV Cache Events"

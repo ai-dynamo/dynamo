@@ -63,7 +63,7 @@ PROCESSOR_CMD="RUST_LOG=info python3 -m kv_router.processor \
     --model $MODEL_NAME \
     --tokenizer $MODEL_NAME \
     --enable-prefix-caching \
-    --block-size 64 \
+    --block-size 32 \
     --max-model-len 16384 "
 tmux new-session -d -s "$SESSION_NAME-processor"
 tmux send-keys -t "$SESSION_NAME-processor" "$INIT_CMD && $PROCESSOR_CMD" C-m
@@ -74,7 +74,8 @@ tmux send-keys -t "$SESSION_NAME-processor" "$INIT_CMD && $PROCESSOR_CMD" C-m
 ROUTER_CMD="RUST_LOG=info python3 -m kv_router.router \
     --model $MODEL_NAME \
     --routing-strategy $ROUTING_STRATEGY \
-    --min-workers $NUM_WORKERS "
+    --min-workers $NUM_WORKERS \
+    --block-size 32"
 
 tmux new-session -d -s "$SESSION_NAME-router"
 tmux send-keys -t "$SESSION_NAME-router" "$INIT_CMD && $ROUTER_CMD" C-m
