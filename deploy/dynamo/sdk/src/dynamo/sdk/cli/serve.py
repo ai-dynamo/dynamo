@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import collections
 import json
 import logging
 import os
@@ -61,7 +62,7 @@ def deprecated_option(*param_decls: str, **attrs: t.Any):
     return decorator
 
 
-def _try_service_args(args: list[str]) -> dict[str, t.Any]:
+def _try_service_args(args: list[str]) -> t.Dict[str, t.Any] | None:
     service_configs = {}
     for arg in args:
         if arg.startswith("--") and "=" in arg:
