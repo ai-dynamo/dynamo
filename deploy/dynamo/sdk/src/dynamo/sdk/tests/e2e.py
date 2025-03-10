@@ -16,6 +16,7 @@
 # This is a simple example of a pipeline that uses Dynamo to deploy a backend, middle, and frontend service. Use this to test
 # changes made to CLI, SDK, etc
 
+import os
 from pydantic import BaseModel
 
 from dynamo.sdk import api, depends, dynamo_endpoint, service
@@ -84,13 +85,55 @@ class Middle:
 
     def __init__(self) -> None:
         print("Starting middle")
+        config = ServiceConfig.get_instance()
+        # loading a small model via VLLM that is not used to test the arg parsing
+        import sys
+        from vllm.engine.arg_utils import AsyncEngineArgs
+        from vllm.utils import FlexibleArgumentParser
+        from vllm.engine.async_llm_engine import AsyncLLMEngine
+
+
+        try:
+            os.environ["VLLM_LOG_LEVEL"] = "DEBUG"
+            # Get VLLM args
+            vllm_args = config.as_args("Middle", prefix="vllm_")
+            print(f"VLLM args to parse: {vllm_args}")
+            
+            # Create and use parser - MUCH SIMPLER!
+            parser = FlexibleArgumentParser()
+            parser = AsyncEngineArgs.add_cli_args(parser)
+            args = parser.parse_args(vllm_args)  # Pass args directly here!
+            self.engine_args = AsyncEngineArgs.from_cli_args(args)
+            self.engine = AsyncLLMEngine.from_engine_args(self.engine_args)
+        
+        except ImportError:
+            print("VLLM imports not available, skipping engine arg parsing")
+        except Exception as e:
+            print(f"Error parsing VLLM args: {e}")
 
     @dynamo_endpoint()
     async def generate(self, req: RequestType):
         """Forward requests to backend."""
+        from vllm.sampling_params import SamplingParams
+
         req_text = req.text
         print(f"Middle received: {req_text}")
-        text = f"{req_text}-mid"
+        example_input = {
+            "prompt": req_text,
+            "stream": False, 
+            "temperature": 0.0,
+            "request_id": 0,
+        }
+        results_generator = self.engine.generate(
+            "what is an LLM",
+            SamplingParams(temperature=example_input["temperature"]),
+            example_input["request_id"])
+        final_output = None
+        async for request_output in results_generator:
+            final_output = request_output
+
+        print(final_output)
+        text = f"{final_output}-mid"
         next_request = RequestType(text=text).model_dump_json()
         async for response in self.backend.generate(next_request):
             print(f"Middle received response: {response}")
