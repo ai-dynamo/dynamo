@@ -24,32 +24,22 @@ import (
 	"net/http"
 
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/client"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/env"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
 	"github.com/rs/zerolog/log"
 )
 
-type backendService struct {
-	backendURL string
-}
+type backendService struct {}
 
 var BackendService = backendService{}
-
-// InitBackendService initializes the backend service with the provided URL
-func InitBackendService(backendURL string) {
-	log.Debug().Msgf("Initializing backend service with URL: %s", backendURL)
-	BackendService = backendService{backendURL: backendURL}
-}
 
 /**
 	 This service connects to the postgresql database
 **/
 
-func (s *backendService) GetBackendURL() string {
-	return s.backendURL
-}
-
 func (s *backendService) GetDynamoNimVersion(ctx context.Context, dynamoNim string, dynamoNimVersion string) (*schemas.DynamoNimVersionFullSchema, error) {
-	getUrl := fmt.Sprintf("%s/api/v1/dynamo_nims/%s/versions/%s", s.backendURL, dynamoNim, dynamoNimVersion)
+	backendUrl := env.GetBackendUrl()
+	getUrl := fmt.Sprintf("%s/api/v1/dynamo_nims/%s/versions/%s", backendUrl, dynamoNim, dynamoNimVersion)
 
 	_, body, err := client.SendRequestJSON(getUrl, http.MethodGet, nil)
 	if err != nil {

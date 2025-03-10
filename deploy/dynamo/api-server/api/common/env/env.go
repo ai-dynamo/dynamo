@@ -43,7 +43,7 @@ func SetupEnv() {
 }
 
 func GetBackendUrl() string {
-	// Gets the backend URL from the Python db.py script
+	// Gets the backend URL from the API_BACKEND_URL environment variable set in the Python script
 	once.Do(func() { // cache and reuse
 		var err error
 		BackendUrl, err = utils.MustGetEnv("API_BACKEND_URL")

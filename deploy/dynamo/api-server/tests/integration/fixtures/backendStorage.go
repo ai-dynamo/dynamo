@@ -32,16 +32,10 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-type MockedBackendService struct {
-	backendURL string
-}
+type MockedBackendService struct {}
 
 func (s *MockedBackendService) GetDynamoNimVersion(ctx context.Context, dynamoNim string, dynamoNimVersion string) (*schemas.DynamoNimVersionFullSchema, error) {
 	return nil, nil
-}
-
-func (s *MockedBackendService) GetBackendURL() string {
-	return s.backendURL
 }
 
 // MockBackendServer represents a mock backend server for testing

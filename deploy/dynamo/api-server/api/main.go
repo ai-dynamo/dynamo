@@ -25,24 +25,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/utils"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/runtime"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/services"
 )
 
 const (
 	port = 8181
 )
-
-// getBackend gets the backend URL from the Python db.py script
-func getBackendURL() string {
-	// First check environment variable
-	backendURL, err := utils.MustGetEnv("API_BACKEND_URL")
-	if err != nil {
-		log.Fatalf("Failed to get backend URL: %v", err)
-	}
-	return backendURL
-}
 
 func startDatabase() {
 	// Check if the database is already running
@@ -76,13 +64,6 @@ func startDatabase() {
 func main() {
 	// Start the database first
 	startDatabase()
-
-	// Get the backend URL
-	backendURL := getBackendURL()
-	log.Printf("Using backend URL: %s", backendURL)
-
-	// Set the database URL for services
-	services.InitBackendService(backendURL)
 
 	// Start the API server
 	runtime.Runtime.StartServer(port)

@@ -74,8 +74,6 @@ func (s *ApiServerSuite) SetupSuite() {
 
 	// Create mock backend servers
 	s.mockBackend = fixtures.CreateMockBackendServer(s.T())
-	backendURL := env.GetBackendUrl()
-	services.InitBackendService(backendURL)
 
 	// Setup server
 	go func() {

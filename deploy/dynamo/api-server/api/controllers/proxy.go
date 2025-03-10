@@ -21,7 +21,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/services"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/env"
 	"github.com/gin-gonic/gin"
 )
 
@@ -33,7 +33,7 @@ func (*proxyController) ReverseProxy(ctx *gin.Context) {
 	director := func(req *http.Request) {
 		r := ctx.Request
 		req.URL.Scheme = "http"
-		req.URL.Host = services.BackendService.GetBackendURL()
+		req.URL.Host = env.GetBackendUrl()
 		req.Header = r.Header.Clone()
 	}
 	proxy := &httputil.ReverseProxy{Director: director}
