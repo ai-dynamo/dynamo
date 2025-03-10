@@ -333,3 +333,24 @@ class KvMetricsAggregator:
         Return the aggregated metrics of the endpoints.
         """
         ...
+
+
+class HttpService:
+    """
+    A HTTP service for dynamo applications.
+    It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
+    """
+    ...
+class HttpError:
+    """
+    An error that occurred in the HTTP service
+    """
+    ...
+
+class HttpAsyncEngine:
+    """
+    An async engine for a distributed Dynamo http service. This is an extension of the
+    python based AsyncEngine that handles HttpError exceptions from Python and
+    converts them to the Rust version of HttpError
+    """
+    ...
