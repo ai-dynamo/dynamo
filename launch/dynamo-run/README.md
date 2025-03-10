@@ -170,12 +170,12 @@ Build: `cargo build --release --features python`
 If the Python engine wants to receive and returns strings - it will do the prompt templating and tokenization itself - run it like this:
 
 ```
-dynamo-run out=pystr:/home/user/my_python_engine.py --name <model-name>
+dynamo-run out=pystr:/home/user/my_python_engine.py
 ```
 
 - The `request` parameter is a map, an OpenAI compatible create chat completion request: https://platform.openai.com/docs/api-reference/chat/create
 - The function must `yield` a series of maps conforming to create chat completion stream response (example below).
-- The `--name` flag is the name we serve the model under, if using an HTTP front end.
+- If using an HTTP front-end add the `--model-name` flag. This is the name we serve the model under.
 
 The file is loaded once at startup and kept in memory.
 
@@ -218,7 +218,7 @@ dynamo-run out=pytok:/home/user/my_python_engine.py --model-path <hf-repo-checko
 {"token_ids":[791],"tokens":None,"text":None,"cum_log_probs":None,"log_probs":None,"finish_reason":None}
 ```
 
-- Command like flag `--model-path` which must point to a Hugging Face repo checkout containing the `tokenizer.json`. The `--name` flag is optional. If not provided we use the HF repo name (directory name) as the model name.
+- Command like flag `--model-path` which must point to a Hugging Face repo checkout containing the `tokenizer.json`. The `--model-name` flag is optional. If not provided we use the HF repo name (directory name) as the model name.
 
 Example engine:
 ```
