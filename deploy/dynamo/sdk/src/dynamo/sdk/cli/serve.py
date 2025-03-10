@@ -66,11 +66,19 @@ def build_serve_command() -> click.Group:
     from bentoml_cli.env_manager import env_manager
     from bentoml_cli.utils import AliasCommand, BentoMLCommandGroup
 
+    
     @click.group(name="serve", cls=BentoMLCommandGroup)
     def cli():
         pass
 
-    @cli.command(aliases=["serve-http"], cls=AliasCommand)
+    @cli.command(
+        context_settings=dict(
+            ignore_unknown_options=True,
+            allow_extra_args=True,
+        ),
+        aliases=["serve-http"], 
+        cls=AliasCommand
+    )
     @click.argument("bento", type=click.STRING, default=".")
     @click.option(
         "--development",
@@ -207,6 +215,7 @@ def build_serve_command() -> click.Group:
     @click.pass_context
     @env_manager
     def serve(
+        ctx: click.Context,
         bento: str,
         development: bool,
         port: int,
@@ -225,14 +234,12 @@ def build_serve_command() -> click.Group:
         ssl_ciphers: str | None,
         timeout_keep_alive: int | None,
         timeout_graceful_shutdown: int | None,
-        ctx: click.Context,
         **attrs: t.Any,
     ) -> None:
         """Start a HTTP BentoServer from a given 🍱
 
         \b
-        You can pass service-specific configuration options using --ServiceName.param=value format. For example:
-        `bentoml serve my_service --Processor.model="mistral-7b" --VllmEngine.block_size=128`
+        You can also pass service-specific configuration options using --ServiceName.param=value format.
 
         \b
         BENTO is the serving target, it can be the import as:
@@ -268,10 +275,9 @@ def build_serve_command() -> click.Group:
         from bentoml import Service
         from bentoml._internal.service.loader import load
 
-        # handle logic for service-specific configuration options
+        # Process service-specific options
         service_configs = {}
-
-        # ctx.args contains all unprocessed arguments
+        
         for arg in ctx.args:
             if arg.startswith('--') and '=' in arg:
                 # Remove leading dashes
@@ -283,10 +289,10 @@ def build_serve_command() -> click.Group:
                     
                     # Try to parse value as appropriate type
                     try:
-                        # Try as JSON first (for complex types)
+                        # Try as JSON for complex types
                         value = json.loads(value)
                     except json.JSONDecodeError:
-                        # Handle basic types: int, float, bool
+                        # Handle basic types
                         if value.isdigit():
                             value = int(value)
                         elif value.replace('.', '', 1).isdigit() and value.count('.') <= 1:
@@ -301,8 +307,7 @@ def build_serve_command() -> click.Group:
         # Set environment variable with service configuration
         if service_configs:
             os.environ["DYNAMO_SERVICE_CONFIG"] = json.dumps(service_configs)
-            print(f"Service configuration: {json.dumps(service_configs, indent=2)}")
-
+        
         configure_server_logging()
         if working_dir is None:
             if os.path.isdir(os.path.expanduser(bento)):

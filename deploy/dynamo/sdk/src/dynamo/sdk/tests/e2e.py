@@ -118,22 +118,7 @@ class Middle:
 
         req_text = req.text
         print(f"Middle received: {req_text}")
-        example_input = {
-            "prompt": req_text,
-            "stream": False, 
-            "temperature": 0.0,
-            "request_id": 0,
-        }
-        results_generator = self.engine.generate(
-            "what is an LLM",
-            SamplingParams(temperature=example_input["temperature"]),
-            example_input["request_id"])
-        final_output = None
-        async for request_output in results_generator:
-            final_output = request_output
-
-        print(final_output)
-        text = f"{final_output}-mid"
+        text = f"{req_text}-mid"
         next_request = RequestType(text=text).model_dump_json()
         async for response in self.backend.generate(next_request):
             print(f"Middle received response: {response}")

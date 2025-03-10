@@ -1,4 +1,4 @@
-from typing import Dict, Any, Optional
+from typing import Any, Dict
 import json
 import os
 
@@ -28,14 +28,36 @@ class ServiceConfig:
         service_config = self.configs.get(service_name, {})
         return service_config.get(key, default)
     
+    def require_config(self, service_name: str, key: str) -> Any:
+        """Get config value, raising error if not found"""
+        value = self.get_config(service_name, key)
+        if value is None:
+            raise ValueError(f"{service_name}.{key} must be specified in configuration")
+        return value
+    
     def get_service_config(self, service_name: str) -> Dict[str, Any]:
         """Get all configs for a specific service"""
         return self.configs.get(service_name, {})
-    
-    def require_config(self, service_name: str, key: str, error_msg: str = None) -> Any:
-        """Get a required config value, raising error if not found"""
-        value = self.get_config(service_name, key)
-        if value is None:
-            msg = error_msg or f"{service_name}.{key} must be specified in configuration"
-            raise ValueError(msg)
-        return value
+        
+    def as_args(self, service_name: str, prefix: str = "") -> list[str]:
+        """Extract configs as CLI args for a service, optionally with a prefix filter"""
+        args = []
+        config = self.get_service_config(service_name)
+        
+        for key, value in config.items():
+            if prefix and not key.startswith(prefix):
+                continue
+                
+            # Strip prefix if needed
+            arg_key = key[len(prefix):] if prefix and key.startswith(prefix) else key
+            
+            # Convert to CLI format
+            if isinstance(value, bool):
+                # Boolean flags
+                if value:
+                    args.append(f"--{arg_key}")
+            else:
+                # Regular arguments
+                args.extend([f"--{arg_key}", str(value)])
+        
+        return args
