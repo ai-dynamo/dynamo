@@ -43,7 +43,7 @@ def new_compound_entity_id() -> str:
 
 
 class DynamoNimVersion(DynamoNimVersionBase, table=True):
-    """A row in the compoundai nim table."""
+    """A row in the dynamo nim table."""
 
     __table_args__ = (
         UniqueConstraint("dynamo_nim_id", "version", name="version_unique_per_nim"),
@@ -55,6 +55,6 @@ class DynamoNimVersion(DynamoNimVersionBase, table=True):
 
 
 class DynamoNim(DynamoNimBase, table=True):
-    """A row in the compoundai nim table."""
+    """A row in the dynamo nim table."""
 
     id: str = SQLField(default_factory=new_compound_entity_id, primary_key=True)

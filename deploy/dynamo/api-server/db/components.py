@@ -165,7 +165,7 @@ class DynamoNimVersionManifestSchema(BaseModel):
 
 def _validate_manifest(v):
     try:
-        # Validate that the 'manifest' matches the CompoundAIManifestSchema
+        # Validate that the 'manifest' matches the DynamoManifestSchema
         return DynamoNimVersionManifestSchema.model_validate(v).model_dump()
     except ValidationError as e:
         raise ValueError(f"Invalid manifest schema: {e}")

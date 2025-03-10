@@ -47,7 +47,7 @@ from components import (
     UserSchema,
 )
 
-API_TAG_MODELS = "compoundai"
+API_TAG_MODELS = "dynamo"
 
 DEFAULT_LIMIT = 3
 SORTABLE_COLUMNS = {
@@ -72,9 +72,9 @@ async def login(
     request: Request,
 ):
     return UserSchema(
-        name="compoundai",
-        email="compoundai@nvidia.com",
-        first_name="compound",
+        name="dynamo",
+        email="dynamo@nvidia.com",
+        first_name="dynamo",
         last_name="ai",
     )
 
@@ -99,7 +99,7 @@ async def current_org(
         name="nvidia",
         resource_type=ResourceType.Organization,
         labels=[],
-        description="CompoundAI default organization.",
+        description="Dynamo default organization.",
     )
 
 
@@ -525,7 +525,7 @@ async def upload_dynamo_nim_version(
 
 
 def generate_file_path(version) -> str:
-    return f"compoundai-{version}"
+    return f"dynamo-{version}"
 
 
 @router.get(

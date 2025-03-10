@@ -85,7 +85,7 @@ async def create_db_and_tables_async():
 
 ### S3 storage
 
-COMPOUNDAI_CONTAINER_NAME = "COMPOUNDAI_CONTAINER_NAME"
+DYNAMO_CONTAINER_NAME = "DYNAMO_CONTAINER_NAME"
 
 
 def get_s3_client():
@@ -107,7 +107,7 @@ def get_s3_client():
 class S3Storage:
     def __init__(self):
         self.s3_client = get_s3_client()
-        self.bucket_name = COMPOUNDAI_CONTAINER_NAME
+        self.bucket_name = DYNAMO_CONTAINER_NAME
         self.ensure_bucket_exists()
 
     def ensure_bucket_exists(self):
