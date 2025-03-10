@@ -215,7 +215,7 @@ func (s *deploymentTargetService) Terminate(ctx context.Context, deploymentTarge
 }
 
 func (s *deploymentTargetService) deleteDeploymentTarget(ctx context.Context, deploymentTarget *models.DeploymentTarget) error {
-	log.Info().Msgf("Deleting deployment target: %+v", deploymentTarget.CompoundNimVersionTag)
+	log.Info().Msgf("Deleting deployment target: %+v", deploymentTarget.DynamoNimVersionTag)
 	err := s.getDB(ctx).Where("id = ?", deploymentTarget.ID).Delete(deploymentTarget).Error
 	return err
 }

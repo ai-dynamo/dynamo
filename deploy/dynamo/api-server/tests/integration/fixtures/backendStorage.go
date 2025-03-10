@@ -325,8 +325,8 @@ func (m *MockBackendServer) handleListDynamoNimVersions(c *gin.Context) {
 		"items": []map[string]interface{}{
 			{
 				"dynamo_nim_uid": dynamoNimName,
-				"version":         "1.0.0",
-				"status":          "ACTIVE",
+				"version":        "1.0.0",
+				"status":         "ACTIVE",
 			},
 		},
 		"total": 1,
@@ -357,8 +357,8 @@ func (m *MockBackendServer) handleCreateDynamoNimVersion(c *gin.Context) {
 	// Create a mock response
 	response := map[string]interface{}{
 		"dynamo_nim_uid": dynamoNimName,
-		"version":         requestBody["version"],
-		"status":          "ACTIVE",
+		"version":        requestBody["version"],
+		"status":         "ACTIVE",
 	}
 
 	c.JSON(http.StatusOK, response)
@@ -386,8 +386,8 @@ func (m *MockBackendServer) handleUpdateImageBuildStatus(c *gin.Context) {
 
 	// Create a mock response
 	response := map[string]interface{}{
-		"dynamo_nim_uid":   dynamoNimName,
-		"version":          version,
+		"dynamo_nim_uid":     dynamoNimName,
+		"version":            version,
 		"image_build_status": requestBody["image_build_status"],
 	}
 
@@ -410,7 +410,7 @@ func (m *MockBackendServer) handleUpdateImageBuildStatusSyncingAt(c *gin.Context
 
 	// Create a mock response
 	response := map[string]interface{}{
-		"dynamo_nim_uid":              dynamoNimName,
+		"dynamo_nim_uid":                dynamoNimName,
 		"version":                       version,
 		"image_build_status_syncing_at": "2025-03-07T10:39:40Z",
 	}

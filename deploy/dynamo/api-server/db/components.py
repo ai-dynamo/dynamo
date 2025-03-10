@@ -33,7 +33,7 @@ class TimeCreatedUpdated(SQLModel):
     updated_at: datetime = SQLField(default_factory=datetime.utcnow, nullable=False)
 
 
-class CompoundNimUploadStatus(str, Enum):
+class DynamoNimUploadStatus(str, Enum):
     Pending = "pending"
     Uploading = "uploading"
     Success = "success"
@@ -56,22 +56,22 @@ class TransmissionStrategy(str, Enum):
 """
 
 
-class CreateCompoundNimRequest(BaseModel):
+class CreateDynamoNimRequest(BaseModel):
     name: str
     description: str
     labels: Optional[Dict[str, str]] = None
 
 
-class CreateCompoundNimVersionRequest(BaseModel):
+class CreateDynamoNimVersionRequest(BaseModel):
     description: str
     version: str
-    manifest: CompoundNimVersionManifestSchema
+    manifest: DynamoNimVersionManifestSchema
     build_at: datetime.datetime
     labels: Optional[list[Dict[str, str]]] = None
 
 
-class UpdateCompoundNimVersionRequest(BaseModel):
-    manifest: CompoundNimVersionManifestSchema
+class UpdateDynamoNimVersionRequest(BaseModel):
+    manifest: DynamoNimVersionManifestSchema
     labels: Optional[list[Dict[str, str]]] = None
 
 
@@ -106,8 +106,8 @@ class ListQuerySchema(BaseModel):
 class ResourceType(str, Enum):
     Organization = "organization"
     Cluster = "cluster"
-    CompoundNim = "compound_nim"
-    CompoundNimVersion = "compound_nim_version"
+    DynamoNim = "dynamo_nim"
+    DynamoNimVersion = "dynamo_nim_version"
     Deployment = "deployment"
     DeploymentRevision = "deployment_revision"
     TerminalRecord = "terminal_record"
@@ -149,29 +149,29 @@ class UserSchema(BaseModel):
     last_name: str
 
 
-class CompoundNimVersionApiSchema(BaseModel):
+class DynamoNimVersionApiSchema(BaseModel):
     route: str
     doc: str
     input: str
     output: str
 
 
-class CompoundNimVersionManifestSchema(BaseModel):
+class DynamoNimVersionManifestSchema(BaseModel):
     service: str
     bentoml_version: str
-    apis: Dict[str, CompoundNimVersionApiSchema]
+    apis: Dict[str, DynamoNimVersionApiSchema]
     size_bytes: int
 
 
 def _validate_manifest(v):
     try:
         # Validate that the 'manifest' matches the CompoundAIManifestSchema
-        return CompoundNimVersionManifestSchema.model_validate(v).model_dump()
+        return DynamoNimVersionManifestSchema.model_validate(v).model_dump()
     except ValidationError as e:
         raise ValueError(f"Invalid manifest schema: {e}")
 
 
-class CompoundNimVersionSchema(ResourceSchema):
+class DynamoNimVersionSchema(ResourceSchema):
     bento_repository_uid: str
     version: str
     description: str
@@ -185,7 +185,7 @@ class CompoundNimVersionSchema(ResourceSchema):
     presigned_urls_deprecated: bool = False
     transmission_strategy: TransmissionStrategy
     upload_id: str = ""
-    manifest: Optional[CompoundNimVersionManifestSchema | dict[str, Any]]
+    manifest: Optional[DynamoNimVersionManifestSchema | dict[str, Any]]
     build_at: datetime.datetime
 
     @field_validator("manifest")
@@ -193,31 +193,31 @@ class CompoundNimVersionSchema(ResourceSchema):
         return _validate_manifest(v)
 
 
-class CompoundNimVersionFullSchema(CompoundNimVersionSchema):
-    repository: CompoundNimSchema
+class DynamoNimVersionFullSchema(DynamoNimVersionSchema):
+    repository: DynamoNimSchema
 
 
-class CompoundNimSchema(ResourceSchema):
-    latest_bento: Optional[CompoundNimVersionSchema]
-    latest_bentos: Optional[List[CompoundNimVersionSchema]]
+class DynamoNimSchema(ResourceSchema):
+    latest_bento: Optional[DynamoNimVersionSchema]
+    latest_bentos: Optional[List[DynamoNimVersionSchema]]
     n_bentos: int
     description: str
 
 
-class CompoundNimSchemaWithDeploymentsSchema(CompoundNimSchema):
+class DynamoNimSchemaWithDeploymentsSchema(DynamoNimSchema):
     deployments: List[str] = []  # mocked for now
 
 
-class CompoundNimSchemaWithDeploymentsListSchema(BaseListSchema):
-    items: List[CompoundNimSchemaWithDeploymentsSchema]
+class DynamoNimSchemaWithDeploymentsListSchema(BaseListSchema):
+    items: List[DynamoNimSchemaWithDeploymentsSchema]
 
 
-class CompoundNimVersionsWithNimListSchema(BaseListSchema):
-    items: List[CompoundNimVersionWithNimSchema]
+class DynamoNimVersionsWithNimListSchema(BaseListSchema):
+    items: List[DynamoNimVersionWithNimSchema]
 
 
-class CompoundNimVersionWithNimSchema(CompoundNimVersionSchema):
-    repository: CompoundNimSchema
+class DynamoNimVersionWithNimSchema(DynamoNimVersionSchema):
+    repository: DynamoNimSchema
 
 
 """
@@ -225,23 +225,23 @@ class CompoundNimVersionWithNimSchema(CompoundNimVersionSchema):
 """
 
 
-class BaseCompoundNimModel(TimeCreatedUpdated, AsyncAttrs):
+class BaseDynamoNimModel(TimeCreatedUpdated, AsyncAttrs):
     deleted_at: Optional[datetime.datetime] = SQLField(nullable=True, default=None)
 
 
-class CompoundNimVersionBase(BaseCompoundNimModel):
+class DynamoNimVersionBase(BaseDynamoNimModel):
     version: str = SQLField(default=None)
     description: str = SQLField(default="")
     file_path: Optional[str] = SQLField(default=None)
     file_oid: Optional[str] = SQLField(default=None)  # Used for GIT Lfs access
-    upload_status: CompoundNimUploadStatus = SQLField()
+    upload_status: DynamoNimUploadStatus = SQLField()
     image_build_status: ImageBuildStatus = SQLField()
     image_build_status_syncing_at: Optional[datetime.datetime] = SQLField(default=None)
     image_build_status_updated_at: Optional[datetime.datetime] = SQLField(default=None)
     upload_started_at: Optional[datetime.datetime] = SQLField(default=None)
     upload_finished_at: Optional[datetime.datetime] = SQLField(default=None)
     upload_finished_reason: str = SQLField(default="")
-    manifest: Optional[CompoundNimVersionManifestSchema | dict[str, Any]] = SQLField(
+    manifest: Optional[DynamoNimVersionManifestSchema | dict[str, Any]] = SQLField(
         default=None, sa_column=Column(JSON)
     )  # JSON-like field for the manifest
     build_at: datetime.datetime = SQLField()
@@ -251,6 +251,6 @@ class CompoundNimVersionBase(BaseCompoundNimModel):
         return _validate_manifest(v)
 
 
-class CompoundNimBase(BaseCompoundNimModel):
+class DynamoNimBase(BaseDynamoNimModel):
     name: str = SQLField(default="", unique=True)
     description: str = SQLField(default="")

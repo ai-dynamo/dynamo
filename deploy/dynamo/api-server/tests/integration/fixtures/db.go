@@ -15,65 +15,65 @@
  * limitations under the License.
  */
 
- package fixtures
+package fixtures
 
- import (
-	 "encoding/json"
-	 "net/http"
-	 "net/http/httptest"
-	 "os"
-	 "strings"
-	 "testing"
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"testing"
 
-	 "github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
- )
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
+)
 
- type MockDbServer struct {
-	 server *httptest.Server
-	 throws *bool
- }
+type MockDbServer struct {
+	server *httptest.Server
+	throws *bool
+}
 
- func (s *MockDbServer) Close() {
-	 s.server.Close()
- }
+func (s *MockDbServer) Close() {
+	s.server.Close()
+}
 
- func (s *MockDbServer) Throws(throws bool) {
-	 s.throws = &throws
- }
+func (s *MockDbServer) Throws(throws bool) {
+	s.throws = &throws
+}
 
- func CreateMockDbServer(t *testing.T) *MockDbServer {
-	 throws := false
-	 mockServer := MockDbServer{}
-	 mockServer.throws = &throws
-	 server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		 if *mockServer.throws {
-			 w.WriteHeader(http.StatusBadRequest)
-			 return
-		 }
-		 urlParts := strings.Split(r.URL.String(), "/")
-		 n := len(urlParts)
+func CreateMockDbServer(t *testing.T) *MockDbServer {
+	throws := false
+	mockServer := MockDbServer{}
+	mockServer.throws = &throws
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if *mockServer.throws {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		urlParts := strings.Split(r.URL.String(), "/")
+		n := len(urlParts)
 
-		 response := schemas.DynamoNimVersionSchema{
-			 ResourceSchema: schemas.ResourceSchema{
-				 BaseSchema: schemas.BaseSchema{
-					 Uid: "123456",
-				 },
-				 Name: "mock-from-db",
-			 },
-			 Version: urlParts[n-1],
-		 }
+		response := schemas.DynamoNimVersionSchema{
+			ResourceSchema: schemas.ResourceSchema{
+				BaseSchema: schemas.BaseSchema{
+					Uid: "123456",
+				},
+				Name: "mock-from-db",
+			},
+			Version: urlParts[n-1],
+		}
 
-		 jsonResponse, err := json.Marshal(response)
-		 if err != nil {
-			 t.Fatalf("Failed to marshal JSON %s", err.Error())
-		 }
+		jsonResponse, err := json.Marshal(response)
+		if err != nil {
+			t.Fatalf("Failed to marshal JSON %s", err.Error())
+		}
 
-		 w.WriteHeader(http.StatusOK)
-		 w.Write(jsonResponse)
-	 }))
+		w.WriteHeader(http.StatusOK)
+		w.Write(jsonResponse)
+	}))
 
-	 os.Setenv("API_DATABASE_URL", server.URL)
+	os.Setenv("API_DATABASE_URL", server.URL)
 
-	 mockServer.server = server
-	 return &mockServer
- }
+	mockServer.server = server
+	return &mockServer
+}

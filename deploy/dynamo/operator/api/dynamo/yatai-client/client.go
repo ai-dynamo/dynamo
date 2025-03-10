@@ -78,13 +78,13 @@ func (c *YataiClient) ListImageBuildStatusUnsyncedBentos(ctx context.Context) (b
 }
 
 func (c *YataiClient) UpdateBentoImageBuildStatusSyncingAt(ctx context.Context, bentoRepositoryName, bentoVersion string) (err error) {
-	url_ := utils.UrlJoin(c.endpoint, fmt.Sprintf("/api/v1/compound_nims/%s/versions/%s/update_image_build_status_syncing_at", bentoRepositoryName, bentoVersion))
+	url_ := utils.UrlJoin(c.endpoint, fmt.Sprintf("/api/v1/dynamo_nims/%s/versions/%s/update_image_build_status_syncing_at", bentoRepositoryName, bentoVersion))
 	_, err = c.getJSONReqBuilder().Method("PATCH").Url(url_).Do(ctx)
 	return
 }
 
 func (c *YataiClient) UpdateBentoImageBuildStatus(ctx context.Context, bentoRepositoryName, bentoVersion string, status modelschemas.ImageBuildStatus) (err error) {
-	url_ := utils.UrlJoin(c.endpoint, fmt.Sprintf("/api/v1/compound_nims/%s/versions/%s/update_image_build_status", bentoRepositoryName, bentoVersion))
+	url_ := utils.UrlJoin(c.endpoint, fmt.Sprintf("/api/v1/dynamo_nims/%s/versions/%s/update_image_build_status", bentoRepositoryName, bentoVersion))
 	_, err = c.getJSONReqBuilder().Method("PATCH").Payload(map[string]string{
 		"image_build_status": string(status),
 	}).Url(url_).Do(ctx)
@@ -183,7 +183,7 @@ func (c *YataiClient) RegisterYataiComponent(ctx context.Context, clusterName st
 }
 
 func (c *YataiClient) PresignBentoDownloadURL(ctx context.Context, bentoRepositoryName, bentoVersion string) (bento *schemasv1.BentoSchema, err error) {
-	url_ := utils.UrlJoin(c.endpoint, fmt.Sprintf("/api/v1/compound_nims/%s/versions/%s/presign_download_url", bentoRepositoryName, bentoVersion))
+	url_ := utils.UrlJoin(c.endpoint, fmt.Sprintf("/api/v1/dynamo_nims/%s/versions/%s/presign_download_url", bentoRepositoryName, bentoVersion))
 	bento = &schemasv1.BentoSchema{}
 	_, err = c.getJSONReqBuilder().Method("PATCH").Url(url_).Result(bento).Do(ctx)
 	return

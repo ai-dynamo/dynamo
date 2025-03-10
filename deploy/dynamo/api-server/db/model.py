@@ -19,7 +19,7 @@ import base58
 from sqlmodel import Field as SQLField
 from sqlmodel import UniqueConstraint
 
-from components import CompoundNimBase, CompoundNimVersionBase
+from components import DynamoNimBase, DynamoNimVersionBase
 
 """
 This file stores all of the models/tables stored in the SQL database.
@@ -42,19 +42,19 @@ def new_compound_entity_id() -> str:
     return get_random_id("compound")
 
 
-class CompoundNimVersion(CompoundNimVersionBase, table=True):
+class DynamoNimVersion(DynamoNimVersionBase, table=True):
     """A row in the compoundai nim table."""
 
     __table_args__ = (
-        UniqueConstraint("compound_nim_id", "version", name="version_unique_per_nim"),
+        UniqueConstraint("dynamo_nim_id", "version", name="version_unique_per_nim"),
     )
 
     id: str = SQLField(default_factory=new_compound_entity_id, primary_key=True)
 
-    compound_nim_id: str = SQLField(foreign_key="compoundnim.id")
+    dynamo_nim_id: str = SQLField(foreign_key="DynamoNim.id")
 
 
-class CompoundNim(CompoundNimBase, table=True):
+class DynamoNim(DynamoNimBase, table=True):
     """A row in the compoundai nim table."""
 
     id: str = SQLField(default_factory=new_compound_entity_id, primary_key=True)

@@ -20,7 +20,7 @@ from typing import Annotated, List, Optional
 
 from db import get_session, s3_storage
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, responses
-from model import CompoundNim, CompoundNimVersion
+from model import DynamoNim, DynamoNimVersion
 from pydantic import ValidationError
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -28,22 +28,22 @@ from sqlmodel import asc, col, desc, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from components import (
-    CompoundNimSchema,
-    CompoundNimSchemaWithDeploymentsListSchema,
-    CompoundNimSchemaWithDeploymentsSchema,
-    CompoundNimUploadStatus,
-    CompoundNimVersionFullSchema,
-    CompoundNimVersionSchema,
-    CompoundNimVersionsWithNimListSchema,
-    CompoundNimVersionWithNimSchema,
-    CreateCompoundNimRequest,
-    CreateCompoundNimVersionRequest,
+    DynamoNimSchema,
+    DynamoNimSchemaWithDeploymentsListSchema,
+    DynamoNimSchemaWithDeploymentsSchema,
+    DynamoNimUploadStatus,
+    DynamoNimVersionFullSchema,
+    DynamoNimVersionSchema,
+    DynamoNimVersionsWithNimListSchema,
+    DynamoNimVersionWithNimSchema,
+    CreateDynamoNimRequest,
+    CreateDynamoNimVersionRequest,
     ImageBuildStatus,
     ListQuerySchema,
     OrganizationSchema,
     ResourceType,
     TransmissionStrategy,
-    UpdateCompoundNimVersionRequest,
+    UpdateDynamoNimVersionRequest,
     UserSchema,
 )
 
@@ -51,8 +51,8 @@ API_TAG_MODELS = "compoundai"
 
 DEFAULT_LIMIT = 3
 SORTABLE_COLUMNS = {
-    "created_at": col(CompoundNim.created_at),
-    "update_at": col(CompoundNim.updated_at),
+    "created_at": col(DynamoNim.created_at),
+    "update_at": col(DynamoNim.updated_at),
 }
 
 router = APIRouter()
@@ -103,27 +103,27 @@ async def current_org(
     )
 
 
-# GetCompoundNim is a FastAPI dependency that will perform stored model lookup.
-async def compound_nim_handler(
+# GetDynamoNim is a FastAPI dependency that will perform stored model lookup.
+async def dynamo_nim_handler(
     *,
     session: AsyncSession = Depends(get_session),
-    compound_nim_name: str,
-) -> CompoundNim:
-    statement = select(CompoundNim).where(CompoundNim.name == compound_nim_name)
-    stored_compound_nim_result = await session.exec(statement)
-    stored_compound_nim = stored_compound_nim_result.first()
+    dynamo_nim_name: str,
+) -> DynamoNim:
+    statement = select(DynamoNim).where(DynamoNim.name == dynamo_nim_name)
+    stored_dynamo_nim_result = await session.exec(statement)
+    stored_dynamo_nim = stored_dynamo_nim_result.first()
 
-    if not stored_compound_nim:
+    if not stored_dynamo_nim:
         raise HTTPException(status_code=404, detail="Record not found")
 
-    return stored_compound_nim
+    return stored_dynamo_nim
 
 
-GetCompoundNim = Depends(compound_nim_handler)
+GetDynamoNim = Depends(dynamo_nim_handler)
 
 
 @router.get(
-    "/api/v1/compound_nims/{compound_nim_name}",
+    "/api/v1/dynamo_nims/{dynamo_nim_name}",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
@@ -131,45 +131,45 @@ GetCompoundNim = Depends(compound_nim_handler)
     tags=[API_TAG_MODELS],
     include_in_schema=False,
 )
-async def get_compound_nim(
+async def get_dynamo_nim(
     *,
-    compound_nim: CompoundNim = GetCompoundNim,
+    dynamo_nim: DynamoNim = GetDynamoNim,
     session: AsyncSession = Depends(get_session),
 ):
     statement = (
-        select(CompoundNimVersion)
+        select(DynamoNimVersion)
         .where(
-            CompoundNimVersion.compound_nim_id == compound_nim.id,
+            DynamoNimVersion.dynamo_nim_id == dynamo_nim.id,
         )
-        .order_by(desc(CompoundNimVersion.created_at))
+        .order_by(desc(DynamoNimVersion.created_at))
     )
 
     result = await session.exec(statement)
-    compound_nims = result.all()
+    dynamo_nims = result.all()
 
-    latest_compound_nim_versions = await convert_compound_nim_version_model_to_schema(
-        session, list(compound_nims), compound_nim
+    latest_dynamo_nim_versions = await convert_dynamo_nim_version_model_to_schema(
+        session, list(dynamo_nims), dynamo_nim
     )
 
-    return CompoundNimSchema(
-        uid=compound_nim.id,
-        created_at=compound_nim.created_at,
-        updated_at=compound_nim.updated_at,
-        deleted_at=compound_nim.deleted_at,
-        name=compound_nim.name,
-        resource_type=ResourceType.CompoundNim,
+    return DynamoNimSchema(
+        uid=dynamo_nim.id,
+        created_at=dynamo_nim.created_at,
+        updated_at=dynamo_nim.updated_at,
+        deleted_at=dynamo_nim.deleted_at,
+        name=dynamo_nim.name,
+        resource_type=ResourceType.DynamoNim,
         labels=[],
-        description=compound_nim.description,
+        description=dynamo_nim.description,
         latest_bento=None
-        if not latest_compound_nim_versions
-        else latest_compound_nim_versions[0],
-        latest_bentos=latest_compound_nim_versions,
-        n_bentos=len(compound_nims),
+        if not latest_dynamo_nim_versions
+        else latest_dynamo_nim_versions[0],
+        latest_bentos=latest_dynamo_nim_versions,
+        n_bentos=len(dynamo_nims),
     )
 
 
 @router.post(
-    "/api/v1/compound_nims",
+    "/api/v1/dynamo_nims",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
@@ -177,34 +177,34 @@ async def get_compound_nim(
     tags=[API_TAG_MODELS],
     include_in_schema=False,
 )
-async def create_compound_nim(
+async def create_dynamo_nim(
     *,
     session: AsyncSession = Depends(get_session),
-    request: CreateCompoundNimRequest,
+    request: CreateDynamoNimRequest,
 ):
     """
     Create a new respository
     """
     try:
-        db_compound_nim = CompoundNim.model_validate(request)
+        db_dynamo_nim = DynamoNim.model_validate(request)
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=json.loads(e.json()))  # type: ignore
 
     logger.debug("Creating repository...")
 
     try:
-        session.add(db_compound_nim)
+        session.add(db_dynamo_nim)
         await session.flush()
-        await session.refresh(db_compound_nim)
+        await session.refresh(db_dynamo_nim)
     except IntegrityError as e:
         logger.error(f"Details: {str(e)}")
         await session.rollback()
         logger.error(
-            f"The requested Compound NIM {db_compound_nim.name} already exists in the database"
+            f"The requested Compound NIM {db_dynamo_nim.name} already exists in the database"
         )
         raise HTTPException(
             status_code=422,
-            detail=f"The Compound NIM {db_compound_nim.name} already exists in the database",
+            detail=f"The Compound NIM {db_dynamo_nim.name} already exists in the database",
         )  # type: ignore
     except SQLAlchemyError as e:
         logger.error("Something went wrong with adding the repository")
@@ -212,18 +212,18 @@ async def create_compound_nim(
 
     await session.commit()
     logger.debug(
-        f"Compound NIM {db_compound_nim.id} with name {db_compound_nim.name} saved to database"
+        f"Compound NIM {db_dynamo_nim.id} with name {db_dynamo_nim.name} saved to database"
     )
 
-    return CompoundNimSchema(
-        uid=db_compound_nim.id,
-        created_at=db_compound_nim.created_at,
-        updated_at=db_compound_nim.updated_at,
-        deleted_at=db_compound_nim.deleted_at,
-        name=db_compound_nim.name,
-        resource_type=ResourceType.CompoundNim,
+    return DynamoNimSchema(
+        uid=db_dynamo_nim.id,
+        created_at=db_dynamo_nim.created_at,
+        updated_at=db_dynamo_nim.updated_at,
+        deleted_at=db_dynamo_nim.deleted_at,
+        name=db_dynamo_nim.name,
+        resource_type=ResourceType.DynamoNim,
         labels=[],
-        description=db_compound_nim.description,
+        description=db_dynamo_nim.description,
         latest_bentos=None,
         latest_bento=None,
         n_bentos=0,
@@ -231,7 +231,7 @@ async def create_compound_nim(
 
 
 @router.get(
-    "/api/v1/compound_nims",
+    "/api/v1/dynamo_nims",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
@@ -239,19 +239,19 @@ async def create_compound_nim(
     tags=[API_TAG_MODELS],
     include_in_schema=False,
 )
-async def get_compound_nim_list(
+async def get_dynamo_nim_list(
     *,
     session: AsyncSession = Depends(get_session),
     query_params: ListQuerySchema = Depends(),
 ):
     try:
-        total_statement = select(func.count(col(CompoundNim.id)))
+        total_statement = select(func.count(col(DynamoNim.id)))
         result = await session.exec(total_statement)
         total = result.first()
         if not total:
             total = 0
 
-        statement = select(CompoundNim)
+        statement = select(DynamoNim)
         statement = statement.offset(query_params.start)
         statement = statement.limit(query_params.count)
 
@@ -266,39 +266,39 @@ async def get_compound_nim_list(
                         statement = statement.order_by(sort_by)
 
         result = await session.exec(statement)
-        compound_nims = list(result.all())
+        dynamo_nims = list(result.all())
 
-        compound_nim_schemas = await convert_compound_nim_model_to_schema(
-            session, compound_nims
+        dynamo_nim_schemas = await convert_dynamo_nim_model_to_schema(
+            session, dynamo_nims
         )
 
-        compound_nims_with_deployments = [
-            CompoundNimSchemaWithDeploymentsSchema(
-                **compound_nim_schema.model_dump(), deployments=[]
+        dynamo_nims_with_deployments = [
+            DynamoNimSchemaWithDeploymentsSchema(
+                **dynamo_nim_schema.model_dump(), deployments=[]
             )
-            for compound_nim_schema in compound_nim_schemas
+            for dynamo_nim_schema in dynamo_nim_schemas
         ]
 
-        return CompoundNimSchemaWithDeploymentsListSchema(
+        return DynamoNimSchemaWithDeploymentsListSchema(
             total=total,
             start=query_params.start,
             count=query_params.count,
-            items=compound_nims_with_deployments,
+            items=dynamo_nims_with_deployments,
         )
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=json.loads(e.json()))
 
 
-async def compound_nim_version_handler(
+async def dynamo_nim_version_handler(
     *,
     session: AsyncSession = Depends(get_session),
-    compound_nim_name: str,
+    dynamo_nim_name: str,
     version: str,
-) -> tuple[CompoundNimVersion, CompoundNim]:
-    statement = select(CompoundNimVersion, CompoundNim).where(
-        CompoundNimVersion.compound_nim_id == CompoundNim.id,
-        CompoundNimVersion.version == version,
-        CompoundNim.name == compound_nim_name,
+) -> tuple[DynamoNimVersion, DynamoNim]:
+    statement = select(DynamoNimVersion, DynamoNim).where(
+        DynamoNimVersion.dynamo_nim_id == DynamoNim.id,
+        DynamoNimVersion.version == version,
+        DynamoNim.name == dynamo_nim_name,
     )
 
     result = await session.exec(statement)
@@ -317,11 +317,11 @@ async def compound_nim_version_handler(
     return records[0]
 
 
-GetCompoundNimVersion = Depends(compound_nim_version_handler)
+GetDynamoNimVersion = Depends(dynamo_nim_version_handler)
 
 
 @router.get(
-    "/api/v1/compound_nims/{compound_nim_name}/versions/{version}",
+    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
@@ -329,30 +329,30 @@ GetCompoundNimVersion = Depends(compound_nim_version_handler)
     tags=[API_TAG_MODELS],
     include_in_schema=False,
 )
-async def get_compound_nim_version(
+async def get_dynamo_nim_version(
     *,
-    compound_nim_entities: tuple[
-        CompoundNimVersion, CompoundNim
-    ] = GetCompoundNimVersion,
+    dynamo_nim_entities: tuple[
+        DynamoNimVersion, DynamoNim
+    ] = GetDynamoNimVersion,
     session: AsyncSession = Depends(get_session),
 ):
-    compound_nim_version, compound_nim = compound_nim_entities
-    compound_nim_version_schemas = await convert_compound_nim_version_model_to_schema(
-        session, [compound_nim_version], compound_nim
+    dynamo_nim_version, dynamo_nim = dynamo_nim_entities
+    dynamo_nim_version_schemas = await convert_dynamo_nim_version_model_to_schema(
+        session, [dynamo_nim_version], dynamo_nim
     )
-    compound_nim_schemas = await convert_compound_nim_model_to_schema(
-        session, [compound_nim]
+    dynamo_nim_schemas = await convert_dynamo_nim_model_to_schema(
+        session, [dynamo_nim]
     )
 
-    full_schema = CompoundNimVersionFullSchema(
-        **compound_nim_version_schemas[0].model_dump(),
-        repository=compound_nim_schemas[0],
+    full_schema = DynamoNimVersionFullSchema(
+        **dynamo_nim_version_schemas[0].model_dump(),
+        repository=dynamo_nim_schemas[0],
     )
     return full_schema
 
 
 @router.post(
-    "/api/v1/compound_nims/{compound_nim_name}/versions",
+    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
@@ -360,9 +360,9 @@ async def get_compound_nim_version(
     tags=[API_TAG_MODELS],
     include_in_schema=False,
 )
-async def create_compound_nim_version(
-    request: CreateCompoundNimVersionRequest,
-    compound_nim: CompoundNim = GetCompoundNim,
+async def create_dynamo_nim_version(
+    request: CreateDynamoNimVersionRequest,
+    dynamo_nim: DynamoNim = GetDynamoNim,
     session: AsyncSession = Depends(get_session),
 ):
     """
@@ -370,23 +370,23 @@ async def create_compound_nim_version(
     """
     try:
         # Create without validation
-        db_compound_nim_version = CompoundNimVersion(
+        db_dynamo_nim_version = DynamoNimVersion(
             **request.model_dump(),
-            compound_nim_id=compound_nim.id,
-            upload_status=CompoundNimUploadStatus.Pending,
+            dynamo_nim_id=dynamo_nim.id,
+            upload_status=DynamoNimUploadStatus.Pending,
             image_build_status=ImageBuildStatus.Pending,
         )
-        CompoundNimVersion.model_validate(db_compound_nim_version)
-        tag = f"{compound_nim.name}:{db_compound_nim_version.version}"
+        DynamoNimVersion.model_validate(db_dynamo_nim_version)
+        tag = f"{dynamo_nim.name}:{db_dynamo_nim_version.version}"
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=json.loads(e.json()))  # type: ignore
     except BaseException as e:
         raise HTTPException(status_code=422, detail=json.loads(e.json()))  # type: ignore
 
     try:
-        session.add(db_compound_nim_version)
+        session.add(db_dynamo_nim_version)
         await session.flush()
-        await session.refresh(db_compound_nim_version)
+        await session.refresh(db_dynamo_nim_version)
     except IntegrityError as e:
         logger.error(f"Details: {str(e)}")
         await session.rollback()
@@ -401,18 +401,18 @@ async def create_compound_nim_version(
         raise HTTPException(status_code=500, detail=str(e))
 
     logger.debug(
-        f"Commiting {compound_nim.name}:{db_compound_nim_version.version} to database"
+        f"Commiting {dynamo_nim.name}:{db_dynamo_nim_version.version} to database"
     )
     await session.commit()
 
-    schema = await convert_compound_nim_version_model_to_schema(
-        session, [db_compound_nim_version]
+    schema = await convert_dynamo_nim_version_model_to_schema(
+        session, [db_dynamo_nim_version]
     )
     return schema[0]
 
 
 @router.get(
-    "/api/v1/compound_nims/{compound_nim_name}/versions",
+    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
@@ -420,51 +420,51 @@ async def create_compound_nim_version(
     tags=[API_TAG_MODELS],
     include_in_schema=False,
 )
-async def get_compound_nim_versions(
+async def get_dynamo_nim_versions(
     *,
-    compound_nim: CompoundNim = GetCompoundNim,
+    dynamo_nim: DynamoNim = GetDynamoNim,
     session: AsyncSession = Depends(get_session),
     query_params: ListQuerySchema = Depends(),
 ):
-    compound_nim_schemas = await convert_compound_nim_model_to_schema(
-        session, [compound_nim]
+    dynamo_nim_schemas = await convert_dynamo_nim_model_to_schema(
+        session, [dynamo_nim]
     )
-    compound_nim_schema = compound_nim_schemas[0]
+    dynamo_nim_schema = dynamo_nim_schemas[0]
 
     total_statement = (
-        select(CompoundNimVersion)
+        select(DynamoNimVersion)
         .where(
-            CompoundNimVersion.compound_nim_id == compound_nim.id,
+            DynamoNimVersion.dynamo_nim_id == dynamo_nim.id,
         )
-        .order_by(desc(CompoundNimVersion.created_at))
+        .order_by(desc(DynamoNimVersion.created_at))
     )
 
     result = await session.exec(total_statement)
-    compound_nim_versions = result.all()
-    total = len(compound_nim_versions)
+    dynamo_nim_versions = result.all()
+    total = len(dynamo_nim_versions)
 
     statement = total_statement.limit(query_params.count)
     result = await session.exec(statement)
-    compound_nim_versions = list(result.all())
+    dynamo_nim_versions = list(result.all())
 
-    compound_nim_version_schemas = await convert_compound_nim_version_model_to_schema(
-        session, compound_nim_versions, compound_nim
+    dynamo_nim_version_schemas = await convert_dynamo_nim_version_model_to_schema(
+        session, dynamo_nim_versions, dynamo_nim
     )
 
     items = [
-        CompoundNimVersionWithNimSchema(
-            **version.model_dump(), repository=compound_nim_schema
+        DynamoNimVersionWithNimSchema(
+            **version.model_dump(), repository=dynamo_nim_schema
         )
-        for version in compound_nim_version_schemas
+        for version in dynamo_nim_version_schemas
     ]
 
-    return CompoundNimVersionsWithNimListSchema(
+    return DynamoNimVersionsWithNimListSchema(
         total=total, count=query_params.count, start=query_params.start, items=items
     )
 
 
 @router.patch(
-    "/api/v1/compound_nims/{compound_nim_name}/versions/{version}",
+    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
@@ -472,21 +472,21 @@ async def get_compound_nim_versions(
     tags=[API_TAG_MODELS],
     include_in_schema=False,
 )
-async def update_compound_nim_version(
+async def update_dynamo_nim_version(
     *,
-    compound_nim_entities: tuple[
-        CompoundNimVersion, CompoundNim
-    ] = GetCompoundNimVersion,
-    request: UpdateCompoundNimVersionRequest,
+    dynamo_nim_entities: tuple[
+        DynamoNimVersion, DynamoNim
+    ] = GetDynamoNimVersion,
+    request: UpdateDynamoNimVersionRequest,
     session: AsyncSession = Depends(get_session),
 ):
-    compound_nim_version, _ = compound_nim_entities
-    compound_nim_version.manifest = request.manifest.model_dump()
+    dynamo_nim_version, _ = dynamo_nim_entities
+    dynamo_nim_version.manifest = request.manifest.model_dump()
 
     try:
-        session.add(compound_nim_version)
+        session.add(dynamo_nim_version)
         await session.flush()
-        await session.refresh(compound_nim_version)
+        await session.refresh(dynamo_nim_version)
     except SQLAlchemyError as e:
         logger.error("Something went wrong with adding the Compound NIM")
         raise HTTPException(status_code=500, detail=str(e))
@@ -494,14 +494,14 @@ async def update_compound_nim_version(
     logger.debug("Updating compound Compound NIM")
     await session.commit()
 
-    schema = await convert_compound_nim_version_model_to_schema(
-        session, [compound_nim_version]
+    schema = await convert_dynamo_nim_version_model_to_schema(
+        session, [dynamo_nim_version]
     )
     return schema[0]
 
 
 @router.put(
-    "/api/v1/compound_nims/{compound_nim_name}/versions/{version}/upload",
+    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}/upload",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
@@ -509,23 +509,23 @@ async def update_compound_nim_version(
     tags=[API_TAG_MODELS],
     include_in_schema=False,
 )
-async def upload_compound_nim_version(
+async def upload_dynamo_nim_version(
     *,
-    compound_nim_entities: tuple[
-        CompoundNimVersion, CompoundNim
-    ] = GetCompoundNimVersion,
+    dynamo_nim_entities: tuple[
+        DynamoNimVersion, DynamoNim
+    ] = GetDynamoNimVersion,
     file: Annotated[bytes, Body()],
     session: AsyncSession = Depends(get_session),
 ):
-    compound_nim_version, compound_nim = compound_nim_entities
-    object_name = f"{compound_nim.name}/{compound_nim_version.version}"
+    dynamo_nim_version, dynamo_nim = dynamo_nim_entities
+    object_name = f"{dynamo_nim.name}/{dynamo_nim_version.version}"
 
     try:
         s3_storage.upload_file(file, object_name)
 
-        compound_nim_version.upload_status = CompoundNimUploadStatus.Success
-        compound_nim_version.upload_finished_at = datetime.now(timezone.utc)
-        session.add(compound_nim_version)
+        dynamo_nim_version.upload_status = DynamoNimUploadStatus.Success
+        dynamo_nim_version.upload_finished_at = datetime.now(timezone.utc)
+        session.add(dynamo_nim_version)
         await session.commit()
 
         return {"message": "File uploaded successfully"}
@@ -539,7 +539,7 @@ def generate_file_path(version) -> str:
 
 
 @router.get(
-    "/api/v1/compound_nims/{compound_nim_name}/versions/{version}/download",
+    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}/download",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
@@ -547,14 +547,14 @@ def generate_file_path(version) -> str:
     tags=[API_TAG_MODELS],
     include_in_schema=False,
 )
-async def download_compound_nim_version(
+async def download_dynamo_nim_version(
     *,
-    compound_nim_entities: tuple[
-        CompoundNimVersion, CompoundNim
-    ] = GetCompoundNimVersion,
+    dynamo_nim_entities: tuple[
+        DynamoNimVersion, DynamoNim
+    ] = GetDynamoNimVersion,
 ):
-    compound_nim_version, compound_nim = compound_nim_entities
-    object_name = f"{compound_nim.name}/{compound_nim_version.version}"
+    dynamo_nim_version, dynamo_nim = dynamo_nim_entities
+    object_name = f"{dynamo_nim.name}/{dynamo_nim_version.version}"
 
     try:
         file_data = s3_storage.download_file(object_name)
@@ -567,7 +567,7 @@ async def download_compound_nim_version(
 
 
 @router.patch(
-    "/api/v1/compound_nims/{compound_nim_name}/versions/{version}/start_upload",
+    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}/start_upload",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
@@ -575,20 +575,20 @@ async def download_compound_nim_version(
     tags=[API_TAG_MODELS],
     include_in_schema=False,
 )
-async def start_compound_nim_version_upload(
+async def start_dynamo_nim_version_upload(
     *,
-    compound_nim_entities: tuple[
-        CompoundNimVersion, CompoundNim
-    ] = GetCompoundNimVersion,
+    dynamo_nim_entities: tuple[
+        DynamoNimVersion, DynamoNim
+    ] = GetDynamoNimVersion,
     session: AsyncSession = Depends(get_session),
 ):
-    compound_nim_version, _ = compound_nim_entities
-    compound_nim_version.upload_status = CompoundNimUploadStatus.Uploading
+    dynamo_nim_version, _ = dynamo_nim_entities
+    dynamo_nim_version.upload_status = DynamoNimUploadStatus.Uploading
 
     try:
-        session.add(compound_nim_version)
+        session.add(dynamo_nim_version)
         await session.flush()
-        await session.refresh(compound_nim_version)
+        await session.refresh(dynamo_nim_version)
     except SQLAlchemyError as e:
         logger.error("Something went wrong with adding the Compound NIM")
         raise HTTPException(status_code=500, detail=str(e))
@@ -596,8 +596,8 @@ async def start_compound_nim_version_upload(
     logger.debug("Setting Compound NIM upload status to Uploading.")
     await session.commit()
 
-    schema = await convert_compound_nim_version_model_to_schema(
-        session, [compound_nim_version]
+    schema = await convert_dynamo_nim_version_model_to_schema(
+        session, [dynamo_nim_version]
     )
     return schema[0]
 
@@ -607,23 +607,23 @@ async def start_compound_nim_version_upload(
 """
 
 
-async def convert_compound_nim_model_to_schema(
-    session: AsyncSession, entities: List[CompoundNim]
-) -> List[CompoundNimSchema]:
-    compound_nim_schemas = []
+async def convert_dynamo_nim_model_to_schema(
+    session: AsyncSession, entities: List[DynamoNim]
+) -> List[DynamoNimSchema]:
+    dynamo_nim_schemas = []
     for entity in entities:
         try:
             statement = (
-                select(CompoundNimVersion)
+                select(DynamoNimVersion)
                 .where(
-                    CompoundNimVersion.compound_nim_id == entity.id,
+                    DynamoNimVersion.dynamo_nim_id == entity.id,
                 )
-                .order_by(desc(CompoundNimVersion.created_at))
+                .order_by(desc(DynamoNimVersion.created_at))
                 .limit(DEFAULT_LIMIT)
             )
 
-            total_statement = select(func.count(col(CompoundNimVersion.id))).where(
-                CompoundNimVersion.compound_nim_id == entity.id
+            total_statement = select(func.count(col(DynamoNimVersion.id))).where(
+                DynamoNimVersion.dynamo_nim_id == entity.id
             )
             result = await session.exec(total_statement)
             total = result.first()
@@ -631,15 +631,15 @@ async def convert_compound_nim_model_to_schema(
                 total = 0
 
             result = await session.exec(statement)
-            compound_nim_versions = list(result.all())
-            compound_nim_version_schemas = (
-                await convert_compound_nim_version_model_to_schema(
-                    session, compound_nim_versions, entity
+            dynamo_nim_versions = list(result.all())
+            dynamo_nim_version_schemas = (
+                await convert_dynamo_nim_version_model_to_schema(
+                    session, dynamo_nim_versions, entity
                 )
             )
 
-            compound_nim_schemas.append(
-                CompoundNimSchema(
+            dynamo_nim_schemas.append(
+                DynamoNimSchema(
                     uid=entity.id,
                     created_at=entity.created_at.replace(tzinfo=timezone.utc),
                     updated_at=entity.updated_at.replace(tzinfo=timezone.utc),
@@ -649,14 +649,14 @@ async def convert_compound_nim_model_to_schema(
                         else entity.deleted_at.replace(tzinfo=timezone.utc)
                     ),
                     name=entity.name,
-                    resource_type=ResourceType.CompoundNim,
+                    resource_type=ResourceType.DynamoNim,
                     labels=[],
                     latest_bento=(
                         None
-                        if not compound_nim_version_schemas
-                        else compound_nim_version_schemas[0]
+                        if not dynamo_nim_version_schemas
+                        else dynamo_nim_version_schemas[0]
                     ),
-                    latest_bentos=compound_nim_version_schemas,
+                    latest_bentos=dynamo_nim_version_schemas,
                     n_bentos=total,
                     description=entity.description,
                 )
@@ -667,38 +667,38 @@ async def convert_compound_nim_model_to_schema(
             )
             raise HTTPException(status_code=500, detail=str(e))
 
-    return compound_nim_schemas
+    return dynamo_nim_schemas
 
 
-async def convert_compound_nim_version_model_to_schema(
+async def convert_dynamo_nim_version_model_to_schema(
     session: AsyncSession,
-    entities: List[CompoundNimVersion],
-    compound_nim: Optional[CompoundNim] = None,
-) -> List[CompoundNimVersionSchema]:
-    compound_nim_version_schemas = []
+    entities: List[DynamoNimVersion],
+    dynamo_nim: Optional[DynamoNim] = None,
+) -> List[DynamoNimVersionSchema]:
+    dynamo_nim_version_schemas = []
     for entity in entities:
-        if not compound_nim:
-            statement = select(CompoundNim).where(
-                CompoundNim.id == entity.compound_nim_id
+        if not dynamo_nim:
+            statement = select(DynamoNim).where(
+                DynamoNim.id == entity.dynamo_nim_id
             )
             results = await session.exec(statement)
-            compound_nim = results.first()
+            dynamo_nim = results.first()
 
-        if compound_nim:
-            compound_nim_version_schema = CompoundNimVersionSchema(
+        if dynamo_nim:
+            dynamo_nim_version_schema = DynamoNimVersionSchema(
                 description=entity.description,
                 version=entity.version,
                 image_build_status=entity.image_build_status,
                 upload_status=str(entity.upload_status.value),
                 upload_finished_reason=entity.upload_finished_reason,
                 uid=entity.id,
-                name=compound_nim.name,
+                name=dynamo_nim.name,
                 created_at=entity.created_at.replace(tzinfo=timezone.utc),
-                resource_type=ResourceType.CompoundNimVersion,
+                resource_type=ResourceType.DynamoNimVersion,
                 labels=[],
                 manifest=entity.manifest,
                 updated_at=entity.updated_at.replace(tzinfo=timezone.utc),
-                bento_repository_uid=compound_nim.id,
+                bento_repository_uid=dynamo_nim.id,
                 upload_started_at=(
                     entity.upload_started_at.replace(tzinfo=timezone.utc)
                     if entity.upload_started_at
@@ -713,10 +713,10 @@ async def convert_compound_nim_version_model_to_schema(
                 build_at=entity.build_at.replace(tzinfo=timezone.utc),
             )
 
-            compound_nim_version_schemas.append(compound_nim_version_schema)
+            dynamo_nim_version_schemas.append(dynamo_nim_version_schema)
         else:
             raise HTTPException(
                 status_code=500, detail="Failed to find related Compound NIM"
             )  # Should never happen
 
-    return compound_nim_version_schemas
+    return dynamo_nim_version_schemas
