@@ -15,7 +15,7 @@
 
 [package]
 name = "dynamo-py3"
-version = "0.2.1"
+version = "0.1.0"
 edition = "2021"
 authors = ["NVIDIA"]
 license = "Apache-2.0"

@@ -25,11 +25,11 @@ import (
 )
 
 const (
-	DynamoNimRequestConditionTypeModelsSeeding          = "ModelsSeeding"
-	DynamoNimRequestConditionTypeImageBuilding          = "ImageBuilding"
-	DynamoNimRequestConditionTypeImageExists            = "ImageExists"
-	DynamoNimRequestConditionTypeImageExistsChecked     = "ImageExistsChecked"
-	DynamoNimRequestConditionTypeModelsExists           = "ModelsExists"
+	DynamoNimRequestConditionTypeModelsSeeding      = "ModelsSeeding"
+	DynamoNimRequestConditionTypeImageBuilding      = "ImageBuilding"
+	DynamoNimRequestConditionTypeImageExists        = "ImageExists"
+	DynamoNimRequestConditionTypeImageExistsChecked = "ImageExistsChecked"
+	DynamoNimRequestConditionTypeModelsExists       = "ModelsExists"
 	DynamoNimRequestConditionTypeDynamoNimAvailable = "DynamoNimAvailable"
 )
 

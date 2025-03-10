@@ -69,8 +69,8 @@ func DefaultUpdateDeploymentSchema() schemas.UpdateDeploymentSchema {
 func DefaultCreateDeploymentTargetSchema() *schemas.CreateDeploymentTargetSchema {
 	return &schemas.CreateDeploymentTargetSchema{
 		DynamoNim: "default-dynamo-nim",
-		Version:     "default-version",
-		Config:      DefaultDeploymentTargetConfig(),
+		Version:   "default-version",
+		Config:    DefaultDeploymentTargetConfig(),
 	}
 }
 

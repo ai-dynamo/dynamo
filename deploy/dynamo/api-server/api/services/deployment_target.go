@@ -34,12 +34,12 @@ type deploymentTargetService struct{}
 var DeploymentTargetService = deploymentTargetService{}
 
 type CreateDeploymentTargetOption struct {
-	CreatorId             string
-	DeploymentId          uint
-	DeploymentRevisionId  uint
-	DynamoNimVersionId  string
-	DynamoNimVersionTag string
-	Config                *schemas.DeploymentTargetConfig
+	CreatorId            string
+	DeploymentId         uint
+	DeploymentRevisionId uint
+	DynamoNimVersionId   string
+	DynamoNimVersionTag  string
+	Config               *schemas.DeploymentTargetConfig
 }
 
 type UpdateDeploymentTargetOption struct {
