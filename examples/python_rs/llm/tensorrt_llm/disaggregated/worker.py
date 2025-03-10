@@ -150,10 +150,6 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
                             result.outputs[0].disaggregated_params
                         )
                     )
-                    if self.metrics_publisher is not None:
-                        # TODO:Tanmay: Asynchronously publish KV events for ctx server
-                        # and publish metrics.
-                        pass
                     yield disaggregated_response.model_dump_json()
                 else:
                     yield chat_processor.get_chat_stream_response(
