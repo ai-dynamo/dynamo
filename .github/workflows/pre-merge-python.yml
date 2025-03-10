@@ -60,7 +60,7 @@ jobs:
           set +e
           if [ "${{ github.event_name }}" == "pull_request" ]; then
             echo "Not pushing to container image cache"
-            echo "cache_to_location=--cache-to \"type=registry,ref=${{ steps.define_image_tag.outputs.image_tag }},image-manifest=true,mode=max\"" >> $GITHUB_OUTPUT
+            echo "cache_to_location=" >> $GITHUB_OUTPUT
           else
             echo "Pushing ${{ steps.define_image_tag.outputs.image_tag }} to container image cache"
             echo "cache_to_location=--cache-to \"type=registry,ref=${{ steps.define_image_tag.outputs.image_tag }},image-manifest=true,mode=max\"" >> $GITHUB_OUTPUT
