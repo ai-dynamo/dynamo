@@ -101,15 +101,15 @@ RUN mkdir /opt/dynamo && \
     uv venv /opt/dynamo/venv --python 3.12 && \
     source /opt/dynamo/venv/bin/activate && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/dynamo*cp312*.whl && \
+    uv pip install /workspace/dist/ai_dynamo*cp312*.whl && \
     cd /workspace/deploy/dynamo/sdk && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/dynamo_sdk*any.whl
+    uv pip install /workspace/dist/ai_dynamo_sdk*any.whl
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
     mkdir /opt/dynamo/bindings/lib && \
-    cp dist/dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
+    cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
     cp lib/bindings/c/target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
     cp -r lib/bindings/c/include /opt/dynamo/bindings/.
 
@@ -117,8 +117,8 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
 # currently run without virtual environment activated.
 # TODO: In future, we may use a virtualenv for everything and remove this.
 RUN cd /opt/dynamo/bindings/wheels && \
-    pip install dynamo*cp312*.whl  && \
-    pip install /workspace/dist/dynamo_sdk*any.whl
+    pip install ai_dynamo*cp312*.whl  && \
+    pip install /workspace/dist/ai_dynamo_sdk*any.whl
 
 # Tell TRTLLM worker to use the Dynamo LLM C API for KV Cache Routing
 ENV DYNAMO_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
