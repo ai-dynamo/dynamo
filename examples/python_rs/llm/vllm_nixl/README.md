@@ -54,8 +54,8 @@ This figure shows an overview of the major components to deploy:
 ```
                                                  +----------------+
                                           +------| prefill worker |-------+
-                                          |      |   (optional)   |       |
-                                call back |      +----------------+       | pull
+                                   notify |      |   (optional)   |       |
+                                 finished |      +----------------+       | pull
                                           v                               v
 +------+      +-----------+      +------------------+    push     +---------------+
 | HTTP |----->| processor |----->| decode/monolith  |------------>| prefill queue |
