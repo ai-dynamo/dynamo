@@ -28,11 +28,13 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 `cargo build --release --features mistralrs`
 
+The binary will be called `dynamo-run` in `$REPO_ROOT/launch/target/release`.
+
 ## Quickstart
 
 If you have an `HF_TOKEN` environment variable set, this will download Qwen2.5 3B from Hugging Face (6 GiB download) and start it in interactive mode:
 ```
-./target/release/dynamo-run Qwen/Qwen2.5-3B-Instruct
+dynamo-run Qwen/Qwen2.5-3B-Instruct
 ```
 
 ## Download a model from Hugging Face
@@ -43,11 +45,11 @@ For example one of these should be fast and good quality on almost any machine: 
 
 *Text interface*
 
-`./target/release/dynamo-run Llama-3.2-1B-Instruct-Q4_K_M.gguf` or path to a Hugging Face repo checkout instead of the GGUF.
+`dynamo-run Llama-3.2-1B-Instruct-Q4_K_M.gguf` or path to a Hugging Face repo checkout instead of the GGUF.
 
 *HTTP interface*
 
-`./target/release/dynamo-run in=http Llama-3.2-1B-Instruct-Q4_K_M.gguf`
+`dynamo-run in=http Llama-3.2-1B-Instruct-Q4_K_M.gguf`
 
 List the models: `curl localhost:8080/v1/models`
 
@@ -117,7 +119,7 @@ The extra `--model-config` flag is because:
 - We send it tokens, meaning we do the tokenization ourself, so we need a tokenizer
 - We don't yet read it out of the GGUF (TODO), so we need an HF repo with `tokenizer.json` et al
 
-If the build step also builds llama_cpp libraries into `target/release` ("libllama.so", "libggml.so", "libggml-base.so", "libggml-cpu.so", "libggml-cuda.so"), then `dynamo-run` will need to find those at runtime. Set `LD_LIBRARY_PATH`, and be sure to deploy them alongside the `dynamo-run` binary.
+If the build step also builds llama_cpp libraries into the same folder as the binary ("libllama.so", "libggml.so", "libggml-base.so", "libggml-cpu.so", "libggml-cuda.so"), then `dynamo-run` will need to find those at runtime. Set `LD_LIBRARY_PATH`, and be sure to deploy them alongside the `dynamo-run` binary.
 
 ## vllm
 
@@ -142,13 +144,13 @@ cargo build --release --features vllm
 
 Run (still inside that virtualenv) - HF repo:
 ```
-./target/release/dynamo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct/
+./dynamo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct/
 
 ```
 
 Run (still inside that virtualenv) - GGUF:
 ```
-./target/release/dynamo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf --model-config ~/llm_models/Llama-3.2-3B-Instruct/
+./dynamo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf --model-config ~/llm_models/Llama-3.2-3B-Instruct/
 ```
 
 + Multi-node:
