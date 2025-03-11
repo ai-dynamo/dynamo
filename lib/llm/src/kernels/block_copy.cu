@@ -348,3 +348,24 @@ BlockCopyControl::~BlockCopyControl()
   cudaEventDestroy(start_event);
   cudaEventDestroy(stop_event);
 }
+
+
+extern "C" {
+int cuda_malloc_host(void** ptr, size_t size);
+int cuda_free_host(void* ptr);
+
+
+int
+cuda_malloc_host(void** ptr, size_t size)
+{
+  CUDA_CHECK(cudaMallocHost(ptr, size));
+  return cudaSuccess;
+}
+
+int
+cuda_free_host(void* ptr)
+{
+  CUDA_CHECK(cudaFreeHost(ptr));
+  return cudaSuccess;
+}
+}
