@@ -35,36 +35,36 @@ spec:
       securityContext:
         runAsUser: 0
       containers:
-        - name: poc-{{ .name | lower }}
-          image: {{ $.Values.image }}
-          args:
-            - uv run compoundai start --service-name {{ .name }}
-          command:
-            - sh
-            - -c
-          resources:
-            requests:
-              cpu: "{{ .config.resources.cpu }}"
-            limits:
-              cpu: "{{ .config.resources.cpu }}"
-          env:
-            - name: TRAFFIC_TIMEOUT
-              value: "{{ .config.traffic.timeout }}"
-          {{- if and .config.nova .config.nova.enabled }}
-            - name: NOVA_NAMESPACE
-              value: "{{ .config.nova.namespace }}"
-            - name: NOVA_NAME
-              value: "{{ .config.nova.name }}"
-          {{- end }}
-          {{- if .config.workers }}
-            - name: WORKERS
-              value: "{{ .config.workers }}"
-          {{- end }}
-            - name: PORT
-              value: "3000"
-            - name: NATS_SERVER
-              value: nats://my-nats:4222
-            - name: ETCD_ENDPOINTS
-              value: etcd:2379
+      - name: poc-{{ .name | lower }}
+        image: {{ $.Values.image }}
+        args:
+        - uv run compoundai start --service-name {{ .name }}
+        command:
+        - sh
+        - -c
+        resources:
+          requests:
+            cpu: "{{ .config.resources.cpu }}"
+          limits:
+            cpu: "{{ .config.resources.cpu }}"
+        env:
+        - name: TRAFFIC_TIMEOUT
+          value: "{{ .config.traffic.timeout }}"
+      {{- if and .config.nova .config.nova.enabled }}
+        - name: NOVA_NAMESPACE
+          value: "{{ .config.nova.namespace }}"
+        - name: NOVA_NAME
+          value: "{{ .config.nova.name }}"
+      {{- end }}
+      {{- if .config.workers }}
+        - name: WORKERS
+          value: "{{ .config.workers }}"
+      {{- end }}
+        - name: PORT
+          value: "3000"
+        - name: NATS_SERVER
+          value: nats://my-nats:4222
+        - name: ETCD_ENDPOINTS
+          value: etcd:2379
 ---
 {{- end }}
