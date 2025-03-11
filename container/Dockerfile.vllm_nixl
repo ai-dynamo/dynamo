@@ -233,16 +233,17 @@ RUN cd lib/bindings/c && \
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 # Build dynamo wheel
 RUN source /opt/dynamo/venv/bin/activate && \
+    cd /workspace/lib/bindings/python && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/ai_dynamo*cp312*.whl && \
-    cd /workspace/deploy/dynamo/sdk && \
+    uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
+    cd /workspace && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/ai_dynamo_sdk*any.whl
+    uv pip install /workspace/dist/ai_dynamo*any.whl
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
     mkdir /opt/dynamo/bindings/lib && \
-    cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
+    cp dist/ai_dynamo_runtime*cp312*.whl /opt/dynamo/bindings/wheels/. && \
     cp lib/bindings/c/target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
     cp -r lib/bindings/c/include /opt/dynamo/bindings/.
 
