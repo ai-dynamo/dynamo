@@ -68,7 +68,7 @@ VLLM_NIXL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 VLLM_NIXL_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 NIXL_COMMIT=3ce6a673b266b4f293909ceb17ca7975f1ba5cd7
-NIXL_REPO=https://github.com/ai-dynamo/nixl.git
+NIXL_REPO=ai-dynamo/nixl.git
 
 get_options() {
     while :; do
@@ -299,8 +299,13 @@ if [[ $FRAMEWORK == "VLLM_NIXL" ]]; then
     # Clean up temp directory on script exit
     trap 'rm -rf "$TEMP_DIR"' EXIT
 
-    # Clone original vLLM to a temp directory
-    git clone ${NIXL_REPO} "$TEMP_DIR/nixl_src"
+    # Clone original NIXL to temp directory
+
+    if [ ! -z ${GITHUB_TOKEN} ]; then
+	git clone https://oauth2:${GITHUB_TOKEN}@github.com/ai-dynamo/nixl.git "$TEMP_DIR/nixl_src"
+    else
+	git clone https://github.com/${NIXL_REPO} "$TEMP_DIR/nixl_src"
+    fi
 
     cd "$TEMP_DIR/nixl_src"
 
