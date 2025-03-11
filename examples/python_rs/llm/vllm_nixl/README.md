@@ -59,7 +59,7 @@ This figure shows an overview of the major components to deploy:
                                           v                               v
 +------+      +-----------+      +------------------+    push     +---------------+
 | HTTP |----->| processor |----->| decode/monolith  |------------>| prefill queue |
-+------+      +-----------+      | worker           | (if disagg) |   (optional)  |
++------+      +-----------+      |      worker      | (if disagg) |   (optional)  |
                   |    ^         +------------------+             +---------------+
                   |    |                  |
        query best |    | return           | publish kv events
