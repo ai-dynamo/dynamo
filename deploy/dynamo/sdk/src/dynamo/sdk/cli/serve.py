@@ -62,7 +62,7 @@ def deprecated_option(*param_decls: str, **attrs: t.Any):
     return decorator
 
 
-def _parse_arg(arg: str) -> tuple[str, str, t.Any] | None:
+def _parse_service_arg(arg: str) -> tuple[str, str, t.Any] | None:
     """Parse a single CLI argument into service name, key, and value."""
     if not (arg.startswith("--") and "=" in arg):
         return None
@@ -94,13 +94,13 @@ def _parse_arg(arg: str) -> tuple[str, str, t.Any] | None:
     return service, key, value
 
 
-def _try_service_args(args: list[str]) -> t.Dict[str, t.Any] | None:
+def _parse_service_args(args: list[str]) -> t.Dict[str, t.Any] | None:
     service_configs: t.DefaultDict[str, t.Dict[str, t.Any]] = collections.defaultdict(
         dict
     )
 
     for arg in args:
-        parsed = _parse_arg(arg)
+        parsed = _parse_service_arg(arg)
         if parsed:
             service, key, value = parsed
             service_configs[service][key] = value
@@ -322,7 +322,7 @@ def build_serve_command() -> click.Group:
         from bentoml._internal.service.loader import load
 
         # Process service-specific options
-        service_configs = _try_service_args(ctx.args)
+        service_configs = _parse_service_args(ctx.args)
 
         # Set environment variable with service configuration
         if service_configs:
