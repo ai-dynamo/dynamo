@@ -49,8 +49,29 @@ All of the commands below are run inside the same container.
 
 ## Run deployment
 
-Add model to dynamo and start http server.
+This figure shows an overview of the major components to deploy:
 
+```
+                                                 +----------------+
+                                          +------| prefill worker |-------+
+                                          |      |   (optional)   |       |
+                                call back |      +----------------+       | pull
+                                          v                               v
++------+      +-----------+      +------------------+    push     +---------------+
+| HTTP |----->| processor |----->| decode/monolith  |------------>| prefill queue |
++------+      +-----------+      | worker           | (if disagg) |   (optional)  |
+                  |    ^         +------------------+             +---------------+
+                  |    |                  |
+       query best |    | return           | publish kv events
+           worker |    | worker_id        v
+                  |    |         +------------------+
+                  |    +---------|     kv-router    |
+                  +------------->|    (optional)    |
+                                 +------------------+
+
+```
+
+Add model to dynamo and start http server.
 ```
 llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo-init.process.chat/completions
 TRT_LOG=DEBUG http --port 8181
