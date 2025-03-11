@@ -43,8 +43,8 @@ PYTHON_PACKAGE_VERSION=${current_tag:-$latest_tag.dev+$commit_id}
 # dependencies are specified in the /container/deps folder and
 # installed within framework specific sections of the Dockerfile.
 
-declare -A FRAMEWORKS=(["STANDARD"]=1 ["TENSORRTLLM"]=2 ["VLLM"]=3 ["VLLM_NIXL"]=4)
-DEFAULT_FRAMEWORK=STANDARD
+declare -A FRAMEWORKS=(["STANDARD"]=1 ["TENSORRTLLM"]=2 ["VLLM"]=3)
+DEFAULT_FRAMEWORK=VLLM
 
 SOURCE_DIR=$(dirname "$(readlink -f "$0")")
 DOCKERFILE=${SOURCE_DIR}/Dockerfile
@@ -63,9 +63,6 @@ TENSORRTLLM_PIP_WHEEL_PATH=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
-
-VLLM_NIXL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-VLLM_NIXL_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 NIXL_COMMIT=3ce6a673b266b4f293909ceb17ca7975f1ba5cd7
 NIXL_REPO=ai-dynamo/nixl.git
@@ -287,13 +284,11 @@ get_options "$@"
 # Update DOCKERFILE if framework is VLLM
 if [[ $FRAMEWORK == "VLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
-elif [[ $FRAMEWORK == "VLLM_NIXL" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm_nixl
 elif [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.tensorrt_llm
 fi
 
-if [[ $FRAMEWORK == "VLLM_NIXL" ]]; then
+if [[ $FRAMEWORK == "VLLM" ]]; then
     TEMP_DIR=$(mktemp -d)
 
     # Clean up temp directory on script exit
