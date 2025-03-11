@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use async_stream::stream;
 use async_trait::async_trait;
@@ -25,9 +25,7 @@ use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseSt
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 
-/// How long to sleep between echoed tokens.
-/// 50ms gives us 20 tok/s.
-const TOKEN_ECHO_DELAY: Duration = Duration::from_millis(50);
+use super::common::TOKEN_ECHO_DELAY;
 
 /// Engine that accepts pre-processed requests and echos the tokens back as the response
 /// The response will include the full prompt template.
@@ -50,7 +48,7 @@ impl AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<LLMEngineOutput>>, Er
 
         let output = stream! {
             for tok in request.token_ids {
-                tokio::time::sleep(TOKEN_ECHO_DELAY).await;
+                tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
                 yield delta_core(tok);
             }
             yield Annotated::from_data(LLMEngineOutput::stop());
