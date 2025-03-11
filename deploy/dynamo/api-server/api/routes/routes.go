@@ -52,7 +52,7 @@ func SetupRouter() *gin.Engine {
 	/* End V1 APIs */
 
 	/* Start V2 APIs */
-	deploymentRoutes(v2)
+	deploymentRoutesV2(v2)
 	/* End V2 APIs */
 
 	return router
@@ -80,9 +80,45 @@ func createClusterRoutes(grp *gin.RouterGroup) {
 	grp.POST("", controllers.ClusterController.Create)
 
 	dynamoComponentRoutes(resourceGrp)
+	deploymentRoutes(resourceGrp)
 }
 
 func deploymentRoutes(grp *gin.RouterGroup) {
+	namespacedGrp := grp.Group("/namespaces/:kubeNamespace/deployments")
+	grp = grp.Group("/deployments")
+
+	resourceGrp := namespacedGrp.Group("/:deploymentName")
+
+	resourceGrp.GET("", controllers.DeploymentController.Get)
+
+	resourceGrp.PATCH("", controllers.DeploymentController.Update)
+
+	resourceGrp.POST("/sync_status", controllers.DeploymentController.SyncStatus)
+
+	resourceGrp.POST("/terminate", controllers.DeploymentController.Terminate)
+
+	resourceGrp.DELETE("", controllers.DeploymentController.Delete)
+
+	// resourceGrp.GET("/terminal_records", controllers.DeploymentController.ListTerminalRecords)
+
+	grp.GET("", controllers.DeploymentController.ListClusterDeployments)
+
+	grp.POST("", controllers.DeploymentController.Create)
+
+	deploymentRevisionRoutes(resourceGrp)
+}
+
+func deploymentRevisionRoutes(grp *gin.RouterGroup) {
+	grp = grp.Group("/revisions")
+
+	resourceGrp := grp.Group("/:revisionUid")
+
+	resourceGrp.GET("", controllers.DeploymentRevisionController.Get)
+
+	grp.GET("", controllers.DeploymentRevisionController.List)
+}
+
+func deploymentRoutesV2(grp *gin.RouterGroup) {
 	grp = grp.Group("/deployments")
 	grp.POST("", controllers.DeploymentController.CreateV2)
 
