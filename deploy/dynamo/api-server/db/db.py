@@ -20,7 +20,7 @@ from typing import AsyncGenerator
 import boto3
 from botocore.exceptions import ClientError
 from sqlalchemy import create_engine
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
 
@@ -67,8 +67,10 @@ def get_session():
 
 
 async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
-    async_session = sessionmaker(
-        async_engine, class_=AsyncSession, expire_on_commit=False
+    async_session = async_sessionmaker(
+        async_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
     )
     async with async_session() as session:
         yield session

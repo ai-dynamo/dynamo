@@ -15,8 +15,8 @@
 
 from __future__ import annotations
 
-import datetime
 from collections import defaultdict
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -29,8 +29,12 @@ from sqlmodel import SQLModel
 
 
 class TimeCreatedUpdated(SQLModel):
-    created_at: datetime = SQLField(default_factory=datetime.utcnow, nullable=False)
-    updated_at: datetime = SQLField(default_factory=datetime.utcnow, nullable=False)
+    created_at: datetime = SQLField(
+        default_factory=lambda: datetime.now(UTC), nullable=False
+    )
+    updated_at: datetime = SQLField(
+        default_factory=lambda: datetime.now(UTC), nullable=False
+    )
 
 
 class DynamoNimUploadStatus(str, Enum):
@@ -66,7 +70,7 @@ class CreateDynamoNimVersionRequest(BaseModel):
     description: str
     version: str
     manifest: DynamoNimVersionManifestSchema
-    build_at: datetime.datetime
+    build_at: datetime
     labels: Optional[list[Dict[str, str]]] = None
 
 
@@ -116,9 +120,9 @@ class ResourceType(str, Enum):
 
 class BaseSchema(BaseModel):
     uid: str
-    created_at: datetime.datetime
-    updated_at: datetime.datetime
-    deleted_at: Optional[datetime.datetime] = None
+    created_at: datetime
+    updated_at: datetime
+    deleted_at: Optional[datetime] = None
 
 
 class BaseListSchema(BaseModel):
@@ -177,8 +181,8 @@ class DynamoNimVersionSchema(ResourceSchema):
     description: str
     image_build_status: ImageBuildStatus
     upload_status: str
-    upload_started_at: Optional[datetime.datetime]
-    upload_finished_at: Optional[datetime.datetime]
+    upload_started_at: Optional[datetime]
+    upload_finished_at: Optional[datetime]
     upload_finished_reason: str
     presigned_upload_url: str = ""
     presigned_download_url: str = ""
@@ -186,7 +190,7 @@ class DynamoNimVersionSchema(ResourceSchema):
     transmission_strategy: TransmissionStrategy
     upload_id: str = ""
     manifest: Optional[DynamoNimVersionManifestSchema | dict[str, Any]]
-    build_at: datetime.datetime
+    build_at: datetime
 
     @field_validator("manifest")
     def validate_manifest(cls, v):
@@ -226,7 +230,7 @@ class DynamoNimVersionWithNimSchema(DynamoNimVersionSchema):
 
 
 class BaseDynamoNimModel(TimeCreatedUpdated, AsyncAttrs):
-    deleted_at: Optional[datetime.datetime] = SQLField(nullable=True, default=None)
+    deleted_at: Optional[datetime] = SQLField(nullable=True, default=None)
 
 
 class DynamoNimVersionBase(BaseDynamoNimModel):
@@ -236,15 +240,15 @@ class DynamoNimVersionBase(BaseDynamoNimModel):
     file_oid: Optional[str] = SQLField(default=None)  # Used for GIT Lfs access
     upload_status: DynamoNimUploadStatus = SQLField()
     image_build_status: ImageBuildStatus = SQLField()
-    image_build_status_syncing_at: Optional[datetime.datetime] = SQLField(default=None)
-    image_build_status_updated_at: Optional[datetime.datetime] = SQLField(default=None)
-    upload_started_at: Optional[datetime.datetime] = SQLField(default=None)
-    upload_finished_at: Optional[datetime.datetime] = SQLField(default=None)
+    image_build_status_syncing_at: Optional[datetime] = SQLField(default=None)
+    image_build_status_updated_at: Optional[datetime] = SQLField(default=None)
+    upload_started_at: Optional[datetime] = SQLField(default=None)
+    upload_finished_at: Optional[datetime] = SQLField(default=None)
     upload_finished_reason: str = SQLField(default="")
     manifest: Optional[DynamoNimVersionManifestSchema | dict[str, Any]] = SQLField(
         default=None, sa_column=Column(JSON)
     )  # JSON-like field for the manifest
-    build_at: datetime.datetime = SQLField()
+    build_at: datetime = SQLField()
 
     @field_validator("manifest")
     def validate_manifest(cls, v):

@@ -18,8 +18,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Annotated, List, Optional
 
-from db import get_session, s3_storage
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, responses
+from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Request, responses
 from model import DynamoNim, DynamoNimVersion
 from pydantic import ValidationError
 from sqlalchemy import func
@@ -27,7 +26,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlmodel import asc, col, desc, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from components import (
+from .components import (
     CreateDynamoNimRequest,
     CreateDynamoNimVersionRequest,
     DynamoNimSchema,
@@ -46,6 +45,7 @@ from components import (
     UpdateDynamoNimVersionRequest,
     UserSchema,
 )
+from .db import get_session, s3_storage
 
 API_TAG_MODELS = "dynamo"
 
@@ -57,6 +57,9 @@ SORTABLE_COLUMNS = {
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+app = FastAPI(title="Dynamo API Database Server")
+app.include_router(router)
 
 
 @router.get(
