@@ -104,6 +104,11 @@ struct Sockets {
     output: async_zmq::Pull,
     // Heartbeat messages from vllm process
     heartbeat: async_zmq::Pull,
+    // TODO: Make this more resilient to whether metrics socket is being used or not
+    //       such as using upstream vllm or patched vllm.
+    // NOTE: Metrics socket is custom to our patch of vllm
+    // Metrics messages from vllm process
+    metrics: async_zmq::Pull,
 }
 
 /// The message vllm sends us over zmq when it's ready to work.
@@ -169,6 +174,7 @@ pub async fn start(
         input,
         output,
         heartbeat,
+        metrics,
     } = zmq_sockets(sock_code)?;
 
     let vllm_process = start_vllm(
@@ -182,6 +188,7 @@ pub async fn start(
     let vllm_join_handle = watch_vllm(cancel_token.clone(), vllm_process);
 
     tokio::spawn(heartbeat_loop(cancel_token.clone(), heartbeat));
+    tokio::spawn(metrics_loop(cancel_token.clone(), metrics));
 
     let active_requests = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let (tx, rx) = tokio::sync::mpsc::channel(8);
@@ -280,12 +287,19 @@ fn zmq_sockets(sock_code: &str) -> anyhow::Result<Sockets> {
         .with_context(&zmq_context)
         .connect()?;
 
+    let metrics = async_zmq::pull(&format!("ipc:///tmp/{sock_code}_metrics_socket"))?
+        .with_context(&zmq_context)
+        .connect()?;
+
+    // TODO: NIXL/Prefill sockets here in the future for disagg?
+
     Ok(Sockets {
         context: zmq_context,
         data,
         input,
         output,
         heartbeat,
+        metrics,
     })
 }
 
@@ -347,6 +361,7 @@ async fn start_vllm(
             .startup_type
             .getattr(py, "IS_SERVER_READY")
             .unwrap();
+        tracing::info!("Sending start request to vllm: {:?}", start_req);
         let pickle_dumps = python_imports.pickle_module.getattr(py, "dumps").unwrap();
         pickle_dumps
             .call1(py, (start_req,))
@@ -354,24 +369,33 @@ async fn start_vllm(
             .extract(py)
             .unwrap()
     });
+    tracing::info!("Sending start request to vllm: {:?}", start_req_bytes);
     data_socket.send(vec![start_req_bytes].into()).await?;
+    tracing::info!("Sent start request to vllm");
     let start_resp: Vec<u8> = match data_socket.next().await {
         Some(Ok(r)) => {
             if !r.is_empty() {
+                tracing::info!("Received start response from vllm: {:?}", r);
                 r[0].deref().to_vec()
             } else {
+                tracing::error!("vllm failed to start. No response on dealer/data socket");
                 anyhow::bail!("vllm failed to start. No response on dealer/data socket");
             }
         }
         Some(Err(err)) => {
+            tracing::error!("vllm failed to start. Error reading from dealer/data socket: {err}");
             anyhow::bail!("vllm failed to start. Error reading from dealer/data socket: {err}");
         }
         None => {
+            tracing::error!("vllm failed to start, dealer/data socket is closed.");
             anyhow::bail!("vllm failed to start. dealer/data socket is closed.");
         }
     };
+    tracing::info!("Received start response from vllm: {:?}", start_resp);
     let resp: RPCStartupResponse = Python::with_gil(|py| {
+        tracing::info!("Deserializing start response from vllm: {:?}", start_resp);
         let pickle_loads = python_imports.pickle_module.getattr(py, "loads").unwrap();
+        tracing::info!("Deserializing start response from vllm: {:?}", pickle_loads);
         pickle_loads
             .call1(py, (start_resp,))
             .unwrap()
@@ -445,6 +469,40 @@ async fn heartbeat_loop(cancel_token: CancellationToken, mut socket: async_zmq::
             tracing::error!("vllm heartbeat error, expected 'SUCCESS' got '{s}'");
             break;
         }
+    }
+}
+
+async fn metrics_loop(cancel_token: CancellationToken, mut socket: async_zmq::Pull) {
+    loop {
+        let maybe_metrics = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                break;
+            }
+            maybe_metrics = socket.next() => {
+                maybe_metrics
+            }
+        };
+        let b = match maybe_metrics {
+            Some(Ok(b)) => b[0].deref().to_vec(),
+            Some(Err(err)) => {
+                tracing::error!("Error reading from vllm metrics socket: {err}");
+                break;
+            }
+            None => {
+                tracing::debug!("vllm metrics socket closed");
+                break;
+            }
+        };
+        // FIXME: "decoding error: invalid type: map, expected unit"
+        let metrics = match serde_pickle::from_slice(&b, Default::default()) {
+            Ok(metrics) => metrics,
+            Err(err) => {
+                tracing::error!("Error de-serializing vllm metrics. It was probably Exception not KVMetrics. {err}");
+                // TODO: Handle this better
+                //break;
+            }
+        };
+        tracing::info!("Received vllm metrics: {:?}", metrics);
     }
 }
 
