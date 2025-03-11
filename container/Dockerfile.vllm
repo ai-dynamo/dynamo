@@ -86,14 +86,22 @@ RUN cd lib/runtime && \
 
 # Build OpenAI HTTP Service binaries
 COPY lib/llm /workspace/lib/llm
-COPY examples/rust /workspace/examples/rust
-RUN cd examples/rust && \
+COPY components /workspace/components
+RUN cd components && \
     cargo build --release && \
-    cp target/release/http /usr/local/bin/ && \
+    cp target/release/http /usr/local/bin/
+
+# Build Dynamo Run binaries
+COPY launch /workspace/launch
+RUN cd launch && \
+    cargo build --release --features mistralrs,sglang,vllm,python && \
+    cp target/release/dynamo-run /usr/local/bin/ && \
     cp target/release/llmctl /usr/local/bin/
 
-# TODO: Build dynamo-run
-# COPY applications/...
+# Generate C bindings for kv cache routing in vLLM
+COPY lib/bindings /workspace/lib/bindings
+RUN cd lib/bindings/c && \
+    cargo build --release --locked && cargo doc --no-deps
 
 # Generate C bindings for kv cache routing in vLLM
 COPY lib/bindings /workspace/lib/bindings
