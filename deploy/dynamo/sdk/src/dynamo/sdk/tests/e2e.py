@@ -33,6 +33,8 @@ def setup_and_teardown():
             "dynamo-sdk",
             "serve",
             "pipeline:Frontend",
+            "--working-dir",
+            "deploy/dynamo/sdk/src/dynamo/sdk/tests",
             "--Frontend.model=qwentastic",
             "--Middle.bias=0.5",
         ]
