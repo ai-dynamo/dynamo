@@ -52,7 +52,9 @@ class RequestType(BaseModel):
 class ResponseType(BaseModel):
     text: str
 
+
 GPU_ENABLED = False
+
 
 class FrontendConfig(BaseModel):
     model: str
@@ -60,8 +62,10 @@ class FrontendConfig(BaseModel):
     max_tokens: int = 1024
     stream: bool = True
 
+
 class MiddleConfig(BaseModel):
     bias: float
+
 
 @service(
     resources={"cpu": "2"},
@@ -169,4 +173,3 @@ class Frontend:
         print(f"Frontend sending: {type(txt)}")
         async for response in self.middle.generate(txt.model_dump_json()):
             yield f"Frontend: {response}"
-
