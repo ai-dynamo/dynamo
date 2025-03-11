@@ -20,12 +20,17 @@ use std::str::FromStr;
 #[derive(clap::Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 pub struct Flags {
-    /// Full path to the model, which can be either a GGUF file or a checked out HF repository.
-    /// For the `echo_full` engine omit the flag.
+    /// The model. The options depend on the engine.
+    ///
+    /// The full list - only mistralrs supports all three currently:
+    /// - Full path to a GGUF file
+    /// - Full path of a checked out Hugging Face repository containing safetensor files
+    /// - Name of a Hugging Face repository, e.g 'google/flan-t5-small'. The model will be
+    ///   downloaded and cached.
     #[arg(index = 1)]
     pub model_path_pos: Option<PathBuf>,
 
-    // `--model-path`. The one above is `tio <positional-model-path>`
+    // `--model-path`. The one above is `dynamo-run <positional-model-path>`
     #[arg(long = "model-path")]
     pub model_path_flag: Option<PathBuf>,
 

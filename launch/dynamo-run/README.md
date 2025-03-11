@@ -28,6 +28,13 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 `cargo build --release --features mistralrs`
 
+## Quickstart
+
+If you have an `HF_TOKEN` environment variable set, this will download Qwen2.5 3B from Hugging Face (6 GiB download) and start it in interactive mode:
+```
+./target/release/dynamo-run Qwen/Qwen2.5-3B-Instruct
+```
+
 ## Download a model from Hugging Face
 
 For example one of these should be fast and good quality on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
@@ -40,7 +47,7 @@ For example one of these should be fast and good quality on almost any machine: 
 
 *HTTP interface*
 
-`./target/release/dynamo-run in=http --model-path Llama-3.2-1B-Instruct-Q4_K_M.gguf`
+`./target/release/dynamo-run in=http Llama-3.2-1B-Instruct-Q4_K_M.gguf`
 
 List the models: `curl localhost:8080/v1/models`
 
@@ -63,7 +70,7 @@ dynamo-run in=dyn://llama3B_pool out=mistralrs ~/llm_models/Llama-3.2-3B-Instruc
 
 This will use etcd to auto-discover the model and NATS to talk to it. You can run multiple workers on the same endpoint and it will pick one at random each time.
 
-The `ns/backend/mistralrs` are purely symbolic, pick anything as long as it has three parts, and it matches the other node.
+The `llama3B_pool` name is purely symbolic, pick anything as long as it matches the other node.
 
 Run `dynamo-run --help` for more options.
 
