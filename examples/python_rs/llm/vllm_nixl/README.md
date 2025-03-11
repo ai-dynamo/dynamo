@@ -217,6 +217,19 @@ CUDA_VISIBLE_DEVICES=1 python3 worker.py \
     <optional disaggregated router args: --conditional-disagg --custom-disagg-router --max-local-prefill-length <length>>
 ```
 
+### Multi-Node Deployment
+
+For multi-node deployment, etcd, nats, processor, and kv router
+are only required on the head node. The only components that need
+to be deployed on all nodes are the workers.
+
+Set the following environment variables on each node before running the workers:
+```bash
+export NATS_SERVER="nats://<nats-server-host>:<nats-server-port>"
+export ETCD_ENDPOINTS="http://<etcd-server-host>:<etcd-server-port>"
+```
+
+
 ### Common Issues
 
 If torch GLOO backend is complaining about file name too long, set
