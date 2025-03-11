@@ -21,7 +21,7 @@ from typing import Any, Dict, Tuple
 
 import yaml
 from tensorrt_llm._torch.pyexecutor.config import PyTorchConfig
-from tensorrt_llm.llmapi import KvCacheConfig
+from tensorrt_llm.llmapi import KvCacheConfig, MTPDecodingConfig
 
 
 @dataclass
@@ -32,18 +32,22 @@ class LLMAPIConfig:
         model_path: str | None = None,
         pytorch_backend_config: PyTorchConfig | None = None,
         kv_cache_config: KvCacheConfig | None = None,
+        mtp_config: MTPDecodingConfig | None = None,
         **kwargs,
     ):
         self.model_name = model_name
         self.model_path = model_path
         self.pytorch_backend_config = pytorch_backend_config
         self.kv_cache_config = kv_cache_config
+        self.mtp_config = mtp_config
         self.extra_args = kwargs
 
     def to_dict(self) -> Dict[str, Any]:
+        # This keys are named as per LLMAPI expectation
         data = {
             "pytorch_backend_config": self.pytorch_backend_config,
             "kv_cache_config": self.kv_cache_config,
+            "speculative_config": self.mtp_config,
         }
         if self.extra_args:
             data.update(self.extra_args)
@@ -59,6 +63,10 @@ class LLMAPIConfig:
         if "kv_cache_config" in other_config:
             self.kv_cache_config = KvCacheConfig(**other_config["kv_cache_config"])
             self.extra_args.pop("kv_cache_config", None)
+
+        if "mtp_config" in other_config:
+            self.mtp_config = MTPDecodingConfig(**other_config["mtp_config"])
+            self.extra_args.pop("mtp_config", None)
 
 
 def _get_llm_args(engine_config):

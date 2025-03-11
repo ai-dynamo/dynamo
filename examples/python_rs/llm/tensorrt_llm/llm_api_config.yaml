@@ -38,3 +38,7 @@ pytorch_backend_config:
   use_cuda_graph: false
   # Uncomment to enable iter perf stats
   #enable_iter_perf_stats: true
+
+# uncomment the following for MTP
+# mtp_config:
+#   num_nextn_predict_layers: 2

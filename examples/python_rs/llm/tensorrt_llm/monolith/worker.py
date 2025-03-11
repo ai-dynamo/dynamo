@@ -34,7 +34,7 @@ from tensorrt_llm.serve.openai_protocol import (
 
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
-logger.set_level("debug")
+logger.set_level("info")
 
 
 class TensorrtLLMEngine(BaseTensorrtLLMEngine):
