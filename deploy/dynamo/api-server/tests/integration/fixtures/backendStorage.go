@@ -32,7 +32,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-type MockedBackendService struct {}
+type MockedBackendService struct{}
 
 func (s *MockedBackendService) GetDynamoNimVersion(ctx context.Context, dynamoNim string, dynamoNimVersion string) (*schemas.DynamoNimVersionFullSchema, error) {
 	return nil, nil

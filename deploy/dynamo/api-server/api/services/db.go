@@ -29,7 +29,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-type backendService struct {}
+type backendService struct{}
 
 var BackendService = backendService{}
 
