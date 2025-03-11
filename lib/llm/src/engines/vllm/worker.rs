@@ -364,7 +364,6 @@ async fn start_vllm(
             .startup_type
             .getattr(py, "IS_SERVER_READY")
             .unwrap();
-        tracing::info!("Sending start request to vllm: {:?}", start_req);
         let pickle_dumps = python_imports.pickle_module.getattr(py, "dumps").unwrap();
         pickle_dumps
             .call1(py, (start_req,))
@@ -372,33 +371,24 @@ async fn start_vllm(
             .extract(py)
             .unwrap()
     });
-    tracing::info!("Sending start request to vllm: {:?}", start_req_bytes);
     data_socket.send(vec![start_req_bytes].into()).await?;
-    tracing::info!("Sent start request to vllm");
     let start_resp: Vec<u8> = match data_socket.next().await {
         Some(Ok(r)) => {
             if !r.is_empty() {
-                tracing::info!("Received start response from vllm: {:?}", r);
                 r[0].deref().to_vec()
             } else {
-                tracing::error!("vllm failed to start. No response on dealer/data socket");
                 anyhow::bail!("vllm failed to start. No response on dealer/data socket");
             }
         }
         Some(Err(err)) => {
-            tracing::error!("vllm failed to start. Error reading from dealer/data socket: {err}");
             anyhow::bail!("vllm failed to start. Error reading from dealer/data socket: {err}");
         }
         None => {
-            tracing::error!("vllm failed to start, dealer/data socket is closed.");
             anyhow::bail!("vllm failed to start. dealer/data socket is closed.");
         }
     };
-    tracing::info!("Received start response from vllm: {:?}", start_resp);
     let resp: RPCStartupResponse = Python::with_gil(|py| {
-        tracing::info!("Deserializing start response from vllm: {:?}", start_resp);
         let pickle_loads = python_imports.pickle_module.getattr(py, "loads").unwrap();
-        tracing::info!("Deserializing start response from vllm: {:?}", pickle_loads);
         pickle_loads
             .call1(py, (start_resp,))
             .unwrap()
@@ -552,9 +542,9 @@ async fn metrics_loop(cancel_token: CancellationToken, mut socket: async_zmq::Pu
 
         match metrics_result {
             Ok(metrics) => {
-                tracing::debug!("Received vllm metrics: {:?}", metrics);
                 // TODO: These metrics could be attached to StatsHandler or Events
                 // for aggregation and visualization.
+                tracing::debug!("Received vllm metrics: {:?}", metrics);
             }
             Err(err) => {
                 tracing::error!(
