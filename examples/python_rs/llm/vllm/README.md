@@ -42,7 +42,7 @@ Start required services (etcd and NATS):
 ## Run container
 
 ```
-./container/run.sh --framework -it
+./container/run.sh -it
 ```
 
 All of the commands below are run inside the same container.
@@ -124,13 +124,11 @@ There are three steps needed to enable the kv router:
 3. Launch the kv router in a separate terminal.
    ```
    RUST_LOG=info python3 kv_router.py \
-       --routing-strategy prefix \
        --model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
        --block-size 64 \
        --min-workers 1
    ```
    where `--min-workers` is the number of (decode) workers.
-   There is also python-based customized router that can be enabled by `--custom-router`.
 
 You can choose only the prefix strategy for now:
 - `prefix`: Route requests to the worker that has the longest prefix match.
@@ -139,37 +137,18 @@ You can choose only the prefix strategy for now:
 
 The disaggregated router determines whether a request should be send to a
 remote prefill engine or a local prefill engine for prefilling based on the
-prefill length. When prefilling locally, the vllm scheduler will prioritize
+prefill length. If kv router is enabled, the disaggregated router will use
+the absolute prefill length (actual prefill length - prefix hit length) to make
+the decision.
+
+When prefilling locally, the vllm scheduler will prioritize
 prefill request and pause any ongoing decode requests.
-
-There are two types of disaggregated router implementations:
-* Rust native: provide a simple heuristic to route to prefill engine
-  if prefill length (including prefix catch hit) is greater than a threshold.
-  This threshold can by dynamically adjusted at runtime through etcd.
-
-  To check the current threshold (this will print out all kv pairs in etcd):
-  ```
-  curl -s -L http://localhost:2379/v3/kv/range -X POST   -d '{"key":"AA==", "range_end":"AA=="}' |   jq -r '.kvs[] | "KEY: \(.key | @base64d)\nVALUE: \(.value | @base64d)\n---"'
-  ```
-
-  To update the threshold:
-  ```
-  ETCDCTL_API=3 etcdctl --endpoints=http://localhost:2379 put 'public/components/disagg_router/models/chat/<vllm.served_model_name(default to "vllm")>' '{"max_local_prefill_length": <new_threshold>}'
-  ```
-
-* Python customized: provide a python implementation that can be easily customized.
-  However, it does not support dynamic threshold adjustment through etcd.
-  It is recommended to use the custom disaggregated router together with the custom
-  kv router as the rust kv router does not report kv cache hit ratio.
-  To use the python disaggregated router, add the following commands when launching
-  the decode worker:
 
 To enable the disaggregated router, add the following commands in the decode workers:
 ```
 python worker.py \
 ...
 --conditional-disagg \
-<optional: --custom-disagg-router> \
 --max-local-prefill-length <length>
 ```
 
@@ -214,7 +193,7 @@ CUDA_VISIBLE_DEVICES=1 python3 worker.py \
     --max-num-batched-tokens 16384 \
     --max-model-len 16384 \
     <optional kv router args: --router kv --enable-prefix-caching>
-    <optional disaggregated router args: --conditional-disagg --custom-disagg-router --max-local-prefill-length <length>>
+    <optional disaggregated router args: --conditional-disagg --max-local-prefill-length <length>>
 ```
 
 ### Multi-Node Deployment

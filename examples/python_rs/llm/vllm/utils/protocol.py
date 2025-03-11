@@ -75,6 +75,7 @@ class vLLMGenerateRequest(BaseModel):
     engine_prompt: PatchedTokensPrompt
     sampling_params: SamplingParams
     request_id: str
+    prefix_hit_rate: Optional[float] = 0.0
 
     @field_validator("sampling_params", mode="before")
     @classmethod
