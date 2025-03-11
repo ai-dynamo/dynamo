@@ -14,6 +14,9 @@
 # limitations under the License.
 
 from dynamo._core import DisaggregatedRouter as DisaggregatedRouter
+from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
+from dynamo._core import HttpError as HttpError
+from dynamo._core import HttpService as HttpService
 from dynamo._core import KvIndexer as KvIndexer
 from dynamo._core import KvMetricsAggregator as KvMetricsAggregator
 from dynamo._core import KvMetricsPublisher as KvMetricsPublisher

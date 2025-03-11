@@ -14,7 +14,7 @@
 #  limitations under the License.
 
 [project]
-name = "dynamo-sdk"
+name = "ai-dynamo-sdk"
 version = "0.1.0"
 description = "Distributed Inference Framework - SDK"
 readme = "README.md"

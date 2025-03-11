@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use async_stream::stream;
 use async_trait::async_trait;
@@ -26,9 +26,7 @@ use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseSt
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 
-/// How long to sleep between echoed tokens.
-/// 50ms gives us 20 tok/s.
-const TOKEN_ECHO_DELAY: Duration = Duration::from_millis(50);
+use super::common::TOKEN_ECHO_DELAY;
 
 /// Engine that accepts un-preprocessed requests and echos the prompt back as the response
 /// Useful for testing ingress such as service-http.
@@ -69,8 +67,8 @@ impl
         let output = stream! {
             let mut id = 1;
             for c in prompt.chars() {
-                // we are returning characters not tokens, so speed up some
-                tokio::time::sleep(TOKEN_ECHO_DELAY/2).await;
+                // we are returning characters not tokens, so there will be some postprocessing overhead
+                tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
                 let inner = deltas.create_choice(0, Some(c.to_string()), None, None);
                 let response = NvCreateChatCompletionStreamResponse {
                     inner,
