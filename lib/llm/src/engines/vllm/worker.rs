@@ -13,10 +13,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{
-    collections::HashMap, ops::Deref, path::Path, process::Stdio, sync::Arc, time::Duration,
-    vec::IntoIter,
-};
+use std::collections::HashMap;
+use std::ops::Deref;
+use std::path::Path;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
+use std::vec::IntoIter;
 
 use async_zmq::{SinkExt, StreamExt};
 use dynamo_runtime::protocols::annotated::Annotated;
@@ -25,11 +28,12 @@ use pyo3::{
     prelude::*,
     types::{IntoPyDict, PyBytes, PyString},
 };
-use tokio::sync::mpsc::Sender;
+use tokio::io::AsyncBufReadExt;
+use tokio::sync::mpsc::{error::SendError, Sender};
 use tokio::task::JoinHandle;
-use tokio::{io::AsyncBufReadExt, sync::mpsc::error::SendError};
 
 use crate::engines::MultiNodeConfig;
+use crate::kv_router::protocols::ForwardPassMetrics;
 use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::FinishReason;
@@ -493,16 +497,76 @@ async fn metrics_loop(cancel_token: CancellationToken, mut socket: async_zmq::Pu
                 break;
             }
         };
-        // FIXME: "decoding error: invalid type: map, expected unit"
-        let metrics = match serde_pickle::from_slice(&b, Default::default()) {
-            Ok(metrics) => metrics,
-            Err(err) => {
-                tracing::error!("Error de-serializing vllm metrics. It was probably Exception not KVMetrics. {err}");
-                // TODO: Handle this better
-                //break;
+
+        // Log the raw bytes for debugging
+        tracing::debug!("Received raw metrics data: {} bytes", b.len());
+
+        // Try to deserialize directly into ForwardPassMetrics using Python's pickle module
+        let metrics_result = Python::with_gil(|py| -> Result<ForwardPassMetrics, String> {
+            let pickle = py
+                .import("pickle")
+                .map_err(|e| format!("Failed to import pickle: {}", e))?;
+            let loads = pickle
+                .getattr("loads")
+                .map_err(|e| format!("Failed to get loads function: {}", e))?;
+            let bytes = PyBytes::new(py, &b);
+
+            let result = loads
+                .call1((bytes,))
+                .map_err(|e| format!("Failed to call pickle.loads: {}", e))?;
+
+            // Log the Python object type for debugging
+            let obj_type = match result.get_type().name() {
+                Ok(name) => name.to_string(),
+                Err(_) => "unknown".to_string(),
+            };
+            let obj_str = result
+                .str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| "unprintable".to_string());
+            tracing::debug!(
+                "Deserialized Python object of type {} with repr: {}",
+                obj_type,
+                obj_str
+            );
+
+            // Try to extract the fields from the Python object
+            let extract_field = |field: &str| -> Result<u64, String> {
+                result
+                    .getattr(field)
+                    .map_err(|e| format!("Field '{}' not found: {}", field, e))?
+                    .extract::<u64>()
+                    .map_err(|e| format!("Failed to extract '{}' as u64: {}", field, e))
+            };
+
+            let request_active_slots = extract_field("request_active_slots")?;
+            let request_total_slots = extract_field("request_total_slots")?;
+            let kv_active_blocks = extract_field("kv_active_blocks")?;
+            let kv_total_blocks = extract_field("kv_total_blocks")?;
+
+            // Create ForwardPassMetrics directly
+            Ok(ForwardPassMetrics {
+                request_active_slots,
+                request_total_slots,
+                kv_active_blocks,
+                kv_total_blocks,
+            })
+        });
+
+        match metrics_result {
+            Ok(metrics) => {
+                tracing::info!("Received vllm metrics: {:?}", metrics);
+
+                // Here you could forward these metrics to a monitoring system or use them
+                // for load balancing decisions
             }
-        };
-        tracing::info!("Received vllm metrics: {:?}", metrics);
+            Err(err) => {
+                tracing::error!(
+                    "Error deserializing vllm metrics with Python pickle: {}",
+                    err
+                );
+            }
+        }
     }
 }
 
