@@ -228,6 +228,10 @@ async fn add_model(
         endpoint_name
     );
 
+    if model_name.starts_with('/') {
+        raise!("Model name '{}' cannot start with a slash", model_name);
+    }
+
     let parts: Vec<&str> = endpoint_name.split('.').collect();
 
     if parts.len() < 2 {
