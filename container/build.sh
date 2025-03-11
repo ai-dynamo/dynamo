@@ -301,10 +301,8 @@ if [[ $FRAMEWORK == "VLLM_NIXL" ]]; then
 
     # Clone original NIXL to temp directory
 
-    if [ ! -z ${GITHUB_TOKEN} ]; then
-	git clone https://oauth2:${GITHUB_TOKEN}@github.com/ai-dynamo/nixl.git "$TEMP_DIR/nixl_src"
-    else
-	git clone https://github.com/${NIXL_REPO} "$TEMP_DIR/nixl_src"
+    if [ ! -z ${GITHUB_CI_TOKEN} ]; then
+        git clone https://oauth2:${GITHUB_CI_TOKEN}@github.com/ai-dynamo/nixl.git "$TEMP_DIR/nixl_src"
     fi
 
     cd "$TEMP_DIR/nixl_src"

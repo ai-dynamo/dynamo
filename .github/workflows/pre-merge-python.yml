@@ -68,7 +68,7 @@ jobs:
           echo "cache_from_location=--cache-from \"type=registry,ref=${{ steps.define_image_tag.outputs.image_tag }}\"" >> $GITHUB_OUTPUT
       - name: Build image
         env:
-          GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
+          GITHUB_CI_TOKEN: ${{ secrets.CI_TOKEN }}
         run: |
           ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --framework ${{ matrix.framework }} ${{ steps.which_caches.outputs.cache_from_location }} ${{ steps.which_caches.outputs.cache_to_location }}
       - name: Run pytest
