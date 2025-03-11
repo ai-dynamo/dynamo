@@ -32,7 +32,11 @@ const (
 	port = 8181
 )
 
-func startDatabase() {
+func startDatabaseServer() {
+	/*
+		Starts the Python FastAPI server for the database.
+	*/
+
 	// Check if the database is already running
 	cmd := exec.Command("python3", "../db/start_db.py")
 	cmd.Stdout = os.Stdout
@@ -62,8 +66,8 @@ func startDatabase() {
 }
 
 func main() {
-	// Start the database first
-	startDatabase()
+	// Start the database server first
+	startDatabaseServer()
 
 	// Start the API server
 	runtime.Runtime.StartServer(port)
