@@ -54,9 +54,11 @@ class CustomRouter:
         worker_scores = {}
         if scores:
             for worker_id, score in scores.scores.items():
-                # score is number of matching blocks we multiply by 64 to get tokens
+                # score is number of matching blocks we multiply by block_size to get tokens
                 # and compare to token_length. The larger the cache hit the better
-                worker_scores[worker_id] = score * 64 / token_length
+                worker_scores[worker_id] = (
+                    score * self.indexer.block_size() / token_length
+                )
 
         worker_metrics = {}
         # pull metrics for each worker
@@ -200,7 +202,7 @@ async def worker(runtime: DistributedRuntime, args: Namespace):
 
     endpoint = router_component.endpoint("generate")
 
-    indexer = KvIndexer(kv_listener)
+    indexer = KvIndexer(kv_listener, args.block_size)
     metrics_aggregator = KvMetricsAggregator(kv_listener)
     await endpoint.serve_endpoint(
         CustomRouter(workers_client, indexer, metrics_aggregator).generate
@@ -218,6 +220,13 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="Minimum number of workers required before proceeding",
+    )
+    # TODO: Read block size
+    parser.add_argument(
+        "--block-size",
+        type=int,
+        default=64,
+        help="Block size for the KV Indexer",
     )
     args = parser.parse_args()
 
