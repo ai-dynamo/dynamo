@@ -108,9 +108,8 @@ struct Sockets {
     output: async_zmq::Pull,
     // Heartbeat messages from vllm process
     heartbeat: async_zmq::Pull,
-    // TODO: Make this more resilient to whether metrics socket is being used or not
-    //       such as using upstream vllm or patched vllm.
-    // NOTE: Metrics socket is custom to our patch of vllm
+    // NOTE: Metrics socket usage is custom to our patch of vllm, and may not
+    // be present when running upstream vllm.
     // Metrics messages from vllm process
     metrics: async_zmq::Pull,
 }
