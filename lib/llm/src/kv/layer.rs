@@ -321,18 +321,20 @@ impl KvLayer {
             tp_rank: block_details.tp_ranks,
         }
     }
-    pub fn view(&self) -> Result<TensorView<'_, Self, 4>> {
+    pub fn view(&self) -> Result<TensorView<'_, Self, 5>> {
         // Calculate dimensions based on layout
         let dims = match self.layout {
             KvLayout::KvFirst => [
                 2, // K and V as first dimension
                 self.number_of_blocks,
+                self.block_size,
                 self.number_of_heads / self.tp_size,
                 self.head_size,
             ],
             KvLayout::BlockFirst => [
                 self.number_of_blocks,
                 2, // K and V as second dimension
+                self.block_size,
                 self.number_of_heads / self.tp_size,
                 self.head_size,
             ],
@@ -442,44 +444,6 @@ impl KvLayer {
 
         Ok(())
     }
-
-    pub fn view_mut(&mut self) -> Result<TensorView<'_, Self, 4>> {
-        // Calculate dimensions based on layout
-        let dims = match self.layout {
-            KvLayout::KvFirst => [
-                2, // K and V as first dimension
-                self.number_of_blocks,
-                self.number_of_heads / self.tp_size,
-                self.head_size,
-            ],
-            KvLayout::BlockFirst => [
-                self.number_of_blocks,
-                2, // K and V as second dimension
-                self.number_of_heads / self.tp_size,
-                self.head_size,
-            ],
-        };
-
-        // Verify dimensions make sense
-        if self.number_of_heads % self.tp_size != 0 {
-            raise!(
-                "Number of heads ({}) is not divisible by tp_size ({})",
-                self.number_of_heads,
-                self.tp_size
-            );
-        }
-
-        tracing::debug!(
-            "Creating mutable TensorView with dims: {:?}, dtype: {:?}, size: {}",
-            dims,
-            self.dtype,
-            self.dtype.size_in_bytes()
-        );
-
-        // Use the TensorViewMut::new directly
-        let element_size = self.dtype.size_in_bytes();
-        TensorView::new(self, dims, element_size)
-    }
 }
 
 #[cfg(test)]
@@ -521,7 +485,7 @@ mod tests {
             let layer = h_blocks.layer_mut(0)?;
 
             // Create a mutable view and work with it
-            let mut view = layer.view_mut()?;
+            let mut view = layer.view()?;
 
             // Get shape information before creating the ndarray view
             let shape = *view.shape();
@@ -534,8 +498,8 @@ mod tests {
                 nd_view.assign(&ones);
 
                 // Verify some values while we have the view
-                assert_eq!(nd_view[[0, 0, 0, 0]], 1.0);
-                assert_eq!(nd_view[[1, 0, 0, 0]], 1.0);
+                assert_eq!(nd_view[[0, 0, 0, 0, 0]], 1.0);
+                assert_eq!(nd_view[[1, 0, 0, 0, 0]], 1.0);
             }
             // nd_view is dropped here, releasing the mutable borrow
         }
@@ -548,7 +512,7 @@ mod tests {
 
         {
             let h_view = h_blocks.layer(0)?.view().unwrap();
-            let mut d_view = d_blocks.layer_mut(0)?.view_mut().unwrap();
+            let mut d_view = d_blocks.layer_mut(0)?.view().unwrap();
             h_view.copy_to(&mut d_view, &stream).unwrap();
             stream.synchronize().unwrap();
         }
@@ -557,13 +521,13 @@ mod tests {
 
         // Set all values on host back to 0
         {
-            let mut h_layer = h_blocks.layer_mut(0)?.view_mut()?;
+            let mut h_layer = h_blocks.layer_mut(0)?.view()?;
             let mut nd_view = h_layer.as_ndarray_view_mut::<f32>()?;
             let zeros = ndarray::Array::from_shape_fn(nd_view.dim(), |_| 0.0);
             nd_view.assign(&zeros);
 
-            assert_eq!(nd_view[[0, 0, 0, 0]], 0.0);
-            assert_eq!(nd_view[[1, 0, 0, 0]], 0.0);
+            assert_eq!(nd_view[[0, 0, 0, 0, 0]], 0.0);
+            assert_eq!(nd_view[[1, 0, 0, 0, 0]], 0.0);
         }
 
         println!("Copying data back to host");
@@ -571,7 +535,7 @@ mod tests {
         // Copy data back to host
         {
             let d_view = d_blocks.layer(0)?.view()?;
-            let mut h_view = h_blocks.layer_mut(0)?.view_mut()?;
+            let mut h_view = h_blocks.layer_mut(0)?.view()?;
             d_view.copy_to(&mut h_view, &stream)?;
             stream.synchronize()?;
         }
@@ -582,8 +546,8 @@ mod tests {
         {
             let h_layer = h_blocks.layer(0)?.view()?;
             let nd_view = h_layer.as_ndarray_view::<f32>()?;
-            assert_eq!(nd_view[[0, 0, 0, 0]], 1.0);
-            assert_eq!(nd_view[[1, 0, 0, 0]], 1.0);
+            assert_eq!(nd_view[[0, 0, 0, 0, 0]], 1.0);
+            assert_eq!(nd_view[[1, 0, 0, 0, 0]], 1.0);
         }
 
         Ok(())
@@ -623,7 +587,7 @@ mod tests {
             let layer = h_blocks.layer_mut(0)?;
 
             // Create a mutable view and work with it
-            let mut view = layer.view_mut()?;
+            let mut view = layer.view()?;
 
             // Get shape information before creating the ndarray view
             let shape = *view.shape();
@@ -636,8 +600,8 @@ mod tests {
                 nd_view.assign(&ones);
 
                 // Verify some values while we have the view
-                assert_eq!(nd_view[[0, 0, 0, 0]], 1.0);
-                assert_eq!(nd_view[[1, 0, 0, 0]], 1.0);
+                assert_eq!(nd_view[[0, 0, 0, 0, 0]], 1.0);
+                assert_eq!(nd_view[[1, 0, 0, 0, 0]], 1.0);
             }
             // nd_view is dropped here, releasing the mutable borrow
         }
@@ -645,9 +609,6 @@ mod tests {
         // Copy data to device
         let context = CudaContext::new(0)?;
         let stream = context.new_stream()?;
-
-        // create block list 0..32
-        let blocks = (0..32).collect::<Vec<_>>();
 
         println!("Copying data to device");
 
@@ -666,13 +627,13 @@ mod tests {
 
         // Set all values on host back to 0
         {
-            let mut h_layer = h_blocks.layer_mut(0)?.view_mut()?;
+            let mut h_layer = h_blocks.layer_mut(0)?.view()?;
             let mut nd_view = h_layer.as_ndarray_view_mut::<f32>()?;
             let zeros = ndarray::Array::from_shape_fn(nd_view.dim(), |_| 0.0);
             nd_view.assign(&zeros);
 
-            assert_eq!(nd_view[[0, 0, 0, 0]], 0.0);
-            assert_eq!(nd_view[[1, 0, 0, 0]], 0.0);
+            assert_eq!(nd_view[[0, 0, 0, 0, 0]], 0.0);
+            assert_eq!(nd_view[[1, 0, 0, 0, 0]], 0.0);
         }
 
         println!("Copying data back to host");
@@ -695,8 +656,196 @@ mod tests {
         {
             let h_layer = h_blocks.layer(0)?.view()?;
             let nd_view = h_layer.as_ndarray_view::<f32>()?;
-            assert_eq!(nd_view[[0, 0, 0, 0]], 1.0);
-            assert_eq!(nd_view[[1, 0, 0, 0]], 1.0);
+            assert_eq!(nd_view[[0, 0, 0, 0, 0]], 1.0);
+            assert_eq!(nd_view[[1, 0, 0, 0, 0]], 1.0);
+        }
+
+        Ok(())
+    }
+
+    #[rstest]
+    #[test]
+    fn test_kv_block_storage_kv_first_direct_with_block_vals() -> Result<()> {
+        let number_of_blocks = 8;
+
+        let model_details = KvModelDetailsBuilder::default()
+            .number_of_layers(2)
+            .number_of_heads(2)
+            .head_size(2)
+            .dtype(DType::F32)
+            .build()?;
+
+        let block_details = KvBlockDetailsBuilder::default()
+            .layout(KvLayout::KvFirst)
+            .block_size(4)
+            .tp_size(1)
+            .tp_ranks(0)
+            .model_details(model_details)
+            .build()?;
+
+        // Create the storage blocks
+        let mut h_blocks =
+            KvBlockStorage::allocate(number_of_blocks, block_details.clone(), StorageType::Pinned)?;
+
+        let mut d_blocks = KvBlockStorage::allocate(
+            number_of_blocks,
+            block_details.clone(),
+            StorageType::Device(0),
+        )?;
+
+        println!("Allocated pinned and device blocks");
+        println!("Letting layer 0 on host to be 1s");
+
+        let layout = h_blocks.layer(0).unwrap().layout.clone();
+        let shape = h_blocks.layer(0).unwrap().view().unwrap().shape().clone();
+
+        println!("shape: {:?}", shape);
+
+        // Use separate scopes to manage borrows
+        {
+            // Get a mutable reference to a layer
+            let layer = h_blocks.layer_mut(0)?;
+
+            // Create a mutable view and work with it
+            let mut view = layer.view()?;
+
+            // Create and use the mutable ndarray view in its own scope
+            {
+                let mut nd_view = view.as_ndarray_view_mut::<f32>()?;
+
+                // iter over nd_view and set the values equal the the block index
+                // all kv and v of block 42 have values 42
+                match layout {
+                    KvLayout::KvFirst => {
+                        for kv_idx in 0..shape[0] {
+                            for block_idx in 0..shape[1] {
+                                for bs_idx in 0..shape[2] {
+                                    for head_idx in 0..shape[3] {
+                                        for head_dim_idx in 0..shape[4] {
+                                            nd_view[[
+                                                kv_idx,
+                                                block_idx,
+                                                bs_idx,
+                                                head_idx,
+                                                head_dim_idx,
+                                            ]] = block_idx as f32;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        assert_eq!(nd_view[[0, 0, 0, 0, 0]], 0.0);
+                        assert_eq!(nd_view[[1, 0, 0, 0, 0]], 0.0);
+                        assert_eq!(nd_view[[1, 0, 1, 1, 1]], 0.0);
+                        assert_eq!(nd_view[[0, 2, 0, 0, 0]], 2.0);
+                        assert_eq!(nd_view[[1, 2, 0, 0, 0]], 2.0);
+                        assert_eq!(nd_view[[1, 2, 1, 1, 1]], 2.0);
+                    }
+                    KvLayout::BlockFirst => {
+                        for block_idx in 0..shape[0] {
+                            for kv_idx in 0..shape[1] {
+                                for bs_idx in 0..shape[2] {
+                                    for head_idx in 0..shape[3] {
+                                        for head_dim_idx in 0..shape[4] {
+                                            nd_view[[block_idx, kv_idx, head_idx, head_dim_idx]] =
+                                                block_idx as f32;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        assert_eq!(nd_view[[0, 0, 0, 0, 0]], 0.0);
+                        assert_eq!(nd_view[[0, 1, 1, 1, 1]], 0.0);
+
+                        assert_eq!(nd_view[[1, 0, 0, 0, 0]], 1.0);
+                        assert_eq!(nd_view[[1, 1, 1, 1, 1]], 1.0);
+                    }
+                }
+            }
+            // nd_view is dropped here, releasing the mutable borrow
+        }
+
+        // Copy data to device
+        let context = CudaContext::new(0)?;
+        let stream = context.new_stream()?;
+
+        println!("Copying data to device");
+
+        {
+            let blocks = (0..number_of_blocks).collect::<Vec<_>>();
+
+            let h_layer = h_blocks.layer(0).unwrap();
+            let mut d_layer = d_blocks.layer_mut(0).unwrap();
+            h_layer
+                .copy_blocks_to(&blocks, &mut d_layer, &blocks, &stream)
+                .unwrap();
+            stream.synchronize().unwrap();
+        }
+
+        println!("Setting all values on host back to 0");
+
+        // Set all values on host back to 0
+        {
+            let mut h_layer = h_blocks.layer_mut(0)?.view()?;
+            let mut nd_view = h_layer.as_ndarray_view_mut::<f32>()?;
+            let zeros = ndarray::Array::from_shape_fn(nd_view.dim(), |_| 0.0);
+            nd_view.assign(&zeros);
+
+            assert_eq!(nd_view[[0, 0, 0, 0, 0]], 0.0);
+            assert_eq!(nd_view[[1, 0, 0, 0, 0]], 0.0);
+            assert_eq!(nd_view[[0, 1, 1, 1, 1]], 0.0);
+            assert_eq!(nd_view[[1, 1, 1, 1, 1]], 0.0);
+        }
+
+        println!("Copying data back to host");
+
+        let src_blocks = &[1, 2, 2, 3, 5];
+        let dst_blocks = &[0, 3, 2, 1, 4];
+
+        // Copy data back to host
+        {
+            let mut h_layer = h_blocks.layer_mut(0).unwrap();
+            let d_layer = d_blocks.layer(0).unwrap();
+            d_layer
+                .copy_blocks_to(src_blocks, &mut h_layer, dst_blocks, &stream)
+                .unwrap();
+            stream.synchronize().unwrap();
+        }
+
+        println!("Verifying host data is 1");
+
+        // Verify the host data is not back to 1
+        {
+            let h_layer = h_blocks.layer(0)?.view()?;
+            let nd_view = h_layer.as_ndarray_view::<f32>()?;
+
+            println!("nd_view: {:?}", nd_view);
+
+            // validate
+
+            for i in 0..src_blocks.len() {
+                println!(
+                    "Validating src block {} -> dst block {}",
+                    src_blocks[i], dst_blocks[i]
+                );
+                let expected_value = src_blocks[i] as f32;
+                match layout {
+                    KvLayout::KvFirst => {
+                        assert_eq!(nd_view[[0, dst_blocks[i], 0, 0, 0]], expected_value);
+                        assert_eq!(nd_view[[1, dst_blocks[i], 0, 0, 0]], expected_value);
+                        assert_eq!(nd_view[[0, dst_blocks[i], 1, 1, 1]], expected_value);
+                        assert_eq!(nd_view[[1, dst_blocks[i], 1, 1, 1]], expected_value);
+                    }
+                    KvLayout::BlockFirst => {
+                        assert_eq!(nd_view[[dst_blocks[i], 0, 0, 0, 0]], expected_value);
+                        assert_eq!(nd_view[[dst_blocks[i], 0, 1, 1, 1]], expected_value);
+                        assert_eq!(nd_view[[dst_blocks[i], 1, 0, 0, 0]], expected_value);
+                        assert_eq!(nd_view[[dst_blocks[i], 1, 1, 1, 1]], expected_value);
+                    }
+                }
+            }
         }
 
         Ok(())
