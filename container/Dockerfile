@@ -133,19 +133,24 @@ RUN cd lib/runtime && \
 
 # Build OpenAI HTTP Service binaries
 COPY lib/llm /workspace/lib/llm
-COPY examples/rust /workspace/examples/rust
-RUN cd examples/rust && \
+COPY components /workspace/components
+RUN cd components && \
     cargo build --release && \
-    cp target/release/http /usr/local/bin/ && \
+    cp target/release/http /usr/local/bin/
+
+# Build Dynamo Run binaries
+COPY launch /workspace/launch
+RUN cd launch && \
+    cargo build --release --features mistralrs,sglang,vllm,python && \
+    cp target/release/dynamo-run /usr/local/bin/ && \
     cp target/release/llmctl /usr/local/bin/
-
-COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
-
 
 # Generate C bindings. Note that this is required for TRTLLM backend re-build
 COPY lib/bindings /workspace/lib/bindings
 RUN cd lib/bindings/c/ && \
     cargo build --release --locked && cargo doc --no-deps
+
+COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 
 # Install uv, create virtualenv for general use, and build dynamo wheel
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/

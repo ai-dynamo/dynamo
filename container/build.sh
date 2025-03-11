@@ -67,6 +67,9 @@ VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 VLLM_NIXL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 VLLM_NIXL_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
+NIXL_COMMIT=3ce6a673b266b4f293909ceb17ca7975f1ba5cd7
+NIXL_REPO=ai-dynamo/nixl.git
+
 get_options() {
     while :; do
         case $1 in
@@ -288,6 +291,31 @@ elif [[ $FRAMEWORK == "VLLM_NIXL" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm_nixl
 elif [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.tensorrt_llm
+fi
+
+if [[ $FRAMEWORK == "VLLM_NIXL" ]]; then
+    TEMP_DIR=$(mktemp -d)
+
+    # Clean up temp directory on script exit
+    trap 'rm -rf "$TEMP_DIR"' EXIT
+
+    # Clone original NIXL to temp directory
+
+    if [ ! -z ${GITHUB_TOKEN} ]; then
+        git clone https://oauth2:${GITHUB_TOKEN}@github.com/${NIXL_REPO} "$TEMP_DIR/nixl_src"
+    else
+        # Try HTTPS first with credential prompting disabled, fall back to SSH if it fails
+        if ! GIT_TERMINAL_PROMPT=0 git clone https://github.com/${NIXL_REPO} "$TEMP_DIR/nixl_src"; then
+            echo "HTTPS clone failed, falling back to SSH..."
+            git clone git@github.com:${NIXL_REPO} "$TEMP_DIR/nixl_src"
+        fi
+    fi
+
+    cd "$TEMP_DIR/nixl_src"
+
+    git checkout ${NIXL_COMMIT}
+
+    BUILD_CONTEXT_ARG+=" --build-context nixl=$TEMP_DIR/nixl_src"
 fi
 
 # BUILD DEV IMAGE

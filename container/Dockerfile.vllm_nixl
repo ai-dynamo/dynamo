@@ -216,14 +216,17 @@ RUN cd lib/runtime && \
 
 # Build OpenAI HTTP Service binaries
 COPY lib/llm /workspace/lib/llm
-COPY examples/rust /workspace/examples/rust
-RUN cd examples/rust && \
+COPY components /workspace/components
+RUN cd components && \
     cargo build --release && \
-    cp target/release/http /usr/local/bin/ && \
-    cp target/release/llmctl /usr/local/bin/
+    cp target/release/http /usr/local/bin/
 
-# TODO: Build tio
-# COPY applications/...
+# Build Dynamo Run binaries
+COPY launch /workspace/launch
+RUN cd launch && \
+    cargo build --release --features mistralrs,sglang,vllm,python && \
+    cp target/release/dynamo-run /usr/local/bin/ && \
+    cp target/release/llmctl /usr/local/bin/
 
 # Generate C bindings for kv cache routing in vLLM
 COPY lib/bindings /workspace/lib/bindings
@@ -258,50 +261,5 @@ ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
 CMD []
 
-### Lean Runtime Image Stage ###
+### TODO Lean Runtime Image Stage ###
 
-# FIXME: Separate build and runtime images
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS runtime
-
-USER root
-
-# Install tools for interactive convenience
-RUN apt update -y && \
-    apt install -y curl tmux vim && \
-    echo "set -g mouse on" >> /root/.tmux.conf
-
-# Set environment variables
-ENV VIRTUAL_ENV=/opt/dynamo/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
-ENV RAPIDS_LIBUCX_PREFER_SYSTEM_LIBRARY=true
-ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
-
-# Copy binaries
-COPY --from=dev /usr/local/bin/http /usr/local/bin/http
-COPY --from=dev /usr/local/bin/llmctl /usr/local/bin/llmctl
-COPY --from=dev /usr/local/bin/etcd/etcd /usr/local/bin/etcd
-COPY --from=dev /usr/bin/nats-server /usr/local/bin/nats-server
-COPY --from=dev /bin/uv /usr/local/bin/uv
-COPY --from=dev /bin/uvx /usr/local/bin/uvx
-
-# Copy venv with installed packages
-RUN uv python install 3.12
-COPY --from=dev /opt/vllm /opt/vllm
-COPY --from=dev ${VIRTUAL_ENV} ${VIRTUAL_ENV}
-
-# Copy minimal set of files for testing. May consider separate stage for testing
-# if test dependencies start to negatively impact deployment environment/size.
-COPY pyproject.toml /workspace/pyproject.toml
-COPY container/deps/vllm /workspace/container/deps/vllm
-# Add library for KV routing
-COPY --from=dev ${VLLM_KV_CAPI_PATH} ${VLLM_KV_CAPI_PATH}
-# Copy minimal set of files for deployment/examples
-# FIXME: Use a more consolidated path after directory restructure
-COPY examples/python_rs/llm/vllm_nixl /workspace/examples/python_rs/llm/vllm_nixl
-
-WORKDIR /workspace
-
-# FIXME: May want a modification with dynamo banner on entry
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-
-CMD []
