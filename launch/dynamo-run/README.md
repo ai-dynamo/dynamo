@@ -303,7 +303,7 @@ dynamo-run in=http out=echo_core --model-path <hf-repo-checkout>
 The `echo_full` engine accepts un-processed requests and echoes the prompt back as the response.
 
 ```
-dynamo-run in=http out=echo_full
+dynamo-run in=http out=echo_full --model-name my_model
 ```
 
 ### Configuration
