@@ -99,10 +99,13 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     # Initially send dummy metrics to kick start,
     # vLLM will not update stat until forward pass is triggered
     metrics_publisher.publish(
-        0,
-        1024,
-        0,
-        1024,
+        0,  # request_active_slots
+        1024,  # request_total_slots
+        0,  # kv_active_blocks
+        1024,  # kv_total_blocks
+        0,  # num_requests_waiting
+        0.0,  # gpu_cache_usage_perc
+        0.0,  # gpu_prefix_cache_hit_rate
     )
 
     await asyncio.gather(
