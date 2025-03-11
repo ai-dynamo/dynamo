@@ -13,9 +13,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use cudarc::driver::{CudaContext, CudaSlice, DevicePtr};
-use dynemo_runtime::{raise, Result};
-use ndarray::IxDyn;
+//! Storage object representing large single slabs of bytes.
+//!
+//! There are three types denoted by [StorageType]
+//!
+//! - [StorageType::Device]: A pointer to a device memory allocation
+//! - [StorageType::Pinned]: A pointer to a pinned memory allocation from cudaMallocHost
+//! - [StorageType::System]: A pointer to a system memory allocation from malloc/calloc or
+//!   other forms of heap allocation.
+//!
+//! Use [StorageType::System] Grace and other embedded platforms.
+//!
+//! Use [StorageType::Pinned] and [StorageType::Device] on traditional x86 platforms.
+//!
+//! WARNING: [Storage] and [OwnedStorage] are not Rust safe objects. For KV blocks, we use
+//! [Storage]-like stabs to form [KvLayers][super::layer::KvLayer], both of which do not
+//! conform to Rust's ownership or safety guarantees.
+//!
+//! As the underlying cuda kernels have ownership policies, they are not guarantees, nor are
+//! they enforceable at this level by the Rust compiler.
+//!
+//! The first unit of ownership that will be Rust safe is the [KvBlock][super::KvBlock].
+
+use cudarc::driver::{CudaContext, CudaSlice, CudaStream, DevicePtr};
+use dynemo_runtime::{error, raise, Result};
+use ndarray::{ArrayViewMut, Dimension, IxDyn, ShapeBuilder};
 use std::any::Any;
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -66,6 +88,12 @@ impl DType {
 extern "C" {
     fn cuda_malloc_host(ptr: *mut *mut c_void, size: usize) -> i32;
     fn cuda_free_host(ptr: *mut c_void) -> i32;
+    fn cuda_memcpy_async(
+        dst: *mut c_void,
+        src: *const c_void,
+        count: usize,
+        stream: *mut c_void,
+    ) -> i32;
 }
 
 pub trait Storage: std::fmt::Debug {
@@ -83,7 +111,7 @@ pub trait Storage: std::fmt::Debug {
         &self,
         shape: [usize; D],
         dtype: DType,
-    ) -> Result<TensorView<'_, Self, D>, String>
+    ) -> Result<TensorView<'_, Self, D>>
     where
         Self: Sized,
     {
@@ -310,7 +338,7 @@ pub struct TensorView<'a, T: Storage, const D: usize> {
 
 impl<'a, T: Storage, const D: usize> TensorView<'a, T, D> {
     /// Create a new tensor view from storage and shape
-    pub fn new(storage: &'a T, shape: [usize; D], element_size: usize) -> Result<Self, String> {
+    pub fn new(storage: &'a T, shape: [usize; D], element_size: usize) -> Result<Self> {
         // Calculate row-major strides (in elements)
         let mut strides = [0; D];
         let mut byte_strides = [0; D];
@@ -331,7 +359,7 @@ impl<'a, T: Storage, const D: usize> TensorView<'a, T, D> {
 
         // Validate that the view fits within the storage
         if total_elements * element_size > storage.storage_size() {
-            return Err(format!(
+            return Err(error!(
                 "Shape {:?} requires {} bytes, but storage only has {} bytes",
                 shape,
                 total_elements * element_size,
@@ -450,11 +478,11 @@ impl<'a, T: Storage, const D: usize> TensorView<'a, T, D> {
     }
 
     /// Calculate byte offset for indices
-    pub fn byte_offset(&self, indices: &[usize; D]) -> Result<usize, String> {
+    pub fn byte_offset(&self, indices: &[usize; D]) -> Result<usize> {
         // Validate indices
         for i in 0..D {
             if indices[i] >= self.shape[i] {
-                return Err(format!(
+                return Err(error!(
                     "Index {} out of bounds for dimension {} with size {}",
                     indices[i], i, self.shape[i]
                 ));
@@ -471,7 +499,7 @@ impl<'a, T: Storage, const D: usize> TensorView<'a, T, D> {
     }
 
     /// Get the absolute memory address for indices
-    pub fn address(&self, indices: &[usize; D]) -> Result<u64, String> {
+    pub fn address(&self, indices: &[usize; D]) -> Result<u64> {
         let byte_offset = self.byte_offset(indices)?;
         Ok(self.storage.get_pointer() + byte_offset as u64)
     }
@@ -501,9 +529,58 @@ impl<'a, T: Storage, const D: usize> TensorView<'a, T, D> {
         self.total_elements
     }
 
+    /// Get the pointer to the data
+    pub fn data(&self) -> u64 {
+        self.storage.get_pointer()
+    }
+
     /// Get the total size in bytes
     pub fn size_in_bytes(&self) -> usize {
         self.total_elements * self.element_size
+    }
+
+    pub fn copy_to<S: Storage>(
+        &self,
+        dst_view: &mut TensorView<'_, S, D>,
+        stream: &CudaStream,
+    ) -> Result<()> {
+        // validate same shape and strides
+        if self.shape != dst_view.shape || self.strides != dst_view.strides {
+            raise!(
+                "Shape or strides mismatch: {:?} vs {:?}",
+                self.shape,
+                dst_view.shape
+            );
+        }
+
+        if !self.is_contiguous() {
+            raise!("Source is not contiguous");
+        }
+
+        if !dst_view.is_contiguous() {
+            raise!("Destination is not contiguous");
+        }
+
+        assert_eq!(self.size_in_bytes(), dst_view.size_in_bytes());
+
+        tracing::debug!("Copying from {:?} to {:?}", self, dst_view);
+
+        let stream_id = stream.cu_stream();
+
+        let rc = unsafe {
+            cuda_memcpy_async(
+                dst_view.data() as *mut c_void,
+                self.data() as *const c_void,
+                self.size_in_bytes(),
+                stream_id as *mut c_void,
+            )
+        };
+
+        if rc != 0 {
+            raise!("cudaMemcpyAsync failed");
+        }
+
+        Ok(())
     }
 
     /// Create a sliced view of this tensor along a dimension
@@ -548,7 +625,7 @@ impl<'a, T: Storage, const D: usize> TensorView<'a, T, D> {
         })
     }
 
-    pub fn as_ndarray_view<'b, DT>(&'b self) -> Result<ndarray::ArrayView<'b, DT, IxDyn>>
+    pub fn as_ndarray_view<DT>(&self) -> Result<ndarray::ArrayView<'_, DT, IxDyn>>
     where
         DT: bytemuck::Pod,
     {
@@ -583,13 +660,54 @@ impl<'a, T: Storage, const D: usize> TensorView<'a, T, D> {
         Ok(array)
     }
 
+    /// Convert to a mutable ndarray view
+    pub fn as_ndarray_view_mut<DT>(&mut self) -> Result<ArrayViewMut<'_, DT, IxDyn>>
+    where
+        DT: bytemuck::Pod,
+    {
+        match self.storage.storage_type() {
+            StorageType::Device(_) => {
+                return Err(anyhow::anyhow!("Cannot convert device tensor to ndarray"))
+            }
+            StorageType::System | StorageType::Pinned => {}
+        };
+
+        // validate DT matches bytes per element
+        if std::mem::size_of::<DT>() != self.element_size {
+            return Err(anyhow::anyhow!(
+                "Type size mismatch: {} vs {}",
+                std::mem::size_of::<DT>(),
+                self.element_size
+            ));
+        }
+
+        if !self.is_contiguous() {
+            return Err(anyhow::anyhow!(
+                "Cannot convert non-contiguous tensor to ndarray"
+            ));
+        }
+
+        // Get the pointer to the data plus offset
+        let ptr =
+            (self.storage.get_pointer() as *mut DT).wrapping_add(self.offset / self.element_size);
+        let size = self.shape.iter().product::<usize>();
+
+        // Create a mutable slice from the raw pointer
+        let slice = unsafe { std::slice::from_raw_parts_mut(ptr, size) };
+
+        // Create an ndarray view from the slice - use the same pattern as the immutable version
+        let dim = ndarray::IxDyn(&self.shape);
+        let array = ndarray::ArrayViewMut::from_shape(dim, slice)?;
+        Ok(array)
+    }
+
     /// Returns the storage type of the underlying tensor
     pub fn storage_type(&self) -> StorageType {
         self.storage.storage_type()
     }
 }
 
-impl<'a, T: Storage, const D: usize> std::fmt::Debug for TensorView<'a, T, D> {
+impl<T: Storage, const D: usize> std::fmt::Debug for TensorView<'_, T, D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TensorView")
             .field("shape", &self.shape)
@@ -870,14 +988,14 @@ mod tests {
         .unwrap();
 
         // It should NOT be contiguous since the strides don't match the shape
-        assert_eq!(non_contiguous.is_contiguous(), false);
+        assert!(!non_contiguous.is_contiguous());
         assert_eq!(non_contiguous.strides(), &[12, 4, 1]);
         assert_eq!(non_contiguous.byte_strides(), &[48, 16, 4]);
 
         // Test accessing the last element to confirm it's within bounds
         let last_index = [1, 1, 3];
         let byte_offset = non_contiguous.byte_offset(&last_index).unwrap();
-        assert_eq!(byte_offset, (1 * 12 + 1 * 4 + 3 * 1) * 4);
+        assert_eq!(byte_offset, (12 + 4 + 3) * 4);
         assert!(
             byte_offset < mock_tensor.storage_size(),
             "Byte offset {} should be less than storage size {}",
@@ -929,7 +1047,7 @@ mod tests {
 
         // Test accessing the last element
         let last_byte_offset = offset_view.byte_offset(&[1, 2, 3]).unwrap();
-        assert_eq!(last_byte_offset, 16 + (1 * 12 + 2 * 4 + 3 * 1) * 4);
+        assert_eq!(last_byte_offset, 16 + (12 + 2 * 4 + 3) * 4);
 
         // Creating a view with an offset that would exceed the tensor size should fail
         let result = TensorView::<_, 3>::with_strides(

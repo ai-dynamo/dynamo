@@ -353,7 +353,7 @@ BlockCopyControl::~BlockCopyControl()
 extern "C" {
 int cuda_malloc_host(void** ptr, size_t size);
 int cuda_free_host(void* ptr);
-
+int cuda_memcpy_async(void* dst, const void* src, size_t count, cudaStream_t stream);
 
 int
 cuda_malloc_host(void** ptr, size_t size)
@@ -366,6 +366,13 @@ int
 cuda_free_host(void* ptr)
 {
   CUDA_CHECK(cudaFreeHost(ptr));
+  return cudaSuccess;
+}
+
+int
+cuda_memcpy_async(void* dst, const void* src, size_t count, cudaStream_t stream)
+{
+  CUDA_CHECK(cudaMemcpyAsync(dst, src, count, cudaMemcpyDefault, stream));
   return cudaSuccess;
 }
 }

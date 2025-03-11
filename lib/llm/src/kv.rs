@@ -52,6 +52,17 @@ pub struct KvBlock {
     return_tick: u64,
 }
 
+pub struct KvStorage {
+    data: u64,
+    size: usize,
+
+    layer_idx: usize,
+    block_idx: usize,
+
+    /// The layout of the tensor
+    layout: layer::KvLayer,
+}
+
 impl KvBlock {
     /// Creates a new KvBlock with the given token block
     pub fn new(token_block: TokenBlock) -> Self {

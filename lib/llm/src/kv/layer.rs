@@ -13,14 +13,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! While KV blocks can be formed from any memory allocation, we highly encourage you to
+//! use large slabs of pinned or device memory.
+//!
+//! The primary reason for this to efficiently map to the RDMA transport layers which perform
+//! better and have less overheads when using fewer large regions of registered memory vs many
+//! smaller regions.
+//!
+//! To this end, we encourage the developer if using the BYO-memory option to allocate either
+//! a single large tensor or a set of tensors, one per layer, to effectively map to the NIXL
+//! dataplane.
+
+use cudarc::driver::{CudaContext, CudaStream};
 use derive_builder::Builder;
 use dynemo_runtime::{error, raise, ErrorContext, Result};
 use std::sync::Arc;
 use validator::{Validate, ValidationError};
 
 use super::storage::{DType, OwnedStorage, Storage, StorageType, TensorView};
+extern "C" {
+    fn copy_blocks_3d(
+        src_data: *const std::ffi::c_void,
+        dst_data: *mut std::ffi::c_void,
+        h_src_block_ids: *const std::os::raw::c_int,
+        h_dst_block_ids: *const std::os::raw::c_int,
+        num_block_pairs: std::os::raw::c_int,
+        prefix_dim: std::os::raw::c_int,
+        src_blocks: std::os::raw::c_int,
+        dst_blocks: std::os::raw::c_int,
+        suffix_dim: std::os::raw::c_int,
+        elem_size: std::os::raw::c_int,
+    ) -> std::os::raw::c_int;
+}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KvLayout {
     /// Tensor is laid out as [kv, block, head, head_dim]
     KvFirst,
@@ -106,6 +132,9 @@ pub struct KvBlockStorage {
     /// The type of storage
     storage_type: StorageType,
 
+    /// Optional cuda device
+    cuda_device: Option<Arc<CudaContext>>,
+
     /// Number of blocks
     number_of_blocks: usize,
 
@@ -121,6 +150,11 @@ impl KvBlockStorage {
 
         // validate all layers have the same type
         let storage_type = layers[0].storage.storage_type();
+
+        let cuda_device = match storage_type {
+            StorageType::Device(device) => Some(CudaContext::new(device)?),
+            _ => None,
+        };
 
         for layer in &layers {
             if layer.storage.storage_type() != storage_type {
@@ -169,6 +203,7 @@ impl KvBlockStorage {
             block_details,
             storage_type,
             number_of_blocks,
+            cuda_device,
             layers,
         })
     }
@@ -187,23 +222,38 @@ impl KvBlockStorage {
 
         // for each layer, create a device storage object, then for a kv layer
         for layer in 0..block_details.model_details.number_of_layers {
-            let storage = OwnedStorage::create(bytes, storage_type.clone()).with_context(|| {
+            let storage = OwnedStorage::create(bytes, storage_type).with_context(|| {
                 error!("Failed to allocate memory for KV BlockStorage for layer {layer}")
             })?;
             let layer = KvLayer::from_storage(&block_details, number_of_blocks, storage);
             layers.push(layer);
         }
 
-        Ok(Self::new(layers).context("Validating KvBlockStorage")?)
+        Self::new(layers).context("Validating KvBlockStorage")
     }
 
+    /// Get an immutable reference to a layer
     pub fn layer(&self, layer: usize) -> Result<&KvLayer> {
-        let layer = self
-            .layers
-            .get(layer)
-            .ok_or(error!("Layer {layer} not found"))?;
+        if layer >= self.layers.len() {
+            raise!(
+                "Layer index {} out of bounds (max {})",
+                layer,
+                self.layers.len() - 1
+            );
+        }
+        Ok(&self.layers[layer])
+    }
 
-        Ok(layer)
+    /// Get a mutable reference to a layer
+    pub fn layer_mut(&mut self, layer: usize) -> Result<&mut KvLayer> {
+        if layer >= self.layers.len() {
+            raise!(
+                "Layer index {} out of bounds (max {})",
+                layer,
+                self.layers.len() - 1
+            );
+        }
+        Ok(&mut self.layers[layer])
     }
 }
 
@@ -272,14 +322,6 @@ impl KvLayer {
         }
     }
     pub fn view(&self) -> Result<TensorView<'_, Self, 4>> {
-        // Check if storage type is compatible with creating a view
-        match self.storage.storage_type() {
-            StorageType::Device(_) => {
-                raise!("Cannot view device storage as a tensor. Use copy_to_host first.");
-            }
-            StorageType::Pinned | StorageType::System => {}
-        }
-
         // Calculate dimensions based on layout
         let dims = match self.layout {
             KvLayout::KvFirst => [
@@ -318,6 +360,126 @@ impl KvLayer {
 
         Ok(view)
     }
+
+    pub fn copy_blocks_to(
+        &self,
+        src_block_ids: &[usize],
+        dst: &mut KvLayer,
+        dst_block_ids: &[usize],
+        stream: &CudaStream,
+    ) -> Result<()> {
+        if src_block_ids.len() != dst_block_ids.len() {
+            raise!("src_block_ids and dst_block_ids must have the same length");
+        }
+
+        if self.layout != dst.layout {
+            raise!("src and dst must have the same layout");
+        }
+
+        match (self.storage.storage_type(), dst.storage.storage_type()) {
+            (StorageType::Pinned, StorageType::Pinned) => {
+                raise!("Pinned to Pinned copy not implemented");
+            }
+            (StorageType::Pinned, StorageType::Device(_)) => {}
+            (StorageType::Device(_), StorageType::Pinned) => {}
+            (StorageType::Device(_), StorageType::Device(_)) => {
+                raise!("Device to Device copy not implemented");
+            }
+            (StorageType::System, _) => {
+                raise!("System to Device copy not implemented");
+            }
+            (_, StorageType::System) => {
+                raise!("Device to System copy not implemented");
+            }
+        };
+
+        let h_src_block_ids = src_block_ids
+            .iter()
+            .map(|id| *id as i32)
+            .collect::<Vec<_>>();
+
+        let h_dst_block_ids = dst_block_ids
+            .iter()
+            .map(|id| *id as i32)
+            .collect::<Vec<_>>();
+
+        let num_block_pairs = src_block_ids.len() as i32;
+
+        let prefix_dim = match self.layout {
+            KvLayout::KvFirst => 2,
+            KvLayout::BlockFirst => 1,
+        };
+
+        let suffix_dim = self.head_size * (self.number_of_heads / self.tp_size) * self.block_size;
+        let suffix_dim = match self.layout {
+            KvLayout::KvFirst => suffix_dim,
+            KvLayout::BlockFirst => 2 * suffix_dim,
+        };
+
+        let elem_size = self.dtype.size_in_bytes();
+
+        let src_blocks = self.number_of_blocks as i32;
+        let dst_blocks = dst.number_of_blocks as i32;
+
+        unsafe {
+            let rc = copy_blocks_3d(
+                self.storage.get_pointer() as *const std::ffi::c_void,
+                dst.storage.get_pointer() as *mut std::ffi::c_void,
+                h_src_block_ids.as_ptr() as *const std::os::raw::c_int,
+                h_dst_block_ids.as_ptr() as *const std::os::raw::c_int,
+                num_block_pairs,
+                prefix_dim as i32,
+                src_blocks,
+                dst_blocks,
+                suffix_dim as i32,
+                elem_size as i32,
+            );
+
+            if rc != 0 {
+                raise!("Failed to copy blocks");
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn view_mut(&mut self) -> Result<TensorView<'_, Self, 4>> {
+        // Calculate dimensions based on layout
+        let dims = match self.layout {
+            KvLayout::KvFirst => [
+                2, // K and V as first dimension
+                self.number_of_blocks,
+                self.number_of_heads / self.tp_size,
+                self.head_size,
+            ],
+            KvLayout::BlockFirst => [
+                self.number_of_blocks,
+                2, // K and V as second dimension
+                self.number_of_heads / self.tp_size,
+                self.head_size,
+            ],
+        };
+
+        // Verify dimensions make sense
+        if self.number_of_heads % self.tp_size != 0 {
+            raise!(
+                "Number of heads ({}) is not divisible by tp_size ({})",
+                self.number_of_heads,
+                self.tp_size
+            );
+        }
+
+        tracing::debug!(
+            "Creating mutable TensorView with dims: {:?}, dtype: {:?}, size: {}",
+            dims,
+            self.dtype,
+            self.dtype.size_in_bytes()
+        );
+
+        // Use the TensorViewMut::new directly
+        let element_size = self.dtype.size_in_bytes();
+        TensorView::new(self, dims, element_size)
+    }
 }
 
 #[cfg(test)]
@@ -343,18 +505,199 @@ mod tests {
             .model_details(model_details)
             .build()?;
 
-        let device_blocks =
-            KvBlockStorage::allocate(16, block_details.clone(), StorageType::Device(0))?;
-        let pinned_blocks =
+        // Create the storage blocks
+        let mut h_blocks =
             KvBlockStorage::allocate(32, block_details.clone(), StorageType::Pinned)?;
 
-        let view = pinned_blocks.layer(0)?.view()?;
-        let ndarray_view = view.as_ndarray_view::<f32>()?;
+        let mut d_blocks =
+            KvBlockStorage::allocate(32, block_details.clone(), StorageType::Device(0))?;
 
-        println!("pinned_blocks_view: {:?}", ndarray_view.shape());
+        println!("Allocated pinned and device blocks");
+        println!("Letting layer 0 on host to be 1s");
 
-        // // set the view values to 1.0
-        // pinned_blocks_view.assign(&ndarray::Array::from_shape_fn((16, 2, 4, 8), |_| 1.0));
+        // Use separate scopes to manage borrows
+        {
+            // Get a mutable reference to a layer
+            let layer = h_blocks.layer_mut(0)?;
+
+            // Create a mutable view and work with it
+            let mut view = layer.view_mut()?;
+
+            // Get shape information before creating the ndarray view
+            let shape = *view.shape();
+            println!("TensorView shape: {:?}", shape);
+
+            // Create and use the mutable ndarray view in its own scope
+            {
+                let mut nd_view = view.as_ndarray_view_mut::<f32>()?;
+                let ones = ndarray::Array::from_shape_fn(nd_view.dim(), |_| 1.0);
+                nd_view.assign(&ones);
+
+                // Verify some values while we have the view
+                assert_eq!(nd_view[[0, 0, 0, 0]], 1.0);
+                assert_eq!(nd_view[[1, 0, 0, 0]], 1.0);
+            }
+            // nd_view is dropped here, releasing the mutable borrow
+        }
+
+        // Copy data to device
+        let context = CudaContext::new(0)?;
+        let stream = context.new_stream()?;
+
+        println!("Copying data to device");
+
+        {
+            let h_view = h_blocks.layer(0)?.view().unwrap();
+            let mut d_view = d_blocks.layer_mut(0)?.view_mut().unwrap();
+            h_view.copy_to(&mut d_view, &stream).unwrap();
+            stream.synchronize().unwrap();
+        }
+
+        println!("Setting all values on host back to 0");
+
+        // Set all values on host back to 0
+        {
+            let mut h_layer = h_blocks.layer_mut(0)?.view_mut()?;
+            let mut nd_view = h_layer.as_ndarray_view_mut::<f32>()?;
+            let zeros = ndarray::Array::from_shape_fn(nd_view.dim(), |_| 0.0);
+            nd_view.assign(&zeros);
+
+            assert_eq!(nd_view[[0, 0, 0, 0]], 0.0);
+            assert_eq!(nd_view[[1, 0, 0, 0]], 0.0);
+        }
+
+        println!("Copying data back to host");
+
+        // Copy data back to host
+        {
+            let d_view = d_blocks.layer(0)?.view()?;
+            let mut h_view = h_blocks.layer_mut(0)?.view_mut()?;
+            d_view.copy_to(&mut h_view, &stream)?;
+            stream.synchronize()?;
+        }
+
+        println!("Verifying host data is 1");
+
+        // Verify the host data is not back to 1
+        {
+            let h_layer = h_blocks.layer(0)?.view()?;
+            let nd_view = h_layer.as_ndarray_view::<f32>()?;
+            assert_eq!(nd_view[[0, 0, 0, 0]], 1.0);
+            assert_eq!(nd_view[[1, 0, 0, 0]], 1.0);
+        }
+
+        Ok(())
+    }
+
+    #[rstest]
+    #[test]
+    fn test_kv_block_storage_kv_first_direct() -> Result<()> {
+        let model_details = KvModelDetailsBuilder::default()
+            .number_of_layers(2)
+            .number_of_heads(4)
+            .head_size(8)
+            .dtype(DType::F32)
+            .build()?;
+
+        let block_details = KvBlockDetailsBuilder::default()
+            .layout(KvLayout::KvFirst)
+            .block_size(8)
+            .tp_size(1)
+            .tp_ranks(0)
+            .model_details(model_details)
+            .build()?;
+
+        // Create the storage blocks
+        let mut h_blocks =
+            KvBlockStorage::allocate(32, block_details.clone(), StorageType::Pinned)?;
+
+        let mut d_blocks =
+            KvBlockStorage::allocate(32, block_details.clone(), StorageType::Device(0))?;
+
+        println!("Allocated pinned and device blocks");
+        println!("Letting layer 0 on host to be 1s");
+
+        // Use separate scopes to manage borrows
+        {
+            // Get a mutable reference to a layer
+            let layer = h_blocks.layer_mut(0)?;
+
+            // Create a mutable view and work with it
+            let mut view = layer.view_mut()?;
+
+            // Get shape information before creating the ndarray view
+            let shape = *view.shape();
+            println!("TensorView shape: {:?}", shape);
+
+            // Create and use the mutable ndarray view in its own scope
+            {
+                let mut nd_view = view.as_ndarray_view_mut::<f32>()?;
+                let ones = ndarray::Array::from_shape_fn(nd_view.dim(), |_| 1.0);
+                nd_view.assign(&ones);
+
+                // Verify some values while we have the view
+                assert_eq!(nd_view[[0, 0, 0, 0]], 1.0);
+                assert_eq!(nd_view[[1, 0, 0, 0]], 1.0);
+            }
+            // nd_view is dropped here, releasing the mutable borrow
+        }
+
+        // Copy data to device
+        let context = CudaContext::new(0)?;
+        let stream = context.new_stream()?;
+
+        // create block list 0..32
+        let blocks = (0..32).collect::<Vec<_>>();
+
+        println!("Copying data to device");
+
+        {
+            let blocks = (0..32).collect::<Vec<_>>();
+
+            let h_layer = h_blocks.layer(0).unwrap();
+            let mut d_layer = d_blocks.layer_mut(0).unwrap();
+            h_layer
+                .copy_blocks_to(&blocks, &mut d_layer, &blocks, &stream)
+                .unwrap();
+            stream.synchronize().unwrap();
+        }
+
+        println!("Setting all values on host back to 0");
+
+        // Set all values on host back to 0
+        {
+            let mut h_layer = h_blocks.layer_mut(0)?.view_mut()?;
+            let mut nd_view = h_layer.as_ndarray_view_mut::<f32>()?;
+            let zeros = ndarray::Array::from_shape_fn(nd_view.dim(), |_| 0.0);
+            nd_view.assign(&zeros);
+
+            assert_eq!(nd_view[[0, 0, 0, 0]], 0.0);
+            assert_eq!(nd_view[[1, 0, 0, 0]], 0.0);
+        }
+
+        println!("Copying data back to host");
+
+        // Copy data back to host
+        {
+            let blocks = (0..32).collect::<Vec<_>>();
+
+            let mut h_layer = h_blocks.layer_mut(0).unwrap();
+            let d_layer = d_blocks.layer(0).unwrap();
+            d_layer
+                .copy_blocks_to(&blocks, &mut h_layer, &blocks, &stream)
+                .unwrap();
+            stream.synchronize().unwrap();
+        }
+
+        println!("Verifying host data is 1");
+
+        // Verify the host data is not back to 1
+        {
+            let h_layer = h_blocks.layer(0)?.view()?;
+            let nd_view = h_layer.as_ndarray_view::<f32>()?;
+            assert_eq!(nd_view[[0, 0, 0, 0]], 1.0);
+            assert_eq!(nd_view[[1, 0, 0, 0]], 1.0);
+        }
 
         Ok(())
     }
