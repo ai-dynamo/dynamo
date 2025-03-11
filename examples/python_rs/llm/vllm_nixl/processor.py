@@ -98,11 +98,14 @@ class Processor(ProcessMixIn):
                 Tokens(tokens=engine_prompt["prompt_token_ids"]).model_dump_json()
             )
 
-            worker_id = (
+            route_response = (
                 await worker_id_generator.__anext__()
             )  # only one worker id is returned
-            worker_id = worker_id.data()
-            vllm_logger.info(f"Worker ID: {worker_id}")
+            worker_id, prefix_hit_rate = route_response.data().split("_")
+            prefix_hit_rate = float(prefix_hit_rate)
+            vllm_logger.info(
+                f"Worker ID: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
+            )
 
             if worker_id == "":
                 engine_generator = await self.workers_client.random(
@@ -110,6 +113,7 @@ class Processor(ProcessMixIn):
                         engine_prompt=engine_prompt,
                         sampling_params=sampling_params,
                         request_id=request_id,
+                        prefix_hit_rate=prefix_hit_rate,
                     ).model_dump_json()
                 )
             else:
@@ -118,6 +122,7 @@ class Processor(ProcessMixIn):
                         engine_prompt=engine_prompt,
                         sampling_params=sampling_params,
                         request_id=request_id,
+                        prefix_hit_rate=prefix_hit_rate,
                     ).model_dump_json(),
                     int(worker_id),
                 )

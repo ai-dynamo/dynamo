@@ -146,7 +146,7 @@ class CustomRouter:
                 f"Requests Waiting: {metrics_dict.get('num_requests_waiting', 0.0) / max_waiting if max_waiting > 0 else 0.0:.3f}"
             )
 
-        return best_worker_id
+        return best_worker_id, worker_scores.get(best_worker_id, 0.0)
 
     @dynamo_endpoint(Tokens, WorkerId)
     async def generate(self, request) -> AsyncIterator[WorkerId]:
@@ -162,11 +162,18 @@ class CustomRouter:
 
         token_length = len(request.tokens)
         metrics = await self.metrics_aggregator.get_metrics()
-        worker_id = self._cost_function(scores, metrics, token_length)
+        schedule_result = self._cost_function(scores, metrics, token_length)
+        if schedule_result == "":
+            worker_id = ""
+            prefix_hit_rate = 0.0
+        else:
+            worker_id, prefix_hit_rate = schedule_result
 
-        vllm_logger.info(f"Scheduling to worker_id: {worker_id}")
+        vllm_logger.info(
+            f"Scheduling to worker_id: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
+        )
 
-        yield str(worker_id)
+        yield f"{worker_id}_{prefix_hit_rate}"
 
 
 @dynamo_worker()

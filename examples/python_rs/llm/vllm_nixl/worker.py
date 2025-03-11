@@ -81,7 +81,7 @@ class RequestHandler:
         # TODO: consider prefix hit when deciding prefill locally or remotely
         if self.disaggregated_router is not None:
             disagg_router_decision = self.disaggregated_router.prefill_remote(
-                len(request.engine_prompt["prompt_token_ids"]), 0
+                len(request.engine_prompt["prompt_token_ids"]), request.prefix_hit_rate
             )
         else:
             # always prefill remotely if no disaggregated router is provided
@@ -182,9 +182,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
             disaggregated_router = PyDisaggregatedRouter(
                 runtime,
                 served_model_name,
-                custom_disagg_router=engine_args.custom_disagg_router,
                 max_local_prefill_length=engine_args.max_local_prefill_length,
-                max_remote_prefill_cache_hit_ratio=engine_args.max_remote_prefill_cache_hit_ratio,
             )
         else:
             disaggregated_router = None
