@@ -53,7 +53,7 @@ yq eval ".name = \"$BENTO_NAME\"" -i bentofile.yaml
 
 # Build the Bento container
 echo "Building Bento image for $BENTO_NAME..."
-DOCKER_DEFAULT_PLATFORM=linux/amd64 uv run compoundai build --containerize
+DOCKER_DEFAULT_PLATFORM=linux/amd64 uv run dynamo build --containerize
 
 # Find the built image
 docker_image=$(docker images --format "{{.Repository}}:{{.Tag}} {{.CreatedAt}}" | grep "^$BENTO_NAME:" | sort -r | head -n 1 | awk '{print $1}')
