@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import collections
+import json
 import logging
 import os
 import sys
@@ -60,6 +62,52 @@ def deprecated_option(*param_decls: str, **attrs: t.Any):
     return decorator
 
 
+def _parse_service_arg(arg: str) -> tuple[str, str, t.Any] | None:
+    """Parse a single CLI argument into service name, key, and value."""
+    if not (arg.startswith("--") and "=" in arg):
+        return None
+
+    # Remove leading dashes
+    param = arg[2:]
+    key_path, value_str = param.split("=", 1)
+
+    if "." not in key_path:
+        return None
+
+    service, key = key_path.split(".", 1)
+
+    # Parse value based on type
+    try:
+        # Try as JSON for complex types
+        value = json.loads(value_str)
+    except json.JSONDecodeError:
+        # Handle basic types
+        if value_str.isdigit():
+            value = int(value_str)
+        elif value_str.replace(".", "", 1).isdigit() and value_str.count(".") <= 1:
+            value = float(value_str)
+        elif value_str.lower() in ("true", "false"):
+            value = value_str.lower() == "true"
+        else:
+            value = value_str
+
+    return service, key, value
+
+
+def _parse_service_args(args: list[str]) -> t.Dict[str, t.Any] | None:
+    service_configs: t.DefaultDict[str, t.Dict[str, t.Any]] = collections.defaultdict(
+        dict
+    )
+
+    for arg in args:
+        parsed = _parse_service_arg(arg)
+        if parsed:
+            service, key, value = parsed
+            service_configs[service][key] = value
+
+    return service_configs
+
+
 def build_serve_command() -> click.Group:
     from bentoml._internal.log import configure_server_logging
     from bentoml_cli.env_manager import env_manager
@@ -69,7 +117,14 @@ def build_serve_command() -> click.Group:
     def cli():
         pass
 
-    @cli.command(aliases=["serve-http"], cls=AliasCommand)
+    @cli.command(
+        context_settings=dict(
+            ignore_unknown_options=True,
+            allow_extra_args=True,
+        ),
+        aliases=["serve-http"],
+        cls=AliasCommand,
+    )
     @click.argument("bento", type=click.STRING, default=".")
     @click.option(
         "--development",
@@ -203,8 +258,10 @@ def build_serve_command() -> click.Group:
         show_default=True,
         hidden=True,
     )
+    @click.pass_context
     @env_manager
     def serve(
+        ctx: click.Context,
         bento: str,
         development: bool,
         port: int,
@@ -226,6 +283,9 @@ def build_serve_command() -> click.Group:
         **attrs: t.Any,
     ) -> None:
         """Start a HTTP BentoServer from a given 🍱
+
+        \b
+        You can also pass service-specific configuration options using --ServiceName.param=value format.
 
         \b
         BENTO is the serving target, it can be the import as:
@@ -260,6 +320,13 @@ def build_serve_command() -> click.Group:
         """
         from bentoml import Service
         from bentoml._internal.service.loader import load
+
+        # Process service-specific options
+        service_configs = _parse_service_args(ctx.args)
+
+        # Set environment variable with service configuration
+        if service_configs:
+            os.environ["DYNAMO_SERVICE_CONFIG"] = json.dumps(service_configs)
 
         configure_server_logging()
         if working_dir is None:

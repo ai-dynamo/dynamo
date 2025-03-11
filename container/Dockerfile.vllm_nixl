@@ -170,7 +170,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     bash /tmp/deps/vllm/install.sh --patch /tmp/deps/vllm/${VLLM_PATCH} --ref ${VLLM_REF} --install-cmd "uv pip install --editable" --use-precompiled --installation-dir /opt/vllm
 
 # Install genai-perf for benchmarking
-ARG GENAI_PERF_TAG="r25.01"
+ARG GENAI_PERF_TAG="25d0188713adc47868d6b3f22426375237a90529"
 RUN uv pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
 
 # Install test dependencies
