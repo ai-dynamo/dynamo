@@ -63,7 +63,9 @@ def deprecated_option(*param_decls: str, **attrs: t.Any):
 
 
 def _try_service_args(args: list[str]) -> t.Dict[str, t.Any] | None:
-    service_configs: t.DefaultDict[str, t.Dict[str, t.Any]] = collections.defaultdict(dict)
+    service_configs: t.DefaultDict[str, t.Dict[str, t.Any]] = collections.defaultdict(
+        dict
+    )
     for arg in args:
         if arg.startswith("--") and "=" in arg:
             # Remove leading dashes
@@ -81,7 +83,10 @@ def _try_service_args(args: list[str]) -> t.Dict[str, t.Any] | None:
                     # Handle basic types
                     if value_str.isdigit():
                         value = int(value_str)
-                    elif value_str.replace(".", "", 1).isdigit() and value_str.count(".") <= 1:
+                    elif (
+                        value_str.replace(".", "", 1).isdigit()
+                        and value_str.count(".") <= 1
+                    ):
                         value = float(value_str)
                     elif value_str.lower() in ("true", "false"):
                         value = value_str.lower() == "true"
