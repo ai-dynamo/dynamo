@@ -112,11 +112,17 @@ fn mock_stats_handler(_stats: Stats) -> serde_json::Value {
     let request_active_slots = rand::thread_rng().gen_range(0..=request_total_slots);
     let kv_total_blocks = 100;
     let kv_active_blocks = rand::thread_rng().gen_range(0..=kv_total_blocks);
+    let num_requests_waiting = rand::thread_rng().gen_range(0..=100);
+    let gpu_cache_usage_perc = rand::thread_rng().gen_range(0.0..=1.0);
+    let gpu_prefix_cache_hit_rate = rand::thread_rng().gen_range(0.0..=1.0);
     let stats = ForwardPassMetrics {
         request_active_slots,
         request_total_slots,
         kv_active_blocks,
         kv_total_blocks,
+        num_requests_waiting,
+        gpu_cache_usage_perc,
+        gpu_prefix_cache_hit_rate,
     };
     println!("stats out: {:?}", stats);
     serde_json::to_value(stats).unwrap()

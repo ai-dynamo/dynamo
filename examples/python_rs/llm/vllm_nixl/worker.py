@@ -137,7 +137,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     else:
         prefill_client = None
 
-    if engine_args.kv_router:
+    if engine_args.router == "kv":
         # TODO: do we need these env vars?
         VLLM_WORKER_ID = endpoint.lease_id()
         os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
@@ -158,7 +158,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
             else "vllm"
         )
 
-        if engine_args.kv_router:
+        if engine_args.router == "kv":
             engine_client.set_metrics_publisher(metrics_publisher)
 
             # Initially send dummy metrics to kick start,
@@ -197,7 +197,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
                 ).generate
             )
         ]
-        if engine_args.kv_router:
+        if engine_args.router == "kv":
             endpoints.append(metrics_publisher.create_endpoint(component))
         await asyncio.gather(*endpoints)
 

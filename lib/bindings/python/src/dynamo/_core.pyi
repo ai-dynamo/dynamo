@@ -242,7 +242,11 @@ class KvMetricsPublisher:
     def publish(self, request_active_slots: int,
         request_total_slots: int,
         kv_active_blocks: int,
-        kv_total_blocks: int) -> None:
+        kv_total_blocks: int,
+        num_requests_waiting: int,
+        gpu_cache_usage_perc: float,
+        gpu_prefix_cache_hit_rate: float
+    ) -> None:
         """
         Update the KV metrics being reported.
         """
@@ -298,7 +302,7 @@ class KvIndexer:
 
     ...
 
-    def __init__(self, component: Component) -> None:
+    def __init__(self, component: Component, block_size: int) -> None:
         """
         Create a `KvIndexer` object
         """
@@ -306,6 +310,12 @@ class KvIndexer:
     def find_matches_for_request(self, token_ids: List[int], lora_id: int) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
+        """
+        ...
+
+    def block_size(self) -> int:
+        """
+        Return the block size of the KV Indexer.
         """
         ...
 

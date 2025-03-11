@@ -16,7 +16,7 @@
 use anyhow::Result;
 use dynamo_runtime::{component::Component, component::Namespace, DistributedRuntime};
 use futures::stream::StreamExt;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing;
 
@@ -29,7 +29,8 @@ pub mod scoring;
 
 use crate::kv_router::{
     indexer::{KvIndexer, KvIndexerInterface, RouterEvent},
-    scheduler::{Endpoint, KvScheduler, Service},
+    metrics_aggregator::collect_endpoints,
+    scheduler::KvScheduler,
     scoring::ProcessedEndpoints,
 };
 
@@ -146,75 +147,5 @@ impl KvRouter {
         tracing::debug!("KV router overlap_scores: {:?}", overlap_scores);
         let worker_id = self.scheduler.schedule(overlap_scores, isl_tokens).await?;
         Ok(worker_id)
-    }
-}
-
-async fn collect_endpoints(
-    nats_client: dynamo_runtime::transports::nats::Client,
-    service_name: String,
-    ep_tx: tokio::sync::mpsc::Sender<ProcessedEndpoints>,
-    cancel: CancellationToken,
-) {
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                tracing::debug!("cancellation token triggered");
-                break;
-            }
-            _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                tracing::trace!("collecting endpoints for service: {}", service_name);
-            }
-        }
-
-        let values = match nats_client
-            .get_endpoints(&service_name, Duration::from_secs(1))
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("Failed to retrieve endpoints for {}: {:?}", service_name, e);
-                continue;
-            }
-        };
-
-        tracing::debug!("values: {:?}", values);
-        let services: Vec<Service> = values
-            .into_iter()
-            .filter(|v| !v.is_empty())
-            .filter_map(|v| match serde_json::from_slice::<Service>(&v) {
-                Ok(service) => Some(service),
-                Err(e) => {
-                    tracing::warn!("For value: {:?} \nFailed to parse service: {:?}", v, e);
-                    None
-                }
-            })
-            .collect();
-        tracing::debug!("services: {:?}", services);
-
-        let endpoints: Vec<Endpoint> = services
-            .into_iter()
-            .flat_map(|s| s.endpoints)
-            .filter(|s| s.data.is_some())
-            .map(|s| Endpoint {
-                name: s.name,
-                subject: s.subject,
-                data: s.data.unwrap(),
-            })
-            .collect();
-        tracing::debug!("endpoints: {:?}", endpoints);
-
-        tracing::trace!(
-            "found {} endpoints for service: {}",
-            endpoints.len(),
-            service_name
-        );
-
-        let processed = ProcessedEndpoints::new(endpoints);
-
-        // process endpoints into
-        if ep_tx.send(processed).await.is_err() {
-            tracing::trace!("failed to send processed endpoints; shutting down");
-            break;
-        }
     }
 }
