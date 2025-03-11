@@ -35,7 +35,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"emperror.dev/errors"
-	"github.com/cisco-open/k8s-objectmatcher/patch"
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/modelschemas"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemasv1"
@@ -46,6 +45,7 @@ import (
 	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/config"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/consts"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/system"
+	"github.com/cisco-open/k8s-objectmatcher/patch"
 	"github.com/huandu/xstrings"
 	"github.com/jinzhu/copier"
 	"github.com/prometheus/common/version"
