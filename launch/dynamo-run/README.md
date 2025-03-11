@@ -12,6 +12,7 @@ apt install -y build-essential libhwloc-dev libudev-dev pkg-config libssl-dev pr
 Install Rust:
 ```
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
 ```
 
 ## Build
