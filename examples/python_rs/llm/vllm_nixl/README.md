@@ -89,7 +89,7 @@ RUST_LOG=info python3 processor.py \
     --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --block-size 64 \
     --max-model-len 16384 \
-    <--random-router / --round-robin-router / --kv-router>
+    --router <random/round-robin/kv>
 ```
 
 Alternatively, the processor can be bypassed by directly hitting the worker endpoints:
@@ -119,8 +119,8 @@ The KV Router is a component that aggregates KV Events from all the workers and 
 a prefix tree of the cached tokens. It makes decisions on which worker to route requests
 to based on the length of the prefix match and the load on the workers.
 There are three steps needed to enable the kv router:
-1. Use `--kv-router` in the processor.
-2. Use `--kv-router` and `--enable-prefix-caching` in all the (decode) workers.
+1. Use `--router kv` in the processor.
+2. Use `--router kv` and `--enable-prefix-caching` in all the (decode) workers.
 3. Launch the kv router in a separate terminal.
    ```
    RUST_LOG=info python3 kv_router.py \
@@ -185,7 +185,7 @@ CUDA_VISIBLE_DEVICES=0 python3 worker.py \
     --enforce-eager \
     --block-size 64 \
     --max-model-len 16384 \
-    <optional kv router args: --kv-router --enable-prefix-caching>
+    <optional kv router args: --router kv --enable-prefix-caching>
 ```
 
 #### Disaggregated
@@ -213,7 +213,7 @@ CUDA_VISIBLE_DEVICES=1 python3 worker.py \
     --block-size 64 \
     --max-num-batched-tokens 16384 \
     --max-model-len 16384 \
-    <optional kv router args: --kv-router --enable-prefix-caching>
+    <optional kv router args: --router kv --enable-prefix-caching>
     <optional disaggregated router args: --conditional-disagg --custom-disagg-router --max-local-prefill-length <length>>
 ```
 
