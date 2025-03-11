@@ -62,15 +62,7 @@ class Processor(ProcessMixIn):
         )
         self.router_client = router_client
         self.workers_client = workers_client
-
-        self.random_router = engine_args.random_router
-        self.round_robin_router = engine_args.round_robin_router
-        self.kv_router = engine_args.kv_router
-        if sum([self.random_router, self.round_robin_router, self.kv_router]) != 1:
-            raise ValueError(
-                "Exactly one router type must be enabled. Please set only one of "
-                "random_router, round_robin_router, or kv_router to True."
-            )
+        self.router_mode = engine_args.router
 
     def _create_tokenizer(self, engine_args: AsyncEngineArgs) -> AnyTokenizer:
         """Create a TokenizerGroup using engine arguments similar to VLLM's approach"""
@@ -101,7 +93,7 @@ class Processor(ProcessMixIn):
             sampling_params,
         ) = await self._parse_raw_request(raw_request)
 
-        if self.kv_router:
+        if self.router_mode == "kv":
             worker_id_generator: AsyncIterator = await self.router_client.generate(
                 Tokens(tokens=engine_prompt["prompt_token_ids"]).model_dump_json()
             )
@@ -129,7 +121,7 @@ class Processor(ProcessMixIn):
                     ).model_dump_json(),
                     int(worker_id),
                 )
-        elif self.random_router:
+        elif self.router_mode == "random":
             engine_generator = await self.workers_client.random(
                 vLLMGenerateRequest(
                     engine_prompt=engine_prompt,
@@ -137,7 +129,7 @@ class Processor(ProcessMixIn):
                     request_id=request_id,
                 ).model_dump_json()
             )
-        elif self.round_robin_router:
+        elif self.router_mode == "round-robin":
             engine_generator = await self.workers_client.round_robin(
                 vLLMGenerateRequest(
                     engine_prompt=engine_prompt,

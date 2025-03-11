@@ -21,19 +21,11 @@ from vllm.utils import FlexibleArgumentParser
 def parse_vllm_args() -> AsyncEngineArgs:
     parser = FlexibleArgumentParser()
     parser.add_argument(
-        "--random-router",
-        action="store_true",
-        help="Randomly schedule request to workers",
-    )
-    parser.add_argument(
-        "--round-robin-router",
-        action="store_true",
-        help="Round robin schedule request to workers",
-    )
-    parser.add_argument(
-        "--kv-router",
-        action="store_true",
-        help="Enable metric publishing for kv router",
+        "--router",
+        type=str,
+        choices=["random", "round-robin", "kv"],
+        default="random",
+        help="Router type to use for scheduling requests to workers",
     )
     parser.add_argument(
         "--remote-prefill", action="store_true", help="Enable remote prefill"
@@ -64,9 +56,7 @@ def parse_vllm_args() -> AsyncEngineArgs:
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine_args.random_router = args.random_router
-    engine_args.round_robin_router = args.round_robin_router
-    engine_args.kv_router = args.kv_router
+    engine_args.router = args.router
     engine_args.remote_prefill = args.remote_prefill
     engine_args.conditional_disagg = args.conditional_disagg
     engine_args.custom_disagg_router = args.custom_disagg_router
