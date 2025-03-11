@@ -72,7 +72,7 @@ llmctl http add completions deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo.vllm
 +------------+------------------------------------------+-----------+-----------+----------+
 | MODEL TYPE | MODEL NAME                               | NAMESPACE | COMPONENT | ENDPOINT |
 +------------+------------------------------------------+-----------+-----------+----------+
-| chat       | deepseek-ai/DeepSeek-R1-Distill-Llama-8B | dynamo | vllm      | generate |
+| chat       | deepseek-ai/DeepSeek-R1-Distill-Llama-8B | dynamo    | vllm      | generate |
 +------------+------------------------------------------+-----------+-----------+----------+
 ```
 
