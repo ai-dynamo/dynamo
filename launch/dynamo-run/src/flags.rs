@@ -26,8 +26,7 @@ pub struct Flags {
     /// - Full path to a GGUF file
     /// - Full path of a checked out Hugging Face repository containing safetensor files
     /// - Name of a Hugging Face repository, e.g 'google/flan-t5-small'. The model will be
-    /// dowloaded and cached.
-    /// For the `echo_full` engine omit the flag.
+    ///   downloaded and cached.
     #[arg(index = 1)]
     pub model_path_pos: Option<PathBuf>,
 
