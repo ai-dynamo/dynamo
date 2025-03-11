@@ -302,9 +302,13 @@ if [[ $FRAMEWORK == "VLLM_NIXL" ]]; then
     # Clone original NIXL to temp directory
 
     if [ ! -z ${GITHUB_TOKEN} ]; then
-	git clone https://oauth2:${GITHUB_TOKEN}@github.com/ai-dynamo/nixl.git "$TEMP_DIR/nixl_src"
+        git clone https://oauth2:${GITHUB_TOKEN}@github.com/${NIXL_REPO} "$TEMP_DIR/nixl_src"
     else
-	git clone https://github.com/${NIXL_REPO} "$TEMP_DIR/nixl_src"
+        # Try HTTPS first with credential prompting disabled, fall back to SSH if it fails
+        if ! GIT_TERMINAL_PROMPT=0 git clone https://github.com/${NIXL_REPO} "$TEMP_DIR/nixl_src"; then
+            echo "HTTPS clone failed, falling back to SSH..."
+            git clone git@github.com:${NIXL_REPO} "$TEMP_DIR/nixl_src"
+        fi
     fi
 
     cd "$TEMP_DIR/nixl_src"
