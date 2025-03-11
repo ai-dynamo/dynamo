@@ -29,9 +29,9 @@ pub mod scoring;
 
 use crate::kv_router::{
     indexer::{KvIndexer, KvIndexerInterface, RouterEvent},
+    metrics_aggregator::collect_endpoints,
     scheduler::KvScheduler,
     scoring::ProcessedEndpoints,
-    metrics_aggregator::collect_endpoints,
 };
 
 // this should be discovered from the backend
@@ -149,4 +149,3 @@ impl KvRouter {
         Ok(worker_id)
     }
 }
-
