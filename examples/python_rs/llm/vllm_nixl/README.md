@@ -89,7 +89,7 @@ RUST_LOG=info python3 processor.py \
     --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --block-size 64 \
     --max-model-len 16384 \
-    --random-router / --round-robin-router / --kv-router
+    <--random-router / --round-robin-router / --kv-router>
 ```
 
 ### kv router
@@ -193,7 +193,7 @@ CUDA_VISIBLE_DEVICES=1 python3 worker.py \
     --max-num-batched-tokens 16384 \
     --max-model-len 16384 \
     <optional kv router args: --kv-router --enable-prefix-caching>
-    <optional disaggregated router args: >
+    <optional disaggregated router args: --conditional-disagg --custom-disagg-router --max-local-prefill-length <length>>
 ```
 
 ### Common Issues
