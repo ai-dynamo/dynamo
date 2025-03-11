@@ -242,7 +242,11 @@ class KvMetricsPublisher:
     def publish(self, request_active_slots: int,
         request_total_slots: int,
         kv_active_blocks: int,
-        kv_total_blocks: int) -> None:
+        kv_total_blocks: int,
+        num_requests_waiting: int,
+        gpu_cache_usage_perc: float,
+        gpu_prefix_cache_hit_rate: float
+    ) -> None:
         """
         Update the KV metrics being reported.
         """
