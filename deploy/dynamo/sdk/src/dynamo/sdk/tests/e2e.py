@@ -13,153 +13,68 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This is a simple example of a pipeline that uses Dynamo to deploy a backend, middle, and frontend service. Use this to test
-# changes made to CLI, SDK, etc
+import subprocess
+import time
 
-import os
+import pytest
 
-from pydantic import BaseModel
-
-from dynamo.sdk import api, depends, dynamo_endpoint, service
-from dynamo.sdk.lib.config import ServiceConfig
-
-"""
-Pipeline Architecture:
-
-Users/Clients (HTTP)
-      │
-      ▼
-┌─────────────┐
-│  Frontend   │  HTTP API endpoint (/generate)
-└─────────────┘
-      │ dynamo/runtime
-      ▼
-┌─────────────┐
-│   Middle    │
-└─────────────┘
-      │ dynamo/runtime
-      ▼
-┌─────────────┐
-│  Backend    │
-└─────────────┘
-"""
+pytestmark = pytest.mark.pre_merge
 
 
-class RequestType(BaseModel):
-    text: str
+@pytest.fixture(scope="module", autouse=True)
+def setup_and_teardown():
+    # Setup code
+    nats_server = subprocess.Popen(["nats-server", "-js"])
+    etcd = subprocess.Popen(["etcd"])
+    print("Setting up resources")
+
+    server = subprocess.Popen(
+        [
+            "dynamo-sdk",
+            "serve",
+            "pipeline:Frontend",
+            "--Frontend.model=qwentastic",
+            "--Middle.bias=0.5",
+        ]
+    )
+
+    time.sleep(5)
+
+    yield
+
+    # Teardown code
+    print("Tearing down resources")
+    server.terminate()
+    server.wait()
+    nats_server.terminate()
+    nats_server.wait()
+    etcd.terminate()
+    etcd.wait()
 
 
-class ResponseType(BaseModel):
-    text: str
+async def test_pipeline():
+    import asyncio
 
+    import aiohttp
 
-@service(
-    resources={"cpu": "2"},
-    traffic={"timeout": 30},
-    dynamo={
-        "enabled": True,
-        "namespace": "inference",
-    },
-    workers=3,
-)
-class Backend:
-    def __init__(self) -> None:
-        print("Starting backend")
-
-    @dynamo_endpoint()
-    async def generate(self, req: RequestType):
-        """Generate tokens."""
-        req_text = req.text
-        print(f"Backend received: {req_text}")
-        text = f"{req_text}-back"
-        for token in text.split():
-            yield f"Backend: {token}"
-
-
-@service(
-    resources={"cpu": "2"},
-    traffic={"timeout": 30},
-    dynamo={"enabled": True, "namespace": "inference"},
-)
-class Middle:
-    backend = depends(Backend)
-
-    def __init__(self) -> None:
-        print("Starting middle")
-        config = ServiceConfig.get_instance()
-        # loading a small model via VLLM that is not used
-
-        from vllm.engine.arg_utils import AsyncEngineArgs
-        from vllm.engine.async_llm_engine import AsyncLLMEngine
-        from vllm.utils import FlexibleArgumentParser
-
+    max_retries = 5
+    for attempt in range(max_retries):
         try:
-            os.environ["VLLM_LOG_LEVEL"] = "DEBUG"
-            # Get VLLM args using new pattern
-            vllm_args = config.as_args("Middle", prefix="vllm_")
-            print(f"VLLM args to parse: {vllm_args}")
-
-            # Create and use parser
-            parser = FlexibleArgumentParser()
-            parser = AsyncEngineArgs.add_cli_args(parser)
-            args = parser.parse_args(vllm_args)
-            self.engine_args = AsyncEngineArgs.from_cli_args(args)
-            self.engine = AsyncLLMEngine.from_engine_args(self.engine_args)
-
-        except ImportError:
-            print("VLLM imports not available, skipping engine arg parsing")
-        except Exception as e:
-            print(f"Error parsing VLLM args: {e}")
-
-    @dynamo_endpoint()
-    async def generate(self, req: RequestType):
-        """Forward requests to backend."""
-
-        req_text = req.text
-        print(f"Middle received: {req_text}")
-        text = f"{req_text}-mid"
-        next_request = RequestType(text=text).model_dump_json()
-        async for response in self.backend.generate(next_request):
-            print(f"Middle received response: {response}")
-            yield f"Middle: {response}"
-
-
-@service(resources={"cpu": "1"}, traffic={"timeout": 60})  # Regular HTTP API
-class Frontend:
-    middle = depends(Middle)
-
-    def __init__(self) -> None:
-        print("Starting frontend")
-        self.config = ServiceConfig.get_instance()
-
-        frontend_config = FrontendConfig(**self.config.get("Frontend", {}))
-
-        print(
-            f"Frontend initialized with model={frontend_config.model}, "
-            f"temp={frontend_config.temperature}, max_tokens={frontend_config.max_tokens}"
-        )
-
-        # Get all configs for a service (new dict pattern)
-        all_frontend_configs = self.config.get("Frontend", {})
-        print(f"All Frontend configs: {all_frontend_configs}")
-
-        # Check other service configs (new dict pattern)
-        if self.config.get("Middle", {}).get("special_mode") == "fast":
-            print("Using Middle service in fast mode")
-
-    @api
-    async def generate(self, text):
-        """Stream results from the pipeline."""
-        print(f"Frontend received: {text}")
-        print(f"Frontend received type: {type(text)}")
-        txt = RequestType(text=text)
-        print(f"Frontend sending: {type(txt)}")
-        async for response in self.middle.generate(txt.model_dump_json()):
-            yield f"Frontend: {response}"
-
-
-class FrontendConfig(BaseModel):
-    model: str
-    temperature: float = 0.7
-    max_tokens: int = 1024
-    stream: bool = True
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "http://localhost:3000/generate",
+                    json={"text": "federer-is-the-greatest-tennis-player-of-all-time"},
+                    headers={"accept": "text/event-stream"},
+                ) as resp:
+                    assert resp.status == 200
+                    text = await resp.text()
+                    assert (
+                        "federer-is-the-greatest-tennis-player-of-all-time-mid-back"
+                        in text
+                    )
+                    break
+        except Exception:
+            if attempt == max_retries - 1:
+                raise
+            print(f"Attempt {attempt + 1} failed, retrying...")
+            await asyncio.sleep(1)
