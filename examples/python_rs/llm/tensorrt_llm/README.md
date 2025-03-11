@@ -41,7 +41,10 @@ Start required services (etcd and NATS):
 
 TODO: Remove the internal references below.
 
-- Build TRT-LLM wheel using latest tensorrt_llm main
+
+### Build the Dynamo container with latest TRT-LLM
+
+#### Step 1:Build TRT-LLM wheel using latest tensorrt_llm main
 
 ```
 git clone https://github.com/NVIDIA/TensorRT-LLM.git
@@ -58,14 +61,12 @@ python3 scripts/build_wheel.py --clean --trt_root /usr/local/tensorrt -a native 
 cp build/tensorrt_llm-*.whl /home
 ```
 
-- Build the Dynamo container
-
-Step 1: Copy the TRT-LLM wheel to dynamo repository.
+####Step 2: Copy the TRT-LLM wheel to dynamo repository.
 ```bash
 cp /home/tensorrt_llm-*.whl /<path-to-repo>/dynamo/trtllm_wheel/
 ```
 
-Step 2: Build the container
+####Step 3: Build the container
 ```bash
 # Build image
 ./container/build.sh --framework TENSORRTLLM --tensorrtllm-pip-wheel-path trtllm_wheel
