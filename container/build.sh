@@ -194,6 +194,10 @@ get_options() {
         FRAMEWORK=$DEFAULT_FRAMEWORK
     fi
 
+    if [[ $FRAMEWORK == "VLLM_NIXL" ]]; then
+	FRAMEWORK="VLLM"
+    fi
+
     if [ ! -z "$FRAMEWORK" ]; then
         FRAMEWORK=${FRAMEWORK^^}
 
@@ -279,9 +283,6 @@ error() {
 }
 
 get_options "$@"
-
-if [[ $FRAMEWORK == "VLLM_NIXL" ]]; then
-    FRAMEWORK="VLLM"
 
 # Update DOCKERFILE if framework is VLLM
 if [[ $FRAMEWORK == "VLLM" ]]; then

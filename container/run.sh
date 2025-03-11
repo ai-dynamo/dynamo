@@ -172,6 +172,7 @@ get_options() {
 
     if [[ $FRAMEWORK == "VLLM_NIXL" ]]; then
 	FRAMEWORK="VLLM"
+    fi
 
     if [ ! -z "$FRAMEWORK" ]; then
 	FRAMEWORK=${FRAMEWORK^^}
