@@ -72,24 +72,9 @@ RUN pip install "git+https://github.com/triton-inference-server/perf_analyzer.gi
 
 # Backend & Framework Specific Installation
 ARG FRAMEWORK="STANDARD"
-ARG TENSORRTLLM_BACKEND_REPO_TAG=
-ARG TENSORRTLLM_BACKEND_REBUILD=
-ARG TENSORRTLLM_SKIP_CLONE=
-ENV FRAMEWORK=${FRAMEWORK}
-RUN --mount=type=bind,source=./container/deps/requirements.tensorrtllm.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/clone_tensorrtllm.sh,target=/tmp/clone_tensorrtllm.sh \
-    if [[ "$FRAMEWORK" == "TENSORRTLLM" ]] ; then pip install --timeout=2000 -r /tmp/requirements.txt; if [ ${TENSORRTLLM_SKIP_CLONE} -ne 1 ] ; then /tmp/clone_tensorrtllm.sh --tensorrtllm-backend-repo-tag ${TENSORRTLLM_BACKEND_REPO_TAG} --tensorrtllm-backend-rebuild ${TENSORRTLLM_BACKEND_REBUILD} --dynamo-llm-path /opt/dynamo/llm_binding ; fi ; fi
-
-
 RUN --mount=type=bind,source=./container/deps/requirements.standard.txt,target=/tmp/requirements.txt \
     if [[ "$FRAMEWORK" == "STANDARD" ]] ; then pip install --timeout=2000 -r /tmp/requirements.txt ; fi
 
-# Backend & Framework Specific LD_LIBRARY_PATH
-ARG TENSORRTLLM_FRAMEWORK
-ENV FRAMEWORK_LD_LIBRARY_PATH=${TENSORRTLLM_FRAMEWORK:+/opt/tritonserver/backends/tensorrtllm/}
-ENV LD_LIBRARY_PATH=${FRAMEWORK_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH}
-ENV TENSORRTLLM_BACKEND_REPO_TAG=$TENSORRTLLM_BACKEND_REPO_TAG
-ENV TRTLLM_USE_MPI_KVCACHE=${TENSORRTLLM_FRAMEWORK:+"1"}
 
 # TODO set VLLM Version
 # ENV VLLM_VERSION
