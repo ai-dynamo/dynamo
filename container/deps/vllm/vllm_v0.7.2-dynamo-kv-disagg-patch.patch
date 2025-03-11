@@ -2990,7 +2990,7 @@ index 3cf1850e..ae006579 100644
 +    gpu_cache_usage_perc: float
 +    gpu_prefix_cache_hit_rate: float
 diff --git a/vllm/engine/multiprocessing/client.py b/vllm/engine/multiprocessing/client.py
-index 85b5f31e..a08f6ad0 100644
+index 85b5f31e..05030292 100644
 --- a/vllm/engine/multiprocessing/client.py
 +++ b/vllm/engine/multiprocessing/client.py
 @@ -8,6 +8,7 @@ from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
@@ -3084,7 +3084,7 @@ index 85b5f31e..a08f6ad0 100644
      @staticmethod
      def is_unsupported_config(engine_args: AsyncEngineArgs):
          # Pipeline parallel not yet supported
-@@ -180,6 +210,62 @@ class MQLLMEngineClient(EngineClient):
+@@ -180,6 +210,61 @@ class MQLLMEngineClient(EngineClient):
          except Exception as e:
              self._set_errored(e)
  
@@ -3118,20 +3118,19 @@ index 85b5f31e..a08f6ad0 100644
 +                    # Metrics received- check the message
 +                    message: Frame = await self.metrics_socket.recv(copy=False)
 +                    metrics = pickle.loads(message.buffer)
-+                    if self.metrics_publisher is not None:
-+                        if isinstance(metrics, KvMetrics):
-+                            self.metrics_publisher.publish(metrics.request_active_slots,
-+                                                        metrics.request_total_slots,
-+                                                        metrics.kv_active_blocks,
-+                                                        metrics.kv_total_blocks,
-+                                                        metrics.num_requests_waiting, 
-+                                                        metrics.gpu_cache_usage_perc, 
-+                                                        metrics.gpu_prefix_cache_hit_rate)
-+                        # TODO: Investigate sending whole stats object
-+                        # if isinstance(metrics, Stats):
-+                        #     pass
++                    if self.metrics_publisher is not None and isinstance(
++                        metrics, KvMetrics
++                    ):
++                        self.metrics_publisher.publish(metrics.request_active_slots,
++                                                    metrics.request_total_slots,
++                                                    metrics.kv_active_blocks,
++                                                    metrics.kv_total_blocks,
++                                                    metrics.num_requests_waiting, 
++                                                    metrics.gpu_cache_usage_perc, 
++                                                    metrics.gpu_prefix_cache_hit_rate)
++                        logger.debug("Metrics successful.")
 +
-+                            logger.debug("Metrics successful.")
++                    # TODO: Investigate sending whole stats object
 +
 +        except asyncio.CancelledError:
 +            logger.debug("Shutting down MQLLMEngineClient check metrics loop.")
@@ -3147,7 +3146,7 @@ index 85b5f31e..a08f6ad0 100644
      async def run_output_handler_loop(self):
          """Get RequestOutputs from Engine and stream to Request Queues"""
  
-@@ -278,12 +364,26 @@ class MQLLMEngineClient(EngineClient):
+@@ -278,12 +363,26 @@ class MQLLMEngineClient(EngineClient):
              # Wait until server is ready.
              response = await self._wait_for_server_rpc(socket)
  
@@ -3174,7 +3173,7 @@ index 85b5f31e..a08f6ad0 100644
  
      def close(self):
          """Destroy the ZeroMQ Context."""
-@@ -293,6 +393,8 @@ class MQLLMEngineClient(EngineClient):
+@@ -293,6 +392,8 @@ class MQLLMEngineClient(EngineClient):
          # Cancel background tasks.
          if self.health_loop is not None:
              self.health_loop.cancel()
@@ -3183,7 +3182,7 @@ index 85b5f31e..a08f6ad0 100644
          if self.output_loop is not None:
              self.output_loop.cancel()
  
-@@ -415,6 +517,9 @@ class MQLLMEngineClient(EngineClient):
+@@ -415,6 +516,9 @@ class MQLLMEngineClient(EngineClient):
          """
          if self._errored_with is not None:
              raise self._errored_with
@@ -3193,7 +3192,7 @@ index 85b5f31e..a08f6ad0 100644
  
      @property
      def is_running(self) -> bool:
-@@ -473,6 +578,7 @@ class MQLLMEngineClient(EngineClient):
+@@ -473,6 +577,7 @@ class MQLLMEngineClient(EngineClient):
          trace_headers: Optional[Mapping[str, str]] = None,
          prompt_adapter_request: Optional[PromptAdapterRequest] = None,
          priority: int = 0,
@@ -3201,7 +3200,7 @@ index 85b5f31e..a08f6ad0 100644
          *,
          inputs: Optional[PromptType] = None  # DEPRECATED
      ) -> AsyncGenerator[RequestOutput, None]:
-@@ -502,7 +608,8 @@ class MQLLMEngineClient(EngineClient):
+@@ -502,7 +607,8 @@ class MQLLMEngineClient(EngineClient):
  
          return self._process_request(prompt, sampling_params, request_id,
                                       lora_request, trace_headers,
@@ -3211,7 +3210,7 @@ index 85b5f31e..a08f6ad0 100644
  
      @overload
      def encode(
-@@ -586,6 +693,7 @@ class MQLLMEngineClient(EngineClient):
+@@ -586,6 +692,7 @@ class MQLLMEngineClient(EngineClient):
          trace_headers: Optional[Mapping[str, str]] = None,
          prompt_adapter_request: Optional[PromptAdapterRequest] = None,
          priority: int = 0,
@@ -3219,7 +3218,7 @@ index 85b5f31e..a08f6ad0 100644
      ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
              PoolingRequestOutput, None]]:
          """Send an RPCGenerateRequest to the RPCServer and stream responses."""
-@@ -630,6 +738,12 @@ class MQLLMEngineClient(EngineClient):
+@@ -630,6 +737,12 @@ class MQLLMEngineClient(EngineClient):
              else:
                  lp_bytes = None
  
@@ -3232,7 +3231,7 @@ index 85b5f31e..a08f6ad0 100644
              request_bytes = pickle.dumps(
                  RPCProcessRequest(
                      prompt=prompt,
-@@ -639,11 +753,11 @@ class MQLLMEngineClient(EngineClient):
+@@ -639,11 +752,11 @@ class MQLLMEngineClient(EngineClient):
                      trace_headers=trace_headers,
                      prompt_adapter_request=prompt_adapter_request,
                      priority=priority,
@@ -3246,7 +3245,7 @@ index 85b5f31e..a08f6ad0 100644
              await self.input_socket.send_multipart(parts, copy=False)
  
              # 4) Stream the RequestOutputs from the output queue. Note
-@@ -705,3 +819,6 @@ class MQLLMEngineClient(EngineClient):
+@@ -705,3 +818,6 @@ class MQLLMEngineClient(EngineClient):
          # Raise on error, otherwise happily return None
          if isinstance(request_output, BaseException):
              raise request_output
@@ -3254,7 +3253,7 @@ index 85b5f31e..a08f6ad0 100644
 +    def set_metrics_publisher(self, metrics_publisher):
 +        self.metrics_publisher = metrics_publisher
 diff --git a/vllm/engine/multiprocessing/engine.py b/vllm/engine/multiprocessing/engine.py
-index a0dd7958..3204cfb8 100644
+index a0dd7958..c82bc15b 100644
 --- a/vllm/engine/multiprocessing/engine.py
 +++ b/vllm/engine/multiprocessing/engine.py
 @@ -3,35 +3,115 @@
@@ -3354,23 +3353,23 @@ index a0dd7958..3204cfb8 100644
 +            self.metrics_socket.send_multipart((metrics_bytes, ), copy=False)
 +
 +# TODO: Send entire stats object to the client
-+class StatLogger(StatLoggerBase):
-+    def __init__(
-+        self,
-+        metrics_socket
-+    ):
-+        self.metrics_socket = metrics_socket
++# class StatLogger(StatLoggerBase):
++#     def __init__(
++#         self,
++#         metrics_socket
++#     ):
++#         self.metrics_socket = metrics_socket
 +
-+    def log(self, stats: Stats) -> None:
-+        self._send_metrics(stats)
++#     def log(self, stats: Stats) -> None:
++#         self._send_metrics(stats)
 +
-+    def info(self, type: str, obj: SupportsMetricsInfo) -> None:
-+        pass
++#     def info(self, type: str, obj: SupportsMetricsInfo) -> None:
++#         pass
 +
-+    def _send_metrics(self, stats: Stats):
-+        if not self.metrics_socket.closed:
-+            metrics_bytes = pickle.dumps(stats)
-+            self.metrics_socket.send_multipart((metrics_bytes, ), copy=False)
++#     def _send_metrics(self, stats: Stats):
++#         if not self.metrics_socket.closed:
++#             metrics_bytes = pickle.dumps(stats)
++#             self.metrics_socket.send_multipart((metrics_bytes, ), copy=False)
 +
 +
 +
@@ -3378,7 +3377,7 @@ index a0dd7958..3204cfb8 100644
  
  class MQLLMEngine:
      """A multiprocessing wrapper for :class:`LLMEngine`.
-@@ -94,12 +174,35 @@ class MQLLMEngine:
+@@ -94,12 +174,37 @@ class MQLLMEngine:
          self.heartbeat_socket = self.ctx.socket(zmq.constants.PUSH)
          self.heartbeat_socket.bind(f"{ipc_path}{IPC_HEALTH_EXT}")
  
@@ -3405,16 +3404,18 @@ index a0dd7958..3204cfb8 100644
 +            self.engine.cache_config.num_gpu_blocks,
 +            self.metrics_socket
 +        )
-+        self.general_stat_logger = StatLogger(
-+            self.metrics_socket
-+        )
 +        self.engine.add_logger("kv_metrics", self.kv_stat_logger)
-+        self.engine.add_logger("general_metrics", self.general_stat_logger)
++        
++        # TODO investigate sending whole stats object
++        # self.general_stat_logger = StatLogger(
++        #     self.metrics_socket
++        # )
++        # self.engine.add_logger("general_metrics", self.general_stat_logger)
 +
      @property
      def dead_error(self) -> BaseException:
          if self._errored_with is not None:
-@@ -171,8 +274,17 @@ class MQLLMEngine:
+@@ -171,8 +276,17 @@ class MQLLMEngine:
                  # Handle the query from the Client.
                  if request == RPCStartupRequest.IS_SERVER_READY:
                      tracing_enabled = self.engine.is_tracing_enabled()
@@ -3434,7 +3435,7 @@ index a0dd7958..3204cfb8 100644
  
              except Exception as e:
                  response = e
-@@ -185,6 +297,7 @@ class MQLLMEngine:
+@@ -185,6 +299,7 @@ class MQLLMEngine:
  
          while True:
              if not self.engine.has_unfinished_requests():
@@ -3442,7 +3443,7 @@ index a0dd7958..3204cfb8 100644
                  # Poll until there is work to do.
                  while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
                      # When there's no work, check on engine health and send
-@@ -220,6 +333,13 @@ class MQLLMEngine:
+@@ -220,6 +335,13 @@ class MQLLMEngine:
      def handle_new_input(self):
          """Handle new input from the socket"""
          try:
@@ -3456,7 +3457,7 @@ index a0dd7958..3204cfb8 100644
              while self.input_socket.poll(timeout=0) != 0:
                  frames = self.input_socket.recv_multipart(copy=False)
                  request = pickle.loads(frames[0].buffer)
-@@ -262,6 +382,11 @@ class MQLLMEngine:
+@@ -262,6 +384,11 @@ class MQLLMEngine:
              self._send_outputs(rpc_err)
  
          try:
@@ -3468,7 +3469,7 @@ index a0dd7958..3204cfb8 100644
              self.engine.add_request(
                  request_id=request_id,
                  prompt=request.prompt,
-@@ -269,7 +394,9 @@ class MQLLMEngine:
+@@ -269,7 +396,9 @@ class MQLLMEngine:
                  lora_request=request.lora_request,
                  trace_headers=request.trace_headers,
                  prompt_adapter_request=request.prompt_adapter_request,

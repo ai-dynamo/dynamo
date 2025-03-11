@@ -16,7 +16,7 @@
 use anyhow::Result;
 use dynamo_runtime::{component::Component, component::Namespace, DistributedRuntime};
 use futures::stream::StreamExt;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing;
 
@@ -29,9 +29,9 @@ pub mod scoring;
 
 use crate::kv_router::{
     indexer::{KvIndexer, KvIndexerInterface, RouterEvent},
+    metrics_aggregator::collect_endpoints,
     scheduler::KvScheduler,
     scoring::ProcessedEndpoints,
-    metrics_aggregator::collect_endpoints,
 };
 
 // this should be discovered from the backend
@@ -149,4 +149,3 @@ impl KvRouter {
         Ok(worker_id)
     }
 }
-
