@@ -80,7 +80,7 @@ impl KvMetricsAggregator {
     }
 }
 
-async fn collect_endpoints(
+pub async fn collect_endpoints(
     nats_client: dynamo_runtime::transports::nats::Client,
     service_name: String,
     ep_tx: tokio::sync::mpsc::Sender<ProcessedEndpoints>,
