@@ -46,6 +46,7 @@ jobs:
         filters: |
           vllm:
             - 'container/Dockerfile.vllm'
+            - 'container/Dockerfile.vllm_nixl'
             - 'examples/python/llm/**'
             - 'examples/python_rs/llm/**'
             - 'container/deps/requirements.vllm.txt'
