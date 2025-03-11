@@ -514,22 +514,7 @@ async fn metrics_loop(cancel_token: CancellationToken, mut socket: async_zmq::Pu
                 .call1((bytes,))
                 .map_err(|e| format!("Failed to call pickle.loads: {}", e))?;
 
-            // Log the Python object type for debugging
-            let obj_type = match result.get_type().name() {
-                Ok(name) => name.to_string(),
-                Err(_) => "unknown".to_string(),
-            };
-            let obj_str = result
-                .str()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|_| "unprintable".to_string());
-            tracing::debug!(
-                "Deserialized Python object of type {} with repr: {}",
-                obj_type,
-                obj_str
-            );
-
-            // Try to extract the fields from the Python object
+            // Try to extract the attributes from the Python object
             let extract_field = |field: &str| -> Result<u64, String> {
                 result
                     .getattr(field)
@@ -538,10 +523,23 @@ async fn metrics_loop(cancel_token: CancellationToken, mut socket: async_zmq::Pu
                     .map_err(|e| format!("Failed to extract '{}' as u64: {}", field, e))
             };
 
-            let request_active_slots = extract_field("request_active_slots")?;
-            let request_total_slots = extract_field("request_total_slots")?;
-            let kv_active_blocks = extract_field("kv_active_blocks")?;
-            let kv_total_blocks = extract_field("kv_total_blocks")?;
+            let extract_float_field = |field: &str| -> Result<f32, String> {
+                result
+                    .getattr(field)
+                    .map_err(|e| format!("Field '{}' not found: {}", field, e))?
+                    .extract::<f32>()
+                    .map_err(|e| format!("Failed to extract '{}' as f32: {}", field, e))
+            };
+
+            // Give default values for any fields not found
+            let request_active_slots = extract_field("request_active_slots").unwrap_or(0);
+            let request_total_slots = extract_field("request_total_slots").unwrap_or(0);
+            let kv_active_blocks = extract_field("kv_active_blocks").unwrap_or(0);
+            let kv_total_blocks = extract_field("kv_total_blocks").unwrap_or(0);
+            let num_requests_waiting = extract_field("num_requests_waiting").unwrap_or(0);
+            let gpu_cache_usage_perc = extract_float_field("gpu_cache_usage_perc").unwrap_or(0.0);
+            let gpu_prefix_cache_hit_rate =
+                extract_float_field("gpu_prefix_cache_hit_rate").unwrap_or(0.0);
 
             // Create ForwardPassMetrics directly
             Ok(ForwardPassMetrics {
@@ -549,6 +547,9 @@ async fn metrics_loop(cancel_token: CancellationToken, mut socket: async_zmq::Pu
                 request_total_slots,
                 kv_active_blocks,
                 kv_total_blocks,
+                num_requests_waiting,
+                gpu_cache_usage_perc,
+                gpu_prefix_cache_hit_rate,
             })
         });
 
