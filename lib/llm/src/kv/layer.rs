@@ -664,8 +664,16 @@ mod tests {
     }
 
     #[rstest]
+    #[case(KvLayout::KvFirst)]
+    #[case(KvLayout::BlockFirst)]
     #[test]
-    fn test_kv_block_storage_kv_first_direct_with_block_vals() -> Result<()> {
+    fn test_kv_block_storage_layouts(#[case] layout: KvLayout) -> Result<()> {
+        let layout_name = match layout {
+            KvLayout::KvFirst => "KvFirst",
+            KvLayout::BlockFirst => "BlockFirst",
+        };
+        println!("Testing layout: {}", layout_name);
+
         let number_of_blocks = 8;
 
         let model_details = KvModelDetailsBuilder::default()
@@ -676,7 +684,7 @@ mod tests {
             .build()?;
 
         let block_details = KvBlockDetailsBuilder::default()
-            .layout(KvLayout::KvFirst)
+            .layout(layout)
             .block_size(4)
             .tp_size(1)
             .tp_ranks(0)
@@ -748,8 +756,13 @@ mod tests {
                                 for bs_idx in 0..shape[2] {
                                     for head_idx in 0..shape[3] {
                                         for head_dim_idx in 0..shape[4] {
-                                            nd_view[[block_idx, kv_idx, head_idx, head_dim_idx]] =
-                                                block_idx as f32;
+                                            nd_view[[
+                                                block_idx,
+                                                kv_idx,
+                                                bs_idx,
+                                                head_idx,
+                                                head_dim_idx,
+                                            ]] = block_idx as f32;
                                         }
                                     }
                                 }
