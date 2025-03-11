@@ -588,6 +588,10 @@ impl KvIndexer {
         }
     }
 
+    pub fn block_size(&self) -> usize {
+        self.kv_block_size
+    }
+
     pub fn new(token: CancellationToken, kv_block_size: usize) -> Self {
         Self::new_with_frequency(token, None, kv_block_size)
     }
@@ -773,6 +777,10 @@ impl KvIndexerSharded {
             remove_worker_tx,
             tasks,
         }
+    }
+
+    pub fn block_size(&self) -> usize {
+        self.kv_block_size
     }
 
     pub fn new(token: CancellationToken, num_shards: usize, kv_block_size: usize) -> Self {
