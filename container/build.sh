@@ -43,7 +43,7 @@ PYTHON_PACKAGE_VERSION=${current_tag:-$latest_tag.dev+$commit_id}
 # dependencies are specified in the /container/deps folder and
 # installed within framework specific sections of the Dockerfile.
 
-declare -A FRAMEWORKS=(["STANDARD"]=1 ["TENSORRTLLM"]=2 ["VLLM"]=3)
+declare -A FRAMEWORKS=(["STANDARD"]=1 ["TENSORRTLLM"]=2 ["VLLM"]=3 ["VLLM_NIXL"]=4)
 DEFAULT_FRAMEWORK=VLLM
 
 SOURCE_DIR=$(dirname "$(readlink -f "$0")")
@@ -280,6 +280,8 @@ error() {
 
 get_options "$@"
 
+if [[ $FRAMEWORK == "VLLM_NIXL" ]]; then
+    FRAMEWORK="VLLM"
 
 # Update DOCKERFILE if framework is VLLM
 if [[ $FRAMEWORK == "VLLM" ]]; then
