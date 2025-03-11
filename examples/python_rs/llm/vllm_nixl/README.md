@@ -92,6 +92,27 @@ RUST_LOG=info python3 processor.py \
     <--random-router / --round-robin-router / --kv-router>
 ```
 
+Alternatively, the processor can be bypassed by directly hitting the worker endpoints:
+```
+llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo-init.vllm.generate
+
+# monolithic
+CUDA_VISIBLE_DEVICES=0 python3 routerless/worker.py \
+    --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+    --enforce-eager
+
+# disaggregated
+CUDA_VISIBLE_DEVICES=0 python routerless/prefill_worker.py \
+    --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+    --enforce-eager \
+    --kv-transfer-config '{"kv_connector":"DynamoNixlConnector"}'
+CUDA_VISIBLE_DEVICES=1 python3 routerless/worker.py \
+    --remote-prefill \
+    --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+    --enforce-eager \
+    --kv-transfer-config '{"kv_connector":"DynamoNixlConnector"}'
+```
+
 ### kv router
 
 The KV Router is a component that aggregates KV Events from all the workers and maintains
