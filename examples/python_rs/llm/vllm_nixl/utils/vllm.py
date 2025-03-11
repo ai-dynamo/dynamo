@@ -21,6 +21,13 @@ from vllm.utils import FlexibleArgumentParser
 def parse_vllm_args() -> AsyncEngineArgs:
     parser = FlexibleArgumentParser()
     parser.add_argument(
+        "--router",
+        type=str,
+        choices=["random", "round-robin", "kv"],
+        default="random",
+        help="Router type to use for scheduling requests to workers",
+    )
+    parser.add_argument(
         "--remote-prefill", action="store_true", help="Enable remote prefill"
     )
     parser.add_argument(
@@ -49,6 +56,7 @@ def parse_vllm_args() -> AsyncEngineArgs:
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     engine_args = AsyncEngineArgs.from_cli_args(args)
+    engine_args.router = args.router
     engine_args.remote_prefill = args.remote_prefill
     engine_args.conditional_disagg = args.conditional_disagg
     engine_args.custom_disagg_router = args.custom_disagg_router
