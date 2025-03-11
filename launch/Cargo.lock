@@ -1402,7 +1402,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.2.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1481,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.2.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -2908,7 +2908,7 @@ dependencies = [
 
 [[package]]
 name = "llmctl"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "clap",
  "dynamo-llm",
