@@ -47,7 +47,7 @@ const DEFAULT_MAX_TOKENS: i32 = 8192;
 const PAGED_ATTENTION_MAX_NUM_SEQS: usize = 5;
 
 /// The environment variable which can hold the Hugging Face token, if any, in order
-const HF_TOKEN_VARS: [&str; 3] = ["HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN", "HF_TOKEN"];
+const HF_TOKEN_VARS: [&str; 3] = ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN"];
 
 pub async fn make_engine(
     gguf_path: &Path,
