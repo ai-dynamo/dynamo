@@ -79,10 +79,10 @@ TRT_LOG=DEBUG http --port 8181
 
 ### Processor
 
-Processor routes the requests to the (decode) workers. Three scheduling strategies are supported: 1. random, 2. round-robin, 3. kv-aware.
+Processor routes the requests to the (decode) workers. Three scheduling strategies are supported: 1. random, 2. round-robin, 3. kv (see [Kv Router](#kv-router)).
 
 ```
-# Processor must take the same args as the (decoer) worker
+# Processor must take the same args as the (decoder) worker
 # This is temporary until we communicate the ModelDeploymentCard over etcd
 RUST_LOG=info python3 processor.py \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
@@ -113,7 +113,7 @@ CUDA_VISIBLE_DEVICES=1 python3 routerless/worker.py \
     --kv-transfer-config '{"kv_connector":"DynamoNixlConnector"}'
 ```
 
-### kv router
+### Kv Router
 
 The KV Router is a component that aggregates KV Events from all the workers and maintains
 a prefix tree of the cached tokens. It makes decisions on which worker to route requests
