@@ -49,115 +49,93 @@ All of the commands below are run inside the same container.
 
 ## Run deployment
 
-Add model to dynamo and start http server.
+This figure shows an overview of the major components to deploy:
 
 ```
+                                                 +----------------+
+                                          +------| prefill worker |-------+
+                                   notify |      |   (optional)   |       |
+                                 finished |      +----------------+       | pull
+                                          v                               v
++------+      +-----------+      +------------------+    push     +---------------+
+| HTTP |----->| processor |----->| decode/monolith  |------------>| prefill queue |
+|      |<-----|           |<-----|      worker      | (if disagg) |   (optional)  |
++------+      +-----------+      +------------------+             +---------------+
+                  |    ^                  |
+       query best |    | return           | publish kv events
+           worker |    | worker_id        v
+                  |    |         +------------------+
+                  |    +---------|     kv-router    |
+                  +------------->|    (optional)    |
+                                 +------------------+
+
+```
+
+Add model to dynamo and start http server.
+```
+llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo-init.process.chat/completions
 TRT_LOG=DEBUG http --port 8181
 ```
 
-### Router-less Deployment
+### Processor
 
-Router-less deployment without kv router and disaggregated router.
+Processor routes the requests to the (decode) workers. Three scheduling strategies are supported: 1. random, 2. round-robin, 3. kv (see [Kv Router](#kv-router)).
 
-For router-less deployment, the client should directly hit the vllm.generate endpoint,
+```
+# Processor must take the same args as the (decoder) worker
+# This is temporary until we communicate the ModelDeploymentCard over etcd
+RUST_LOG=info python3 processor.py \
+    --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+    --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+    --block-size 64 \
+    --max-model-len 16384 \
+    --router <random/round-robin/kv>
+```
+
+Alternatively, the processor can be bypassed by directly hitting the worker endpoints:
 ```
 llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo-init.vllm.generate
-```
 
-#### Monolithic
-
-```
-cd /workspace/examples/python_rs/llm/vllm_nixl
+# monolithic
 CUDA_VISIBLE_DEVICES=0 python3 routerless/worker.py \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager
-```
 
-#### Disaggregated
-
-In disaggregated router-less deployment, the decode worker will directly send requests to a random prefill worker. All the requests will be sent to prefill worker(s) for remote prefill.
-
-In terminal 1:
-
-```
-cd /workspace/examples/python_rs/llm/vllm_nixl
+# disaggregated
 CUDA_VISIBLE_DEVICES=0 python routerless/prefill_worker.py \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
-    --block-size 64 \
-    --kv-transfer-config \
-    '{"kv_connector":"DynamoNixlConnector"}'
-```
-
-In terminal 2:
-```
-cd /workspace/examples/python_rs/llm/vllm_nixl
-CUDA_VISIBLE_DEVICES=1,2 python3 routerless/worker.py \
+    --kv-transfer-config '{"kv_connector":"DynamoNixlConnector"}'
+CUDA_VISIBLE_DEVICES=1 python3 routerless/worker.py \
     --remote-prefill \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
-    --block-size 64 \
-    --tensor-parallel-size 2 \
-    --kv-transfer-config \
-    '{"kv_connector":"DynamoNixlConnector"}'
+    --kv-transfer-config '{"kv_connector":"DynamoNixlConnector"}'
 ```
 
-### Router-based Deployment
+### Kv Router
 
-Router-based deployment use kv router to schedule the request to the best decode worker and disaggregated router to decide whether to prefill locally or remotely. The remote prefill requests will be sent to a global prefill queue to balance the prefill load.
-
-For router deployment, the client should hit the endpoint of the processor,
-```
-llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo-init.process.chat/completions
-```
-
-To launch disaggregated vllm deployment, there are four major components:
-1. Processor
-2. KV Router
-3. Disaggregated Router
-4. Prefill and Decode Workers
-
-#### Processor
-
-```
-# Processor must take the same args as the worker
-# This is temporary until we communicate the ModelDeploymentCard over etcd
-# Currently only block-size=64 is supported
-cd /workspace/examples/python_rs/llm/vllm_nixl
-RUST_LOG=info python3 router/processor.py \
-    --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-    --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-    --enable-prefix-caching \
-    --block-size 64 \
-    --max-model-len 16384
-```
-
-#### KV Router
-
-The KV Router is a component that aggregates KV Events from all the workers and maintains a prefix tree of the cached tokens. It makes decisions on which worker to route requests to based on the length of the prefix match and the load on the workers.
-
-To launch the KV Router, run the following command:
-```
-RUST_LOG=info python3 router/kv_router.py \
-    --routing-strategy prefix \
-    --model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-    --min-workers 1
-```
-
-There is also a custom router that uses a cost function defined in python to make routing decisions. To launch the custom router, run the following command:
-```
-RUST_LOG=info python3 router/kv_router.py \
-    --routing-strategy prefix \
-    --model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-    --custom-router \
-    --min-workers 1
-```
+The KV Router is a component that aggregates KV Events from all the workers and maintains
+a prefix tree of the cached tokens. It makes decisions on which worker to route requests
+to based on the length of the prefix match and the load on the workers.
+There are three steps needed to enable the kv router:
+1. Use `--router kv` in the processor.
+2. Use `--router kv` and `--enable-prefix-caching` in all the (decode) workers.
+3. Launch the kv router in a separate terminal.
+   ```
+   RUST_LOG=info python3 kv_router.py \
+       --routing-strategy prefix \
+       --model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+       --block-size 64 \
+       --min-workers 1
+   ```
+   where `--min-workers` is the number of (decode) workers.
+   There is also python-based customized router that can be enabled by `--custom-router`.
 
 You can choose only the prefix strategy for now:
 - `prefix`: Route requests to the worker that has the longest prefix match.
 
-
-#### Disaggregated Router
+### Disaggregated Router
 
 The disaggregated router determines whether a request should be send to a
 remote prefill engine or a local prefill engine for prefilling based on the
@@ -185,20 +163,39 @@ There are two types of disaggregated router implementations:
   kv router as the rust kv router does not report kv cache hit ratio.
   To use the python disaggregated router, add the following commands when launching
   the decode worker:
-  ```
-  python worker.py \
-    --custom-disagg-router \
-    --max-local-prefill-length <length> \
-    --max-remote-prefill-cache-hit-ratio <ratio>
-  ```
 
-#### Workers
+To enable the disaggregated router, add the following commands in the decode workers:
+```
+python worker.py \
+...
+--conditional-disagg \
+<optional: --custom-disagg-router> \
+--max-local-prefill-length <length>
+```
+
+### Worker
+
+#### Monolithic
+
+Only kv router is supported for monolithic deployment.
 
 ```
-# start prefill worker in Terminal 1
+CUDA_VISIBLE_DEVICES=0 python3 worker.py \
+    --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+    --enforce-eager \
+    --block-size 64 \
+    --max-model-len 16384 \
+    <optional kv router args: --router kv --enable-prefix-caching>
+```
+
+#### Disaggregated
+
+Kv router and disaggregated router are supported and can be turned on/off individually.
+
+```
+# start prefill worker in one terminal
 # Note: prefix caching is not supported in the prefill for now
-cd /workspace/examples/python_rs/llm/vllm_nixl
-CUDA_VISIBLE_DEVICES=0 python3 router/prefill_worker.py \
+CUDA_VISIBLE_DEVICES=0 python3 prefill_worker.py \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
     --kv-transfer-config '{"kv_connector":"DynamoNixlConnector"}' \
@@ -206,26 +203,32 @@ CUDA_VISIBLE_DEVICES=0 python3 router/prefill_worker.py \
     --max-num-batched-tokens 16384 \
     --max-model-len 16384
 
-# start decode worker in Terminal 2
-cd /workspace/examples/python_rs/llm/vllm_nixl
-CUDA_VISIBLE_DEVICES=1 python3 router/worker.py \
+# start decode worker in another terminal
+CUDA_VISIBLE_DEVICES=1 python3 worker.py \
     --remote-prefill \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
     --tensor-parallel-size 1 \
     --kv-transfer-config '{"kv_connector":"DynamoNixlConnector"}' \
-    --enable-prefix-caching \
     --block-size 64 \
     --max-num-batched-tokens 16384 \
-    --max-model-len 16384
+    --max-model-len 16384 \
+    <optional kv router args: --router kv --enable-prefix-caching>
+    <optional disaggregated router args: --conditional-disagg --custom-disagg-router --max-local-prefill-length <length>>
 ```
 
-Alternatively, we also provide a script to launch all workers in one go (with the python customized router):
+### Multi-Node Deployment
+
+For multi-node deployment, etcd, nats, processor, and kv router
+are only required on the head node. The only components that need
+to be deployed on all nodes are the workers.
+
+Set the following environment variables on each node before running the workers:
+```bash
+export NATS_SERVER="nats://<nats-server-host>:<nats-server-port>"
+export ETCD_ENDPOINTS="http://<etcd-server-host>:<etcd-server-port>"
 ```
-# this TODO: change to dynamo-deploy functionality
-./start_single_node.sh
-# Usage [--model <model>] [--p_tensor_parallel_size <size>] [--d_tensor_parallel_size <size>] [--max_model_len <len>] [--max_num_batched_tokens <tokens>] [--max_num_seqs <seqs>] [--gpu_memory_utilization <utilization>] [--enable_chunked_prefill <True/False>] [--num_p <p>] [--num_d <d>]
-```
+
 
 ### Common Issues
 
@@ -294,7 +297,6 @@ pkill -9 -f python
 - [ ] Add etcd for discovery
 - [ ] Multi-node deployment support
 - [ ] Enable chunked prefill
-- [ ] Support mixed tp
 - [ ] Process many remote prefill in one iteration
 - [ ] Support recompute preemption
 - [ ] Make sure decode does not preempt blocks before xfer finishes
@@ -304,6 +306,7 @@ pkill -9 -f python
 - [ ] Support pp > 1
 - [ ] Check why adding extra seed input is crashing vllm with remote prefill
 - [ ] Unified worker for both prefill and decode
+- [x] Support mixed tp
 - [x] Require sending two parallel requests to start decode for the first time
 - [x] Concurrency > 2 is not working
 - [x] Parse cmdline args
