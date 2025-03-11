@@ -30,3 +30,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 tracing = { version = "0.1" }
 tokio = { version = "1", features = ["full"] }
+clap = { version = "4.5", features = ["derive"] }
+tabled = "0.18"
