@@ -187,6 +187,10 @@ impl KvIndexer {
         })
     }
 
+    fn block_size(&self) -> usize {
+        self.inner.block_size()
+    }
+
     fn find_matches_for_request<'p>(
         &self,
         py: Python<'p>,

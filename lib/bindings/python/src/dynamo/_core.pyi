@@ -302,7 +302,7 @@ class KvIndexer:
 
     ...
 
-    def __init__(self, component: Component) -> None:
+    def __init__(self, component: Component, block_size: int) -> None:
         """
         Create a `KvIndexer` object
         """
@@ -310,6 +310,12 @@ class KvIndexer:
     def find_matches_for_request(self, token_ids: List[int], lora_id: int) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
+        """
+        ...
+
+    def block_size(self) -> int:
+        """
+        Return the block size of the KV Indexer.
         """
         ...
 

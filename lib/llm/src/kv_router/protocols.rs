@@ -21,8 +21,11 @@ pub struct ForwardPassMetrics {
     pub request_total_slots: u64,
     pub kv_active_blocks: u64,
     pub kv_total_blocks: u64,
+    // integer from 0 to large number
     pub num_requests_waiting: u64,
+    // percentage represented as a float from 0 to 1
     pub gpu_cache_usage_perc: f32,
+    // percentage represented as a float from 0 to 1
     pub gpu_prefix_cache_hit_rate: f32,
 }
 
