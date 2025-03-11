@@ -15,9 +15,8 @@
 
 [workspace]
 members = [
-    "llmctl",
-    "dynamo-run"
-
+    "hello_world",
+    "service_metrics",
 ]
 resolver = "2"
 
@@ -32,22 +31,4 @@ repository = "https://github.com/ai-dynamo/dynamo.git"
 
 [workspace.dependencies]
 # local or crates.io
-dynamo-runtime = { path = "../lib/runtime" }
-dynamo-llm = { path = "../lib/llm" }
-
-# crates.io
-anyhow = { version = "1" }
-async-stream = { version = "0.3" }
-async-trait = { version = "0.1" }
-bytes = "1"
-derive_builder = "0.20"
-futures = "0.3"
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1" }
-thiserror = { version = "2.0.11" }
-tokio = { version = "1", features = ["full"] }
-tokio-stream = { version = "0.1" }
-tokio-util = { version = "0.7", features = ["codec", "net"] }
-tracing = { version = "0.1" }
-validator = { version = "0.20.0", features = ["derive"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+dynamo-runtime = { path = "../" }

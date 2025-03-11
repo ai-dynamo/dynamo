@@ -15,21 +15,18 @@
 
 [package]
 name = "llmctl"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
-homepage.workspace = true
-repository.workspace = true
+version = "0.1.0"
+edition = "2021"
+authors = ["NVIDIA"]
+license = "Apache-2.0"
+homepage = "https://github.com/ai-dynamo/dynamo"
+repository = "https://github.com/ai-dynamo/dynamo.git"
 
 [dependencies]
-dynamo-runtime = { workspace = true}
-dynamo-llm = { workspace = true}
+dynamo-runtime = { path = "../../lib/runtime" }
+dynamo-llm = { path = "../../lib/llm" }
 
-serde = { workspace = true }
-serde_json = { workspace = true }
-tracing = { workspace = true }
-tokio = { workspace = true }
-
-clap = { version = "4.5", features = ["derive"] }
-tabled = "0.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+tracing = { version = "0.1" }
+tokio = { version = "1", features = ["full"] }
