@@ -16,7 +16,7 @@
 use anyhow::Result;
 use dynamo_runtime::{component::Component, component::Namespace, DistributedRuntime};
 use futures::stream::StreamExt;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing;
 
