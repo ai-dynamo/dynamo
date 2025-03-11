@@ -8,7 +8,6 @@ This is a proof of concept for a Helm chart to deploy services defined in a bent
 
 - make sure dynamo cli is installed
 
-
 ### Install the Helm chart
 
 ```bash

@@ -31,7 +31,7 @@ spec:
     spec:
       # pull secrets
       imagePullSecrets:
-        - name: yatai-regcred
+      - name: yatai-regcred
       securityContext:
         runAsUser: 0
       containers:
@@ -60,8 +60,6 @@ spec:
             - name: WORKERS
               value: "{{ .config.workers }}"
           {{- end }}
-            # - name: VIRTUAL_ENV
-            #   value: /opt/triton/venv
             - name: PORT
               value: "3000"
             - name: NATS_SERVER
