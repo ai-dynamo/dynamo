@@ -62,38 +62,49 @@ def deprecated_option(*param_decls: str, **attrs: t.Any):
     return decorator
 
 
+def _parse_arg(arg: str) -> tuple[str, str, t.Any] | None:
+    """Parse a single CLI argument into service name, key, and value."""
+    if not (arg.startswith("--") and "=" in arg):
+        return None
+
+    # Remove leading dashes
+    param = arg[2:]
+    key_path, value_str = param.split("=", 1)
+
+    if "." not in key_path:
+        return None
+
+    service, key = key_path.split(".", 1)
+
+    # Parse value based on type
+    try:
+        # Try as JSON for complex types
+        value = json.loads(value_str)
+    except json.JSONDecodeError:
+        # Handle basic types
+        if value_str.isdigit():
+            value = int(value_str)
+        elif value_str.replace(".", "", 1).isdigit() and value_str.count(".") <= 1:
+            value = float(value_str)
+        elif value_str.lower() in ("true", "false"):
+            value = value_str.lower() == "true"
+        else:
+            value = value_str
+
+    return service, key, value
+
+
 def _try_service_args(args: list[str]) -> t.Dict[str, t.Any] | None:
     service_configs: t.DefaultDict[str, t.Dict[str, t.Any]] = collections.defaultdict(
         dict
     )
+
     for arg in args:
-        if arg.startswith("--") and "=" in arg:
-            # Remove leading dashes
-            param = arg[2:]
-            key_path, value_str = param.split("=", 1)
+        parsed = _parse_arg(arg)
+        if parsed:
+            service, key, value = parsed
+            service_configs[service][key] = value
 
-            if "." in key_path:
-                service, key = key_path.split(".", 1)
-
-                # Different parsing logic for different types
-                try:
-                    # Try as JSON for complex types
-                    value = json.loads(value_str)
-                except json.JSONDecodeError:
-                    # Handle basic types
-                    if value_str.isdigit():
-                        value = int(value_str)
-                    elif (
-                        value_str.replace(".", "", 1).isdigit()
-                        and value_str.count(".") <= 1
-                    ):
-                        value = float(value_str)
-                    elif value_str.lower() in ("true", "false"):
-                        value = value_str.lower() == "true"
-                    else:
-                        value = value_str
-
-                service_configs[service][key] = value
     return service_configs
 
 
