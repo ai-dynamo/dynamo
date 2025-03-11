@@ -475,6 +475,7 @@ async fn heartbeat_loop(cancel_token: CancellationToken, mut socket: async_zmq::
     }
 }
 
+// NOTE: Custom to our patch of vllm.
 async fn metrics_loop(cancel_token: CancellationToken, mut socket: async_zmq::Pull) {
     loop {
         let maybe_metrics = tokio::select! {
@@ -496,9 +497,6 @@ async fn metrics_loop(cancel_token: CancellationToken, mut socket: async_zmq::Pu
                 break;
             }
         };
-
-        // Log the raw bytes for debugging
-        tracing::debug!("Received raw metrics data: {} bytes", b.len());
 
         // Try to deserialize directly into ForwardPassMetrics using Python's pickle module
         let metrics_result = Python::with_gil(|py| -> Result<ForwardPassMetrics, String> {
@@ -541,7 +539,6 @@ async fn metrics_loop(cancel_token: CancellationToken, mut socket: async_zmq::Pu
             let gpu_prefix_cache_hit_rate =
                 extract_float_field("gpu_prefix_cache_hit_rate").unwrap_or(0.0);
 
-            // Create ForwardPassMetrics directly
             Ok(ForwardPassMetrics {
                 request_active_slots,
                 request_total_slots,
@@ -555,10 +552,9 @@ async fn metrics_loop(cancel_token: CancellationToken, mut socket: async_zmq::Pu
 
         match metrics_result {
             Ok(metrics) => {
-                tracing::info!("Received vllm metrics: {:?}", metrics);
-
-                // Here you could forward these metrics to a monitoring system or use them
-                // for load balancing decisions
+                tracing::debug!("Received vllm metrics: {:?}", metrics);
+                // TODO: These metrics could be attached to StatsHandler or Events
+                // for aggregation and visualization.
             }
             Err(err) => {
                 tracing::error!(
