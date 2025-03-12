@@ -60,6 +60,19 @@ extern "C" {
         dst_block_ids: *const std::os::raw::c_int,
         num_block_pairs: std::os::raw::c_int,
     ) -> std::os::raw::c_int;
+
+    fn copy_stream_launch(
+        cs: *mut std::ffi::c_void,
+        src_data: *const std::ffi::c_void,
+        dst_data: *mut std::ffi::c_void,
+        prefix_dim: std::os::raw::c_int,
+        suffix_dim: std::os::raw::c_int,
+        elem_size: std::os::raw::c_int,
+        src_block_dim: std::os::raw::c_int,
+        dst_block_dim: std::os::raw::c_int,
+    ) -> std::os::raw::c_int;
+
+    fn copy_stream_sync(cs: *mut std::ffi::c_void) -> std::os::raw::c_int;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,11 +195,11 @@ pub struct CopyStreamLayerDetails {
 
     /// The size of the source blocks dimension in the layer shape
     #[validate(range(min = 1))]
-    src_blocks_dim: i32,
+    src_block_dim: i32,
 
     /// The size of the destination blocks dimension in the layer shape
     #[validate(range(min = 1))]
-    dst_blocks_dim: i32,
+    dst_block_dim: i32,
 
     /// The contiguous dimension below the block_dimension
     #[validate(range(min = 1))]
@@ -221,11 +234,11 @@ pub struct CopyStreamContext {
     /// Pointer to the C++ copy stream object
     c_handle: NonNull<std::ffi::c_void>,
 
-    /// Number of layers used to initialize the C++ object
-    num_layers: usize,
+    /// Maximum number of layers used to initialize the C++ object
+    max_num_layers: usize,
 
-    /// Number of blocks used to initialize the C++ object
-    num_blocks: usize,
+    /// Maximum number of blocks used to initialize the C++ object
+    max_num_blocks: usize,
 
     /// Whether the layers have been staged
     staged_layers: bool,
@@ -245,19 +258,21 @@ pub struct CopyStreamContext {
 }
 
 impl CopyStreamContext {
-    pub fn new(num_layers: usize, num_blocks: usize) -> Result<Self> {
+    pub fn new(max_num_layers: usize, max_num_blocks: usize) -> Result<Self> {
         let mut c_handle = std::ptr::null_mut();
-        let rc = unsafe { create_copy_stream(&mut c_handle, num_layers as i32, num_blocks as i32) };
+        let rc = unsafe {
+            create_copy_stream(&mut c_handle, max_num_layers as i32, max_num_blocks as i32)
+        };
         if rc != 0 {
             return Err(error!("Failed to create copy stream"));
         }
 
-        let layer_doorbells = vec![false; num_layers];
+        let layer_doorbells = vec![false; max_num_layers];
 
         Ok(Self {
             c_handle: NonNull::new(c_handle).ok_or(error!("Failed to create copy stream"))?,
-            num_layers,
-            num_blocks,
+            max_num_layers,
+            max_num_blocks,
             staged_layers: false,
             staged_block_ids: false,
             layer_doorbells,
@@ -304,15 +319,27 @@ impl CopyStream {
     pub fn prepare_layer(&mut self, details: Arc<CopyStreamLayerDetails>) -> Result<()> {
         let mut state = self.state.lock().unwrap();
 
+        let layer_count = details.src_layer_ptrs.len();
+
+        if state.max_num_layers < layer_count {
+            return Err(error!(
+                "Number of layers {} exceeds max number of layers {}",
+                layer_count, state.max_num_layers
+            ));
+        }
+
         if state.staged_layers {
             return Err(error!("Layers already loaded"));
         }
 
-        let layer_count = details.src_layer_ptrs.len();
-
         state.staged_layers = true;
         state.layer_details = details;
-        state.layer_doorbells = vec![false; layer_count];
+
+        assert!(state.layer_doorbells.len() >= layer_count);
+        state
+            .layer_doorbells
+            .iter_mut()
+            .for_each(|doorbell| *doorbell = false);
 
         Ok(())
     }
@@ -345,6 +372,14 @@ impl CopyStream {
         }
 
         let mut state = self.state.lock().unwrap();
+
+        if state.max_num_blocks < src_block_ids.len() {
+            return Err(error!(
+                "Number of blocks {} exceeds max number of blocks {}",
+                src_block_ids.len(),
+                state.max_num_blocks
+            ));
+        }
 
         if !state.staged_layers {
             return Err(error!("Layers must be loaded before preparing block ids"));
@@ -382,11 +417,11 @@ impl CopyStream {
     pub fn trigger_layer(&self, layer: usize) -> Result<()> {
         let mut state = self.state.lock().unwrap();
 
-        if layer >= state.num_layers {
+        if layer >= state.layer_details.src_layer_ptrs.len() {
             return Err(error!(
                 "layer index {} out of bounds (max {})",
                 layer,
-                state.num_layers - 1
+                state.layer_details.src_layer_ptrs.len() - 1
             ));
         }
 
@@ -395,21 +430,20 @@ impl CopyStream {
             return Ok(());
         }
 
+        let cs = state.c_handle.as_ptr() as *mut std::ffi::c_void;
         let src_data = state.layer_details.src_layer_ptrs[layer] as *const std::ffi::c_void;
         let dst_data = state.layer_details.dst_layer_ptrs[layer] as *mut std::ffi::c_void;
 
         let rc = unsafe {
-            copy_blocks_3d(
+            copy_stream_launch(
+                cs,
                 src_data,
                 dst_data,
-                state.src_block_ids.as_ptr() as *const std::os::raw::c_int,
-                state.dst_block_ids.as_ptr() as *const std::os::raw::c_int,
-                state.src_block_ids.len() as i32,
                 state.layer_details.prefix_dim,
-                state.layer_details.src_blocks_dim,
-                state.layer_details.dst_blocks_dim,
                 state.layer_details.suffix_dim,
                 state.layer_details.elem_size,
+                state.layer_details.src_block_dim,
+                state.layer_details.dst_block_dim,
             )
         };
 
@@ -460,8 +494,8 @@ impl KvBlockStorage {
         // validate all layers have the same type
         let storage_type = layers[0].storage.storage_type();
 
-        let cuda_device = match storage_type {
-            StorageType::Device(device) => Some(CudaContext::new(device)?),
+        let cuda_device = match &storage_type {
+            StorageType::Device(device) => Some(device.clone()),
             _ => None,
         };
 
@@ -531,7 +565,7 @@ impl KvBlockStorage {
 
         // for each layer, create a device storage object, then for a kv layer
         for layer in 0..block_details.model_details.number_of_layers {
-            let storage = OwnedStorage::create(bytes, storage_type).with_context(|| {
+            let storage = OwnedStorage::create(bytes, storage_type.clone()).with_context(|| {
                 error!("Failed to allocate memory for KV BlockStorage for layer {layer}")
             })?;
             let layer = KvLayer::from_storage(&block_details, number_of_blocks, storage);
@@ -767,6 +801,8 @@ mod tests {
     #[rstest]
     #[test]
     fn test_kv_block_storage_kv_first() -> Result<()> {
+        let device = CudaContext::new(0)?;
+
         let model_details = KvModelDetailsBuilder::default()
             .number_of_layers(2)
             .number_of_heads(4)
@@ -786,8 +822,11 @@ mod tests {
         let mut h_blocks =
             KvBlockStorage::allocate(32, block_details.clone(), StorageType::Pinned)?;
 
-        let mut d_blocks =
-            KvBlockStorage::allocate(32, block_details.clone(), StorageType::Device(0))?;
+        let mut d_blocks = KvBlockStorage::allocate(
+            32,
+            block_details.clone(),
+            StorageType::Device(device.clone()),
+        )?;
 
         println!("Allocated pinned and device blocks");
         println!("Letting layer 0 on host to be 1s");
@@ -869,6 +908,8 @@ mod tests {
     #[rstest]
     #[test]
     fn test_kv_block_storage_kv_first_direct() -> Result<()> {
+        let device = CudaContext::new(0)?;
+
         let model_details = KvModelDetailsBuilder::default()
             .number_of_layers(2)
             .number_of_heads(4)
@@ -888,8 +929,11 @@ mod tests {
         let mut h_blocks =
             KvBlockStorage::allocate(32, block_details.clone(), StorageType::Pinned)?;
 
-        let mut d_blocks =
-            KvBlockStorage::allocate(32, block_details.clone(), StorageType::Device(0))?;
+        let mut d_blocks = KvBlockStorage::allocate(
+            32,
+            block_details.clone(),
+            StorageType::Device(device.clone()),
+        )?;
 
         println!("Allocated pinned and device blocks");
         println!("Letting layer 0 on host to be 1s");
@@ -981,6 +1025,8 @@ mod tests {
     #[case(KvLayout::BlockFirst)]
     #[test]
     fn test_kv_block_storage_layouts(#[case] layout: KvLayout) -> Result<()> {
+        let device = CudaContext::new(0)?;
+
         let layout_name = match layout {
             KvLayout::KvFirst => "KvFirst",
             KvLayout::BlockFirst => "BlockFirst",
@@ -1011,7 +1057,7 @@ mod tests {
         let mut d_blocks = KvBlockStorage::allocate(
             number_of_blocks,
             block_details.clone(),
-            StorageType::Device(0),
+            StorageType::Device(device.clone()),
         )?;
 
         println!("Allocated pinned and device blocks");
@@ -1173,6 +1219,61 @@ mod tests {
                 }
             }
         }
+
+        Ok(())
+    }
+
+    #[rstest]
+    #[case(KvLayout::KvFirst)]
+    #[case(KvLayout::BlockFirst)]
+    #[test]
+    fn test_kv_block_copy_stream(#[case] layout: KvLayout) -> Result<()> {
+        let layout_name = match layout {
+            KvLayout::KvFirst => "KvFirst",
+            KvLayout::BlockFirst => "BlockFirst",
+        };
+        println!("Testing layout: {}", layout_name);
+
+        let device = CudaContext::new(0)?;
+
+        let number_of_cpu_blocks = 128;
+        let number_of_gpu_blocks = 64;
+
+        let model_details = KvModelDetailsBuilder::default()
+            .number_of_layers(2)
+            .number_of_heads(2)
+            .head_size(2)
+            .dtype(DType::F32)
+            .build()?;
+
+        let block_details = KvBlockDetailsBuilder::default()
+            .layout(layout)
+            .block_size(4)
+            .tp_size(1)
+            .tp_rank(0)
+            .model_details(model_details)
+            .build()?;
+
+        // Create the storage blocks
+        let mut h_blocks = KvBlockStorage::allocate(
+            number_of_cpu_blocks,
+            block_details.clone(),
+            StorageType::Pinned,
+        )?;
+
+        let mut d_blocks = KvBlockStorage::allocate(
+            number_of_gpu_blocks,
+            block_details.clone(),
+            StorageType::Device(device),
+        )?;
+
+        println!("Allocated pinned and device blocks");
+        println!("Letting layer 0 on host to be 1s");
+
+        let layout = h_blocks.layer(0).unwrap().layout.clone();
+        let shape = h_blocks.layer(0).unwrap().view().unwrap().shape().clone();
+
+        println!("shape: {:?}", shape);
 
         Ok(())
     }

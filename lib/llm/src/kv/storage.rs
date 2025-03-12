@@ -43,9 +43,9 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageType {
-    Device(usize),
+    Device(Arc<CudaContext>),
     Pinned,
     System, // todo: for grace
 }
@@ -139,7 +139,7 @@ impl OwnedStorage {
         }
     }
 
-    pub fn create_device_array(bytes: usize, device: usize) -> Result<Self> {
+    pub fn create_device_array(bytes: usize, device: Arc<CudaContext>) -> Result<Self> {
         let device_storage = DeviceStorageOwned::new(bytes, device)?;
         Ok(Self::new(Arc::new(device_storage)))
     }
@@ -152,7 +152,7 @@ impl OwnedStorage {
     pub fn byo_device_array(
         device_ptr: u64,
         bytes: usize,
-        device: usize,
+        device: Arc<CudaContext>,
         owner: Arc<dyn Any + Send + Sync>,
     ) -> Result<Self> {
         let device_storage = DeviceStorageFromAny::new(owner, device_ptr, bytes, device);
@@ -189,14 +189,13 @@ pub struct DeviceStorageOwned {
 }
 
 impl DeviceStorageOwned {
-    pub fn new(bytes: usize, device: usize) -> Result<Self> {
-        let cuda_device = CudaContext::new(device)?;
-        let cuda_slice = cuda_device.default_stream().alloc_zeros::<u8>(bytes)?;
-        cuda_device.default_stream().synchronize()?;
+    pub fn new(bytes: usize, device: Arc<CudaContext>) -> Result<Self> {
+        let cuda_slice = device.default_stream().alloc_zeros::<u8>(bytes)?;
+        device.default_stream().synchronize()?;
 
         Ok(Self {
             bytes,
-            cuda_device,
+            cuda_device: device,
             cuda_slice: Arc::new(cuda_slice),
         })
     }
@@ -221,7 +220,7 @@ impl Storage for DeviceStorageOwned {
     }
 
     fn storage_type(&self) -> StorageType {
-        StorageType::Device(self.cuda_device.ordinal())
+        StorageType::Device(self.cuda_device.clone())
     }
 }
 
@@ -793,7 +792,7 @@ pub struct DeviceStorageFromAny {
     bytes: usize,
 
     /// CUDA device ordinal
-    device_id: usize,
+    device: Arc<CudaContext>,
 }
 
 impl DeviceStorageFromAny {
@@ -810,13 +809,13 @@ impl DeviceStorageFromAny {
         source: Arc<dyn Any + Send + Sync>,
         device_ptr: u64,
         bytes: usize,
-        device_id: usize,
+        device: Arc<CudaContext>,
     ) -> Self {
         Self {
             source,
             device_ptr,
             bytes,
-            device_id,
+            device,
         }
     }
 
@@ -841,7 +840,7 @@ impl Storage for DeviceStorageFromAny {
     }
 
     fn storage_type(&self) -> StorageType {
-        StorageType::Device(self.device_id)
+        StorageType::Device(self.device.clone())
     }
 }
 

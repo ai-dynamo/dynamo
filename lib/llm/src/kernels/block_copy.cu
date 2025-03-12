@@ -193,6 +193,14 @@ copy_blocks_launcher_3d(
   size_t src_prefix_stride = src_block_dim * src_block_stride;
   size_t dst_prefix_stride = dst_block_dim * dst_block_stride;
 
+  // // Optional debug output
+  // printf(
+  //     "Tensor dims: prefix=%d, src_blocks=%d, dst_blocks=%d, suffix=%d, elem_size=%d\n", prefix_dim, src_blocks_dim,
+  //     dst_blocks_dim, suffix_dim, elem_size);
+  // printf(
+  //     "Calculated strides: src_prefix=%zu, src_block=%zu, src_suffix=%zu\n", src_prefix_stride, src_block_stride,
+  //     src_suffix_stride);
+
   // Calculate total number of bytes to copy
   size_t total_bytes = (size_t)prefix_dim * num_block_pairs * suffix_dim * elem_size;
 
@@ -238,24 +246,6 @@ copy_blocks_3d(
     const void* src_data, void* dst_data, const int* h_src_block_ids, const int* h_dst_block_ids, int num_block_pairs,
     int prefix_dim, int src_blocks_dim, int dst_blocks_dim, int suffix_dim, int elem_size)
 {
-  // // Calculate row-major strides internally
-  // size_t src_suffix_stride = elem_size;
-  // size_t dst_suffix_stride = elem_size;
-
-  // size_t src_block_stride = suffix_dim * src_suffix_stride;
-  // size_t dst_block_stride = suffix_dim * dst_suffix_stride;
-
-  // size_t src_prefix_stride = src_blocks_dim * src_block_stride;
-  // size_t dst_prefix_stride = dst_blocks_dim * dst_block_stride;
-
-  // // Optional debug output
-  // printf(
-  //     "Tensor dims: prefix=%d, src_blocks=%d, dst_blocks=%d, suffix=%d, elem_size=%d\n", prefix_dim, src_blocks_dim,
-  //     dst_blocks_dim, suffix_dim, elem_size);
-  // printf(
-  //     "Calculated strides: src_prefix=%zu, src_block=%zu, src_suffix=%zu\n", src_prefix_stride, src_block_stride,
-  //     src_suffix_stride);
-
   // Allocate device memory for block IDs
   int* d_src_block_ids = NULL;
   int* d_dst_block_ids = NULL;
@@ -416,6 +406,14 @@ copy_stream_launch(
   return copy_blocks_launcher_3d(
       src_data, dst_data, cs->d_src_blocks, cs->d_dst_blocks, cs->num_blocks, prefix_dim, suffix_dim, elem_size,
       src_block_dim, dst_block_dim, cs->start_event, cs->stream);
+}
+
+int
+copy_stream_sync(CopyStream* cs)
+{
+  // sync on the event
+  CUDA_CHECK(cudaStreamSynchronize(cs->stream));
+  return cudaSuccess;
 }
 
 int
