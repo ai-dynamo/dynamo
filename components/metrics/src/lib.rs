@@ -116,10 +116,7 @@ pub enum MetricsMode {
 
 impl Default for MetricsMode {
     fn default() -> Self {
-        Self::Pull {
-            host: "0.0.0.0".to_string(),
-            port: 9091,
-        }
+        Self::new_pull()
     }
 }
 
@@ -231,9 +228,20 @@ impl PrometheusMetricsCollector {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.shutdown_tx = Some(tx);
 
+        // Try to bind to the address first to fail early if it's not available
+        let server = match axum::Server::try_bind(&addr) {
+            Ok(server) => server,
+            Err(e) => {
+                return Err(error!(
+                    "Failed to bind to address {}: {}. The port may be in use.",
+                    addr, e
+                ));
+            }
+        };
+
         // Spawn the server in a background task
         tokio::spawn(async move {
-            let server = axum::Server::bind(&addr).serve(app.into_make_service());
+            let server = server.serve(app.into_make_service());
 
             // Create a future that completes when shutdown signal is received
             let shutdown_future = async {
@@ -242,12 +250,18 @@ impl PrometheusMetricsCollector {
 
             // Run the server with graceful shutdown
             tokio::select! {
-                _ = server => {},
-                _ = shutdown_future => {},
+                result = server => {
+                    if let Err(e) = result {
+                        tracing::error!("Metrics server error: {}", e);
+                    }
+                },
+                _ = shutdown_future => {
+                    tracing::info!("Metrics server shutting down gracefully");
+                },
             }
         });
 
-        tracing::info!("Prometheus metrics server started at {addr:?}/metrics");
+        tracing::info!("Prometheus metrics server started at {addr}/metrics");
         Ok(())
     }
 
