@@ -26,10 +26,7 @@
 
 use derive_builder::Builder;
 use dynemo_runtime::{error, raise, utils::pool::Returnable, ErrorContext, Result};
-use std::{
-    ptr::NonNull,
-    sync::Arc,
-};
+use std::{ptr::NonNull, sync::Arc};
 use validator::{Validate, ValidationError};
 
 use super::storage::{DType, OwnedStorage, Storage, StorageType, TensorView};
@@ -1053,7 +1050,7 @@ mod tests {
         {
             let h_view = h_blocks.layer(0)?.view().unwrap();
             let mut d_view = d_blocks.layer_mut(0)?.view().unwrap();
-            h_view.copy_to(&mut d_view, &stream).unwrap();
+            h_view.copy_to_v2(&mut d_view, &stream).unwrap();
             stream.synchronize().unwrap();
         }
 
@@ -1076,7 +1073,7 @@ mod tests {
         {
             let d_view = d_blocks.layer(0)?.view()?;
             let mut h_view = h_blocks.layer_mut(0)?.view()?;
-            d_view.copy_to(&mut h_view, &stream)?;
+            d_view.copy_to_v2(&mut h_view, &stream)?;
             stream.synchronize()?;
         }
 
