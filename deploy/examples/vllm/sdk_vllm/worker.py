@@ -128,40 +128,43 @@ class VllmWorker:
 
     @async_onstart
     async def async_init(self):
-        async with build_async_engine_client_from_engine_args(self.engine_args) as engine_client:
-            self.engine_client = engine_client 
-            if self.engine_args.router == "kv":
-                assert self.engine_client is not None, "engine_client was not initialized"
-                self.engine_client.set_metrics_publisher(self.metrics_publisher)
-                # Initially send dummy metrics to kick start,
-                # vLLM will not update stat until forward pass is triggered
-                self.metrics_publisher.publish(
-                    0,  # request_active_slots
-                    1024,  # request_total_slots
-                    0,  # kv_active_blocks
-                    1024,  # kv_total_blocks
-                    0,  # num_requests_waiting
-                    0.0,  # gpu_cache_usage_perc
-                    0.0,  # gpu_prefix_cache_hit_rate
-                )
-                task = asyncio.create_task(self.create_metrics_publisher_endpoint())
-                task.add_done_callback(lambda _: print("metrics publisher endpoint created"))
+        self._engine_context = build_async_engine_client_from_engine_args(self.engine_args)
+        if self._engine_context is not None:
+            self.engine_client = await self._engine_context.__aenter__()
+        else:
+            raise RuntimeError("Failed to initialize engine client")
+        if self.engine_args.router == "kv":
+            assert self.engine_client is not None, "engine_client was not initialized"
+            self.engine_client.set_metrics_publisher(self.metrics_publisher)
+            # Initially send dummy metrics to kick start,
+            # vLLM will not update stat until forward pass is triggered
+            self.metrics_publisher.publish(
+                0,  # request_active_slots
+                1024,  # request_total_slots
+                0,  # kv_active_blocks
+                1024,  # kv_total_blocks
+                0,  # num_requests_waiting
+                0.0,  # gpu_cache_usage_perc
+                0.0,  # gpu_prefix_cache_hit_rate
+            )
+            task = asyncio.create_task(self.create_metrics_publisher_endpoint())
+            task.add_done_callback(lambda _: print("metrics publisher endpoint created"))
 
-            runtime = dynamo_context["runtime"]
+        runtime = dynamo_context["runtime"]
 
-            if self.engine_args.remote_prefill:
-                metadata = engine_client.nixl_metadata
-                metadata_store = NixlMetadataStore("dynamo-init", runtime)
-                await metadata_store.put(metadata.engine_id, metadata)
+        if self.engine_args.remote_prefill:
+            metadata = self.engine_client.nixl_metadata
+            metadata_store = NixlMetadataStore("dynamo-init", runtime)
+            await metadata_store.put(metadata.engine_id, metadata)
 
-            if self.engine_args.conditional_disagg:
-                self.disaggregated_router = PyDisaggregatedRouter(
-                    runtime,
-                    self.model_name,
-                    max_local_prefill_length=self.engine_args.max_local_prefill_length,
-                )
-            else:
-                self.disaggregated_router = None
+        if self.engine_args.conditional_disagg:
+            self.disaggregated_router = PyDisaggregatedRouter(
+                runtime,
+                self.model_name,
+                max_local_prefill_length=self.engine_args.max_local_prefill_length,
+            )
+        else:
+            self.disaggregated_router = None
         print("VllmWorker has been initialized")
         
     async def create_metrics_publisher_endpoint(self):
