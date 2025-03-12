@@ -72,18 +72,27 @@ For example one of these should be fast and good quality on almost any machine: 
 E.g. https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/blob/main/Llama-3.2-1B-Instruct-Q8_0.gguf
 
 Download model file:
-`curl -L -o Llama-3.2-1B-Instruct-Q4_K_M.gguf "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf?download=true"`
+```
+curl -L -o Llama-3.2-1B-Instruct-Q4_K_M.gguf "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf?download=true"
+```
 
 
 *Text interface*
 
-`dynamo-run Llama-3.2-1B-Instruct-Q4_K_M.gguf` or path to a Hugging Face repo checkout instead of the GGUF.
+```
+dynamo-run Llama-3.2-1B-Instruct-Q4_K_M.gguf # or path to a Hugging Face repo checkout instead of the GGUF
+```
 
 *HTTP interface*
 
-`dynamo-run in=http Llama-3.2-1B-Instruct-Q4_K_M.gguf`
+```
+dynamo-run in=http Llama-3.2-1B-Instruct-Q4_K_M.gguf
+```
 
-List the models: `curl localhost:8080/v1/models`
+List the models:
+```
+curl localhost:8080/v1/models
+```
 
 Send a request:
 ```
