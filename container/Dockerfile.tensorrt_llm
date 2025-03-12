@@ -85,14 +85,15 @@ RUN cd components && \
 
 # Build Dynamo Run binaries
 COPY launch /workspace/launch
+# TODO: Tanmay Add LLMAPI-based feature flag once the engine is ready.
 RUN cd launch && \
-    cargo build --release --features mistralrs,sglang,vllm,python && \
+    cargo build --release --features python && \
     cp target/release/dynamo-run /usr/local/bin/ && \
     cp target/release/llmctl /usr/local/bin/
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 
 
-# Generate C bindings for kv cache routing in vLLM
+# Generate C bindings for kv cache routing.
 COPY lib/bindings /workspace/lib/bindings
 RUN cd lib/bindings/c && \
     cargo build --release --locked && cargo doc --no-deps
