@@ -16,9 +16,13 @@
 # TODO: rename to avoid ambiguity with vllm package
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
+from dynamo.sdk.lib.config import ServiceConfig
 
-
-def parse_vllm_args() -> AsyncEngineArgs:
+def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
+    config = ServiceConfig.get_instance()
+    print(f"[DEBUG] config: {config}")
+    vllm_args = config.as_args(service_name, prefix=prefix)
+    print(f"[DEBUG] service_name: {service_name}, vllm_args: {vllm_args}")
     parser = FlexibleArgumentParser()
     parser.add_argument(
         "--router",
@@ -42,7 +46,7 @@ def parse_vllm_args() -> AsyncEngineArgs:
         help="Maximum length of local prefill",
     )
     parser = AsyncEngineArgs.add_cli_args(parser)
-    args = parser.parse_args()
+    args = parser.parse_args(vllm_args)
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine_args.router = args.router
     engine_args.remote_prefill = args.remote_prefill

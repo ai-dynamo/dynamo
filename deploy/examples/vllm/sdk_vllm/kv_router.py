@@ -90,17 +90,17 @@ class Router:
     @async_onstart
     async def async_init(self):
         self.runtime = dynamo_context["runtime"]
-        workers_client = (
+        self.workers_client = (
             await self.runtime.namespace("dynamo-init")
             .component("VllmWorker")
             .endpoint("generate")
             .client()
         )
-        while len(workers_client.endpoint_ids()) < self.args.min_workers:
+        while len(self.workers_client.endpoint_ids()) < self.args.min_workers:
             # TODO: replace print w/ vllm_logger.info
             print(
                 f"Waiting for more workers to be ready.\n"
-                f" Current: {len(workers_client.endpoint_ids())},"
+                f" Current: {len(self.workers_client.endpoint_ids())},"
                 f" Required: {self.args.min_workers}"
             )
             await asyncio.sleep(2)

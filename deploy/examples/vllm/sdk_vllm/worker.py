@@ -28,7 +28,6 @@ from vllm.entrypoints.openai.api_server import (
 from vllm.logger import logger as vllm_logger
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
-from vllm.utils import FlexibleArgumentParser
 from dynamo.llm import KvMetricsPublisher
 from dynamo.sdk import (
     async_onstart,
@@ -37,43 +36,11 @@ from dynamo.sdk import (
     server_context,
     service,
 )
-from dynamo.sdk.lib.config import ServiceConfig
+from utils.vllm import parse_vllm_args
+
 
 os.environ["VLLM_LOG_LEVEL"] = "DEBUG"
 
-def parse_args(service_name, prefix) -> AsyncEngineArgs:
-    config = ServiceConfig.get_instance()
-    vllm_args = config.as_args(service_name, prefix=prefix)
-    parser = FlexibleArgumentParser()
-    parser.add_argument(
-        "--router",
-        type=str,
-        choices=["random", "round-robin", "kv"],
-        default="random",
-        help="Router type to use for scheduling requests to workers",
-    )
-    parser.add_argument(
-        "--remote-prefill", action="store_true", help="Enable remote prefill"
-    )
-    parser.add_argument(
-        "--conditional-disagg",
-        action="store_true",
-        help="Use disaggregated router to decide whether to prefill locally or remotely",
-    )
-    parser.add_argument(
-        "--max-local-prefill-length",
-        type=int,
-        default=1000,
-        help="Maximum length of local prefill",
-    )
-    parser = AsyncEngineArgs.add_cli_args(parser)
-    args = parser.parse_args(vllm_args)
-    engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine_args.router = args.router
-    engine_args.remote_prefill = args.remote_prefill
-    engine_args.conditional_disagg = args.conditional_disagg
-    engine_args.max_local_prefill_length = args.max_local_prefill_length
-    return engine_args
 
 @service(
     dynamo={
@@ -87,10 +54,10 @@ class VllmWorker:
 
     def __init__(self): 
         self.client = None
-        self.do_remote_prefill = False
         self.disaggregated_router: PyDisaggregatedRouter = None
         class_name = self.__class__.__name__
-        self.engine_args = parse_args(class_name, "vllm_")
+        self.engine_args = parse_vllm_args(class_name, "")
+        self.do_remote_prefill = self.engine_args.remote_prefill
         self.model_name = (
                 self.engine_args.served_model_name
                 if self.engine_args.served_model_name is not None

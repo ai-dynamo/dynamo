@@ -28,16 +28,97 @@ from vllm.entrypoints.openai.api_server import (
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import logger as vllm_logger
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
+from vllm.utils import FlexibleArgumentParser
 
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.llm import KvMetricsPublisher
+from dynamo.sdk import (
+    async_onstart,
+    dynamo_context,
+    dynamo_endpoint,
+    server_context,
+    service, api
+)
+from dynamo.sdk.lib.config import ServiceConfig
+from pydantic import BaseModel
+
+class RequestType(BaseModel):
+    text: str
 
 
-class RequestHandler:
-    def __init__(self, engine_client, metadata_store):
-        self.engine_client = engine_client
-        self._metadata_store = metadata_store
+os.environ["VLLM_LOG_LEVEL"] = "DEBUG"
+
+@service(
+    dynamo={
+        "enabled": True,
+        "namespace": "dynamo-init",
+    },
+    resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
+    workers=1,
+)
+class PrefillWorker:
+
+    def __init__(self):
+        class_name = self.__class__.__name__
+        self.engine_args = parse_vllm_args(class_name, "")
         self._loaded_metadata = set()
-        print("RequestHandler initialized")
+        self.initialized = False
+        if self.engine_args.enable_chunked_prefill is not False:
+            print("Chunked prefill is not supported yet, setting to False")
+            self.engine_args.enable_chunked_prefill = False
+
+        if self.engine_args.pipeline_parallel_size != 1:
+            print("Pipeline parallel size is not supported yet, setting to 1")
+            self.engine_args.pipeline_parallel_size = 1
+
+        if self.engine_args.disable_async_output_proc is not True:
+            print("Async output processing is not supported yet, setting to True")
+            self.engine_args.disable_async_output_proc = True
+
+        if self.engine_args.enforce_eager is not True:
+            print("Prefill must be done eagerly, setting to True")
+            self.engine_args.enforce_eager = True
+            print("PrefillWorker initialized")
+
+    @async_onstart
+    async def async_init(self):
+        self._engine_context = build_async_engine_client_from_engine_args(self.engine_args)
+        if self._engine_context is not None:
+            self.engine_client = await self._engine_context.__aenter__()
+        else:
+            raise RuntimeError("Failed to initialize engine client")
+        runtime = dynamo_context["runtime"]
+        metadata = self.engine_client.nixl_metadata
+        self._metadata_store = NixlMetadataStore("dynamo-init", runtime)
+        await self._metadata_store.put(metadata.engine_id, metadata)
+        task = asyncio.create_task(self.prefill_queue_handler())
+        task.add_done_callback(lambda _: print("prefill queue handler created"))
+
+    async def prefill_queue_handler(self):
+        print("[DEBUG] prefill queue handler entered")
+        prefill_queue_nats_server = os.getenv("NATS_SERVER", "nats://localhost:4222")
+        prefill_queue_stream_name = (
+            self.engine_args.served_model_name
+            if self.engine_args.served_model_name is not None
+            else "vllm"
+        )
+        print(
+            f"Prefill queue: {prefill_queue_nats_server}:{prefill_queue_stream_name}"
+        )
+        self.initialized = True
+        # TODO: integrate prefill_queue to a dynamo endpoint
+        async with PrefillQueue.get_instance(
+            nats_server=prefill_queue_nats_server,
+            stream_name=prefill_queue_stream_name,
+        ) as prefill_queue:
+            print("prefill queue handler started")
+            while True:
+                # TODO: this might add a small overhead to pull prefill from nats
+                # need to test and check how much overhead it is
+                prefill_request = await prefill_queue.dequeue_prefill_request()
+                if prefill_request is not None:
+                    vllm_logger.info(f"Dequeued prefill request: {prefill_request}")
+                    async for _ in self.generate(prefill_request):
+                        pass
 
     async def generate(self, request: RemotePrefillRequest):
         sampling_params = request.sampling_params
@@ -52,12 +133,12 @@ class RequestHandler:
 
         # TODO check if metadata has changed
         # and reload - currently only loading once
-
         if request.engine_id not in self._loaded_metadata:
             remote_metadata = await self._metadata_store.get(request.engine_id)
             await self.engine_client.add_remote_nixl_metadata(remote_metadata)
             print(
-                f"Loaded nixl metadata from engine {request.engine_id} into engine {self.engine_client.nixl_metadata.engine_id}"
+                f"Loaded nixl metadata from engine {request.engine_id} into "
+                f"engine {self.engine_client.nixl_metadata.engine_id}"
             )
             self._loaded_metadata.add(request.engine_id)
 
@@ -69,64 +150,6 @@ class RequestHandler:
         ):
             yield
 
-
-@dynamo_worker()
-async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
-    # TODO: we don't need it now, but will need it after the queue is integrated to the runtime
-    component = runtime.namespace("dynamo-init").component("prefill")
-    await component.create_service()
-
-    async with build_async_engine_client_from_engine_args(engine_args) as engine_client:
-        metadata = engine_client.nixl_metadata
-        metadata_store = NixlMetadataStore("dynamo-init", runtime)
-        await metadata_store.put(metadata.engine_id, metadata)
-
-        # TODO: move this to prefill_queue.py
-        prefill_queue_nats_server = os.getenv("NATS_SERVER", "nats://localhost:4222")
-        prefill_queue_stream_name = (
-            engine_args.served_model_name
-            if engine_args.served_model_name is not None
-            else "vllm"
-        )
-        vllm_logger.info(
-            f"Prefill queue: {prefill_queue_nats_server}:{prefill_queue_stream_name}"
-        )
-
-        request_handler = RequestHandler(engine_client, metadata_store)
-
-        # TODO: integrate prefill_queue to a dynamo endpoint
-        async with PrefillQueue.get_instance(
-            nats_server=prefill_queue_nats_server,
-            stream_name=prefill_queue_stream_name,
-        ) as prefill_queue:
-            while True:
-                # TODO: this might add a small overhead to pull prefill from nats
-                # need to test and check how much overhead it is
-                prefill_request = await prefill_queue.dequeue_prefill_request()
-                if prefill_request is not None:
-                    vllm_logger.info(f"Dequeued prefill request: {prefill_request}")
-                    async for _ in request_handler.generate(prefill_request):
-                        pass
-
-
-if __name__ == "__main__":
-    uvloop.install()
-    engine_args = parse_vllm_args()
-
-    if engine_args.enable_chunked_prefill is not False:
-        print("Chunked prefill is not supported yet, setting to False")
-        engine_args.enable_chunked_prefill = False
-
-    if engine_args.pipeline_parallel_size != 1:
-        print("Pipeline parallel size is not supported yet, setting to 1")
-        engine_args.pipeline_parallel_size = 1
-
-    if engine_args.disable_async_output_proc is not True:
-        print("Async output processing is not supported yet, setting to True")
-        engine_args.disable_async_output_proc = True
-
-    if engine_args.enforce_eager is not True:
-        print("Prefill must be done eagerly, setting to True")
-        engine_args.enforce_eager = True
-
-    asyncio.run(worker(engine_args))
+    @dynamo_endpoint()
+    async def mock(self, req: RequestType):
+        yield f"mock_response: {req}"
