@@ -142,7 +142,6 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
         gpu_cache_usage_perc = 0.5
         gpu_prefix_cache_hit_rate = 0.5
 
-
         if self._kv_metrics_publisher is None:
             logger.error("KV metrics publisher not initialized!")
             return

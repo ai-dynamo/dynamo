@@ -97,7 +97,9 @@ class Router:
         async for response in await self.gen_completion_client.round_robin(
             gen_req.model_dump_json()
         ):
-            logger.debug(f"[router] Received response from generation server: {response.data()}")
+            logger.debug(
+                f"[router] Received response from generation server: {response.data()}"
+            )
             gen_resp_obj = DisaggCompletionStreamResponse.model_validate(
                 response.data()
             )
@@ -131,7 +133,9 @@ class Router:
         async for response in await self.gen_chat_client.round_robin(
             gen_req.model_dump_json()
         ):
-            logger.debug(f"[router] Received response from generation server: {response.data()}")
+            logger.debug(
+                f"[router] Received response from generation server: {response.data()}"
+            )
             gen_resp_obj = DisaggChatCompletionStreamResponse.model_validate_json(
                 response.data()
             )

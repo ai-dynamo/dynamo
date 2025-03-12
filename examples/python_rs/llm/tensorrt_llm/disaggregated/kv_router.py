@@ -15,8 +15,8 @@
 
 import asyncio
 import copy
-import json
 import enum
+import json
 import traceback
 from typing import AsyncIterator
 
@@ -42,6 +42,7 @@ logger.set_level("debug")
 class EndpointType(enum.Enum):
     chat = "chat"
     completion = "completion"
+
 
 class Scheduler:
     def __init__(self, kv_router: KvRouter):
@@ -157,7 +158,9 @@ class Router(ChatProcessorMixin):
 
         gen_req = copy.deepcopy(request)
 
-        ctx_resp = await self._get_ctx_resp(request, self.ctx_completion_client, EndpointType.completion)
+        ctx_resp = await self._get_ctx_resp(
+            request, self.ctx_completion_client, EndpointType.completion
+        )
         ctx_resp_obj = DisaggCompletionStreamResponse.model_validate(ctx_resp)
 
         gen_req.disaggregated_params = DisaggregatedParams.model_validate(
@@ -190,7 +193,9 @@ class Router(ChatProcessorMixin):
 
         gen_req = copy.deepcopy(request)
 
-        ctx_resp = await self._get_ctx_resp(request, self.ctx_chat_client, EndpointType.chat)
+        ctx_resp = await self._get_ctx_resp(
+            request, self.ctx_chat_client, EndpointType.chat
+        )
         ctx_resp_obj = DisaggChatCompletionStreamResponse.model_validate_json(ctx_resp)
 
         gen_req.disaggregated_params = DisaggregatedParams.model_validate(
