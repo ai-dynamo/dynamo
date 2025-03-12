@@ -64,7 +64,7 @@ TENSORRTLLM_PIP_WHEEL_PATH=""
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-NIXL_COMMIT=3ce6a673b266b4f293909ceb17ca7975f1ba5cd7
+NIXL_COMMIT=d7a2c571a60d76a3d6c8458140eaaa5025fa48c4
 NIXL_REPO=ai-dynamo/nixl.git
 
 get_options() {
