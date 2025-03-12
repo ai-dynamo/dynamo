@@ -38,7 +38,7 @@ If you have an `HF_TOKEN` environment variable set, this will download Qwen2.5 3
 dynamo-run Qwen/Qwen2.5-3B-Instruct
 ```
 
-The parameter can be the ID of a Hugging Face repository (it will be downloaded), a GGUF file or a folder container safetensors, config.json, etc (a checked out Hugging Face repository).
+The parameter can be the ID of a HuggingFace repository (it will be downloaded), a GGUF file, or a folder containing safetensors, config.json, etc (a locally checked out HuggingFace repository).
 
 ## Download a model from Hugging Face
 
