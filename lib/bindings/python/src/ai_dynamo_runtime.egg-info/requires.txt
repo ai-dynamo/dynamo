@@ -1,2 +1,0 @@
-pydantic>=2.10.6
-uvloop>=0.21.0
