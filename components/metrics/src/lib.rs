@@ -50,7 +50,7 @@
 //!
 //!     // Start pushing metrics to a Prometheus PushGateway
 //!     collector.start(MetricsMode::Push {
-//!         host: "http://localhost".to_string(),
+//!         host: "127.0.0.1".to_string(),
 //!         port: 9091,
 //!         job: "dynamo_metrics".to_string(),
 //!         interval: 2, // Push every 2 seconds
