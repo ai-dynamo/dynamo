@@ -17,6 +17,10 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include <cstring>
+#include <memory>
+#include <vector>
+
 // Error checking macro
 #define CUDA_CHECK(call)                                                                            \
   do {                                                                                              \
@@ -154,10 +158,9 @@ copy_blocks_kernel(
 // Simplified launcher that uses the 3D tensor view
 extern "C" cudaError_t
 copy_blocks_launcher_3d(
-    const void* src_data, void* dst_data, const int* h_src_block_ids, const int* h_dst_block_ids, int num_block_pairs,
-    int prefix_dim, int suffix_dim, int elem_size, size_t src_prefix_stride, size_t src_block_stride,
-    size_t src_suffix_stride, size_t dst_prefix_stride, size_t dst_block_stride, size_t dst_suffix_stride,
-    int* d_src_block_ids, int* d_dst_block_ids, cudaEvent_t event, cudaStream_t stream)
+    const void* src_data, void* dst_data, const int* d_src_block_ids, const int* d_dst_block_ids, int num_block_pairs,
+    int prefix_dim, int suffix_dim, int elem_size, int src_block_dim, int dst_block_dim, cudaEvent_t event,
+    cudaStream_t stream)
 {
   // Validate inputs
   if (src_data == NULL || dst_data == NULL) {
@@ -180,6 +183,16 @@ copy_blocks_launcher_3d(
     return cudaErrorInvalidValue;
   }
 
+  // Calculate row-major strides internally
+  size_t src_suffix_stride = elem_size;
+  size_t dst_suffix_stride = elem_size;
+
+  size_t src_block_stride = suffix_dim * src_suffix_stride;
+  size_t dst_block_stride = suffix_dim * dst_suffix_stride;
+
+  size_t src_prefix_stride = src_block_dim * src_block_stride;
+  size_t dst_prefix_stride = dst_block_dim * dst_block_stride;
+
   // Calculate total number of bytes to copy
   size_t total_bytes = (size_t)prefix_dim * num_block_pairs * suffix_dim * elem_size;
 
@@ -201,7 +214,7 @@ copy_blocks_launcher_3d(
 
   // Launch kernel on specified stream
   copy_blocks_kernel<<<grid_size, cuda_block_size, 0, stream>>>(
-      src_data, dst_data, h_src_block_ids, h_dst_block_ids, num_block_pairs, prefix_dim, suffix_dim, elem_size,
+      src_data, dst_data, d_src_block_ids, d_dst_block_ids, num_block_pairs, prefix_dim, suffix_dim, elem_size,
       src_prefix_stride, src_block_stride, src_suffix_stride, dst_prefix_stride, dst_block_stride, dst_suffix_stride);
 
   // Check for kernel launch errors immediately
@@ -223,35 +236,37 @@ copy_blocks_launcher_3d(
 extern "C" cudaError_t
 copy_blocks_3d(
     const void* src_data, void* dst_data, const int* h_src_block_ids, const int* h_dst_block_ids, int num_block_pairs,
-    int prefix_dim, int src_blocks, int dst_blocks, int suffix_dim, int elem_size)
+    int prefix_dim, int src_blocks_dim, int dst_blocks_dim, int suffix_dim, int elem_size)
 {
-  // Calculate row-major strides internally
-  size_t src_suffix_stride = elem_size;
-  size_t dst_suffix_stride = elem_size;
+  // // Calculate row-major strides internally
+  // size_t src_suffix_stride = elem_size;
+  // size_t dst_suffix_stride = elem_size;
 
-  size_t src_block_stride = suffix_dim * src_suffix_stride;
-  size_t dst_block_stride = suffix_dim * dst_suffix_stride;
+  // size_t src_block_stride = suffix_dim * src_suffix_stride;
+  // size_t dst_block_stride = suffix_dim * dst_suffix_stride;
 
-  size_t src_prefix_stride = src_blocks * src_block_stride;
-  size_t dst_prefix_stride = dst_blocks * dst_block_stride;
+  // size_t src_prefix_stride = src_blocks_dim * src_block_stride;
+  // size_t dst_prefix_stride = dst_blocks_dim * dst_block_stride;
 
-  // Optional debug output
-  printf(
-      "Tensor dims: prefix=%d, src_blocks=%d, dst_blocks=%d, suffix=%d, elem_size=%d\n", prefix_dim, src_blocks,
-      dst_blocks, suffix_dim, elem_size);
-  printf(
-      "Calculated strides: src_prefix=%zu, src_block=%zu, src_suffix=%zu\n", src_prefix_stride, src_block_stride,
-      src_suffix_stride);
+  // // Optional debug output
+  // printf(
+  //     "Tensor dims: prefix=%d, src_blocks=%d, dst_blocks=%d, suffix=%d, elem_size=%d\n", prefix_dim, src_blocks_dim,
+  //     dst_blocks_dim, suffix_dim, elem_size);
+  // printf(
+  //     "Calculated strides: src_prefix=%zu, src_block=%zu, src_suffix=%zu\n", src_prefix_stride, src_block_stride,
+  //     src_suffix_stride);
 
   // Allocate device memory for block IDs
-  int* d_src_blocks_ids = NULL;
-  int* d_dst_blocks_ids = NULL;
+  int* d_src_block_ids = NULL;
+  int* d_dst_block_ids = NULL;
 
-  CUDA_CHECK(cudaMalloc(&d_src_blocks_ids, num_block_pairs * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&d_dst_blocks_ids, num_block_pairs * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_src_block_ids, num_block_pairs * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_dst_block_ids, num_block_pairs * sizeof(int)));
 
-  CUDA_CHECK(cudaMemcpy(d_src_blocks_ids, h_src_block_ids, num_block_pairs * sizeof(int), cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_dst_blocks_ids, h_dst_block_ids, num_block_pairs * sizeof(int), cudaMemcpyHostToDevice));
+  CUDA_CHECK(
+      cudaMemcpyAsync(d_src_block_ids, h_src_block_ids, num_block_pairs * sizeof(int), cudaMemcpyHostToDevice, 0));
+  CUDA_CHECK(
+      cudaMemcpyAsync(d_dst_block_ids, h_dst_block_ids, num_block_pairs * sizeof(int), cudaMemcpyHostToDevice, 0));
 
   // Create CUDA event
   cudaEvent_t event;
@@ -259,14 +274,13 @@ copy_blocks_3d(
 
   // Launch kernel with explicit strides
   cudaError_t result = copy_blocks_launcher_3d(
-      src_data, dst_data, h_src_block_ids, h_dst_block_ids, num_block_pairs, prefix_dim, suffix_dim, elem_size,
-      src_prefix_stride, src_block_stride, src_suffix_stride, dst_prefix_stride, dst_block_stride, dst_suffix_stride,
-      d_src_blocks_ids, d_dst_blocks_ids, event, 0);
+      src_data, dst_data, d_src_block_ids, d_dst_block_ids, num_block_pairs, prefix_dim, suffix_dim, elem_size,
+      src_blocks_dim, dst_blocks_dim, event, 0);
 
   // Handle errors from kernel launch
   if (result != cudaSuccess) {
-    cudaFree(d_src_blocks_ids);
-    cudaFree(d_dst_blocks_ids);
+    cudaFree(d_src_block_ids);
+    cudaFree(d_dst_block_ids);
     cudaEventDestroy(event);
     return result;
   }
@@ -275,8 +289,8 @@ copy_blocks_3d(
   CUDA_CHECK(cudaEventSynchronize(event));
 
   // Clean up
-  cudaFree(d_src_blocks_ids);
-  cudaFree(d_dst_blocks_ids);
+  cudaFree(d_src_block_ids);
+  cudaFree(d_dst_block_ids);
   cudaEventDestroy(event);
 
   printf("3D tensor block copy completed successfully\n");
@@ -286,8 +300,8 @@ copy_blocks_3d(
 // TODO: Refactor the driver code to take pointers for the device block_id arrays
 // TODO: Maintain a blocking driver, but then also provide a non-blocking driver
 //
-// We will have N copies of the BlockCopyControl struct which we will put in a reusable
-// pool. Acquiring a BlockCopyControl will let you perform a copy for a kv attention layer.
+// We will have N copies of the CopyStream struct which we will put in a reusable
+// pool. Acquiring a CopyStream will let you perform a copy for a kv attention layer.
 //
 // From rust or python we'll execute this on a thread allowed to block. We'll await the
 // cuda event for completion and report the return code on the driver.
@@ -298,19 +312,22 @@ copy_blocks_3d(
 // a new forward pass can not start until the last copy has completed.
 //
 // To that end, we might want to tie this copy kernel to the stream used for the forward pass.
-struct BlockCopyControl {
+struct CopyStream {
   int* d_src_blocks;
   int* d_dst_blocks;
+  int num_blocks;
+
+  cudaStream_t stream;
   cudaEvent_t start_event;
   cudaEvent_t stop_event;
 
-  BlockCopyControl(int num_blocks);
-  ~BlockCopyControl();
+  CopyStream(int num_layers, int num_blocks);
+  ~CopyStream();
 
   void reset();
 };
 
-BlockCopyControl::BlockCopyControl(int num_blocks)
+CopyStream::CopyStream(int num_layers, int num_blocks)
 {
   cudaError_t status;
   status = cudaMalloc(&d_src_blocks, num_blocks * sizeof(int));
@@ -323,6 +340,14 @@ BlockCopyControl::BlockCopyControl(int num_blocks)
   if (status != cudaSuccess) {
     fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(status));
     cudaFree(d_src_blocks);
+    return;
+  }
+
+  status = cudaStreamCreate(&stream);
+  if (status != cudaSuccess) {
+    fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(status));
+    cudaFree(d_src_blocks);
+    cudaFree(d_dst_blocks);
     return;
   }
 
@@ -341,7 +366,7 @@ BlockCopyControl::BlockCopyControl(int num_blocks)
   }
 }
 
-BlockCopyControl::~BlockCopyControl()
+CopyStream::~CopyStream()
 {
   cudaFree(d_src_blocks);
   cudaFree(d_dst_blocks);
@@ -354,6 +379,44 @@ extern "C" {
 int cuda_malloc_host(void** ptr, size_t size);
 int cuda_free_host(void* ptr);
 int cuda_memcpy_async(void* dst, const void* src, size_t count, cudaStream_t stream);
+
+int
+copy_stream_create(CopyStream** stream, int num_layers, int num_blocks)
+{
+  *stream = new CopyStream(num_layers, num_blocks);
+  return 0;
+}
+
+int
+copy_stream_destroy(CopyStream* stream)
+{
+  delete stream;
+  return 0;
+}
+
+
+int
+copy_stream_prepare_block_ids(CopyStream* cs, int* src_block_ids, int* dst_block_ids, int num_blocks)
+{
+  CUDA_CHECK(
+      cudaMemcpyAsync(cs->d_src_blocks, src_block_ids, num_blocks * sizeof(int), cudaMemcpyHostToDevice, cs->stream));
+  CUDA_CHECK(
+      cudaMemcpyAsync(cs->d_dst_blocks, dst_block_ids, num_blocks * sizeof(int), cudaMemcpyHostToDevice, cs->stream));
+
+  cs->num_blocks = num_blocks;
+
+  return 0;
+}
+
+int
+copy_stream_launch(
+    CopyStream* cs, const void* src_data, void* dst_data, int prefix_dim, int suffix_dim, int elem_size,
+    int src_block_dim, int dst_block_dim)
+{
+  return copy_blocks_launcher_3d(
+      src_data, dst_data, cs->d_src_blocks, cs->d_dst_blocks, cs->num_blocks, prefix_dim, suffix_dim, elem_size,
+      src_block_dim, dst_block_dim, cs->start_event, cs->stream);
+}
 
 int
 cuda_malloc_host(void** ptr, size_t size)

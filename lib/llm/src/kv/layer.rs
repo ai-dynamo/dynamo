@@ -26,8 +26,11 @@
 
 use cudarc::driver::{CudaContext, CudaStream};
 use derive_builder::Builder;
-use dynemo_runtime::{error, raise, ErrorContext, Result};
-use std::sync::Arc;
+use dynemo_runtime::{error, raise, utils::pool::Returnable, ErrorContext, Result};
+use std::{
+    ptr::NonNull,
+    sync::{Arc, Mutex},
+};
 use validator::{Validate, ValidationError};
 
 use super::storage::{DType, OwnedStorage, Storage, StorageType, TensorView};
@@ -43,6 +46,19 @@ extern "C" {
         dst_blocks: std::os::raw::c_int,
         suffix_dim: std::os::raw::c_int,
         elem_size: std::os::raw::c_int,
+    ) -> std::os::raw::c_int;
+
+    fn create_copy_stream(
+        stream: *mut *mut std::ffi::c_void,
+        num_layers: std::os::raw::c_int,
+        num_blocks: std::os::raw::c_int,
+    ) -> std::os::raw::c_int;
+
+    fn copy_stream_prepare_block_ids(
+        cs: *mut std::ffi::c_void,
+        src_block_ids: *const std::os::raw::c_int,
+        dst_block_ids: *const std::os::raw::c_int,
+        num_block_pairs: std::os::raw::c_int,
     ) -> std::os::raw::c_int;
 }
 
@@ -99,7 +115,7 @@ pub struct KvBlockDetails {
 
     /// The rank of the current process in the tensor parallel group
     #[builder(default = "0")]
-    tp_ranks: usize,
+    tp_rank: usize,
 
     /// The size of the tensor parallel group
     #[builder(default = "1")]
@@ -121,7 +137,300 @@ fn validate_block_details(block_details: &KvBlockDetails) -> Result<(), Validati
         return Err(ValidationError::new("tp_size must evenly divide num_heads"));
     }
 
+    if block_details.tp_rank >= block_details.tp_size {
+        return Err(ValidationError::new("tp_rank must be less than tp_size"));
+    }
+
+    if block_details.tp_size > block_details.model_details.number_of_heads {
+        return Err(ValidationError::new("tp_size must be less than num_heads"));
+    }
+
     Ok(())
+}
+
+/// This struct holds the details of the layers to be copied
+/// We should not have to recompute this for each copy stream, simply once for each
+/// block set and each direction.
+///
+/// If we have two block sets -- one host, one device, the we need two copies of
+/// this object, one H2D copies and another for D2H copies.
+///
+/// If we direct address into flash storage, then we will need another pair for H2F
+/// and F2H copies.
+///
+/// Note: When we register two block sets, we need to validate that the suffix dimensions
+/// is equivalent in both sets.
+///
+/// We may in the future need to add src_suffix_dim, dst_suffix_dim, src_suffix_stride and
+/// dst_suffix_stride to the details to support non-unit strides. Today, the copy kernel
+/// does not support that.
+#[derive(Debug, Clone, Builder, Default, Validate)]
+#[validate(schema(
+    function = "validate_copy_stream_layer_details",
+    skip_on_field_errors = true
+))]
+pub struct CopyStreamLayerDetails {
+    /// The source layer pointer
+    src_layer_ptrs: Vec<u64>,
+
+    /// The destination layer pointer
+    dst_layer_ptrs: Vec<u64>,
+
+    /// The non-contiguous dimension above the block_dimension
+    #[validate(range(min = 1))]
+    prefix_dim: i32,
+
+    /// The size of the source blocks dimension in the layer shape
+    #[validate(range(min = 1))]
+    src_blocks_dim: i32,
+
+    /// The size of the destination blocks dimension in the layer shape
+    #[validate(range(min = 1))]
+    dst_blocks_dim: i32,
+
+    /// The contiguous dimension below the block_dimension
+    #[validate(range(min = 1))]
+    suffix_dim: i32,
+
+    /// The element size in bytes
+    #[validate(range(min = 1, max = 8))]
+    elem_size: i32,
+}
+
+fn validate_copy_stream_layer_details(
+    layer_details: &CopyStreamLayerDetails,
+) -> Result<(), ValidationError> {
+    if layer_details.src_layer_ptrs.is_empty() {
+        return Err(ValidationError::new("src_layer_ptrs must not be empty"));
+    }
+
+    if layer_details.dst_layer_ptrs.is_empty() {
+        return Err(ValidationError::new("dst_layer_ptrs must not be empty"));
+    }
+
+    if layer_details.src_layer_ptrs.len() != layer_details.dst_layer_ptrs.len() {
+        return Err(ValidationError::new(
+            "src_layer_ptrs and dst_layer_ptrs must have the same length",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub struct CopyStreamContext {
+    /// Pointer to the C++ copy stream object
+    c_handle: NonNull<std::ffi::c_void>,
+
+    /// Number of layers used to initialize the C++ object
+    num_layers: usize,
+
+    /// Number of blocks used to initialize the C++ object
+    num_blocks: usize,
+
+    /// Whether the layers have been staged
+    staged_layers: bool,
+
+    /// Whether the block ids have been staged
+    staged_block_ids: bool,
+
+    /// Doorbells for each layer
+    layer_doorbells: Vec<bool>,
+
+    // block ids
+    src_block_ids: Vec<i32>,
+    dst_block_ids: Vec<i32>,
+
+    // layer details
+    layer_details: Arc<CopyStreamLayerDetails>,
+}
+
+impl CopyStreamContext {
+    pub fn new(num_layers: usize, num_blocks: usize) -> Result<Self> {
+        let mut c_handle = std::ptr::null_mut();
+        let rc = unsafe { create_copy_stream(&mut c_handle, num_layers as i32, num_blocks as i32) };
+        if rc != 0 {
+            return Err(error!("Failed to create copy stream"));
+        }
+
+        let layer_doorbells = vec![false; num_layers];
+
+        Ok(Self {
+            c_handle: NonNull::new(c_handle).ok_or(error!("Failed to create copy stream"))?,
+            num_layers,
+            num_blocks,
+            staged_layers: false,
+            staged_block_ids: false,
+            layer_doorbells,
+
+            // block ids
+            src_block_ids: Vec::new(),
+            dst_block_ids: Vec::new(),
+
+            // layer details
+            layer_details: Arc::new(CopyStreamLayerDetails::default()),
+        })
+    }
+}
+
+unsafe impl Send for CopyStream {}
+unsafe impl Sync for CopyStream {}
+
+/// This object holds a stateful copy stream for the copy_blocks_3d kernel
+/// Each instance will hold:
+/// - device memory for the block ids
+/// - a cuda stream
+/// - a cuda event
+pub struct CopyStream {
+    state: Arc<Mutex<CopyStreamContext>>,
+}
+
+impl CopyStream {
+    pub fn new(num_layers: usize, num_blocks: usize) -> Result<Self> {
+        let state = CopyStreamContext::new(num_layers, num_blocks)?;
+        Ok(Self {
+            state: Arc::new(Mutex::new(state)),
+        })
+    }
+
+    /// Prepare the layer pointers for the copy kernel
+    /// See [CopyStreamLayerDetails] for more details
+    /// - src_layer_ptrs: the source layer pointers
+    /// - dst_layer_ptrs: the destination layer pointers
+    /// - prefix_dim: the non-contiguous dimension above the block_dimension
+    /// - src_blocks_dim: the size of the source blocks dimension in the layer shape
+    /// - dst_blocks_dim: the size of the destination blocks dimension in the layer shape
+    /// - suffix_dim: the contiguous dimension below the block_dimension
+    /// - elem_size: the element size in bytes
+    pub fn prepare_layer(&mut self, details: Arc<CopyStreamLayerDetails>) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+
+        if state.staged_layers {
+            return Err(error!("Layers already loaded"));
+        }
+
+        let layer_count = details.src_layer_ptrs.len();
+
+        state.staged_layers = true;
+        state.layer_details = details;
+        state.layer_doorbells = vec![false; layer_count];
+
+        Ok(())
+    }
+
+    /// Prepare the block ids for the copy kernel
+    /// See [CopyStreamLayerDetails] for more details
+    /// - src_block_ids: the source block ids
+    /// - dst_block_ids: the destination block ids
+    pub fn prepare_block_ids(&self, src_block_ids: &[i32], dst_block_ids: &[i32]) -> Result<()> {
+        if src_block_ids.len() != dst_block_ids.len() {
+            return Err(error!(
+                "src_block_ids and dst_block_ids must have the same length"
+            ));
+        }
+
+        // we could disable the unique block id test in production as it adds some overhead
+        #[cfg(debug_assertions)]
+        {
+            // validate that the dst block ids are unique
+            let dst_block_ids_set: std::collections::HashSet<_> = dst_block_ids.iter().collect();
+            if dst_block_ids_set.len() != dst_block_ids.len() {
+                return Err(error!("dst_block_ids must be unique"));
+            }
+
+            // validate that the src block ids are unique
+            let src_block_ids_set: std::collections::HashSet<_> = src_block_ids.iter().collect();
+            if src_block_ids_set.len() != src_block_ids.len() {
+                return Err(error!("src_block_ids must be unique"));
+            }
+        }
+
+        let mut state = self.state.lock().unwrap();
+
+        if !state.staged_layers {
+            return Err(error!("Layers must be loaded before preparing block ids"));
+        }
+
+        if state.staged_block_ids {
+            return Err(error!("Block ids already loaded"));
+        }
+
+        // we need to copy the block ids to the state so we don't have to block on the async xfer
+        // of the lists from host to device
+        state.src_block_ids = src_block_ids.to_vec();
+        state.dst_block_ids = dst_block_ids.to_vec();
+
+        // transfer the block ids to the device
+        // this can be safely done without blocking as the copy stream state is
+        let rc = unsafe {
+            copy_stream_prepare_block_ids(
+                state.c_handle.as_ptr() as *mut std::ffi::c_void,
+                state.src_block_ids.as_ptr() as *const std::os::raw::c_int,
+                state.dst_block_ids.as_ptr() as *const std::os::raw::c_int,
+                state.src_block_ids.len() as i32,
+            )
+        };
+
+        if rc != 0 {
+            return Err(error!("Failed to prepare block ids"));
+        }
+
+        state.staged_block_ids = true;
+
+        Ok(())
+    }
+
+    pub fn trigger_layer(&self, layer: usize) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+
+        if layer >= state.num_layers {
+            return Err(error!(
+                "layer index {} out of bounds (max {})",
+                layer,
+                state.num_layers - 1
+            ));
+        }
+
+        if state.layer_doorbells[layer] {
+            tracing::debug!("Layer {} already triggered; this is a no-op", layer);
+            return Ok(());
+        }
+
+        let src_data = state.layer_details.src_layer_ptrs[layer] as *const std::ffi::c_void;
+        let dst_data = state.layer_details.dst_layer_ptrs[layer] as *mut std::ffi::c_void;
+
+        let rc = unsafe {
+            copy_blocks_3d(
+                src_data,
+                dst_data,
+                state.src_block_ids.as_ptr() as *const std::os::raw::c_int,
+                state.dst_block_ids.as_ptr() as *const std::os::raw::c_int,
+                state.src_block_ids.len() as i32,
+                state.layer_details.prefix_dim,
+                state.layer_details.src_blocks_dim,
+                state.layer_details.dst_blocks_dim,
+                state.layer_details.suffix_dim,
+                state.layer_details.elem_size,
+            )
+        };
+
+        if rc != 0 {
+            return Err(error!("Failed to execute layer {} copy", layer));
+        }
+
+        state.layer_doorbells[layer] = true;
+
+        Ok(())
+    }
+}
+
+impl Returnable for CopyStream {
+    fn on_return(&mut self) -> () {
+        let mut state = self.state.lock().unwrap();
+
+        // reset the staged flags
+        state.staged_block_ids = false;
+        state.staged_layers = false;
+    }
 }
 
 #[derive(Debug)]
@@ -183,7 +492,7 @@ impl KvBlockStorage {
             .block_size(layers[0].block_size)
             .model_details(model_details.clone())
             .tp_size(layers[0].tp_size)
-            .tp_ranks(layers[0].tp_rank)
+            .tp_rank(layers[0].tp_rank)
             .build()?;
 
         block_details.validate()?;
@@ -318,9 +627,11 @@ impl KvLayer {
             head_size: block_details.model_details.head_size,
             dtype: block_details.model_details.dtype,
             tp_size: block_details.tp_size,
-            tp_rank: block_details.tp_ranks,
+            tp_rank: block_details.tp_rank,
         }
     }
+
+    /// Get a view of the layer
     pub fn view(&self) -> Result<TensorView<'_, Self, 5>> {
         // Calculate dimensions based on layout
         let dims = match self.layout {
@@ -363,6 +674,8 @@ impl KvLayer {
         Ok(view)
     }
 
+    /// Perform a copy of blocks from one layer to another
+    /// This launch a cuda kernel to perform the copy
     pub fn copy_blocks_to(
         &self,
         src_block_ids: &[usize],
@@ -465,7 +778,7 @@ mod tests {
             .layout(KvLayout::KvFirst)
             .block_size(8)
             .tp_size(1)
-            .tp_ranks(0)
+            .tp_rank(0)
             .model_details(model_details)
             .build()?;
 
@@ -567,7 +880,7 @@ mod tests {
             .layout(KvLayout::KvFirst)
             .block_size(8)
             .tp_size(1)
-            .tp_ranks(0)
+            .tp_rank(0)
             .model_details(model_details)
             .build()?;
 
@@ -687,7 +1000,7 @@ mod tests {
             .layout(layout)
             .block_size(4)
             .tp_size(1)
-            .tp_ranks(0)
+            .tp_rank(0)
             .model_details(model_details)
             .build()?;
 
