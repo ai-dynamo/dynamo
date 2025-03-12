@@ -24,6 +24,7 @@ import click
 def build_run_command() -> click.Group:
     from bentoml_cli.utils import BentoMLCommandGroup
     
+
     @click.group(name="run", cls=BentoMLCommandGroup)
     def cli():
         pass
@@ -38,7 +39,8 @@ def build_run_command() -> click.Group:
         """Call dynamo-run under the hood to execute whatever options passed in"""
         command = ["dynamo-run"] + sys.argv[2:]
         subprocess.run(command)
-       
+
+        
     return cli
 
 
