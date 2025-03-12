@@ -84,7 +84,15 @@ class VllmEngine(BaseVllmEngine):
             print("vLLM worker initialized")
         assert self.engine_client is not None, "engine_client was not initialized"
         self.engine_client.set_metrics_publisher(self.metrics_publisher)
-        self.metrics_publisher.publish(0, 1024, 0, 1024, 0, 0, 0,)
+        self.metrics_publisher.publish(
+            0,
+            1024,
+            0,
+            1024,
+            0,
+            0,
+            0,
+        )
         task = asyncio.create_task(self.create_metrics_publisher_endpoint())
         task.add_done_callback(lambda _: print("metrics publisher endpoint created"))
 
