@@ -28,8 +28,17 @@
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let mut collector = PrometheusMetricsCollector::new()?;
 //!
-//!     // Start a metrics server on port 9091
-//!     collector.start(MetricsMode::Pull { port: 9091 })?;
+//!     // Start a metrics server with default values
+//!     collector.start(MetricsMode::default())?;
+//!
+//!     // Or explicitly specify values
+//!     collector.start(MetricsMode::Pull {
+//!         host: "127.0.0.1".to_string(),
+//!         port: 9090,
+//!     })?;
+//!
+//!     // Or use the convenience constructor
+//!     collector.start(MetricsMode::new_pull())?;
 //!
 //!     // Your application code here
 //!     tokio::signal::ctrl_c().await?;
@@ -48,12 +57,15 @@
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let mut collector = PrometheusMetricsCollector::new()?;
 //!
-//!     // Start pushing metrics to a Prometheus PushGateway
+//!     // Start pushing metrics to a Prometheus PushGateway with default values
+//!     collector.start(MetricsMode::new_push())?;
+//!
+//!     // Or explicitly specify values
 //!     collector.start(MetricsMode::Push {
 //!         host: "127.0.0.1".to_string(),
 //!         port: 9091,
-//!         job: "dynamo_metrics".to_string(),
-//!         interval: 2, // Push every 2 seconds
+//!         job: "custom_job".to_string(),
+//!         interval: 5, // Push every 5 seconds
 //!     })?;
 //!
 //!     // Your application code here
@@ -75,7 +87,9 @@ use dynamo_llm::kv_router::protocols::ForwardPassMetrics;
 use dynamo_llm::kv_router::scheduler::Endpoint;
 use dynamo_llm::kv_router::scoring::ProcessedEndpoints;
 
-use dynamo_runtime::{distributed::Component, service::EndpointInfo, utils::Duration, Result};
+use dynamo_runtime::{
+    distributed::Component, error, service::EndpointInfo, utils::Duration, Result,
+};
 
 /// Configuration for metrics collection mode
 #[derive(Debug, Clone)]
@@ -98,6 +112,35 @@ pub enum MetricsMode {
         /// Push interval in seconds
         interval: u64,
     },
+}
+
+impl Default for MetricsMode {
+    fn default() -> Self {
+        Self::Pull {
+            host: "0.0.0.0".to_string(),
+            port: 9091,
+        }
+    }
+}
+
+impl MetricsMode {
+    /// Create a new Pull mode with default values
+    pub fn new_pull() -> Self {
+        Self::Pull {
+            host: "0.0.0.0".to_string(),
+            port: 9091,
+        }
+    }
+
+    /// Create a new Push mode with default values
+    pub fn new_push() -> Self {
+        Self::Push {
+            host: "127.0.0.1".to_string(),
+            port: 9091,
+            job: "dynamo_metrics".to_string(),
+            interval: 2,
+        }
+    }
 }
 
 /// Configuration for LLM worker load capacity metrics
@@ -179,8 +222,9 @@ impl PrometheusMetricsCollector {
         );
 
         // Create a socket address to listen on
-        //let ip_addr = host.parse().unwrap_or_else(|_| "0.0.0.0".parse().unwrap());
-        let ip_addr = host.parse().unwrap();
+        let ip_addr = host.parse().map_err(|e| {
+            error!("Failed to parse host '{}' as IP address: {}. Use a valid IPv4 or IPv6 address (e.g. '0.0.0.0' or '127.0.0.1')", host, e)
+        })?;
         let addr = SocketAddr::new(ip_addr, port);
 
         // Create shutdown channel

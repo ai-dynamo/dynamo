@@ -97,6 +97,7 @@ When using Push mode:
 - The `--host` parameter specifies be the IP address of the PushGateway
 - The `--port` parameter specifies the port of the PushGateway
 - The push interval can be configured with `--push-interval` (default: 2 seconds)
+- A default job name of "dynamo_metrics" is used for the Prometheus job label
 - Metrics persist in the PushGateway until explicitly deleted
 - Prometheus should be configured to scrape the PushGateway with `honor_labels: true`
 
