@@ -83,7 +83,13 @@ pub async fn run(
     let model_path = flags
         .model_path_pos
         .or(flags.model_path_flag)
-        .and_then(|p| p.canonicalize().ok());
+        .and_then(|p| {
+            if p.exists() {
+                p.canonicalize().ok()
+            } else {
+                Some(p)
+            }
+        });
     // Serve the model under the name provided, or the name of the GGUF file or HF repo.
     let model_name = flags
         .model_name

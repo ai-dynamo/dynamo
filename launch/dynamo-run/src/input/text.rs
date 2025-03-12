@@ -188,17 +188,33 @@ async fn main_loop(
         let mut stdout = std::io::stdout();
         let mut assistant_message = String::new();
         while let Some(item) = stream.next().await {
-            let data = item.data.as_ref().unwrap();
-            let entry = data.inner.choices.first();
-            let chat_comp = entry.as_ref().unwrap();
-            if let Some(c) = &chat_comp.delta.content {
-                let _ = stdout.write(c.as_bytes());
-                let _ = stdout.flush();
-                assistant_message += c;
-            }
-            if chat_comp.finish_reason.is_some() {
-                tracing::trace!("finish reason: {:?}", chat_comp.finish_reason.unwrap());
-                break;
+            match (item.data.as_ref(), item.event.as_deref()) {
+                (Some(data), _) => {
+                    // Normal case
+                    let entry = data.inner.choices.first();
+                    let chat_comp = entry.as_ref().unwrap();
+                    if let Some(c) = &chat_comp.delta.content {
+                        let _ = stdout.write(c.as_bytes());
+                        let _ = stdout.flush();
+                        assistant_message += c;
+                    }
+                    if chat_comp.finish_reason.is_some() {
+                        tracing::trace!("finish reason: {:?}", chat_comp.finish_reason.unwrap());
+                        break;
+                    }
+                }
+                (None, Some("error")) => {
+                    // There's only one error but we loop in case that changes
+                    for err in item.comment.unwrap_or_default() {
+                        tracing::error!("Engine error: {err}");
+                    }
+                }
+                (None, Some(annotation)) => {
+                    tracing::debug!("Annotation. {annotation}: {:?}", item.comment);
+                }
+                _ => {
+                    unreachable!("Event from engine with no data, no error, no annotation.");
+                }
             }
         }
         println!();

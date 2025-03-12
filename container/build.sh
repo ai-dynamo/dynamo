@@ -44,7 +44,7 @@ PYTHON_PACKAGE_VERSION=${current_tag:-$latest_tag.dev+$commit_id}
 # installed within framework specific sections of the Dockerfile.
 
 declare -A FRAMEWORKS=(["STANDARD"]=1 ["TENSORRTLLM"]=2 ["VLLM"]=3 ["VLLM_NIXL"]=4)
-DEFAULT_FRAMEWORK=STANDARD
+DEFAULT_FRAMEWORK=VLLM
 
 SOURCE_DIR=$(dirname "$(readlink -f "$0")")
 DOCKERFILE=${SOURCE_DIR}/Dockerfile
@@ -64,8 +64,8 @@ TENSORRTLLM_PIP_WHEEL_PATH=""
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-VLLM_NIXL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-VLLM_NIXL_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+NIXL_COMMIT=3ce6a673b266b4f293909ceb17ca7975f1ba5cd7
+NIXL_REPO=ai-dynamo/nixl.git
 
 get_options() {
     while :; do
@@ -194,6 +194,10 @@ get_options() {
         FRAMEWORK=$DEFAULT_FRAMEWORK
     fi
 
+    if [[ ${FRAMEWORK^^} == "VLLM_NIXL" ]]; then
+	FRAMEWORK="VLLM"
+    fi
+
     if [ ! -z "$FRAMEWORK" ]; then
         FRAMEWORK=${FRAMEWORK^^}
 
@@ -280,14 +284,36 @@ error() {
 
 get_options "$@"
 
-
 # Update DOCKERFILE if framework is VLLM
 if [[ $FRAMEWORK == "VLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
-elif [[ $FRAMEWORK == "VLLM_NIXL" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm_nixl
 elif [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.tensorrt_llm
+fi
+
+if [[ $FRAMEWORK == "VLLM" ]]; then
+    TEMP_DIR=$(mktemp -d)
+
+    # Clean up temp directory on script exit
+    trap 'rm -rf "$TEMP_DIR"' EXIT
+
+    # Clone original NIXL to temp directory
+
+    if [ ! -z ${GITHUB_TOKEN} ]; then
+        git clone https://oauth2:${GITHUB_TOKEN}@github.com/${NIXL_REPO} "$TEMP_DIR/nixl_src"
+    else
+        # Try HTTPS first with credential prompting disabled, fall back to SSH if it fails
+        if ! GIT_TERMINAL_PROMPT=0 git clone https://github.com/${NIXL_REPO} "$TEMP_DIR/nixl_src"; then
+            echo "HTTPS clone failed, falling back to SSH..."
+            git clone git@github.com:${NIXL_REPO} "$TEMP_DIR/nixl_src"
+        fi
+    fi
+
+    cd "$TEMP_DIR/nixl_src"
+
+    git checkout ${NIXL_COMMIT}
+
+    BUILD_CONTEXT_ARG+=" --build-context nixl=$TEMP_DIR/nixl_src"
 fi
 
 # BUILD DEV IMAGE
@@ -305,8 +331,6 @@ fi
 if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
     if [ ! -z ${TENSORRTLLM_PIP_WHEEL_PATH} ]; then
         BUILD_ARGS+=" --build-arg TENSORRTLLM_PIP_WHEEL_PATH=${TENSORRTLLM_PIP_WHEEL_PATH} "
-    else
-        error "ERROR: --tensorrtllm-pip-wheel-path is not provided"
     fi
 fi
 

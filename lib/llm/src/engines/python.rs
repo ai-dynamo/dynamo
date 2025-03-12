@@ -234,17 +234,14 @@ where
                                 // todo: add task-local context to the python async generator
                                 ctx.stop_generating();
                                 let msg = format!("critical error: invalid response object from python async generator; application-logic-mismatch: {}", e);
-                                tracing::error!(request_id, "{}", msg);
                                 msg
                             }
                             ResponseProcessingError::PythonException(e) => {
                                 let msg = format!("a python exception was caught while processing the async generator: {}", e);
-                                tracing::warn!(request_id, "{}", msg);
                                 msg
                             }
                             ResponseProcessingError::OffloadError(e) => {
                                 let msg = format!("critical error: failed to offload the python async generator to a new thread: {}", e);
-                                tracing::error!(request_id, "{}", msg);
                                 msg
                             }
                         };
@@ -288,8 +285,11 @@ async fn process_item<Resp>(
 where
     Resp: Data + for<'de> Deserialize<'de>,
 {
-    let item = item.map_err(|e| ResponseProcessingError::PythonException(e.to_string()))?;
-
+    let item = item.map_err(|e| {
+        println!();
+        Python::with_gil(|py| e.display(py));
+        ResponseProcessingError::PythonException(e.to_string())
+    })?;
     let response = tokio::task::spawn_blocking(move || {
         Python::with_gil(|py| depythonize::<Resp>(&item.into_bound(py)))
     })

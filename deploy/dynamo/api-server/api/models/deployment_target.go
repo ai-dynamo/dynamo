@@ -25,7 +25,7 @@ type DeploymentTarget struct {
 	DeploymentAssociate
 	DeploymentRevisionAssociate
 	DynamoNimVersionAssociate
-	DmsAssociate
+	K8sAssociate
 
 	Config *schemas.DeploymentTargetConfig `json:"config"`
 }

@@ -30,7 +30,7 @@ def setup_and_teardown():
 
     server = subprocess.Popen(
         [
-            "dynamo-sdk",
+            "dynamo",
             "serve",
             "pipeline:Frontend",
             "--working-dir",
