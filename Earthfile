@@ -27,7 +27,7 @@ golang-base:
 ############### ALL TARGETS ##############################
 all-test:
     BUILD ./deploy/dynamo/operator+test
-    BUILD ./deploy/dynamo/api-server+tests
+    BUILD ./deploy/dynamo/api-server+test
 
 all-docker:
     ARG CI_REGISTRY_IMAGE=my-registry
