@@ -60,7 +60,9 @@ class RequestHandler:
         )
         self._prefill_queue_stream_name = model_name
         vllm_logger.info(
-            f"Prefill queue: {self._prefill_queue_nats_server}:{self._prefill_queue_stream_name}"
+            "Prefill queue: %s:%s",
+            self._prefill_queue_nats_server,
+            self._prefill_queue_stream_name,
         )
 
         print("RequestHandler initialized")
@@ -92,13 +94,17 @@ class RequestHandler:
                 is_remote_prefill=True,
                 remote_prefill_request_callback=self.get_remote_prefill_request_callback(),
             )
-            vllm_logger.info(
-                f"Prefilling remotely for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
+            vllm_logger.debug(
+                "Prefilling remotely for request %s with length %s",
+                request.request_id,
+                len(request.engine_prompt["prompt_token_ids"]),
             )
         else:
             remote_prefill_params = None
-            vllm_logger.info(
-                f"Prefilling locally for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
+            vllm_logger.debug(
+                "Prefilling locally for request %s with length %s",
+                request.request_id,
+                len(request.engine_prompt["prompt_token_ids"]),
             )
 
         # rust HTTP requires Delta streaming
@@ -141,7 +147,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
         # TODO: do we need these env vars?
         VLLM_WORKER_ID = endpoint.lease_id()
         os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
-        vllm_logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
+        vllm_logger.info("Generate endpoint ID: %s", VLLM_WORKER_ID)
 
         VLLM_KV_NAMESPACE = "dynamo-init"
         os.environ["VLLM_KV_NAMESPACE"] = str(VLLM_KV_NAMESPACE)

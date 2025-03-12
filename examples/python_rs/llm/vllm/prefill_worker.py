@@ -89,7 +89,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
             else "vllm"
         )
         vllm_logger.info(
-            f"Prefill queue: {prefill_queue_nats_server}:{prefill_queue_stream_name}"
+            "Prefill queue: %s:%s", prefill_queue_nats_server, prefill_queue_stream_name
         )
 
         request_handler = RequestHandler(engine_client, metadata_store)
@@ -104,7 +104,9 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
                 # need to test and check how much overhead it is
                 prefill_request = await prefill_queue.dequeue_prefill_request()
                 if prefill_request is not None:
-                    vllm_logger.info(f"Dequeued prefill request: {prefill_request}")
+                    vllm_logger.debug(
+                        "Dequeued prefill request: %s", prefill_request.request_id
+                    )
                     async for _ in request_handler.generate(prefill_request):
                         pass
 
