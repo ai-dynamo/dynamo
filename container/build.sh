@@ -331,8 +331,6 @@ fi
 if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
     if [ ! -z ${TENSORRTLLM_PIP_WHEEL_PATH} ]; then
         BUILD_ARGS+=" --build-arg TENSORRTLLM_PIP_WHEEL_PATH=${TENSORRTLLM_PIP_WHEEL_PATH} "
-    else
-        error "ERROR: --tensorrtllm-pip-wheel-path is not provided"
     fi
 fi
 
