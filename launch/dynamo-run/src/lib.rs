@@ -82,7 +82,8 @@ pub async fn run(
     // Turn relative paths into absolute paths
     let model_path = flags
         .model_path_pos
-        .or(flags.model_path_flag)
+        .clone()
+        .or(flags.model_path_flag.clone())
         .and_then(|p| {
             if p.exists() {
                 p.canonicalize().ok()
@@ -93,6 +94,7 @@ pub async fn run(
     // Serve the model under the name provided, or the name of the GGUF file or HF repo.
     let model_name = flags
         .model_name
+        .clone()
         .or_else(|| {
             model_path
                 .as_ref()
@@ -338,8 +340,9 @@ pub async fn run(
             let Some(model_name) = model_name else {
                 anyhow::bail!("Provide model service name as `--model-name <this>`");
             };
+            let py_args = flags.as_vec(&path_str, &model_name);
             let p = std::path::PathBuf::from(path_str);
-            let engine = python::make_string_engine(cancel_token.clone(), &p).await?;
+            let engine = python::make_string_engine(cancel_token.clone(), &p, py_args).await?;
             EngineConfig::StaticFull {
                 service_name: model_name,
                 engine,
@@ -354,8 +357,9 @@ pub async fn run(
             let Some(model_name) = model_name else {
                 unreachable!("If we have a card we must have a model name");
             };
+            let py_args = flags.as_vec(&path_str, &model_name);
             let p = std::path::PathBuf::from(path_str);
-            let engine = python::make_token_engine(cancel_token.clone(), &p).await?;
+            let engine = python::make_token_engine(cancel_token.clone(), &p, py_args).await?;
             EngineConfig::StaticCore {
                 service_name: model_name.clone(),
                 engine,

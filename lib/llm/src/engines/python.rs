@@ -16,6 +16,7 @@
 use std::ffi::CStr;
 use std::{path::Path, sync::Arc};
 
+use anyhow::Context;
 use dynamo_runtime::pipeline::error as pipeline_error;
 pub use dynamo_runtime::{
     error,
@@ -43,12 +44,11 @@ const PY_IMPORT: &CStr = cr#"
 import importlib.util
 import sys
 
-module_name = file_path.split("/")[-1].replace(".py", "")
-spec = importlib.util.spec_from_file_location(module_name, file_path)
-
+spec = importlib.util.spec_from_file_location("__main__", file_path)
 module = importlib.util.module_from_spec(spec)
 
-sys.modules[module_name] = module
+sys.argv = sys_argv
+sys.modules["__main__"] = module
 spec.loader.exec_module(module)
 "#;
 
@@ -56,10 +56,11 @@ spec.loader.exec_module(module)
 pub async fn make_string_engine(
     cancel_token: CancellationToken,
     py_file: &Path,
+    py_args: Vec<String>,
 ) -> pipeline_error::Result<OpenAIChatCompletionsStreamingEngine> {
     pyo3::prepare_freethreaded_python();
 
-    let engine = new_engine(cancel_token, py_file).await?;
+    let engine = new_engine(cancel_token, py_file, py_args).await?;
     let engine: OpenAIChatCompletionsStreamingEngine = Arc::new(engine);
     Ok(engine)
 }
@@ -68,10 +69,11 @@ pub async fn make_string_engine(
 pub async fn make_token_engine(
     cancel_token: CancellationToken,
     py_file: &Path,
+    py_args: Vec<String>,
 ) -> pipeline_error::Result<ExecutionContext> {
     pyo3::prepare_freethreaded_python();
 
-    let engine = new_engine(cancel_token, py_file).await?;
+    let engine = new_engine(cancel_token, py_file, py_args).await?;
     let engine: ExecutionContext = Arc::new(engine);
     Ok(engine)
 }
@@ -86,13 +88,28 @@ pub struct PythonServerStreamingEngine {
 async fn new_engine(
     cancel_token: CancellationToken,
     py_file: &Path,
+    py_args: Vec<String>,
 ) -> anyhow::Result<PythonServerStreamingEngine> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::task::spawn_blocking(move || run_asyncio(tx));
     let event_loop = rx.await?;
 
-    let user_module = python_file_to_module(py_file)?;
-    let generator = Python::with_gil(|py| user_module.getattr(py, "generate").unwrap());
+    let user_module = python_file_to_module(py_file, py_args.clone())
+        .with_context(|| py_file.display().to_string())?;
+    let generator = Python::with_gil(|py| {
+        if let Ok(initialize) = user_module.getattr(py, "initialize") {
+            initialize
+                .call1(py, (py_args,))
+                .inspect_err(|err| {
+                    println!();
+                    err.display(py);
+                })
+                .with_context(|| "Failed calling python engine's initialize(args)")?;
+        };
+        user_module
+            .getattr(py, "generate")
+            .with_context(|| "generate")
+    })?;
     Ok(PythonServerStreamingEngine::new(
         cancel_token,
         Arc::new(generator),
@@ -127,16 +144,25 @@ fn run_asyncio(tx: Sender<Arc<PyObject>>) {
     });
 }
 
-fn python_file_to_module(p: &Path) -> Result<PyObject> {
+fn python_file_to_module(p: &Path, mut py_args: Vec<String>) -> Result<PyObject> {
+    if let Some(filename) = p.file_name() {
+        py_args.insert(0, filename.to_string_lossy().to_string());
+    };
     let module: PyObject = Python::with_gil(|py| {
-        let globals = [("file_path", p.display().to_string())]
+        let py_file_path: PyObject = p.display().to_string().into_pyobject(py).unwrap().into();
+        let py_sys_argv: PyObject = py_args.into_pyobject(py).unwrap().into();
+        let globals = [("file_path", py_file_path), ("sys_argv", py_sys_argv)]
             .into_py_dict(py)
-            .unwrap();
+            .context("into_py_dict")?;
         let locals = PyDict::new(py);
-        py.run(PY_IMPORT, Some(&globals), Some(&locals)).unwrap();
-        let module = locals.get_item("module").unwrap().unwrap();
-        module.extract().unwrap()
-    });
+        py.run(PY_IMPORT, Some(&globals), Some(&locals))
+            .context("PY_IMPORT")?;
+        let module = locals
+            .get_item("module")
+            .unwrap()
+            .context("get module after import")?;
+        module.extract().context("extract")
+    })?;
     Ok(module)
 }
 
