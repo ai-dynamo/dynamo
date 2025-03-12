@@ -84,7 +84,7 @@ pub enum KvLayout {
     BlockFirst,
 }
 
-#[derive(Debug, Clone, Builder)]
+#[derive(Debug, Clone, Builder, PartialEq, Eq)]
 pub struct KvModelDetails {
     /// The number of layers in the model
     number_of_layers: usize,
@@ -142,6 +142,13 @@ impl KvBlockDetails {
     pub fn bytes_per_token_block_per_layer(&self) -> usize {
         (self.model_details.bytes_per_token_per_layer() * self.block_size) / self.tp_size
     }
+
+    pub fn is_compatible(&self, other: &KvBlockDetails) -> bool {
+        self.layout == other.layout
+            && self.block_size == other.block_size
+            && self.tp_size == other.tp_size
+            && self.model_details == other.model_details
+    }
 }
 
 fn validate_block_details(block_details: &KvBlockDetails) -> Result<(), ValidationError> {
@@ -159,6 +166,391 @@ fn validate_block_details(block_details: &KvBlockDetails) -> Result<(), Validati
     }
 
     Ok(())
+}
+
+#[derive(Debug, Builder, Validate)]
+#[validate(schema(function = "validate_kv_layer", skip_on_field_errors = true))]
+pub struct KvLayer {
+    /// The layout of the tensor
+    layout: KvLayout,
+
+    /// The storage of the tensor
+    storage: OwnedStorage,
+
+    /// The number of blocks in the tensor
+    #[validate(range(min = 1))]
+    number_of_blocks: usize,
+
+    /// The size of each block in the tensor
+    #[validate(range(min = 1))]
+    block_size: usize,
+
+    /// The number of heads in the tensor of the canonical model
+    /// The actual number for this layer is this number divided by tp_size
+    #[validate(range(min = 1))]
+    number_of_heads: usize,
+
+    /// The size of each head in the tensor
+    #[validate(range(min = 1))]
+    head_size: usize,
+
+    /// DataType
+    dtype: DType,
+
+    /// The tensor parallel size (default is 1)
+    #[builder(default = 1)]
+    tp_size: usize,
+
+    /// The tensor parallel rank (default is 0)
+    #[builder(default = 0)]
+    tp_rank: usize,
+}
+
+fn validate_kv_layer(layer: &KvLayer) -> Result<(), ValidationError> {
+    if layer.number_of_heads % layer.tp_size != 0 {
+        return Err(ValidationError::new(
+            "number_of_heads must be divisible by tp_size",
+        ));
+    }
+
+    if layer.tp_rank >= layer.tp_size {
+        return Err(ValidationError::new("tp_rank must be less than tp_size"));
+    }
+
+    if layer.tp_size > layer.number_of_heads {
+        return Err(ValidationError::new(
+            "tp_size must be less than number_of_heads",
+        ));
+    }
+
+    let dims = layer.layer_shape();
+    let elements = dims.iter().product::<usize>();
+    let bytes = elements * layer.dtype.size_in_bytes();
+
+    if layer.storage.storage_size() < bytes {
+        return Err(ValidationError::new(
+            "storage must be at least as large as the layer",
+        ));
+    }
+
+    Ok(())
+}
+
+impl KvLayer {}
+
+impl Storage for KvLayer {
+    fn storage_type(&self) -> StorageType {
+        self.storage.storage_type()
+    }
+
+    fn get_pointer(&self) -> u64 {
+        self.storage.get_pointer()
+    }
+
+    fn storage_size(&self) -> usize {
+        self.storage.storage_size()
+    }
+}
+
+impl KvLayer {
+    fn from_storage(
+        block_details: &KvBlockDetails,
+        number_of_blocks: usize,
+        storage: OwnedStorage,
+    ) -> Result<Self> {
+        let layer = Self {
+            storage,
+            number_of_blocks,
+            layout: block_details.layout.clone(),
+            block_size: block_details.block_size,
+            number_of_heads: block_details.model_details.number_of_heads,
+            head_size: block_details.model_details.head_size,
+            dtype: block_details.model_details.dtype,
+            tp_size: block_details.tp_size,
+            tp_rank: block_details.tp_rank,
+        };
+
+        layer.validate()?;
+
+        Ok(layer)
+    }
+
+    /// Get the shape of the layer
+    pub fn layer_shape(&self) -> [usize; 5] {
+        match self.layout {
+            KvLayout::KvFirst => [
+                2, // K and V as first dimension
+                self.number_of_blocks,
+                self.block_size,
+                self.number_of_heads / self.tp_size,
+                self.head_size,
+            ],
+            KvLayout::BlockFirst => [
+                self.number_of_blocks,
+                2,
+                self.block_size,
+                self.number_of_heads / self.tp_size,
+                self.head_size,
+            ],
+        }
+    }
+
+    /// Get a view of the layer
+    pub fn view(&self) -> Result<TensorView<'_, Self, 5>> {
+        // Calculate dimensions based on layout
+        let dims = self.layer_shape();
+
+        // Verify dimensions make sense
+        if self.number_of_heads % self.tp_size != 0 {
+            raise!(
+                "Number of heads ({}) is not divisible by tp_size ({})",
+                self.number_of_heads,
+                self.tp_size
+            );
+        }
+
+        // Log dimensions for debugging
+        tracing::debug!(
+            "Creating TensorView with dims: {:?}, dtype: {:?}, size: {}",
+            dims,
+            self.dtype,
+            self.dtype.size_in_bytes()
+        );
+        // Create and return the view
+        let view = TensorView::new(self, dims, self.dtype.size_in_bytes())
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        Ok(view)
+    }
+
+    /// Perform a copy of blocks from one layer to another
+    /// This launch a cuda kernel to perform the copy
+    pub fn copy_blocks_to(
+        &self,
+        src_block_ids: &[usize],
+        dst: &mut KvLayer,
+        dst_block_ids: &[usize],
+    ) -> Result<()> {
+        if src_block_ids.len() != dst_block_ids.len() {
+            raise!("src_block_ids and dst_block_ids must have the same length");
+        }
+
+        if self.layout != dst.layout {
+            raise!("src and dst must have the same layout");
+        }
+
+        match (self.storage.storage_type(), dst.storage.storage_type()) {
+            (StorageType::Pinned, StorageType::Pinned) => {
+                raise!("Pinned to Pinned copy not implemented");
+            }
+            (StorageType::Pinned, StorageType::Device(_)) => {}
+            (StorageType::Device(_), StorageType::Pinned) => {}
+            (StorageType::Device(_), StorageType::Device(_)) => {
+                raise!("Device to Device copy not implemented");
+            }
+            (StorageType::System, _) => {
+                raise!("System to Device copy not implemented");
+            }
+            (_, StorageType::System) => {
+                raise!("Device to System copy not implemented");
+            }
+        };
+
+        let h_src_block_ids = src_block_ids
+            .iter()
+            .map(|id| *id as i32)
+            .collect::<Vec<_>>();
+
+        let h_dst_block_ids = dst_block_ids
+            .iter()
+            .map(|id| *id as i32)
+            .collect::<Vec<_>>();
+
+        let num_block_pairs = src_block_ids.len() as i32;
+
+        let prefix_dim = match self.layout {
+            KvLayout::KvFirst => 2,
+            KvLayout::BlockFirst => 1,
+        };
+
+        let suffix_dim = self.head_size * (self.number_of_heads / self.tp_size) * self.block_size;
+        let suffix_dim = match self.layout {
+            KvLayout::KvFirst => suffix_dim,
+            KvLayout::BlockFirst => 2 * suffix_dim,
+        };
+
+        let elem_size = self.dtype.size_in_bytes();
+
+        let src_blocks = self.number_of_blocks as i32;
+        let dst_blocks = dst.number_of_blocks as i32;
+
+        unsafe {
+            let rc = copy_blocks_3d(
+                self.storage.get_pointer() as *const std::ffi::c_void,
+                dst.storage.get_pointer() as *mut std::ffi::c_void,
+                h_src_block_ids.as_ptr() as *const std::os::raw::c_int,
+                h_dst_block_ids.as_ptr() as *const std::os::raw::c_int,
+                num_block_pairs,
+                prefix_dim as i32,
+                src_blocks,
+                dst_blocks,
+                suffix_dim as i32,
+                elem_size as i32,
+            );
+
+            if rc != 0 {
+                raise!("Failed to copy blocks");
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct KvBlockStorage {
+    /// The details of the model
+    block_details: KvBlockDetails,
+
+    /// The type of storage
+    storage_type: StorageType,
+
+    /// Optional cuda device
+    cuda_device: Option<Arc<CudaContext>>,
+
+    /// Number of blocks
+    number_of_blocks: usize,
+
+    /// Layers
+    layers: Vec<KvLayer>,
+}
+
+/// This object holds a set of layers that are used to store the KV cache
+impl KvBlockStorage {
+    /// Create a new KvBlockStorage object
+    /// This allows you to bring in a set of layers that are already allocated
+    pub fn from_layers(layers: Vec<KvLayer>) -> Result<Self> {
+        if layers.is_empty() {
+            raise!("Layers must not be empty");
+        }
+
+        // validate all layers have the same type
+        let storage_type = layers[0].storage.storage_type();
+
+        let cuda_device = match &storage_type {
+            StorageType::Device(device) => Some(device.clone()),
+            _ => None,
+        };
+
+        for layer in &layers {
+            if layer.storage.storage_type() != storage_type {
+                raise!("All layers must have the same storage type");
+            }
+        }
+
+        // validate all layers have the same number of blocks
+        let number_of_blocks = layers[0].number_of_blocks;
+        for layer in &layers {
+            if layer.number_of_blocks != number_of_blocks {
+                raise!("All layers must have the same number of blocks");
+            }
+        }
+
+        // extract the details from the first layer, construct ModelDetails, BlockDetails
+        let model_details = KvModelDetailsBuilder::default()
+            .number_of_layers(layers.len())
+            .number_of_heads(layers[0].number_of_heads)
+            .head_size(layers[0].head_size)
+            .dtype(layers[0].dtype)
+            .build()?;
+
+        let block_details = KvBlockDetailsBuilder::default()
+            .layout(layers[0].layout.clone())
+            .block_size(layers[0].block_size)
+            .model_details(model_details.clone())
+            .tp_size(layers[0].tp_size)
+            .tp_rank(layers[0].tp_rank)
+            .build()?;
+
+        block_details.validate()?;
+
+        let bytes_per_token_block = block_details.bytes_per_token_block_per_layer();
+
+        let storage_type = layers[0].storage.storage_type();
+
+        // validate all layers have enough capacity to store hold the block data
+        for layer in &layers {
+            if layer.storage.storage_size() < bytes_per_token_block {
+                raise!("All layers must have enough capacity to store hold the block data");
+            }
+        }
+
+        Ok(Self {
+            block_details,
+            storage_type,
+            number_of_blocks,
+            cuda_device,
+            layers,
+        })
+    }
+
+    /// Given a number of blocks and the block details, allocate the storage for the layers
+    pub fn allocate(
+        number_of_blocks: usize,
+        block_details: KvBlockDetails,
+        storage_type: StorageType,
+    ) -> Result<Self> {
+        block_details.validate()?;
+
+        // determine the number of blocks
+        let bytes = block_details.bytes_per_token_block_per_layer() * number_of_blocks;
+
+        let mut layers = Vec::new();
+
+        // for each layer, create a device storage object, then for a kv layer
+        for layer in 0..block_details.model_details.number_of_layers {
+            let storage = OwnedStorage::create(bytes, storage_type.clone()).with_context(|| {
+                error!("Failed to allocate memory for KV BlockStorage for layer {layer}")
+            })?;
+            let layer = KvLayer::from_storage(&block_details, number_of_blocks, storage)?;
+            layers.push(layer);
+        }
+
+        Self::from_layers(layers).context("Validating KvBlockStorage")
+    }
+
+    /// Get an immutable reference to a layer
+    pub fn layer(&self, layer: usize) -> Result<&KvLayer> {
+        if layer >= self.layers.len() {
+            raise!(
+                "Layer index {} out of bounds (max {})",
+                layer,
+                self.layers.len() - 1
+            );
+        }
+        Ok(&self.layers[layer])
+    }
+
+    /// Get a mutable reference to a layer
+    pub fn layer_mut(&mut self, layer: usize) -> Result<&mut KvLayer> {
+        if layer >= self.layers.len() {
+            raise!(
+                "Layer index {} out of bounds (max {})",
+                layer,
+                self.layers.len() - 1
+            );
+        }
+        Ok(&mut self.layers[layer])
+    }
+
+    // pub fn suffix_dim(&self) -> usize {
+    //     let value = match self.block_details.layout {
+    //         KvLayout::KvFirst => self.block_details.model_details.number_of_heads * self.block_details.block_size,
+
+    //         // s![block_id, 0..block_size, 0..
+    //         KvLayout::BlockFirst => 2 *
+    //     };
+    // }
 }
 
 /// This struct holds the details of the layers to be copied
@@ -208,6 +600,23 @@ pub struct CopyStreamLayerDetails {
     /// The element size in bytes
     #[validate(range(min = 1, max = 8))]
     elem_size: i32,
+}
+
+impl CopyStreamLayerDetails {
+    pub fn new(src: &KvBlockDetails, dst: &KvBlockDetails) -> Result<Self> {
+        if !src.is_compatible(dst) {
+            return Err(error!("src and dst must have compatible block details"));
+        }
+
+        let suffix_dim = match &src.layout {
+            KvLayout::KvFirst => src.model_details.number_of_heads * src.block_size,
+            KvLayout::BlockFirst => 2 * src.model_details.number_of_heads * src.block_size,
+        };
+
+        let elem_size = src.model_details.dtype.size_in_bytes();
+
+        unimplemented!()
+    }
 }
 
 fn validate_copy_stream_layer_details(
@@ -467,332 +876,6 @@ impl Returnable for CopyStream {
     }
 }
 
-#[derive(Debug)]
-pub struct KvBlockStorage {
-    /// The details of the model
-    block_details: KvBlockDetails,
-
-    /// The type of storage
-    storage_type: StorageType,
-
-    /// Optional cuda device
-    cuda_device: Option<Arc<CudaContext>>,
-
-    /// Number of blocks
-    number_of_blocks: usize,
-
-    /// Layers
-    layers: Vec<KvLayer>,
-}
-
-impl KvBlockStorage {
-    pub fn new(layers: Vec<KvLayer>) -> Result<Self> {
-        if layers.is_empty() {
-            raise!("Layers must not be empty");
-        }
-
-        // validate all layers have the same type
-        let storage_type = layers[0].storage.storage_type();
-
-        let cuda_device = match &storage_type {
-            StorageType::Device(device) => Some(device.clone()),
-            _ => None,
-        };
-
-        for layer in &layers {
-            if layer.storage.storage_type() != storage_type {
-                raise!("All layers must have the same storage type");
-            }
-        }
-
-        // validate all layers have the same number of blocks
-        let number_of_blocks = layers[0].number_of_blocks;
-        for layer in &layers {
-            if layer.number_of_blocks != number_of_blocks {
-                raise!("All layers must have the same number of blocks");
-            }
-        }
-
-        // extract the details from the first layer, construct ModelDetails, BlockDetails
-        let model_details = KvModelDetailsBuilder::default()
-            .number_of_layers(layers.len())
-            .number_of_heads(layers[0].number_of_heads)
-            .head_size(layers[0].head_size)
-            .dtype(layers[0].dtype)
-            .build()?;
-
-        let block_details = KvBlockDetailsBuilder::default()
-            .layout(layers[0].layout.clone())
-            .block_size(layers[0].block_size)
-            .model_details(model_details.clone())
-            .tp_size(layers[0].tp_size)
-            .tp_rank(layers[0].tp_rank)
-            .build()?;
-
-        block_details.validate()?;
-
-        let bytes_per_token_block = block_details.bytes_per_token_block_per_layer();
-
-        let storage_type = layers[0].storage.storage_type();
-
-        // validate all layers have enough capacity to store hold the block data
-        for layer in &layers {
-            if layer.storage.storage_size() < bytes_per_token_block {
-                raise!("All layers must have enough capacity to store hold the block data");
-            }
-        }
-
-        Ok(Self {
-            block_details,
-            storage_type,
-            number_of_blocks,
-            cuda_device,
-            layers,
-        })
-    }
-
-    pub fn allocate(
-        number_of_blocks: usize,
-        block_details: KvBlockDetails,
-        storage_type: StorageType,
-    ) -> Result<Self> {
-        block_details.validate()?;
-
-        // determine the number of blocks
-        let bytes = block_details.bytes_per_token_block_per_layer() * number_of_blocks;
-
-        let mut layers = Vec::new();
-
-        // for each layer, create a device storage object, then for a kv layer
-        for layer in 0..block_details.model_details.number_of_layers {
-            let storage = OwnedStorage::create(bytes, storage_type.clone()).with_context(|| {
-                error!("Failed to allocate memory for KV BlockStorage for layer {layer}")
-            })?;
-            let layer = KvLayer::from_storage(&block_details, number_of_blocks, storage);
-            layers.push(layer);
-        }
-
-        Self::new(layers).context("Validating KvBlockStorage")
-    }
-
-    /// Get an immutable reference to a layer
-    pub fn layer(&self, layer: usize) -> Result<&KvLayer> {
-        if layer >= self.layers.len() {
-            raise!(
-                "Layer index {} out of bounds (max {})",
-                layer,
-                self.layers.len() - 1
-            );
-        }
-        Ok(&self.layers[layer])
-    }
-
-    /// Get a mutable reference to a layer
-    pub fn layer_mut(&mut self, layer: usize) -> Result<&mut KvLayer> {
-        if layer >= self.layers.len() {
-            raise!(
-                "Layer index {} out of bounds (max {})",
-                layer,
-                self.layers.len() - 1
-            );
-        }
-        Ok(&mut self.layers[layer])
-    }
-}
-
-#[derive(Debug, Builder)]
-pub struct KvLayer {
-    /// The layout of the tensor
-    layout: KvLayout,
-
-    /// The storage of the tensor
-    storage: OwnedStorage,
-
-    /// The number of blocks in the tensor
-    number_of_blocks: usize,
-
-    /// The size of each block in the tensor
-    block_size: usize,
-
-    /// The number of heads in the tensor
-    number_of_heads: usize,
-
-    /// The size of each head in the tensor
-    head_size: usize,
-
-    /// DataType
-    dtype: DType,
-
-    /// The tensor parallel size (default is 1)
-    #[builder(default = 1)]
-    tp_size: usize,
-
-    /// The tensor parallel rank (default is 0)
-    #[builder(default = 0)]
-    tp_rank: usize,
-}
-
-impl Storage for KvLayer {
-    fn storage_type(&self) -> StorageType {
-        self.storage.storage_type()
-    }
-
-    fn get_pointer(&self) -> u64 {
-        self.storage.get_pointer()
-    }
-
-    fn storage_size(&self) -> usize {
-        self.storage.storage_size()
-    }
-}
-
-impl KvLayer {
-    fn from_storage(
-        block_details: &KvBlockDetails,
-        number_of_blocks: usize,
-        storage: OwnedStorage,
-    ) -> Self {
-        Self {
-            storage,
-            number_of_blocks,
-            layout: block_details.layout.clone(),
-            block_size: block_details.block_size,
-            number_of_heads: block_details.model_details.number_of_heads,
-            head_size: block_details.model_details.head_size,
-            dtype: block_details.model_details.dtype,
-            tp_size: block_details.tp_size,
-            tp_rank: block_details.tp_rank,
-        }
-    }
-
-    /// Get a view of the layer
-    pub fn view(&self) -> Result<TensorView<'_, Self, 5>> {
-        // Calculate dimensions based on layout
-        let dims = match self.layout {
-            KvLayout::KvFirst => [
-                2, // K and V as first dimension
-                self.number_of_blocks,
-                self.block_size,
-                self.number_of_heads / self.tp_size,
-                self.head_size,
-            ],
-            KvLayout::BlockFirst => [
-                self.number_of_blocks,
-                2, // K and V as second dimension
-                self.block_size,
-                self.number_of_heads / self.tp_size,
-                self.head_size,
-            ],
-        };
-
-        // Verify dimensions make sense
-        if self.number_of_heads % self.tp_size != 0 {
-            raise!(
-                "Number of heads ({}) is not divisible by tp_size ({})",
-                self.number_of_heads,
-                self.tp_size
-            );
-        }
-
-        // Log dimensions for debugging
-        tracing::debug!(
-            "Creating TensorView with dims: {:?}, dtype: {:?}, size: {}",
-            dims,
-            self.dtype,
-            self.dtype.size_in_bytes()
-        );
-        // Create and return the view
-        let view = TensorView::new(self, dims, self.dtype.size_in_bytes())
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        Ok(view)
-    }
-
-    /// Perform a copy of blocks from one layer to another
-    /// This launch a cuda kernel to perform the copy
-    pub fn copy_blocks_to(
-        &self,
-        src_block_ids: &[usize],
-        dst: &mut KvLayer,
-        dst_block_ids: &[usize],
-        stream: &CudaStream,
-    ) -> Result<()> {
-        if src_block_ids.len() != dst_block_ids.len() {
-            raise!("src_block_ids and dst_block_ids must have the same length");
-        }
-
-        if self.layout != dst.layout {
-            raise!("src and dst must have the same layout");
-        }
-
-        match (self.storage.storage_type(), dst.storage.storage_type()) {
-            (StorageType::Pinned, StorageType::Pinned) => {
-                raise!("Pinned to Pinned copy not implemented");
-            }
-            (StorageType::Pinned, StorageType::Device(_)) => {}
-            (StorageType::Device(_), StorageType::Pinned) => {}
-            (StorageType::Device(_), StorageType::Device(_)) => {
-                raise!("Device to Device copy not implemented");
-            }
-            (StorageType::System, _) => {
-                raise!("System to Device copy not implemented");
-            }
-            (_, StorageType::System) => {
-                raise!("Device to System copy not implemented");
-            }
-        };
-
-        let h_src_block_ids = src_block_ids
-            .iter()
-            .map(|id| *id as i32)
-            .collect::<Vec<_>>();
-
-        let h_dst_block_ids = dst_block_ids
-            .iter()
-            .map(|id| *id as i32)
-            .collect::<Vec<_>>();
-
-        let num_block_pairs = src_block_ids.len() as i32;
-
-        let prefix_dim = match self.layout {
-            KvLayout::KvFirst => 2,
-            KvLayout::BlockFirst => 1,
-        };
-
-        let suffix_dim = self.head_size * (self.number_of_heads / self.tp_size) * self.block_size;
-        let suffix_dim = match self.layout {
-            KvLayout::KvFirst => suffix_dim,
-            KvLayout::BlockFirst => 2 * suffix_dim,
-        };
-
-        let elem_size = self.dtype.size_in_bytes();
-
-        let src_blocks = self.number_of_blocks as i32;
-        let dst_blocks = dst.number_of_blocks as i32;
-
-        unsafe {
-            let rc = copy_blocks_3d(
-                self.storage.get_pointer() as *const std::ffi::c_void,
-                dst.storage.get_pointer() as *mut std::ffi::c_void,
-                h_src_block_ids.as_ptr() as *const std::os::raw::c_int,
-                h_dst_block_ids.as_ptr() as *const std::os::raw::c_int,
-                num_block_pairs,
-                prefix_dim as i32,
-                src_blocks,
-                dst_blocks,
-                suffix_dim as i32,
-                elem_size as i32,
-            );
-
-            if rc != 0 {
-                raise!("Failed to copy blocks");
-            }
-        }
-
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -857,8 +940,7 @@ mod tests {
         }
 
         // Copy data to device
-        let context = CudaContext::new(0)?;
-        let stream = context.new_stream()?;
+        let stream = device.new_stream()?;
 
         println!("Copying data to device");
 
@@ -963,10 +1045,6 @@ mod tests {
             // nd_view is dropped here, releasing the mutable borrow
         }
 
-        // Copy data to device
-        let context = CudaContext::new(0)?;
-        let stream = context.new_stream()?;
-
         println!("Copying data to device");
 
         {
@@ -975,9 +1053,8 @@ mod tests {
             let h_layer = h_blocks.layer(0).unwrap();
             let mut d_layer = d_blocks.layer_mut(0).unwrap();
             h_layer
-                .copy_blocks_to(&blocks, &mut d_layer, &blocks, &stream)
+                .copy_blocks_to(&blocks, &mut d_layer, &blocks)
                 .unwrap();
-            stream.synchronize().unwrap();
         }
 
         println!("Setting all values on host back to 0");
@@ -1002,9 +1079,8 @@ mod tests {
             let mut h_layer = h_blocks.layer_mut(0).unwrap();
             let d_layer = d_blocks.layer(0).unwrap();
             d_layer
-                .copy_blocks_to(&blocks, &mut h_layer, &blocks, &stream)
+                .copy_blocks_to(&blocks, &mut h_layer, &blocks)
                 .unwrap();
-            stream.synchronize().unwrap();
         }
 
         println!("Verifying host data is 1");
@@ -1151,7 +1227,7 @@ mod tests {
             let h_layer = h_blocks.layer(0).unwrap();
             let mut d_layer = d_blocks.layer_mut(0).unwrap();
             h_layer
-                .copy_blocks_to(&blocks, &mut d_layer, &blocks, &stream)
+                .copy_blocks_to(&blocks, &mut d_layer, &blocks)
                 .unwrap();
             stream.synchronize().unwrap();
         }
@@ -1181,7 +1257,7 @@ mod tests {
             let mut h_layer = h_blocks.layer_mut(0).unwrap();
             let d_layer = d_blocks.layer(0).unwrap();
             d_layer
-                .copy_blocks_to(src_blocks, &mut h_layer, dst_blocks, &stream)
+                .copy_blocks_to(src_blocks, &mut h_layer, dst_blocks)
                 .unwrap();
             stream.synchronize().unwrap();
         }

@@ -159,8 +159,7 @@ copy_blocks_kernel(
 extern "C" cudaError_t
 copy_blocks_launcher_3d(
     const void* src_data, void* dst_data, const int* d_src_block_ids, const int* d_dst_block_ids, int num_block_pairs,
-    int prefix_dim, int suffix_dim, int elem_size, int src_block_dim, int dst_block_dim, cudaEvent_t event,
-    cudaStream_t stream)
+    int prefix_dim, int suffix_dim, int elem_size, int src_block_dim, int dst_block_dim, cudaStream_t stream)
 {
   // Validate inputs
   if (src_data == NULL || dst_data == NULL) {
@@ -232,11 +231,6 @@ copy_blocks_launcher_3d(
     return kernel_error;
   }
 
-  // Record event on the stream (for synchronization by caller)
-  if (event != NULL) {
-    CUDA_CHECK(cudaEventRecord(event, stream));
-  }
-
   return cudaSuccess;
 }
 
@@ -258,32 +252,25 @@ copy_blocks_3d(
   CUDA_CHECK(
       cudaMemcpyAsync(d_dst_block_ids, h_dst_block_ids, num_block_pairs * sizeof(int), cudaMemcpyHostToDevice, 0));
 
-  // Create CUDA event
-  cudaEvent_t event;
-  CUDA_CHECK(cudaEventCreate(&event));
-
   // Launch kernel with explicit strides
   cudaError_t result = copy_blocks_launcher_3d(
       src_data, dst_data, d_src_block_ids, d_dst_block_ids, num_block_pairs, prefix_dim, suffix_dim, elem_size,
-      src_blocks_dim, dst_blocks_dim, event, 0);
+      src_blocks_dim, dst_blocks_dim, 0);
 
   // Handle errors from kernel launch
   if (result != cudaSuccess) {
     cudaFree(d_src_block_ids);
     cudaFree(d_dst_block_ids);
-    cudaEventDestroy(event);
     return result;
   }
 
   // Wait for completion
-  CUDA_CHECK(cudaEventSynchronize(event));
+  CUDA_CHECK(cudaStreamSynchronize(0));
 
   // Clean up
   cudaFree(d_src_block_ids);
   cudaFree(d_dst_block_ids);
-  cudaEventDestroy(event);
 
-  printf("3D tensor block copy completed successfully\n");
   return cudaSuccess;
 }
 
@@ -405,7 +392,7 @@ copy_stream_launch(
 {
   return copy_blocks_launcher_3d(
       src_data, dst_data, cs->d_src_blocks, cs->d_dst_blocks, cs->num_blocks, prefix_dim, suffix_dim, elem_size,
-      src_block_dim, dst_block_dim, cs->start_event, cs->stream);
+      src_block_dim, dst_block_dim, cs->stream);
 }
 
 int
