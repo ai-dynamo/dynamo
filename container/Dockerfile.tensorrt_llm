@@ -84,15 +84,18 @@ RUN cd examples/rust && \
     cp target/release/http /usr/local/bin/ && \
     cp target/release/llmctl /usr/local/bin/
 
-# TODO: Build dynamo-run
-# COPY applications/...
-
+# Build Dynamo Run binaries
+COPY launch /workspace/launch
+RUN cd launch && \
+    cargo build --release --features mistralrs,sglang,vllm,python && \
+    cp target/release/dynamo-run /usr/local/bin/ && \
+    cp target/release/llmctl /usr/local/bin/
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 
 
-# Generate C bindings. Note that this is required for TRTLLM backend re-build
+# Generate C bindings for kv cache routing in vLLM
 COPY lib/bindings /workspace/lib/bindings
-RUN cd lib/bindings/c/ && \
+RUN cd lib/bindings/c && \
     cargo build --release --locked && cargo doc --no-deps
 
 # Install uv, create virtualenv for general use, and build dynamo wheel
