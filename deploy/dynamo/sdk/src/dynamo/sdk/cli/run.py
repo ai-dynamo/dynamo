@@ -15,7 +15,8 @@
 
 from __future__ import annotations
 
-import os
+import sys
+import subprocess
 import click
 
 
@@ -26,13 +27,16 @@ def build_run_command() -> click.Group:
     def cli():
         pass
 
-    @click.argument('args', type=click.STRING, nargs=-1)
-
-    def run(
-        args: str,
-    ) -> None:
+    @cli.command(
+        context_settings=dict(
+            ignore_unknown_options=True,
+            allow_extra_args=True,
+        ),
+    )
+    def run() -> None:
         """Call dynamo-run under the hood to execute whatever options passed in"""
-        os.system(f"dynamo-run {args}")
+        command = ["dynamo-run"] + sys.argv[2:]
+        subprocess.run(command)
        
     return cli
 

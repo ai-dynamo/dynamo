@@ -30,7 +30,7 @@ dependencies = [
 ]
 
 [project.scripts]
-dynamo-sdk = "dynamo.sdk.cli.cli:cli"
+dynamo = "dynamo.sdk.cli.cli:cli"
 
 [tool.setuptools]
 namespace-packages = ["dynamo"]
