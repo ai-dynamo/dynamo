@@ -119,6 +119,14 @@ copy_blocks_kernel(
       for (size_t i = 0; i < elements_to_copy / 2; i++) {
         dst_ptr[i] = src_ptr[i];
       }
+      // } else if (elem_size == 1 && (elements_to_copy % 4 == 0)) {
+      //   // Use 32-bit loads/stores for 8-bit data when possible (half precision)
+      //   const uint32_t* src_ptr = (const uint32_t*)((const char*)src_data + src_byte_offset);
+      //   uint32_t* dst_ptr = (uint32_t*)((char*)dst_data + dst_byte_offset);
+
+      //   for (size_t i = 0; i < elements_to_copy / 4; i++) {
+      //     dst_ptr[i] = src_ptr[i];
+      //   }
     } else if (elem_size == 2) {
       // Handle 16-bit elements one by one if necessary
       const uint16_t* src_ptr = (const uint16_t*)((const char*)src_data + src_byte_offset);
@@ -234,12 +242,76 @@ copy_blocks_launcher_3d(
   return cudaSuccess;
 }
 
+
+extern "C" cudaError_t
+copy_blocks_memcpy_3d(
+    const void* src_data, void* dst_data, const int* h_src_block_ids, const int* h_dst_block_ids, int num_block_pairs,
+    int prefix_dim, int suffix_dim, int elem_size, int src_block_dim, int dst_block_dim, cudaStream_t stream)
+{
+  // Validate inputs
+  if (src_data == NULL || dst_data == NULL) {
+    fprintf(stderr, "NULL data pointers\n");
+    return cudaErrorInvalidValue;
+  }
+
+  if (h_src_block_ids == NULL || h_dst_block_ids == NULL) {
+    fprintf(stderr, "NULL host block ID pointers\n");
+    return cudaErrorInvalidValue;
+  }
+
+  if (num_block_pairs <= 0) {
+    fprintf(stderr, "Invalid number of block pairs: %d\n", num_block_pairs);
+    return cudaErrorInvalidValue;
+  }
+
+  if (prefix_dim <= 0 || suffix_dim <= 0 || elem_size <= 0) {
+    fprintf(stderr, "Invalid dimensions: prefix=%d, suffix=%d, elem=%d\n", prefix_dim, suffix_dim, elem_size);
+    return cudaErrorInvalidValue;
+  }
+
+  // Calculate row-major strides for source and destination
+  size_t suffix_size_bytes = suffix_dim * elem_size;
+  size_t src_block_stride = suffix_size_bytes;
+  size_t dst_block_stride = suffix_size_bytes;
+  size_t src_prefix_stride = src_block_dim * src_block_stride;
+  size_t dst_prefix_stride = dst_block_dim * dst_block_stride;
+
+  size_t count = 0;
+
+  // Loop through all prefix dimensions and block pairs
+  for (int prefix_idx = 0; prefix_idx < prefix_dim; prefix_idx++) {
+    for (int pair_idx = 0; pair_idx < num_block_pairs; pair_idx++) {
+      int src_block_id = h_src_block_ids[pair_idx];
+      int dst_block_id = h_dst_block_ids[pair_idx];
+
+      // Calculate byte offsets
+      size_t src_offset = prefix_idx * src_prefix_stride + src_block_id * src_block_stride;
+      size_t dst_offset = prefix_idx * dst_prefix_stride + dst_block_id * dst_block_stride;
+
+      // Copy the suffix data in one call (it's contiguous)
+      const void* src_ptr = static_cast<const char*>(src_data) + src_offset;
+      void* dst_ptr = static_cast<char*>(dst_data) + dst_offset;
+
+      cudaError_t error = cudaMemcpyAsync(dst_ptr, src_ptr, suffix_size_bytes, cudaMemcpyDefault, stream);
+      if (error != cudaSuccess) {
+        return error;
+      }
+
+      count += suffix_size_bytes;
+    }
+  }
+
+  return cudaSuccess;
+}
+
+
 // New function for 3D tensor copy blocks operation
 extern "C" cudaError_t
 copy_blocks_3d(
     const void* src_data, void* dst_data, const int* h_src_block_ids, const int* h_dst_block_ids, int num_block_pairs,
     int prefix_dim, int src_blocks_dim, int dst_blocks_dim, int suffix_dim, int elem_size)
 {
+#ifdef USE_KERNEL
   // Allocate device memory for block IDs
   int* d_src_block_ids = NULL;
   int* d_dst_block_ids = NULL;
@@ -263,16 +335,23 @@ copy_blocks_3d(
     cudaFree(d_dst_block_ids);
     return result;
   }
-
+#else
+  cudaError_t result = copy_blocks_memcpy_3d(
+      src_data, dst_data, h_src_block_ids, h_dst_block_ids, num_block_pairs, prefix_dim, suffix_dim, elem_size,
+      src_blocks_dim, dst_blocks_dim, 0);
+#endif
   // Wait for completion
   CUDA_CHECK(cudaStreamSynchronize(0));
 
+#ifdef USE_KERNEL
   // Clean up
   cudaFree(d_src_block_ids);
   cudaFree(d_dst_block_ids);
+#endif
 
   return cudaSuccess;
 }
+
 
 // TODO: Refactor the driver code to take pointers for the device block_id arrays
 // TODO: Maintain a blocking driver, but then also provide a non-blocking driver
@@ -290,8 +369,14 @@ copy_blocks_3d(
 //
 // To that end, we might want to tie this copy kernel to the stream used for the forward pass.
 struct CopyStream {
+  // Device block arrays
   int* d_src_blocks;
   int* d_dst_blocks;
+
+  // Host copies of block arrays
+  int* h_src_blocks;
+  int* h_dst_blocks;
+
   int num_blocks;
 
   cudaStream_t stream;
@@ -307,6 +392,8 @@ struct CopyStream {
 CopyStream::CopyStream(int num_layers, int num_blocks)
 {
   cudaError_t status;
+
+  // Allocate device memory
   status = cudaMalloc(&d_src_blocks, num_blocks * sizeof(int));
   if (status != cudaSuccess) {
     fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(status));
@@ -320,17 +407,34 @@ CopyStream::CopyStream(int num_layers, int num_blocks)
     return;
   }
 
-  status = cudaStreamCreate(&stream);
-  if (status != cudaSuccess) {
-    fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(status));
+  // Allocate host memory
+  h_src_blocks = (int*)malloc(num_blocks * sizeof(int));
+  h_dst_blocks = (int*)malloc(num_blocks * sizeof(int));
+  if (!h_src_blocks || !h_dst_blocks) {
+    fprintf(stderr, "Host memory allocation failed\n");
+    if (h_src_blocks)
+      free(h_src_blocks);
     cudaFree(d_src_blocks);
     cudaFree(d_dst_blocks);
     return;
   }
 
+  status = cudaStreamCreate(&stream);
+  if (status != cudaSuccess) {
+    fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(status));
+    free(h_src_blocks);
+    free(h_dst_blocks);
+    cudaFree(d_src_blocks);
+    cudaFree(d_dst_blocks);
+    return;
+  }
+
+  // Create events
   status = cudaEventCreateWithFlags(&start_event, cudaEventDisableTiming);
   if (status != cudaSuccess) {
     fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(status));
+    free(h_src_blocks);
+    free(h_dst_blocks);
     cudaFree(d_src_blocks);
     cudaFree(d_dst_blocks);
   }
@@ -338,6 +442,8 @@ CopyStream::CopyStream(int num_layers, int num_blocks)
   status = cudaEventCreateWithFlags(&stop_event, cudaEventDisableTiming);
   if (status != cudaSuccess) {
     fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(status));
+    free(h_src_blocks);
+    free(h_dst_blocks);
     cudaFree(d_src_blocks);
     cudaFree(d_dst_blocks);
   }
@@ -345,6 +451,8 @@ CopyStream::CopyStream(int num_layers, int num_blocks)
 
 CopyStream::~CopyStream()
 {
+  free(h_src_blocks);
+  free(h_dst_blocks);
   cudaFree(d_src_blocks);
   cudaFree(d_dst_blocks);
   cudaEventDestroy(start_event);
@@ -375,6 +483,11 @@ copy_stream_destroy(CopyStream* stream)
 int
 copy_stream_prepare_block_ids(CopyStream* cs, int* src_block_ids, int* dst_block_ids, int num_blocks)
 {
+  // Make host copies
+  memcpy(cs->h_src_blocks, src_block_ids, num_blocks * sizeof(int));
+  memcpy(cs->h_dst_blocks, dst_block_ids, num_blocks * sizeof(int));
+
+  // Copy to device (for kernel-based implementation)
   CUDA_CHECK(
       cudaMemcpyAsync(cs->d_src_blocks, src_block_ids, num_blocks * sizeof(int), cudaMemcpyHostToDevice, cs->stream));
   CUDA_CHECK(
@@ -396,6 +509,16 @@ copy_stream_launch(
 }
 
 int
+copy_stream_memcpy(
+    CopyStream* cs, const void* src_data, void* dst_data, int prefix_dim, int suffix_dim, int elem_size,
+    int src_block_dim, int dst_block_dim)
+{
+  return copy_blocks_memcpy_3d(
+      src_data, dst_data, cs->h_src_blocks, cs->h_dst_blocks, cs->num_blocks, prefix_dim, suffix_dim, elem_size,
+      src_block_dim, dst_block_dim, cs->stream);
+}
+
+int
 copy_stream_sync(CopyStream* cs)
 {
   // sync on the event
@@ -406,7 +529,7 @@ copy_stream_sync(CopyStream* cs)
 int
 cuda_malloc_host(void** ptr, size_t size)
 {
-  CUDA_CHECK(cudaMallocHost(ptr, size));
+  CUDA_CHECK(cudaHostAlloc(ptr, size, cudaHostAllocDefault));
   return cudaSuccess;
 }
 
