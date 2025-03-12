@@ -37,6 +37,7 @@
 
 use cudarc::driver::{CudaContext, CudaSlice, CudaStream, DevicePtr};
 use dynemo_runtime::{error, raise, Result};
+use ndarray::prelude::*;
 use ndarray::{ArrayViewMut, IxDyn};
 use std::any::Any;
 use std::ffi::c_void;
@@ -723,6 +724,13 @@ impl<'a, T: Storage, const D: usize> TensorView<'a, T, D> {
             StorageType::System | StorageType::Pinned => {}
         };
 
+        self.as_unsafe_ndarray_view::<DT>()
+    }
+
+    pub(crate) fn as_unsafe_ndarray_view<DT>(&self) -> Result<ndarray::ArrayView<'_, DT, IxDyn>>
+    where
+        DT: bytemuck::Pod,
+    {
         // validate DT matches bytes per element
         if std::mem::size_of::<DT>() != self.element_size {
             return Err(anyhow::anyhow!(
@@ -1780,7 +1788,7 @@ mod tests {
             }
         }
 
-        // Create a new ndarray view to see the changes
+        // Create another ndarray view to see the changes
         let updated_view = view.as_ndarray_view::<u32>().unwrap();
 
         // Verify all elements are now 42

@@ -1395,6 +1395,7 @@ mod tests {
 
         Ok(())
     }
+
     #[rstest]
     #[case(KvLayout::KvFirst, true)]
     #[case(KvLayout::KvFirst, false)]
@@ -1480,7 +1481,7 @@ mod tests {
         let duration = timer.elapsed();
         println!("Time taken: {:?}", duration);
 
-        let iterations = 100;
+        let iterations = 10;
 
         let timer = Instant::now();
         for _ in 0..iterations {
@@ -1505,6 +1506,37 @@ mod tests {
             (iterations * total_gpu_storage_size) as f64
                 / (1024.0 * 1024.0 * 1024.0 * duration.as_secs_f64())
         );
+
+        // explore tp scatter/gatehr
+
+        let h_layer = h_blocks.layer(0).unwrap();
+        let h_view = h_layer.view().unwrap();
+        let h = h_view.as_ndarray_view::<u8>().unwrap();
+
+        let start = h.as_ptr();
+
+        println!("{:?}", h.shape());
+        println!("{:?}", h.strides());
+
+        let s = h.shape().to_vec();
+        let new_nheads = h.shape()[3] / 2;
+
+        let h_tp = h
+            .into_shape_with_order([s[0], s[1], s[2], 2, new_nheads, s[4]])
+            .unwrap();
+        let new_start = h_tp.as_ptr();
+
+        println!("{:?}", h_tp.shape());
+        println!("{:?}", h_tp.strides());
+
+        assert_eq!(start, new_start);
+
+        let permuted = h_tp.permuted_axes([3, 0, 1, 2, 4, 5]);
+        let new_start = permuted.as_ptr();
+        assert_eq!(start, new_start);
+
+        println!("{:?}", permuted.shape());
+        println!("{:?}", permuted.strides());
 
         Ok(())
     }
