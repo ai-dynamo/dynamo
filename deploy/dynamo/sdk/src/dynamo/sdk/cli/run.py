@@ -35,7 +35,7 @@ def build_run_command() -> click.Group:
         ),
     )
     def run() -> None:
-        """Call dynamo-run under the hood to execute whatever options passed in"""
+        """Call dynamo-run with remaining arguments"""
         command = ["dynamo-run"] + sys.argv[2:]
         subprocess.run(command)
 
