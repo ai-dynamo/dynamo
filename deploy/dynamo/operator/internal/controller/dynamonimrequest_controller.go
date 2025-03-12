@@ -34,10 +34,10 @@ import (
 	"time"
 
 	"emperror.dev/errors"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
+	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/config"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/consts"
 	"github.com/apparentlymart/go-shquot/shquot"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/internal/controller_common"
-	commonconfig "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/pkg/dynamo/config"
-	commonconsts "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/pkg/dynamo/consts"
 	"github.com/ettle/strcase"
 	"github.com/huandu/xstrings"
 	"github.com/mitchellh/hashstructure/v2"
@@ -63,22 +63,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	dynamoCommon "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/common"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/modelschemas"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/schemasv1"
-	yataiclient "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/yatai-client"
-	nvidiacomv1alpha1 "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/v1alpha1"
+	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/modelschemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemasv1"
+	yataiclient "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/yatai-client"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 )
 
 const (
 	KubeAnnotationDynamoNimRequestHash            = "yatai.ai/bento-request-hash"
 	KubeAnnotationDynamoNimRequestImageBuiderHash = "yatai.ai/bento-request-image-builder-hash"
 	KubeAnnotationDynamoNimRequestModelSeederHash = "yatai.ai/bento-request-model-seeder-hash"
-	KubeLabelYataiImageBuilderSeparateModels          = "yatai.ai/yatai-image-builder-separate-models"
+	KubeLabelYataiImageBuilderSeparateModels      = "yatai.ai/yatai-image-builder-separate-models"
 	KubeAnnotationDynamoNimStorageNS              = "yatai.ai/bento-storage-namespace"
-	KubeAnnotationModelStorageNS                      = "yatai.ai/model-storage-namespace"
-	StoreSchemaAWS                                    = "aws"
-	StoreSchemaGCP                                    = "gcp"
+	KubeAnnotationModelStorageNS                  = "yatai.ai/model-storage-namespace"
+	StoreSchemaAWS                                = "aws"
+	StoreSchemaGCP                                = "gcp"
 )
 
 // DynamoNimRequestReconciler reconciles a DynamoNimRequest object
@@ -213,13 +213,13 @@ func (r *DynamoNimRequestReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if separateModels {
 		dynamoNimRequest, modelsExists, modelsExistsResult, modelsExistsErr = r.ensureModelsExists(ctx, ensureModelsExistsOption{
 			dynamoNimRequest: dynamoNimRequest,
-			req:                  req,
+			req:              req,
 		})
 	}
 
 	dynamoNimRequest, imageInfo, imageExists, imageExistsResult, err := r.ensureImageExists(ctx, ensureImageExistsOption{
 		dynamoNimRequest: dynamoNimRequest,
-		req:                  req,
+		req:              req,
 	})
 
 	if err != nil {
@@ -361,7 +361,7 @@ func isEstargzEnabled() bool {
 
 type ensureImageExistsOption struct {
 	dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest
-	req                  ctrl.Request
+	req              ctrl.Request
 }
 
 //nolint:gocyclo,nakedret
@@ -522,7 +522,7 @@ func (r *DynamoNimRequestReconciler) ensureImageExists(ctx context.Context, opt 
 
 	if job == nil {
 		job, err = r.generateImageBuilderJob(ctx, GenerateImageBuilderJobOption{
-			ImageInfo:            imageInfo,
+			ImageInfo:        imageInfo,
 			DynamoNimRequest: dynamoNimRequest,
 		})
 		if err != nil {
@@ -659,7 +659,7 @@ func (r *DynamoNimRequestReconciler) ensureImageExists(ctx context.Context, opt 
 
 type ensureModelsExistsOption struct {
 	dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest
-	req                  ctrl.Request
+	req              ctrl.Request
 }
 
 //nolint:gocyclo,nakedret
@@ -771,7 +771,7 @@ func (r *DynamoNimRequestReconciler) ensureModelsExists(ctx context.Context, opt
 		if isPVCNotFound {
 			pvc = r.generateModelPVC(GenerateModelPVCOption{
 				DynamoNimRequest: dynamoNimRequest,
-				Model:                &model,
+				Model:            &model,
 			})
 			err = r.Create(ctx, pvc)
 			isPVCAlreadyExists := k8serrors.IsAlreadyExists(err)
@@ -783,7 +783,7 @@ func (r *DynamoNimRequestReconciler) ensureModelsExists(ctx context.Context, opt
 		var job *batchv1.Job
 		job, err = r.generateModelSeederJob(ctx, GenerateModelSeederJobOption{
 			DynamoNimRequest: dynamoNimRequest,
-			Model:                &model,
+			Model:            &model,
 		})
 		if err != nil {
 			err = errors.Wrap(err, "generate model seeder job")
@@ -1519,7 +1519,7 @@ func isHuggingfaceModel(model *nvidiacomv1alpha1.BentoModel) bool {
 
 type GenerateModelPVCOption struct {
 	DynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest
-	Model                *nvidiacomv1alpha1.BentoModel
+	Model            *nvidiacomv1alpha1.BentoModel
 }
 
 //nolint:nakedret
@@ -1558,7 +1558,7 @@ func (r *DynamoNimRequestReconciler) generateModelPVC(opt GenerateModelPVCOption
 
 type GenerateModelSeederJobOption struct {
 	DynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest
-	Model                *nvidiacomv1alpha1.BentoModel
+	Model            *nvidiacomv1alpha1.BentoModel
 }
 
 //nolint:nakedret
@@ -1611,7 +1611,7 @@ func (r *DynamoNimRequestReconciler) generateModelSeederJob(ctx context.Context,
 
 type GenerateModelSeederPodTemplateSpecOption struct {
 	DynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest
-	Model                *nvidiacomv1alpha1.BentoModel
+	Model            *nvidiacomv1alpha1.BentoModel
 }
 
 //nolint:nakedret
@@ -1879,7 +1879,7 @@ echo "Done"
 }
 
 type GenerateImageBuilderJobOption struct {
-	ImageInfo            ImageInfo
+	ImageInfo        ImageInfo
 	DynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest
 }
 
@@ -1959,7 +1959,7 @@ const ModelSeederContainerName = "seeder"
 const ModelSeederJobFailedExitCode = 42
 
 type GenerateImageBuilderPodTemplateSpecOption struct {
-	ImageInfo            ImageInfo
+	ImageInfo        ImageInfo
 	DynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest
 }
 
@@ -2063,7 +2063,7 @@ func (r *DynamoNimRequestReconciler) generateImageBuilderPodTemplateSpec(ctx con
 			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for dynamoNim %s from yatai service", opt.DynamoNimRequest.Spec.BentoTag)
 			dynamoNimDownloadURL = dynamoNim_.PresignedDownloadUrl
 		} else {
-			dynamoNimDownloadURL = fmt.Sprintf("%s/api/v1/bento_repositories/%s/bentos/%s/download", yataiConf.Endpoint, dynamoNimRepositoryName, dynamoNimVersion)
+			dynamoNimDownloadURL = fmt.Sprintf("%s/api/v1/dynamo_nims/%s/versions/%s/download", yataiConf.Endpoint, dynamoNimRepositoryName, dynamoNimVersion)
 			dynamoNimDownloadHeader = fmt.Sprintf("%s: %s:%s:$%s", commonconsts.YataiApiTokenHeaderName, commonconsts.YataiImageBuilderComponentName, yataiConf.ClusterName, commonconsts.EnvYataiApiToken)
 		}
 
@@ -2154,7 +2154,7 @@ echo "Done"
 		"DynamoNimDownloadHeader": dynamoNimDownloadHeader,
 		"DynamoNimRepositoryName": dynamoNimRepositoryName,
 		"DynamoNimVersion":        dynamoNimVersion,
-		"Privileged":                  privileged,
+		"Privileged":              privileged,
 	})
 	if err != nil {
 		err = errors.Wrap(err, "failed to execute download command template")

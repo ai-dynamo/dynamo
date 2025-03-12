@@ -18,7 +18,7 @@
 package crds
 
 import (
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
 	autoscalingv2beta2 "k8s.io/api/autoscaling/v2beta2"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -35,9 +35,9 @@ type DynamoNimVersionDeploymentIngressTLSSpec struct {
 }
 
 type DynamoNimVersionDeploymentIngressSpec struct {
-	Enabled     bool                                        `json:"enabled,omitempty"`
-	Annotations map[string]string                           `json:"annotations,omitempty"`
-	Labels      map[string]string                           `json:"labels,omitempty"`
+	Enabled     bool                                      `json:"enabled,omitempty"`
+	Annotations map[string]string                         `json:"annotations,omitempty"`
+	Labels      map[string]string                         `json:"labels,omitempty"`
 	TLS         *DynamoNimVersionDeploymentIngressTLSSpec `json:"tls,omitempty"`
 }
 
@@ -79,5 +79,5 @@ type DynamoNimDeploymentData struct {
 
 type DynamoNimDeploymentConfigurationV1Alpha1 struct {
 	Data    DynamoNimDeploymentData `json:"data"`
-	Version string                    `json:"version"`
+	Version string                  `json:"version"`
 }

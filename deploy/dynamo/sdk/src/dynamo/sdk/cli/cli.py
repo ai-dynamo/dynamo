@@ -35,6 +35,7 @@ def create_bentoml_cli() -> click.Command:
     from bentoml_cli.secret import secret_command
     from bentoml_cli.utils import BentoMLCommandGroup, get_entry_points
 
+    from dynamo.sdk.cli.run import run_command
     from dynamo.sdk.cli.serve import serve_command
     from dynamo.sdk.cli.start import start_command
 
@@ -54,6 +55,7 @@ def create_bentoml_cli() -> click.Command:
     bentoml_cli.add_subcommands(bento_command)
     bentoml_cli.add_subcommands(start_command)
     bentoml_cli.add_subcommands(serve_command)
+    bentoml_cli.add_subcommands(run_command)
     bentoml_cli.add_command(containerize_command)
     bentoml_cli.add_command(deploy_command)
     bentoml_cli.add_command(develop_command)

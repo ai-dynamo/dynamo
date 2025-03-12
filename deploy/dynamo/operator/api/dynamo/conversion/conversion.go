@@ -18,8 +18,8 @@
 package conversion
 
 import (
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/common"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/modelschemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/modelschemas"
 )
 
 func ConvertToDeploymentTargetResourceItem(src *common.ResourceItem) (dest *modelschemas.DeploymentTargetResourceItem) {

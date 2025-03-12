@@ -27,8 +27,8 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemasv2"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemasv2"
 )
 
 /**

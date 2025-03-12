@@ -37,3 +37,4 @@
 **/*backup*/
 .dockerignore
 **/target/*
+**/*safetensors

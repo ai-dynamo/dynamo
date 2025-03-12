@@ -18,8 +18,8 @@
 package fixtures
 
 import (
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemasv2"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemasv2"
 )
 
 // DefaultScalingSpec generates a default ScalingSpec
@@ -67,7 +67,7 @@ func DefaultDeploymentConfigSchema() schemasv2.DeploymentConfigSchema {
 func DefaultUpdateDeploymentSchemaV2() schemasv2.UpdateDeploymentSchema {
 	return schemasv2.UpdateDeploymentSchema{
 		DeploymentConfigSchema: DefaultDeploymentConfigSchema(),
-		DynamoNim:            "nvidia:123456",
+		DynamoNim:              "nvidia:123456",
 	}
 }
 

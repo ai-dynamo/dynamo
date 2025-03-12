@@ -26,20 +26,20 @@ import (
 	"strings"
 
 	"emperror.dev/errors"
-	compounaiCommon "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/common"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/modelschemas"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/schemasv1"
-	yataiclient "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/yatai-client"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/v1alpha1"
-	commonconfig "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/pkg/dynamo/config"
-	commonconsts "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/pkg/dynamo/consts"
+	compounaiCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/modelschemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemasv1"
+	yataiclient "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/yatai-client"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
+	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/config"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/consts"
 	"github.com/huandu/xstrings"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/internal/archive"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/archive"
 	"gopkg.in/yaml.v2"
 )
 
@@ -122,7 +122,7 @@ func RetrieveDynamoNimDownloadURL(ctx context.Context, dynamoDeployment *v1alpha
 		recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for dynamoNim %s from yatai service", dynamoDeployment.Spec.DynamoNim)
 		dynamoNimDownloadURL = dynamoNim_.PresignedDownloadUrl
 	} else {
-		dynamoNimDownloadURL = fmt.Sprintf("%s/api/v1/bento_repositories/%s/bentos/%s/download", yataiConf.Endpoint, dynamoNimRepositoryName, dynamoNimVersion)
+		dynamoNimDownloadURL = fmt.Sprintf("%s/api/v1/dynamo_nims/%s/versions/%s/download", yataiConf.Endpoint, dynamoNimRepositoryName, dynamoNimVersion)
 		dynamoNimApiToken = fmt.Sprintf("%s:%s:$%s", commonconsts.YataiImageBuilderComponentName, yataiConf.ClusterName, commonconsts.EnvYataiApiToken)
 	}
 

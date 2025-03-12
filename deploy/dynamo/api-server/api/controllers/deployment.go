@@ -25,14 +25,14 @@ import (
 	"os"
 	"strings"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/common/env"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/converters"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/database"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/mocks"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/models"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemasv2"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/services"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/env"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/converters"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/database"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/mocks"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/models"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemasv2"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/services"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/invopop/jsonschema"
@@ -222,7 +222,7 @@ func (c *deploymentController) Update(ctx *gin.Context) {
 func (c *deploymentController) updateDeploymentEntities(ctx context.Context, schema schemas.UpdateDeploymentSchema, deployment *models.Deployment, ownership *schemas.OwnershipSchema) (*models.Deployment, error) {
 	dynamoNimVersions := map[string]*schemas.DynamoNimVersionFullSchema{}
 	for _, target := range schema.Targets {
-		dynamoNimVersionSchema, err := services.DatastoreService.GetDynamoNimVersion(ctx, target.DynamoNim, target.Version)
+		dynamoNimVersionSchema, err := services.BackendService.GetDynamoNimVersion(ctx, target.DynamoNim, target.Version)
 		if err != nil {
 			return nil, err
 		}
@@ -281,12 +281,12 @@ func (c *deploymentController) updateDeploymentEntities(ctx context.Context, sch
 
 		dynamoNimTag := fmt.Sprintf("%s:%s", createDeploymentTargetSchema.DynamoNim, createDeploymentTargetSchema.Version)
 		deploymentTarget, err := services.DeploymentTargetService.Create(ctx, services.CreateDeploymentTargetOption{
-			CreatorId:             ownership.UserId,
-			DeploymentId:          deployment.ID,
-			DeploymentRevisionId:  deploymentRevision.ID,
-			DynamoNimVersionId:  dynamoNimVersions[dynamoNimTag].Uid,
-			DynamoNimVersionTag: dynamoNimTag,
-			Config:                createDeploymentTargetSchema.Config,
+			CreatorId:            ownership.UserId,
+			DeploymentId:         deployment.ID,
+			DeploymentRevisionId: deploymentRevision.ID,
+			DynamoNimVersionId:   dynamoNimVersions[dynamoNimTag].Uid,
+			DynamoNimVersionTag:  dynamoNimTag,
+			Config:               createDeploymentTargetSchema.Config,
 		})
 		if err != nil {
 			return nil, err
@@ -929,7 +929,7 @@ func (c *deploymentController) buildDeploymentTargetConfiguration(schema *schema
 	// Convert service configuration into CreateDeploymentTargetSchema
 	createDeploymentTarget := &schemas.CreateDeploymentTargetSchema{
 		DynamoNim: dynamoNim,
-		Version:     dynamoNimVersion,
+		Version:   dynamoNimVersion,
 		Config: &schemas.DeploymentTargetConfig{
 			HPAConf: &schemas.DeploymentTargetHPAConf{
 				MinReplicas: &hpaMinReplica,

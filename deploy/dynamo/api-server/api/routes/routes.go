@@ -23,10 +23,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog/log"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/common/consts"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/controllers"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/mocks"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/consts"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/controllers"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/mocks"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
 )
 
 func SetupRouter() *gin.Engine {
@@ -43,10 +43,7 @@ func SetupRouter() *gin.Engine {
 
 	/* Start V1 APIs */
 	createClusterRoutes(v1)
-
-	// These routes are proxied to NDS
 	createDynamoNimRoutes(v1)
-	createBentoRepositoriesRoutes(v1)
 
 	createMiscellaneousRoutes(v1)
 	createMockedRoutes(v1)
@@ -130,64 +127,6 @@ func deploymentRoutesV2(grp *gin.RouterGroup) {
 	resourceGrp.PUT("", controllers.DeploymentController.UpdateV2)
 	resourceGrp.POST("/terminate", controllers.DeploymentController.TerminateV2)
 	resourceGrp.DELETE("", controllers.DeploymentController.DeleteV2)
-}
-
-func createBentoRepositoriesRoutes(grp *gin.RouterGroup) {
-	grp = grp.Group("/bento_repositories")
-
-	resourceGrp := grp.Group("/:bentoRepositoryName")
-
-	resourceGrp.GET("", controllers.ProxyController.ReverseProxy)
-
-	resourceGrp.PATCH("", controllers.ProxyController.ReverseProxy)
-
-	resourceGrp.GET("/deployments", controllers.ProxyController.ReverseProxy)
-
-	grp.GET("", controllers.ProxyController.ReverseProxy)
-
-	grp.POST("", controllers.ProxyController.ReverseProxy)
-
-	bentoRoutes(resourceGrp)
-}
-
-func bentoRoutes(grp *gin.RouterGroup) {
-	grp = grp.Group("/bentos")
-
-	resourceGrp := grp.Group("/:version")
-
-	resourceGrp.GET("", controllers.ProxyController.ReverseProxy)
-
-	resourceGrp.PATCH("", controllers.ProxyController.ReverseProxy)
-
-	resourceGrp.PATCH("/update_image_build_status_syncing_at", controllers.ProxyController.ReverseProxy)
-
-	resourceGrp.PATCH("/update_image_build_status", controllers.ProxyController.ReverseProxy)
-
-	resourceGrp.GET("/models", controllers.ProxyController.ReverseProxy)
-
-	resourceGrp.GET("/deployments", controllers.ProxyController.ReverseProxy)
-
-	resourceGrp.PATCH("/start_multipart_upload", controllers.ProxyController.ReverseProxy)
-
-	resourceGrp.PATCH("/presign_multipart_upload_url", controllers.ProxyController.ReverseProxy)
-
-	resourceGrp.PATCH("/complete_multipart_upload", controllers.ProxyController.ReverseProxy)
-
-	resourceGrp.PATCH("/presign_upload_url", controllers.ProxyController.ReverseProxy)
-
-	resourceGrp.PATCH("/presign_download_url", controllers.ProxyController.ReverseProxy)
-
-	resourceGrp.PATCH("/start_upload", controllers.ProxyController.ReverseProxy)
-
-	resourceGrp.PATCH("/finish_upload", controllers.ProxyController.ReverseProxy)
-
-	resourceGrp.PUT("/upload", controllers.ProxyController.ReverseProxy)
-
-	resourceGrp.GET("/download", controllers.ProxyController.ReverseProxy)
-
-	grp.GET("", controllers.ProxyController.ReverseProxy)
-
-	grp.POST("", controllers.ProxyController.ReverseProxy)
 }
 
 func createDynamoNimRoutes(grp *gin.RouterGroup) {

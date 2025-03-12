@@ -12,6 +12,7 @@ apt install -y build-essential libhwloc-dev libudev-dev pkg-config libssl-dev pr
 Install Rust:
 ```
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
 ```
 
 ## Build
@@ -28,6 +29,15 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 `cargo build --release --features mistralrs`
 
+The binary will be called `dynamo-run` in `$REPO_ROOT/launch/target/release`.
+
+## Quickstart
+
+If you have an `HF_TOKEN` environment variable set, this will download Qwen2.5 3B from Hugging Face (6 GiB download) and start it in interactive mode:
+```
+dynamo-run Qwen/Qwen2.5-3B-Instruct
+```
+
 ## Download a model from Hugging Face
 
 For example one of these should be fast and good quality on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
@@ -36,11 +46,11 @@ For example one of these should be fast and good quality on almost any machine: 
 
 *Text interface*
 
-`./target/release/dynamo-run Llama-3.2-1B-Instruct-Q4_K_M.gguf` or path to a Hugging Face repo checkout instead of the GGUF.
+`dynamo-run Llama-3.2-1B-Instruct-Q4_K_M.gguf` or path to a Hugging Face repo checkout instead of the GGUF.
 
 *HTTP interface*
 
-`./target/release/dynamo-run in=http --model-path Llama-3.2-1B-Instruct-Q4_K_M.gguf`
+`dynamo-run in=http Llama-3.2-1B-Instruct-Q4_K_M.gguf`
 
 List the models: `curl localhost:8080/v1/models`
 
@@ -63,7 +73,7 @@ dynamo-run in=dyn://llama3B_pool out=mistralrs ~/llm_models/Llama-3.2-3B-Instruc
 
 This will use etcd to auto-discover the model and NATS to talk to it. You can run multiple workers on the same endpoint and it will pick one at random each time.
 
-The `ns/backend/mistralrs` are purely symbolic, pick anything as long as it has three parts, and it matches the other node.
+The `llama3B_pool` name is purely symbolic, pick anything as long as it matches the other node.
 
 Run `dynamo-run --help` for more options.
 
@@ -110,7 +120,7 @@ The extra `--model-config` flag is because:
 - We send it tokens, meaning we do the tokenization ourself, so we need a tokenizer
 - We don't yet read it out of the GGUF (TODO), so we need an HF repo with `tokenizer.json` et al
 
-If the build step also builds llama_cpp libraries into `target/release` ("libllama.so", "libggml.so", "libggml-base.so", "libggml-cpu.so", "libggml-cuda.so"), then `dynamo-run` will need to find those at runtime. Set `LD_LIBRARY_PATH`, and be sure to deploy them alongside the `dynamo-run` binary.
+If the build step also builds llama_cpp libraries into the same folder as the binary ("libllama.so", "libggml.so", "libggml-base.so", "libggml-cpu.so", "libggml-cuda.so"), then `dynamo-run` will need to find those at runtime. Set `LD_LIBRARY_PATH`, and be sure to deploy them alongside the `dynamo-run` binary.
 
 ## vllm
 
@@ -135,13 +145,13 @@ cargo build --release --features vllm
 
 Run (still inside that virtualenv) - HF repo:
 ```
-./target/release/dynamo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct/
+./dynamo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct/
 
 ```
 
 Run (still inside that virtualenv) - GGUF:
 ```
-./target/release/dynamo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf --model-config ~/llm_models/Llama-3.2-3B-Instruct/
+./dynamo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf --model-config ~/llm_models/Llama-3.2-3B-Instruct/
 ```
 
 + Multi-node:
@@ -170,12 +180,12 @@ Build: `cargo build --release --features python`
 If the Python engine wants to receive and returns strings - it will do the prompt templating and tokenization itself - run it like this:
 
 ```
-dynamo-run out=pystr:/home/user/my_python_engine.py --name <model-name>
+dynamo-run out=pystr:/home/user/my_python_engine.py
 ```
 
 - The `request` parameter is a map, an OpenAI compatible create chat completion request: https://platform.openai.com/docs/api-reference/chat/create
 - The function must `yield` a series of maps conforming to create chat completion stream response (example below).
-- The `--name` flag is the name we serve the model under, if using an HTTP front end.
+- If using an HTTP front-end add the `--model-name` flag. This is the name we serve the model under.
 
 The file is loaded once at startup and kept in memory.
 
@@ -218,7 +228,7 @@ dynamo-run out=pytok:/home/user/my_python_engine.py --model-path <hf-repo-checko
 {"token_ids":[791],"tokens":None,"text":None,"cum_log_probs":None,"log_probs":None,"finish_reason":None}
 ```
 
-- Command like flag `--model-path` which must point to a Hugging Face repo checkout containing the `tokenizer.json`. The `--name` flag is optional. If not provided we use the HF repo name (directory name) as the model name.
+- Command like flag `--model-path` which must point to a Hugging Face repo checkout containing the `tokenizer.json`. The `--model-name` flag is optional. If not provided we use the HF repo name (directory name) as the model name.
 
 Example engine:
 ```
@@ -278,3 +288,34 @@ sudo docker run --gpus all -it -v /home/user:/outside-home gitlab-master.nvidia.
 ```
 
 Copy the trt-llm engine, the model's `.json` files (for the model deployment card) and the `nio` binary built for the correct glibc (container is Ubuntu 22.04 currently) into that container.
+
+## Echo Engines
+
+Dynamo includes two echo engines for testing and debugging purposes:
+
+### echo_core
+
+The `echo_core` engine accepts pre-processed requests and echoes the tokens back as the response. This is useful for testing pre-processing functionality as the response will include the full prompt template.
+
+```
+dynamo-run in=http out=echo_core --model-path <hf-repo-checkout>
+```
+
+### echo_full
+
+The `echo_full` engine accepts un-processed requests and echoes the prompt back as the response.
+
+```
+dynamo-run in=http out=echo_full --model-name my_model
+```
+
+### Configuration
+
+Both echo engines use a configurable delay between tokens to simulate generation speed. You can adjust this using the `DYN_TOKEN_ECHO_DELAY_MS` environment variable:
+
+```
+# Set token echo delay to 1ms (1000 tokens per second)
+DYN_TOKEN_ECHO_DELAY_MS=1 dynamo-run in=http out=echo_full
+```
+
+The default delay is 10ms, which produces approximately 100 tokens per second.

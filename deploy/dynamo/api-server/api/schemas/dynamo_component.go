@@ -53,20 +53,20 @@ func (c *DynamoComponentManifestSchema) Value() (driver.Value, error) {
 
 type RegisterDynamoComponentSchema struct {
 	Name           DynamoComponentName            `json:"name"`
-	Version        string                           `json:"version"`
-	KubeNamespace  string                           `json:"kube_namespace"`
-	SelectorLabels map[string]string                `json:"selector_labels,omitempty"`
+	Version        string                         `json:"version"`
+	KubeNamespace  string                         `json:"kube_namespace"`
+	SelectorLabels map[string]string              `json:"selector_labels,omitempty"`
 	Manifest       *DynamoComponentManifestSchema `json:"manifest"`
 }
 
 type DynamoComponentSchema struct {
 	ResourceSchema
-	Creator           *UserSchema                      `json:"creator"`
-	Cluster           *ClusterFullSchema               `json:"cluster"`
-	Description       string                           `json:"description"`
-	Version           string                           `json:"version"`
-	KubeNamespace     string                           `json:"kube_namespace"`
+	Creator           *UserSchema                    `json:"creator"`
+	Cluster           *ClusterFullSchema             `json:"cluster"`
+	Description       string                         `json:"description"`
+	Version           string                         `json:"version"`
+	KubeNamespace     string                         `json:"kube_namespace"`
 	Manifest          *DynamoComponentManifestSchema `json:"manifest"`
-	LatestInstalledAt *time.Time                       `json:"latest_installed_at"`
-	LatestHeartbeatAt *time.Time                       `json:"latest_heartbeat_at"`
+	LatestInstalledAt *time.Time                     `json:"latest_installed_at"`
+	LatestHeartbeatAt *time.Time                     `json:"latest_heartbeat_at"`
 }

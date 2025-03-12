@@ -17,12 +17,58 @@
 
 package main
 
-import "github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/runtime"
+import (
+	"log"
+	"os"
+	"os/exec"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/runtime"
+)
 
 const (
 	port = 8181
 )
 
+func startDatabaseServer() {
+	/*
+		Starts the Python FastAPI server for the database.
+	*/
+
+	// Check if the database is already running
+	cmd := exec.Command("python3", "../db/start_db.py")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		log.Printf("Failed to start database: %v", err)
+		return
+	}
+
+	// Give the database time to initialize
+	time.Sleep(2 * time.Second)
+
+	log.Println("Database started successfully")
+
+	// Set up graceful shutdown
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		log.Println("Shutting down database...")
+		if err := cmd.Process.Kill(); err != nil {
+			log.Printf("Failed to kill database process: %v", err)
+		}
+		os.Exit(0)
+	}()
+}
+
 func main() {
+	// Start the database server first
+	startDatabaseServer()
+
+	// Start the API server
 	runtime.Runtime.StartServer(port)
 }

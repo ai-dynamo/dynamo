@@ -14,12 +14,12 @@
 # limitations under the License.
 
 [project]
-name = "dynamo"
-version = "0.2.1"
+name = "ai-dynamo"
+version = "0.1.0"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
-    { name = "NVIDIA Inc.", email = "sw-dl-dynemo@nvidia.com" },
+    { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
 ]
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -27,6 +27,7 @@ dependencies = [
     "pytest>=8.3.4",
     "pydantic>=2.10.6",
     "uvloop>=0.21.0",
+    "nats-py>=2.6.0",
 ]
 
 [tool.maturin]
@@ -95,6 +96,7 @@ xfail_strict = true
 log_cli_level = "INFO"
 filterwarnings = [
   "error",
+  "ignore:.*cuda*:DeprecationWarning", # Need this to avoid deprecation warnings from CUDA in tensorrt_llm.
   "ignore:.*pkg_resources.*:DeprecationWarning",
   "ignore:.*multipart.*:PendingDeprecationWarning"
 ]
@@ -145,4 +147,4 @@ ignore_missing_imports = true
 
 # declare namespace packages
 [tool.setuptools]
-namespace-packages = ["dynemo", "dynemo.sdk"]
+namespace-packages = ["dynamo", "dynamo.sdk"]

@@ -20,8 +20,8 @@ package nim
 import (
 	"testing"
 
-	compounaiCommon "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/common"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/v1alpha1"
+	compounaiCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 	"github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -29,7 +29,7 @@ import (
 func TestGenerateDynamoNIMDeployments(t *testing.T) {
 	type args struct {
 		parentDynamoDeployment *v1alpha1.DynamoDeployment
-		config                     *DynamoNIMConfig
+		config                 *DynamoNIMConfig
 	}
 	tests := []struct {
 		name    string
@@ -91,8 +91,8 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						DynamoNim: "dynamonim",
-						ServiceName:   "service1",
+						DynamoNim:   "dynamonim",
+						ServiceName: "service1",
 						Resources: &compounaiCommon.Resources{
 							Requests: &compounaiCommon.ResourceItem{
 								CPU:    "1",
@@ -125,8 +125,8 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						ServiceName:   "service2",
-						DynamoNim: "dynamonim",
+						ServiceName: "service2",
+						DynamoNim:   "dynamonim",
 					},
 				},
 			},
@@ -188,8 +188,8 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						DynamoNim: "dynamonim",
-						ServiceName:   "service1",
+						DynamoNim:   "dynamonim",
+						ServiceName: "service1",
 						Resources: &compounaiCommon.Resources{
 							Requests: &compounaiCommon.ResourceItem{
 								CPU:    "1",
@@ -222,8 +222,8 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						DynamoNim: "dynamonim",
-						ServiceName:   "service2",
+						DynamoNim:   "dynamonim",
+						ServiceName: "service2",
 					},
 				},
 			},

@@ -17,12 +17,12 @@
 name = "dynamo-runtime"
 description = "Distributed Inference Framework"
 readme = "README.md"
-version = "0.2.1" # TODO: Centralize Version Automation
+version = "0.1.0" # TODO: Centralize Version Automation
 edition = "2021"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
-homepage = "https://github.com/dynemo-ai/dynemo"
-repository = "https://github.com/dynemo-ai/dynemo.git"
+homepage = "https://github.com/ai-dynamo/dynamo"
+repository = "https://github.com/ai-dynamo/dynamo.git"
 keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 
 [features]

@@ -20,7 +20,7 @@ from bentoml._internal.context import server_context  # type: ignore
 
 from dynamo.sdk.lib.decorators import async_onstart, dynamo_api, dynamo_endpoint
 from dynamo.sdk.lib.dependency import depends
-from dynamo.sdk.lib.image import DYNEMO_IMAGE
+from dynamo.sdk.lib.image import DYNAMO_IMAGE
 from dynamo.sdk.lib.service import service
 
 dynamo_context: dict[str, Any] = {}
@@ -32,7 +32,7 @@ __all__ = [
     "dynamo_api",
     "dynamo_endpoint",
     "depends",
-    "DYNEMO_IMAGE",
+    "DYNAMO_IMAGE",
     "service",
     "dynamo_context",
 ]

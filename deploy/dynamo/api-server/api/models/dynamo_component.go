@@ -20,19 +20,19 @@ package models
 import (
 	"time"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
 )
 
 type DynamoComponent struct {
 	Resource
 	ClusterAssociate
 
-	Version           string                                   `json:"version"`
-	KubeNamespace     string                                   `json:"kube_namespace"`
-	Description       string                                   `json:"description"`
+	Version           string                                 `json:"version"`
+	KubeNamespace     string                                 `json:"kube_namespace"`
+	Description       string                                 `json:"description"`
 	Manifest          *schemas.DynamoComponentManifestSchema `json:"manifest" type:"jsonb"`
-	LatestInstalledAt *time.Time                               `json:"latest_installed_at"`
-	LatestHeartbeatAt *time.Time                               `json:"latest_heartbeat_at"`
+	LatestInstalledAt *time.Time                             `json:"latest_installed_at"`
+	LatestHeartbeatAt *time.Time                             `json:"latest_heartbeat_at"`
 }
 
 func (d *DynamoComponent) GetResourceType() schemas.ResourceType {

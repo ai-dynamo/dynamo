@@ -17,6 +17,7 @@ pyright
 pytest
 pytest-asyncio
 pytest-benchmark
+pytest-codeblocks
 pytest-cov
 pytest-md-report
 pytest-mypy

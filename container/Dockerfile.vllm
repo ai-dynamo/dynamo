@@ -8,6 +8,133 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS dev
 
 USER root
 
+### NIXL SETUP ###
+
+ARG MOFED_VERSION=24.10-1.1.4.0
+ARG PYTHON_VERSION=3.12
+ARG NSYS_URL=https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_1/
+ARG NSYS_PKG=NsightSystems-linux-cli-public-2025.1.1.131-3554042.deb
+
+RUN apt-get update -y && apt-get -y install curl \
+                                            git \
+                                            libnuma-dev \
+                                            numactl \
+                                            wget \
+                                            autotools-dev \
+                                            automake \
+                                            libtool \
+                                            libz-dev \
+                                            libiberty-dev \
+                                            flex \
+                                            build-essential \
+                                            cmake \
+                                            libibverbs-dev \
+                                            libgoogle-glog-dev \
+                                            libgtest-dev \
+                                            libjsoncpp-dev \
+                                            libpython3-dev \
+                                            libboost-all-dev \
+                                            libssl-dev \
+                                            libgrpc-dev \
+                                            libgrpc++-dev \
+                                            libprotobuf-dev \
+                                            protobuf-compiler-grpc \
+                                            pybind11-dev \
+                                            python3-full \
+                                            python3-pip \
+                                            python3-numpy \
+                                            etcd-server \
+                                            net-tools \
+                                            pciutils \
+                                            libpci-dev \
+                                            vim \
+                                            tmux \
+                                            screen \
+                                            ibverbs-utils \
+                                            libibmad-dev
+
+RUN apt-get install -y linux-tools-common linux-tools-generic ethtool iproute2
+RUN apt-get install -y dkms linux-headers-generic
+RUN apt-get install -y meson ninja-build uuid-dev gdb
+
+RUN apt-get update && apt install -y wget libglib2.0-0
+RUN wget ${NSYS_URL}${NSYS_PKG} && dpkg -i $NSYS_PKG && rm $NSYS_PKG
+
+RUN cd /usr/local/src && \
+    curl -fSsL "https://content.mellanox.com/ofed/MLNX_OFED-${MOFED_VERSION}/MLNX_OFED_LINUX-${MOFED_VERSION}-ubuntu24.04-x86_64.tgz" -o mofed.tgz && \
+    tar -xf /usr/local/src/mofed.tgz && \
+    cd MLNX_OFED_LINUX-* && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        ./DEBS/libibverbs* ./DEBS/ibverbs-providers* ./DEBS/librdmacm* ./DEBS/libibumad* && \
+    rm -rf /var/lib/apt/lists/* /usr/local/src/*
+
+ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/cuda/lib64 \
+    LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
+
+ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/lib \
+    LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+
+WORKDIR /workspace
+RUN git clone https://github.com/NVIDIA/gdrcopy.git
+RUN PREFIX=/usr/local DESTLIB=/usr/local/lib make -C /workspace/gdrcopy lib_install
+RUN cp gdrcopy/src/libgdrapi.so.2.* /usr/lib/x86_64-linux-gnu/
+RUN ldconfig
+
+ARG UCX_VERSION=v1.18.0
+
+RUN cd /usr/local/src && \
+    curl -fSsL "https://github.com/openucx/ucx/tarball/${UCX_VERSION}" | tar xz && \
+    cd openucx-ucx* && \
+    ./autogen.sh && ./configure     \
+        --enable-shared             \
+        --disable-static            \
+        --disable-doxygen-doc       \
+        --enable-optimizations      \
+        --enable-cma                \
+        --enable-devel-headers      \
+        --with-cuda=/usr/local/cuda \
+        --with-verbs                \
+        --with-dm                   \
+        --with-gdrcopy=/usr/local   \
+        --enable-mt                 \
+        --with-mlx5-dv &&           \
+    make -j &&                      \
+    make -j install-strip &&        \
+    ldconfig
+
+ENV LD_LIBRARY_PATH=/usr/lib:$LD_LIBRARY_PATH
+ENV CPATH=/usr/include:$CPATH
+ENV PATH=/usr/bin:$PATH
+ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
+SHELL ["/bin/bash", "-c"]
+
+WORKDIR /workspace
+
+ENV LD_LIBRARY_PATH=/usr/local/ompi/lib:$LD_LIBRARY_PATH
+ENV CPATH=/usr/local/ompi/include:$CPATH
+ENV PATH=/usr/local/ompi/bin:$PATH
+ENV PKG_CONFIG_PATH=/usr/local/ompi/lib/pkgconfig:$PKG_CONFIG_PATH
+
+COPY --from=nixl . /opt/nixl
+
+RUN cd /opt/nixl && \
+    mkdir build && \
+    meson setup build/ --prefix=/usr/local/nixl && \
+    cd build/ && \
+    ninja && \
+    ninja install
+
+ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
+ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/:$PYTHONPATH
+ENV UCX_TLS=^cuda_ipc
+ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/x86_64-linux-gnu/plugins
+
+RUN ls -l /usr/local/nixl/
+RUN ls -l /usr/local/nixl/include/
+RUN ls -l /usr/local/nixl/include/internal/
+
+RUN ls /opt/nixl
+
 # Install utilities
 RUN apt update -y && apt install -y git wget curl nvtop tmux vim
 # nats
@@ -31,6 +158,10 @@ RUN mkdir /opt/dynamo && \
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
+# Common dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
+
 # Install patched vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
 ARG VLLM_REF="v0.7.2"
@@ -39,7 +170,6 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     bash /tmp/deps/vllm/install.sh --patch /tmp/deps/vllm/${VLLM_PATCH} --ref ${VLLM_REF} --install-cmd "uv pip install --editable" --use-precompiled --installation-dir /opt/vllm
 
 # Install genai-perf for benchmarking
-# TODO: Move to tag when fix for genai-perf will be released
 ARG GENAI_PERF_TAG="25d0188713adc47868d6b3f22426375237a90529"
 RUN uv pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
 
@@ -47,7 +177,7 @@ RUN uv pip install "git+https://github.com/triton-inference-server/perf_analyzer
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
     uv pip install --requirement /tmp/requirements.txt
 
-### MISC UTILITY SETUP ###
+# ### MISC UTILITY SETUP ###
 
 # Finish pyright install
 RUN pyright --help > /dev/null 2>&1
@@ -86,33 +216,36 @@ RUN cd lib/runtime && \
 
 # Build OpenAI HTTP Service binaries
 COPY lib/llm /workspace/lib/llm
-COPY examples/rust /workspace/examples/rust
-RUN cd examples/rust && \
+COPY components /workspace/components
+RUN cd components && \
     cargo build --release && \
-    cp target/release/http /usr/local/bin/ && \
-    cp target/release/llmctl /usr/local/bin/
+    cp target/release/http /usr/local/bin/
 
-# TODO: Build dynamo-run
-# COPY applications/...
+# Build Dynamo Run binaries
+COPY launch /workspace/launch
+RUN cd launch && \
+    cargo build --release --features mistralrs,sglang,vllm,python && \
+    cp target/release/dynamo-run /usr/local/bin/ && \
+    cp target/release/llmctl /usr/local/bin/
 
 # Generate C bindings for kv cache routing in vLLM
 COPY lib/bindings /workspace/lib/bindings
 RUN cd lib/bindings/c && \
-cargo build --release --locked && cargo doc --no-deps
+    cargo build --release --locked && cargo doc --no-deps
 
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 # Build dynamo wheel
 RUN source /opt/dynamo/venv/bin/activate && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/dynamo*cp312*.whl && \
+    uv pip install /workspace/dist/ai_dynamo*cp312*.whl && \
     cd /workspace/deploy/dynamo/sdk && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/dynamo_sdk*any.whl
+    uv pip install /workspace/dist/ai_dynamo_sdk*any.whl
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
     mkdir /opt/dynamo/bindings/lib && \
-    cp dist/dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
+    cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
     cp lib/bindings/c/target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
     cp -r lib/bindings/c/include /opt/dynamo/bindings/.
 
@@ -127,50 +260,5 @@ ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
 CMD []
 
-### Lean Runtime Image Stage ###
+### TODO Lean Runtime Image Stage ###
 
-# FIXME: Separate build and runtime images
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS runtime
-
-USER root
-
-# Install tools for interactive convenience
-RUN apt update -y && \
-    apt install -y curl tmux vim && \
-    echo "set -g mouse on" >> /root/.tmux.conf
-
-# Set environment variables
-ENV VIRTUAL_ENV=/opt/dynamo/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
-ENV RAPIDS_LIBUCX_PREFER_SYSTEM_LIBRARY=true
-ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
-
-# Copy binaries
-COPY --from=dev /usr/local/bin/http /usr/local/bin/http
-COPY --from=dev /usr/local/bin/llmctl /usr/local/bin/llmctl
-COPY --from=dev /usr/local/bin/etcd/etcd /usr/local/bin/etcd
-COPY --from=dev /usr/bin/nats-server /usr/local/bin/nats-server
-COPY --from=dev /bin/uv /usr/local/bin/uv
-COPY --from=dev /bin/uvx /usr/local/bin/uvx
-
-# Copy venv with installed packages
-RUN uv python install 3.12
-COPY --from=dev /opt/vllm /opt/vllm
-COPY --from=dev ${VIRTUAL_ENV} ${VIRTUAL_ENV}
-
-# Copy minimal set of files for testing. May consider separate stage for testing
-# if test dependencies start to negatively impact deployment environment/size.
-COPY pyproject.toml /workspace/pyproject.toml
-COPY container/deps/vllm /workspace/container/deps/vllm
-# Add library for KV routing
-COPY --from=dev ${VLLM_KV_CAPI_PATH} ${VLLM_KV_CAPI_PATH}
-# Copy minimal set of files for deployment/examples
-# FIXME: Use a more consolidated path after directory restructure
-COPY examples/python_rs/llm/vllm /workspace/examples/python_rs/llm/vllm
-
-WORKDIR /workspace
-
-# FIXME: May want a modification with dynamo banner on entry
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-
-CMD []

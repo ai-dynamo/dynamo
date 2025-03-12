@@ -26,7 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	dynamoCommon "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/common"
+	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
 )
 
 type Duration time.Duration
@@ -238,8 +238,8 @@ type BentoRequestOverrides struct {
 
 	ImageBuilderExtraPodMetadata   *dynamoCommon.ExtraPodMetadata `json:"imageBuilderExtraPodMetadata,omitempty"`
 	ImageBuilderExtraPodSpec       *dynamoCommon.ExtraPodSpec     `json:"imageBuilderExtraPodSpec,omitempty"`
-	ImageBuilderExtraContainerEnv  []corev1.EnvVar                    `json:"imageBuilderExtraContainerEnv,omitempty"`
-	ImageBuilderContainerResources *corev1.ResourceRequirements       `json:"imageBuilderContainerResources,omitempty"`
+	ImageBuilderExtraContainerEnv  []corev1.EnvVar                `json:"imageBuilderExtraContainerEnv,omitempty"`
+	ImageBuilderContainerResources *corev1.ResourceRequirements   `json:"imageBuilderContainerResources,omitempty"`
 
 	DockerConfigJSONSecretName string `json:"dockerConfigJsonSecretName,omitempty"`
 

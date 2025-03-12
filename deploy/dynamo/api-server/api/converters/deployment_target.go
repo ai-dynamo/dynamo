@@ -22,10 +22,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/mocks"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/models"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/services"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/mocks"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/models"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/services"
 	"github.com/pkg/errors"
 )
 
@@ -55,7 +55,7 @@ func ToDeploymentTargetSchemas(ctx context.Context, deploymentTargets []*models.
 			return nil, errors.Errorf("Invalid format for DynamoNIM version tag %s. Expected 2 parts got %d", deploymentTarget.DynamoNimVersionTag, len(dynamoNimParts))
 		}
 
-		dynamoNimVersionFullSchema, err := services.DatastoreService.GetDynamoNimVersion(ctx, dynamoNimParts[0], dynamoNimParts[1])
+		dynamoNimVersionFullSchema, err := services.BackendService.GetDynamoNimVersion(ctx, dynamoNimParts[0], dynamoNimParts[1])
 		if err != nil {
 			dynamoNimVersionFullSchema = nil // We shouldn't fail the request if this info is missing
 		}
@@ -69,9 +69,9 @@ func ToDeploymentTargetSchemas(ctx context.Context, deploymentTargets []*models.
 			DeploymentTargetTypeSchema: schemas.DeploymentTargetTypeSchema{
 				Type: "stable",
 			},
-			Creator:            creatorSchema,
+			Creator:          creatorSchema,
 			DynamoNimVersion: dynamoNimVersionFullSchema,
-			Config:             deploymentTarget.Config,
+			Config:           deploymentTarget.Config,
 		})
 	}
 	return res, nil

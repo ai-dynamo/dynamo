@@ -116,9 +116,9 @@ pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
 /// ### Returns
 ///
 /// A vector of `LocalBlockHash` representing the computed hashes for each chunk of tokens.
-pub fn compute_block_hash_for_seq(tokens: &[u32]) -> Vec<LocalBlockHash> {
+pub fn compute_block_hash_for_seq(tokens: &[u32], kv_block_size: usize) -> Vec<LocalBlockHash> {
     tokens
-        .chunks_exact(KV_BLOCK_SIZE) // Split into chunks of KV_BLOCK_SIZE elements
+        .chunks_exact(kv_block_size) // Split into chunks of kv_block_size elements
         .map(|chunk| {
             let bytes: Vec<u8> = chunk
                 .iter()
@@ -503,6 +503,8 @@ pub struct KvIndexer {
     remove_worker_tx: mpsc::Sender<WorkerId>,
     /// A handle to the background task managing the KV store.
     task: OnceLock<std::thread::JoinHandle<()>>,
+    /// The size of the KV block this indexer can handle.
+    kv_block_size: usize,
 }
 
 impl KvIndexer {
@@ -519,6 +521,7 @@ impl KvIndexer {
     pub fn new_with_frequency(
         token: CancellationToken,
         expiration_duration: Option<Duration>,
+        kv_block_size: usize,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel::<RouterEvent>(2048);
         let (match_tx, match_rx) = mpsc::channel::<MatchRequest>(128);
@@ -581,11 +584,16 @@ impl KvIndexer {
             match_tx,
             remove_worker_tx,
             task: once,
+            kv_block_size,
         }
     }
 
-    pub fn new(token: CancellationToken) -> Self {
-        Self::new_with_frequency(token, None)
+    pub fn block_size(&self) -> usize {
+        self.kv_block_size
+    }
+
+    pub fn new(token: CancellationToken, kv_block_size: usize) -> Self {
+        Self::new_with_frequency(token, None, kv_block_size)
     }
 
     /// Get a sender for `RouterEvent`s.
@@ -633,7 +641,7 @@ impl KvIndexerInterface for KvIndexer {
             tokens,
             tokens.len()
         );
-        let sequence = compute_block_hash_for_seq(tokens);
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size);
         log::debug!("Computed sequence: {:?}", sequence);
         self.find_matches(sequence).await
     }
@@ -665,6 +673,8 @@ pub struct ShardedMatchRequest {
 pub struct KvIndexerSharded {
     /// A `CancellationToken` for managing shutdown.
     cancel: CancellationToken,
+    /// The size of the KV block this indexer can handle.
+    kv_block_size: usize,
     worker_assignments: HashMap<WorkerId, usize>,
     worker_counts: Vec<usize>,
 
@@ -690,6 +700,7 @@ impl KvIndexerSharded {
         token: CancellationToken,
         num_shards: usize,
         expiration_duration: Option<Duration>,
+        kv_block_size: usize,
     ) -> Self {
         let worker_assignments: HashMap<WorkerId, usize> = HashMap::new();
         let worker_counts: Vec<usize> = vec![0; num_shards];
@@ -758,6 +769,7 @@ impl KvIndexerSharded {
 
         Self {
             cancel: token,
+            kv_block_size,
             worker_assignments,
             worker_counts,
             event_tx,
@@ -767,8 +779,12 @@ impl KvIndexerSharded {
         }
     }
 
-    pub fn new(token: CancellationToken, num_shards: usize) -> Self {
-        Self::new_with_frequency(token, num_shards, None)
+    pub fn block_size(&self) -> usize {
+        self.kv_block_size
+    }
+
+    pub fn new(token: CancellationToken, num_shards: usize, kv_block_size: usize) -> Self {
+        Self::new_with_frequency(token, num_shards, None, kv_block_size)
     }
 }
 
@@ -827,7 +843,7 @@ impl KvIndexerInterface for KvIndexerSharded {
         &self,
         tokens: &[u32],
     ) -> Result<OverlapScores, KvRouterError> {
-        let sequence = compute_block_hash_for_seq(tokens);
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size);
         self.find_matches(sequence).await
     }
 
@@ -875,6 +891,7 @@ mod tests {
 
     use super::*;
     use rstest::rstest;
+    use rstest_reuse::{self, *};
     use tokio::time;
     use tokio_util::sync::CancellationToken;
 
@@ -1180,64 +1197,67 @@ mod tests {
         assert!(result.len() == 2 && result[&worker_0] == 2 && result[&worker_1] == 1);
     }
 
-    #[test]
-    fn test_compute_block_hash_for_seq() {
+    #[rstest]
+    #[case(11)]
+    #[case(32)]
+    #[case(64)]
+    fn test_compute_block_hash_for_seq(#[case] kv_block_size: usize) {
         // create a sequence of 64 elements
-        let sequence = (0..KV_BLOCK_SIZE).map(|i| i as u32).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence);
+        let sequence = (0..kv_block_size).map(|i| i as u32).collect::<Vec<u32>>();
+        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size);
         assert_eq!(hashes.len(), 1);
 
         // create a sequence of 65 elements
-        let sequence = (0..(KV_BLOCK_SIZE + 1))
+        let sequence = (0..(kv_block_size + 1))
             .map(|i| i as u32)
             .collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence);
+        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size);
         assert_eq!(hashes.len(), 1);
 
         // create a sequence of 129 elements
-        let sequence = (0..(2 * KV_BLOCK_SIZE + 1))
+        let sequence = (0..(2 * kv_block_size + 1))
             .map(|i| i as u32)
             .collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence);
+        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size);
         assert_eq!(hashes.len(), 2);
     }
 
-    fn make_indexer(token: &CancellationToken, num_shards: usize) -> Box<dyn KvIndexerInterface> {
+    fn make_indexer(
+        token: &CancellationToken,
+        num_shards: usize,
+        kv_block_size: usize,
+    ) -> Box<dyn KvIndexerInterface> {
         if num_shards == 1 {
-            Box::new(KvIndexer::new(token.clone()))
+            Box::new(KvIndexer::new(token.clone(), kv_block_size))
         } else {
-            Box::new(KvIndexerSharded::new(token.clone(), num_shards))
+            Box::new(KvIndexerSharded::new(
+                token.clone(),
+                num_shards,
+                kv_block_size,
+            ))
         }
     }
 
+    #[template]
     #[rstest]
-    #[case(1)]
-    #[case(2)]
-    #[case(3)]
-    #[case(4)]
-    #[case(5)]
-    #[case(6)]
-    #[case(7)]
-    #[case(8)]
-    #[tokio::test]
-    async fn test_kv_indexer_new(#[case] num_shards: usize) {
-        let token = CancellationToken::new();
-        let _ = make_indexer(&token, num_shards);
+    fn indexer_template(
+        #[values(1, 3, 8)] num_shards: usize,
+        #[values(11, 32, 64)] kv_block_size: usize,
+    ) {
     }
 
-    #[rstest]
-    #[case(1)]
-    #[case(2)]
-    #[case(3)]
-    #[case(4)]
-    #[case(5)]
-    #[case(6)]
-    #[case(7)]
-    #[case(8)]
     #[tokio::test]
-    async fn test_find_matches(#[case] num_shards: usize) {
+    #[apply(indexer_template)]
+    async fn test_kv_indexer_new(num_shards: usize, kv_block_size: usize) {
+        let token: CancellationToken = CancellationToken::new();
+        let _ = make_indexer(&token, num_shards, kv_block_size);
+    }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_find_matches(num_shards: usize, kv_block_size: usize) {
         let token = CancellationToken::new();
-        let kv_indexer = make_indexer(&token, num_shards);
+        let kv_indexer = make_indexer(&token, num_shards, kv_block_size);
 
         let sequence = vec![compute_block_hash(b"test data")];
         let scores = kv_indexer.find_matches(sequence).await;
@@ -1245,19 +1265,11 @@ mod tests {
         assert!(scores.unwrap().scores.is_empty());
     }
 
-    #[rstest]
-    #[case(1)]
-    #[case(2)]
-    #[case(3)]
-    #[case(4)]
-    #[case(5)]
-    #[case(6)]
-    #[case(7)]
-    #[case(8)]
     #[tokio::test]
-    async fn test_find_matches_for_request(#[case] num_shards: usize) {
+    #[apply(indexer_template)]
+    async fn test_find_matches_for_request(num_shards: usize, kv_block_size: usize) {
         let token = CancellationToken::new();
-        let kv_indexer = make_indexer(&token, num_shards);
+        let kv_indexer = make_indexer(&token, num_shards, kv_block_size);
 
         let tokens = vec![1, 2, 3, 4];
         let scores = kv_indexer.find_matches_for_request(&tokens).await;
@@ -1265,21 +1277,13 @@ mod tests {
         assert!(scores.unwrap().scores.is_empty());
     }
 
-    #[rstest]
-    #[case(1)]
-    #[case(2)]
-    #[case(3)]
-    #[case(4)]
-    #[case(5)]
-    #[case(6)]
-    #[case(7)]
-    #[case(8)]
     #[tokio::test]
-    async fn test_apply_event(#[case] num_shards: usize) {
+    #[apply(indexer_template)]
+    async fn test_apply_event(num_shards: usize, kv_block_size: usize) {
         let worker_id = 0;
 
         let token = CancellationToken::new();
-        let mut kv_indexer = make_indexer(&token, num_shards);
+        let mut kv_indexer = make_indexer(&token, num_shards, kv_block_size);
 
         let event = create_store_event(worker_id, 1, vec![1, 2, 3], None);
         kv_indexer.apply_event(event).await;
@@ -1287,43 +1291,34 @@ mod tests {
         // No assertion here, just ensuring it runs without panic
     }
 
-    #[rstest]
-    #[case(1)]
-    #[case(2)]
-    #[case(3)]
-    #[case(4)]
-    #[case(5)]
-    #[case(6)]
-    #[case(7)]
-    #[case(8)]
     #[tokio::test]
-    async fn test_shutdown(#[case] num_shards: usize) {
+    #[apply(indexer_template)]
+    async fn test_shutdown(num_shards: usize, kv_block_size: usize) {
         let token = CancellationToken::new();
-        let mut kv_indexer = make_indexer(&token, num_shards);
+        let mut kv_indexer = make_indexer(&token, num_shards, kv_block_size);
 
         kv_indexer.shutdown();
     }
 
-    #[rstest]
-    #[case(1)]
-    #[case(2)]
-    #[case(3)]
-    #[case(4)]
-    #[case(5)]
-    #[case(6)]
-    #[case(7)]
-    #[case(8)]
     #[tokio::test]
-    async fn test_frequency(#[case] num_shards: usize) {
+    #[apply(indexer_template)]
+    async fn test_frequency(num_shards: usize, kv_block_size: usize) {
         let mut kv_indexer: Box<dyn KvIndexerInterface>;
         let token = CancellationToken::new();
         let duration = Some(Duration::from_millis(50));
 
         if num_shards == 1 {
-            kv_indexer = Box::new(KvIndexer::new_with_frequency(token, duration));
+            kv_indexer = Box::new(KvIndexer::new_with_frequency(
+                token,
+                duration,
+                kv_block_size,
+            ));
         } else {
             kv_indexer = Box::new(KvIndexerSharded::new_with_frequency(
-                token, num_shards, duration,
+                token,
+                num_shards,
+                duration,
+                kv_block_size,
             ));
         }
 

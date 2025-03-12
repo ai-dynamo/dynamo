@@ -33,7 +33,7 @@ nvllm_trt_engine_t nvllm_trt_engine_create(const char* config_proto);
 // Create a nvLLM TRT Engine from an instance of the engine
 // This requires the raw engine pointer to be an instantiated object at the exact same
 // commit version as the version of TRTLLM used to build the nvLLM C API.
-// This is a workaround to enable the Triton TensorRT LLM backend to use nvLLM.
+// This is a workaround to enable the Dynamo TensorRT LLM backend to use nvLLM.
 nvllm_trt_engine_t nvllm_trt_engine_unsafe_create_from_executor(void* engine);
 
 // Source: Enqueue a streaming request via a json message to the request queue

@@ -29,8 +29,6 @@ from dynamo.runtime import DistributedRuntime
 
 pytestmark = pytest.mark.pre_merge
 
-runtime = None
-
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_and_teardown():
@@ -50,25 +48,33 @@ def setup_and_teardown():
     etcd.wait()
 
 
-async def test_event_handler():
-    global runtime
-    if runtime is None:
-        loop = asyncio.get_running_loop()
-        runtime = DistributedRuntime(loop)
+@pytest.fixture(scope="module")
+async def distributed_runtime():
+    loop = asyncio.get_running_loop()
+    return DistributedRuntime(loop)
 
+
+# TODO Figure out how to test with different kv_block_size
+# Right now I get an error in EventPublisher init when I run this test
+# back to back. It occurs when calling dynamo_llm_init and I think is related to the
+# OnceCell initializations not being reset.
+# The test works individually if I run it with 32, then 11, then 64.
+# @pytest.mark.parametrize("kv_block_size", [11, 32, 64])
+async def test_event_handler(distributed_runtime):
+    kv_block_size = 32
     namespace = "kv_test"
     component = "event"
 
     # publisher
     worker_id = 233
-    event_publisher = EventPublisher(namespace, component, worker_id)
+    event_publisher = EventPublisher(namespace, component, worker_id, kv_block_size)
 
     # indexer
-    kv_listener = runtime.namespace(namespace).component(component)
+    kv_listener = distributed_runtime.namespace(namespace).component(component)
     await kv_listener.create_service()
-    indexer = KvIndexer(kv_listener)
+    indexer = KvIndexer(kv_listener, kv_block_size)
 
-    test_token = [3] * 64
+    test_token = [3] * kv_block_size
     lora_id = 0  # lora_id is not used in the indexer
     scores = await indexer.find_matches_for_request(test_token, lora_id)
     assert not scores.scores
@@ -87,6 +93,8 @@ async def test_event_handler():
     scores = await indexer.find_matches_for_request(test_token, lora_id)
     assert not scores.scores
 
+    event_publisher.shutdown()
+
 
 # KV events
 class DynamoResult:
@@ -95,18 +103,21 @@ class DynamoResult:
 
 
 class EventPublisher:
-    def __init__(self, namespace: str, component: str, worker_id: int):
+    def __init__(
+        self, namespace: str, component: str, worker_id: int, kv_block_size: int
+    ):
         self.event_id_counter = 0
         self.block_ids: List[int] = []
 
         # load event publisher library
         self.lib = ctypes.CDLL(os.environ["VLLM_KV_CAPI_PATH"])
-        self.lib.dynamo_llm_init.argtypes = [c_char_p, c_char_p, c_int64]
+        self.lib.dynamo_llm_init.argtypes = [c_char_p, c_char_p, c_int64, c_uint32]
         self.lib.dynamo_llm_init.restype = c_uint32
         result = self.lib.dynamo_llm_init(
-            namespace.encode(), component.encode(), worker_id
+            namespace.encode(), component.encode(), worker_id, kv_block_size
         )
         assert result == DynamoResult.OK
+
         self.lib.dynamo_kv_event_publish_stored.argtypes = [
             ctypes.c_uint64,  # event_id
             ctypes.POINTER(ctypes.c_uint32),  # token_ids
@@ -159,16 +170,15 @@ class EventPublisher:
 
         assert result == DynamoResult.OK
 
+    def shutdown(self):
+        result = self.lib.dynamo_llm_shutdown()
+        assert result == DynamoResult.OK
 
-async def test_metrics_aggregator():
-    global runtime
-    if runtime is None:
-        loop = asyncio.get_running_loop()
-        runtime = DistributedRuntime(loop)
 
+async def test_metrics_aggregator(distributed_runtime):
     namespace = "kv_test"
     component = "metrics"
-    kv_listener = runtime.namespace(namespace).component(component)
+    kv_listener = distributed_runtime.namespace(namespace).component(component)
     await kv_listener.create_service()
 
     # aggregator
@@ -183,10 +193,13 @@ async def test_metrics_aggregator():
         "request_total_slots": 1024,
         "kv_active_blocks": 523,
         "kv_total_blocks": 777,
+        "num_requests_waiting": 10,
+        "gpu_cache_usage_perc": 0.5,
+        "gpu_prefix_cache_hit_rate": 0.75,
     }
 
-    # need 'create_taskk' to put publisher task in the background
-    asyncio.create_task(metrics_publisher(kv_listener, expected_metrics))
+    # need 'create_task' to put publisher task in the background
+    asyncio.create_task(metrics_publisher_task(kv_listener, expected_metrics))
 
     # needs time for publisher to spawn up
     for i in range(10):
@@ -205,12 +218,15 @@ async def test_metrics_aggregator():
         assert endpoint.kv_total_blocks == expected_metrics["kv_total_blocks"]
 
 
-async def metrics_publisher(kv_listener, expected_metrics):
+async def metrics_publisher_task(kv_listener, expected_metrics):
     metrics_publisher = KvMetricsPublisher()
     metrics_publisher.publish(
         expected_metrics["request_active_slots"],
         expected_metrics["request_total_slots"],
         expected_metrics["kv_active_blocks"],
         expected_metrics["kv_total_blocks"],
+        expected_metrics["num_requests_waiting"],
+        expected_metrics["gpu_cache_usage_perc"],
+        expected_metrics["gpu_prefix_cache_hit_rate"],
     )
     await metrics_publisher.create_endpoint(kv_listener)

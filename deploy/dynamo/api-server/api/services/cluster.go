@@ -22,9 +22,9 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/common/consts"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/database"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/models"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/consts"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/database"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/models"
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/rs/zerolog/log"

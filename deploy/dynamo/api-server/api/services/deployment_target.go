@@ -21,10 +21,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/common/consts"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/database"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/models"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/consts"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/database"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/models"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
 	"github.com/rs/zerolog/log"
 	"gorm.io/gorm"
 )
@@ -34,12 +34,12 @@ type deploymentTargetService struct{}
 var DeploymentTargetService = deploymentTargetService{}
 
 type CreateDeploymentTargetOption struct {
-	CreatorId             string
-	DeploymentId          uint
-	DeploymentRevisionId  uint
-	DynamoNimVersionId  string
-	DynamoNimVersionTag string
-	Config                *schemas.DeploymentTargetConfig
+	CreatorId            string
+	DeploymentId         uint
+	DeploymentRevisionId uint
+	DynamoNimVersionId   string
+	DynamoNimVersionTag  string
+	Config               *schemas.DeploymentTargetConfig
 }
 
 type UpdateDeploymentTargetOption struct {
@@ -190,10 +190,9 @@ func (s *deploymentTargetService) Update(ctx context.Context, b *models.Deployme
 }
 
 func (s *deploymentTargetService) Deploy(ctx context.Context, deploymentTarget *models.DeploymentTarget, deployOption *models.DeployOption, ownership *schemas.OwnershipSchema) (*models.DeploymentTarget, error) {
-
 	err := s.getDB(ctx).Where("id = ?", deploymentTarget.ID).Save(deploymentTarget).Error
 	if err != nil {
-		deleteErr := DeploymentManagementService.Delete(ctx, deploymentTarget)
+		deleteErr := s.deleteDeploymentTarget(ctx, deploymentTarget)
 		if deleteErr != nil {
 			log.Error().Msg("Failed to clean up kube resources for erroneous deployment")
 		}
@@ -206,13 +205,19 @@ func (s *deploymentTargetService) Deploy(ctx context.Context, deploymentTarget *
 }
 
 func (s *deploymentTargetService) Terminate(ctx context.Context, deploymentTarget *models.DeploymentTarget) (*models.DeploymentTarget, error) {
-	err := DeploymentManagementService.Delete(ctx, deploymentTarget)
+	err := s.deleteDeploymentTarget(ctx, deploymentTarget)
 	if err != nil {
 		log.Error().Msgf("Failed to terminate kube resources for deployment target %s\n", deploymentTarget.DynamoNimVersionTag)
 		return nil, err
 	}
 
 	return deploymentTarget, nil
+}
+
+func (s *deploymentTargetService) deleteDeploymentTarget(ctx context.Context, deploymentTarget *models.DeploymentTarget) error {
+	log.Info().Msgf("Deleting deployment target: %+v", deploymentTarget.DynamoNimVersionTag)
+	err := s.getDB(ctx).Where("id = ?", deploymentTarget.ID).Delete(deploymentTarget).Error
+	return err
 }
 
 func (s *deploymentTargetService) getDB(ctx context.Context) *gorm.DB {

@@ -22,9 +22,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/database"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/database"
 	"github.com/joho/godotenv"
 	"github.com/rs/zerolog/log"
+	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 )

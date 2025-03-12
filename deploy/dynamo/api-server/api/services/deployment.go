@@ -23,10 +23,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/common/consts"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/database"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/models"
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/consts"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/database"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/models"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
@@ -61,18 +61,18 @@ type UpdateDeploymentStatusOption struct {
 
 type ListDeploymentOption struct {
 	BaseListOption
-	ClusterId             *uint
-	CreatorId             *string
-	LastUpdaterId         *uint
-	OrganizationId        *string
-	ClusterIds            *[]string
-	CreatorIds            *[]uint
-	LastUpdaterIds        *[]uint
-	OrganizationIds       *[]string
-	Ids                   *[]uint
+	ClusterId           *uint
+	CreatorId           *string
+	LastUpdaterId       *uint
+	OrganizationId      *string
+	ClusterIds          *[]string
+	CreatorIds          *[]uint
+	LastUpdaterIds      *[]uint
+	OrganizationIds     *[]string
+	Ids                 *[]uint
 	DynamoNimVersionIds *[]uint
-	Statuses              *[]schemas.DeploymentStatus
-	Order                 *string
+	Statuses            *[]schemas.DeploymentStatus
+	Order               *string
 	DynamoNimName       *string
 	DynamoNimTag        *string
 }

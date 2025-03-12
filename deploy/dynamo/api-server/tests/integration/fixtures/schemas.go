@@ -17,7 +17,7 @@
 
 package fixtures
 
-import "github.com/dynemo-ai/dynemo/deploy/dynamo/api-server/api/schemas"
+import "github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
 
 func DefaultCreateClusterSchema() schemas.CreateClusterSchema {
 	return schemas.CreateClusterSchema{
@@ -69,8 +69,8 @@ func DefaultUpdateDeploymentSchema() schemas.UpdateDeploymentSchema {
 func DefaultCreateDeploymentTargetSchema() *schemas.CreateDeploymentTargetSchema {
 	return &schemas.CreateDeploymentTargetSchema{
 		DynamoNim: "default-dynamo-nim",
-		Version:     "default-version",
-		Config:      DefaultDeploymentTargetConfig(),
+		Version:   "default-version",
+		Config:    DefaultDeploymentTargetConfig(),
 	}
 }
 

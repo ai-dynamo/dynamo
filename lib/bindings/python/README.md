@@ -83,14 +83,14 @@ each time.
 
 # Performance
 
-The performance impacts of synchrononizing the Python and Rust async runtimes
+The performance impacts of synchronizing the Python and Rust async runtimes
 is a critical consideration when optimizing the performance of a highly
 concurrent and parallel distributed system.
 
 The Python GIL is a global critical section and is ultimately the death of
 parallelism. To compound that, when Rust async futures become ready,
 accessing the GIL on those async event loop needs to be considered carefully.
-Under high load, accessing the GIL or performing CPU intenstive tasks on
+Under high load, accessing the GIL or performing CPU intensive tasks on
 on the event loop threads can starve out other async tasks for CPU resources.
 However, performing a `tokio::task::spawn_blocking` is not without overheads
 as well.

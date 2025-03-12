@@ -18,8 +18,16 @@
 package env
 
 import (
+	"sync"
+
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/utils"
 	"github.com/joho/godotenv"
 	"github.com/rs/zerolog/log"
+)
+
+var (
+	BackendUrl string
+	once       sync.Once
 )
 
 func SetupEnv() {
@@ -32,9 +40,17 @@ func SetupEnv() {
 	if err != nil {
 		log.Fatal().Msgf("Failed to set resource scope during env setup %s", err.Error())
 	}
+}
 
-	_, err = SetNdsHost()
-	if err != nil {
-		log.Fatal().Msgf("Failed to set nds urls during env setup %s", err.Error())
-	}
+func GetBackendUrl() string {
+	// Gets the backend URL from the API_BACKEND_URL environment variable set in the Python script
+	once.Do(func() { // cache and reuse
+		var err error
+		BackendUrl, err = utils.MustGetEnv("API_BACKEND_URL")
+		if err != nil {
+			log.Fatal().Msgf("Failed to get backend URL: %v", err)
+		}
+	})
+
+	return BackendUrl
 }

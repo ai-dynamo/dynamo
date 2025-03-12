@@ -18,13 +18,13 @@
 package v1alpha1
 
 import (
-	dynamoCommon "github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/common"
+	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
-	DynamoDeploymentConditionTypeAvailable                 = "Available"
+	DynamoDeploymentConditionTypeAvailable             = "Available"
 	DynamoDeploymentConditionTypeDynamoNimFound        = "DynamoNimFound"
 	DynamoDeploymentConditionTypeDynamoNimRequestFound = "DynamoNimRequestFound"
 )
@@ -45,7 +45,7 @@ type DynamoNimDeploymentSpec struct {
 	// contains the name of the service
 	ServiceName string `json:"serviceName,omitempty"`
 
-	Resources        *dynamoCommon.Resources `json:"resources,omitempty"`
+	Resources        *dynamoCommon.Resources    `json:"resources,omitempty"`
 	Autoscaling      *Autoscaling               `json:"autoscaling,omitempty"`
 	Envs             []corev1.EnvVar            `json:"envs,omitempty"`
 	EnvFromSecret    *string                    `json:"envFromSecret,omitempty"`

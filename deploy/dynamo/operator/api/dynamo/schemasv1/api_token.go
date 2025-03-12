@@ -20,7 +20,7 @@ package schemasv1
 import (
 	"time"
 
-	"github.com/dynemo-ai/dynemo/deploy/dynamo/operator/api/dynamo/modelschemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/modelschemas"
 )
 
 type ApiTokenSchema struct {
