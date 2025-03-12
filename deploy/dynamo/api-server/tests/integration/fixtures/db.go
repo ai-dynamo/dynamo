@@ -25,42 +25,42 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/services"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
 )
 
-type MockDMSServer struct {
+type MockDbServer struct {
 	server *httptest.Server
 	throws *bool
 }
 
-func (s *MockDMSServer) Close() {
+func (s *MockDbServer) Close() {
 	s.server.Close()
 }
 
-func (s *MockDMSServer) Throws(throws bool) {
+func (s *MockDbServer) Throws(throws bool) {
 	s.throws = &throws
 }
 
-func CreateMockDMSServer(t *testing.T) *MockDMSServer {
+func CreateMockDbServer(t *testing.T) *MockDbServer {
 	throws := false
-	mockServer := MockDMSServer{}
+	mockServer := MockDbServer{}
 	mockServer.throws = &throws
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if *mockServer.throws {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		response := services.DMSCreateResponse{
-			Id: "abc123",
-			Status: services.DMSResponseStatus{
-				Status:  "success",
-				Message: "DMS resource created successfully",
+		urlParts := strings.Split(r.URL.String(), "/")
+		n := len(urlParts)
+
+		response := schemas.DynamoNimVersionSchema{
+			ResourceSchema: schemas.ResourceSchema{
+				BaseSchema: schemas.BaseSchema{
+					Uid: "123456",
+				},
+				Name: "mock-from-db",
 			},
-			Configuration: map[string]string{
-				"setting1": "value1",
-				"setting2": "value2",
-				"setting3": "value3",
-			},
+			Version: urlParts[n-1],
 		}
 
 		jsonResponse, err := json.Marshal(response)
@@ -72,9 +72,7 @@ func CreateMockDMSServer(t *testing.T) *MockDMSServer {
 		w.Write(jsonResponse)
 	}))
 
-	idx := strings.LastIndex(server.URL, ":")
-	os.Setenv("DMS_HOST", "localhost")
-	os.Setenv("DMS_PORT", server.URL[idx+1:])
+	os.Setenv("API_DATABASE_URL", server.URL)
 
 	mockServer.server = server
 	return &mockServer

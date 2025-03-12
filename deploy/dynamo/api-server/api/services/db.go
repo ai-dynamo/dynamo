@@ -29,23 +29,21 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-type datastoreService struct{}
+type backendService struct{}
 
-var DatastoreService = datastoreService{}
+var BackendService = backendService{}
 
 /**
-	This service connects to the Nemo Datastore Microservice
-
-	Note: We should not do any write requests via this service as transactionality is not guaranteed in this way
+	 This service connects to the postgresql database
 **/
 
-func (s *datastoreService) GetDynamoNimVersion(ctx context.Context, dynamoNim string, dynamoNimVersion string) (*schemas.DynamoNimVersionFullSchema, error) {
-	ndsUrl := env.GetNdsUrl()
-	getUrl := fmt.Sprintf("%s/api/v1/bento_repositories/%s/bentos/%s", ndsUrl, dynamoNim, dynamoNimVersion)
+func (s *backendService) GetDynamoNimVersion(ctx context.Context, dynamoNim string, dynamoNimVersion string) (*schemas.DynamoNimVersionFullSchema, error) {
+	backendUrl := env.GetBackendUrl()
+	getUrl := fmt.Sprintf("%s/api/v1/dynamo_nims/%s/versions/%s", backendUrl, dynamoNim, dynamoNimVersion)
 
 	_, body, err := client.SendRequestJSON(getUrl, http.MethodGet, nil)
 	if err != nil {
-		log.Error().Msgf("Failed to get Dynamo NIM version %s:%s from %s", dynamoNim, dynamoNimVersion, ndsUrl)
+		log.Error().Msgf("Failed to get Dynamo NIM version %s:%s from database", dynamoNim, dynamoNimVersion)
 		return nil, err
 	}
 
