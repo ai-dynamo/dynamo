@@ -356,4 +356,5 @@ The default delay is 10ms, which produces approximately 100 tokens per second.
 
 The input defaults to `in=text`.
 
-The output will default to whatever engine you have complied in (so depending on `--features`).
+The output will default to whatever engine you have compiled in (so depending on `--features`). If all features
+are enabled at build time, then the default is currently `out=vllm`.
