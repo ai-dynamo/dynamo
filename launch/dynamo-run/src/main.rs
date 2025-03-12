@@ -31,8 +31,6 @@ Example:
 
 "#;
 
-const DEFAULT_IN: Input = Input::Text;
-
 const ZMQ_SOCKET_PREFIX: &str = "dyn";
 
 const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|none] out=[mistralrs|sglang|llamacpp|vllm|trtllm|echo_full|echo_core|pystr:<engine.py>|pytok:<engine.py>] [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0]";
@@ -153,7 +151,7 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
             non_flag_params += 1;
             x
         }
-        None => DEFAULT_IN,
+        None => Input::default(),
     };
     let out_opt = match out_opt {
         Some(x) => {
@@ -162,7 +160,7 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
         }
         None => {
             let default_engine = Output::default(); // smart default based on feature flags
-            tracing::info!("Using engine: {default_engine}");
+            tracing::debug!("Using engine: {default_engine}");
             default_engine
         }
     };

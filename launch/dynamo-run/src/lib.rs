@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io::Read;
 #[cfg(any(feature = "vllm", feature = "sglang"))]
 use std::{future::Future, pin::Pin};
 
@@ -387,7 +388,19 @@ pub async fn run(
             crate::input::http::run(runtime.clone(), flags.http_port, engine_config).await?;
         }
         Input::Text => {
-            crate::input::text::run(runtime.clone(), cancel_token.clone(), engine_config).await?;
+            crate::input::text::run(runtime.clone(), cancel_token.clone(), None, engine_config)
+                .await?;
+        }
+        Input::Stdin => {
+            let mut prompt = String::new();
+            std::io::stdin().read_to_string(&mut prompt).unwrap();
+            crate::input::text::run(
+                runtime.clone(),
+                cancel_token.clone(),
+                Some(prompt),
+                engine_config,
+            )
+            .await?;
         }
         Input::Endpoint(path) => {
             crate::input::endpoint::run(runtime.clone(), path, engine_config).await?;

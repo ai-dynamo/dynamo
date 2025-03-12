@@ -27,7 +27,7 @@ pub async fn from_hf(name: &Path) -> anyhow::Result<PathBuf> {
     let info = repo.info().await?;
     let mut p = PathBuf::new();
     for sib in info.siblings {
-        if IGNORED.contains(&sib.rfilename.as_str()) {
+        if IGNORED.contains(&sib.rfilename.as_str()) || is_image(&sib.rfilename) {
             continue;
         }
         p = repo.get(&sib.rfilename).await?;
@@ -36,4 +36,8 @@ pub async fn from_hf(name: &Path) -> anyhow::Result<PathBuf> {
         Some(p) => Ok(p.to_path_buf()),
         None => Err(anyhow::anyhow!("Invalid HF cache path: {}", p.display())),
     }
+}
+
+fn is_image(s: &str) -> bool {
+    s.ends_with(".png") || s.ends_with("PNG") || s.ends_with(".jpg") || s.ends_with("JPG")
 }

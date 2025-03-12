@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
+use std::{fmt, io::IsTerminal as _};
 
 use crate::ENDPOINT_SCHEME;
 
@@ -22,7 +22,10 @@ pub enum Input {
     /// Run an OpenAI compatible HTTP server
     Http,
 
-    /// Read prompt from stdin
+    /// Single prompt on stdin
+    Stdin,
+
+    /// Interactive chat
     Text,
 
     /// Pull requests from a namespace/component/endpoint path.
@@ -41,6 +44,7 @@ impl TryFrom<&str> for Input {
         match s {
             "http" => Ok(Input::Http),
             "text" => Ok(Input::Text),
+            "stdin" => Ok(Input::Stdin),
             "none" => Ok(Input::None),
             endpoint_path if endpoint_path.starts_with(ENDPOINT_SCHEME) => {
                 let path = endpoint_path.strip_prefix(ENDPOINT_SCHEME).unwrap();
@@ -56,10 +60,21 @@ impl fmt::Display for Input {
         let s = match self {
             Input::Http => "http",
             Input::Text => "text",
+            Input::Stdin => "stdin",
             Input::Endpoint(path) => path,
             Input::None => "none",
         };
         write!(f, "{s}")
+    }
+}
+
+impl Default for Input {
+    fn default() -> Self {
+        if std::io::stdin().is_terminal() {
+            Input::Text
+        } else {
+            Input::Stdin
+        }
     }
 }
 
