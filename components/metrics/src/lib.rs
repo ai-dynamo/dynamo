@@ -16,50 +16,51 @@
 //! Library functions for the metrics application.
 //!
 //! This library provides functionality to expose Prometheus metrics either through a local HTTP server
-//! or by pushing to a Prometheus Pushgateway.
+//! or by pushing to a Prometheus PushGateway.
 //!
 //! # Examples
 //!
-//! ## Using the metrics server mode
+//! ## Using the metrics pull mode
 //! ```no_run
-//! use metrics::{PrometheusMetricsServer, MetricsMode};
+//! use metrics::{PrometheusMetricsCollector, MetricsMode};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let mut server = PrometheusMetricsServer::new()?;
+//!     let mut collector = PrometheusMetricsCollector::new()?;
 //!
-//!     // Start the metrics server on port 9090
-//!     server.start(MetricsMode::Server { port: 9090 })?;
+//!     // Start a metrics server on port 9091
+//!     collector.start(MetricsMode::Pull { port: 9091 })?;
 //!
 //!     // Your application code here
 //!     tokio::signal::ctrl_c().await?;
 //!
 //!     // Stop the metrics server gracefully
-//!     server.stop();
+//!     collector.stop();
 //!     Ok(())
 //! }
 //! ```
 //!
-//! ## Using the Pushgateway mode
+//! ## Using the Push mode
 //! ```no_run
-//! use metrics::{PrometheusMetricsServer, MetricsMode};
+//! use metrics::{PrometheusMetricsCollector, MetricsMode};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let mut server = PrometheusMetricsServer::new()?;
+//!     let mut collector = PrometheusMetricsCollector::new()?;
 //!
-//!     // Start pushing metrics to a Pushgateway
-//!     server.start(MetricsMode::Pushgateway {
-//!         url: "http://localhost:9091".to_string(),
-//!         job: "my_metrics_job".to_string(),
-//!         interval: 15, // Push every 15 seconds
+//!     // Start pushing metrics to a Prometheus PushGateway
+//!     collector.start(MetricsMode::Push {
+//!         host: "http://localhost".to_string(),
+//!         port: 9091,
+//!         job: "dynamo_metrics".to_string(),
+//!         interval: 2, // Push every 2 seconds
 //!     })?;
 //!
 //!     // Your application code here
 //!     tokio::signal::ctrl_c().await?;
 //!
 //!     // Stop pushing metrics gracefully
-//!     server.stop();
+//!     collector.stop();
 //!     Ok(())
 //! }
 
@@ -79,15 +80,19 @@ use dynamo_runtime::{distributed::Component, service::EndpointInfo, utils::Durat
 /// Configuration for metrics collection mode
 #[derive(Debug, Clone)]
 pub enum MetricsMode {
-    /// Host a Prometheus metrics server
-    Server {
-        /// Port to listen on
+    /// Host a Prometheus metrics server for pull-based collection
+    Pull {
+        /// Host to listen on (e.g. "0.0.0.0")
+        host: String,
+        /// Port to listen on (e.g. 9091)
         port: u16,
     },
-    /// Push to a Prometheus Pushgateway
-    Pushgateway {
-        /// Pushgateway URL (e.g. "http://localhost:9091")
-        url: String,
+    /// Push to a Prometheus PushGateway
+    Push {
+        /// PushGateway host (e.g. "http://localhost")
+        host: String,
+        /// PushGateway port (e.g. 9091)
+        port: u16,
         /// Job name for the metrics
         job: String,
         /// Push interval in seconds
@@ -120,15 +125,14 @@ pub struct StatsWithData {
     pub data: serde_json::Value,
 }
 
-/// Prometheus metrics server for exposing metrics
-pub struct PrometheusMetricsServer {
+/// Metrics collector for exposing metrics to prometheus/grafana
+pub struct PrometheusMetricsCollector {
     metrics: PrometheusMetrics,
     mode: Option<MetricsMode>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
-impl PrometheusMetricsServer {
-    /// Initialize the metrics server
+impl PrometheusMetricsCollector {
     pub fn new() -> Result<Self> {
         Ok(Self {
             metrics: PrometheusMetrics::new()?,
@@ -143,10 +147,13 @@ impl PrometheusMetricsServer {
         self.mode = Some(mode.clone());
 
         match mode {
-            MetricsMode::Server { port } => self.start_server(port),
-            MetricsMode::Pushgateway { url, job, interval } => {
-                self.start_pushgateway(url, job, interval)
-            }
+            MetricsMode::Pull { host, port } => self.start_pull_mode(host, port),
+            MetricsMode::Push {
+                host,
+                port,
+                job,
+                interval,
+            } => self.start_push_mode(host, port, job, interval),
         }
     }
 
@@ -157,8 +164,8 @@ impl PrometheusMetricsServer {
         }
     }
 
-    /// Start the metrics server on the specified port
-    fn start_server(&mut self, port: u16) -> Result<()> {
+    /// Start a metrics server for pull-based collection on the specified port
+    fn start_pull_mode(&mut self, host: String, port: u16) -> Result<()> {
         // Create an axum router with a metrics endpoint
         let app = Router::new().route(
             "/metrics",
@@ -172,7 +179,9 @@ impl PrometheusMetricsServer {
         );
 
         // Create a socket address to listen on
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        //let ip_addr = host.parse().unwrap_or_else(|_| "0.0.0.0".parse().unwrap());
+        let ip_addr = host.parse().unwrap();
+        let addr = SocketAddr::new(ip_addr, port);
 
         // Create shutdown channel
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -198,15 +207,22 @@ impl PrometheusMetricsServer {
         Ok(())
     }
 
-    /// Start pushing metrics to a Prometheus Pushgateway
-    fn start_pushgateway(&mut self, url: String, job: String, interval: u64) -> Result<()> {
+    /// Start pushing metrics to a Prometheus PushGateway
+    fn start_push_mode(
+        &mut self,
+        host: String,
+        port: u16,
+        job: String,
+        interval: u64,
+    ) -> Result<()> {
         // Create shutdown channel
         let (tx, mut rx) = tokio::sync::oneshot::channel();
         self.shutdown_tx = Some(tx);
 
         // Create HTTP client
         let client = Client::new();
-        let push_url = format!("{}/metrics/job/{}", url.trim_end_matches('/'), job);
+        let url = format!("http://{host}:{port}/metrics/job/{job}");
+        let url_clone = url.clone();
         let interval_duration = StdDuration::from_secs(interval);
 
         // Spawn background task to periodically push metrics
@@ -225,7 +241,7 @@ impl PrometheusMetricsServer {
                         }
 
                         // Push metrics to the gateway
-                        match client.post(&push_url)
+                        match client.post(&url)
                             .header("Content-Type", encoder.format_type())
                             .body(buffer)
                             .send()
@@ -233,17 +249,17 @@ impl PrometheusMetricsServer {
                         {
                             Ok(response) => {
                                 if response.status().is_success() {
-                                    tracing::debug!("Successfully pushed metrics to Pushgateway");
+                                    tracing::debug!("Successfully pushed metrics to PushGateway");
                                 } else {
                                     tracing::error!(
-                                        "Failed to push metrics to Pushgateway. Status: {}, Error: {:?}",
+                                        "Failed to push metrics to PushGateway. Status: {}, Error: {:?}",
                                         response.status(),
                                         response.text().await
                                     );
                                 }
                             }
                             Err(e) => {
-                                tracing::error!("Failed to push metrics to Pushgateway: {}", e);
+                                tracing::error!("Failed to push metrics to PushGateway: {}", e);
                             }
                         }
                     }
@@ -255,7 +271,9 @@ impl PrometheusMetricsServer {
             }
         });
 
-        tracing::info!("Started pushing metrics to Pushgateway at {url} with job name '{job}'");
+        tracing::info!(
+            "Started pushing metrics to PushGateway at '{url_clone}' with job name '{job}'"
+        );
         Ok(())
     }
 

@@ -12,7 +12,7 @@ This will:
 For example:
 ```bash
 # For more details, try DYN_LOG=debug
-DYN_LOG=info cargo run --bin metrics -- --namespace dynamo --component backend --endpoint generate
+DYN_LOG=info metrics --namespace dynamo --component backend --endpoint generate
 
 # 2025-02-26T18:45:05.467026Z  INFO metrics: Creating unique instance of Metrics at dynamo/components/metrics/instance
 # 2025-02-26T18:45:05.472146Z  INFO metrics: Scraping service dynamo_backend_720278f8 and filtering on subject dynamo_backend_720278f8.generate
@@ -27,23 +27,39 @@ With no matching endpoints running to collect stats from, you should see warning
 After a matching endpoint gets started, you should see the warnings stop
 when the endpoint gets automatically discovered.
 
-## Metrics Collection Modes
+## Building/Running from Source
 
-The metrics component supports two modes for exposing metrics:
-
-### Server Mode (Default)
-
-When running in server mode, the metrics component will expose a Prometheus metrics endpoint on the specified port (default: 9091):
+For easy iteration while making edits to the metrics component, you can use `cargo run`
+to build and run with your local changes:
 
 ```bash
-# Start metrics server on port 9091 (default)
-DYN_LOG=info cargo run --bin metrics -- --component backend --endpoint generate
-
-# Or specify a custom port
-DYN_LOG=info cargo run --bin metrics -- --component backend --endpoint generate --metrics-port 9092
+DYN_LOG=info cargo run --bin metrics -- --namespace dynamo --component backend --endpoint generate
 ```
 
-You can then scrape the metrics using:
+## Metrics Collection Modes
+
+The metrics component supports two modes for exposing metrics in a Prometheus format:
+
+### Pull Mode (Default)
+
+When running in pull mode (the default), the metrics component will expose a Prometheus metrics endpoint on the specified host and port that a Prometheus server or curl client can pull from:
+
+```bash
+# Start metrics server on default host (0.0.0.0) and port (9091)
+DYN_LOG=info metrics --component backend --endpoint generate
+
+# Or specify a custom port
+DYN_LOG=info metrics --component backend --endpoint generate --port 9092
+
+# Or specify a custom host and port
+DYN_LOG=info metrics --component backend --endpoint generate --host 127.0.0.1 --port 9092
+```
+
+In pull mode:
+- The `--host` parameter must be a valid IPv4 or IPv6 address (e.g., "0.0.0.0", "127.0.0.1")
+- The `--port` parameter specifies which port the HTTP server will listen on
+
+You can then query the metrics using:
 ```bash
 curl localhost:9091/metrics
 
@@ -57,37 +73,38 @@ curl localhost:9091/metrics
 # llm_kv_blocks_total{component="backend",endpoint="generate",worker_id="7587884888253033401"} 100
 ```
 
-### Pushgateway Mode
+### Push Mode
 
-For ephemeral or batch jobs, or when metrics need to be pushed through a firewall, you can use Pushgateway mode. In this mode, the metrics component will periodically push metrics to a Prometheus Pushgateway:
+For ephemeral or batch jobs, or when metrics need to be pushed through a firewall, you can use Push mode. In this mode, the metrics component will periodically push metrics to an externally hosted Prometheus PushGateway:
 
 Start a prometheus push gateway service via docker:
 ```bash
 docker run --rm -d -p 9091:9091 --name pushgateway prom/pushgateway
 ```
 
-Start the metrics component in `--push` mode, pointing at the URL for the
-prometheus push gateway service that's been started:
+Start the metrics component in `--push` mode, specifying the host and port of your PushGateway:
 ```bash
-# Push metrics to a Prometheus Pushgateway every 2 seconds
-DYN_LOG=info cargo run --bin metrics -- \
+# Push metrics to a Prometheus PushGateway every --push-interval seconds
+DYN_LOG=info metrics \
     --component backend \
     --endpoint generate \
-    --push \
-    --push-url http://localhost:9091 \
-    --push-interval 2
+    --host 127.0.0.1 \
+    --port 9091 \
+    --push
 ```
 
-When using Pushgateway mode:
-- Metrics are pushed to the specified URL with the job label
-- The push interval can be configured (default: 15 seconds)
-- Metrics persist in the Pushgateway until explicitly deleted
-- Prometheus should be configured to scrape the Pushgateway with `honor_labels: true`
+When using Push mode:
+- The `--host` parameter specifies be the IP address of the PushGateway
+- The `--port` parameter specifies the port of the PushGateway
+- The push interval can be configured with `--push-interval` (default: 2 seconds)
+- Metrics persist in the PushGateway until explicitly deleted
+- Prometheus should be configured to scrape the PushGateway with `honor_labels: true`
 
-To view the metrics in the Pushgateway:
+To view the metrics hosted on the PushGateway:
 ```bash
 # View all metrics
-curl http://localhost:9091/metrics
+# curl http://<pushgateway_ip>:<pushgateway_port>/metrics
+curl 127.0.0.1:9091/metrics
 ```
 
 ## Workers
@@ -113,5 +130,5 @@ Start the `metrics` component with the corresponding namespace/component/endpoin
 KV Routing example is using (NOTE: `load_metrics` endpoint is currently a hard-coded value
 internally for the ForwardPassMetrics StatsHandler), for example:
 ```
-DYN_LOG=info cargo run --bin metrics -- --namespace dynamo --component vllm --endpoint load_metrics
+DYN_LOG=info metrics --namespace dynamo --component vllm --endpoint load_metrics
 ```
