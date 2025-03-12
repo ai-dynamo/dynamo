@@ -94,9 +94,10 @@ async fn new_engine(
     tokio::task::spawn_blocking(move || run_asyncio(tx));
     let event_loop = rx.await?;
 
-    let user_module = python_file_to_module(py_file, py_args.clone())
-        .with_context(|| py_file.display().to_string())?;
+    let user_module =
+        python_file_to_module(py_file, py_args).with_context(|| py_file.display().to_string())?;
     let generator = Python::with_gil(|py| {
+        /* Leave commented, `initialize` may be needed to match Triton
         if let Ok(initialize) = user_module.getattr(py, "initialize") {
             initialize
                 .call1(py, (py_args,))
@@ -106,6 +107,7 @@ async fn new_engine(
                 })
                 .with_context(|| "Failed calling python engine's initialize(args)")?;
         };
+        */
         user_module
             .getattr(py, "generate")
             .with_context(|| "generate")

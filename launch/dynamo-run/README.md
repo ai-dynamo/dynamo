@@ -216,17 +216,14 @@ Command line arguments are passed to the python engine like this:
 dynamo-run out=pystr:my_python_engine.py -- -n 42 --custom-arg Orange --yes
 ```
 
-The python engine has two options for receiving those command line arguments (both of which are optional).
-
-In both cases the argument list will include some standard ones as well as anything after the `--`.
+The python engine receives the arguments in `sys.argv`. The argument list will include some standard ones as well as anything after the `--`.
 
 This input:
 ```
 dynamo-run out=pystr:my_engine.py /opt/models/Llama-3.2-3B-Instruct/ --model-name llama_3.2 --tensor-parallel-size 4 -- -n 1
 ```
 
-1. In `sys.argv`:
-
+is read like this:
 ```
 async def generate(request):
     .. as before ..
@@ -235,31 +232,12 @@ if __name__ == "__main__":
     print(f"MAIN: {sys.argv}")
 ```
 
-Produces this output:
+and produces this output:
 ```
 MAIN: ['my_engine.py', '--model-path', '/opt/models/Llama-3.2-3B-Instruct/', '--model-name', 'llama3.2', '--http-port', '8080', '--tensor-parallel-size', '4', '--base-gpu-id', '0', '--num-nodes', '1', '--node-rank', '0', '-n', '1']
 ```
 
-This form allows quick iteration on the engine setup.
-
-2. In an `initialize` function:
-
-```
-async def generate(request):
-    .. as before ..
-
-def initialize(args: list[str]) -> None:
-    print(f"initialize: {args}")
-```
-
-Produces this output:
-```
-initialize: ['--model-path', '/opt/models/Llama-3.2-3B-Instruct/', '--model-name', 'llama3.2', '--http-port', '8080', '--tensor-parallel-size', '4', '--base-gpu-id', '0', '--num-nodes', '1', '--node-rank', '0', '-n', '1']
-```
-
-Note how in both cases the `-n` `1` is included.
-
-Flags `--leader-addr` and `--model-config` will also be added if provided to `dynamo-run`.
+This allows quick iteration on the engine setup. Note how the `-n` `1` is included. Flags `--leader-addr` and `--model-config` will also be added if provided to `dynamo-run`.
 
 ### Dynamo does the pre-processing
 
