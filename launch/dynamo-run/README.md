@@ -4,9 +4,20 @@
 
 ## Setup
 
-Libraries (Ubuntu):
+Libraries Ubuntu:
 ```
 apt install -y build-essential libhwloc-dev libudev-dev pkg-config libssl-dev protobuf-compiler python3-dev
+```
+
+Libraries macOS:
+```
+brew install cmake protobuf
+
+# install Xcode from App Store and check that Metal is accessible
+xcrun -sdk macosx metal
+
+# may have to install Xcode Command Line Tools:
+xcode-select --install
 ```
 
 Install Rust:
@@ -17,11 +28,14 @@ source $HOME/.cargo/env
 
 ## Build
 
-- CUDA:
+- Navidate to launch/ directory
+`cd launch`
+
+- Linux with GPU and CUDA (tested on Ubuntu):
 
 `cargo build --release --features mistralrs,cuda`
 
-- MAC w/ Metal:
+- macOS with Metal:
 
 `cargo build --release --features mistralrs,metal`
 
@@ -29,20 +43,29 @@ source $HOME/.cargo/env
 
 `cargo build --release --features mistralrs`
 
-The binary will be called `dynamo-run` in `$REPO_ROOT/launch/target/release`.
+The binary will be called `dynamo-run` in `target/release`
+```
+cd target/release
+```
 
 ## Quickstart
+### Automatically download a model from [Hugging Face](https://huggingface.co/models)
 
-If you have an `HF_TOKEN` environment variable set, this will download Qwen2.5 3B from Hugging Face (6 GiB download) and start it in interactive mode:
+You may have to have an `HF_TOKEN` environment variable set.
 ```
-dynamo-run Qwen/Qwen2.5-3B-Instruct
+./dynamo-run <HUGGING_FACE_ORGANIZATION/MODEL_NAME>
 ```
+This will automatically download Qwen2.5 1B from Hugging Face (1 GiB download) and start it interactive text mode:
+`./dynamo-run Qwen/Qwen2.5-1B-Instruct`
 
-## Download a model from Hugging Face
+### Run a model from local file
 
-For example one of these should be fast and good quality on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
+For example one of these should be fast and good quality on almost any machine: https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF
+E.g. https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/blob/main/Llama-3.2-1B-Instruct-Q8_0.gguf
 
-## Run
+Download model file:
+`curl -L -o Llama-3.2-1B-Instruct-Q4_K_M.gguf "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf?download=true"`
+
 
 *Text interface*
 
