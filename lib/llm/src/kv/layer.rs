@@ -28,7 +28,7 @@ use derive_builder::Builder;
 use dynemo_runtime::{error, raise, utils::pool::Returnable, ErrorContext, Result};
 use std::{
     ptr::NonNull,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 use validator::{Validate, ValidationError};
 
@@ -60,6 +60,7 @@ extern "C" {
         num_block_pairs: std::os::raw::c_int,
     ) -> std::os::raw::c_int;
 
+    #[allow(unused)]
     fn copy_stream_launch(
         cs: *mut std::ffi::c_void,
         src_data: *const std::ffi::c_void,
@@ -423,7 +424,7 @@ impl KvLayer {
                 h_src_block_ids.as_ptr() as *const std::os::raw::c_int,
                 h_dst_block_ids.as_ptr() as *const std::os::raw::c_int,
                 num_block_pairs,
-                prefix_dim as i32,
+                prefix_dim,
                 src_blocks,
                 dst_blocks,
                 suffix_dim as i32,
@@ -764,15 +765,13 @@ unsafe impl Sync for CopyStream {}
 /// - a cuda stream
 /// - a cuda event
 pub struct CopyStream {
-    state: Arc<Mutex<CopyStreamContext>>,
+    state: CopyStreamContext,
 }
 
 impl CopyStream {
     pub fn new(num_layers: usize, num_blocks: usize) -> Result<Self> {
         let state = CopyStreamContext::new(num_layers, num_blocks)?;
-        Ok(Self {
-            state: Arc::new(Mutex::new(state)),
-        })
+        Ok(Self { state })
     }
 
     /// Prepare the layer pointers for the copy kernel
@@ -784,8 +783,8 @@ impl CopyStream {
     /// - dst_blocks_dim: the size of the destination blocks dimension in the layer shape
     /// - suffix_dim: the contiguous dimension below the block_dimension
     /// - elem_size: the element size in bytes
-    pub fn prepare_block_map(&self, details: Arc<CopyStreamBlockMap>) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
+    pub fn prepare_block_map(&mut self, details: Arc<CopyStreamBlockMap>) -> Result<()> {
+        let state = &mut self.state;
 
         let layer_count = details.src_layer_ptrs.len();
 
@@ -817,7 +816,7 @@ impl CopyStream {
     /// - src_block_ids: the source block ids
     /// - dst_block_ids: the destination block ids
     pub fn prepare_block_ids(
-        &self,
+        &mut self,
         src_block_ids: Vec<i32>,
         dst_block_ids: Vec<i32>,
     ) -> Result<()> {
@@ -843,7 +842,7 @@ impl CopyStream {
             }
         }
 
-        let mut state = self.state.lock().unwrap();
+        let state = &mut self.state;
 
         if state.max_num_blocks < src_block_ids.len() {
             return Err(error!(
@@ -886,8 +885,8 @@ impl CopyStream {
         Ok(())
     }
 
-    pub fn trigger_layer(&self, layer: usize) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
+    pub fn trigger_layer(&mut self, layer: usize) -> Result<()> {
+        let state = &mut self.state;
 
         if !state.staged_layers {
             return Err(error!("Layers must be loaded before triggering a layer"));
@@ -937,11 +936,10 @@ impl CopyStream {
     }
 
     pub fn layer_count(&self) -> usize {
-        let state = self.state.lock().unwrap();
-        state.layer_details.src_layer_ptrs.len()
+        self.state.layer_details.src_layer_ptrs.len()
     }
 
-    pub fn trigger_all_layers(&self) -> Result<()> {
+    pub fn trigger_all_layers(&mut self) -> Result<()> {
         let layer_count = self.layer_count();
 
         for layer in 0..layer_count {
@@ -951,8 +949,8 @@ impl CopyStream {
         Ok(())
     }
 
-    pub fn sync_stream(&self) -> Result<()> {
-        let state = self.state.lock().unwrap();
+    pub fn sync_stream(&mut self) -> Result<()> {
+        let state = &mut self.state;
         let cs = state.c_handle.as_ptr() as *mut std::ffi::c_void;
         let rc = unsafe { copy_stream_sync(cs) };
 
@@ -961,24 +959,13 @@ impl CopyStream {
         }
         Ok(())
     }
-
-    fn reuse(&self) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        state
-            .layer_doorbells
-            .iter_mut()
-            .for_each(|doorbell| *doorbell = false);
-        Ok(())
-    }
 }
 
 impl Returnable for CopyStream {
-    fn on_return(&mut self) -> () {
-        let mut state = self.state.lock().unwrap();
-
+    fn on_return(&mut self) {
         // reset the staged flags
-        state.staged_block_ids = false;
-        state.staged_layers = false;
+        self.state.staged_block_ids = false;
+        self.state.staged_layers = false;
     }
 }
 
@@ -989,6 +976,16 @@ mod tests {
     use super::*;
     use cudarc::driver::CudaContext;
     use rstest::rstest;
+
+    impl CopyStream {
+        fn reuse(&mut self) -> Result<()> {
+            self.state
+                .layer_doorbells
+                .iter_mut()
+                .for_each(|doorbell| *doorbell = false);
+            Ok(())
+        }
+    }
 
     #[rstest]
     #[test]
@@ -1160,10 +1157,8 @@ mod tests {
             let blocks = (0..32).collect::<Vec<_>>();
 
             let h_layer = h_blocks.layer(0).unwrap();
-            let mut d_layer = d_blocks.layer_mut(0).unwrap();
-            h_layer
-                .copy_blocks_to(&blocks, &mut d_layer, &blocks)
-                .unwrap();
+            let d_layer = d_blocks.layer_mut(0).unwrap();
+            h_layer.copy_blocks_to(&blocks, d_layer, &blocks).unwrap();
         }
 
         println!("Setting all values on host back to 0");
@@ -1185,11 +1180,9 @@ mod tests {
         {
             let blocks = (0..32).collect::<Vec<_>>();
 
-            let mut h_layer = h_blocks.layer_mut(0).unwrap();
+            let h_layer = h_blocks.layer_mut(0).unwrap();
             let d_layer = d_blocks.layer(0).unwrap();
-            d_layer
-                .copy_blocks_to(&blocks, &mut h_layer, &blocks)
-                .unwrap();
+            d_layer.copy_blocks_to(&blocks, h_layer, &blocks).unwrap();
         }
 
         println!("Verifying host data is 1");
@@ -1249,7 +1242,7 @@ mod tests {
         println!("Letting layer 0 on host to be 1s");
 
         let layout = h_blocks.layer(0).unwrap().layout.clone();
-        let shape = h_blocks.layer(0).unwrap().view().unwrap().shape().clone();
+        let shape = *h_blocks.layer(0).unwrap().view().unwrap().shape();
 
         println!("shape: {:?}", shape);
 
@@ -1334,10 +1327,8 @@ mod tests {
             let blocks = (0..number_of_blocks).collect::<Vec<_>>();
 
             let h_layer = h_blocks.layer(0).unwrap();
-            let mut d_layer = d_blocks.layer_mut(0).unwrap();
-            h_layer
-                .copy_blocks_to(&blocks, &mut d_layer, &blocks)
-                .unwrap();
+            let d_layer = d_blocks.layer_mut(0).unwrap();
+            h_layer.copy_blocks_to(&blocks, d_layer, &blocks).unwrap();
             stream.synchronize().unwrap();
         }
 
@@ -1363,10 +1354,10 @@ mod tests {
 
         // Copy data back to host
         {
-            let mut h_layer = h_blocks.layer_mut(0).unwrap();
+            let h_layer = h_blocks.layer_mut(0).unwrap();
             let d_layer = d_blocks.layer(0).unwrap();
             d_layer
-                .copy_blocks_to(src_blocks, &mut h_layer, dst_blocks)
+                .copy_blocks_to(src_blocks, h_layer, dst_blocks)
                 .unwrap();
             stream.synchronize().unwrap();
         }
@@ -1463,7 +1454,17 @@ mod tests {
         let mut copy_stream = CopyStream::new(number_of_layers, number_of_gpu_blocks).unwrap();
 
         // block list 0..64 as i32
-        let block_list: Vec<i32> = (0..number_of_gpu_blocks).map(|x| x as i32).collect();
+        let mut block_list: Vec<i32> = (0..number_of_gpu_blocks).map(|x| x as i32).collect();
+
+        // randomize the block list
+        use rand::seq::SliceRandom;
+        let mut rng = rand::rng();
+
+        block_list.shuffle(&mut rng);
+        let src_block_ids = block_list.clone();
+
+        block_list.shuffle(&mut rng);
+        let dst_block_ids = block_list.clone();
 
         // Select the appropriate block map based on direction
         if is_h2d {
@@ -1473,7 +1474,7 @@ mod tests {
         }
 
         copy_stream
-            .prepare_block_ids(block_list.clone(), block_list.clone())
+            .prepare_block_ids(src_block_ids, dst_block_ids)
             .unwrap();
 
         let timer = Instant::now();

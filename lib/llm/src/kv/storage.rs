@@ -37,7 +37,7 @@
 
 use cudarc::driver::{CudaContext, CudaSlice, CudaStream, DevicePtr};
 use dynemo_runtime::{error, raise, Result};
-use ndarray::{ArrayViewMut, Dimension, IxDyn, ShapeBuilder};
+use ndarray::{ArrayViewMut, IxDyn};
 use std::any::Any;
 use std::ffi::c_void;
 use std::ptr::NonNull;

@@ -100,6 +100,7 @@ regex = "1"
 # kv_cuda
 cudarc = { git = "https://github.com/coreylowman/cudarc.git", rev = "8c52e735b55bf8e979e1a16bd85e3dfe4f87c9fe", features = ["cuda-12040"], optional = true }
 ndarray = "0.16"
+rand = "0.9"
 # candle-core = { version = "0.8.3", features = ["cuda"], optional = true }
 # half = "2.4.1"
 
