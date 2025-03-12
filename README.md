@@ -23,13 +23,12 @@ limitations under the License.
 [![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
 
 
-Dynamo is a flexible, component based, data center scale
-inference serving framework designed to leverage the strengths of the
-standalone Dynamo Inference Server while expanding its capabilities
-to meet the demands of complex use cases including those of Generative
-AI. It is designed to enable developers to implement and customize
-routing, load balancing, scaling and workflow definitions at the data
-center scale without sacrificing performance or ease of use.
+Dynamo is a flexible, component based, data center scale inference
+serving framework designed to meet the demands of complex use cases
+including those of Generative AI. It is designed to enable developers
+to implement and customize routing, load balancing, scaling and
+workflow definitions at the data center scale without sacrificing
+performance or ease of use.
 
 > [!NOTE]
 > This project is currently in the alpha / experimental /
@@ -58,7 +57,10 @@ We provide 3 types of builds:
 
 For example, if you want to build a container for the `STANDARD` backends you can run
 
-`./container/build.sh`
+<!--pytest.mark.skip-->
+```bash
+./container/build.sh
+```
 
 Please see the instructions in the corresponding example for specific build instructions.
 
@@ -71,24 +73,37 @@ The run script offers a few common workflows:
 
 1. Running a command in a container and exiting.
 
-```
+<!--pytest.mark.skip-->
+```bash
 ./container/run.sh -- python3 -c "import dynamo.runtime; help(dynamo.runtime)"
 ```
+<!--
+
+# This tests the above the line but from within the container
+# using pytest-codeblocks
+
+```bash
+python3 -c "import dynamo.runtime; help(dynamo.runtime)"
+```
+-- >
 
 2. Starting an interactive shell.
-```
+
+<!--pytest.mark.skip-->
+```bash
 ./container/run.sh -it
 ```
 
 3. Mounting the local workspace and Starting an interactive shell.
 
-```
+<!--pytest.mark.skip-->
+```bash
 ./container/run.sh -it --mount-workspace
 ```
 
-The last command also passes common environment variables ( ```-e
-HF_TOKEN```) and mounts common directories such as ```/tmp:/tmp```,
-```/mnt:/mnt```.
+The last command also passes common environment variables ( `-e
+HF_TOKEN` ) and mounts common directories such as `/tmp:/tmp`,
+`/mnt:/mnt`.
 
 Please see the instructions in the corresponding example for specific
 deployment instructions.
