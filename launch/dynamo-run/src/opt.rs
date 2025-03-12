@@ -185,3 +185,36 @@ impl fmt::Display for Output {
         write!(f, "{s}")
     }
 }
+
+/// Returns the engine to use if user did not say on cmd line
+/// Uses whatever was compiled in, with a priority ordering.
+#[allow(unused_assignments, unused_mut)]
+impl Default for Output {
+    fn default() -> Self {
+        // Default if no engines
+        let mut out = Output::EchoFull;
+
+        // Runs everywhere but needs local CUDA to build
+        #[cfg(feature = "mistralrs")]
+        {
+            out = Output::MistralRs;
+        }
+
+        #[cfg(feature = "llamacpp")]
+        {
+            out = Output::LlamaCpp;
+        }
+
+        #[cfg(feature = "sglang")]
+        {
+            out = Output::SgLang;
+        }
+
+        #[cfg(feature = "vllm")]
+        {
+            out = Output::Vllm;
+        }
+
+        out
+    }
+}
