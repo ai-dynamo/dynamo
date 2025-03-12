@@ -28,20 +28,28 @@ source $HOME/.cargo/env
 
 ## Build
 
-- Navidate to launch/ directory
-`cd launch`
+Navidate to launch/ directory
+```
+cd launch/
+```
 
 - Linux with GPU and CUDA (tested on Ubuntu):
 
-`cargo build --release --features mistralrs,cuda`
+```
+cargo build --release --features mistralrs,cuda
+```
 
 - macOS with Metal:
 
-`cargo build --release --features mistralrs,metal`
+```
+cargo build --release --features mistralrs,metal
+```
 
 - CPU only:
 
-`cargo build --release --features mistralrs`
+```
+cargo build --release --features mistralrs
+```
 
 The binary will be called `dynamo-run` in `target/release`
 ```
