@@ -8,7 +8,7 @@
 Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4
 
 # Python Libraries
-*.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @nv-blazejkubiak @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4
+*.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @nv-blazejkubiak @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk
 
 # Container/Environments
 /container/ @rmccorm4 @tanmayv25 @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @nv-anants
