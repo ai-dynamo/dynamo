@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/env"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/runtime"
 )
 
@@ -48,7 +49,9 @@ func startDatabaseServer() {
 	}
 
 	// Give the database time to initialize
-	time.Sleep(2 * time.Second)
+	time.Sleep(5 * time.Second)
+	// Check the backend URL is reachable
+	_ = env.GetBackendUrl()
 
 	log.Println("Database started successfully")
 
