@@ -39,7 +39,7 @@ func startDatabaseServer() {
 	*/
 
 	// Check if the database is already running
-	cmd := exec.Command("python3", "../db/start_db.py")
+	cmd := exec.Command("python3", "db/start_db.py")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
