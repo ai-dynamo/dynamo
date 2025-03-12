@@ -48,9 +48,7 @@ use metrics::{
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Dynamo Config
-
-    /// Namespace to operate in
+    /// Namespace to operate in and subscribe to events on
     #[arg(long, env = "DYN_NAMESPACE", default_value = "dynamo")]
     namespace: String,
 
@@ -65,8 +63,6 @@ struct Args {
     /// Polling interval in seconds for scraping dynamo endpoint stats (minimum 1 second)
     #[arg(long, default_value = "2")]
     poll_interval: u64,
-
-    /// Prometheus Metrics Config
 
     /// Host for serving or pushing prometheus metrics (default: 0.0.0.0)
     #[arg(
