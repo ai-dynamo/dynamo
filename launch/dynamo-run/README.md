@@ -4,9 +4,20 @@
 
 ## Setup
 
-Libraries (Ubuntu):
+Libraries Ubuntu:
 ```
-apt install -y build-essential libhwloc-dev libudev-dev pkg-config libssl-dev protobuf-compiler python3-dev
+apt install -y build-essential libhwloc-dev libudev-dev pkg-config libssl-dev libclang-dev protobuf-compiler python3-dev
+```
+
+Libraries macOS:
+```
+brew install cmake protobuf
+
+# install Xcode from App Store and check that Metal is accessible
+xcrun -sdk macosx metal
+
+# may have to install Xcode Command Line Tools:
+xcode-select --install
 ```
 
 Install Rust:
@@ -17,48 +28,79 @@ source $HOME/.cargo/env
 
 ## Build
 
-- CUDA:
+Navidate to launch/ directory
+```
+cd launch/
+```
+Optionally can run `cargo build` from any location with arguments:
+* `--target-dir /path/to/target_directory` specify target_directory with write privileges
+* `--manifest-path /path/to/project/Cargo.toml` if cargo build is run outside of `launch/` directory
 
-`cargo build --release --features mistralrs,cuda`
+- Linux with GPU and CUDA (tested on Ubuntu):
 
-- MAC w/ Metal:
+```
+cargo build --release --features mistralrs,cuda
+```
 
-`cargo build --release --features mistralrs,metal`
+- macOS with Metal:
+
+```
+cargo build --release --features mistralrs,metal
+```
 
 - CPU only:
 
-`cargo build --release --features mistralrs`
+```
+cargo build --release --features mistralrs
+```
 
-The binary will be called `dynamo-run` in `$REPO_ROOT/launch/target/release`.
+The binary will be called `dynamo-run` in `target/release`
+```
+cd target/release
+```
 
 ## Quickstart
+### Automatically download a model from [Hugging Face](https://huggingface.co/models)
+NOTE: for gated models (e.g. meta-llama/Llama-3.2-3B-Instruct) you have to have an `HF_TOKEN` environment variable set.
 
-If you have an `HF_TOKEN` environment variable set, this will download Qwen2.5 3B from Hugging Face (6 GiB download) and start it in interactive mode:
 ```
-dynamo-run Qwen/Qwen2.5-3B-Instruct
+./dynamo-run <HUGGING_FACE_ORGANIZATION/MODEL_NAME>
 ```
+This will automatically download Qwen2.5 3B from Hugging Face (6 GiB download) and start it interactive text mode:
+`./dynamo-run Qwen/Qwen2.5-3B-Instruct`
 
 The parameter can be the ID of a HuggingFace repository (it will be downloaded), a GGUF file, or a folder containing safetensors, config.json, etc (a locally checked out HuggingFace repository).
 
 ## Download a model from Hugging Face
 
-One of these should be fast and good quality on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
+One of these models should be high quality and fast on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
+E.g. https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/blob/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf
 
-## Run
+Download model file:
+```
+curl -L -o Llama-3.2-3B-Instruct-Q4_K_M.gguf "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/blob/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf?download=true"
+```
+
+## Run a model from local file
 
 *Text interface*
-
-`dynamo-run Llama-3.2-1B-Instruct-Q4_K_M.gguf` or path to a Hugging Face repo checkout instead of the GGUF.
+```
+dynamo-run Llama-3.2-3B-Instruct-Q4_K_M.gguf # or path to a Hugging Face repo checkout instead of the GGUF
+```
 
 *HTTP interface*
-
-`dynamo-run in=http Llama-3.2-1B-Instruct-Q4_K_M.gguf`
-
-List the models: `curl localhost:8080/v1/models`
-
-Send a request:
 ```
-curl -d '{"model": "Llama-3.2-1B-Instruct-Q4_K_M", "max_tokens": 2049, "messages":[{"role":"user", "content": "What is the capital of South Africa?" }]}' -H 'Content-Type: application/json' http://localhost:8080/v1/chat/completions
+dynamo-run in=http Llama-3.2-3B-Instruct-Q4_K_M.gguf
+```
+
+*List the models*
+```
+curl localhost:8080/v1/models
+```
+
+*Send a request*
+```
+curl -d '{"model": "Llama-3.2-3B-Instruct-Q4_K_M", "max_tokens": 2049, "messages":[{"role":"user", "content": "What is the capital of South Africa?" }]}' -H 'Content-Type: application/json' http://localhost:8080/v1/chat/completions
 ```
 
 *Multi-node*
