@@ -28,7 +28,7 @@ source $HOME/.cargo/env
 
 ## Build
 
-Navidate to launch/ directory
+Navigate to launch/ directory
 ```
 cd launch/
 ```
