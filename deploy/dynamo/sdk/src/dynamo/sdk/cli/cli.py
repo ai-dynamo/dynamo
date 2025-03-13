@@ -56,7 +56,7 @@ def create_bentoml_cli() -> click.Command:
     bentoml_cli.add_subcommands(serve_command)
     bentoml_cli.add_subcommands(run_command)
     bentoml_cli.add_command(containerize_command)
-    bentoml_cli.add_subcommands(deploy_command)
+    bentoml_cli.add_command(deploy_command)
     bentoml_cli.add_command(develop_command)
     bentoml_cli.add_command(deployment_command)
     bentoml_cli.add_command(secret_command)
