@@ -14,6 +14,7 @@
 #  limitations under the License.
 
 aiosqlite==0.21.0
+asyncpg==0.30.0
 base58==2.1.1
 boto3==1.37.1
 botocore==1.37.1
