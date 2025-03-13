@@ -38,9 +38,11 @@ If you have an `HF_TOKEN` environment variable set, this will download Qwen2.5 3
 dynamo-run Qwen/Qwen2.5-3B-Instruct
 ```
 
+The parameter can be the ID of a HuggingFace repository (it will be downloaded), a GGUF file, or a folder containing safetensors, config.json, etc (a locally checked out HuggingFace repository).
+
 ## Download a model from Hugging Face
 
-For example one of these should be fast and good quality on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
+One of these should be fast and good quality on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
 
 ## Run
 
@@ -349,3 +351,10 @@ DYN_TOKEN_ECHO_DELAY_MS=1 dynamo-run in=http out=echo_full
 ```
 
 The default delay is 10ms, which produces approximately 100 tokens per second.
+
+## Defaults
+
+The input defaults to `in=text`.
+
+The output will default to whatever engine you have compiled in (so depending on `--features`). If all features
+are enabled at build time, then the default is currently `out=vllm`.
