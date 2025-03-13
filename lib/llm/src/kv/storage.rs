@@ -35,6 +35,8 @@
 //!
 //! The first unit of ownership that will be Rust safe is the [KvBlock][super::KvBlock].
 
+use bs62::num_traits;
+use bytemuck::Pod;
 use cudarc::driver::{CudaContext, CudaSlice, CudaStream, DevicePtr};
 use dynemo_runtime::{error, raise, Result};
 use ndarray::prelude::*;
@@ -97,6 +99,7 @@ extern "C" {
         count: usize,
         stream: *mut c_void,
     ) -> i32;
+    fn cuda_memcpy_sync(dst: *mut c_void, src: *const c_void, count: usize) -> i32;
 }
 
 pub trait Storage: std::fmt::Debug {
@@ -655,14 +658,11 @@ impl<'a, T: Storage, const D: usize> TensorView<'a, T, D> {
 
         tracing::debug!("Copying from {:?} to {:?}", self, dst_view);
 
-        let stream_id = stream.cu_stream();
-
         let rc = unsafe {
-            cuda_memcpy_async(
+            cuda_memcpy_sync(
                 dst_view.data() as *mut c_void,
                 self.data() as *const c_void,
                 self.size_in_bytes(),
-                stream_id as *mut c_void,
             )
         };
 
@@ -716,8 +716,8 @@ impl<'a, T: Storage, const D: usize> TensorView<'a, T, D> {
     }
 
     pub fn as_ndarray_view<DT>(&self) -> Result<ndarray::ArrayView<'_, DT, IxDyn>>
-    where
-        DT: bytemuck::Pod,
+// where
+    //     DT: bytemuck::Pod,
     {
         match self.storage.storage_type() {
             StorageType::Device(_) => raise!("Cannot convert device tensor to ndarray"),
@@ -728,8 +728,8 @@ impl<'a, T: Storage, const D: usize> TensorView<'a, T, D> {
     }
 
     pub(crate) fn as_unsafe_ndarray_view<DT>(&self) -> Result<ndarray::ArrayView<'_, DT, IxDyn>>
-    where
-        DT: bytemuck::Pod,
+// where
+    //    DT: bytemuck::Pod,
     {
         // validate DT matches bytes per element
         if std::mem::size_of::<DT>() != self.element_size {
@@ -1045,6 +1045,48 @@ impl<'a, T: Storage, const D: usize> TensorView<'a, T, D> {
         }
 
         Ok(())
+    }
+    /// Convert the tensor view to a new owned ndarray tensor in host memory
+    pub fn to_owned<DT: std::fmt::Debug + Clone + num_traits::Zero>(
+        &self,
+    ) -> Result<ndarray::Array<DT, IxDyn>> {
+        match self.storage.storage_type() {
+            StorageType::System | StorageType::Pinned => {
+                let nd = self.as_ndarray_view::<DT>()?;
+                Ok(nd.to_owned())
+            }
+            StorageType::Device(device) => {
+                // create an ndarray with the same shape and element size
+                let shape = self.shape.to_vec();
+
+                // Create an ndarray with the correct shape
+                let dim = ndarray::IxDyn(&shape);
+
+                // Create an uninitialized array with the correct shape
+                let mut nd = ndarray::Array::<DT, _>::zeros(dim);
+
+                println!("Copying from device to host");
+                println!("Before copy Values: {:?}", nd);
+
+                let rc = unsafe {
+                    cuda_memcpy_sync(
+                        nd.as_mut_ptr() as *mut c_void,
+                        self.storage.get_pointer() as *const c_void,
+                        self.size_in_bytes(),
+                    )
+                };
+
+                if rc != 0 {
+                    return Err(error!(
+                        "cudaMemcpyAsync failed during device-to-host transfer"
+                    ));
+                }
+
+                println!("After copy Values: {:?}", nd);
+
+                Ok(nd)
+            }
+        }
     }
 }
 

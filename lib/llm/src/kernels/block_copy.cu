@@ -546,4 +546,223 @@ cuda_memcpy_async(void* dst, const void* src, size_t count, cudaStream_t stream)
   CUDA_CHECK(cudaMemcpyAsync(dst, src, count, cudaMemcpyDefault, stream));
   return cudaSuccess;
 }
+
+int
+cuda_memcpy_sync(void* dst, const void* src, size_t count)
+{
+  CUDA_CHECK(cudaMemcpy(dst, src, count, cudaMemcpyDefault));
+  return cudaSuccess;
+}
+}
+
+/// This accepts a 6D tensor with dimensions that represent a tensor to be distributed
+/// across tensor parallel ranks.
+///
+/// The dimensions of the source tensor are expected to be:
+/// dims[0]: kv or block (depending on KvLayout)
+/// dims[1]: block or kv (depending on KvLayout)
+/// dims[2]: block_size (sequence length) # aka bs
+/// dims[3]: scatter_factor (dst_tp_size / src_tp_size)
+/// dims[4]: num_heads / (src_tp_size * scatter_factor) # aka dst_num_heads or dnh
+/// dims[5]: head_size # aka hs
+///
+/// The permutation applied is typically (3, 0, 1, 4, 2, 5) which transforms
+/// the tensor:
+///  - from: [kv/block, block/kv, bs, scatter_factor, dnh, hs] to
+///  - to:   [scatter_factor, kv/block, block/kv, bs, dnh, hs].
+///
+/// This transformation effectively distributes the heads dimension across
+/// tensor parallel ranks, where we transform from src_tp_size to dst_tp_size,
+/// with dst_tp_size > src_tp_size.
+///
+/// @param dst: destination data pointer
+/// @param src: source data pointer
+/// @param dims: 6D dimensions of source tensor
+/// @param num_dims: number of dimensions (must be 6)
+/// @param elem_size: element size in bytes
+/// @param block_dim_index: which dimension represents blocks; either 0 or 1
+/// @param src_block_ids: source block IDs to copy
+/// @param dst_block_ids: destination block IDs to copy
+/// @param stream: CUDA stream to use for the operation
+int
+permute_scatter_memcpy(
+    const void* src,           // source data
+    void* dst,                 // destination data
+    const uint32_t* dims,      // 6d dimensions of source tensor
+    uint32_t num_dims,         // semi-redundant, size of the dims array, must be 6
+    uint32_t elem_size,        // element size in bytes
+    uint32_t block_dim_index,  // which dimension represents blocks
+    uint32_t src_block_dim,    // the dimension of the source blocks
+    uint32_t dst_block_dim,    // the dimension of the destination blocks
+    int* src_block_ids,        // from state: the block IDs to copy
+    int* dst_block_ids,        // from state: the block IDs to copy
+    uint32_t num_blocks,       // from state: the number of blocks to copy
+    cudaStream_t stream        // from state: the stream to use
+)
+{
+  if (num_dims != 6) {
+    printf("ERROR: num_dims must be 6\n");
+    return -1;
+  }
+
+  if (block_dim_index != 0 && block_dim_index != 1) {
+    printf("ERROR: block_dim_index must be 0 or 1\n");
+    return -2;
+  }
+
+  uint32_t kv_dim_index = block_dim_index == 0 ? 1 : 0;
+
+  // expect dims[block_dim_index] == src_block_dim
+  // expect dims[kv_dim_index] == 2
+  if (dims[block_dim_index] != src_block_dim) {
+    printf("ERROR: dims[block_dim_index] must be equal to src_block_dim\n");
+    return -3;
+  }
+
+  if (dims[kv_dim_index] != 2) {
+    printf("ERROR: dims[kv_dim_index] must be 2\n");
+    return -4;
+  }
+
+  size_t src_shape[5];
+  size_t dst_shape[5];
+
+  src_shape[block_dim_index] = src_block_dim;
+  src_shape[kv_dim_index] = dims[kv_dim_index];
+  src_shape[2] = dims[2];
+  src_shape[3] = dims[3];
+  src_shape[4] = dims[4] * dims[5];
+
+  dst_shape[0] = dims[3];  // scatter factor
+  dst_shape[block_dim_index + 1] = dst_block_dim;
+  dst_shape[kv_dim_index + 1] = dims[kv_dim_index];
+  dst_shape[3] = dims[2];  // block size
+  dst_shape[4] = dims[4] * dims[5];
+
+  size_t src_strides[5];
+  size_t dst_strides[5];
+
+  src_strides[4] = elem_size;
+  dst_strides[4] = elem_size;
+
+  // Compute source strides recursively (row-major order)
+  for (int i = 3; i >= 0; i--) {
+    src_strides[i] = src_strides[i + 1] * src_shape[i + 1];
+  }
+
+  // Compute destination strides based on permuted dimensions
+  for (int i = 3; i >= 0; i--) {
+    dst_strides[i] = dst_strides[i + 1] * dst_shape[i + 1];
+  }
+
+#ifdef DEBUG
+  printf("src_shape: ");
+  for (int i = 0; i < 5; i++) {
+    printf("%zu ", src_shape[i]);
+  }
+  printf("\n");
+
+  printf("src_strides: ");
+  for (int i = 0; i < 5; i++) {
+    printf("%zu ", src_strides[i]);
+  }
+  printf("\n");
+
+  printf("dst_shape: ");
+  for (int i = 0; i < 5; i++) {
+    printf("%zu ", dst_shape[i]);
+  }
+  printf("\n");
+
+  printf("dst_strides: ");
+  for (int i = 0; i < 5; i++) {
+    printf("%zu ", dst_strides[i]);
+  }
+  printf("\n");
+#endif
+
+  size_t copy_size_bytes = dims[4] * dims[5] * elem_size;
+
+  // we will start by computing the full offsets for each inner copy blocks
+  size_t src_idx[5];
+  size_t dst_idx[5];
+
+  // notes:
+  // - in the outer two loops, the index for the dst is shifted by one since we moved the
+  //   scatter dimension to the front [0]
+
+  const char* src_ptr = (const char*)src;
+  char* dst_ptr = (char*)dst;
+
+  // loop over blocks
+  for (int block = 0; block < num_blocks; block++) {
+    src_idx[block_dim_index] = block;
+    dst_idx[block_dim_index + 1] = block;
+    // loop over the kv dimension
+    for (int kv = 0; kv < src_shape[kv_dim_index]; kv++) {
+      src_idx[kv_dim_index] = kv;
+      dst_idx[kv_dim_index + 1] = kv;
+      // loop over block size
+      for (int block_size = 0; block_size < src_shape[2]; block_size++) {
+        src_idx[2] = block_size;
+        dst_idx[3] = block_size;
+        // loop over scatter factor
+        for (int scatter = 0; scatter < src_shape[3]; scatter++) {
+          src_idx[3] = scatter;
+          dst_idx[0] = scatter;
+
+          src_idx[4] = 0;
+          dst_idx[4] = 0;
+
+          size_t src_offset = 0;
+          size_t dst_offset = 0;
+
+          for (int i = 0; i < 5; i++) {
+            src_offset += src_idx[i] * src_strides[i];
+            dst_offset += dst_idx[i] * dst_strides[i];
+          }
+
+          auto rc =
+              cudaMemcpyAsync(dst_ptr + dst_offset, src_ptr + src_offset, copy_size_bytes, cudaMemcpyDefault, stream);
+
+          if (rc != cudaSuccess) {
+            printf("ERROR: cudaMemcpyAsync failed with error code %d\n", rc);
+            return -5;
+          }
+        }
+      }
+    }
+  }
+
+  return 0;
+}
+
+// Updated C API wrapper for the permutation function
+extern "C" int
+copy_stream_scatter(
+    CopyStream* cs,            // the copy stream
+    const void* src_data,      // the source data (single layer)
+    void* dst_data,            // the destination data (single layer)
+    const uint32_t* dims,      // 6d dimensions of source tensor
+    uint32_t num_dims,         // semi-redundant, size of the dims array, must be 6
+    uint32_t elem_size,        // element size in bytes
+    uint32_t block_dim_index,  // which dimension represents blocks; either 0 or 1
+    uint32_t src_block_dim,    // number of blocks in the src tensor (should match dims[block_dim_index])
+    uint32_t dst_block_dim     // number of blocks in the dst tensor
+)
+{
+  return permute_scatter_memcpy(
+      src_data,          //
+      dst_data,          //
+      dims,              //
+      num_dims,          //
+      elem_size,         //
+      block_dim_index,   //
+      src_block_dim,     //
+      dst_block_dim,     //
+      cs->h_src_blocks,  //
+      cs->h_dst_blocks,  //
+      cs->num_blocks,    //
+      cs->stream         //
+  );
 }

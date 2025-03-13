@@ -81,6 +81,19 @@ extern "C" {
     ) -> std::os::raw::c_int;
 
     fn copy_stream_sync(cs: *mut std::ffi::c_void) -> std::os::raw::c_int;
+
+    fn copy_stream_scatter(
+        cs: *mut std::ffi::c_void,
+        src_data: *const std::ffi::c_void,
+        dst_data: *mut std::ffi::c_void,
+        dims: *const u32,
+        num_dims: u32,
+        elem_size: u32,
+        block_dim_index: u32,
+        src_block_dim: u32,
+        dst_block_dim: u32,
+    ) -> std::os::raw::c_int;
+
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -751,6 +764,14 @@ impl CopyStreamContext {
             layer_details: Arc::new(CopyStreamBlockMap::default()),
         })
     }
+
+    pub fn src_block_dim(&self) -> usize {
+        self.layer_details.src_block_dim as usize
+    }
+
+    pub fn dst_block_dim(&self) -> usize {
+        self.layer_details.dst_block_dim as usize
+    }
 }
 
 unsafe impl Send for CopyStream {}
@@ -956,6 +977,157 @@ impl CopyStream {
         }
         Ok(())
     }
+
+    /// Performs a tensor permutation with arbitrary dimension reordering
+    /// This accepts a 5D tensor with a known src_tp_size and a dst_tp_size.
+    ///
+    /// The dimensions of the src_data are expected to be consistent with the
+    /// KvLayout, where the first two dimensions are the kv dimension and the block
+    /// dimension depending on the KvLayout.
+    ///
+    /// dim0: kv or block
+    /// dim1: block or kv
+    /// dim2: block_size
+    /// dim3: num_heads / src_tp_size
+    /// dim4: head_size
+    ///
+    /// Note: the incoming tensor dimensions for dim3 is already the number of heads per TP rank
+    /// for the source TP size (src_tp_size).
+    ///
+    /// A scatter will always transform from tpX -> tpY where X < Y.
+    ///
+    /// The scale of the transformation `scatter_factor` is given by `dst_tp_size / src_tp_size`.
+    ///
+    /// This results in a reshaping of the tensor view to 6 dimensions, but the memory layout
+    /// is still contiguous in memory.
+    ///
+    /// src6d_dim0: kv or block
+    /// src6d_dim1: block or kv
+    /// src6d_dim2: block_size
+    /// src6d_dim3: scatter_factor
+    /// src6d_dim4: (model_num_heads / src_tp_size) / scatter_factor
+    /// src6d_dim5: head_size
+    ///
+    /// The 6D tensor has exactly the same storage requirement and data layout as the 5D tensor.
+    ///
+    /// The `scatter_copy` method will then do a fused permute copy from src_data to dst_data with
+    /// the following permutation: (3, 0, 1, 4, 2, 5) of the src6d dimensions.
+    ///
+    /// The resulting dst6d dimensions are:
+    ///
+    /// dst6d_dim0: scatter_factor
+    /// dst6d_dim1: kv or block
+    /// dst6d_dim2: block or kv
+    /// dst6d_dim3: block_size
+    /// dst6d_dim4: (model_num_heads / src_tp_size) / scatter_factor
+    /// dst6d_dim5: head_size
+    ///
+    /// These are fully contiguous in memory.
+    ///
+    pub fn scatter_copy_layer(
+        &mut self,
+        layer: usize,
+        dims: &[usize], // 5d dimensions of source tensor per the description above
+        elem_size: usize,
+        block_dim_index: usize, // Added parameter for block dimension index
+        src_tp_size: usize,
+        dst_tp_size: usize,
+    ) -> Result<()> {
+        // validate the dimensions
+        if dims.len() != 5 {
+            return Err(error!("Expected 5 dimensions for src_data"));
+        }
+
+        // validate the block_dim_index is 0 or 1
+        if block_dim_index > 1 {
+            return Err(error!("block_dim_index must be 0 or 1"));
+        }
+
+        // validate the elem_size is supported (should be > 0 and <= 8)
+        if elem_size == 0 || elem_size > 8 {
+            return Err(error!(
+                "elem_size must be greater than 0 and less or equal to 8 bytes"
+            ));
+        }
+
+        // validate src_tp_size < dst_tp_size and both are powers of 2
+        if src_tp_size >= dst_tp_size {
+            return Err(error!("src_tp_size must be less than dst_tp_size"));
+        }
+
+        if src_tp_size & (src_tp_size - 1) != 0 {
+            return Err(error!("src_tp_size must be a power of 2"));
+        }
+
+        if dst_tp_size & (dst_tp_size - 1) != 0 {
+            return Err(error!("dst_tp_size must be a power of 2"));
+        }
+
+        let scatter_factor = dst_tp_size / src_tp_size;
+
+        let state = &mut self.state;
+
+        if !state.staged_layers {
+            return Err(error!(
+                "Layers must be loaded before performing permutation"
+            ));
+        }
+
+        if !state.staged_block_ids {
+            return Err(error!(
+                "Block IDs must be loaded before performing permutation"
+            ));
+        }
+
+        // check layer index is valid
+        if layer >= state.layer_details.src_layer_ptrs.len() {
+            return Err(error!(
+                "layer index {} out of bounds (max {})",
+                layer,
+                state.layer_details.src_layer_ptrs.len() - 1
+            ));
+        }
+
+        let src_data = state.layer_details.src_layer_ptrs[layer] as *const std::ffi::c_void;
+        let dst_data = state.layer_details.dst_layer_ptrs[layer] as *mut std::ffi::c_void;
+
+        // prepare 6d dimensions
+        let mut src_6d_dims = vec![0_u32; 6];
+
+        // populate src_6d_dims
+        src_6d_dims[0] = dims[0] as u32;
+        src_6d_dims[1] = dims[1] as u32;
+        src_6d_dims[2] = dims[2] as u32;
+        src_6d_dims[3] = scatter_factor as u32;
+        src_6d_dims[4] = (dims[3] / scatter_factor) as u32;
+        src_6d_dims[5] = dims[4] as u32;
+
+        tracing::debug!("scatter_factor: {}", scatter_factor);
+        tracing::debug!("src_6d_dims: {:?}", src_6d_dims);
+
+        // the state has the layers src/dst pointers and src/dst block ids
+        let cs = state.c_handle.as_ptr() as *mut std::ffi::c_void;
+
+        let rc = unsafe {
+            copy_stream_scatter(
+                cs,
+                src_data,
+                dst_data,
+                src_6d_dims.as_ptr(),
+                6 as u32,
+                elem_size as u32,
+                block_dim_index as u32,
+                self.state.src_block_dim() as u32,
+                self.state.dst_block_dim() as u32,
+            )
+        };
+
+        if rc != 0 {
+            return Err(error!("Failed to execute tensor permutation"));
+        }
+
+        Ok(())
+    }
 }
 
 impl Returnable for CopyStream {
@@ -970,8 +1142,11 @@ impl Returnable for CopyStream {
 mod tests {
     use std::time::Instant;
 
+    use crate::kv::storage::DeviceStorageOwned;
+
     use super::*;
     use cudarc::driver::CudaContext;
+    use ndarray::prelude::*;
     use rstest::rstest;
 
     impl CopyStream {
@@ -1412,38 +1587,48 @@ mod tests {
 
         let device = CudaContext::new(0)?;
 
-        let number_of_layers = 32;
-        let number_of_heads = 8;
-        let head_size = 128;
-        let number_of_cpu_blocks = 128;
-        let number_of_gpu_blocks = 64;
+        // Reduce sizes for testing performance
+        let number_of_layers = 8;
+        let number_of_heads = 2;
+        let head_size = 2;
+        let number_of_cpu_blocks = 8;
+        let number_of_gpu_blocks = 4;
+        let block_size = 2;
+
+        println!("Test configuration:");
+        println!("  Number of layers: {}", number_of_layers);
+        println!("  Number of heads: {}", number_of_heads);
+        println!("  Head size: {}", head_size);
+        println!("  Block size: {}", block_size);
+        println!("  CPU blocks: {}", number_of_cpu_blocks);
+        println!("  GPU blocks: {}", number_of_gpu_blocks);
 
         let model_details = KvModelDetailsBuilder::default()
             .number_of_layers(number_of_layers)
             .number_of_heads(number_of_heads)
             .head_size(head_size)
-            .dtype(DType::FP8)
+            .dtype(DType::F32) // Use F32 for easier validation
             .build()?;
 
         let block_details = KvBlockDetailsBuilder::default()
-            .layout(layout)
-            .block_size(64)
+            .layout(layout.clone())
+            .block_size(block_size)
             .tp_size(1)
             .tp_rank(0)
             .model_details(model_details)
             .build()?;
 
         // Create the storage blocks
-        let h_blocks = KvBlockStorage::allocate(
+        let mut h_blocks = KvBlockStorage::allocate(
             number_of_cpu_blocks,
             block_details.clone(),
             StorageType::Pinned,
         )?;
 
-        let d_blocks = KvBlockStorage::allocate(
+        let mut d_blocks = KvBlockStorage::allocate(
             number_of_gpu_blocks,
             block_details.clone(),
-            StorageType::Device(device),
+            StorageType::Device(device.clone()),
         )?;
 
         let h2d_block_map = CopyStreamBlockMap::new(&h_blocks, &d_blocks).unwrap();
@@ -1507,36 +1692,392 @@ mod tests {
                 / (1024.0 * 1024.0 * 1024.0 * duration.as_secs_f64())
         );
 
-        // explore tp scatter/gatehr
+        Ok(())
+    }
 
-        let h_layer = h_blocks.layer(0).unwrap();
-        let h_view = h_layer.view().unwrap();
-        let h = h_view.as_ndarray_view::<u8>().unwrap();
+    #[rstest]
+    #[case(KvLayout::KvFirst)]
+    #[case(KvLayout::BlockFirst)]
+    #[test]
+    fn test_kv_block_copy_stream_validated(#[case] layout: KvLayout) -> Result<()> {
+        println!("Testing block copy stream with validation");
 
-        let start = h.as_ptr();
+        let device = CudaContext::new(0)?;
 
-        println!("{:?}", h.shape());
-        println!("{:?}", h.strides());
+        // Set up a small tensor for testing with validation
+        let number_of_layers = 2;
+        let number_of_heads = 2;
+        let head_size = 2;
+        let number_of_cpu_blocks = 4;
+        let number_of_gpu_blocks = 4;
+        let block_size = 2;
 
-        let s = h.shape().to_vec();
-        let new_nheads = h.shape()[3] / 2;
+        println!("Test configuration:");
+        println!("  Number of layers: {}", number_of_layers);
+        println!("  Number of heads: {}", number_of_heads);
+        println!("  Head size: {}", head_size);
+        println!("  Block size: {}", block_size);
+        println!("  CPU blocks: {}", number_of_cpu_blocks);
+        println!("  GPU blocks: {}", number_of_gpu_blocks);
 
-        let h_tp = h
-            .into_shape_with_order([s[0], s[1], s[2], 2, new_nheads, s[4]])
-            .unwrap();
-        let new_start = h_tp.as_ptr();
+        let model_details = KvModelDetailsBuilder::default()
+            .number_of_layers(number_of_layers)
+            .number_of_heads(number_of_heads)
+            .head_size(head_size)
+            .dtype(DType::F32) // Use F32 for easier validation
+            .build()?;
 
-        println!("{:?}", h_tp.shape());
-        println!("{:?}", h_tp.strides());
+        let block_details = KvBlockDetailsBuilder::default()
+            .layout(layout.clone())
+            .block_size(block_size)
+            .tp_size(1)
+            .tp_rank(0)
+            .model_details(model_details)
+            .build()?;
 
-        assert_eq!(start, new_start);
+        // Create the storage blocks
+        let mut h_blocks = KvBlockStorage::allocate(
+            number_of_cpu_blocks,
+            block_details.clone(),
+            StorageType::Pinned,
+        )?;
 
-        let permuted = h_tp.permuted_axes([3, 0, 1, 2, 4, 5]);
-        let new_start = permuted.as_ptr();
-        assert_eq!(start, new_start);
+        let mut d_blocks = KvBlockStorage::allocate(
+            number_of_gpu_blocks,
+            block_details.clone(),
+            StorageType::Device(device.clone()),
+        )?;
 
-        println!("{:?}", permuted.shape());
-        println!("{:?}", permuted.strides());
+        // Initialize host blocks with sequential values for validation
+        for layer_idx in 0..number_of_layers {
+            let layer = h_blocks.layer_mut(layer_idx)?;
+            let mut view = layer.view()?;
+            let shape = *view.shape();
+
+            println!("Layer {} shape: {:?}", layer_idx, shape);
+
+            let mut nd_view = view.as_ndarray_view_mut::<f32>()?;
+
+            // Initialize with sequential values based on layer and indices
+            match layout {
+                KvLayout::KvFirst => {
+                    for kv_idx in 0..shape[0] {
+                        for block_idx in 0..shape[1] {
+                            for bs_idx in 0..shape[2] {
+                                for head_idx in 0..shape[3] {
+                                    for head_dim_idx in 0..shape[4] {
+                                        let value = 100.0 * layer_idx as f32
+                                            + 10.0 * block_idx as f32
+                                            + 1.0
+                                                * (kv_idx + bs_idx + head_idx + head_dim_idx)
+                                                    as f32;
+                                        nd_view
+                                            [[kv_idx, block_idx, bs_idx, head_idx, head_dim_idx]] =
+                                            value;
+
+                                        // Debug print for a few values
+                                        if bs_idx == 0 && head_idx == 0 && head_dim_idx == 0 {
+                                            println!(
+                                                "Init: l={}, [kv={}, b={}, bs={}, h={}, hd={}] = {}",
+                                                layer_idx, kv_idx, block_idx, bs_idx, head_idx, head_dim_idx, value
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                KvLayout::BlockFirst => {
+                    for block_idx in 0..shape[0] {
+                        for kv_idx in 0..shape[1] {
+                            for bs_idx in 0..shape[2] {
+                                for head_idx in 0..shape[3] {
+                                    for head_dim_idx in 0..shape[4] {
+                                        let value = 100.0 * layer_idx as f32
+                                            + 10.0 * block_idx as f32
+                                            + 1.0
+                                                * (kv_idx + bs_idx + head_idx + head_dim_idx)
+                                                    as f32;
+                                        nd_view
+                                            [[block_idx, kv_idx, bs_idx, head_idx, head_dim_idx]] =
+                                            value;
+
+                                        // Debug print for a few values
+                                        if bs_idx == 0 && head_idx == 0 && head_dim_idx == 0 {
+                                            println!(
+                                                "Init: l={}, [b={}, kv={}, bs={}, h={}, hd={}] = {}",
+                                                layer_idx, block_idx, kv_idx, bs_idx, head_idx, head_dim_idx, value
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Set up block mapping for copying
+        let h2d_block_map = CopyStreamBlockMap::new(&h_blocks, &d_blocks)?;
+        let d2h_block_map = CopyStreamBlockMap::new(&d_blocks, &h_blocks)?;
+
+        let mut copy_stream = CopyStream::new(number_of_layers, number_of_gpu_blocks)?;
+
+        // Create simple block mapping for test
+        let src_blocks = vec![0, 1, 2, 3];
+        let dst_blocks = vec![0, 1, 2, 3];
+
+        // Convert to i32 for the API
+        let src_block_ids: Vec<i32> = src_blocks.iter().map(|&id| id as i32).collect();
+        let dst_block_ids: Vec<i32> = dst_blocks.iter().map(|&id| id as i32).collect();
+
+        // Test H2D copy
+        copy_stream.prepare_block_map(h2d_block_map.clone())?;
+        copy_stream.prepare_block_ids(src_block_ids.clone(), dst_block_ids.clone())?;
+
+        println!("Copying data from host to device");
+        copy_stream.trigger_all_layers()?;
+        copy_stream.sync_stream()?;
+
+        // Clear host blocks to verify D2H copy later
+        println!("Clearing host blocks to verify D2H copy");
+        for layer_idx in 0..number_of_layers {
+            let layer = h_blocks.layer_mut(layer_idx)?;
+            let mut view = layer.view()?;
+            let mut nd_view = view.as_ndarray_view_mut::<f32>()?;
+            let zeros = ndarray::Array::from_shape_fn(nd_view.dim(), |_| 0.0);
+            nd_view.assign(&zeros);
+        }
+
+        // Now copy back from device to host
+        copy_stream.prepare_block_map(d2h_block_map)?;
+        copy_stream.prepare_block_ids(src_block_ids, dst_block_ids.clone())?;
+
+        println!("Copying data back from device to host");
+        copy_stream.trigger_all_layers()?;
+        copy_stream.sync_stream()?;
+
+        // Verify the data transfer
+        println!("Verifying transfer for {} blocks", src_blocks.len());
+        for layer_idx in 0..src_blocks.len() {
+            let host_layer = h_blocks.layer(layer_idx)?;
+            let host_view = host_layer.view()?;
+            let host_nd_view = host_view.as_ndarray_view::<f32>()?;
+
+            let expected_value = src_blocks[layer_idx] as f32;
+
+            assert_eq!(host_nd_view[[0, layer_idx, 0, 0, 0]], expected_value);
+        }
+
+        println!("Transfer validation successful");
+        Ok(())
+    }
+
+    #[rstest]
+    #[case(KvLayout::KvFirst)]
+    #[case(KvLayout::BlockFirst)]
+    #[test]
+    fn test_kv_tensor_permute_basic(#[case] layout: KvLayout) -> Result<()> {
+        println!("Testing simple tensor permutation");
+
+        let device = CudaContext::new(0)?;
+
+        // Set up a small tensor for testing permutation
+        let number_of_blocks = 8;
+        let block_size = 2;
+        let number_of_heads = 16;
+        let head_size = 6;
+
+        let src_tp_size = 1;
+        let dst_tp_size = 4;
+        let scatter_factor = (dst_tp_size / src_tp_size) as usize;
+
+        println!("Test configuration:");
+        println!("  Layout: {:?}", layout);
+        println!("  Number of blocks: {}", number_of_blocks);
+        println!("  Block size: {}", block_size);
+        println!("  Number of heads: {}", number_of_heads);
+        println!("  Head size: {}", head_size);
+        println!("  Source TP size: {}", src_tp_size);
+        println!("  Destination TP size: {}", dst_tp_size);
+
+        let (kv_dim_idx, block_dim_idx) = match layout {
+            KvLayout::KvFirst => (0, 1),
+            KvLayout::BlockFirst => (1, 0),
+        };
+
+        let model_details = KvModelDetailsBuilder::default()
+            .number_of_layers(1)
+            .number_of_heads(number_of_heads)
+            .head_size(head_size)
+            .dtype(DType::F32)
+            .build()?;
+
+        let block_details = KvBlockDetailsBuilder::default()
+            .layout(layout.clone())
+            .block_size(block_size)
+            .tp_size(src_tp_size)
+            .tp_rank(0)
+            .model_details(model_details.clone())
+            .build()?;
+
+        // 1. Allocate storage for source blocks
+        let mut src_blocks =
+            KvBlockStorage::allocate(number_of_blocks, block_details.clone(), StorageType::Pinned)?;
+
+        // 2. Create a view for the source layer and initialize it
+        {
+            let src_layer = src_blocks.layer_mut(0)?;
+            let mut src_view = src_layer.view()?;
+            let src_shape = *src_view.shape();
+
+            println!("Source tensor shape: {:?}", src_shape);
+            println!("Scatter factor: {}", scatter_factor);
+            // println!("Source tensor strides: {:?}", src_view.strides());
+            // println!("Source tensor byte_strides: {:?}", src_view.byte_strides());
+
+            // 3. Initialize the source tensor with known values
+            // For KV layout [2, number_of_blocks, block_size, number_of_heads/tp_size, head_size]
+            // values will be: kv*1000 + block*100 + bs*10 + head*1 + dim*0.1
+            let mut nd_view = src_view.as_ndarray_view_mut::<f32>()?;
+
+            for idx_0 in 0..src_shape[0] {
+                for idx_1 in 0..src_shape[1] {
+                    for bs_idx in 0..src_shape[2] {
+                        for head_idx in 0..src_shape[3] {
+                            for head_dim_idx in 0..src_shape[4] {
+                                let value = 1000.0 * idx_0 as f32
+                                    + 100.0 * idx_1 as f32
+                                    + 10.0 * bs_idx as f32
+                                    + 1.0 * head_idx as f32
+                                    + 0.1 * head_dim_idx as f32;
+                                nd_view[[idx_0, idx_1, bs_idx, head_idx, head_dim_idx]] = value;
+
+                                // println!(
+                                //     "Init: [idx_0={}, idx_1={}, bs={}, h={}, hd={}] = {}",
+                                //     idx_0, idx_1, bs_idx, head_idx, head_dim_idx, value
+                                // );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Get source layer shape for later use
+        let src_layer = src_blocks.layer(0)?;
+        let src_view = src_layer.view()?;
+        let src_shape = *src_view.shape();
+        let src_strides = src_view.byte_strides().to_vec();
+
+        // 4. Allocate device storage for the test
+        let mut dst_blocks = KvBlockStorage::allocate(
+            number_of_blocks,
+            block_details.clone(),
+            StorageType::Device(device.clone()),
+        )?;
+
+        // 5. Create a copy stream for the tensor transpose
+        let mut copy_stream = CopyStream::new(1, number_of_blocks)?;
+
+        // Set up block mapping - for permutation, we'll use same blocks
+        let src_block_ids: Vec<i32> = (0..number_of_blocks).map(|id| id as i32).collect();
+        let dst_block_ids: Vec<i32> = (0..number_of_blocks).map(|id| id as i32).collect();
+
+        let h2d_block_map = CopyStreamBlockMap::new(&src_blocks, &dst_blocks)?;
+        let d2h_block_map = CopyStreamBlockMap::new(&dst_blocks, &src_blocks)?;
+
+        copy_stream.prepare_block_map(h2d_block_map)?;
+        copy_stream.prepare_block_ids(src_block_ids.clone(), dst_block_ids.clone())?;
+
+        // 6. Define a simple permutation - swap first two dimensions
+        // For this test, we'll use a simple permutation [1, 0, 2, 3, 4] - swap first two dims
+
+        let dims = src_shape.to_vec();
+        let elem_size = model_details.dtype.size_in_bytes();
+
+        // println!("Dimensions: {:?}", dims);
+        // println!("Source strides (bytes): {:?}", src_strides);
+        // println!("Element size: {} bytes", elem_size);
+
+        // 7. Execute the permutation
+        copy_stream.scatter_copy_layer(
+            0,
+            &dims,
+            elem_size,
+            block_dim_idx,
+            src_tp_size,
+            dst_tp_size,
+        )?;
+
+        copy_stream.sync_stream()?;
+
+        // 8. Preserve a copy of the source tensor for validation
+        let src_layer = src_blocks.layer(0)?;
+        let src_view = src_layer.view()?;
+        let src_nd = src_view.as_ndarray_view::<f32>()?;
+        let mut expected = src_nd.to_owned();
+
+        // reshape expected to match the src layout in 6d
+        let expected_6d = expected.into_shape_with_order([
+            src_shape[0],
+            src_shape[1],
+            src_shape[2],
+            scatter_factor,
+            src_shape[3] / scatter_factor,
+            src_shape[4],
+        ])?;
+
+        let expected = expected_6d.permuted_axes([3, 0, 1, 2, 4, 5]).into_dyn();
+
+        // 9. Copy results back to host for verification
+        copy_stream.on_return(); // reset
+        copy_stream.prepare_block_map(d2h_block_map)?;
+        copy_stream.prepare_block_ids(src_block_ids.clone(), dst_block_ids.clone())?;
+        copy_stream.trigger_all_layers()?;
+        copy_stream.sync_stream()?;
+
+        // the host data should be updated with the values from the device
+        let src_layer = src_blocks.layer(0)?;
+        let src_view = src_layer.view()?;
+        let src_nd = src_view.as_ndarray_view::<f32>()?;
+        let actual = src_nd.to_owned();
+
+        // reshape actual to match the dst layout in 6d
+        let actual = actual.into_shape_with_order([
+            scatter_factor,
+            src_shape[0],
+            src_shape[1],
+            src_shape[2],
+            src_shape[3] / scatter_factor,
+            src_shape[4],
+        ])?;
+
+        // 10. Validate
+
+        // the shapes of expected and actual should be the same
+        assert_eq!(expected.shape(), actual.shape());
+        println!("Output Shape: {:?}", actual.shape());
+
+        // check that the values are the same
+        // Compare all elements with a small epsilon to account for potential floating point differences
+        let epsilon = 1e-6;
+        let mut all_match = true;
+
+        for (idx, (&expected_val, &actual_val)) in expected.iter().zip(actual.iter()).enumerate() {
+            if (expected_val - actual_val).abs() > epsilon {
+                println!(
+                    "Mismatch at index {}: expected {}, got {}",
+                    idx, expected_val, actual_val
+                );
+                all_match = false;
+                break;
+            }
+        }
+
+        assert!(all_match, "Tensor values don't match after permutation");
 
         Ok(())
     }
