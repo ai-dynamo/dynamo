@@ -56,17 +56,6 @@ class ResponseType(BaseModel):
 GPU_ENABLED = False
 
 
-class FrontendConfig(BaseModel):
-    model: str
-    temperature: float = 0.7
-    max_tokens: int = 1024
-    stream: bool = True
-
-
-class MiddleConfig(BaseModel):
-    bias: float
-
-
 @service(
     resources={"cpu": "2"},
     traffic={"timeout": 30},
@@ -100,33 +89,6 @@ class Middle:
 
     def __init__(self) -> None:
         print("Starting middle")
-        config = ServiceConfig.get_instance()
-
-        middle_config = MiddleConfig(**config.get("Middle", {}))
-        print(f"bias: {middle_config.bias}")
-
-        if GPU_ENABLED:
-            from vllm.engine.arg_utils import AsyncEngineArgs
-            from vllm.engine.async_llm_engine import AsyncLLMEngine
-            from vllm.utils import FlexibleArgumentParser
-
-            try:
-                os.environ["VLLM_LOG_LEVEL"] = "DEBUG"
-                # Get VLLM args using new pattern
-                vllm_args = config.as_args("Middle", prefix="vllm_")
-                print(f"VLLM args to parse: {vllm_args}")
-
-                # Create and use parser
-                parser = FlexibleArgumentParser()
-                parser = AsyncEngineArgs.add_cli_args(parser)
-                args = parser.parse_args(vllm_args)
-                self.engine_args = AsyncEngineArgs.from_cli_args(args)
-                self.engine = AsyncLLMEngine.from_engine_args(self.engine_args)
-
-            except ImportError:
-                print("VLLM imports not available, skipping engine arg parsing")
-            except Exception as e:
-                print(f"Error parsing VLLM args: {e}")
 
     @dynamo_endpoint()
     async def generate(self, req: RequestType):
@@ -147,22 +109,6 @@ class Frontend:
 
     def __init__(self) -> None:
         print("Starting frontend")
-        self.config = ServiceConfig.get_instance()
-
-        frontend_config = FrontendConfig(**self.config.get("Frontend", {}))
-
-        print(
-            f"Frontend initialized with model={frontend_config.model}, "
-            f"temp={frontend_config.temperature}, max_tokens={frontend_config.max_tokens}"
-        )
-
-        # Get all configs for a service (new dict pattern)
-        all_frontend_configs = self.config.get("Frontend", {})
-        print(f"All Frontend configs: {all_frontend_configs}")
-
-        # Check other service configs (new dict pattern)
-        if self.config.get("Middle", {}).get("special_mode") == "fast":
-            print("Using Middle service in fast mode")
 
     @api
     async def generate(self, text):

@@ -8,7 +8,7 @@ print("Backend dependencies", Backend.dependencies)
 
 # print("--------------------------------")
 
-pipeline = Frontend.link(Backend).link(Middle)
+pipeline = Frontend.link(Middle).link(Backend)
 pipeline.apply()
 
 print("FINAL DEPENDENCIES")
