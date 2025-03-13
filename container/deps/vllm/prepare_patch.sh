@@ -78,6 +78,6 @@ cd "$TEMP_DIR/original_vllm"
 
 git remote add fork "$FORK_REPO"
 git fetch fork "$FORK_REF"
-git diff "$ORIGINAL_REF" fork/"$FORK_REF" > "$PATCH_OUTPUT"
+git diff "$ORIGINAL_REF" fork/"$FORK_REF" --  . ':(exclude)*.png' > "$PATCH_OUTPUT"
 
 echo "Patch created successfully: $PATCH_OUTPUT"

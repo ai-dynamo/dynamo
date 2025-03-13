@@ -8,6 +8,152 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS dev
 
 USER root
 
+# Install utilities
+RUN apt update -y && apt install -y git wget curl nvtop tmux vim
+# nats
+RUN wget https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-amd64.deb && dpkg -i nats-server-v2.10.24-amd64.deb
+# etcd
+ENV ETCD_VERSION="v3.5.18"
+RUN wget https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-amd64.tar.gz -O /tmp/etcd.tar.gz && \
+mkdir -p /usr/local/bin/etcd && \
+tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1
+ENV PATH=/usr/local/bin/etcd/:$PATH
+
+
+### VIRTUAL ENVIRONMENT SETUP ###
+
+# Install uv and create virtualenv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+RUN mkdir /opt/dynamo && \
+    uv venv /opt/dynamo/venv --python 3.12
+
+# Activate virtual environment
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+# Common dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
+
+# Install patched vllm - keep this early in Dockerfile to avoid
+# rebuilds from unrelated source code changes
+ARG VLLM_REF="c34eeec58d3a94437c5311e256f8ba21d1912a39"
+ARG VLLM_PATCH="vllm_${VLLM_REF}-dynamo-kv-disagg-patch.patch"
+ARG VLLM_SRC_DIR=/opt/vllm/vllm-src
+
+ARG FLASH_ATTN_SRC_DIR=/opt/vllm/vllm-flash-attn
+ARG RECOMPILE_VLLM=0
+
+ENV PYTHONPATH=$PYTHONPATH:/usr/local/lib/python3.12/dist-packages/
+
+RUN rm -rf /usr/local/lib/python3.12/dist-packages/vllm*
+RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
+    rm -rf ${VLLM_SRC_DIR} && \
+    mkdir -p ${VLLM_SRC_DIR} && \
+    git clone https://github.com/vllm-project/vllm.git ${VLLM_SRC_DIR} && \
+    cd ${VLLM_SRC_DIR} && \
+    git checkout ${VLLM_REF} && \
+    git apply /tmp/deps/vllm/${VLLM_PATCH} && \
+    if [ "${RECOMPILE_VLLM}" = "0" ]; then \
+        export VLLM_USE_PRECOMPILED=1; \
+        echo "Installing precompiled vLLM"; \
+        uv pip install --editable .; \
+    else \
+        export VLLM_FLASH_ATTN_SRC_DIR=${FLASH_ATTN_SRC_DIR}; \
+        python -m pip install setuptools_scm; \
+        echo "Installing vLLM from source"; \
+        export MAX_JOBS=$(nproc); \
+        python setup.py install; \
+    fi
+
+
+
+# Install genai-perf for benchmarking
+ARG GENAI_PERF_TAG="25d0188713adc47868d6b3f22426375237a90529"
+RUN uv pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
+
+# Install test dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
+
+# ### MISC UTILITY SETUP ###
+
+# Finish pyright install
+RUN pyright --help > /dev/null 2>&1
+
+# Enable Git operations in the /workspace directory
+RUN printf "[safe]\n      directory=/workspace\n" > /root/.gitconfig
+
+RUN ln -sf /bin/bash /bin/sh
+
+### BUILDS ###
+
+# Rust build/dev dependencies
+RUN apt update -y && \
+    apt install -y \
+    build-essential \
+    protobuf-compiler \
+    cmake \
+    libssl-dev \
+    pkg-config && \
+    curl https://sh.rustup.rs -sSf | bash -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN rustup toolchain install 1.85.0-x86_64-unknown-linux-gnu
+
+# Working directory
+WORKDIR /workspace
+
+# Copy Python wheel configuration files
+COPY pyproject.toml /workspace/
+COPY README.md /workspace/
+COPY LICENSE /workspace/
+
+# Build Rust runtime
+COPY lib/runtime /workspace/lib/runtime
+RUN cd lib/runtime && \
+    cargo build --jobs 2 --release --locked && cargo doc --no-deps
+
+# Build OpenAI HTTP Service binaries
+COPY lib/llm /workspace/lib/llm
+COPY components /workspace/components
+RUN cd components && \
+    cargo build --jobs 2 --release && \
+    cp target/release/http /usr/local/bin/
+
+# Build Dynamo Run binaries
+COPY launch /workspace/launch
+RUN cd launch && \
+    cargo build --jobs 2 --release --features mistralrs,sglang,vllm,python && \
+    cp target/release/dynamo-run /usr/local/bin/ && \
+    cp target/release/llmctl /usr/local/bin/
+
+# Generate C bindings for kv cache routing in vLLM
+COPY lib/bindings /workspace/lib/bindings
+RUN cd lib/bindings/c && \
+    cargo build --jobs 2 --release --locked && cargo doc --no-deps
+
+COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
+# Build dynamo wheel
+RUN source /opt/dynamo/venv/bin/activate && \
+    uv build --wheel --out-dir /workspace/dist && \
+    uv pip install /workspace/dist/ai_dynamo*cp312*.whl && \
+    cd /workspace/deploy/dynamo/sdk && \
+    uv build --wheel --out-dir /workspace/dist && \
+    uv pip install /workspace/dist/ai_dynamo_sdk*any.whl
+
+# Package the bindings
+RUN mkdir -p /opt/dynamo/bindings/wheels && \
+    mkdir /opt/dynamo/bindings/lib && \
+    cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
+    cp lib/bindings/c/target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
+    cp -r lib/bindings/c/include /opt/dynamo/bindings/.
+
+# Tell vllm to use the Dynamo LLM C API for KV Cache Routing
+ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
+
+
+
+
 ### NIXL SETUP ###
 
 ARG MOFED_VERSION=24.10-1.1.4.0
@@ -43,7 +189,6 @@ RUN apt-get update -y && apt-get -y install curl \
                                             python3-full \
                                             python3-pip \
                                             python3-numpy \
-                                            etcd-server \
                                             net-tools \
                                             pciutils \
                                             libpci-dev \
@@ -104,16 +249,11 @@ RUN cd /usr/local/src && \
 
 ENV LD_LIBRARY_PATH=/usr/lib:$LD_LIBRARY_PATH
 ENV CPATH=/usr/include:$CPATH
-ENV PATH=/usr/bin:$PATH
+ENV PATH=$PATH:/usr/bin
 ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
 SHELL ["/bin/bash", "-c"]
 
 WORKDIR /workspace
-
-ENV LD_LIBRARY_PATH=/usr/local/ompi/lib:$LD_LIBRARY_PATH
-ENV CPATH=/usr/local/ompi/include:$CPATH
-ENV PATH=/usr/local/ompi/bin:$PATH
-ENV PKG_CONFIG_PATH=/usr/local/ompi/lib/pkgconfig:$PKG_CONFIG_PATH
 
 COPY --from=nixl . /opt/nixl
 
@@ -135,125 +275,8 @@ RUN ls -l /usr/local/nixl/include/internal/
 
 RUN ls /opt/nixl
 
-# Install utilities
-RUN apt update -y && apt install -y git wget curl nvtop tmux vim
-# nats
-RUN wget https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-amd64.deb && dpkg -i nats-server-v2.10.24-amd64.deb
-# etcd
-ENV ETCD_VERSION="v3.5.18"
-RUN wget https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-amd64.tar.gz -O /tmp/etcd.tar.gz && \
-mkdir -p /usr/local/bin/etcd && \
-tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1
-ENV PATH=/usr/local/bin/etcd/:$PATH
-
-
-### VIRTUAL ENVIRONMENT SETUP ###
-
-# Install uv and create virtualenv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN mkdir /opt/dynamo && \
-    uv venv /opt/dynamo/venv --python 3.12
-
-# Activate virtual environment
-ENV VIRTUAL_ENV=/opt/dynamo/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
-
-# Common dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
-
-# Install patched vllm - keep this early in Dockerfile to avoid
-# rebuilds from unrelated source code changes
-ARG VLLM_REF="v0.7.2"
-ARG VLLM_PATCH="vllm_${VLLM_REF}-dynamo-kv-disagg-patch.patch"
-RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
-    bash /tmp/deps/vllm/install.sh --patch /tmp/deps/vllm/${VLLM_PATCH} --ref ${VLLM_REF} --install-cmd "uv pip install --editable" --use-precompiled --installation-dir /opt/vllm
-
-# Install genai-perf for benchmarking
-ARG GENAI_PERF_TAG="25d0188713adc47868d6b3f22426375237a90529"
-RUN uv pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
-
-# Install test dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
-
-# ### MISC UTILITY SETUP ###
-
-# Finish pyright install
-RUN pyright --help > /dev/null 2>&1
-
-# Enable Git operations in the /workspace directory
-RUN printf "[safe]\n      directory=/workspace\n" > /root/.gitconfig
-
-RUN ln -sf /bin/bash /bin/sh
-
-### BUILDS ###
-
-# Rust build/dev dependencies
-RUN apt update -y && \
-    apt install -y \
-    build-essential \
-    protobuf-compiler \
-    cmake \
-    libssl-dev \
-    pkg-config && \
-    curl https://sh.rustup.rs -sSf | bash -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
-RUN rustup toolchain install 1.85.0-x86_64-unknown-linux-gnu
-
-# Working directory
-WORKDIR /workspace
-
-# Copy Python wheel configuration files
-COPY pyproject.toml /workspace/
-COPY README.md /workspace/
-COPY LICENSE /workspace/
-
-# Build Rust runtime
-COPY lib/runtime /workspace/lib/runtime
-RUN cd lib/runtime && \
-    cargo build --release --locked && cargo doc --no-deps
-
-# Build OpenAI HTTP Service binaries
-COPY lib/llm /workspace/lib/llm
-COPY components /workspace/components
-RUN cd components && \
-    cargo build --release && \
-    cp target/release/http /usr/local/bin/
-
-# Build Dynamo Run binaries
-COPY launch /workspace/launch
-RUN cd launch && \
-    cargo build --release --features mistralrs,sglang,vllm,python && \
-    cp target/release/dynamo-run /usr/local/bin/ && \
-    cp target/release/llmctl /usr/local/bin/
-
-# Generate C bindings for kv cache routing in vLLM
-COPY lib/bindings /workspace/lib/bindings
-RUN cd lib/bindings/c && \
-    cargo build --release --locked && cargo doc --no-deps
-
-COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
-# Build dynamo wheel
-RUN source /opt/dynamo/venv/bin/activate && \
-    uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/ai_dynamo*cp312*.whl && \
-    cd /workspace/deploy/dynamo/sdk && \
-    uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/ai_dynamo_sdk*any.whl
-
-# Package the bindings
-RUN mkdir -p /opt/dynamo/bindings/wheels && \
-    mkdir /opt/dynamo/bindings/lib && \
-    cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
-    cp lib/bindings/c/target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
-    cp -r lib/bindings/c/include /opt/dynamo/bindings/.
-
-# Tell vllm to use the Dynamo LLM C API for KV Cache Routing
-ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
-
 # FIXME: Copy more specific folders in for dev/debug after directory restructure
-COPY . /workspace
+# COPY . /workspace
 
 # FIXME: May want a modification with dynamo banner on entry
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]

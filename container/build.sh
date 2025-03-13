@@ -67,6 +67,8 @@ VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 NIXL_COMMIT=d7a2c571a60d76a3d6c8458140eaaa5025fa48c4
 NIXL_REPO=ai-dynamo/nixl.git
 
+PROGRESS="auto"
+
 get_options() {
     while :; do
         case $1 in
@@ -168,6 +170,14 @@ get_options() {
         --build-context)
             if [ "$2" ]; then
                 BUILD_CONTEXT_ARG="--build-context $2"
+                shift
+            else
+                missing_requirement $1
+            fi
+            ;;
+        --progress)
+            if [ "$2" ]; then
+                PROGRESS=$2
                 shift
             else
                 missing_requirement $1
@@ -349,7 +359,7 @@ if [ -z "$RUN_PREFIX" ]; then
     set -x
 fi
 
-$RUN_PREFIX docker buildx build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --output type=docker $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+$RUN_PREFIX docker buildx build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --output type=docker $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE --progress=$PROGRESS
 
 { set +x; } 2>/dev/null
 
