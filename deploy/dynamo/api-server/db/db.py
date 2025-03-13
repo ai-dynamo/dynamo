@@ -87,7 +87,7 @@ async def create_db_and_tables_async():
 
 ### S3 storage
 
-DYNAMO_CONTAINER_NAME = "DYNAMO_CONTAINER_NAME"
+DYNAMO_CONTAINER_NAME = os.getenv("DYNAMO_CONTAINER_NAME", "dynamo-storage").lower()
 
 
 def get_s3_client():
@@ -109,14 +109,23 @@ def get_s3_client():
 class S3Storage:
     def __init__(self):
         self.s3_client = get_s3_client()
-        self.bucket_name = DYNAMO_CONTAINER_NAME
+        self.bucket_name = DYNAMO_CONTAINER_NAME.replace("_", "-").lower()
         self.ensure_bucket_exists()
 
     def ensure_bucket_exists(self):
         try:
             self.s3_client.head_bucket(Bucket=self.bucket_name)
-        except ClientError:
-            self.s3_client.create_bucket(Bucket=self.bucket_name)
+        except ClientError as e:
+            if e.response['Error']['Code'] == '404':
+                # Bucket doesn't exist, create it
+                try:
+                    self.s3_client.create_bucket(Bucket=self.bucket_name)
+                except ClientError as create_error:
+                    logger.error(f"Failed to create bucket {self.bucket_name}: {create_error}")
+                    raise
+            else:
+                logger.error(f"Error checking bucket {self.bucket_name}: {e}")
+                raise
 
     def upload_file(self, file_data, object_name):
         try:
