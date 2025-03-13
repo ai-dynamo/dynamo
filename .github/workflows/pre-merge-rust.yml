@@ -40,7 +40,7 @@ jobs:
   pre-merge-rust:
     runs-on: ubuntu-latest
     strategy:
-      matrix: { dir: ['lib/runtime', 'lib/llm', 'lib/bindings/c', 'lib/bindings/python', 'launch/dynamo-run', 'launch/llmctl', 'components', 'lib/runtime/examples'] }
+      matrix: { dir: ['.', 'lib/runtime/examples'] }
     permissions:
       contents: read
     steps:
