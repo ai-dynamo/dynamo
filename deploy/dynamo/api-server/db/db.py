@@ -116,12 +116,14 @@ class S3Storage:
         try:
             self.s3_client.head_bucket(Bucket=self.bucket_name)
         except ClientError as e:
-            if e.response['Error']['Code'] == '404':
+            if e.response["Error"]["Code"] == "404":
                 # Bucket doesn't exist, create it
                 try:
                     self.s3_client.create_bucket(Bucket=self.bucket_name)
                 except ClientError as create_error:
-                    logger.error(f"Failed to create bucket {self.bucket_name}: {create_error}")
+                    logger.error(
+                        f"Failed to create bucket {self.bucket_name}: {create_error}"
+                    )
                     raise
             else:
                 logger.error(f"Error checking bucket {self.bucket_name}: {e}")
