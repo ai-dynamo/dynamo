@@ -39,7 +39,7 @@
 
 use std::sync::atomic::Ordering;
 
-use dynemo_runtime::utils::pool::ReturnHandle;
+use dynamo_runtime::utils::pool::ReturnHandle;
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,

@@ -1,5 +1,5 @@
 ---
-source: dynemo-llm/tests/openai_completions.rs
+source: dynamo.llm/tests/openai_completions.rs
 description: "should have prompt, model, and logit_bias fields with the logits_bias having two key/value pairs"
 expression: sample.request
 ---

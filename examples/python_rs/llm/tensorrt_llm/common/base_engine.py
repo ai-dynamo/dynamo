@@ -17,20 +17,26 @@
 import asyncio
 import threading
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from queue import Queue
 from typing import Any, Optional
 
 from common.parser import LLMAPIConfig
 from common.processor import ChatProcessor, CompletionsProcessor
+from common.utils import ManagedThread
 from tensorrt_llm._torch import LLM
 from tensorrt_llm.logger import logger
 from transformers import AutoTokenizer
 
+from dynamo.llm import KvMetricsPublisher
 
-class BaseTensorrtLLMEngine:
+from .kv_cache_event_publisher import KVCacheEventPublisher
+
+
+class ChatProcessorMixin:
     def __init__(self, engine_config: LLMAPIConfig):
         self._engine_config = engine_config
-        logger.info(f"Using LLM API config: {self._engine_config}")
-
+        logger.info(f"Using LLM API config: {self._engine_config.to_dict()}")
         # model name for chat processor
         self._model_name = self._engine_config.model_name
         logger.info(f"Set model name: {self._model_name}")
@@ -49,8 +55,6 @@ class BaseTensorrtLLMEngine:
                 self._engine_config.model_name
             )
 
-        self._init_engine()
-
         if self._engine_config.extra_args.get("tokenizer", None):
             self._tokenizer = AutoTokenizer.from_pretrained(
                 self._engine_config.extra_args.get("tokenizer", None)
@@ -58,6 +62,34 @@ class BaseTensorrtLLMEngine:
 
         self.chat_processor = ChatProcessor(self._model_name, self._tokenizer)
         self.completions_processor = CompletionsProcessor(self._model_name)
+
+
+@dataclass
+class TensorrtLLMEngineConfig:
+    namespace_str: str = "dynamo"
+    component_str: str = "tensorrt-llm"
+    engine_config: LLMAPIConfig = None
+    worker_id: Optional[str] = None
+    kv_metrics_publisher: Optional[KvMetricsPublisher] = None
+    publish_stats: bool = False
+    publish_kv_cache_events: bool = False
+
+
+class BaseTensorrtLLMEngine(ChatProcessorMixin):
+    def __init__(
+        self,
+        trt_llm_engine_config: TensorrtLLMEngineConfig,
+    ):
+        super().__init__(trt_llm_engine_config.engine_config)
+        self._namespace_str = trt_llm_engine_config.namespace_str
+        self._component_str = trt_llm_engine_config.component_str
+        self._worker_id = trt_llm_engine_config.worker_id
+        self._kv_metrics_publisher = trt_llm_engine_config.kv_metrics_publisher
+        self._publish_stats = trt_llm_engine_config.publish_stats
+        self._publish_kv_cache_events = trt_llm_engine_config.publish_kv_cache_events
+        self._error_queue: Optional[Queue] = None
+
+        self._init_engine()
 
     def _init_engine(self):
         logger.info("Initializing engine")
@@ -68,6 +100,10 @@ class BaseTensorrtLLMEngine:
         self._event_thread = threading.Thread(
             target=asyncio.run, args=(self._run_llm_engine(),)
         )
+
+        self.publish_kv_cache_events_thread = None
+        self.publish_stats_thread = None
+
         self._event_thread.start()
         with self._llm_engine_start_cv:
             while self._llm_engine is None:
@@ -82,6 +118,158 @@ class BaseTensorrtLLMEngine:
                 self._event_thread.join()
                 self._event_thread = None
             raise e
+
+        self._error_queue = Queue()
+        try:
+            if self._publish_stats:
+                self._init_publish_metrics_thread()
+
+            if self._publish_kv_cache_events:
+                self._init_publish_kv_cache_events_thread()
+        except Exception as e:
+            logger.error(f"Failed to initialize publish metrics threads: {e}")
+            raise e
+
+    def _init_publish_metrics_thread(self):
+        # Need to publish stats once so that worker can be selected.
+        # Publishing some dummy values...
+        request_active_slots = 0
+        request_total_slots = 4
+        kv_active_block = 0
+        kv_total_blocks = 4
+
+        num_requests_waiting = 0
+        gpu_cache_usage_perc = 0.0
+        gpu_prefix_cache_hit_rate = 0.0
+
+        if self._kv_metrics_publisher is None:
+            logger.error("KV metrics publisher not initialized!")
+            return
+
+        self._kv_metrics_publisher.publish(
+            request_active_slots,
+            request_total_slots,
+            kv_active_block,
+            kv_total_blocks,
+            num_requests_waiting,
+            gpu_cache_usage_perc,
+            gpu_prefix_cache_hit_rate,
+        )
+
+        # Prepare threads for publishing stats but don't start them yet.
+        # TRTLLM needs to start generating tokens first before stats
+        # can be retrieved.
+        self.publish_stats_thread = ManagedThread(
+            self.publish_stats_task,
+            error_queue=self._error_queue,
+            name="publish_stats_thread",
+        )
+
+    def _init_publish_kv_cache_events_thread(self):
+        if self._worker_id is None:
+            logger.error("Worker ID not initialized!")
+            return
+
+        # TODO: Use python bindings to publish kv cache events once they
+        # are available.
+        lib_path = "/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
+        self._kv_cache_events_publisher = KVCacheEventPublisher(
+            self._namespace_str, self._component_str, int(self._worker_id), lib_path
+        )
+
+        # Prepare threads for publishing kv cache events but don't start them yet.
+        # TRTLLM needs to start generating tokens first before kv cache events
+        # can be retrieved.
+        self.publish_kv_cache_events_thread = ManagedThread(
+            self.publish_kv_cache_events_task,
+            error_queue=self._error_queue,
+            name="publish_kv_cache_events_thread",
+        )
+
+    async def publish_stats_task(self):
+        """
+        Publish stats to the metrics publisher.
+        """
+        if self._llm_engine is None:
+            logger.error("LLM engine not initialized!")
+            return
+
+        stats = self._llm_engine.get_stats_async(timeout=5)
+        async for stat in stats:
+            request_active_slots = stat["numActiveRequests"]
+            request_total_slots = stat["maxNumActiveRequests"]
+            kv_active_block = stat["kvCacheStats"]["usedNumBlocks"]
+            kv_total_blocks = stat["kvCacheStats"]["maxNumBlocks"]
+            if self._kv_metrics_publisher is None:
+                logger.error("KV metrics publisher not initialized!")
+                return False
+
+            # TODO: Remove this once we have the actual values.
+            # Adding dummy values for now so it doesn't break the metrics.
+            num_requests_waiting = 0
+            gpu_cache_usage_perc = 0.0
+            gpu_prefix_cache_hit_rate = 0.0
+
+            self._kv_metrics_publisher.publish(
+                request_active_slots,
+                request_total_slots,
+                kv_active_block,
+                kv_total_blocks,
+                num_requests_waiting,
+                gpu_cache_usage_perc,
+                gpu_prefix_cache_hit_rate,
+            )
+            logger.debug(
+                f"Published stats: request_active_slots: {request_active_slots}, request_total_slots: {request_total_slots}, kv_active_block: {kv_active_block}, kv_total_blocks: {kv_total_blocks}"
+            )
+
+        return True
+
+    async def publish_kv_cache_events_task(self):
+        """
+        Publish kv cache events to the events publisher.
+        """
+        if self._llm_engine is None:
+            logger.error("LLM engine not initialized!")
+            return
+
+        events = self._llm_engine.get_kv_cache_events_async(timeout=5)
+        async for event_list in events:
+            for event in event_list:
+                logger.debug(f"Received event from llmapi: {event}")
+                id = event["event_id"]
+                data = event["data"]
+                if data["type"] == "stored":
+                    parent_hash = data["parent_hash"]
+                    token_ids = []
+                    block_hashes = []
+                    for block in data["blocks"]:
+                        block_hash = block["block_hash"]
+                        block_hashes.append(block_hash)
+                        for token in block["tokens"]:
+                            # TODO: How to handle token_extra_id?
+                            token_ids.append(token["token_id"])
+                    # Note: Currently data does not have lora_id.
+                    # Using 0 as default value. If later data has
+                    # lora_id, we need to verify if this is correct.
+                    lora_id = data.get("lora_id", 0)
+                    # Publish the stored event
+                    self._kv_cache_events_publisher.stored_event(
+                        id, parent_hash, block_hashes, token_ids, lora_id
+                    )
+                    logger.debug(
+                        f"Published stored event: {id}, parent_hash: {parent_hash}, block_hashes: {block_hashes}, token_ids: {token_ids}"
+                    )
+                elif data["type"] == "removed":
+                    # Publish the removed event
+                    block_hashes = []
+                    for block_hash in data["block_hashes"]:
+                        block_hashes.append(block_hash)
+                    self._kv_cache_events_publisher.removed_event(id, block_hashes)
+                    logger.debug(
+                        f"Published removed event: {id}, block_hashes: {block_hashes}"
+                    )
+        return True
 
     async def _run_llm_engine(self):
         # Counter to keep track of ongoing request counts.
@@ -116,6 +304,17 @@ class BaseTensorrtLLMEngine:
 
                 # Wait for the engine shutdown signal.
                 await self._llm_engine_shutdown_event.wait()
+
+                # Stop the publishing threads
+                if self.publish_stats_thread and self.publish_stats_thread.is_alive():
+                    self.publish_stats_thread.stop()
+                    self.publish_stats_thread.join()
+                if (
+                    self.publish_kv_cache_events_thread
+                    and self.publish_kv_cache_events_thread.is_alive()
+                ):
+                    self.publish_kv_cache_events_thread.stop()
+                    self.publish_kv_cache_events_thread.join()
 
                 # Wait for the ongoing requests to complete.
                 while self._ongoing_request_count > 0:

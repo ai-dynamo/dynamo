@@ -19,7 +19,7 @@
 **/*.plan
 **/.cache/*
 **/*onnx*
-# Engine must be allowed because code contains dynemo_engine.py
+# Engine must be allowed because code contains dynamo_engine.py
 **/*tensorrtllm_engines*
 **/*tensorrtllm_models*
 **/*tensorrtllm_checkpoints*
@@ -37,3 +37,4 @@
 **/*backup*/
 .dockerignore
 **/target/*
+**/*safetensors

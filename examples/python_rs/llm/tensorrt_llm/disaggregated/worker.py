@@ -13,14 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import asyncio
 import json
 import os
 import signal
 
 import uvloop
-from common.base_engine import BaseTensorrtLLMEngine
+from common.base_engine import BaseTensorrtLLMEngine, TensorrtLLMEngineConfig
 from common.disagg_processor import ChatProcessor, parse_chat_message_content
 from common.parser import LLMAPIConfig, parse_tensorrt_llm_args
 from common.processor import merge_promises
@@ -44,7 +43,8 @@ from tensorrt_llm.llmapi.disagg_utils import (
 from tensorrt_llm.logger import logger
 from tensorrt_llm.serve.openai_protocol import CompletionRequest
 
-from dynemo.runtime import DistributedRuntime, dynemo_endpoint, dynemo_worker
+from dynamo.llm import KvMetricsPublisher
+from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
 logger.set_level("debug")
 
@@ -66,7 +66,7 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
 
     def __init__(
         self,
-        engine_config: LLMAPIConfig,
+        trt_llm_engine_config: TensorrtLLMEngineConfig,
         disagg_config: DisaggServerConfig,
         instance_idx: int,
         sub_comm,
@@ -77,18 +77,27 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
             instance_idx
         ]
         engine_config = update_args_from_disagg_config(
-            engine_config, self.server_config
+            trt_llm_engine_config.engine_config, self.server_config
         )
+        trt_llm_engine_config.engine_config = engine_config
 
         # needed for disagg
         self._mpi_session = MpiCommSession(sub_comm, n_workers=sub_comm.Get_size())
-        engine_config.extra_args["_mpi_session"] = self._mpi_session
-        super().__init__(engine_config)
+        trt_llm_engine_config.engine_config.extra_args[
+            "_mpi_session"
+        ] = self._mpi_session
 
-    @dynemo_endpoint(DisaggChatCompletionRequest, DisaggChatCompletionStreamResponse)
+        super().__init__(trt_llm_engine_config)
+
+    @dynamo_endpoint(DisaggChatCompletionRequest, DisaggChatCompletionStreamResponse)
     async def generate_chat(self, request):
         if self._llm_engine is None:
             raise RuntimeError("Engine not initialized")
+
+        # Check if there are any errors in the error queue.
+        if self._error_queue.qsize() > 0:
+            error = self._error_queue.get()
+            raise error
 
         logger.debug(f"Received request: {request}")
         chat_processor = ChatProcessor(self._model, self._tokenizer, request)
@@ -162,12 +171,29 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
         except Exception as e:
             raise RuntimeError("Failed to generate: " + str(e))
 
+        # Start the publishing threads with first request submission
+        self._stats_loop = asyncio.get_running_loop()
+        if (
+            self.publish_kv_cache_events_thread
+            and not self.publish_kv_cache_events_thread.is_alive()
+        ):
+            self.publish_kv_cache_events_thread.start()
+
+        if self.publish_stats_thread and not self.publish_stats_thread.is_alive():
+            self.publish_stats_thread.start()
+
         self._ongoing_request_count -= 1
 
-    @dynemo_endpoint(CompletionRequest, DisaggCompletionStreamResponse)
+    @dynamo_endpoint(CompletionRequest, DisaggCompletionStreamResponse)
     async def generate_completions(self, request):
+        logger.debug(f"[worker] worker_id: {self._worker_id} received request")
         if self._llm_engine is None:
             raise RuntimeError("Engine not initialized")
+
+        # Check if there are any errors in the error queue.
+        if self._error_queue.qsize() > 0:
+            error = self._error_queue.get()
+            raise error
 
         self._ongoing_request_count += 1
         logger.debug(f"[worker] Received completions request: {request}")
@@ -208,16 +234,33 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
         else:
             raise RuntimeError("Non-streaming is not supported")
 
+        # Start the publishing threads with first request submission
+        if (
+            self.publish_kv_cache_events_thread
+            and not self.publish_kv_cache_events_thread.is_alive()
+        ):
+            # [NOTE:] TRTLLM needs the stats to be collected on the same loop as the request handler.
+            self._stats_loop = asyncio.get_running_loop()
+            self.publish_kv_cache_events_thread.set_loop(self._stats_loop)
+            self.publish_kv_cache_events_thread.start()
+
+        if self.publish_stats_thread and not self.publish_stats_thread.is_alive():
+            self._stats_loop = asyncio.get_running_loop()
+            self.publish_stats_thread.set_loop(self._stats_loop)
+            self.publish_stats_thread.start()
+
         self._ongoing_request_count -= 1
 
 
-@dynemo_worker()
+@dynamo_worker()
 async def worker(
     runtime: DistributedRuntime,
     engine_config: LLMAPIConfig,
     disagg_config: DisaggServerConfig,
     instance_idx: int,
     sub_comm,
+    publish_stats: bool,
+    publish_kv_cache_events: bool,
 ):
     """
     Instantiate a `backend` component and serve the `generate` endpoint
@@ -226,16 +269,57 @@ async def worker(
     server_type = disagg_config.server_configs[instance_idx].type
     logger.info(f"Starting {server_type} server")
 
-    component = runtime.namespace("dynemo").component(f"tensorrt-llm-{server_type}")
+    namespace_str = "dynamo"
+    component_str = f"tensorrt-llm-{server_type}"
+
+    component = runtime.namespace(namespace_str).component(component_str)
     await component.create_service()
 
     completions_endpoint = component.endpoint("completions")
     chat_endpoint = component.endpoint("chat/completions")
-    engine = TensorrtLLMEngine(engine_config, disagg_config, instance_idx, sub_comm)
-    await asyncio.gather(
+
+    if server_type == "gen":
+        if publish_stats:
+            logger.warning("Stats can only be published for ctx server")
+            publish_stats = False
+        if publish_kv_cache_events:
+            logger.warning("KV cache events can only be published for ctx server")
+            publish_kv_cache_events = False
+
+    trt_llm_engine_config = TensorrtLLMEngineConfig(
+        namespace_str=namespace_str,
+        component_str=component_str,
+        engine_config=engine_config,
+        publish_stats=publish_stats,
+        publish_kv_cache_events=publish_kv_cache_events,
+    )
+
+    # NOTE: Current implementation adds two endpoints. We can refactor this code to expose only one endpoint.
+    # and handle both completions and chat in the same endpoint.
+    # Currently, we are using completions endpoint lease id as worker id.
+    # I believe this might cause some issues using smart routing with chat completions endpoint.
+    trt_llm_engine_config.worker_id = completions_endpoint.lease_id()
+
+    if publish_stats:
+        trt_llm_engine_config.kv_metrics_publisher = KvMetricsPublisher()
+
+    engine = TensorrtLLMEngine(
+        trt_llm_engine_config,
+        disagg_config,
+        instance_idx,
+        sub_comm,
+    )
+
+    coros = [
         completions_endpoint.serve_endpoint(engine.generate_completions),
         chat_endpoint.serve_endpoint(engine.generate_chat),
-    )
+    ]
+    if publish_stats:
+        coros.append(
+            trt_llm_engine_config.kv_metrics_publisher.create_endpoint(component)
+        )
+
+    await asyncio.gather(*coros)
 
 
 if __name__ == "__main__":
@@ -262,7 +346,16 @@ if __name__ == "__main__":
     logger.info(f"is_leader: {is_leader}, instance_idx: {instance_idx}")
 
     if is_leader:
-        asyncio.run(worker(engine_config, disagg_config, instance_idx, sub_comm))
+        asyncio.run(
+            worker(
+                engine_config,
+                disagg_config,
+                instance_idx,
+                sub_comm,
+                args.publish_stats,
+                args.publish_kv_cache_events,
+            )
+        )
     else:
         with MPICommExecutor(sub_comm) as executor:
             if not is_leader and executor is not None:

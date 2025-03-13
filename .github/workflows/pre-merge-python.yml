@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: NVIDIA Test Github Validation
+
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+    paths-ignore:
+      - 'deploy/Kubernetes/**'
+      - '**/*.md'
+
+jobs:
+  build-test:
+    runs-on: ${{ fromJSON(vars.PR_FASTCHECK_RUNNERS) }}
+    strategy:
+      matrix:
+        framework:
+          - vllm
+    name: Build and Test - ${{ matrix.framework }}
+    env:
+      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework }}
+      PYTEST_XML_FILE: pytest_test_report.xml
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Define Image Tag
+        id: define_image_tag
+        run: |
+          echo "image_tag=${{ steps.login-ecr.outputs.registry }}/${{ github.repository }}:latest-${{ matrix.framework }}" >> $GITHUB_OUTPUT
+      - name: Decide on cache
+        id: which_caches
+        run: |
+          set +e
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "Not pushing to container image cache"
+            echo "cache_to_location=" >> $GITHUB_OUTPUT
+          else
+            echo "Pushing ${{ steps.define_image_tag.outputs.image_tag }} to container image cache"
+            echo "cache_to_location=--cache-to \"type=registry,ref=${{ steps.define_image_tag.outputs.image_tag }},image-manifest=true,mode=max\"" >> $GITHUB_OUTPUT
+          fi
+          echo "cache_from_location=--cache-from \"type=registry,ref=${{ steps.define_image_tag.outputs.image_tag }}\"" >> $GITHUB_OUTPUT
+      - name: Build image
+        env:
+          GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
+        run: |
+          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --framework ${{ matrix.framework }} ${{ steps.which_caches.outputs.cache_from_location }} ${{ steps.which_caches.outputs.cache_to_location }}
+      - name: Run pytest
+        env:
+          PYTEST_MARKS: "pre_merge or mypy"
+        run: |
+          docker run -w /workspace --name ${{ env.CONTAINER_ID }} ${{ steps.define_image_tag.outputs.image_tag }} pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m "${{ env.PYTEST_MARKS }}"
+      - name: Copy test report from test Container
+        if: always()
+        run: |
+          docker cp ${{ env.CONTAINER_ID }}:/workspace/${{ env.PYTEST_XML_FILE }} .
+      - name: Archive test report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ matrix.framework }}-python-test-results
+          if-no-files-found: error
+          path: |
+            ${{ env.PYTEST_XML_FILE }}
+
+  event_file:
+    name: "Event File"
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Upload
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: Event File
+          path: ${{ github.event_path }}

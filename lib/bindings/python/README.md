@@ -15,9 +15,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Triton Distributed Python Bindings
+# Dynamo Python Bindings
 
-Python bindings for the Triton distributed runtime system, enabling distributed computing capabilities for machine learning workloads.
+Python bindings for the Dynamo runtime system, enabling distributed computing capabilities for machine learning workloads.
 
 ## 🚀 Quick Start
 
@@ -41,7 +41,7 @@ source .venv/bin/activate
 uv pip install maturin
 ```
 
-4. Build and install dynemo wheel
+4. Build and install dynamo wheel
 ```
 maturin develop --uv
 ```
@@ -56,7 +56,7 @@ See [README.md](/lib/runtime/README.md).
 
 1. Start 3 separate shells, and activate the virtual environment in each
 ```
-cd python-wheels/triton-distributed
+cd python-wheels/dynamo
 source .venv/bin/activate
 ```
 
@@ -83,14 +83,14 @@ each time.
 
 # Performance
 
-The performance impacts of synchrononizing the Python and Rust async runtimes
+The performance impacts of synchronizing the Python and Rust async runtimes
 is a critical consideration when optimizing the performance of a highly
 concurrent and parallel distributed system.
 
 The Python GIL is a global critical section and is ultimately the death of
 parallelism. To compound that, when Rust async futures become ready,
 accessing the GIL on those async event loop needs to be considered carefully.
-Under high load, accessing the GIL or performing CPU intenstive tasks on
+Under high load, accessing the GIL or performing CPU intensive tasks on
 on the event loop threads can starve out other async tasks for CPU resources.
 However, performing a `tokio::task::spawn_blocking` is not without overheads
 as well.

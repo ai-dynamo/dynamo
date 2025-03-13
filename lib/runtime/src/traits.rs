@@ -16,7 +16,7 @@
 pub mod events;
 
 use super::{DistributedRuntime, Runtime};
-/// A trait for objects taht proivde access to the [Runtime]
+/// A trait for objects that proivde access to the [Runtime]
 pub trait RuntimeProvider {
     fn rt(&self) -> &Runtime;
 }

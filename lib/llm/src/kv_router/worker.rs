@@ -19,12 +19,12 @@ pub use crate::kv_router::protocols::ForwardPassMetrics;
 
 use anyhow::Result;
 use derive_builder::Builder;
-use dynemo_runtime::pipeline::network::{
+use dynamo_runtime::pipeline::network::{
     ingress::push_endpoint::PushEndpoint,
     PushWorkHandler,
 };
 
-use dynemo_runtime::transports::nats::{self, ServiceExt};
+use dynamo_runtime::transports::nats::{self, ServiceExt};
 
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;

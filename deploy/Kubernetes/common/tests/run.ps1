@@ -27,13 +27,13 @@ $tests = @(
         lines = @(
           'labels:'
           '  app: test'
-          '  app.kubernetes.io/component: test_dynemo_chart'
+          '  app.kubernetes.io/component: test_dynamo_chart'
           '  app.kubernetes.io/instance: test'
-          '  app.kubernetes.io/name: test_dynemo_chart'
-          '  app.kubernetes.io/part-of: dynemo'
+          '  app.kubernetes.io/name: test_dynamo_chart'
+          '  app.kubernetes.io/part-of: dynamo'
           '  app.kubernetes.io/version: "1.0.0"'
           '  app.kubernetes.io/managed-by: Helm'
-          '  helm.sh/chart: "dynemo_component"'
+          '  helm.sh/chart: "dynamo_component"'
           '  helm.sh/version: "1.0.0"'
         )
       }

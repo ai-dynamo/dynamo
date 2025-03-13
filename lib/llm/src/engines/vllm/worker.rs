@@ -13,23 +13,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{
-    collections::HashMap, ops::Deref, path::Path, process::Stdio, sync::Arc, time::Duration,
-    vec::IntoIter,
-};
+use std::collections::HashMap;
+use std::ops::Deref;
+use std::path::Path;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
+use std::vec::IntoIter;
 
 use async_zmq::{SinkExt, StreamExt};
-use dynemo_runtime::protocols::annotated::Annotated;
-use dynemo_runtime::CancellationToken;
+use dynamo_runtime::protocols::annotated::Annotated;
+use dynamo_runtime::CancellationToken;
 use pyo3::{
     prelude::*,
     types::{IntoPyDict, PyBytes, PyString},
 };
-use tokio::sync::mpsc::Sender;
+use tokio::io::AsyncBufReadExt;
+use tokio::sync::mpsc::{error::SendError, Sender};
 use tokio::task::JoinHandle;
-use tokio::{io::AsyncBufReadExt, sync::mpsc::error::SendError};
 
 use crate::engines::MultiNodeConfig;
+use crate::kv_router::protocols::ForwardPassMetrics;
 use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::FinishReason;
@@ -104,6 +108,10 @@ struct Sockets {
     output: async_zmq::Pull,
     // Heartbeat messages from vllm process
     heartbeat: async_zmq::Pull,
+    // NOTE: Metrics socket usage is custom to our patch of vllm, and may not
+    // be present when running upstream vllm.
+    // Metrics messages from vllm process
+    metrics: async_zmq::Pull,
 }
 
 /// The message vllm sends us over zmq when it's ready to work.
@@ -169,6 +177,7 @@ pub async fn start(
         input,
         output,
         heartbeat,
+        metrics,
     } = zmq_sockets(sock_code)?;
 
     let vllm_process = start_vllm(
@@ -182,6 +191,7 @@ pub async fn start(
     let vllm_join_handle = watch_vllm(cancel_token.clone(), vllm_process);
 
     tokio::spawn(heartbeat_loop(cancel_token.clone(), heartbeat));
+    tokio::spawn(metrics_loop(cancel_token.clone(), metrics));
 
     let active_requests = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let (tx, rx) = tokio::sync::mpsc::channel(8);
@@ -280,12 +290,19 @@ fn zmq_sockets(sock_code: &str) -> anyhow::Result<Sockets> {
         .with_context(&zmq_context)
         .connect()?;
 
+    let metrics = async_zmq::pull(&format!("ipc:///tmp/{sock_code}_metrics_socket"))?
+        .with_context(&zmq_context)
+        .connect()?;
+
+    // TODO: NIXL/Prefill sockets here in the future for disagg?
+
     Ok(Sockets {
         context: zmq_context,
         data,
         input,
         output,
         heartbeat,
+        metrics,
     })
 }
 
@@ -319,7 +336,7 @@ async fn start_vllm(
         let mut lines = stdout.lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let mut line_parts = line.splitn(4, ' ');
-            let log_level = line_parts.next().unwrap_or_default();
+            let mut log_level = line_parts.next().unwrap_or_default();
             // Skip date (0) and time (1). Print last (2) which is everything else.
             let line = line_parts.nth(2).unwrap_or_default();
             if line.starts_with("custom_op.py:68") {
@@ -327,10 +344,14 @@ async fn start_vllm(
                 // custom_op.py:68] custom op <the op> enabled
                 continue;
             }
+            if line.contains("ERROR") {
+                log_level = "ERROR";
+            }
             match log_level {
                 "DEBUG" => tracing::debug!("VLLM: {line}"),
-                "INFO" => tracing::info!("VLLM: {line}"),
+                "INFO" => tracing::debug!("VLLM: {line}"), // VLLM is noisy
                 "WARNING" => tracing::warn!("VLLM: {line}"),
+                "ERROR" => tracing::error!("VLLM: {line}"),
                 level => tracing::info!("VLLM: {level} {line}"),
             }
         }
@@ -444,6 +465,97 @@ async fn heartbeat_loop(cancel_token: CancellationToken, mut socket: async_zmq::
         if s != "SUCCESS" {
             tracing::error!("vllm heartbeat error, expected 'SUCCESS' got '{s}'");
             break;
+        }
+    }
+}
+
+// NOTE: Custom to our patch of vllm.
+async fn metrics_loop(cancel_token: CancellationToken, mut socket: async_zmq::Pull) {
+    loop {
+        let maybe_metrics = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                break;
+            }
+            maybe_metrics = socket.next() => {
+                maybe_metrics
+            }
+        };
+        let b = match maybe_metrics {
+            Some(Ok(b)) => b[0].deref().to_vec(),
+            Some(Err(err)) => {
+                tracing::error!("Error reading from vllm metrics socket: {err}");
+                break;
+            }
+            None => {
+                tracing::debug!("vllm metrics socket closed");
+                break;
+            }
+        };
+
+        // Try to deserialize directly into ForwardPassMetrics using Python's pickle module
+        let metrics_result = Python::with_gil(|py| -> Result<ForwardPassMetrics, String> {
+            let pickle = py
+                .import("pickle")
+                .map_err(|e| format!("Failed to import pickle: {}", e))?;
+            let loads = pickle
+                .getattr("loads")
+                .map_err(|e| format!("Failed to get loads function: {}", e))?;
+            let bytes = PyBytes::new(py, &b);
+
+            let result = loads
+                .call1((bytes,))
+                .map_err(|e| format!("Failed to call pickle.loads: {}", e))?;
+
+            // Try to extract the attributes from the Python object
+            let extract_field = |field: &str| -> Result<u64, String> {
+                result
+                    .getattr(field)
+                    .map_err(|e| format!("Field '{}' not found: {}", field, e))?
+                    .extract::<u64>()
+                    .map_err(|e| format!("Failed to extract '{}' as u64: {}", field, e))
+            };
+
+            let extract_float_field = |field: &str| -> Result<f32, String> {
+                result
+                    .getattr(field)
+                    .map_err(|e| format!("Field '{}' not found: {}", field, e))?
+                    .extract::<f32>()
+                    .map_err(|e| format!("Failed to extract '{}' as f32: {}", field, e))
+            };
+
+            // Give default values for any fields not found
+            let request_active_slots = extract_field("request_active_slots").unwrap_or(0);
+            let request_total_slots = extract_field("request_total_slots").unwrap_or(0);
+            let kv_active_blocks = extract_field("kv_active_blocks").unwrap_or(0);
+            let kv_total_blocks = extract_field("kv_total_blocks").unwrap_or(0);
+            let num_requests_waiting = extract_field("num_requests_waiting").unwrap_or(0);
+            let gpu_cache_usage_perc = extract_float_field("gpu_cache_usage_perc").unwrap_or(0.0);
+            let gpu_prefix_cache_hit_rate =
+                extract_float_field("gpu_prefix_cache_hit_rate").unwrap_or(0.0);
+
+            Ok(ForwardPassMetrics {
+                request_active_slots,
+                request_total_slots,
+                kv_active_blocks,
+                kv_total_blocks,
+                num_requests_waiting,
+                gpu_cache_usage_perc,
+                gpu_prefix_cache_hit_rate,
+            })
+        });
+
+        match metrics_result {
+            Ok(metrics) => {
+                // TODO: These metrics could be attached to StatsHandler or Events
+                // for aggregation and visualization.
+                tracing::debug!("Received vllm metrics: {:?}", metrics);
+            }
+            Err(err) => {
+                tracing::error!(
+                    "Error deserializing vllm metrics with Python pickle: {}",
+                    err
+                );
+            }
         }
     }
 }

@@ -25,7 +25,7 @@
 //! dataplane.
 
 use derive_builder::Builder;
-use dynemo_runtime::{error, raise, utils::pool::Returnable, ErrorContext, Result};
+use dynamo_runtime::{error, raise, utils::pool::Returnable, ErrorContext, Result};
 use std::{ptr::NonNull, sync::Arc};
 use validator::{Validate, ValidationError};
 

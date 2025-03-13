@@ -15,7 +15,7 @@
 
 # `component` contains configuration options related to the Distributed Neural Models Component.
 component:
-  # `component.name` is the name of the Distributed Neural Models (dynemo) Component in the distributed deployment.
+  # `component.name` is the name of the Distributed Neural Models (dynamo) Component in the distributed deployment.
   name: # (required)
   # `component.namespace` is the Distributed Neural Models namespace in which the Distributed Neural Models Component will be deployed.
   namespace: # (default: "default")

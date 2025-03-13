@@ -15,7 +15,7 @@
 
 apiVersion: v2
 appVersion: 1.0.0
-description: Distributed Neural Models (dynemo) Component
+description: Distributed Neural Models (dynamo) Component
 icon: https://www.nvidia.com/content/dam/en-zz/Solutions/about-nvidia/logo-and-brand/01-nvidia-logo-vert-500x200-2c50-d@2x.png
-name: dynemo_component
+name: dynamo_component
 version: 1.0.0

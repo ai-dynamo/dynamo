@@ -25,20 +25,20 @@ Contributions intended to add significant new functionality must
 follow a more collaborative path described in the following
 points. Before submitting a large PR that adds a major enhancement or
 extension, be sure to submit a GitHub issue that describes the
-proposed change so that the Triton team can provide feedback.
+proposed change so that the Dynamo team can provide feedback.
 
 - As part of the GitHub issue discussion, a design for your change
   will be agreed upon. An up-front design discussion is required to
   ensure that your enhancement is done in a manner that is consistent
-  with Triton Distributed's overall architecture.
+  with Dynamo's overall architecture.
 
-- The Triton Distributed project is spread across multiple GitHub Repositories.
-  The Triton team will provide guidance about how and where your enhancement
+- The Dynamo project is spread across multiple GitHub Repositories.
+  The Dynamo team will provide guidance about how and where your enhancement
   should be implemented.
 
-- Testing is a critical part of any Triton
+- Testing is a critical part of any Dynamo
   enhancement. You should plan on spending significant time on
-  creating tests for your change. The Triton team will help you to
+  creating tests for your change. The Dynamo team will help you to
   design your testing so that it is compatible with existing testing
   infrastructure.
 
@@ -75,7 +75,7 @@ proposed change so that the Triton team can provide feedback.
 
   - Make sure all tests pass.
 
-- Triton Distributed's default build assumes recent versions of
+- Dynamo's default build assumes recent versions of
   dependencies (CUDA, TensorFlow, PyTorch, TensorRT,
   etc.). Contributions that add compatibility with older versions of
   those dependencies will be considered, but NVIDIA cannot guarantee
@@ -85,7 +85,7 @@ proposed change so that the Triton team can provide feedback.
 - Make sure that you can contribute your work to open source (no
   license and/or patent conflict is introduced by your code).
   You must certify compliance with the
-  [license terms](https://github.com/triton-inference-server/triton-distributed/blob/main/LICENSE)
+  [license terms](https://github.com/ai-dynamo/dynamo/blob/main/LICENSE)
   and sign off on the [Developer Certificate of Origin (DCO)](https://developercertificate.org)
   described below before your pull request (PR) can be merged.
 
@@ -96,7 +96,7 @@ proposed change so that the Triton team can provide feedback.
 
 All pull requests are checked against the
 [pre-commit hooks](https://github.com/pre-commit/pre-commit-hooks)
-located [in the repository's top-level .pre-commit-config.yaml](https://github.com/triton-inference-server/triton-distributed/blob/main/.pre-commit-config.yaml).
+located [in the repository's top-level .pre-commit-config.yaml](https://github.com/ai-dynamo/dynamo/blob/main/.pre-commit-config.yaml).
 The hooks do some sanity checking like linting and formatting.
 These checks must pass to merge a change.
 
@@ -123,7 +123,7 @@ Also you can use vscode extension [GitHub Local Actions](https://marketplace.vis
 
 # Developer Certificate of Origin
 
-Triton Distributed is an open source product released under
+Dynamo is an open source product released under
 the Apache 2.0 license (see either
 [the Apache site](https://www.apache.org/licenses/LICENSE-2.0) or
 the [LICENSE file](./LICENSE)). The Apache 2.0 license allows you
@@ -177,7 +177,7 @@ By making a contribution to this project, I certify that:
     this project or the open source license(s) involved.
 ```
 
-We require that every contribution to Triton Distributed is signed with
+We require that every contribution to Dynamo is signed with
 a Developer Certificate of Origin. Additionally, please use your real name.
 We do not accept anonymous contributors nor those utilizing pseudonyms.
 

@@ -15,9 +15,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# TensorRT-LLM Integration with Triton Distributed
+# TensorRT-LLM Integration with Dynamo
 
-This example demonstrates how to use Triton Distributed to serve large language models with the tensorrt_llm engine, enabling efficient model serving with both monolithic and disaggregated deployment options.
+This example demonstrates how to use Dynamo to serve large language models with the tensorrt_llm engine, enabling efficient model serving with both monolithic and disaggregated deployment options.
 
 ## Prerequisites
 
@@ -41,7 +41,10 @@ Start required services (etcd and NATS):
 
 TODO: Remove the internal references below.
 
-- Build TRT-LLM wheel using latest tensorrt_llm main
+
+### Build the Dynamo container with latest TRT-LLM
+
+#### Step 1:Build TRT-LLM wheel using latest tensorrt_llm main
 
 ```
 git clone https://github.com/NVIDIA/TensorRT-LLM.git
@@ -58,26 +61,24 @@ python3 scripts/build_wheel.py --clean --trt_root /usr/local/tensorrt -a native 
 cp build/tensorrt_llm-*.whl /home
 ```
 
-- Build the Triton Distributed container
+####Step 2: Copy the TRT-LLM wheel to dynamo repository.
 ```bash
-# Build image
-./container/build.sh --base-image gitlab-master.nvidia.com:5005/dl/dgx/tritonserver/tensorrt-llm/amd64 --base-image-tag krish-fix-trtllm-build.23766174
+cp /home/tensorrt_llm-*.whl /<path-to-repo>/dynamo/trtllm_wheel/
 ```
 
-Alternatively, you can build with latest tensorrt_llm pipeline like below:
+####Step 3: Build the container
 ```bash
 # Build image
-./container/build.sh --framework TENSORRTLLM --skip-clone-tensorrtllm 1 --base-image urm.nvidia.com/sw-tensorrt-docker/tensorrt-llm-staging/release --base-image-tag main
+./container/build.sh --framework TENSORRTLLM --tensorrtllm-pip-wheel-path trtllm_wheel
 ```
-**Note:** If you are using the latest tensorrt_llm image, you do not need to install the TRT-LLM wheel.
+
+We need to copy the TRT-LLM wheel to repository and point the build script to the path within
+the repository so that it can be picked by the docker build context.
 
 ## Launching the Environment
 ```
-# Run image interactively from with the triton distributed root directory.
-./container/run.sh --framework TENSORRTLLM -it -v /home/:/home/
-
-# Install the TRT-LLM wheel. No need to do this if you are using the latest tensorrt_llm image.
-pip install /home/tensorrt_llm-*.whl
+# Run image interactively from with the Dynamo root directory.
+./container/run.sh --framework TENSORRTLLM -it
 ```
 
 ## Deployment Options
@@ -96,8 +97,8 @@ By default the server will run on port 8080.
 
 Add model to the server:
 ```bash
-llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynemo.tensorrt-llm.chat/completions
-llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynemo.tensorrt-llm.completions
+llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.tensorrt-llm.chat/completions
+llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.tensorrt-llm.completions
 ```
 
 #### 2. Workers
@@ -220,8 +221,8 @@ By default the server will run on port 8080.
 
 Add model to the server:
 ```bash
-llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynemo.router.chat/completions
-llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynemo.router.completions
+llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.router.chat/completions
+llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.router.completions
 ```
 
 #### 2. Workers
@@ -242,7 +243,7 @@ For example, 2 TP2 generation servers are 2 servers but 4 workers/mpi executor.
 cd /workspace/examples/python_rs/llm/tensorrt_llm/
 mpirun --allow-run-as-root --oversubscribe -n WORLD_SIZE python3 -m disaggregated.worker --engine_args llm_api_config.yaml -c disaggregated/llmapi_disaggregated_configs/single_node_config.yaml 1>disagg_workers.log 2>&1 &
 ```
-If using the provided [single_node_config.yaml](disaggregated/llmapi_disaggregated_configs/single_node_config.yaml), WORLD_SIZE should be 3 as it has 2 context servers(TP=1) and 1 generation server(TP=1).
+If using the provided [single_node_config.yaml](disaggregated/llmapi_disaggregated_configs/single_node_config.yaml), WORLD_SIZE should be 2 as it has 1 context servers(TP=1) and 1 generation server(TP=1).
 
 2. **Launch the router**
 
@@ -250,6 +251,8 @@ If using the provided [single_node_config.yaml](disaggregated/llmapi_disaggregat
 cd /workspace/examples/python_rs/llm/tensorrt_llm/
 python3 -m disaggregated.router 1>router.log 2>&1 &
 ```
+
+Note: For KV cache aware routing, please refer to the [KV Aware Routing](./docs/kv_aware_routing.md) section.
 
 3. **Send Requests**
 Follow the instructions in the [Monolithic Deployment](#3-client) section to send requests to the router.
@@ -306,7 +309,7 @@ export ETCD_ENDPOINTS="http://node1:2379,http://node2:2379"
 
 3. Launch the workers from node1 or login node. WORLD_SIZE is similar to single node deployment.
 ```bash
-srun --mpi pmix -N NUM_NODES --ntasks WORLD_SIZE --ntasks-per-node=WORLD_SIZE --no-container-mount-home --overlap --container-image IMAGE --output batch_%x_%j.log --err batch_%x_%j.err --container-mounts PATH_TO_TRITON_DISTRIBUTED:/workspace --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/tensorrt_llm && python3 -m disaggregated.worker --engine_args llm_api_config.yaml -c disaggregated/llmapi_disaggregated_configs/multi_node_config.yaml' &
+srun --mpi pmix -N NUM_NODES --ntasks WORLD_SIZE --ntasks-per-node=WORLD_SIZE --no-container-mount-home --overlap --container-image IMAGE --output batch_%x_%j.log --err batch_%x_%j.err --container-mounts PATH_TO_DYNAMO:/workspace --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/tensorrt_llm && python3 -m disaggregated.worker --engine_args llm_api_config.yaml -c disaggregated/llmapi_disaggregated_configs/multi_node_config.yaml' &
 ```
 
 Once the workers are launched, you should see the output similar to the following in the worker logs.
@@ -323,7 +326,7 @@ Once the workers are launched, you should see the output similar to the followin
 
 4. Launch the router from node1 or login node.
 ```bash
-srun --mpi pmix -N 1 --ntasks 1 --ntasks-per-node=1 --overlap --container-image IMAGE --output batch_router_%x_%j.log --err batch_router_%x_%j.err --container-mounts PATH_TO_TRITON_DISTRIBUTED:/workspace  --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/tensorrt_llm && python3 -m disaggregated.router' &
+srun --mpi pmix -N 1 --ntasks 1 --ntasks-per-node=1 --overlap --container-image IMAGE --output batch_router_%x_%j.log --err batch_router_%x_%j.err --container-mounts PATH_TO_DYNAMO:/workspace  --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/tensorrt_llm && python3 -m disaggregated.router' &
 ```
 
 5. Send requests to the router.

@@ -25,16 +25,17 @@ use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 use tracing_subscriber::FmtSubscriber;
 
-use dynemo_runtime::{
+use dynamo_runtime::{
     self as rs,
     pipeline::{EngineStream, ManyOut, SingleIn},
     protocols::annotated::Annotated as RsAnnotated,
     traits::DistributedRuntimeProvider,
 };
 
-use dynemo_llm::{self as llm_rs};
+use dynamo_llm::{self as llm_rs};
 
 mod engine;
+mod http;
 mod llm;
 
 type JsonServerStreamingIngress =
@@ -66,10 +67,19 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<EtcdClient>()?;
     m.add_class::<AsyncResponseStream>()?;
     m.add_class::<llm::kv::KvRouter>()?;
+    m.add_class::<llm::disagg_router::DisaggregatedRouter>()?;
     m.add_class::<llm::kv::KvMetricsPublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?;
     m.add_class::<llm::preprocessor::OAIChatPreprocessor>()?;
     m.add_class::<llm::backend::Backend>()?;
+    m.add_class::<llm::kv::OverlapScores>()?;
+    m.add_class::<llm::kv::KvIndexer>()?;
+    m.add_class::<llm::kv::EndpointKvMetrics>()?;
+    m.add_class::<llm::kv::AggregatedMetrics>()?;
+    m.add_class::<llm::kv::KvMetricsAggregator>()?;
+    m.add_class::<http::HttpService>()?;
+    m.add_class::<http::HttpError>()?;
+    m.add_class::<http::HttpAsyncEngine>()?;
 
     engine::add_to_module(m)?;
 

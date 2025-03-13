@@ -1,5 +1,5 @@
 ---
-source: dynemo-llm/tests/preprocessor.rs
+source: dynamo.llm/tests/preprocessor.rs
 expression: formatted_prompt
 info:
   messages:

@@ -16,9 +16,9 @@
 #[cfg(feature = "integration")]
 mod integration {
 
-    pub const DEFAULT_NAMESPACE: &str = "dynemo";
+    pub const DEFAULT_NAMESPACE: &str = "dynamo";
 
-    use dynemo_runtime::{
+    use dynamo_runtime::{
         logging,
         pipeline::{
             async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,

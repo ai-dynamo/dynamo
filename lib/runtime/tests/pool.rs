@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use dynemo_runtime::utils::pool::{PoolExt, PoolItem, PoolValue, ReturnHandle, Returnable};
+use dynamo_runtime::utils::pool::{PoolExt, PoolItem, PoolValue, ReturnHandle, Returnable};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 

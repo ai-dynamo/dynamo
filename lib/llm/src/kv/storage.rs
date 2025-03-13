@@ -37,7 +37,7 @@
 
 use bs62::num_traits;
 use cudarc::driver::{CudaContext, CudaSlice, CudaStream, DevicePtr};
-use dynemo_runtime::{error, raise, Result};
+use dynamo_runtime::{error, raise, Result};
 use ndarray::{ArrayViewMut, IxDyn};
 use std::any::Any;
 use std::ffi::c_void;

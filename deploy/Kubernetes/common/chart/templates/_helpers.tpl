@@ -15,7 +15,7 @@
 
 # Annotation Groups
 {{- define "nvidia.annotations.default" }}
-dynemo: "{{ .Release.Name }}.{{ .Chart.AppVersion | default "0.0" }}"
+dynamo: "{{ .Release.Name }}.{{ .Chart.AppVersion | default "0.0" }}"
 {{-   with .Values.kubernetes }}
 {{-     with .annotations }}
 {{        toYaml . }}
@@ -54,7 +54,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{- define "nvidia.label.appManagedBy" }}
-{{-   $service_name := "dynemo" }}
+{{-   $service_name := "dynamo" }}
 {{-   with .Release.Service }}
 {{-     $service_name = . }}
 {{-   end }}
@@ -66,7 +66,7 @@ app.kubernetes.io/name: {{ required "Property '.component.name' is required." .V
 {{- end }}
 
 {{- define "nvidia.label.appPartOf" }}
-{{-   $part_of := "dynemo" }}
+{{-   $part_of := "dynamo" }}
 {{-   with .Values.kubernetes }}
 {{-     with .partOf }}
 {{-       $part_of = . }}

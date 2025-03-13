@@ -154,6 +154,10 @@ impl Component {
         format!("{}/{}", self.namespace, self.name)
     }
 
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
     pub fn drt(&self) -> &DistributedRuntime {
         &self.drt
     }

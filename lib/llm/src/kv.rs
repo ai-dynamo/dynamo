@@ -32,7 +32,7 @@ use std::{
 
 use async_trait::async_trait;
 use derive_getters::Dissolve;
-use dynemo_runtime::{
+use dynamo_runtime::{
     raise,
     utils::pool::{PoolExt, PoolItem, PoolValue, Returnable, SharedPoolItem},
     Result,

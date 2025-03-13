@@ -31,7 +31,7 @@ on:
     - 'lib/llm/**'
     - 'lib/bindings/**'
     - 'launch/**'
-    - 'examples/rust/**'
+    - 'components/**'
     - '**.rs'
     - 'Cargo.toml'
     - 'Cargo.lock'
@@ -40,7 +40,7 @@ jobs:
   pre-merge-rust:
     runs-on: ubuntu-latest
     strategy:
-      matrix: { dir: ['lib/runtime', 'lib/llm', 'lib/bindings/c', 'lib/bindings/python', 'launch/dynemo-run', 'applications/llm/count', 'examples/rust'] }
+      matrix: { dir: ['lib/runtime', 'lib/llm', 'lib/bindings/c', 'lib/bindings/python', 'launch/dynamo-run', 'launch/llmctl', 'components', 'lib/runtime/examples'] }
     permissions:
       contents: read
     steps:

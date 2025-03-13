@@ -23,7 +23,7 @@ RUN_PREFIX=
 # installed within framework specific sections of the Dockerfile.
 
 declare -A FRAMEWORKS=(["STANDARD"]=1 ["TENSORRTLLM"]=2 ["VLLM"]=3 ["VLLM_NIXL"]=4)
-DEFAULT_FRAMEWORK=STANDARD
+DEFAULT_FRAMEWORK=VLLM
 
 SOURCE_DIR=$(dirname "$(readlink -f "$0")")
 
@@ -170,6 +170,10 @@ get_options() {
 	FRAMEWORK=$DEFAULT_FRAMEWORK
     fi
 
+    if [[ ${FRAMEWORK^^} == "VLLM_NIXL" ]]; then
+	FRAMEWORK="VLLM"
+    fi
+
     if [ ! -z "$FRAMEWORK" ]; then
 	FRAMEWORK=${FRAMEWORK^^}
 	if [[ ! -n "${FRAMEWORKS[$FRAMEWORK]}" ]]; then
@@ -178,7 +182,7 @@ get_options() {
     fi
 
     if [ -z "$IMAGE" ]; then
-        IMAGE="triton-distributed:latest-${FRAMEWORK,,}"
+        IMAGE="dynamo:latest-${FRAMEWORK,,}"
         if [ ! -z ${TARGET} ]; then
             IMAGE="${IMAGE}-${TARGET}"
         fi

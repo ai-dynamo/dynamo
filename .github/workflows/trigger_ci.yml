@@ -46,16 +46,53 @@ jobs:
         filters: |
           vllm:
             - 'container/Dockerfile.vllm'
+            - 'container/Dockerfile.vllm_nixl'
             - 'examples/python/llm/**'
             - 'examples/python_rs/llm/**'
             - 'container/deps/requirements.vllm.txt'
             - 'container/deps/vllm/**'
+          sdk:
+            - 'deploy/**'
+    - name: Check if Validation Workflow has run
+      id: check_workflow
+      uses: actions/github-script@v6
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const eventName = context.eventName;
+          let commit_sha = context.sha;
+          const workflow_id = 'pre-merge-python.yml';
+          if (eventName === 'pull_request') {
+            commit_sha = context.payload.pull_request.head.sha;
+          }
+          const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: workflow_id,
+              head_sha: commit_sha,
+              event: eventName
+            });
+          const inProgressCount = runs.data.workflow_runs.filter(run => run.status === 'in_progress').length;
+          const queuedCount = runs.data.workflow_runs.filter(run => run.status === 'queued').length;
+          const skip_ci = inProgressCount > 0 || queuedCount > 0;
+          console.log(`Validation Workflow is running: ${skip_ci}`);
+          core.setOutput('skip_ci', skip_ci.toString());
     - name: Trigger Pipeline
       run: |
         #!/bin/bash -e
         declare -A ci_variables
+
+        if [[ "${{ vars.ALLOW_GITLAB_TEST_SKIP }}" == "1" && "${{ steps.check_workflow.outputs.skip_ci }}" == "true" ]]; then
+          echo "Github Workflow has run and RUN_PRE_MERGE_TESTS variable value is False"
+          ci_variables["RUN_PRE_MERGE_TESTS"]="false"
+        fi
+
         if [ "${{ steps.src_changes.outputs.vllm }}" == "true" ]; then
           ci_variables["RUN_VLLM"]="true"
+        fi
+
+        if [ "${{ steps.src_changes.outputs.sdk }}" == "true" ]; then
+          ci_variables["RUN_SDK_CI"]="true"
         fi
 
         ci_args=""

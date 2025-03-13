@@ -144,7 +144,7 @@ pub struct PrefillOffload {
 // #[cfg(test)]
 // mod tests {
 //     use super::*;
-//     use dynemo_runtime::logging::init;
+//     use dynamo_runtime::logging::init;
 
 //     #[tokio::test]
 //     async fn test() {

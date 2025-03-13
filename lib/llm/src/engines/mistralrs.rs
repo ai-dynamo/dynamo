@@ -13,7 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{cmp::min, num::NonZero, path::Path, sync::Arc};
+use std::collections::HashMap;
+use std::{cmp::min, env, num::NonZero, path::Path, sync::Arc};
 
 use async_openai::types::FinishReason;
 use async_stream::stream;
@@ -21,17 +22,18 @@ use async_trait::async_trait;
 use either::Either;
 use indexmap::IndexMap;
 use mistralrs::{
-    Constraint, DefaultSchedulerMethod, Device, DeviceMapMetadata, DeviceMapSetting,
+    AutoDeviceMapParams, Constraint, DefaultSchedulerMethod, Device, DeviceMapSetting,
     GGUFLoaderBuilder, GGUFSpecificConfig, MemoryGpuConfig, MistralRs, MistralRsBuilder,
     ModelDType, NormalLoaderBuilder, NormalRequest, NormalSpecificConfig, PagedAttentionConfig,
-    Pipeline, Request, RequestMessage, ResponseOk, SamplingParams, SchedulerConfig, TokenSource,
+    Pipeline, Request, RequestMessage, ResponseOk, SamplingParams, SchedulerConfig, StopTokens,
+    TokenSource,
 };
 use tokio::sync::mpsc::channel;
 
-use dynemo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
-use dynemo_runtime::pipeline::error as pipeline_error;
-use dynemo_runtime::pipeline::{Error, ManyOut, SingleIn};
-use dynemo_runtime::protocols::annotated::Annotated;
+use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
+use dynamo_runtime::pipeline::error as pipeline_error;
+use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
+use dynamo_runtime::protocols::annotated::Annotated;
 
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -40,6 +42,12 @@ use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine
 
 /// If user does not provide a max_tokens limit prompt+output to this many
 const DEFAULT_MAX_TOKENS: i32 = 8192;
+
+/// TODO: tune
+const PAGED_ATTENTION_MAX_NUM_SEQS: usize = 5;
+
+/// The environment variable which can hold the Hugging Face token, if any, in order
+const HF_TOKEN_VARS: [&str; 3] = ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN"];
 
 pub async fn make_engine(
     gguf_path: &Path,
@@ -68,6 +76,17 @@ struct MistralRsEngine {
 
 impl MistralRsEngine {
     async fn new(model_path: &Path) -> pipeline_error::Result<Self> {
+        let mut hf_token_source = TokenSource::CacheToken;
+        // We might be trying to download a repo from Hugging Face. See if we have a token.
+        if !model_path.exists() {
+            for v_name in HF_TOKEN_VARS {
+                if env::var(v_name).is_ok() {
+                    tracing::debug!("Using Hugging Face token from {v_name}");
+                    hf_token_source = TokenSource::EnvVar(v_name.to_string());
+                    break;
+                }
+            }
+        }
         let loader = if model_path.is_file() {
             // Load from a GGUF
             let Some(model_filename) = model_path.file_name() else {
@@ -108,12 +127,14 @@ impl MistralRsEngine {
             .build(None)?
         };
 
+        let max_seq_len = AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN;
+
         // Paged attention requires cuda
         let paged_attention_config = if cfg!(feature = "cuda") {
             Some(PagedAttentionConfig::new(
-                Some(32),
-                1024,
-                MemoryGpuConfig::Utilization(0.9),
+                None, // Block size, default 32
+                512,  // CPU memory in MiB
+                MemoryGpuConfig::ContextSize(max_seq_len),
             )?)
         } else {
             None
@@ -121,11 +142,14 @@ impl MistralRsEngine {
         // Load, into a Pipeline
         let pipeline = loader.load_model_from_hf(
             None,
-            TokenSource::CacheToken,
+            hf_token_source,
             &ModelDType::Auto,
             &best_device()?,
             false,
-            DeviceMapSetting::Map(DeviceMapMetadata::dummy()),
+            DeviceMapSetting::Auto(AutoDeviceMapParams::Text {
+                max_seq_len,
+                max_batch_size: AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
+            }),
             None,
             paged_attention_config,
         )?;
@@ -138,18 +162,18 @@ impl MistralRsEngine {
                 }
             };
             SchedulerConfig::PagedAttentionMeta {
-                max_num_seqs: 5,
+                max_num_seqs: PAGED_ATTENTION_MAX_NUM_SEQS,
                 config,
             }
         } else {
             tracing::debug!("Using mistralrs DefaultScheduler");
             SchedulerConfig::DefaultScheduler {
                 // Safety: unwrap trivially safe here
-                method: DefaultSchedulerMethod::Fixed(NonZero::new(5).unwrap()),
+                method: DefaultSchedulerMethod::Fixed(NonZero::new(max_seq_len).unwrap()),
             }
         };
         // Create the MistralRs, which is a runner
-        let builder = MistralRsBuilder::new(pipeline.clone(), scheduler);
+        let builder = MistralRsBuilder::new(pipeline.clone(), scheduler).with_prefix_cache_n(16);
         Ok(MistralRsEngine {
             mistralrs: builder.build(),
             pipeline,
@@ -213,11 +237,43 @@ impl
             limit,
         );
 
+        let det = SamplingParams::deterministic();
+        let sampling_params = SamplingParams {
+            temperature: request
+                .inner
+                .temperature
+                .map(|t| t as f64)
+                .or(det.temperature),
+            top_p: request.inner.top_p.map(|t| t as f64).or(det.top_p),
+            top_n_logprobs: request
+                .inner
+                .top_logprobs
+                .map(|t| t as usize)
+                .unwrap_or(det.top_n_logprobs),
+            frequency_penalty: request.inner.frequency_penalty.or(det.frequency_penalty),
+            presence_penalty: request.inner.presence_penalty.or(det.presence_penalty),
+            stop_toks: request.inner.stop.map(to_stop_tokens).or(det.stop_toks),
+            max_len: request
+                .inner
+                .max_completion_tokens
+                .map(|m| m as usize)
+                .or(det.max_len),
+            logits_bias: request
+                .inner
+                .logit_bias
+                .map(to_logit_bias)
+                .or(det.logits_bias),
+            // These are not in async-openai yet
+            top_k: det.top_k,
+            min_p: det.min_p,
+            n_choices: 1,
+            dry_params: det.dry_params,
+        };
         let mistralrs_request = Request::Normal(NormalRequest {
             messages: RequestMessage::Chat(messages),
-            sampling_params: SamplingParams::deterministic(),
+            sampling_params,
             response: tx,
-            return_logprobs: false,
+            return_logprobs: request.inner.logprobs.unwrap_or_default(),
             is_streaming: true,
             id: self.mistralrs.next_request_id(),
             constraint: Constraint::None,
@@ -306,4 +362,35 @@ impl
         };
         Ok(ResponseStream::new(Box::pin(output), ctx))
     }
+}
+
+/// openai stop tokens to mistralrs stop tokens
+fn to_stop_tokens(t: async_openai::types::Stop) -> StopTokens {
+    match t {
+        async_openai::types::Stop::String(s) => StopTokens::Seqs(vec![s]),
+        async_openai::types::Stop::StringArray(v) => StopTokens::Seqs(v),
+    }
+}
+
+/// openai logit bias (strings/json) to mistralrs (u32/f32)
+/// I think the input looks like this: {"3721": -100, "17765": 100}
+fn to_logit_bias(lb: HashMap<String, serde_json::Value>) -> HashMap<u32, f32> {
+    let mut out = HashMap::new();
+    for (key, value) in &lb {
+        let token_id: u32 = match key.parse() {
+            Ok(t) => t,
+            Err(err) => {
+                tracing::warn!(
+                    "Unexpected logit_bias map. Key '{key}' is not an int: {lb:?}. {err}."
+                );
+                return HashMap::new();
+            }
+        };
+        let Some(bias) = value.as_f64() else {
+            tracing::warn!("Unexpected logit_bias map. Value '{value}' is not a float: {lb:?}");
+            return HashMap::new();
+        };
+        out.insert(token_id, bias as f32);
+    }
+    out
 }

@@ -18,7 +18,7 @@
 //!
 //! In the future, the [Worker] should probably be moved to a procedural macro similar
 //! to the `#[tokio::main]` attribute, where we might annotate an async main function with
-//! `#[dynemo::main]` or similar.
+//! `#[dynamo::main]` or similar.
 //!
 //! The [Worker::execute] method is designed to be called once from main and will block
 //! the calling thread until the application completes or is canceled. The method initialized
@@ -153,7 +153,7 @@ impl Worker {
 
             match &result {
                 Ok(_) => {
-                    tracing::info!("Application shutdown successfully");
+                    tracing::debug!("Application shutdown successfully");
                 }
                 Err(e) => {
                     tracing::error!("Application shutdown with error: {:?}", e);
@@ -200,7 +200,7 @@ async fn signal_handler(cancel_token: CancellationToken) -> Result<()> {
             tracing::info!("SIGTERM received, starting graceful shutdown");
         },
         _ = cancel_token.cancelled() => {
-            tracing::info!("CancellationToken triggered; shutting down");
+            tracing::debug!("CancellationToken triggered; shutting down");
         },
     }
 

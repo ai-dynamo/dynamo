@@ -17,7 +17,10 @@ pyright
 pytest
 pytest-asyncio
 pytest-benchmark
+pytest-codeblocks
 pytest-cov
 pytest-md-report
 pytest-mypy
 pytest-timeout
+# add types library stub for PyYAML
+types-PyYAML
