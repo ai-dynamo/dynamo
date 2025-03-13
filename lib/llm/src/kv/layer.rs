@@ -1128,19 +1128,23 @@ impl CopyStream {
 
         Ok(())
     }
-}
 
-impl Returnable for CopyStream {
-    fn on_return(&mut self) {
-        // reset the staged flags
+    pub fn reset(&mut self) {
         self.state.staged_block_ids = false;
         self.state.staged_layers = false;
     }
 }
 
+impl Returnable for CopyStream {
+    fn on_return(&mut self) {
+        // reset the staged flags
+        self.reset()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::{io::copy, time::Instant};
 
     use crate::kv::storage::DeviceStorageOwned;
 
@@ -1159,6 +1163,42 @@ mod tests {
         }
     }
 
+    impl KvBlockStorage {
+        // only works with host/pinned fp32 tensors
+        fn fill_layer_with_block_id(&mut self) -> Result<()> {
+            match self.storage_type() {
+                StorageType::Device(_) => {
+                    raise!("fill_layer_with_block_id not implemented for device storage");
+                }
+                _ => {}
+            }
+
+            // get number of blocks
+            let num_blocks = self.number_of_blocks();
+            let num_layers = self.layers.len();
+            let layout = self.block_details.layout.clone();
+
+            for ilayer in 0..num_layers {
+                let layer = self.layer_mut(ilayer)?;
+                let mut view = layer.view()?;
+                let mut nd_view = view.as_ndarray_view_mut::<f32>()?;
+                for iblock in 0..num_blocks {
+                    match &layout {
+                        KvLayout::KvFirst => nd_view
+                            .slice_mut(s![.., iblock, .., .., ..])
+                            .fill(iblock as f32),
+                        KvLayout::BlockFirst => {
+                            nd_view
+                                .slice_mut(s![iblock, .., .., .., ..])
+                                .fill(iblock as f32);
+                        }
+                    }
+                }
+            }
+
+            Ok(())
+        }
+    }
     #[rstest]
     #[test]
     fn test_kv_block_storage_kv_first() -> Result<()> {
@@ -1418,7 +1458,14 @@ mod tests {
 
         println!("shape: {:?}", shape);
 
-        // Use separate scopes to manage borrows
+        let (kv_dim_idx, block_dim_idx) = match layout {
+            KvLayout::KvFirst => (0, 1),
+            KvLayout::BlockFirst => (1, 0),
+        };
+
+        h_blocks.fill_layer_with_block_id().unwrap();
+
+        // test that our test function fill_layer_with_block_id works
         {
             // Get a mutable reference to a layer
             let layer = h_blocks.layer_mut(0)?;
@@ -1434,23 +1481,11 @@ mod tests {
                 // all kv and v of block 42 have values 42
                 match layout {
                     KvLayout::KvFirst => {
-                        for kv_idx in 0..shape[0] {
-                            for block_idx in 0..shape[1] {
-                                for bs_idx in 0..shape[2] {
-                                    for head_idx in 0..shape[3] {
-                                        for head_dim_idx in 0..shape[4] {
-                                            nd_view[[
-                                                kv_idx,
-                                                block_idx,
-                                                bs_idx,
-                                                head_idx,
-                                                head_dim_idx,
-                                            ]] = block_idx as f32;
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        // let block_count = shape[block_dim_idx];
+                        // Fill each block with its index as the value
+                        // for i in 0..block_count {
+                        //     nd_view.slice_mut(s![.., i, .., .., ..]).fill(i as f32);
+                        // }
 
                         assert_eq!(nd_view[[0, 0, 0, 0, 0]], 0.0);
                         assert_eq!(nd_view[[1, 0, 0, 0, 0]], 0.0);
@@ -1460,23 +1495,11 @@ mod tests {
                         assert_eq!(nd_view[[1, 2, 1, 1, 1]], 2.0);
                     }
                     KvLayout::BlockFirst => {
-                        for block_idx in 0..shape[0] {
-                            for kv_idx in 0..shape[1] {
-                                for bs_idx in 0..shape[2] {
-                                    for head_idx in 0..shape[3] {
-                                        for head_dim_idx in 0..shape[4] {
-                                            nd_view[[
-                                                block_idx,
-                                                kv_idx,
-                                                bs_idx,
-                                                head_idx,
-                                                head_dim_idx,
-                                            ]] = block_idx as f32;
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        //let block_count = shape[block_dim_idx];
+                        // Fill each block with its index as the value
+                        // for i in 0..block_count {
+                        //     nd_view.slice_mut(s![i, .., .., .., ..]).fill(i as f32);
+                        // }
 
                         assert_eq!(nd_view[[0, 0, 0, 0, 0]], 0.0);
                         assert_eq!(nd_view[[0, 1, 1, 1, 1]], 0.0);
@@ -1510,8 +1533,7 @@ mod tests {
         {
             let mut h_layer = h_blocks.layer_mut(0)?.view()?;
             let mut nd_view = h_layer.as_ndarray_view_mut::<f32>()?;
-            let zeros = ndarray::Array::from_shape_fn(nd_view.dim(), |_| 0.0);
-            nd_view.assign(&zeros);
+            nd_view.fill(0.0);
 
             assert_eq!(nd_view[[0, 0, 0, 0, 0]], 0.0);
             assert_eq!(nd_view[[1, 0, 0, 0, 0]], 0.0);
@@ -1572,12 +1594,165 @@ mod tests {
     }
 
     #[rstest]
+    #[case(KvLayout::KvFirst)]
+    #[case(KvLayout::BlockFirst)]
+    #[test]
+    fn test_kv_block_copy_stream_validated(#[case] layout: KvLayout) -> Result<()> {
+        println!("Testing block copy stream with validation");
+
+        let device = CudaContext::new(0)?;
+
+        // Set up a small tensor for testing with validation
+        let number_of_layers = 2;
+        let number_of_heads = 2;
+        let head_size = 2;
+        let number_of_cpu_blocks = 8;
+        let number_of_gpu_blocks = 4;
+        let block_size = 2;
+
+        println!("Test configuration:");
+        println!("  Number of layers: {}", number_of_layers);
+        println!("  Number of heads: {}", number_of_heads);
+        println!("  Head size: {}", head_size);
+        println!("  Block size: {}", block_size);
+        println!("  CPU blocks: {}", number_of_cpu_blocks);
+        println!("  GPU blocks: {}", number_of_gpu_blocks);
+
+        let model_details = KvModelDetailsBuilder::default()
+            .number_of_layers(number_of_layers)
+            .number_of_heads(number_of_heads)
+            .head_size(head_size)
+            .dtype(DType::F32) // Use F32 for easier validation
+            .build()?;
+
+        let block_details = KvBlockDetailsBuilder::default()
+            .layout(layout.clone())
+            .block_size(block_size)
+            .tp_size(1)
+            .tp_rank(0)
+            .model_details(model_details)
+            .build()?;
+
+        // Create the storage blocks
+        let mut h_blocks = KvBlockStorage::allocate(
+            number_of_cpu_blocks,
+            block_details.clone(),
+            StorageType::Pinned,
+        )?;
+
+        h_blocks.fill_layer_with_block_id().unwrap();
+
+        let d_blocks = KvBlockStorage::allocate(
+            number_of_gpu_blocks,
+            block_details.clone(),
+            StorageType::Device(device.clone()),
+        )?;
+
+        // Set up block mapping for copying
+        let h2d_block_map = CopyStreamBlockMap::new(&h_blocks, &d_blocks)?;
+        let d2h_block_map = CopyStreamBlockMap::new(&d_blocks, &h_blocks)?;
+
+        let mut copy_stream = CopyStream::new(number_of_layers, number_of_gpu_blocks)?;
+
+        // Convert to i32 for the API
+        let src_block_ids: Vec<i32> = (0..number_of_gpu_blocks).map(|id| id as i32).collect();
+        let dst_block_ids: Vec<i32> = (0..number_of_gpu_blocks).map(|id| id as i32).collect();
+
+        // Test H2D copy
+        copy_stream.prepare_block_map(h2d_block_map.clone())?;
+        copy_stream.prepare_block_ids(src_block_ids.clone(), dst_block_ids.clone())?;
+
+        println!("Copying data from host to device");
+        copy_stream.trigger_all_layers()?;
+        copy_stream.sync_stream()?;
+        copy_stream.reset();
+
+        // Clear host blocks to verify D2H copy later
+        println!("Clearing host blocks to verify D2H copy");
+        for layer_idx in 0..number_of_layers {
+            let layer = h_blocks.layer_mut(layer_idx)?;
+            let mut view = layer.view()?;
+            let mut nd_view = view.as_ndarray_view_mut::<f32>()?;
+            nd_view.fill(0.0);
+        }
+
+        // Now copy back from device to host
+        // let's reverse the src block ids this will take gpu
+        //
+        // this should map:
+        // - gpu:3 -> cpu:0
+        // - gpu:2 -> cpu:1
+        // - gpu:1 -> cpu:2
+        // - gpu:0 -> cpu:3
+        let src_block_ids: Vec<i32> = (0..number_of_gpu_blocks)
+            .rev()
+            .map(|id| id as i32)
+            .collect();
+
+        let dst_lblock_ids: Vec<i32> = (0..number_of_gpu_blocks).map(|id| id as i32).collect();
+
+        copy_stream.prepare_block_map(d2h_block_map)?;
+        copy_stream.prepare_block_ids(src_block_ids.clone(), dst_block_ids.clone())?;
+
+        println!("Copying data back from device to host");
+        copy_stream.trigger_all_layers()?;
+        copy_stream.sync_stream()?;
+
+        // Verify the data transfer
+        for layer_idx in 0..number_of_layers {
+            let host_layer = h_blocks.layer(layer_idx)?;
+            let host_view = host_layer.view()?;
+            let host_nd_view = host_view.as_ndarray_view::<f32>()?;
+
+            // Validate that each destination block contains the expected values from the source block
+            for (src_block_id, dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
+                let src_block_value = *src_block_id as f32;
+
+                match layout {
+                    KvLayout::KvFirst => {
+                        // In KvFirst layout, blocks are in dimension 1
+                        let block_slice =
+                            host_nd_view.slice(s![.., *dst_block_id as usize, .., .., ..]);
+                        for &value in block_slice.iter() {
+                            assert_eq!(
+                                value, src_block_value,
+                                "Block validation failed: src_block {} -> dst_block {}",
+                                src_block_id, dst_block_id
+                            );
+                        }
+                    }
+                    KvLayout::BlockFirst => {
+                        // In BlockFirst layout, blocks are in dimension 0
+                        let block_slice =
+                            host_nd_view.slice(s![*dst_block_id as usize, .., .., .., ..]);
+                        for &value in block_slice.iter() {
+                            assert_eq!(
+                                value, src_block_value,
+                                "Block validation failed: src_block {} -> dst_block {}",
+                                src_block_id, dst_block_id
+                            );
+                        }
+                    }
+                }
+
+                println!(
+                    "Validated: src_block {} -> dst_block {}",
+                    src_block_id, dst_block_id
+                );
+            }
+        }
+
+        println!("Transfer validation successful");
+        Ok(())
+    }
+
+    #[rstest]
     #[case(KvLayout::KvFirst, true)]
     #[case(KvLayout::KvFirst, false)]
     #[case(KvLayout::BlockFirst, true)]
     #[case(KvLayout::BlockFirst, false)]
     #[test]
-    fn test_kv_block_copy_stream(#[case] layout: KvLayout, #[case] is_h2d: bool) -> Result<()> {
+    fn bench_kv_block_copy_stream(#[case] layout: KvLayout, #[case] is_h2d: bool) -> Result<()> {
         let layout_name = match layout {
             KvLayout::KvFirst => "KvFirst",
             KvLayout::BlockFirst => "BlockFirst",
@@ -1588,12 +1763,12 @@ mod tests {
         let device = CudaContext::new(0)?;
 
         // Reduce sizes for testing performance
-        let number_of_layers = 8;
-        let number_of_heads = 2;
-        let head_size = 2;
-        let number_of_cpu_blocks = 8;
-        let number_of_gpu_blocks = 4;
-        let block_size = 2;
+        let number_of_layers = 32;
+        let number_of_heads = 8;
+        let head_size = 128;
+        let number_of_cpu_blocks = 64;
+        let number_of_gpu_blocks = 64;
+        let block_size = 64;
 
         println!("Test configuration:");
         println!("  Number of layers: {}", number_of_layers);
@@ -1692,186 +1867,6 @@ mod tests {
                 / (1024.0 * 1024.0 * 1024.0 * duration.as_secs_f64())
         );
 
-        Ok(())
-    }
-
-    #[rstest]
-    #[case(KvLayout::KvFirst)]
-    #[case(KvLayout::BlockFirst)]
-    #[test]
-    fn test_kv_block_copy_stream_validated(#[case] layout: KvLayout) -> Result<()> {
-        println!("Testing block copy stream with validation");
-
-        let device = CudaContext::new(0)?;
-
-        // Set up a small tensor for testing with validation
-        let number_of_layers = 2;
-        let number_of_heads = 2;
-        let head_size = 2;
-        let number_of_cpu_blocks = 4;
-        let number_of_gpu_blocks = 4;
-        let block_size = 2;
-
-        println!("Test configuration:");
-        println!("  Number of layers: {}", number_of_layers);
-        println!("  Number of heads: {}", number_of_heads);
-        println!("  Head size: {}", head_size);
-        println!("  Block size: {}", block_size);
-        println!("  CPU blocks: {}", number_of_cpu_blocks);
-        println!("  GPU blocks: {}", number_of_gpu_blocks);
-
-        let model_details = KvModelDetailsBuilder::default()
-            .number_of_layers(number_of_layers)
-            .number_of_heads(number_of_heads)
-            .head_size(head_size)
-            .dtype(DType::F32) // Use F32 for easier validation
-            .build()?;
-
-        let block_details = KvBlockDetailsBuilder::default()
-            .layout(layout.clone())
-            .block_size(block_size)
-            .tp_size(1)
-            .tp_rank(0)
-            .model_details(model_details)
-            .build()?;
-
-        // Create the storage blocks
-        let mut h_blocks = KvBlockStorage::allocate(
-            number_of_cpu_blocks,
-            block_details.clone(),
-            StorageType::Pinned,
-        )?;
-
-        let mut d_blocks = KvBlockStorage::allocate(
-            number_of_gpu_blocks,
-            block_details.clone(),
-            StorageType::Device(device.clone()),
-        )?;
-
-        // Initialize host blocks with sequential values for validation
-        for layer_idx in 0..number_of_layers {
-            let layer = h_blocks.layer_mut(layer_idx)?;
-            let mut view = layer.view()?;
-            let shape = *view.shape();
-
-            println!("Layer {} shape: {:?}", layer_idx, shape);
-
-            let mut nd_view = view.as_ndarray_view_mut::<f32>()?;
-
-            // Initialize with sequential values based on layer and indices
-            match layout {
-                KvLayout::KvFirst => {
-                    for kv_idx in 0..shape[0] {
-                        for block_idx in 0..shape[1] {
-                            for bs_idx in 0..shape[2] {
-                                for head_idx in 0..shape[3] {
-                                    for head_dim_idx in 0..shape[4] {
-                                        let value = 100.0 * layer_idx as f32
-                                            + 10.0 * block_idx as f32
-                                            + 1.0
-                                                * (kv_idx + bs_idx + head_idx + head_dim_idx)
-                                                    as f32;
-                                        nd_view
-                                            [[kv_idx, block_idx, bs_idx, head_idx, head_dim_idx]] =
-                                            value;
-
-                                        // Debug print for a few values
-                                        if bs_idx == 0 && head_idx == 0 && head_dim_idx == 0 {
-                                            println!(
-                                                "Init: l={}, [kv={}, b={}, bs={}, h={}, hd={}] = {}",
-                                                layer_idx, kv_idx, block_idx, bs_idx, head_idx, head_dim_idx, value
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                KvLayout::BlockFirst => {
-                    for block_idx in 0..shape[0] {
-                        for kv_idx in 0..shape[1] {
-                            for bs_idx in 0..shape[2] {
-                                for head_idx in 0..shape[3] {
-                                    for head_dim_idx in 0..shape[4] {
-                                        let value = 100.0 * layer_idx as f32
-                                            + 10.0 * block_idx as f32
-                                            + 1.0
-                                                * (kv_idx + bs_idx + head_idx + head_dim_idx)
-                                                    as f32;
-                                        nd_view
-                                            [[block_idx, kv_idx, bs_idx, head_idx, head_dim_idx]] =
-                                            value;
-
-                                        // Debug print for a few values
-                                        if bs_idx == 0 && head_idx == 0 && head_dim_idx == 0 {
-                                            println!(
-                                                "Init: l={}, [b={}, kv={}, bs={}, h={}, hd={}] = {}",
-                                                layer_idx, block_idx, kv_idx, bs_idx, head_idx, head_dim_idx, value
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Set up block mapping for copying
-        let h2d_block_map = CopyStreamBlockMap::new(&h_blocks, &d_blocks)?;
-        let d2h_block_map = CopyStreamBlockMap::new(&d_blocks, &h_blocks)?;
-
-        let mut copy_stream = CopyStream::new(number_of_layers, number_of_gpu_blocks)?;
-
-        // Create simple block mapping for test
-        let src_blocks = vec![0, 1, 2, 3];
-        let dst_blocks = vec![0, 1, 2, 3];
-
-        // Convert to i32 for the API
-        let src_block_ids: Vec<i32> = src_blocks.iter().map(|&id| id as i32).collect();
-        let dst_block_ids: Vec<i32> = dst_blocks.iter().map(|&id| id as i32).collect();
-
-        // Test H2D copy
-        copy_stream.prepare_block_map(h2d_block_map.clone())?;
-        copy_stream.prepare_block_ids(src_block_ids.clone(), dst_block_ids.clone())?;
-
-        println!("Copying data from host to device");
-        copy_stream.trigger_all_layers()?;
-        copy_stream.sync_stream()?;
-
-        // Clear host blocks to verify D2H copy later
-        println!("Clearing host blocks to verify D2H copy");
-        for layer_idx in 0..number_of_layers {
-            let layer = h_blocks.layer_mut(layer_idx)?;
-            let mut view = layer.view()?;
-            let mut nd_view = view.as_ndarray_view_mut::<f32>()?;
-            let zeros = ndarray::Array::from_shape_fn(nd_view.dim(), |_| 0.0);
-            nd_view.assign(&zeros);
-        }
-
-        // Now copy back from device to host
-        copy_stream.prepare_block_map(d2h_block_map)?;
-        copy_stream.prepare_block_ids(src_block_ids, dst_block_ids.clone())?;
-
-        println!("Copying data back from device to host");
-        copy_stream.trigger_all_layers()?;
-        copy_stream.sync_stream()?;
-
-        // Verify the data transfer
-        println!("Verifying transfer for {} blocks", src_blocks.len());
-        for layer_idx in 0..src_blocks.len() {
-            let host_layer = h_blocks.layer(layer_idx)?;
-            let host_view = host_layer.view()?;
-            let host_nd_view = host_view.as_ndarray_view::<f32>()?;
-
-            let expected_value = src_blocks[layer_idx] as f32;
-
-            assert_eq!(host_nd_view[[0, layer_idx, 0, 0, 0]], expected_value);
-        }
-
-        println!("Transfer validation successful");
         Ok(())
     }
 
