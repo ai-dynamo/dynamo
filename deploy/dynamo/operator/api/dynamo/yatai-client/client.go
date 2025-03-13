@@ -92,7 +92,7 @@ func (c *YataiClient) UpdateBentoImageBuildStatus(ctx context.Context, bentoRepo
 }
 
 func (c *YataiClient) GetBento(ctx context.Context, bentoRepositoryName, bentoVersion string) (bento *schemasv1.BentoFullSchema, err error) {
-	url_ := utils.UrlJoin(c.endpoint, fmt.Sprintf("/api/v1/bento_repositories/%s/bentos/%s", bentoRepositoryName, bentoVersion))
+	url_ := utils.UrlJoin(c.endpoint, fmt.Sprintf("/api/v1/dynamo_nims/%s/versions/%s", bentoRepositoryName, bentoVersion))
 	bento = &schemasv1.BentoFullSchema{}
 	_, err = c.getJSONReqBuilder().Method("GET").Url(url_).Result(bento).Do(ctx)
 	return
@@ -106,7 +106,7 @@ func (c *YataiClient) GetModel(ctx context.Context, modelRepositoryName, modelVe
 }
 
 func (c *YataiClient) GetBentoRepository(ctx context.Context, bentoRepositoryName string) (bentoRepository *schemasv1.BentoRepositorySchema, err error) {
-	url_ := utils.UrlJoin(c.endpoint, fmt.Sprintf("/api/v1/bento_repositories/%s", bentoRepositoryName))
+	url_ := utils.UrlJoin(c.endpoint, fmt.Sprintf("/api/v1/dynamo_nims/%s", bentoRepositoryName))
 	bentoRepository = &schemasv1.BentoRepositorySchema{}
 	_, err = c.getJSONReqBuilder().Method("GET").Url(url_).Result(bentoRepository).Do(ctx)
 	return

@@ -63,7 +63,7 @@ def dynamo_endpoint(
     request_model: Union[Type[BaseModel], Type[Any]], response_model: Type[BaseModel]
 ) -> Callable:
     def decorator(
-        func: Callable[..., AsyncGenerator[Any, None]]
+        func: Callable[..., AsyncGenerator[Any, None]],
     ) -> Callable[..., AsyncGenerator[Any, None]]:
         @wraps(func)
         async def wrapper(*args, **kwargs) -> AsyncGenerator[Any, None]:
