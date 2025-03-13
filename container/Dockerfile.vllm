@@ -210,7 +210,7 @@ COPY README.md /workspace/
 COPY LICENSE /workspace/
 
 # Build Rust runtime
-COPY .cargo /workspace/.cargo
+ENV CARGO_BUILD_JOBS=$(( $(nproc) > 32 ? 32 : $(nproc) ))
 COPY lib/runtime /workspace/lib/runtime
 RUN cd lib/runtime && \
     cargo build --release --locked && cargo doc --no-deps
