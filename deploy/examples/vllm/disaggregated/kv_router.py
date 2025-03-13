@@ -24,7 +24,6 @@ from utils.protocol import Tokens
 from vllm.logger import logger as vllm_logger
 
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
-from dynamo.runtime import dynamo_endpoint
 from dynamo.sdk import async_onstart, dynamo_context, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
