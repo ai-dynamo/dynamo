@@ -126,7 +126,7 @@ COPY pyproject.toml /workspace/
 COPY README.md /workspace/
 COPY LICENSE /workspace/
 
-ENV CARGO_BUILD_JOBS=$(( $(nproc) > 32 ? 32 : $(nproc) ))
+RUN CARGO_BUILD_JOBS=$(( $(nproc) > 32 ? 32 : $(nproc) ))
 
 # Build Rust runtime
 COPY lib/runtime /workspace/lib/runtime
