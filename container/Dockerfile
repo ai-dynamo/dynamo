@@ -126,7 +126,7 @@ COPY pyproject.toml /workspace/
 COPY README.md /workspace/
 COPY LICENSE /workspace/
 
-RUN nproc && CARGO_BUILD_JOBS=$(( $(nproc) > 32 ? 32 : $(nproc) ))
+RUN export CARGO_BUILD_JOBS=$(( $(nproc) > 32 ? 32 : $(nproc) ))
 RUN echo $CARGO_BUILD_JOBS
 
 # Build Rust runtime
