@@ -393,6 +393,16 @@ DYN_TOKEN_ECHO_DELAY_MS=1 dynamo-run in=http out=echo_full
 
 The default delay is 10ms, which produces approximately 100 tokens per second.
 
+## Batch mode
+
+dynamo-run can take a folder full of prompts and evaluate them all:
+
+```
+dynamo-run in=batch:/opt/prompts out=llamacpp <model>
+```
+
+The `/opt/prompts` folder should contain multiple plain text files. Each one is passed as a prompt to the model. The output is written in plain text into `<filename>.out`. At the end of the run some statistics are printed.
+
 ## Defaults
 
 The input defaults to `in=text`.
