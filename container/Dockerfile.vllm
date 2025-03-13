@@ -219,6 +219,7 @@ COPY components /workspace/components
 COPY launch /workspace/launch
 
 ARG CARGO_BUILD_JOBS
+
 ENV CARGO_TARGET_DIR=/workspace/target
 
 RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
