@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
+use std::{fmt, io::IsTerminal as _};
 
 use crate::ENDPOINT_SCHEME;
 
@@ -22,7 +22,10 @@ pub enum Input {
     /// Run an OpenAI compatible HTTP server
     Http,
 
-    /// Read prompt from stdin
+    /// Single prompt on stdin
+    Stdin,
+
+    /// Interactive chat
     Text,
 
     /// Pull requests from a namespace/component/endpoint path.
@@ -41,6 +44,7 @@ impl TryFrom<&str> for Input {
         match s {
             "http" => Ok(Input::Http),
             "text" => Ok(Input::Text),
+            "stdin" => Ok(Input::Stdin),
             "none" => Ok(Input::None),
             endpoint_path if endpoint_path.starts_with(ENDPOINT_SCHEME) => {
                 let path = endpoint_path.strip_prefix(ENDPOINT_SCHEME).unwrap();
@@ -56,10 +60,21 @@ impl fmt::Display for Input {
         let s = match self {
             Input::Http => "http",
             Input::Text => "text",
+            Input::Stdin => "stdin",
             Input::Endpoint(path) => path,
             Input::None => "none",
         };
         write!(f, "{s}")
+    }
+}
+
+impl Default for Input {
+    fn default() -> Self {
+        if std::io::stdin().is_terminal() {
+            Input::Text
+        } else {
+            Input::Stdin
+        }
     }
 }
 
@@ -102,6 +117,9 @@ pub enum Output {
     /// tokens. We do the pre-processing.
     #[cfg(feature = "python")]
     PythonTok(String),
+    //
+    // DEVELOPER NOTE
+    // If you add an engine add it to `available_engines` below, and to Default if it makes sense
 }
 
 impl TryFrom<&str> for Output {
@@ -177,11 +195,83 @@ impl fmt::Display for Output {
             Output::Endpoint(path) => path,
 
             #[cfg(feature = "python")]
-            Output::PythonStr(path) => path,
+            Output::PythonStr(_) => "pystr",
 
             #[cfg(feature = "python")]
-            Output::PythonTok(path) => path,
+            Output::PythonTok(_) => "pytok",
         };
         write!(f, "{s}")
+    }
+}
+
+/// Returns the engine to use if user did not say on cmd line
+/// Uses whatever was compiled in, with a priority ordering.
+#[allow(unused_assignments, unused_mut)]
+impl Default for Output {
+    fn default() -> Self {
+        // Default if no engines
+        let mut out = Output::EchoFull;
+
+        // Runs everywhere but needs local CUDA to build
+        #[cfg(feature = "mistralrs")]
+        {
+            out = Output::MistralRs;
+        }
+
+        #[cfg(feature = "llamacpp")]
+        {
+            out = Output::LlamaCpp;
+        }
+
+        #[cfg(feature = "sglang")]
+        {
+            out = Output::SgLang;
+        }
+
+        #[cfg(feature = "vllm")]
+        {
+            out = Output::Vllm;
+        }
+
+        out
+    }
+}
+
+impl Output {
+    #[allow(unused_mut)]
+    pub fn available_engines() -> Vec<String> {
+        let mut out = vec!["echo_core".to_string(), "echo_full".to_string()];
+        #[cfg(feature = "mistralrs")]
+        {
+            out.push(Output::MistralRs.to_string());
+        }
+
+        #[cfg(feature = "llamacpp")]
+        {
+            out.push(Output::LlamaCpp.to_string());
+        }
+
+        #[cfg(feature = "sglang")]
+        {
+            out.push(Output::SgLang.to_string());
+        }
+
+        #[cfg(feature = "vllm")]
+        {
+            out.push(Output::Vllm.to_string());
+        }
+
+        #[cfg(feature = "python")]
+        {
+            out.push(Output::PythonStr("file.py".to_string()).to_string());
+            out.push(Output::PythonTok("file.py".to_string()).to_string());
+        }
+
+        #[cfg(feature = "trtllm")]
+        {
+            out.push(Output::TrtLLM.to_string());
+        }
+
+        out
     }
 }

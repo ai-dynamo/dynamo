@@ -28,16 +28,7 @@ Example:
 - cd target/release
 - ./dynamo-run hf_checkouts/Llama-3.2-3B-Instruct/
 - OR: ./dynamo-run Llama-3.2-1B-Instruct-Q4_K_M.gguf
-
 "#;
-
-const DEFAULT_IN: Input = Input::Text;
-
-#[cfg(feature = "mistralrs")]
-const DEFAULT_OUT: Output = Output::MistralRs;
-
-#[cfg(not(feature = "mistralrs"))]
-const DEFAULT_OUT: Output = Output::EchoFull;
 
 const ZMQ_SOCKET_PREFIX: &str = "dyn";
 
@@ -134,6 +125,11 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
     if args.is_empty() || args[0] == "-h" || args[0] == "--help" {
         println!("{USAGE}");
         println!("{HELP}");
+        println!(
+            "Available engines: {}",
+            Output::available_engines().join(", ")
+        );
+
         return Ok(());
     }
     for arg in env::args().skip(1).take(2) {
@@ -159,14 +155,18 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
             non_flag_params += 1;
             x
         }
-        None => DEFAULT_IN,
+        None => Input::default(),
     };
     let out_opt = match out_opt {
         Some(x) => {
             non_flag_params += 1;
             x
         }
-        None => DEFAULT_OUT,
+        None => {
+            let default_engine = Output::default(); // smart default based on feature flags
+            tracing::debug!("Using engine: {default_engine}");
+            default_engine
+        }
     };
 
     // Clap skips the first argument expecting it to be the binary name, so add it back

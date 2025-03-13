@@ -136,7 +136,6 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
                 streaming=request.stream,
                 disaggregated_params=disaggregated_params,
             ):
-                self.generate_event.set()
                 final_result = result
                 logger.debug(f"Generated result: {result}")
                 if self.server_config.type == "ctx":

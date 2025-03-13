@@ -48,7 +48,7 @@ class Router:
     async def _get_ctx_resp(self, request, ctx_client):
         logger.debug(f"Received request {request}")
 
-        request.max_tokens = 1
+        request.max_completion_tokens = 1
         request.disaggregated_params = DisaggregatedParams(request_type="context_only")
         logger.debug(f"[router] Sending request to context server: {request}")
         ctx_resp = [
@@ -97,6 +97,9 @@ class Router:
         async for response in await self.gen_completion_client.round_robin(
             gen_req.model_dump_json()
         ):
+            logger.debug(
+                f"[router] Received response from generation server: {response.data()}"
+            )
             gen_resp_obj = DisaggCompletionStreamResponse.model_validate(
                 response.data()
             )
@@ -130,7 +133,10 @@ class Router:
         async for response in await self.gen_chat_client.round_robin(
             gen_req.model_dump_json()
         ):
-            gen_resp_obj = DisaggChatCompletionStreamResponse.model_validate(
+            logger.debug(
+                f"[router] Received response from generation server: {response.data()}"
+            )
+            gen_resp_obj = DisaggChatCompletionStreamResponse.model_validate_json(
                 response.data()
             )
             yield json.loads(gen_resp_obj.model_dump_json(exclude_unset=True))

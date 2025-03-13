@@ -128,5 +128,11 @@ def parse_tensorrt_llm_args() -> Tuple[Any, Tuple[Dict[str, Any], Dict[str, Any]
         action="store_true",
         help="Publish stats from TensorRT-LLM. Currently, only supported for context worker in Disaggregated mode.",
     )
+    parser.add_argument(
+        "--kv-block-size",
+        type=int,
+        help="KV block size for TensorRT-LLM. Currently, only supported for context worker in Disaggregated mode.",
+        default=64,
+    )
     args = parser.parse_args()
     return (args, _init_engine_args(args.engine_args))

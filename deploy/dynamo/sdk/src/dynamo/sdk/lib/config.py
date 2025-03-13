@@ -63,6 +63,8 @@ class ServiceConfig(dict):
             if isinstance(value, bool):
                 if value:
                     args.append(f"--{arg_key}")
+            elif isinstance(value, dict):
+                args.extend([f"--{arg_key}", json.dumps(value)])
             else:
                 args.extend([f"--{arg_key}", str(value)])
 
