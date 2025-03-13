@@ -1619,7 +1619,6 @@ dependencies = [
  "dynamo-runtime",
  "futures",
  "futures-util",
- "libc",
  "netlink-packet-route",
  "rtnetlink",
  "serde",

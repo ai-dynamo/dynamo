@@ -51,7 +51,8 @@ candle-hf-hub = { version = "0.3.3", default-features = false, features = ["toki
 clap = { version = "4.5", features = ["derive", "env"] }
 dialoguer = { version = "0.11", default-features = false, features = ["editor", "history"] }
 futures-util = "0.3"
-libc = { version = "0.2" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
+
+[target.x86_64-unknown-linux-gnu.dependencies]
 netlink-packet-route = { version = "0.19", optional = true }
 rtnetlink = { version = "0.14", optional = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
