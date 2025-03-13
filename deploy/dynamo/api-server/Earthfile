@@ -32,6 +32,7 @@ docker:
     COPY +build/.env .
     COPY db/ db/
     RUN pip install -r db/requirements.txt
+    ENV PYTHONPATH="/:${PYTHONPATH}"
     USER 65532:65532
     ENTRYPOINT ["/server"]
     SAVE IMAGE --push $CI_REGISTRY_IMAGE/$IMAGE:$CI_COMMIT_SHA
