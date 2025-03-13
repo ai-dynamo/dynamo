@@ -110,6 +110,16 @@ class DynamoService(Service[T]):
     def list_dynamo_endpoints(self) -> List[str]:
         """List names of all registered Dynamo endpoints"""
         return list(self._dynamo_endpoints.keys())
+    
+    @classmethod
+    def link(cls, next_service):
+        """
+        Link this service to another service, creating a pipeline.
+        Returns a Graph object for further chaining.
+        """
+        from dynamo.sdk.lib.dependency import Graph
+        print(f"DEBUG: Importing Graph for service {cls.name}")
+        return Graph(cls, next_service)
 
     # todo: add another function to bind an instance of the inner to the self within these methods
 
