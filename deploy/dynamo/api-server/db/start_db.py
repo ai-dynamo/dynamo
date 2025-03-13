@@ -19,8 +19,8 @@ import os
 
 import uvicorn
 
-from .api import app
-from .db import create_db_and_tables_async
+from db.api import app
+from db.db import create_db_and_tables_async
 
 logger = logging.getLogger(__name__)
 

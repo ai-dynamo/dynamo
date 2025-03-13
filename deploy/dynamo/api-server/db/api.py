@@ -26,7 +26,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlmodel import asc, col, desc, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from .components import (
+from db.components import (
     CreateDynamoNimRequest,
     CreateDynamoNimVersionRequest,
     DynamoNimSchema,
@@ -45,7 +45,7 @@ from .components import (
     UpdateDynamoNimVersionRequest,
     UserSchema,
 )
-from .db import get_session, s3_storage
+from db.db import get_session, s3_storage
 
 API_TAG_MODELS = "dynamo"
 

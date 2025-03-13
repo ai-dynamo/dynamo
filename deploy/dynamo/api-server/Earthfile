@@ -14,7 +14,6 @@ build:
     RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o server api/main.go
     SAVE ARTIFACT /workspace/server
     SAVE ARTIFACT /workspace/.env
-    SAVE IMAGE build-api-server:latest
 
 test:
     FROM +build
