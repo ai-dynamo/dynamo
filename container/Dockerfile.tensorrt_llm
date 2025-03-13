@@ -74,13 +74,15 @@ COPY Cargo.toml /workspace/
 COPY Cargo.lock /workspace/
 COPY rust-toolchain.toml /workspace/
 
-# Build Rust runtime
-# TODO: Tanmay Add LLMAPI-based feature flag once the engine is ready.
+ARG CARGO_BUILD_JOBS
+
+# Build Rust
 COPY lib/ /workspace/lib/
 COPY components /workspace/components
 COPY launch /workspace/launch
 
-RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
+# TODO: Tanmay Add LLMAPI-based feature flag once the engine is ready.
+RUN cargo build --release --locked --features python && \
     cargo doc --no-deps && \
     cp target/release/dynamo-run /usr/local/bin/ && \
     cp target/release/llmctl /usr/local/bin/

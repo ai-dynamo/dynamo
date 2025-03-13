@@ -4,9 +4,20 @@
 
 ## Setup
 
-Libraries (Ubuntu):
+Libraries Ubuntu:
 ```
-apt install -y build-essential libhwloc-dev libudev-dev pkg-config libssl-dev protobuf-compiler python3-dev
+apt install -y build-essential libhwloc-dev libudev-dev pkg-config libssl-dev libclang-dev protobuf-compiler python3-dev
+```
+
+Libraries macOS:
+```
+brew install cmake protobuf
+
+# install Xcode from App Store and check that Metal is accessible
+xcrun -sdk macosx metal
+
+# may have to install Xcode Command Line Tools:
+xcode-select --install
 ```
 
 Install Rust:
@@ -17,46 +28,78 @@ source $HOME/.cargo/env
 
 ## Build
 
-- CUDA:
+Navigate to launch/ directory
+```
+cd launch/
+```
+Optionally can run `cargo build` from any location with arguments:
+```
+--target-dir /path/to/target_directory` specify target_directory with write privileges
+--manifest-path /path/to/project/Cargo.toml` if cargo build is run outside of `launch/` directory
+```
 
-`cargo build --release --features mistralrs,cuda`
+- Linux with GPU and CUDA (tested on Ubuntu):
+```
+cargo build --release --features mistralrs,cuda
+```
 
-- MAC w/ Metal:
-
-`cargo build --release --features mistralrs,metal`
+- macOS with Metal:
+```
+cargo build --release --features mistralrs,metal
+```
 
 - CPU only:
+```
+cargo build --release --features mistralrs
+```
 
-`cargo build --release --features mistralrs`
-
-The binary will be called `dynamo-run` in `$REPO_ROOT/launch/target/release`.
+The binary will be called `dynamo-run` in `target/release`
+```
+cd target/release
+```
 
 ## Quickstart
+### Automatically download a model from [Hugging Face](https://huggingface.co/models)
+NOTE: for gated models (e.g. meta-llama/Llama-3.2-3B-Instruct) you have to have an `HF_TOKEN` environment variable set.
 
-If you have an `HF_TOKEN` environment variable set, this will download Qwen2.5 3B from Hugging Face (6 GiB download) and start it in interactive mode:
 ```
-dynamo-run Qwen/Qwen2.5-3B-Instruct
+./dynamo-run <HUGGING_FACE_ORGANIZATION/MODEL_NAME>
 ```
+This will automatically download Qwen2.5 3B from Hugging Face (6 GiB download) and start it in interactive text mode:
+`./dynamo-run Qwen/Qwen2.5-3B-Instruct`
+
+The parameter can be the ID of a HuggingFace repository (it will be downloaded), a GGUF file, or a folder containing safetensors, config.json, etc (a locally checked out HuggingFace repository).
 
 ## Download a model from Hugging Face
 
-For example one of these should be fast and good quality on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
+One of these models should be high quality and fast on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
+E.g. https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/blob/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf
 
-## Run
+Download model file:
+```
+curl -L -o Llama-3.2-3B-Instruct-Q4_K_M.gguf "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/blob/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf?download=true"
+```
+
+## Run a model from local file
 
 *Text interface*
-
-`dynamo-run Llama-3.2-1B-Instruct-Q4_K_M.gguf` or path to a Hugging Face repo checkout instead of the GGUF.
+```
+dynamo-run Llama-3.2-3B-Instruct-Q4_K_M.gguf # or path to a Hugging Face repo checkout instead of the GGUF
+```
 
 *HTTP interface*
-
-`dynamo-run in=http Llama-3.2-1B-Instruct-Q4_K_M.gguf`
-
-List the models: `curl localhost:8080/v1/models`
-
-Send a request:
 ```
-curl -d '{"model": "Llama-3.2-1B-Instruct-Q4_K_M", "max_tokens": 2049, "messages":[{"role":"user", "content": "What is the capital of South Africa?" }]}' -H 'Content-Type: application/json' http://localhost:8080/v1/chat/completions
+dynamo-run in=http Llama-3.2-3B-Instruct-Q4_K_M.gguf
+```
+
+*List the models*
+```
+curl localhost:8080/v1/models
+```
+
+*Send a request*
+```
+curl -d '{"model": "Llama-3.2-3B-Instruct-Q4_K_M", "max_tokens": 2049, "messages":[{"role":"user", "content": "What is the capital of South Africa?" }]}' -H 'Content-Type: application/json' http://localhost:8080/v1/chat/completions
 ```
 
 *Multi-node*
@@ -194,21 +237,21 @@ Example engine:
 import asyncio
 
 async def generate(request):
-    yield {"id":"1","choices":[{"index":0,"delta":{"content":"The","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-1B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
+    yield {"id":"1","choices":[{"index":0,"delta":{"content":"The","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-3B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
     await asyncio.sleep(0.1)
-    yield {"id":"1","choices":[{"index":0,"delta":{"content":" capital","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-1B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
+    yield {"id":"1","choices":[{"index":0,"delta":{"content":" capital","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-3B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
     await asyncio.sleep(0.1)
-    yield {"id":"1","choices":[{"index":0,"delta":{"content":" of","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-1B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
+    yield {"id":"1","choices":[{"index":0,"delta":{"content":" of","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-3B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
     await asyncio.sleep(0.1)
-    yield {"id":"1","choices":[{"index":0,"delta":{"content":" France","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-1B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
+    yield {"id":"1","choices":[{"index":0,"delta":{"content":" France","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-3B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
     await asyncio.sleep(0.1)
-    yield {"id":"1","choices":[{"index":0,"delta":{"content":" is","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-1B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
+    yield {"id":"1","choices":[{"index":0,"delta":{"content":" is","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-3B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
     await asyncio.sleep(0.1)
-    yield {"id":"1","choices":[{"index":0,"delta":{"content":" Paris","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-1B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
+    yield {"id":"1","choices":[{"index":0,"delta":{"content":" Paris","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-3B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
     await asyncio.sleep(0.1)
-    yield {"id":"1","choices":[{"index":0,"delta":{"content":".","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-1B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
+    yield {"id":"1","choices":[{"index":0,"delta":{"content":".","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-3B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
     await asyncio.sleep(0.1)
-    yield {"id":"1","choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"stop"}],"created":1841762283,"model":"Llama-3.2-1B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
+    yield {"id":"1","choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"stop"}],"created":1841762283,"model":"Llama-3.2-3B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
 ```
 
 Command line arguments are passed to the python engine like this:
@@ -349,3 +392,10 @@ DYN_TOKEN_ECHO_DELAY_MS=1 dynamo-run in=http out=echo_full
 ```
 
 The default delay is 10ms, which produces approximately 100 tokens per second.
+
+## Defaults
+
+The input defaults to `in=text`.
+
+The output will default to whatever engine you have compiled in (so depending on `--features`). If all features
+are enabled at build time, then the default is currently `out=vllm`.

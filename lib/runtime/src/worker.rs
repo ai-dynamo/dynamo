@@ -153,7 +153,7 @@ impl Worker {
 
             match &result {
                 Ok(_) => {
-                    tracing::info!("Application shutdown successfully");
+                    tracing::debug!("Application shutdown successfully");
                 }
                 Err(e) => {
                     tracing::error!("Application shutdown with error: {:?}", e);
@@ -200,7 +200,7 @@ async fn signal_handler(cancel_token: CancellationToken) -> Result<()> {
             tracing::info!("SIGTERM received, starting graceful shutdown");
         },
         _ = cancel_token.cancelled() => {
-            tracing::info!("CancellationToken triggered; shutting down");
+            tracing::debug!("CancellationToken triggered; shutting down");
         },
     }
 

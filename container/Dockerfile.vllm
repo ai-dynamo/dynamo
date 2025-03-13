@@ -57,8 +57,10 @@ RUN apt-get install -y linux-tools-common linux-tools-generic ethtool iproute2
 RUN apt-get install -y dkms linux-headers-generic
 RUN apt-get install -y meson ninja-build uuid-dev gdb
 
-RUN apt-get update && apt install -y wget libglib2.0-0
-RUN wget ${NSYS_URL}${NSYS_PKG} && dpkg -i $NSYS_PKG && rm $NSYS_PKG
+RUN apt install -y libglib2.0-0
+RUN wget ${NSYS_URL}${NSYS_PKG} &&\
+    apt install -y ./${NSYS_PKG} &&\
+    rm ${NSYS_PKG}
 
 RUN cd /usr/local/src && \
     curl -fSsL "https://content.mellanox.com/ofed/MLNX_OFED-${MOFED_VERSION}/MLNX_OFED_LINUX-${MOFED_VERSION}-ubuntu24.04-x86_64.tgz" -o mofed.tgz && \
@@ -66,7 +68,7 @@ RUN cd /usr/local/src && \
     cd MLNX_OFED_LINUX-* && \
     apt-get update && apt-get install -y --no-install-recommends \
         ./DEBS/libibverbs* ./DEBS/ibverbs-providers* ./DEBS/librdmacm* ./DEBS/libibumad* && \
-    rm -rf /var/lib/apt/lists/* /usr/local/src/*
+    rm -rf /var/lib/apt/lists/* /usr/local/src/* mofed.tgz
 
 ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/cuda/lib64 \
     LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64

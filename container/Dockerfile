@@ -134,7 +134,7 @@ COPY lib/ /workspace/lib/
 COPY components /workspace/components
 COPY launch /workspace/launch
 
-RUN cargo build --release --locked && cargo doc --no-deps && \
+RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && cargo doc --no-deps && \
     cp target/release/dynamo-run /usr/local/bin/ && \
     cp target/release/llmctl /usr/local/bin/
 

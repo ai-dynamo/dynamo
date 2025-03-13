@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io::Read;
 #[cfg(any(feature = "vllm", feature = "sglang"))]
 use std::{future::Future, pin::Pin};
 
@@ -24,6 +25,7 @@ use dynamo_runtime::protocols::Endpoint;
 
 mod flags;
 pub use flags::Flags;
+mod hub;
 mod input;
 #[cfg(any(feature = "vllm", feature = "sglang"))]
 mod net;
@@ -80,7 +82,7 @@ pub async fn run(
     let cancel_token = runtime.primary_token();
 
     // Turn relative paths into absolute paths
-    let model_path = flags
+    let mut model_path = flags
         .model_path_pos
         .clone()
         .or(flags.model_path_flag.clone())
@@ -91,8 +93,9 @@ pub async fn run(
                 Some(p)
             }
         });
+
     // Serve the model under the name provided, or the name of the GGUF file or HF repo.
-    let model_name = flags
+    let mut model_name = flags
         .model_name
         .clone()
         .or_else(|| {
@@ -108,6 +111,18 @@ pub async fn run(
                 None
             }
         });
+
+    // If it's an HF repo download it
+    if let Some(inner_model_path) = model_path.as_ref() {
+        if !inner_model_path.exists() {
+            model_name = inner_model_path
+                .iter()
+                .last()
+                .map(|s| s.to_string_lossy().to_string());
+            model_path = Some(hub::from_hf(inner_model_path).await?);
+        }
+    }
+
     // Load the model deployment card, if any
     // Only used by some engines, so without those feature flags it's unused.
     #[allow(unused_variables)]
@@ -373,7 +388,19 @@ pub async fn run(
             crate::input::http::run(runtime.clone(), flags.http_port, engine_config).await?;
         }
         Input::Text => {
-            crate::input::text::run(runtime.clone(), cancel_token.clone(), engine_config).await?;
+            crate::input::text::run(runtime.clone(), cancel_token.clone(), None, engine_config)
+                .await?;
+        }
+        Input::Stdin => {
+            let mut prompt = String::new();
+            std::io::stdin().read_to_string(&mut prompt).unwrap();
+            crate::input::text::run(
+                runtime.clone(),
+                cancel_token.clone(),
+                Some(prompt),
+                engine_config,
+            )
+            .await?;
         }
         Input::Endpoint(path) => {
             crate::input::endpoint::run(runtime.clone(), path, engine_config).await?;

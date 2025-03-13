@@ -47,6 +47,7 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 async-openai = "0.27.2"
+candle-hf-hub = { version = "0.3.3", default-features = false, features = ["tokio", "rustls-tls"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 dialoguer = { version = "0.11", default-features = false, features = ["editor", "history"] }
 futures-util = "0.3"

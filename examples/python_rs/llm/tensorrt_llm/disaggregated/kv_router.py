@@ -15,6 +15,7 @@
 
 import asyncio
 import copy
+import enum
 import json
 import traceback
 from typing import AsyncIterator
@@ -22,6 +23,7 @@ from typing import AsyncIterator
 import uvloop
 from common.base_engine import ChatProcessorMixin
 from common.parser import LLMAPIConfig, parse_tensorrt_llm_args
+from common.processor import parse_chat_message_content
 from common.protocol import (
     DisaggChatCompletionRequest,
     DisaggChatCompletionStreamResponse,
@@ -35,6 +37,11 @@ from dynamo.llm import KvRouter
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
 logger.set_level("debug")
+
+
+class EndpointType(enum.Enum):
+    chat = "chat"
+    completion = "completion"
 
 
 class Scheduler:
@@ -77,13 +84,32 @@ class Router(ChatProcessorMixin):
 
         logger.info("INITIALIZED ROUTER")
 
-    async def _get_ctx_resp(self, request, ctx_client):
+    async def _get_ctx_resp(self, request, ctx_client, endpoint_type: EndpointType):
         logger.debug(f"Received request {request}")
 
         # NOTE: this will increase TTFT since we are encoding the prompt here
         # prompt is also encoded in the worker.
         # TODO: we need to implement our own request processing and protocols to send only token ids to llmapi worker.
-        token_ids = self._tokenizer.encode(request.prompt)
+        if endpoint_type == EndpointType.completion:
+            token_ids = self._tokenizer.encode(request.prompt)
+        else:
+            conversation = []
+            for message in request.messages:
+                conversation.extend(parse_chat_message_content(message))
+            tool_dicts = (
+                None
+                if request.tools is None
+                else [tool.model_dump() for tool in request.tools]
+            )
+            token_ids = self._tokenizer.apply_chat_template(
+                conversation=conversation,
+                tokenize=True,
+                add_generation_prompt=request.add_generation_prompt,
+                tools=tool_dicts,
+                documents=request.documents,
+                chat_template=request.chat_template,
+                **(request.chat_template_kwargs or {}),
+            )
         worker_id_generator: AsyncIterator = self.scheduler.generate(
             Tokens(tokens=token_ids).model_dump_json()
         )
@@ -92,7 +118,7 @@ class Router(ChatProcessorMixin):
             await worker_id_generator.__anext__()
         )  # only one worker id is returned
 
-        request.max_tokens = 1
+        request.max_completion_tokens = 1
         request.disaggregated_params = DisaggregatedParams(request_type="context_only")
         logger.debug(f"[router] Sending request to context server: {request}")
 
@@ -132,7 +158,9 @@ class Router(ChatProcessorMixin):
 
         gen_req = copy.deepcopy(request)
 
-        ctx_resp = await self._get_ctx_resp(request, self.ctx_completion_client)
+        ctx_resp = await self._get_ctx_resp(
+            request, self.ctx_completion_client, EndpointType.completion
+        )
         ctx_resp_obj = DisaggCompletionStreamResponse.model_validate(ctx_resp)
 
         gen_req.disaggregated_params = DisaggregatedParams.model_validate(
@@ -165,7 +193,9 @@ class Router(ChatProcessorMixin):
 
         gen_req = copy.deepcopy(request)
 
-        ctx_resp = await self._get_ctx_resp(request, self.ctx_chat_client)
+        ctx_resp = await self._get_ctx_resp(
+            request, self.ctx_chat_client, EndpointType.chat
+        )
         ctx_resp_obj = DisaggChatCompletionStreamResponse.model_validate_json(ctx_resp)
 
         gen_req.disaggregated_params = DisaggregatedParams.model_validate(
@@ -184,7 +214,7 @@ class Router(ChatProcessorMixin):
         async for response in await self.gen_chat_client.round_robin(
             gen_req.model_dump_json()
         ):
-            gen_resp_obj = DisaggChatCompletionStreamResponse.model_validate(
+            gen_resp_obj = DisaggChatCompletionStreamResponse.model_validate_json(
                 response.data()
             )
             yield json.loads(gen_resp_obj.model_dump_json(exclude_unset=True))
@@ -228,7 +258,7 @@ async def worker(runtime: DistributedRuntime, args, engine_config):
     kv_listener = runtime.namespace("dynamo").component("tensorrt-llm-ctx")
     await kv_listener.create_service()
 
-    kv_router = KvRouter(runtime, kv_listener)
+    kv_router = KvRouter(runtime, kv_listener, args.kv_block_size)
 
     completions_endpoint = component.endpoint("completions")
     chat_endpoint = component.endpoint("chat/completions")
