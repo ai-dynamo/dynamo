@@ -41,13 +41,17 @@ use std::sync::Arc;
 // Import from our library
 use metrics::{
     collect_endpoints, extract_metrics, postprocess_metrics, LLMWorkerLoadCapacityConfig,
-    PrometheusMetricsServer,
+    MetricsMode, PrometheusMetricsCollector,
 };
 
 /// CLI arguments for the metrics application
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// Namespace to operate in and subscribe to events on
+    #[arg(long, env = "DYN_NAMESPACE", default_value = "dynamo")]
+    namespace: String,
+
     /// Component to scrape metrics from
     #[arg(long)]
     component: String,
@@ -56,13 +60,33 @@ struct Args {
     #[arg(long)]
     endpoint: String,
 
-    /// Namespace to operate in
-    #[arg(long, env = "DYN_NAMESPACE", default_value = "dynamo")]
-    namespace: String,
-
-    /// Polling interval in seconds (minimum 1 second)
+    /// Polling interval in seconds for scraping dynamo endpoint stats (minimum 1 second)
     #[arg(long, default_value = "2")]
     poll_interval: u64,
+
+    /// Host for serving or pushing prometheus metrics (default: 0.0.0.0)
+    #[arg(
+        long,
+        default_value = "0.0.0.0",
+        help_heading = "Prometheus Metrics Config"
+    )]
+    host: String,
+
+    /// Port to run the Prometheus metrics server on (default: 9091)
+    #[arg(
+        long,
+        default_value = "9091",
+        help_heading = "Prometheus Metrics Config"
+    )]
+    port: u16,
+
+    /// Push metrics to an external Prometheus Pushgateway instead of hosting them in-process
+    #[arg(long, help_heading = "Prometheus Metrics Config")]
+    push: bool,
+
+    /// Push interval in seconds, when using push mode (minimum 1 second, default: 2)
+    #[arg(long, default_value = "2", help_heading = "Prometheus Metrics Config")]
+    push_interval: u64,
 }
 
 fn get_config(args: &Args) -> Result<LLMWorkerLoadCapacityConfig> {
@@ -76,6 +100,10 @@ fn get_config(args: &Args) -> Result<LLMWorkerLoadCapacityConfig> {
 
     if args.poll_interval < 1 {
         return Err(error!("Polling interval must be at least 1 second"));
+    }
+
+    if args.push && args.push_interval < 1 {
+        return Err(error!("Push interval must be at least 1 second"));
     }
 
     Ok(LLMWorkerLoadCapacityConfig {
@@ -116,24 +144,35 @@ async fn app(runtime: Runtime) -> Result<()> {
     let token = drt.primary_lease().child_token();
     let event_name = format!("l2c.{}.{}", config.component_name, config.endpoint_name);
 
-    // TODO: Make metrics host/port configurable
-    // Initialize Prometheus metrics and start server
-    let metrics_server = PrometheusMetricsServer::new()?;
-    // Metrics will be updated concurrently, so protect it with a mutex:
-    // - Main loop: Collect and process ForwardPassMetrics at an interval from endpoint stats handlers
-    // - Subscription task: Collect and process KVHitRateEvent metrics from the KV router as they are published
-    let metrics_server = Arc::new(tokio::sync::Mutex::new(metrics_server));
-    metrics_server.lock().await.start(9091);
+    // Initialize Prometheus metrics with the selected mode
+    let metrics_collector = PrometheusMetricsCollector::new()?;
+    let metrics_collector = Arc::new(tokio::sync::Mutex::new(metrics_collector));
+
+    // Start metrics collection in the selected mode
+    let metrics_mode = if args.push {
+        MetricsMode::Push {
+            host: args.host,
+            port: args.port,
+            job: "dynamo_push_metrics".to_string(),
+            interval: args.push_interval,
+        }
+    } else {
+        MetricsMode::Pull {
+            host: args.host,
+            port: args.port,
+        }
+    };
+
+    metrics_collector.lock().await.start(metrics_mode)?;
 
     // Subscribe to KV hit rate events
     let kv_hit_rate_subject = KV_HIT_RATE_SUBJECT;
     tracing::info!("Subscribing to KV hit rate events on subject: {kv_hit_rate_subject}");
 
-    // Clone the metrics server and config for the subscription task
-    let metrics_server_clone = metrics_server.clone();
+    // Clone fields for the event subscription task
     let config_clone = config.clone();
-    // Clone the namespace for the subscription task
     let namespace_clone = namespace.clone();
+    let metrics_collector_clone = metrics_collector.clone();
 
     // Spawn a task to handle KV hit rate events
     tokio::spawn(async move {
@@ -156,7 +195,7 @@ async fn app(runtime: Runtime) -> Result<()> {
                             );
 
                             // Update metrics with the event data
-                            let mut metrics = metrics_server_clone.lock().await;
+                            let mut metrics = metrics_collector_clone.lock().await;
                             metrics.update_kv_hit_rate(
                                 &config_clone,
                                 event.worker_id,
@@ -190,7 +229,7 @@ async fn app(runtime: Runtime) -> Result<()> {
         tracing::debug!("Aggregated metrics: {processed:?}");
 
         // Update Prometheus metrics
-        metrics_server.lock().await.update(&config, &processed);
+        metrics_collector.lock().await.update(&config, &processed);
 
         // TODO: Enable KV Routers to subscribe to metrics events published here
         // for a single view of the aggregated metrics, as opposed to the current

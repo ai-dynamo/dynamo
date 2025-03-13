@@ -36,6 +36,7 @@ anyhow = "1"
 async-openai = "0.27.2"
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
+candle-hf-hub = { version = "0.3.3", default-features = false, features = ["tokio", "rustls-tls"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 dialoguer = { version = "0.11", default-features = false, features = ["editor", "history"] }
 futures = { version = "0.3" }

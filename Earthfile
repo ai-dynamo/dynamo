@@ -27,7 +27,7 @@ golang-base:
 ############### ALL TARGETS ##############################
 all-test:
     BUILD ./deploy/dynamo/operator+test
-#    BUILD ./deploy/dynamo/api-server+test  #TODO: mkhadkevich earthly tests fail https://gitlab-master.nvidia.com/aire/microservices/compoundai/-/jobs/144475821
+    BUILD ./deploy/dynamo/api-server+test
 
 all-docker:
     ARG CI_REGISTRY_IMAGE=my-registry

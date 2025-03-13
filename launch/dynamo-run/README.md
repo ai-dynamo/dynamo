@@ -38,9 +38,11 @@ If you have an `HF_TOKEN` environment variable set, this will download Qwen2.5 3
 dynamo-run Qwen/Qwen2.5-3B-Instruct
 ```
 
+The parameter can be the ID of a HuggingFace repository (it will be downloaded), a GGUF file, or a folder containing safetensors, config.json, etc (a locally checked out HuggingFace repository).
+
 ## Download a model from Hugging Face
 
-For example one of these should be fast and good quality on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
+One of these should be fast and good quality on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
 
 ## Run
 
@@ -211,6 +213,34 @@ async def generate(request):
     yield {"id":"1","choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"stop"}],"created":1841762283,"model":"Llama-3.2-1B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
 ```
 
+Command line arguments are passed to the python engine like this:
+```
+dynamo-run out=pystr:my_python_engine.py -- -n 42 --custom-arg Orange --yes
+```
+
+The python engine receives the arguments in `sys.argv`. The argument list will include some standard ones as well as anything after the `--`.
+
+This input:
+```
+dynamo-run out=pystr:my_engine.py /opt/models/Llama-3.2-3B-Instruct/ --model-name llama_3.2 --tensor-parallel-size 4 -- -n 1
+```
+
+is read like this:
+```
+async def generate(request):
+    .. as before ..
+
+if __name__ == "__main__":
+    print(f"MAIN: {sys.argv}")
+```
+
+and produces this output:
+```
+MAIN: ['my_engine.py', '--model-path', '/opt/models/Llama-3.2-3B-Instruct/', '--model-name', 'llama3.2', '--http-port', '8080', '--tensor-parallel-size', '4', '--base-gpu-id', '0', '--num-nodes', '1', '--node-rank', '0', '-n', '1']
+```
+
+This allows quick iteration on the engine setup. Note how the `-n` `1` is included. Flags `--leader-addr` and `--model-config` will also be added if provided to `dynamo-run`.
+
 ### Dynamo does the pre-processing
 
 If the Python engine wants to receive and return tokens - the prompt templating and tokenization is already done - run it like this:
@@ -249,6 +279,8 @@ async def generate(request):
     await asyncio.sleep(0.1)
     yield {"token_ids":[13]}
 ```
+
+`pytok` supports the same ways of passing command line arguments as `pystr` - `initialize` or `main` with `sys.argv`.
 
 ## trtllm
 
@@ -319,3 +351,10 @@ DYN_TOKEN_ECHO_DELAY_MS=1 dynamo-run in=http out=echo_full
 ```
 
 The default delay is 10ms, which produces approximately 100 tokens per second.
+
+## Defaults
+
+The input defaults to `in=text`.
+
+The output will default to whatever engine you have compiled in (so depending on `--features`). If all features
+are enabled at build time, then the default is currently `out=vllm`.

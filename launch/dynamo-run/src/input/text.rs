@@ -31,7 +31,7 @@ use dynamo_runtime::{
 };
 use futures::StreamExt;
 use std::{
-    io::{ErrorKind, Read, Write},
+    io::{ErrorKind, Write},
     sync::Arc,
 };
 
@@ -40,12 +40,10 @@ use crate::EngineConfig;
 /// Max response tokens for each single query. Must be less than model context size.
 const MAX_TOKENS: u32 = 8192;
 
-/// Output of `isatty` if the fd is indeed a TTY
-const IS_A_TTY: i32 = 1;
-
 pub async fn run(
     runtime: Runtime,
     cancel_token: CancellationToken,
+    single_prompt: Option<String>,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
     let (service_name, engine, inspect_template): (
@@ -75,7 +73,7 @@ pub async fn run(
             service_name,
             engine,
         } => {
-            tracing::info!("Model: {service_name}");
+            tracing::debug!("Model: {service_name}");
             (service_name, engine, false)
         }
         EngineConfig::StaticCore {
@@ -101,12 +99,19 @@ pub async fn run(
                 .link(preprocessor.backward_edge())?
                 .link(frontend)?;
 
-            tracing::info!("Model: {service_name} with pre-processing");
+            tracing::debug!("Model: {service_name} with pre-processing");
             (service_name, pipeline, true)
         }
         EngineConfig::None => unreachable!(),
     };
-    main_loop(cancel_token, &service_name, engine, inspect_template).await
+    main_loop(
+        cancel_token,
+        &service_name,
+        engine,
+        single_prompt,
+        inspect_template,
+    )
+    .await
 }
 
 #[allow(deprecated)]
@@ -114,20 +119,17 @@ async fn main_loop(
     cancel_token: CancellationToken,
     service_name: &str,
     engine: OpenAIChatCompletionsStreamingEngine,
+    mut initial_prompt: Option<String>,
     _inspect_template: bool,
 ) -> anyhow::Result<()> {
-    tracing::info!("Ctrl-c to exit");
+    if initial_prompt.is_none() {
+        tracing::info!("Ctrl-c to exit");
+    }
     let theme = dialoguer::theme::ColorfulTheme::default();
 
-    let mut initial_prompt = if unsafe { libc::isatty(libc::STDIN_FILENO) == IS_A_TTY } {
-        None
-    } else {
-        // Something piped in, use that as initial prompt
-        let mut input = String::new();
-        std::io::stdin().read_to_string(&mut input).unwrap();
-        Some(input)
-    };
-
+    // Initial prompt is the pipe case: `echo "Hello" | dynamo-run ..`
+    // We run that single prompt and exit
+    let single = initial_prompt.is_some();
     let mut history = dialoguer::BasicHistory::default();
     let mut messages = vec![];
     while !cancel_token.is_cancelled() {
@@ -236,6 +238,10 @@ async fn main_loop(
             },
         );
         messages.push(assistant_message);
+
+        if single {
+            break;
+        }
     }
     println!();
     Ok(())

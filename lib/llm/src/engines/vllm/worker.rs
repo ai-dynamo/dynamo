@@ -336,7 +336,7 @@ async fn start_vllm(
         let mut lines = stdout.lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let mut line_parts = line.splitn(4, ' ');
-            let log_level = line_parts.next().unwrap_or_default();
+            let mut log_level = line_parts.next().unwrap_or_default();
             // Skip date (0) and time (1). Print last (2) which is everything else.
             let line = line_parts.nth(2).unwrap_or_default();
             if line.starts_with("custom_op.py:68") {
@@ -344,10 +344,14 @@ async fn start_vllm(
                 // custom_op.py:68] custom op <the op> enabled
                 continue;
             }
+            if line.contains("ERROR") {
+                log_level = "ERROR";
+            }
             match log_level {
                 "DEBUG" => tracing::debug!("VLLM: {line}"),
-                "INFO" => tracing::info!("VLLM: {line}"),
+                "INFO" => tracing::debug!("VLLM: {line}"), // VLLM is noisy
                 "WARNING" => tracing::warn!("VLLM: {line}"),
+                "ERROR" => tracing::error!("VLLM: {line}"),
                 level => tracing::info!("VLLM: {level} {line}"),
             }
         }
