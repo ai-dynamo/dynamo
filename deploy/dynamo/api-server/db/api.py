@@ -125,6 +125,15 @@ GetDynamoNim = Depends(dynamo_nim_handler)
 
 
 @router.get(
+    "/api/v1/bento_repositories/{dynamo_nim_name}",
+    responses={
+        200: {"description": "Successful Response"},
+        422: {"description": "Validation Error"},
+    },
+    tags=[API_TAG_MODELS],
+    include_in_schema=False,
+)
+@router.get(
     "/api/v1/dynamo_nims/{dynamo_nim_name}",
     responses={
         200: {"description": "Successful Response"},
@@ -171,6 +180,15 @@ async def get_dynamo_nim(
 
 
 @router.post(
+    "/api/v1/bento_repositories",
+    responses={
+        200: {"description": "Successful Response"},
+        422: {"description": "Validation Error"},
+    },
+    tags=[API_TAG_MODELS],
+    include_in_schema=False,
+)
+@router.post(
     "/api/v1/dynamo_nims",
     responses={
         200: {"description": "Successful Response"},
@@ -202,11 +220,11 @@ async def create_dynamo_nim(
         logger.error(f"Details: {str(e)}")
         await session.rollback()
         logger.error(
-            f"The requested Compound NIM {db_dynamo_nim.name} already exists in the database"
+            f"The requested Dynamo NIM {db_dynamo_nim.name} already exists in the database"
         )
         raise HTTPException(
             status_code=422,
-            detail=f"The Compound NIM {db_dynamo_nim.name} already exists in the database",
+            detail=f"The Dynamo NIM {db_dynamo_nim.name} already exists in the database",
         )  # type: ignore
     except SQLAlchemyError as e:
         logger.error("Something went wrong with adding the repository")
@@ -214,7 +232,7 @@ async def create_dynamo_nim(
 
     await session.commit()
     logger.debug(
-        f"Compound NIM {db_dynamo_nim.id} with name {db_dynamo_nim.name} saved to database"
+        f"Dynamo NIM {db_dynamo_nim.id} with name {db_dynamo_nim.name} saved to database"
     )
 
     return DynamoNimSchema(
@@ -232,6 +250,15 @@ async def create_dynamo_nim(
     )
 
 
+@router.get(
+    "/api/v1/bento_repositories",
+    responses={
+        200: {"description": "Successful Response"},
+        422: {"description": "Validation Error"},
+    },
+    tags=[API_TAG_MODELS],
+    include_in_schema=False,
+)
 @router.get(
     "/api/v1/dynamo_nims",
     responses={
@@ -307,13 +334,13 @@ async def dynamo_nim_version_handler(
     records = result.all()
 
     if not records:
-        logger.error("No Compound NIM version record found")
+        logger.error("No Dynamo NIM version record found")
         raise HTTPException(status_code=404, detail="Record not found")
 
     if len(records) >= 2:
-        logger.error("Found multiple relations for Compound NIM version")
+        logger.error("Found multiple relations for Dynamo NIM version")
         raise HTTPException(
-            status_code=422, detail="Found multiple relations for Compound NIM version"
+            status_code=422, detail="Found multiple relations for Dynamo NIM version"
         )
 
     return records[0]
@@ -322,6 +349,15 @@ async def dynamo_nim_version_handler(
 GetDynamoNimVersion = Depends(dynamo_nim_version_handler)
 
 
+@router.get(
+    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos/{version}",
+    responses={
+        200: {"description": "Successful Response"},
+        422: {"description": "Validation Error"},
+    },
+    tags=[API_TAG_MODELS],
+    include_in_schema=False,
+)
 @router.get(
     "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}",
     responses={
@@ -349,6 +385,15 @@ async def get_dynamo_nim_version(
     return full_schema
 
 
+@router.post(
+    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos",
+    responses={
+        200: {"description": "Successful Response"},
+        422: {"description": "Validation Error"},
+    },
+    tags=[API_TAG_MODELS],
+    include_in_schema=False,
+)
 @router.post(
     "/api/v1/dynamo_nims/{dynamo_nim_name}/versions",
     responses={
@@ -389,13 +434,13 @@ async def create_dynamo_nim_version(
         logger.error(f"Details: {str(e)}")
         await session.rollback()
 
-        logger.error(f"The Compound NIM {tag} already exists")
+        logger.error(f"The Dynamo NIM {tag} already exists")
         raise HTTPException(
             status_code=422,
-            detail=f"The Compound NIM version {tag} already exists",
+            detail=f"The Dynamo NIM version {tag} already exists",
         )  # type: ignore
     except SQLAlchemyError as e:
-        logger.error("Something went wrong with adding the Compound NIM")
+        logger.error("Something went wrong with adding the Dynamo NIM")
         raise HTTPException(status_code=500, detail=str(e))
 
     logger.debug(
@@ -409,6 +454,15 @@ async def create_dynamo_nim_version(
     return schema[0]
 
 
+@router.get(
+    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos",
+    responses={
+        200: {"description": "Successful Response"},
+        422: {"description": "Validation Error"},
+    },
+    tags=[API_TAG_MODELS],
+    include_in_schema=False,
+)
 @router.get(
     "/api/v1/dynamo_nims/{dynamo_nim_name}/versions",
     responses={
@@ -460,6 +514,15 @@ async def get_dynamo_nim_versions(
 
 
 @router.patch(
+    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos/{version}",
+    responses={
+        200: {"description": "Successful Response"},
+        422: {"description": "Validation Error"},
+    },
+    tags=[API_TAG_MODELS],
+    include_in_schema=False,
+)
+@router.patch(
     "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}",
     responses={
         200: {"description": "Successful Response"},
@@ -482,10 +545,10 @@ async def update_dynamo_nim_version(
         await session.flush()
         await session.refresh(dynamo_nim_version)
     except SQLAlchemyError as e:
-        logger.error("Something went wrong with adding the Compound NIM")
+        logger.error("Something went wrong with adding the Dynamo NIM")
         raise HTTPException(status_code=500, detail=str(e))
 
-    logger.debug("Updating compound Compound NIM")
+    logger.debug("Updating Dynamo NIM")
     await session.commit()
 
     schema = await convert_dynamo_nim_version_model_to_schema(
@@ -494,6 +557,15 @@ async def update_dynamo_nim_version(
     return schema[0]
 
 
+@router.put(
+    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos/{version}/upload",
+    responses={
+        200: {"description": "Successful Response"},
+        422: {"description": "Validation Error"},
+    },
+    tags=[API_TAG_MODELS],
+    include_in_schema=False,
+)
 @router.put(
     "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}/upload",
     responses={
@@ -531,6 +603,15 @@ def generate_file_path(version) -> str:
 
 
 @router.get(
+    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos/{version}/download",
+    responses={
+        200: {"description": "Successful Response"},
+        422: {"description": "Validation Error"},
+    },
+    tags=[API_TAG_MODELS],
+    include_in_schema=False,
+)
+@router.get(
     "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}/download",
     responses={
         200: {"description": "Successful Response"},
@@ -557,6 +638,15 @@ async def download_dynamo_nim_version(
 
 
 @router.patch(
+    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos/{version}/start_upload",
+    responses={
+        200: {"description": "Successful Response"},
+        422: {"description": "Validation Error"},
+    },
+    tags=[API_TAG_MODELS],
+    include_in_schema=False,
+)
+@router.patch(
     "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}/start_upload",
     responses={
         200: {"description": "Successful Response"},
@@ -578,10 +668,10 @@ async def start_dynamo_nim_version_upload(
         await session.flush()
         await session.refresh(dynamo_nim_version)
     except SQLAlchemyError as e:
-        logger.error("Something went wrong with adding the Compound NIM")
+        logger.error("Something went wrong with adding the Dynamo NIM")
         raise HTTPException(status_code=500, detail=str(e))
 
-    logger.debug("Setting Compound NIM upload status to Uploading.")
+    logger.debug("Setting Dynamo NIM upload status to Uploading.")
     await session.commit()
 
     schema = await convert_dynamo_nim_version_model_to_schema(
@@ -651,7 +741,7 @@ async def convert_dynamo_nim_model_to_schema(
             )
         except SQLAlchemyError as e:
             logger.error(
-                "Something went wrong with getting associated Compound NIM versions"
+                "Something went wrong with getting associated Dynamo NIM versions"
             )
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -702,7 +792,7 @@ async def convert_dynamo_nim_version_model_to_schema(
             dynamo_nim_version_schemas.append(dynamo_nim_version_schema)
         else:
             raise HTTPException(
-                status_code=500, detail="Failed to find related Compound NIM"
+                status_code=500, detail="Failed to find related Dynamo NIM"
             )  # Should never happen
 
     return dynamo_nim_version_schemas
