@@ -126,6 +126,8 @@ COPY pyproject.toml /workspace/
 COPY README.md /workspace/
 COPY LICENSE /workspace/
 
+ARG CARGO_BUILD_JOBS
+
 # Build Rust runtime
 COPY lib/runtime /workspace/lib/runtime
 RUN cd lib/runtime && \

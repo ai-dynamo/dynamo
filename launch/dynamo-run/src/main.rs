@@ -28,7 +28,6 @@ Example:
 - cd target/release
 - ./dynamo-run hf_checkouts/Llama-3.2-3B-Instruct/
 - OR: ./dynamo-run Llama-3.2-1B-Instruct-Q4_K_M.gguf
-
 "#;
 
 const ZMQ_SOCKET_PREFIX: &str = "dyn";
@@ -126,6 +125,11 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
     if args.is_empty() || args[0] == "-h" || args[0] == "--help" {
         println!("{USAGE}");
         println!("{HELP}");
+        println!(
+            "Available engines: {}",
+            Output::available_engines().join(", ")
+        );
+
         return Ok(());
     }
     for arg in env::args().skip(1).take(2) {

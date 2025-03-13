@@ -339,7 +339,7 @@ async fn start_vllm(
             let mut log_level = line_parts.next().unwrap_or_default();
             // Skip date (0) and time (1). Print last (2) which is everything else.
             let line = line_parts.nth(2).unwrap_or_default();
-            if line.starts_with("custom_op.py:68") {
+            if line.starts_with("custom_op.py:68") || line.trim().len() == 0 {
                 // Skip a noisy line
                 // custom_op.py:68] custom op <the op> enabled
                 continue;
@@ -349,7 +349,7 @@ async fn start_vllm(
             }
             match log_level {
                 "DEBUG" => tracing::debug!("VLLM: {line}"),
-                "INFO" => tracing::debug!("VLLM: {line}"), // VLLM is noisy
+                "INFO" => tracing::debug!("VLLM: {line}"), // VLLM is noisy in debug mode
                 "WARNING" => tracing::warn!("VLLM: {line}"),
                 "ERROR" => tracing::error!("VLLM: {line}"),
                 level => tracing::info!("VLLM: {level} {line}"),
@@ -359,6 +359,9 @@ async fn start_vllm(
     tokio::spawn(async move {
         let mut lines = stderr.lines();
         while let Ok(Some(line)) = lines.next_line().await {
+            if line.trim().len() == 0 {
+                continue;
+            }
             tracing::warn!("VLLM: {line}");
         }
     });
@@ -399,7 +402,7 @@ async fn start_vllm(
             .extract(py)
             .unwrap()
     });
-    tracing::info!("vllm zmq backend is ready: {resp:?}");
+    tracing::debug!("vllm zmq backend is ready: {resp:?}");
 
     Ok(proc)
 }

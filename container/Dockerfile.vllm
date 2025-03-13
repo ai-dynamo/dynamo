@@ -211,29 +211,31 @@ COPY pyproject.toml /workspace/
 COPY README.md /workspace/
 COPY LICENSE /workspace/
 
+ARG CARGO_BUILD_JOBS
+
 # Build Rust runtime
 COPY lib/runtime /workspace/lib/runtime
 RUN cd lib/runtime && \
-    cargo build --jobs 2 --release --locked && cargo doc --no-deps
+    cargo build --release --locked && cargo doc --no-deps
 
 # Build OpenAI HTTP Service binaries
 COPY lib/llm /workspace/lib/llm
 COPY components /workspace/components
 RUN cd components && \
-    cargo build --jobs 2 --release && \
+    cargo build --release && \
     cp target/release/http /usr/local/bin/
 
 # Build Dynamo Run binaries
 COPY launch /workspace/launch
 RUN cd launch && \
-    cargo build --jobs 2 --release --features mistralrs,sglang,vllm,python && \
+    cargo build --release --features mistralrs,sglang,vllm,python && \
     cp target/release/dynamo-run /usr/local/bin/ && \
     cp target/release/llmctl /usr/local/bin/
 
 # Generate C bindings for kv cache routing in vLLM
 COPY lib/bindings /workspace/lib/bindings
 RUN cd lib/bindings/c && \
-    cargo build --jobs 2 --release --locked && cargo doc --no-deps
+    cargo build --release --locked && cargo doc --no-deps
 
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 # Build dynamo wheel

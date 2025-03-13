@@ -114,7 +114,6 @@ pub async fn run(
     .await
 }
 
-#[allow(deprecated)]
 async fn main_loop(
     cancel_token: CancellationToken,
     service_name: &str,
@@ -172,7 +171,9 @@ async fn main_loop(
             .messages(messages.clone())
             .model(service_name)
             .stream(true)
-            .max_tokens(MAX_TOKENS)
+            .max_completion_tokens(MAX_TOKENS)
+            .temperature(0.7)
+            .n(1) // only generate one response
             .build()?;
 
         // TODO We cannot set min_tokens with async-openai
@@ -190,6 +191,9 @@ async fn main_loop(
         let mut stdout = std::io::stdout();
         let mut assistant_message = String::new();
         while let Some(item) = stream.next().await {
+            if cancel_token.is_cancelled() {
+                break;
+            }
             match (item.data.as_ref(), item.event.as_deref()) {
                 (Some(data), _) => {
                     // Normal case
@@ -226,15 +230,10 @@ async fn main_loop(
                 assistant_message,
             );
 
-        // ALLOW: function_call is deprecated
         let assistant_message = async_openai::types::ChatCompletionRequestMessage::Assistant(
             async_openai::types::ChatCompletionRequestAssistantMessage {
                 content: Some(assistant_content),
-                refusal: None,
-                name: None,
-                audio: None,
-                tool_calls: None,
-                function_call: None,
+                ..Default::default()
             },
         );
         messages.push(assistant_message);
