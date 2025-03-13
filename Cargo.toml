@@ -15,34 +15,49 @@
 
 [workspace]
 members = [
-    "http",
-    "metrics",
+    "components/http",
+    "components/metrics",
+    "launch/llmctl",
+    "launch/dynamo-run",
+    "lib/llm",
+    "lib/runtime",
+    "lib/bindings/python",
+    "lib/bindings/c",
+    "lib/runtime/examples/hello_world",
+    "lib/runtime/examples/service_metrics",
 ]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+description = "Dynamo Inference Framework"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
 homepage = "https://github.com/ai-dynamo/dynamo"
 repository = "https://github.com/ai-dynamo/dynamo.git"
-
+keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 
 [workspace.dependencies]
-# local or crates.io
-dynamo-runtime = { path = "../lib/runtime" }
-dynamo-llm = { path = "../lib/llm" }
+# Local crates
+dynamo-runtime = { path = "lib/runtime" }
+dynamo-llm = { path = "lib/llm" }
 
-# crates.io
+# External dependencies
 anyhow = { version = "1" }
+async-nats = { version = "0.38", features = ["service"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
+async_zmq = { version = "0.4.0" }
+blake3 = "1"
 bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["alloc", "std", "clock", "now", "serde"] }
 derive_builder = "0.20"
+derive-getters = "0.5"
+either = { version = "1.13", features = ["serde"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1" }
+serde_json = "1"
 thiserror = { version = "2.0.11" }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1" }
@@ -50,3 +65,6 @@ tokio-util = { version = "0.7", features = ["codec", "net"] }
 tracing = { version = "0.1" }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
+strum = { version = "0.27", features = ["derive"] }
+prometheus = { version = "0.13" } 

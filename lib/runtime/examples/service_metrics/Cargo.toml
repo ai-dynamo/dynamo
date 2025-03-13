@@ -26,7 +26,7 @@ repository.workspace = true
 dynamo-runtime = { workspace = true }
 
 # third-party
-futures = "0.3"
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1" }
-tokio = { version = "1", features = ["full"] }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }

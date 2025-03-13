@@ -15,11 +15,12 @@
 
 [package]
 name = "dynamo-run"
-version = "0.1.0"
-edition = "2021"
-authors = ["NVIDIA"]
-homepage = "https://github.com/ai-dynamo/dynamo"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [features]
 mistralrs = ["dynamo-llm/mistralrs"]
@@ -32,22 +33,24 @@ cuda = ["dynamo-llm/cuda"]
 metal = ["dynamo-llm/metal"]
 
 [dependencies]
-anyhow = "1"
+dynamo-llm = { workspace = true }
+dynamo-runtime = { workspace = true }
+
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
 async-openai = "0.27.2"
-async-stream = { version = "0.3" }
-async-trait = { version = "0.1" }
 clap = { version = "4.5", features = ["derive", "env"] }
 dialoguer = { version = "0.11", default-features = false, features = ["editor", "history"] }
-futures = { version = "0.3" }
 futures-util = "0.3"
 libc = { version = "0.2" }
 netlink-packet-route = { version = "0.19", optional = true }
 rtnetlink = { version = "0.14", optional = true }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["codec", "net"] }
-tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
-dynamo-runtime = { path = "../../lib/runtime" }
-dynamo-llm = { path = "../../lib/llm" }
