@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import argparse
 import asyncio
 import random
 from argparse import Namespace
@@ -23,15 +24,9 @@ from utils.protocol import Tokens
 from vllm.logger import logger as vllm_logger
 
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
-from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
-from dynamo.sdk import (
-    async_onstart,
-    dynamo_context,
-    dynamo_endpoint,
-    service,
-)
+from dynamo.runtime import dynamo_endpoint
+from dynamo.sdk import async_onstart, dynamo_context, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
-import argparse
 
 WorkerId = str
 

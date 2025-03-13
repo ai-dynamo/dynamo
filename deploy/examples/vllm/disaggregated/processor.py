@@ -18,29 +18,22 @@ import uuid
 from enum import Enum
 from typing import AsyncIterator, Tuple, Union
 
+from disaggregated.kv_router import Router
+from disaggregated.worker import VllmWorker
 from transformers import AutoTokenizer
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.protocol import MyRequestOutput, Tokens, vLLMGenerateRequest
 from utils.vllm import parse_vllm_args
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    CompletionRequest,
-)
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
 from vllm.logger import logger as vllm_logger
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from dynamo.sdk import (
-    depends,
-    dynamo_endpoint,
-    service,
-    dynamo_context,
-)
-from disaggregated.worker import VllmWorker
-from disaggregated.kv_router import Router
-from utils.vllm import parse_vllm_args
+
+from dynamo.sdk import depends, dynamo_context, dynamo_endpoint, service
 
 os.environ["VLLM_LOG_LEVEL"] = "DEBUG"
+
 
 class RequestType(Enum):
     CHAT = "chat"

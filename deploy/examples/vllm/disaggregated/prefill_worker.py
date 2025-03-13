@@ -17,6 +17,7 @@
 import asyncio
 import os
 
+from pydantic import BaseModel
 from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
 from utils.vllm import parse_vllm_args
@@ -26,20 +27,22 @@ from vllm.entrypoints.openai.api_server import (
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import logger as vllm_logger
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
+
 from dynamo.sdk import (
     async_onstart,
     dynamo_context,
     dynamo_endpoint,
     server_context,
-    service
+    service,
 )
-from pydantic import BaseModel
+
 
 class RequestType(BaseModel):
     text: str
 
 
 os.environ["VLLM_LOG_LEVEL"] = "DEBUG"
+
 
 @service(
     dynamo={
@@ -50,11 +53,14 @@ os.environ["VLLM_LOG_LEVEL"] = "DEBUG"
     workers=1,
 )
 class PrefillWorker:
-
     def __init__(self):
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
-        gpu_idx = self.engine_args.cuda_visible_device_offset + server_context.worker_index - 1
+        gpu_idx = (
+            self.engine_args.cuda_visible_device_offset
+            + server_context.worker_index
+            - 1
+        )
         os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_idx}"
         self._loaded_metadata = set()
         self.initialized = False
@@ -77,7 +83,9 @@ class PrefillWorker:
 
     @async_onstart
     async def async_init(self):
-        self._engine_context = build_async_engine_client_from_engine_args(self.engine_args)
+        self._engine_context = build_async_engine_client_from_engine_args(
+            self.engine_args
+        )
         if self._engine_context is not None:
             self.engine_client = await self._engine_context.__aenter__()
         else:
@@ -97,9 +105,7 @@ class PrefillWorker:
             if self.engine_args.served_model_name is not None
             else "vllm"
         )
-        print(
-            f"Prefill queue: {prefill_queue_nats_server}:{prefill_queue_stream_name}"
-        )
+        print(f"Prefill queue: {prefill_queue_nats_server}:{prefill_queue_stream_name}")
         self.initialized = True
         # TODO: integrate prefill_queue to a dynamo endpoint
         async with PrefillQueue.get_instance(

@@ -68,7 +68,7 @@ This figure shows an overview of the major components to deploy:
 
 ### Disaggregated vLLM deployment
 
-Serve following components: 
+Serve following components:
 
 - processor: Processor routes the requests to the (decode) workers. Three scheduling strategies are supported: random and kv.
 - kv router: The KV Router is a component that aggregates KV Events from all the workers and maintains

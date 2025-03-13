@@ -17,29 +17,28 @@
 import asyncio
 import os
 
+from disaggregated.disagg_router import PyDisaggregatedRouter
+from disaggregated.prefill_worker import PrefillWorker
 from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
 from utils.protocol import MyRequestOutput, vLLMGenerateRequest
-from vllm.engine.arg_utils import AsyncEngineArgs
+from utils.vllm import parse_vllm_args
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
 )
 from vllm.logger import logger as vllm_logger
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
+
 from dynamo.llm import KvMetricsPublisher
 from dynamo.sdk import (
     async_onstart,
+    depends,
     dynamo_context,
     dynamo_endpoint,
     server_context,
     service,
-    depends
 )
-from utils.vllm import parse_vllm_args
-from disaggregated.prefill_worker import PrefillWorker
-from disaggregated.disagg_router import PyDisaggregatedRouter
-
 
 os.environ["VLLM_LOG_LEVEL"] = "DEBUG"
 
@@ -53,20 +52,19 @@ os.environ["VLLM_LOG_LEVEL"] = "DEBUG"
     workers=1,
 )
 class VllmWorker:
-
     prefill_worker = depends(PrefillWorker)
 
-    def __init__(self): 
+    def __init__(self):
         self.client = None
         self.disaggregated_router: PyDisaggregatedRouter = None
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
         self.do_remote_prefill = self.engine_args.remote_prefill
         self.model_name = (
-                self.engine_args.served_model_name
-                if self.engine_args.served_model_name is not None
-                else "vllm"
-            )
+            self.engine_args.served_model_name
+            if self.engine_args.served_model_name is not None
+            else "vllm"
+        )
         self._prefill_queue_nats_server = os.getenv(
             "NATS_SERVER", "nats://localhost:4222"
         )
@@ -95,13 +93,19 @@ class VllmWorker:
             os.environ["VLLM_KV_COMPONENT"] = class_name
             vllm_logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
             # note: worker_index is 1-based, but CUDA_VISIBLE_DEVICES is 0-based
-            gpu_idx = self.engine_args.cuda_visible_device_offset + server_context.worker_index - 1
+            gpu_idx = (
+                self.engine_args.cuda_visible_device_offset
+                + server_context.worker_index
+                - 1
+            )
             os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_idx}"
             self.metrics_publisher = KvMetricsPublisher()
 
     @async_onstart
     async def async_init(self):
-        self._engine_context = build_async_engine_client_from_engine_args(self.engine_args)
+        self._engine_context = build_async_engine_client_from_engine_args(
+            self.engine_args
+        )
         if self._engine_context is not None:
             self.engine_client = await self._engine_context.__aenter__()
         else:
@@ -121,7 +125,9 @@ class VllmWorker:
                 0.0,  # gpu_prefix_cache_hit_rate
             )
             task = asyncio.create_task(self.create_metrics_publisher_endpoint())
-            task.add_done_callback(lambda _: print("metrics publisher endpoint created"))
+            task.add_done_callback(
+                lambda _: print("metrics publisher endpoint created")
+            )
 
         runtime = dynamo_context["runtime"]
 
@@ -139,7 +145,7 @@ class VllmWorker:
         else:
             self.disaggregated_router = None
         print("VllmWorker has been initialized")
-        
+
     async def create_metrics_publisher_endpoint(self):
         component = dynamo_context["component"]
         await self.metrics_publisher.create_endpoint(component)
