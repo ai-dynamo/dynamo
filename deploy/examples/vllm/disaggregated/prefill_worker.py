@@ -17,28 +17,22 @@
 import asyncio
 import os
 
-import uvloop
 from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
 from utils.vllm import parse_vllm_args
-from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
 )
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import logger as vllm_logger
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
-from vllm.utils import FlexibleArgumentParser
-
-from dynamo.llm import KvMetricsPublisher
 from dynamo.sdk import (
     async_onstart,
     dynamo_context,
     dynamo_endpoint,
     server_context,
-    service, api
+    service
 )
-from dynamo.sdk.lib.config import ServiceConfig
 from pydantic import BaseModel
 
 class RequestType(BaseModel):
@@ -60,6 +54,8 @@ class PrefillWorker:
     def __init__(self):
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
+        gpu_idx = self.engine_args.cuda_visible_device_offset + server_context.worker_index - 1
+        os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_idx}"
         self._loaded_metadata = set()
         self.initialized = False
         if self.engine_args.enable_chunked_prefill is not False:

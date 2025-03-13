@@ -30,16 +30,14 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.logger import logger as vllm_logger
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import FlexibleArgumentParser
 from dynamo.sdk import (
     depends,
     dynamo_endpoint,
     service,
     dynamo_context,
 )
-from dynamo.sdk.lib.config import ServiceConfig
-from sdk_vllm.worker import VllmWorker
-from sdk_vllm.kv_router import Router
+from disaggregated.worker import VllmWorker
+from disaggregated.kv_router import Router
 from utils.vllm import parse_vllm_args
 
 os.environ["VLLM_LOG_LEVEL"] = "DEBUG"
