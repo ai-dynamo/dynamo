@@ -34,157 +34,176 @@ from dynamo.sdk.cli.deployment import DynamoDeployment
 logger = logging.getLogger(__name__)
 
 
-@click.command(name="deploy")
-@click.argument("bento", type=click.STRING, default=".")
-@click.option("-n", "--name", type=click.STRING, help="Deployment name")
-@click.option(
-    "--namespace",
-    type=click.STRING,
-    default="default",
-    help="Kubernetes namespace to deploy to",
-)
-@click.option(
-    "--scaling-min",
-    type=click.INT,
-    default=1,
-    show_default=True,
-    help="Minimum scaling value",
-)
-@click.option(
-    "--scaling-max",
-    type=click.INT,
-    default=5,
-    show_default=True,
-    help="Maximum scaling value",
-)
-@click.option("--instance-type", type=click.STRING, help="Type of instance")
-@click.option(
-    "--env",
-    type=click.STRING,
-    multiple=True,
-    default=[],
-    help="Environment variables in key=value format",
-)
-@click.option("--secret", type=click.STRING, multiple=True, help="Secret names")
-@click.option(
-    "-f",
-    "--config-file",
-    type=click.Path(exists=True, dir_okay=False, readable=True),
-    help="Configuration file path",
-)
-@click.option("--wait/--no-wait", default=True, help="Wait for deployment to be ready")
-@click.option(
-    "--timeout",
-    type=click.INT,
-    default=600,
-    help="Timeout for deployment readiness in seconds",
-)
-@click.option(
-    "--working-dir",
-    type=click.Path(),
-    default=None,
-    show_default=True,
-    help="Directory to find the Service instance",
-)
-@click.option(
-    "--access-authorization", type=click.BOOL, default=False, show_default=True
-)
-@click.option("--strategy", type=click.STRING, default="rolling-update")
-@click.option("--version", type=click.STRING, help="Version tag for the Bento")
-def deploy_command(
-    bento: str | None,
-    name: str | None,
-    namespace: str | None = "default",
-    access_authorization: bool | None = False,
-    scaling_min: int | None = 1,
-    scaling_max: int | None = 5,
-    instance_type: str | None = None,
-    strategy: str | None = "rolling-update",
-    env: tuple[str, ...] | None = None,
-    secret: tuple[str] | None = None,
-    config_file: str | t.TextIO | None = None,
-    config_dict: str | None = None,
-    wait: bool = True,
-    timeout: int = 600,
-    working_dir: str | None = None,
-    version: str | None = None,
-):
-    """
-    Deploy 🍱 to a cluster
+@click.group(name="deploy")
+def deploy_command_group():
+    """Deploy 🍱 to a cluster"""
+    pass
 
-    Args:
-        bento: The Bento to deploy
-        name: The name of the deployment
-        namespace: The namespace to deploy to
-    """
-    from bentoml._internal.log import configure_server_logging
 
-    configure_server_logging()
-
-    # Fix handling of None values
-    if working_dir is None:
-        if bento is not None and os.path.isdir(os.path.expanduser(bento)):
-            working_dir = os.path.expanduser(bento)
-        else:
-            working_dir = "."
-
-    # Make sure working_dir is in the front of sys.path for imports
-    if sys.path[0] != working_dir:
-        sys.path.insert(0, working_dir)
-
-    # Load the Bento to validate
-    import bentoml
-    from bentoml._internal.service.loader import load
-
-    # Check if the bento exists in the local store
-    bento_exists = False
-    bento_tag = None
-
-    try:
-        bentos = bentoml.list()
-        bento_tags = [str(b.tag) for b in bentos]
-        bento_exists = bento in bento_tags
-
-        if bento_exists:
-            bento_tag = bento
-            logger.debug("Verified Bento exists: %s", bento_tag)
-        else:
-            # If not a tag, check if it's a path to a built Bento
-            if bento is not None and os.path.isdir(bento):
-                service_name = os.path.basename(os.path.abspath(bento))
-                bento_version = version or f"v{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                bento_tag = f"{service_name}:{bento_version}"
-                logger.debug(
-                    "Using Bento from directory: %s with tag: %s", bento, bento_tag
-                )
-            else:
-                raise click.ClickException(
-                    f"Invalid Bento reference: {bento}. Ensure it's a valid Bento tag or directory."
-                )
-    except Exception as exception_var:
-        logger.error("Bento validation failed:", exc_info=True)
-        raise click.ClickException(f"Failed to validate bento: {str(exception_var)}")
-
-    # Load the service to validate it
-    svc = load(bento_identifier=bento_tag, working_dir=working_dir)
-    print(f"Service loaded: {svc}")
-
-    create_dynamo_deployment(
-        bento=bento_tag,
-        name=name,
-        namespace=namespace,
-        access_authorization=access_authorization,
-        scaling_min=scaling_min,
-        scaling_max=scaling_max,
-        instance_type=instance_type,
-        strategy=strategy,
-        env=env,
-        secret=secret,
-        config_file=config_file,
-        config_dict=config_dict,
-        wait=wait,
-        timeout=timeout,
+def build_deploy_command() -> click.Command:
+    @click.command(name="deploy")
+    @click.argument("bento", type=click.STRING, default=".")
+    @click.option("-n", "--name", type=click.STRING, help="Deployment name")
+    @click.option(
+        "--namespace",
+        type=click.STRING,
+        default="default",
+        help="Kubernetes namespace to deploy to",
     )
+    @click.option(
+        "--scaling-min",
+        type=click.INT,
+        default=1,
+        show_default=True,
+        help="Minimum scaling value",
+    )
+    @click.option(
+        "--scaling-max",
+        type=click.INT,
+        default=5,
+        show_default=True,
+        help="Maximum scaling value",
+    )
+    @click.option("--instance-type", type=click.STRING, help="Type of instance")
+    @click.option(
+        "--env",
+        type=click.STRING,
+        multiple=True,
+        default=[],
+        help="Environment variables in key=value format",
+    )
+    @click.option("--secret", type=click.STRING, multiple=True, help="Secret names")
+    @click.option(
+        "-f",
+        "--config-file",
+        type=click.Path(exists=True, dir_okay=False, readable=True),
+        help="Configuration file path",
+    )
+    @click.option(
+        "--wait/--no-wait", default=True, help="Wait for deployment to be ready"
+    )
+    @click.option(
+        "--timeout",
+        type=click.INT,
+        default=600,
+        help="Timeout for deployment readiness in seconds",
+    )
+    @click.option(
+        "--working-dir",
+        type=click.Path(),
+        default=None,
+        show_default=True,
+        help="Directory to find the Service instance",
+    )
+    @click.option(
+        "--access-authorization", type=click.BOOL, default=False, show_default=True
+    )
+    @click.option("--strategy", type=click.STRING, default="rolling-update")
+    @click.option("--version", type=click.STRING, help="Version tag for the Bento")
+    def deploy_command(
+        bento: str | None,
+        name: str | None,
+        namespace: str | None = "default",
+        access_authorization: bool | None = False,
+        scaling_min: int | None = 1,
+        scaling_max: int | None = 5,
+        instance_type: str | None = None,
+        strategy: str | None = "rolling-update",
+        env: tuple[str, ...] | None = None,
+        secret: tuple[str] | None = None,
+        config_file: str | t.TextIO | None = None,
+        config_dict: str | None = None,
+        wait: bool = True,
+        timeout: int = 600,
+        working_dir: str | None = None,
+        version: str | None = None,
+    ):
+        """
+        Deploy 🍱 to a cluster
+
+        \b
+        BENTO is the serving target, it can be:
+        - a tag to a Bento in local Bento store
+        - a folder containing a valid 'bentofile.yaml'
+        - a path to a built Bento
+        """
+        from bentoml._internal.log import configure_server_logging
+
+        configure_server_logging()
+
+        # Fix handling of None values
+        if working_dir is None:
+            if bento is not None and os.path.isdir(os.path.expanduser(bento)):
+                working_dir = os.path.expanduser(bento)
+            else:
+                working_dir = "."
+
+        # Make sure working_dir is in the front of sys.path for imports
+        if sys.path[0] != working_dir:
+            sys.path.insert(0, working_dir)
+
+        # Load the Bento to validate
+        import bentoml
+        from bentoml._internal.service.loader import load
+
+        # Check if the bento exists in the local store
+        bento_exists = False
+        bento_tag = None
+
+        try:
+            bentos = bentoml.list()
+            bento_tags = [str(b.tag) for b in bentos]
+            bento_exists = bento in bento_tags
+
+            if bento_exists:
+                bento_tag = bento
+                logger.debug("Verified Bento exists: %s", bento_tag)
+            else:
+                # If not a tag, check if it's a path to a built Bento
+                if bento is not None and os.path.isdir(bento):
+                    service_name = os.path.basename(os.path.abspath(bento))
+                    bento_version = (
+                        version or f"v{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                    )
+                    bento_tag = f"{service_name}:{bento_version}"
+                    logger.debug(
+                        "Using Bento from directory: %s with tag: %s", bento, bento_tag
+                    )
+                else:
+                    raise click.ClickException(
+                        f"Invalid Bento reference: {bento}. Ensure it's a valid Bento tag or directory."
+                    )
+        except Exception as exception_var:
+            logger.error("Bento validation failed:", exc_info=True)
+            raise click.ClickException(
+                f"Failed to validate bento: {str(exception_var)}"
+            )
+
+        # Load the service to validate it
+        svc = load(bento_identifier=bento_tag, working_dir=working_dir)
+        print(f"Service loaded: {svc}")
+
+        create_dynamo_deployment(
+            bento=bento_tag,
+            name=name,
+            namespace=namespace,
+            access_authorization=access_authorization,
+            scaling_min=scaling_min,
+            scaling_max=scaling_max,
+            instance_type=instance_type,
+            strategy=strategy,
+            env=env,
+            secret=secret,
+            config_file=config_file,
+            config_dict=config_dict,
+            wait=wait,
+            timeout=timeout,
+        )
+
+    return deploy_command
+
+
+deploy_command = build_deploy_command()
 
 
 @inject
@@ -419,3 +438,6 @@ def create_dynamo_deployment(
             logger.error("Deployment failed", exc_info=True)
             spinner.log(f"[bold red]Deployment failed: {str(e)}[/]")
             raise SystemExit(1)
+
+
+deploy_command = build_deploy_command()
