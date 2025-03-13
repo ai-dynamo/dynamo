@@ -57,8 +57,15 @@ RUN apt-get install -y linux-tools-common linux-tools-generic ethtool iproute2
 RUN apt-get install -y dkms linux-headers-generic
 RUN apt-get install -y meson ninja-build uuid-dev gdb
 
+<<<<<<< Updated upstream
 RUN apt-get update && apt install -y wget libglib2.0-0
 RUN wget ${NSYS_URL}${NSYS_PKG} && dpkg -i $NSYS_PKG && rm $NSYS_PKG
+=======
+RUN apt install -y libglib2.0-0
+RUN wget ${NSYS_URL}${NSYS_PKG} &&\
+    apt install -y ./${NSYS_PKG} &&\
+    rm ${NSYS_PKG}
+>>>>>>> Stashed changes
 
 RUN cd /usr/local/src && \
     curl -fSsL "https://content.mellanox.com/ofed/MLNX_OFED-${MOFED_VERSION}/MLNX_OFED_LINUX-${MOFED_VERSION}-ubuntu24.04-x86_64.tgz" -o mofed.tgz && \
@@ -66,7 +73,7 @@ RUN cd /usr/local/src && \
     cd MLNX_OFED_LINUX-* && \
     apt-get update && apt-get install -y --no-install-recommends \
         ./DEBS/libibverbs* ./DEBS/ibverbs-providers* ./DEBS/librdmacm* ./DEBS/libibumad* && \
-    rm -rf /var/lib/apt/lists/* /usr/local/src/*
+    rm -rf /var/lib/apt/lists/* /usr/local/src/* mofed.tgz
 
 ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/cuda/lib64 \
     LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
@@ -212,26 +219,26 @@ COPY LICENSE /workspace/
 # Build Rust runtime
 COPY lib/runtime /workspace/lib/runtime
 RUN cd lib/runtime && \
-    cargo build --release --locked && cargo doc --no-deps
+    cargo build --jobs 2 --release --locked && cargo doc --no-deps
 
 # Build OpenAI HTTP Service binaries
 COPY lib/llm /workspace/lib/llm
 COPY components /workspace/components
 RUN cd components && \
-    cargo build --release && \
+    cargo build --jobs 2 --release && \
     cp target/release/http /usr/local/bin/
 
 # Build Dynamo Run binaries
 COPY launch /workspace/launch
 RUN cd launch && \
-    cargo build --release --features mistralrs,sglang,vllm,python && \
+    cargo build --jobs 2 --release --features mistralrs,sglang,vllm,python && \
     cp target/release/dynamo-run /usr/local/bin/ && \
     cp target/release/llmctl /usr/local/bin/
 
 # Generate C bindings for kv cache routing in vLLM
 COPY lib/bindings /workspace/lib/bindings
 RUN cd lib/bindings/c && \
-    cargo build --release --locked && cargo doc --no-deps
+    cargo build --jobs 2 --release --locked && cargo doc --no-deps
 
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 # Build dynamo wheel
