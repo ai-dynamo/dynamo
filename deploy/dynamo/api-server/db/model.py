@@ -45,16 +45,19 @@ def new_compound_entity_id() -> str:
 class DynamoNimVersion(DynamoNimVersionBase, table=True):
     """A row in the dynamo nim table."""
 
+    __tablename__ = "dynamonimversion"
     __table_args__ = (
         UniqueConstraint("dynamo_nim_id", "version", name="version_unique_per_nim"),
     )
 
     id: str = SQLField(default_factory=new_compound_entity_id, primary_key=True)
 
-    dynamo_nim_id: str = SQLField(foreign_key="DynamoNim.id")
+    dynamo_nim_id: str = SQLField(foreign_key="dynamonim.id")
 
 
 class DynamoNim(DynamoNimBase, table=True):
     """A row in the dynamo nim table."""
+
+    __tablename__ = "dynamonim"
 
     id: str = SQLField(default_factory=new_compound_entity_id, primary_key=True)

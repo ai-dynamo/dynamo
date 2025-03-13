@@ -39,7 +39,6 @@ async def main():
 
     # Get port from environment or default to 8001
     port = int(os.getenv("API_DATABASE_PORT", "8001"))
-    os.environ["API_BACKEND_URL"] = f"http://0.0.0.0:{port}"
 
     # Start the FastAPI server
     config = uvicorn.Config(app=app, host="0.0.0.0", port=port, log_level="info")
