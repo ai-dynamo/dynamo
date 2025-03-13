@@ -566,7 +566,7 @@ cuda_memcpy_sync(void* dst, const void* src, size_t count)
 /// dims[4]: num_heads / (src_tp_size * scatter_factor) # aka dst_num_heads or dnh
 /// dims[5]: head_size # aka hs
 ///
-/// The permutation applied is typically (3, 0, 1, 4, 2, 5) which transforms
+/// The permutation applied is (3, 0, 1, 2, 4, 5) which transforms
 /// the tensor:
 ///  - from: [kv/block, block/kv, bs, scatter_factor, dnh, hs] to
 ///  - to:   [scatter_factor, kv/block, block/kv, bs, dnh, hs].
@@ -574,16 +574,6 @@ cuda_memcpy_sync(void* dst, const void* src, size_t count)
 /// This transformation effectively distributes the heads dimension across
 /// tensor parallel ranks, where we transform from src_tp_size to dst_tp_size,
 /// with dst_tp_size > src_tp_size.
-///
-/// @param dst: destination data pointer
-/// @param src: source data pointer
-/// @param dims: 6D dimensions of source tensor
-/// @param num_dims: number of dimensions (must be 6)
-/// @param elem_size: element size in bytes
-/// @param block_dim_index: which dimension represents blocks; either 0 or 1
-/// @param src_block_ids: source block IDs to copy
-/// @param dst_block_ids: destination block IDs to copy
-/// @param stream: CUDA stream to use for the operation
 int
 permute_scatter_memcpy(
     const void* src,           // source data
