@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import Query
 from pydantic import BaseModel, ValidationError, field_validator
@@ -189,7 +189,7 @@ class DynamoNimVersionSchema(ResourceSchema):
     presigned_urls_deprecated: bool = False
     transmission_strategy: TransmissionStrategy
     upload_id: str = ""
-    manifest: Optional[DynamoNimVersionManifestSchema | dict[str, Any]]
+    manifest: Optional[Union[DynamoNimVersionManifestSchema, Dict[str, Any]]]
     build_at: datetime
 
     @field_validator("manifest")
@@ -245,7 +245,9 @@ class DynamoNimVersionBase(BaseDynamoNimModel):
     upload_started_at: Optional[datetime] = SQLField(default=None)
     upload_finished_at: Optional[datetime] = SQLField(default=None)
     upload_finished_reason: str = SQLField(default="")
-    manifest: Optional[DynamoNimVersionManifestSchema | dict[str, Any]] = SQLField(
+    manifest: Optional[
+        Union[DynamoNimVersionManifestSchema, Dict[str, Any]]
+    ] = SQLField(
         default=None, sa_column=Column(JSON)
     )  # JSON-like field for the manifest
     build_at: datetime = SQLField()
