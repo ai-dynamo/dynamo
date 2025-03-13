@@ -5,6 +5,8 @@ build:
     FROM golang:1.23
     ARG TARGETOS
     ARG TARGETARCH
+    WORKDIR /
+    COPY ../../../+operator-src/operator ./operator
     WORKDIR /workspace
     COPY go.mod go.mod
     COPY go.sum go.sum

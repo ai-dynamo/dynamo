@@ -87,12 +87,8 @@ func ToDeploymentSchemas(ctx context.Context, deployments []*models.Deployment) 
 		}
 		clusterSchema := ToClusterFullSchema(cluster)
 
-		urls := make([]string, 0)
-		// TODO: implement get ingress urls...
-		// urls, err := services.DeploymentService.GetURLs(ctx, deployment)
-		// if err != nil {
-		// 	return nil, err
-		// }
+		// TODO: Add Implementation for Ingress URLs after UI is integrated
+
 		resourceSchema, ok := resourceSchemaMap[deployment.GetUid()]
 		if !ok {
 			return nil, fmt.Errorf("resourceSchema not found for deployment %s", deployment.GetUid())
@@ -103,7 +99,6 @@ func ToDeploymentSchemas(ctx context.Context, deployments []*models.Deployment) 
 			Cluster:        clusterSchema,
 			Status:         deployment.Status,
 			LatestRevision: deploymentRevisionSchema,
-			URLs:           urls,
 			KubeNamespace:  deployment.KubeNamespace,
 		})
 	}
@@ -134,6 +129,14 @@ func ToDeploymentSchemaV2(ctx context.Context, cluster *models.Cluster, deployme
 		return nil, err
 	}
 
+	urls := make([]string, 0)
+	if deployment.KubeNamespace != "" && cluster != nil {
+		urls = append(urls, fmt.Sprintf("https://%s.dev.aire.nvidia.com/api/v2/deployments/%s?cluster=%s",
+			deployment.KubeNamespace,
+			deployment.Name,
+			cluster.Name))
+	}
+
 	return &schemasv2.DeploymentSchema{
 		ResourceSchema: schemas.ResourceSchema{
 			Name:         deployment.Resource.Name,
@@ -149,7 +152,7 @@ func ToDeploymentSchemaV2(ctx context.Context, cluster *models.Cluster, deployme
 		Creator:        creator,
 		Cluster:        clusterSchema,
 		Status:         deployment.Status,
-		URLs:           []string{},
+		URLs:           urls,
 		LatestRevision: revisionSchema,
 		KubeNamespace:  deployment.KubeNamespace,
 	}, nil
