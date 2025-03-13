@@ -14,9 +14,7 @@
 // limitations under the License.
 
 #[cfg(not(feature = "cuda_kv"))]
-fn main() {
-    println!("cargo:warning=Building CUDA KV");
-}
+fn main() {}
 
 #[cfg(feature = "cuda_kv")]
 fn main() {
