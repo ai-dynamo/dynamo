@@ -33,11 +33,11 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 async-nats = { version = "0.38", features = ["service"] }
-axum = "0.6"
+axum = { version = "0.6" }
 clap = { version = "4.5", features = ["derive", "env"] }
-opentelemetry = "0.20"
-opentelemetry-prometheus = "0.13"
-prometheus = "0.13"
-rand = "0.8"
+opentelemetry = { version = "0.20" }
+opentelemetry-prometheus = { version = "0.13" }
+prometheus = { version = "0.13" }
+rand = { version = "0.8" }
 reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
-thiserror = "1.0"
+thiserror = { version = "1.0" }

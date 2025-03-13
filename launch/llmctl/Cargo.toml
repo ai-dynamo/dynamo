@@ -32,4 +32,4 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 
 clap = { version = "4.5", features = ["derive"] }
-tabled = "0.18"
+tabled = { version = "0.18" }

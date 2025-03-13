@@ -44,15 +44,15 @@ async-nats = { version = "0.38", features = ["service"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
 async_zmq = { version = "0.4.0" }
-blake3 = "1"
-bytes = "1"
+blake3 = { version = "1" }
+bytes = { version = "1" }
 chrono = { version = "0.4", default-features = false, features = ["alloc", "std", "clock", "now", "serde"] }
-derive_builder = "0.20"
-derive-getters = "0.5"
+derive_builder = { version = "0.20" }
+derive-getters = { version = "0.5" }
 either = { version = "1.13", features = ["serde"] }
-futures = "0.3"
+futures = { version = "0.3" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1" }
 thiserror = { version = "2.0.11" }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1" }

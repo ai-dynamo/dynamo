@@ -57,14 +57,14 @@ thiserror.workspace = true
 figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
 humantime = { version = "2.1.0" }
 log = { version = "0.4" }
-once_cell = "1"
+once_cell = { version = "1" }
 regex = { version = "1" }
 socket2 = { version = "0.5.8" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
 
-async-once-cell = "0.5.4"
-educe = "0.6.0"
-etcd-client = "0.14"
+async-once-cell = { version = "0.5.4" }
+educe = { version = "0.6.0" }
+etcd-client = { version = "0.14" }
 local-ip-address = { version = "0.6.3" }
 nid = { version = "3.0.0", features = ["serde"] }
 nix = { version = "0.29", features = ["signal"] }
