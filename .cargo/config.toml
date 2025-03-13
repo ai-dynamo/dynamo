@@ -1,2 +1,2 @@
 [build]
-jobs = "$(if [ $(nproc) -gt 2 ]; then echo 2; else echo $(nproc); fi)" 
+jobs = "$(if [ $(nproc) -gt 32 ]; then echo 32; else echo $(nproc); fi)"
