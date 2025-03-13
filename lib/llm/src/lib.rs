@@ -23,7 +23,6 @@ pub mod common;
 pub mod disagg_router;
 pub mod engines;
 pub mod http;
-pub mod kv;
 pub mod kv_router;
 pub mod model_card;
 pub mod model_type;
@@ -32,3 +31,6 @@ pub mod protocols;
 pub mod tokenizers;
 pub mod tokens;
 pub mod types;
+
+#[cfg(feature = "cuda_kv")]
+pub mod kv;
