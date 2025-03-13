@@ -129,6 +129,8 @@ COPY Cargo.toml /workspace/
 COPY Cargo.lock /workspace/
 COPY rust-toolchain.toml /workspace/
 
+ARG CARGO_BUILD_JOBS
+
 # Build Rust
 COPY lib/ /workspace/lib/
 COPY components /workspace/components
