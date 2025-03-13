@@ -37,7 +37,7 @@ from db.components import (
     UpdateDynamoNimVersionRequest,
     UserSchema,
 )
-from db.db import get_session, s3_storage
+from db.storage import get_session, s3_storage
 from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Request, responses
 from model import DynamoNim, DynamoNimVersion
 from pydantic import ValidationError
