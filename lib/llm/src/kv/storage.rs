@@ -36,10 +36,8 @@
 //! The first unit of ownership that will be Rust safe is the [KvBlock][super::KvBlock].
 
 use bs62::num_traits;
-use bytemuck::Pod;
 use cudarc::driver::{CudaContext, CudaSlice, CudaStream, DevicePtr};
 use dynemo_runtime::{error, raise, Result};
-use ndarray::prelude::*;
 use ndarray::{ArrayViewMut, IxDyn};
 use std::any::Any;
 use std::ffi::c_void;
@@ -246,6 +244,9 @@ pub struct CudaPinnedMemory {
     /// Size in bytes
     bytes: usize,
 }
+
+unsafe impl Send for CudaPinnedMemory {}
+unsafe impl Sync for CudaPinnedMemory {}
 
 impl CudaPinnedMemory {
     /// Allocate new pinned memory using CUDA
@@ -632,10 +633,9 @@ impl<'a, T: Storage, const D: usize> TensorView<'a, T, D> {
         self.total_elements * self.element_size
     }
 
-    pub fn copy_to_v2<S: Storage>(
+    pub fn copy_to_view_blocking<S: Storage>(
         &self,
         dst_view: &mut TensorView<'_, S, D>,
-        stream: &CudaStream,
     ) -> Result<()> {
         // validate same shape and strides
         if self.shape != dst_view.shape || self.strides != dst_view.strides {
@@ -1046,7 +1046,9 @@ impl<'a, T: Storage, const D: usize> TensorView<'a, T, D> {
 
         Ok(())
     }
+
     /// Convert the tensor view to a new owned ndarray tensor in host memory
+    /// This is not a performant operation, and should only be used for testing
     pub fn to_owned<DT: std::fmt::Debug + Clone + num_traits::Zero>(
         &self,
     ) -> Result<ndarray::Array<DT, IxDyn>> {
@@ -1055,7 +1057,7 @@ impl<'a, T: Storage, const D: usize> TensorView<'a, T, D> {
                 let nd = self.as_ndarray_view::<DT>()?;
                 Ok(nd.to_owned())
             }
-            StorageType::Device(device) => {
+            StorageType::Device(_device) => {
                 // create an ndarray with the same shape and element size
                 let shape = self.shape.to_vec();
 
@@ -1871,7 +1873,7 @@ mod tests {
 
     #[test]
     fn test_host_device_transfers() {
-        use cudarc::driver::{CudaContext, DevicePtr};
+        use cudarc::driver::CudaContext;
 
         // Initialize CUDA
         let context = CudaContext::new(0).unwrap();

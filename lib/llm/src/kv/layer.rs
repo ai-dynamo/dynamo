@@ -887,7 +887,7 @@ impl CopyStream {
         // this can be safely done without blocking as the copy stream state is
         let rc = unsafe {
             copy_stream_prepare_block_ids(
-                state.c_handle.as_ptr() as *mut std::ffi::c_void,
+                state.c_handle.as_ptr(),
                 state.src_block_ids.as_ptr() as *const std::os::raw::c_int,
                 state.dst_block_ids.as_ptr() as *const std::os::raw::c_int,
                 state.src_block_ids.len() as i32,
@@ -927,7 +927,7 @@ impl CopyStream {
             return Ok(());
         }
 
-        let cs = state.c_handle.as_ptr() as *mut std::ffi::c_void;
+        let cs = state.c_handle.as_ptr();
         let src_data = state.layer_details.src_layer_ptrs[layer] as *const std::ffi::c_void;
         let dst_data = state.layer_details.dst_layer_ptrs[layer] as *mut std::ffi::c_void;
 
@@ -969,7 +969,7 @@ impl CopyStream {
 
     pub fn sync_stream(&mut self) -> Result<()> {
         let state = &mut self.state;
-        let cs = state.c_handle.as_ptr() as *mut std::ffi::c_void;
+        let cs = state.c_handle.as_ptr();
         let rc = unsafe { copy_stream_sync(cs) };
 
         if rc != 0 {
@@ -1106,7 +1106,7 @@ impl CopyStream {
         tracing::debug!("src_6d_dims: {:?}", src_6d_dims);
 
         // the state has the layers src/dst pointers and src/dst block ids
-        let cs = state.c_handle.as_ptr() as *mut std::ffi::c_void;
+        let cs = state.c_handle.as_ptr();
 
         let rc = unsafe {
             copy_stream_scatter(
@@ -1114,7 +1114,7 @@ impl CopyStream {
                 src_data,
                 dst_data,
                 src_6d_dims.as_ptr(),
-                6 as u32,
+                6_u32,
                 elem_size as u32,
                 block_dim_index as u32,
                 self.state.src_block_dim() as u32,
@@ -1144,9 +1144,7 @@ impl Returnable for CopyStream {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::copy, time::Instant};
-
-    use crate::kv::storage::DeviceStorageOwned;
+    use std::time::Instant;
 
     use super::*;
     use cudarc::driver::CudaContext;
@@ -1166,11 +1164,8 @@ mod tests {
     impl KvBlockStorage {
         // only works with host/pinned fp32 tensors
         fn fill_layer_with_block_id(&mut self) -> Result<()> {
-            match self.storage_type() {
-                StorageType::Device(_) => {
-                    raise!("fill_layer_with_block_id not implemented for device storage");
-                }
-                _ => {}
+            if let StorageType::Device(_) = self.storage_type() {
+                raise!("fill_layer_with_block_id not implemented for device storage");
             }
 
             // get number of blocks
@@ -1265,7 +1260,7 @@ mod tests {
         {
             let h_view = h_blocks.layer(0)?.view().unwrap();
             let mut d_view = d_blocks.layer_mut(0)?.view().unwrap();
-            h_view.copy_to_v2(&mut d_view, &stream).unwrap();
+            h_view.copy_to_view_blocking(&mut d_view).unwrap();
             stream.synchronize().unwrap();
         }
 
@@ -1288,7 +1283,7 @@ mod tests {
         {
             let d_view = d_blocks.layer(0)?.view()?;
             let mut h_view = h_blocks.layer_mut(0)?.view()?;
-            d_view.copy_to_v2(&mut h_view, &stream)?;
+            d_view.copy_to_view_blocking(&mut h_view)?;
             stream.synchronize()?;
         }
 
@@ -1458,11 +1453,6 @@ mod tests {
 
         println!("shape: {:?}", shape);
 
-        let (kv_dim_idx, block_dim_idx) = match layout {
-            KvLayout::KvFirst => (0, 1),
-            KvLayout::BlockFirst => (1, 0),
-        };
-
         h_blocks.fill_layer_with_block_id().unwrap();
 
         // test that our test function fill_layer_with_block_id works
@@ -1475,7 +1465,7 @@ mod tests {
 
             // Create and use the mutable ndarray view in its own scope
             {
-                let mut nd_view = view.as_ndarray_view_mut::<f32>()?;
+                let nd_view = view.as_ndarray_view_mut::<f32>()?;
 
                 // iter over nd_view and set the values equal the the block index
                 // all kv and v of block 42 have values 42
@@ -1689,8 +1679,6 @@ mod tests {
             .map(|id| id as i32)
             .collect();
 
-        let dst_lblock_ids: Vec<i32> = (0..number_of_gpu_blocks).map(|id| id as i32).collect();
-
         copy_stream.prepare_block_map(d2h_block_map)?;
         copy_stream.prepare_block_ids(src_block_ids.clone(), dst_block_ids.clone())?;
 
@@ -1794,13 +1782,13 @@ mod tests {
             .build()?;
 
         // Create the storage blocks
-        let mut h_blocks = KvBlockStorage::allocate(
+        let h_blocks = KvBlockStorage::allocate(
             number_of_cpu_blocks,
             block_details.clone(),
             StorageType::Pinned,
         )?;
 
-        let mut d_blocks = KvBlockStorage::allocate(
+        let d_blocks = KvBlockStorage::allocate(
             number_of_gpu_blocks,
             block_details.clone(),
             StorageType::Device(device.clone()),
@@ -1887,7 +1875,7 @@ mod tests {
 
         let src_tp_size = 1;
         let dst_tp_size = 4;
-        let scatter_factor = (dst_tp_size / src_tp_size) as usize;
+        let scatter_factor = dst_tp_size / src_tp_size;
 
         println!("Test configuration:");
         println!("  Layout: {:?}", layout);
@@ -1898,7 +1886,7 @@ mod tests {
         println!("  Source TP size: {}", src_tp_size);
         println!("  Destination TP size: {}", dst_tp_size);
 
-        let (kv_dim_idx, block_dim_idx) = match layout {
+        let (_kv_dim_idx, block_dim_idx) = match layout {
             KvLayout::KvFirst => (0, 1),
             KvLayout::BlockFirst => (1, 0),
         };
@@ -1965,10 +1953,9 @@ mod tests {
         let src_layer = src_blocks.layer(0)?;
         let src_view = src_layer.view()?;
         let src_shape = *src_view.shape();
-        let src_strides = src_view.byte_strides().to_vec();
 
         // 4. Allocate device storage for the test
-        let mut dst_blocks = KvBlockStorage::allocate(
+        let dst_blocks = KvBlockStorage::allocate(
             number_of_blocks,
             block_details.clone(),
             StorageType::Device(device.clone()),
@@ -2013,7 +2000,7 @@ mod tests {
         let src_layer = src_blocks.layer(0)?;
         let src_view = src_layer.view()?;
         let src_nd = src_view.as_ndarray_view::<f32>()?;
-        let mut expected = src_nd.to_owned();
+        let expected = src_nd.to_owned();
 
         // reshape expected to match the src layout in 6d
         let expected_6d = expected.into_shape_with_order([
