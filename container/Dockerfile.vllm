@@ -16,42 +16,42 @@ ARG NSYS_URL=https://developer.nvidia.com/downloads/assets/tools/secure/nsight-s
 ARG NSYS_PKG=NsightSystems-linux-cli-public-2025.1.1.131-3554042.deb
 
 RUN apt-get update -y && apt-get -y install curl \
-                                            git \
-                                            libnuma-dev \
-                                            numactl \
-                                            wget \
-                                            autotools-dev \
-                                            automake \
-                                            libtool \
-                                            libz-dev \
-                                            libiberty-dev \
-                                            flex \
-                                            build-essential \
-                                            cmake \
-                                            libibverbs-dev \
-                                            libgoogle-glog-dev \
-                                            libgtest-dev \
-                                            libjsoncpp-dev \
-                                            libpython3-dev \
-                                            libboost-all-dev \
-                                            libssl-dev \
-                                            libgrpc-dev \
-                                            libgrpc++-dev \
-                                            libprotobuf-dev \
-                                            protobuf-compiler-grpc \
-                                            pybind11-dev \
-                                            python3-full \
-                                            python3-pip \
-                                            python3-numpy \
-                                            etcd-server \
-                                            net-tools \
-                                            pciutils \
-                                            libpci-dev \
-                                            vim \
-                                            tmux \
-                                            screen \
-                                            ibverbs-utils \
-                                            libibmad-dev
+    git \
+    libnuma-dev \
+    numactl \
+    wget \
+    autotools-dev \
+    automake \
+    libtool \
+    libz-dev \
+    libiberty-dev \
+    flex \
+    build-essential \
+    cmake \
+    libibverbs-dev \
+    libgoogle-glog-dev \
+    libgtest-dev \
+    libjsoncpp-dev \
+    libpython3-dev \
+    libboost-all-dev \
+    libssl-dev \
+    libgrpc-dev \
+    libgrpc++-dev \
+    libprotobuf-dev \
+    protobuf-compiler-grpc \
+    pybind11-dev \
+    python3-full \
+    python3-pip \
+    python3-numpy \
+    etcd-server \
+    net-tools \
+    pciutils \
+    libpci-dev \
+    vim \
+    tmux \
+    screen \
+    ibverbs-utils \
+    libibmad-dev
 
 RUN apt-get install -y linux-tools-common linux-tools-generic ethtool iproute2
 RUN apt-get install -y dkms linux-headers-generic
@@ -67,7 +67,7 @@ RUN cd /usr/local/src && \
     tar -xf /usr/local/src/mofed.tgz && \
     cd MLNX_OFED_LINUX-* && \
     apt-get update && apt-get install -y --no-install-recommends \
-        ./DEBS/libibverbs* ./DEBS/ibverbs-providers* ./DEBS/librdmacm* ./DEBS/libibumad* && \
+    ./DEBS/libibverbs* ./DEBS/ibverbs-providers* ./DEBS/librdmacm* ./DEBS/libibumad* && \
     rm -rf /var/lib/apt/lists/* /usr/local/src/* mofed.tgz
 
 ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/cuda/lib64 \
@@ -88,18 +88,18 @@ RUN cd /usr/local/src && \
     curl -fSsL "https://github.com/openucx/ucx/tarball/${UCX_VERSION}" | tar xz && \
     cd openucx-ucx* && \
     ./autogen.sh && ./configure     \
-        --enable-shared             \
-        --disable-static            \
-        --disable-doxygen-doc       \
-        --enable-optimizations      \
-        --enable-cma                \
-        --enable-devel-headers      \
-        --with-cuda=/usr/local/cuda \
-        --with-verbs                \
-        --with-dm                   \
-        --with-gdrcopy=/usr/local   \
-        --enable-mt                 \
-        --with-mlx5-dv &&           \
+    --enable-shared             \
+    --disable-static            \
+    --disable-doxygen-doc       \
+    --enable-optimizations      \
+    --enable-cma                \
+    --enable-devel-headers      \
+    --with-cuda=/usr/local/cuda \
+    --with-verbs                \
+    --with-dm                   \
+    --with-gdrcopy=/usr/local   \
+    --enable-mt                 \
+    --with-mlx5-dv &&           \
     make -j &&                      \
     make -j install-strip &&        \
     ldconfig
@@ -140,12 +140,13 @@ RUN ls /opt/nixl
 # Install utilities
 RUN apt update -y && apt install -y git wget curl nvtop tmux vim
 # nats
-RUN wget https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-amd64.deb && dpkg -i nats-server-v2.10.24-amd64.deb
+RUN wget https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-amd64.deb && dpkg -i nats-server-v2.10.24-amd64.deb && rm nats-server-v2.10.24-amd64.deb
 # etcd
 ENV ETCD_VERSION="v3.5.18"
 RUN wget https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-amd64.tar.gz -O /tmp/etcd.tar.gz && \
-mkdir -p /usr/local/bin/etcd && \
-tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1
+    mkdir -p /usr/local/bin/etcd && \
+    tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
+    rm /tmp/etcd.tar.gz
 ENV PATH=/usr/local/bin/etcd/:$PATH
 
 
