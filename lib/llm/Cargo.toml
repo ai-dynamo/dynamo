@@ -13,14 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-[workspace.package]
-version = "0.1.0"
-edition = "2021"
-authors = ["NVIDIA"]
-license = "Apache-2.0"
-homepage = "https://github.com/ai-dynamo/dynamo"
-repository = "https://github.com/ai-dynamo/dynamo.git"
-
 [package]
 name = "dynamo-llm"
 version.workspace = true
@@ -42,30 +34,7 @@ cuda = ["mistralrs/cuda", "llama-cpp-2/cuda"]
 metal = ["mistralrs/metal", "llama-cpp-2/metal"]
 vulkan = ["llama-cpp-2/vulkan"]
 
-[workspace.dependencies]
-# local or crates.io
-dynamo-runtime = { version = "0.1.0", path = "../runtime" }
-
-# crates.io
-anyhow = { version = "1" }
-async-stream = { version = "0.3" }
-async-trait = { version = "0.1" }
-bytes = "1"
-derive_builder = "0.20"
-futures = "0.3"
-serde = { version = "1", features = ["derive"] }
-thiserror = { version = "2.0.11" }
-tokio = { version = "1", features = ["full"] }
-tokio-stream = { version = "0.1" }
-tokio-util = { version = "0.7", features = ["codec", "net"] }
-tracing = { version = "0.1" }
-validator = { version = "0.20.0", features = ["derive"] }
-uuid = { version = "1", features = ["v4", "serde"] }
-xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
-strum = { version = "0.27", features = ["derive"] }
-
 [dependencies]
-
 # repo
 dynamo-runtime = { workspace = true }
 
