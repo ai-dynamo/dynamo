@@ -40,7 +40,7 @@ jobs:
   pre-merge-rust:
     runs-on: ubuntu-latest
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
     permissions:
       contents: read
     steps:
