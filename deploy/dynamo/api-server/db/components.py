@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -30,10 +30,10 @@ from sqlmodel import SQLModel
 
 class TimeCreatedUpdated(SQLModel):
     created_at: datetime = SQLField(
-        default_factory=lambda: datetime.now(UTC), nullable=False
+        default_factory=lambda: datetime.now(timezone.utc), nullable=False
     )
     updated_at: datetime = SQLField(
-        default_factory=lambda: datetime.now(UTC), nullable=False
+        default_factory=lambda: datetime.now(timezone.utc), nullable=False
     )
 
 
