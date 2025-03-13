@@ -117,6 +117,7 @@ fn main() {
     }
 }
 
+#[cfg(feature = "cuda_kv")]
 fn get_cuda_root_or_default() -> String {
     match std::env::var("CUDA_ROOT") {
         Ok(path) => path,
