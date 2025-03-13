@@ -23,8 +23,6 @@ members = [
     "lib/runtime",
     "lib/bindings/python",
     "lib/bindings/c",
-    "lib/runtime/examples/hello_world",
-    "lib/runtime/examples/service_metrics",
 ]
 resolver = "2"
 
