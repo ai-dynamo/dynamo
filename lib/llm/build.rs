@@ -28,7 +28,7 @@ fn main() {
     // if so, we don't need to set the cuda_lib
     let nvcc = Command::new("which").arg("nvcc").output().unwrap();
     let cuda_lib = if nvcc.status.success() {
-        println!("cargo:warning=nvcc found in path");
+        println!("cargo:info=nvcc found in path");
         // Extract the path from nvcc location by removing "bin/nvcc"
         let nvcc_path = String::from_utf8_lossy(&nvcc.stdout).trim().to_string();
         let path = PathBuf::from(nvcc_path);
@@ -50,10 +50,10 @@ fn main() {
         get_cuda_root_or_default()
     };
 
-    println!("cargo:warning=Using CUDA installation at: {}", cuda_lib);
+    println!("cargo:info=Using CUDA installation at: {}", cuda_lib);
 
     let cuda_lib_path = PathBuf::from(&cuda_lib).join("lib64");
-    println!("cargo:warning=Using CUDA libs: {}", cuda_lib_path.display());
+    println!("cargo:info=Using CUDA libs: {}", cuda_lib_path.display());
     println!("cargo:rustc-link-search=native={}", cuda_lib_path.display());
 
     // Link against multiple CUDA libraries
