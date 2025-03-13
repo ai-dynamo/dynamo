@@ -18,7 +18,6 @@ import logging
 import os
 
 import uvicorn
-
 from db.api import app
 from db.db import create_db_and_tables_async
 

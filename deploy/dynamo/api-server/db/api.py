@@ -18,14 +18,6 @@ import logging
 from datetime import datetime, timezone
 from typing import Annotated, List, Optional
 
-from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Request, responses
-from model import DynamoNim, DynamoNimVersion
-from pydantic import ValidationError
-from sqlalchemy import func
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlmodel import asc, col, desc, select
-from sqlmodel.ext.asyncio.session import AsyncSession
-
 from db.components import (
     CreateDynamoNimRequest,
     CreateDynamoNimVersionRequest,
@@ -46,6 +38,13 @@ from db.components import (
     UserSchema,
 )
 from db.db import get_session, s3_storage
+from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Request, responses
+from model import DynamoNim, DynamoNimVersion
+from pydantic import ValidationError
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlmodel import asc, col, desc, select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 API_TAG_MODELS = "dynamo"
 
