@@ -65,7 +65,7 @@ NOTE: for gated models (e.g. meta-llama/Llama-3.2-3B-Instruct) you have to have 
 ```
 ./dynamo-run <HUGGING_FACE_ORGANIZATION/MODEL_NAME>
 ```
-This will automatically download Qwen2.5 3B from Hugging Face (6 GiB download) and start it interactive text mode:
+This will automatically download Qwen2.5 3B from Hugging Face (6 GiB download) and start it in interactive text mode:
 `./dynamo-run Qwen/Qwen2.5-3B-Instruct`
 
 The parameter can be the ID of a HuggingFace repository (it will be downloaded), a GGUF file, or a folder containing safetensors, config.json, etc (a locally checked out HuggingFace repository).
