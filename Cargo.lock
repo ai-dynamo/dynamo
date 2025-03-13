@@ -315,27 +315,25 @@ checksum = "ace50bade8e6234aa140d9a2f552bbee1db4d353f69b8217bc503490fc1a9f26"
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.12.5"
+version = "1.12.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e4e8200b9a4a5801a769d50eeabc05670fec7e959a8cb7a63a93e4e519942ae"
+checksum = "dabb68eb3a7aa08b46fddfd59a3d55c978243557a90ab804769f7e20e67d2b01"
 dependencies = [
  "aws-lc-sys",
- "paste",
  "zeroize",
 ]
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.26.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f9dd2e03ee80ca2822dd6ea431163d2ef259f2066a4d6ccaca6d9dcb386aa43"
+checksum = "6bbe221bbf523b625a4dd8585c7f38166e31167ec2ca98051dbcb4c3b6e825d2"
 dependencies = [
  "bindgen 0.69.5",
  "cc",
  "cmake",
  "dunce",
  "fs_extra",
- "paste",
 ]
 
 [[package]]
@@ -784,12 +782,8 @@ dependencies = [
  "log",
  "num_cpus",
  "rand",
-<<<<<<< HEAD:Cargo.lock
  "reqwest 0.12.14",
-=======
- "reqwest",
- "rustls",
->>>>>>> main:launch/Cargo.lock
+ "rustls 0.23.23",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -2666,11 +2660,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.2",
  "tower-service",
-<<<<<<< HEAD:Cargo.lock
  "webpki-roots 0.26.8",
-=======
- "webpki-roots",
->>>>>>> main:launch/Cargo.lock
 ]
 
 [[package]]
@@ -5192,11 +5182,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
-<<<<<<< HEAD:Cargo.lock
  "webpki-roots 0.26.8",
-=======
- "webpki-roots",
->>>>>>> main:launch/Cargo.lock
  "windows-registry",
 ]
 
