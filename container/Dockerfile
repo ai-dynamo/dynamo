@@ -125,32 +125,21 @@ WORKDIR /workspace
 COPY pyproject.toml /workspace/
 COPY README.md /workspace/
 COPY LICENSE /workspace/
+COPY Cargo.toml /workspace/
+COPY Cargo.lock /workspace/
+COPY rust-toolchain.toml /workspace/
 
 ARG CARGO_BUILD_JOBS
 
-# Build Rust runtime
-COPY lib/runtime /workspace/lib/runtime
-RUN cd lib/runtime && \
-    cargo build --release --locked && cargo doc --no-deps
-
-# Build OpenAI HTTP Service binaries
-COPY lib/llm /workspace/lib/llm
+ENV CARGO_TARGET_DIR=/workspace/target
+# Build Rust
+COPY lib/ /workspace/lib/
 COPY components /workspace/components
-RUN cd components && \
-    cargo build --release && \
-    cp target/release/http /usr/local/bin/
-
-# Build Dynamo Run binaries
 COPY launch /workspace/launch
-RUN cd launch && \
-    cargo build --release --features mistralrs,sglang,vllm,python && \
+
+RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && cargo doc --no-deps && \
     cp target/release/dynamo-run /usr/local/bin/ && \
     cp target/release/llmctl /usr/local/bin/
-
-# Generate C bindings. Note that this is required for TRTLLM backend re-build
-COPY lib/bindings /workspace/lib/bindings
-RUN cd lib/bindings/c/ && \
-    cargo build --release --locked && cargo doc --no-deps
 
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 
@@ -170,7 +159,7 @@ RUN mkdir /opt/dynamo && \
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
     mkdir /opt/dynamo/bindings/lib && \
     cp dist/ai_dynamo_runtime*cp312*.whl /opt/dynamo/bindings/wheels/. && \
-    cp lib/bindings/c/target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
+    cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
     cp -r lib/bindings/c/include /opt/dynamo/bindings/.
 
 # Install dynamo.runtime and dynamo.llm wheels globally in container for tests that
