@@ -17,8 +17,9 @@
 from typing import Optional
 
 import msgspec
-from utils.nats_queue import NATSQueue
 from vllm.remote_prefill import RemotePrefillRequest
+
+from dynamo.components.vllm_worker.utils.nats_queue import NATSQueue
 
 
 class PrefillQueue(NATSQueue):

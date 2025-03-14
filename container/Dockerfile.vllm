@@ -242,6 +242,16 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
     cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
     cp -r lib/bindings/c/include /opt/dynamo/bindings/.
 
+# Install components
+RUN source /opt/dynamo/venv/bin/activate && \
+    uv pip install -e /workspace/components/vllm_worker
+
+# Install solution
+COPY solutions /workspace/solutions
+RUN source /opt/dynamo/venv/bin/activate && \
+    uv pip install -e /workspace/solutions/dynamo_llm
+
+
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
 

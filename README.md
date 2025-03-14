@@ -35,7 +35,7 @@ performance or ease of use.
 > rapid-prototyping stage and we are actively looking for feedback and
 > collaborators.
 
-## Building Dynamo
+## Quick Start
 
 ### Requirements
 Dynamo development and examples are container based.
@@ -43,19 +43,8 @@ Dynamo development and examples are container based.
 * [Docker](https://docs.docker.com/get-started/get-docker/)
 * [buildx](https://github.com/docker/buildx)
 
-### Development
+### Build Default Dynamo Environment
 
-You can build the Dynamo container using the build scripts
-in `container/` (or directly with `docker build`).
-
-We provide 3 types of builds:
-
-1. `STANDARD` which includes our default set of backends (onnx, openvino...)
-2. `TENSORRTLLM` which includes our TRT-LLM backend
-3. `VLLM` which includes our VLLM backend using NCCL communication library.
-4. `VLLM_NIXL` which includes our VLLM backend using new NIXL communication library.
-
-For example, if you want to build a container for the `STANDARD` backends you can run
 
 <!--pytest.mark.skip-->
 ```bash

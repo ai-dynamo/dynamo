@@ -18,11 +18,6 @@ import asyncio
 import os
 
 import uvloop
-from disagg_router import PyDisaggregatedRouter
-from utils.nixl import NixlMetadataStore
-from utils.prefill_queue import PrefillQueue
-from utils.protocol import MyRequestOutput, vLLMGenerateRequest
-from utils.vllm import parse_vllm_args
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.multiprocessing.client import EngineClient
 from vllm.entrypoints.openai.api_server import (
@@ -32,6 +27,14 @@ from vllm.logger import logger as vllm_logger
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
+from dynamo.components.vllm_worker.disagg_router import PyDisaggregatedRouter
+from dynamo.components.vllm_worker.utils.nixl import NixlMetadataStore
+from dynamo.components.vllm_worker.utils.parser import parse_vllm_args
+from dynamo.components.vllm_worker.utils.prefill_queue import PrefillQueue
+from dynamo.components.vllm_worker.utils.protocol import (
+    MyRequestOutput,
+    vLLMGenerateRequest,
+)
 from dynamo.llm import KvMetricsPublisher
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
@@ -209,7 +212,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
         await asyncio.gather(*endpoints)
 
 
-if __name__ == "__main__":
+def main():
     uvloop.install()
     engine_args = parse_vllm_args()
 
@@ -227,3 +230,7 @@ if __name__ == "__main__":
             engine_args.pipeline_parallel_size = 1
 
     asyncio.run(worker(engine_args))
+
+
+if __name__ == "__main__":
+    main()

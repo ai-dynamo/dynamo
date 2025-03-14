@@ -1,0 +1,40 @@
+#  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-License-Identifier: Apache-2.0
+#  #
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#  #
+#  http://www.apache.org/licenses/LICENSE-2.0
+#  #
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+[project]
+name = "ai-dynamo-components-vllm-worker"
+version = "0.1.0"
+description = "Distributed Inference Framework - SDK"
+readme = "README.md"
+authors = [
+    { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
+]
+dependencies = [
+    # TODO: currently compatible with bentoml==1.4.1,
+    # v1.4.2 has removed normalize_identifier which is used in dynamo
+    # "dynamo=={dynamo_version}",
+      "ai-dynamo==0.1.0"
+]
+
+[tool.setuptools]
+package-dir = {"dynamo.components.vllm_worker" = "src/dynamo/components/vllm_worker"}
+
+[project.scripts]
+vllm-routerless-worker = "dynamo.components.vllm_worker.routerless.worker:main"
+vllm-routerless-prefill-worker = "dynamo.components.vllm_worker.routerless.prefill_worker:main"
+vllm-worker = "dynamo.components.vllm_worker.worker:main"
+vllm-prefill-worker = "dynamo.components.vllm_worker.prefill_worker:main"
+vllm-kv-router = "dynamo.components.vllm_worker.kv_router:main"
+vllm-processor = "dynamo.components.vllm_worker.processor:main"

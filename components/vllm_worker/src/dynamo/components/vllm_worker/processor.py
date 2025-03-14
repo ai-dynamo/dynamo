@@ -20,9 +20,6 @@ from typing import AsyncIterator, Tuple, Union
 
 import uvloop
 from transformers import AutoTokenizer
-from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
-from utils.protocol import MyRequestOutput, Tokens, vLLMGenerateRequest
-from utils.vllm import parse_vllm_args
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
@@ -34,6 +31,17 @@ from vllm.logger import logger as vllm_logger
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
+from dynamo.components.vllm_worker.utils.chat_processor import (
+    ChatProcessor,
+    CompletionsProcessor,
+    ProcessMixIn,
+)
+from dynamo.components.vllm_worker.utils.parser import parse_vllm_args
+from dynamo.components.vllm_worker.utils.protocol import (
+    MyRequestOutput,
+    Tokens,
+    vLLMGenerateRequest,
+)
 from dynamo.runtime import Client, DistributedRuntime, dynamo_endpoint, dynamo_worker
 
 
@@ -226,7 +234,11 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
     )
 
 
-if __name__ == "__main__":
+def main():
     uvloop.install()
     engine_args = parse_vllm_args()
     asyncio.run(worker(engine_args))
+
+
+if __name__ == "__main__":
+    main()

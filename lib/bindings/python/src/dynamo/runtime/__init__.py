@@ -69,6 +69,7 @@ def dynamo_endpoint(
         async def wrapper(*args, **kwargs) -> AsyncGenerator[Any, None]:
             # Validate the request
             try:
+                print(args, kwargs)
                 args_list = list(args)
                 if len(args) in [1, 2] and issubclass(request_model, BaseModel):
                     if isinstance(args[-1], str):

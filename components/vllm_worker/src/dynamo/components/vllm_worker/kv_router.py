@@ -20,9 +20,9 @@ from argparse import Namespace
 from typing import AsyncIterator
 
 import uvloop
-from utils.protocol import Tokens
 from vllm.logger import logger as vllm_logger
 
+from dynamo.components.vllm_worker.utils.protocol import Tokens
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
@@ -215,7 +215,7 @@ async def worker(runtime: DistributedRuntime, args: Namespace):
     )
 
 
-if __name__ == "__main__":
+def main():
     uvloop.install()
 
     import argparse
@@ -249,3 +249,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     asyncio.run(worker(args))
+
+
+if __name__ == "__main__":
+    main()

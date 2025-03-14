@@ -19,8 +19,6 @@ import json
 
 import msgspec
 import uvloop
-from utils.nixl import NixlMetadataStore
-from utils.vllm import parse_vllm_args
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.multiprocessing.client import EngineClient
 from vllm.entrypoints.openai.api_server import (
@@ -34,6 +32,8 @@ from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 
+from dynamo.components.vllm_worker.utils.nixl import NixlMetadataStore
+from dynamo.components.vllm_worker.utils.parser import parse_vllm_args
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
 
@@ -151,7 +151,7 @@ async def worker(runtime: DistributedRuntime, engine_args: AsyncEngineArgs):
             )
 
 
-if __name__ == "__main__":
+def main():
     uvloop.install()
     engine_args = parse_vllm_args()
 
@@ -169,3 +169,7 @@ if __name__ == "__main__":
             engine_args.pipeline_parallel_size = 1
 
     asyncio.run(worker(engine_args))
+
+
+if __name__ == "__main__":
+    main()
