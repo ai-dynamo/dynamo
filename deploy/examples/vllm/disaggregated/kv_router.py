@@ -20,13 +20,13 @@ import random
 from argparse import Namespace
 from typing import AsyncIterator
 
+from disaggregated.worker import VllmWorker
 from utils.protocol import Tokens
 from vllm.logger import logger as vllm_logger
 
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
-from dynamo.sdk import async_onstart, dynamo_context, dynamo_endpoint, service, depends
+from dynamo.sdk import async_onstart, depends, dynamo_context, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
-from disaggregated.worker import VllmWorker
 
 WorkerId = str
 

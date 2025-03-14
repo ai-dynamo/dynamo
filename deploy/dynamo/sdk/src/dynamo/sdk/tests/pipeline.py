@@ -16,12 +16,10 @@
 # This is a simple example of a pipeline that uses Dynamo to deploy a backend, middle, and frontend service. Use this to test
 # changes made to CLI, SDK, etc
 
-import os
 
 from pydantic import BaseModel
 
 from dynamo.sdk import api, depends, dynamo_endpoint, service
-from dynamo.sdk.lib.config import ServiceConfig
 
 """
 Pipeline Architecture:
@@ -55,24 +53,6 @@ class ResponseType(BaseModel):
 
 GPU_ENABLED = False
 
-@service(
-    resources={"cpu": "2"},
-    traffic={"timeout": 30},
-    dynamo={
-        "enabled": True,
-        "namespace": "inference",
-    },
-    workers=1,
-)
-class End:
-    def __init__(self) -> None:
-        print("Starting end")
-
-    @dynamo_endpoint()
-    async def generate(self, req: RequestType):
-        """Generate tokens."""
-        req_text = req.text
-
 
 @service(
     resources={"cpu": "1"},
@@ -84,8 +64,6 @@ class End:
     workers=1,
 )
 class Backend:
-    # end = depends(End)
-
     def __init__(self) -> None:
         print("Starting backend")
 
@@ -97,6 +75,7 @@ class Backend:
         text = f"{req_text}-back"
         for token in text.split():
             yield f"Backend: {token}"
+
 
 @service(
     resources={"cpu": "2"},
@@ -127,8 +106,8 @@ class Backend2:
     dynamo={"enabled": True, "namespace": "inference"},
 )
 class Middle:
-    # backend = depends(Backend)
-    # backend2 = depends(Backend2)
+    backend = depends(Backend)
+    backend2 = depends(Backend2)
 
     def __init__(self) -> None:
         print("Starting middle")
@@ -141,6 +120,7 @@ class Middle:
         text = f"{req_text}-mid"
         for token in text.split():
             yield f"Mid: {token}"
+
 
 @service(
     resources={"cpu": "2"},
@@ -161,8 +141,8 @@ class Backend2:
         print(f"Middle2 received: {req_text}")
         text = f"{req_text}-mid2"
         next_request = RequestType(text=text).model_dump_json()
+        print(next_request)
 
-from typing import Optional
 
 @service(resources={"cpu": "1"}, traffic={"timeout": 60})
 class Frontend:
@@ -180,7 +160,7 @@ class Frontend:
         txt = RequestType(text=text)
         print(f"Frontend sending: {type(txt)}")
         if self.backend:
-            async for back_resp in self.backend.generate(mid_resp):
+            async for back_resp in self.backend.generate(txt.model_dump_json()):
                 print(f"Frontend received back_resp: {back_resp}")
                 yield f"Frontend: {back_resp}"
         else:

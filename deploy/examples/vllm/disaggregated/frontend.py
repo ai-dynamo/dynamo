@@ -15,17 +15,20 @@
 
 import os
 import subprocess
-from dynamo.sdk import service
-from dynamo.sdk import depends
+
 from disaggregated.processor import Processor
 from disaggregated.worker import VllmWorker
-from dynamo.sdk.lib.config import ServiceConfig
 from pydantic import BaseModel
+
+from dynamo.sdk import depends, service
+from dynamo.sdk.lib.config import ServiceConfig
+
 
 class FrontendConfig(BaseModel):
     model: str
     endpoint: str
     port: int = 8080
+
 
 @service(
     resources={"cpu": "10", "memory": "20Gi"},
@@ -38,9 +41,22 @@ class Frontend:
     def __init__(self):
         config = ServiceConfig.get_instance()
         frontend_config = FrontendConfig(**config.get("Frontend", {}))
-        
+
         os.environ["TRT_LOG"] = "DEBUG"
-        subprocess.run(["llmctl", "http", "remove", "chat-models", frontend_config.model])
-        subprocess.run(["llmctl", "http", "add", "chat-models", frontend_config.model, frontend_config.endpoint])
-        
-        subprocess.run(["http", "-p", str(frontend_config.port)], stdout=None, stderr=None)
+        subprocess.run(
+            ["llmctl", "http", "remove", "chat-models", frontend_config.model]
+        )
+        subprocess.run(
+            [
+                "llmctl",
+                "http",
+                "add",
+                "chat-models",
+                frontend_config.model,
+                frontend_config.endpoint,
+            ]
+        )
+
+        subprocess.run(
+            ["http", "-p", str(frontend_config.port)], stdout=None, stderr=None
+        )

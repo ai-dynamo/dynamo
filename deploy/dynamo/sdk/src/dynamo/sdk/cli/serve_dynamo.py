@@ -31,7 +31,6 @@ from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 from dynamo.sdk import dynamo_context
 from dynamo.sdk.lib.service import LinkedServices
 
-
 logger = logging.getLogger("dynamo.sdk.serve.dynamo")
 logger.setLevel(logging.INFO)
 

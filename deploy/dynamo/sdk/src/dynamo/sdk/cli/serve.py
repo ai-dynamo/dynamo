@@ -21,10 +21,10 @@ import logging
 import os
 import sys
 import typing as t
-import yaml
 
 import click
 import rich
+import yaml
 
 if t.TYPE_CHECKING:
     P = t.ParamSpec("P")  # type: ignore
@@ -328,11 +328,12 @@ def build_serve_command() -> click.Group:
         """
         from bentoml import Service
         from bentoml._internal.service.loader import load
+
         from dynamo.sdk.lib.service import LinkedServices
 
         # Process service-specific options
         service_configs = _parse_service_args(ctx.args)
-        
+
         # Load and merge config file if provided
         if file:
             with open(file) as f:

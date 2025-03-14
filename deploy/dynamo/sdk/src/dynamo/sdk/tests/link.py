@@ -1,7 +1,7 @@
 # linking syntax example
 
-import sys
-from dynamo.sdk.tests.pipeline import Frontend, Middle, Backend, Backend2, End
+
+from dynamo.sdk.tests.pipeline import Backend, Frontend, Middle
 
 # print("INITIAL DEPENDENCIES")
 # print("Frontend dependencies", Frontend.dependencies)
@@ -29,7 +29,7 @@ class DecodeWorker:
     prefill_worker = depends(PrefillWorker) # optional
 ---------------
 
-# Optional 
+# Optional
 Frontend -> Preproc
 
 if cli.enable_prefill:
@@ -37,7 +37,7 @@ if cli.enable_prefill:
 
 if cli.enable_prefill:
     DecodeWorker -> PrefillWorker
------------ 
+-----------
 
 Monolith
 Frontend.link(DecodeWorker).build()
