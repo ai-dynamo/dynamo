@@ -17,41 +17,14 @@
 import asyncio
 import ctypes
 import os
-import subprocess
 from ctypes import c_char_p, c_int64, c_uint32
-from time import sleep
 from typing import List
 
 import pytest
 
 from dynamo.llm import KvIndexer, KvMetricsAggregator, KvMetricsPublisher
-from dynamo.runtime import DistributedRuntime
 
 pytestmark = pytest.mark.pre_merge
-
-
-@pytest.fixture(scope="module", autouse=True)
-def setup_and_teardown():
-    # Setup code
-    nats_server = subprocess.Popen(["nats-server", "-js"])
-    etcd = subprocess.Popen(["etcd"])
-    print("Setting up resources")
-
-    sleep(5)  # wait for nats-server and etcd to start
-    yield
-
-    # Teardown code
-    print("Tearing down resources")
-    nats_server.terminate()
-    nats_server.wait()
-    etcd.terminate()
-    etcd.wait()
-
-
-@pytest.fixture(scope="module")
-async def distributed_runtime():
-    loop = asyncio.get_running_loop()
-    return DistributedRuntime(loop)
 
 
 # TODO Figure out how to test with different kv_block_size

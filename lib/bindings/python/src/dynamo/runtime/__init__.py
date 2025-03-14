@@ -37,7 +37,7 @@ def dynamo_worker():
             loop = asyncio.get_running_loop()
             runtime = DistributedRuntime(loop)
 
-            await func(runtime, *args, **kwargs)
+            return await func(runtime, *args, **kwargs)
 
             # # wait for one of
             # # 1. the task to complete
