@@ -86,20 +86,16 @@ pub fn start_leader(leader_address: SocketAddrV4) -> Result<Ray, RayError> {
     // Process stdout
     if let Some(stdout) = child.stdout.take() {
         let reader = BufReader::new(stdout);
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                tracing::info!("RAY: {line}");
-            }
+        for line in reader.lines().map_while(Result::ok) {
+            tracing::info!("RAY: {line}");
         }
     }
 
     // Process stderr
     if let Some(stderr) = child.stderr.take() {
         let reader = BufReader::new(stderr);
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                tracing::info!("RAY: {line}");
-            }
+        for line in reader.lines().map_while(Result::ok) {
+            tracing::info!("RAY: {line}");
         }
     }
 
@@ -126,20 +122,16 @@ pub fn start_follower(leader_address: SocketAddrV4) -> Result<Ray, RayError> {
     // Process stdout
     if let Some(stdout) = child.stdout.take() {
         let reader = BufReader::new(stdout);
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                tracing::info!("RAY: {line}");
-            }
+        for line in reader.lines().map_while(Result::ok) {
+            tracing::info!("RAY: {line}");
         }
     }
 
     // Process stderr
     if let Some(stderr) = child.stderr.take() {
         let reader = BufReader::new(stderr);
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                tracing::info!("RAY: {line}");
-            }
+        for line in reader.lines().map_while(Result::ok) {
+            tracing::info!("RAY: {line}");
         }
     }
 
@@ -248,6 +240,7 @@ fn parse_ray_status(output: &str) -> Option<RayStatus> {
 
     // Regex to match node IDs
     let node_regex = Regex::new(r"(\d+)\s+(node_[a-f0-9]+)").unwrap();
+    let num_regex = Regex::new(r"(\d+)").unwrap();
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -280,7 +273,7 @@ fn parse_ray_status(output: &str) -> Option<RayStatus> {
             }
         } else if in_pending_section && trimmed != "(no pending nodes)" {
             // Count pending nodes
-            if let Some(captures) = Regex::new(r"(\d+)").unwrap().captures(trimmed) {
+            if let Some(captures) = num_regex.captures(trimmed) {
                 if let Some(count) = captures.get(1) {
                     if let Ok(count) = count.as_str().parse::<usize>() {
                         pending_nodes_count += count;
@@ -289,7 +282,7 @@ fn parse_ray_status(output: &str) -> Option<RayStatus> {
             }
         } else if in_failures_section && trimmed != "(no failures)" {
             // Count failures
-            if let Some(captures) = Regex::new(r"(\d+)").unwrap().captures(trimmed) {
+            if let Some(captures) = num_regex.captures(trimmed) {
                 if let Some(count) = captures.get(1) {
                     if let Ok(count) = count.as_str().parse::<usize>() {
                         recent_failures_count += count;

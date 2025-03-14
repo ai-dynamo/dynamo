@@ -15,7 +15,7 @@
 
 use std::{
     collections::HashMap,
-    fmt,
+    env, fmt,
     os::fd::{FromRawFd as _, RawFd},
     path::Path,
     process::Stdio,
@@ -293,7 +293,10 @@ pub async fn start(
     tp_size: u32,
     base_gpu_id: u32,
 ) -> anyhow::Result<SgLangWorker> {
-    pyo3::prepare_freethreaded_python(); // or enable feature "auto-initialize"
+    pyo3::prepare_freethreaded_python();
+    if let Ok(venv) = env::var("VIRTUAL_ENV") {
+        Python::with_gil(|py| crate::engines::fix_venv(venv, py));
+    }
 
     let Sockets {
         context,
