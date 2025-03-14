@@ -178,7 +178,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     uv pip install /workspace/dist/vllm*cp312*.whl && \
     cd .. && rm -rf vllm
 
-# # Install genai-perf for benchmarking
+# Install genai-perf for benchmarking
 ARG GENAI_PERF_TAG="25d0188713adc47868d6b3f22426375237a90529"
 RUN uv pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
 
