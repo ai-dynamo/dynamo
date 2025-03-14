@@ -80,10 +80,11 @@ class UpdateDynamoNimVersionRequest(BaseModel):
 
 
 class ListQuerySchema(BaseModel):
-    start: int = Query(0, alias="start")
-    count: int = Query(0, alias="count")
+    start: int = Query(default=0, ge=0, alias="start")
+    count: int = Query(default=20, ge=0, alias="count")
     search: Optional[str] = Query(None, alias="search")
-    q: Optional[str] = Query(None, alias="q")
+    q: Optional[str] = Query(default="", alias="q")
+    sort_asc: bool = Query(default=False)
 
     def get_query_map(self) -> Dict[str, Any]:
         if not self.q:

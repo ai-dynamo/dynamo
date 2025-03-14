@@ -15,14 +15,13 @@
 
 import logging
 import os
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 import boto3
 from botocore.exceptions import ClientError
-from sqlalchemy import create_engine
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -57,31 +56,21 @@ if not database_url:  # default to sqlite in-memory
     )  # noqa: T201
 
 os.environ["API_DATABASE_URL"] = database_url
-engine = create_engine(database_url, echo=True)
-async_engine = create_async_engine(database_url, echo=True)
+engine = create_async_engine(
+    url=database_url, echo=True, pool_pre_ping=True, connect_args=connect_args
+)
 
 
-def get_session():
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    return SessionLocal()
-
-
-async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
+async def get_session() -> AsyncGenerator[AsyncSession, Any]:
     async_session = async_sessionmaker(
-        async_engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
+        bind=engine, class_=AsyncSession, expire_on_commit=False
     )
     async with async_session() as session:
         yield session
 
 
-def create_db_and_tables():
-    SQLModel.metadata.create_all(engine)
-
-
 async def create_db_and_tables_async():
-    async with async_engine.begin() as conn:
+    async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
 

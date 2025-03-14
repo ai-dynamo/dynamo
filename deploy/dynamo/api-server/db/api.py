@@ -38,12 +38,11 @@ from db.components import (
     UserSchema,
 )
 from db.storage import get_session, s3_storage
-from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Request, responses
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, responses
 from model import DynamoNim, DynamoNimVersion
 from pydantic import ValidationError
-from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlmodel import asc, col, desc, select
+from sqlmodel import col, desc, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 API_TAG_MODELS = "dynamo"
@@ -56,9 +55,6 @@ SORTABLE_COLUMNS = {
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-app = FastAPI(title="Dynamo API Database Server")
-app.include_router(router)
 
 
 @router.get(
@@ -112,7 +108,7 @@ async def dynamo_nim_handler(
     dynamo_nim_name: str,
 ) -> DynamoNim:
     statement = select(DynamoNim).where(DynamoNim.name == dynamo_nim_name)
-    stored_dynamo_nim_result = await session.exec(statement)
+    stored_dynamo_nim_result = await session.execute(statement)
     stored_dynamo_nim = stored_dynamo_nim_result.first()
 
     if not stored_dynamo_nim:
@@ -155,7 +151,7 @@ async def get_dynamo_nim(
         .order_by(desc(DynamoNimVersion.created_at))
     )
 
-    result = await session.exec(statement)
+    result = await session.execute(statement)
     dynamo_nims = result.all()
 
     latest_dynamo_nim_versions = await convert_dynamo_nim_version_model_to_schema(
@@ -274,29 +270,35 @@ async def get_dynamo_nim_list(
     query_params: ListQuerySchema = Depends(),
 ):
     try:
-        total_statement = select(func.count(col(DynamoNim.id)))
-        result = await session.exec(total_statement)
-        total = result.first()
-        if not total:
-            total = 0
-
+        # Base query using SQLModel's select
         statement = select(DynamoNim)
-        statement = statement.offset(query_params.start)
-        statement = statement.limit(query_params.count)
 
-        query = query_params.get_query_map()
-        for k, v_list in query.items():
-            if k == "sort":
-                for v in v_list:
-                    column, order = v.split("-")
-                    if column in SORTABLE_COLUMNS and order in ["asc", "desc"]:
-                        to_sort = SORTABLE_COLUMNS[column]
-                        sort_by = asc(to_sort) if order == "asc" else desc(to_sort)
-                        statement = statement.order_by(sort_by)
+        # Handle search query 'q'
+        if query_params.q:
+            statement = statement.where(DynamoNim.name.ilike(f"%{query_params.q}%"))
 
-        result = await session.exec(statement)
-        dynamo_nims = list(result.all())
+        # Get total count using SQLModel
+        total_statement = select(func.count(DynamoNim.id)).select_from(statement)
 
+        # Execute count query
+        result = await session.execute(total_statement)
+        total = result.scalar() or 0
+
+        # Apply pagination and sorting
+        if query_params.sort_asc is not None:
+            statement = statement.order_by(
+                DynamoNim.created_at.asc()
+                if query_params.sort_asc
+                else DynamoNim.created_at.desc()
+            )
+
+        statement = statement.offset(query_params.start).limit(query_params.count)
+
+        # Execute main query
+        result = await session.execute(statement)
+        dynamo_nims = result.scalars().all()
+
+        # Rest of your code remains the same
         dynamo_nim_schemas = await convert_dynamo_nim_model_to_schema(
             session, dynamo_nims
         )
@@ -330,7 +332,7 @@ async def dynamo_nim_version_handler(
         DynamoNim.name == dynamo_nim_name,
     )
 
-    result = await session.exec(statement)
+    result = await session.execute(statement)
     records = result.all()
 
     if not records:
@@ -489,12 +491,12 @@ async def get_dynamo_nim_versions(
         .order_by(desc(DynamoNimVersion.created_at))
     )
 
-    result = await session.exec(total_statement)
+    result = await session.execute(total_statement)
     dynamo_nim_versions = result.all()
     total = len(dynamo_nim_versions)
 
     statement = total_statement.limit(query_params.count)
-    result = await session.exec(statement)
+    result = await session.execute(statement)
     dynamo_nim_versions = list(result.all())
 
     dynamo_nim_version_schemas = await convert_dynamo_nim_version_model_to_schema(
@@ -680,6 +682,11 @@ async def start_dynamo_nim_version_upload(
     return schema[0]
 
 
+@router.get("/api/v1/healthz")
+async def health_check():
+    return {"status": "ok"}
+
+
 """
     DB to Schema Converters
 """
@@ -703,12 +710,12 @@ async def convert_dynamo_nim_model_to_schema(
             total_statement = select(func.count(col(DynamoNimVersion.id))).where(
                 DynamoNimVersion.dynamo_nim_id == entity.id
             )
-            result = await session.exec(total_statement)
+            result = await session.execute(total_statement)
             total = result.first()
             if not total:
                 total = 0
 
-            result = await session.exec(statement)
+            result = await session.execute(statement)
             dynamo_nim_versions = list(result.all())
             dynamo_nim_version_schemas = (
                 await convert_dynamo_nim_version_model_to_schema(
@@ -757,7 +764,7 @@ async def convert_dynamo_nim_version_model_to_schema(
     for entity in entities:
         if not dynamo_nim:
             statement = select(DynamoNim).where(DynamoNim.id == entity.dynamo_nim_id)
-            results = await session.exec(statement)
+            results = await session.execute(statement)
             dynamo_nim = results.first()
 
         if dynamo_nim:
