@@ -206,35 +206,3 @@ def depends(
     if on is not None and not isinstance(on, Service):
         raise TypeError("depends() expects a class decorated with @service()")
     return DynamoDependency(on, url=url, deployment=deployment, cluster=cluster)
-
-
-def create_pipeline(*services):
-    """
-    Create a pipeline by linking services together.
-
-    Args:
-        *services: A sequence of service classes to link in order
-
-    Returns:
-        The first service in the chain for further configuration
-
-    Example:
-        pipeline = create_pipeline(Frontend, Backend, Middle)
-    """
-    if len(services) < 2:
-        raise ValueError("At least two services are required to create a pipeline")
-
-    # Reset dependencies for all services in the chain
-    for service in services:
-        service.dependencies = {}
-
-    # Create the dependency chain
-    for i in range(len(services) - 1):
-        current = services[i]
-        next_service = services[i + 1]
-
-        # Use the lowercase name of the target service as the dependency key
-        dep_name = next_service.name.lower()
-        current.dependencies[dep_name] = DynamoDependency(next_service)
-
-    return services[0]  # Return the head of the pipeline
