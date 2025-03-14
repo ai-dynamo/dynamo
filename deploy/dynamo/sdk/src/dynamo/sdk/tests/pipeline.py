@@ -76,27 +76,6 @@ class Backend:
         for token in text.split():
             yield f"Backend: {token}"
 
-@service(
-    resources={"cpu": "1"},
-    traffic={"timeout": 30},
-    dynamo={"enabled": True, "namespace": "inference"},
-)
-class Middle:
-    backend = depends(Backend)
-    backend2 = depends(Backend2)
-
-    def __init__(self) -> None:
-        print("Starting middle")
-
-    @dynamo_endpoint()
-    async def generate(self, req: RequestType):
-        """Forward requests to backend."""
-        req_text = req.text
-        print(f"Middle received: {req_text}")
-        text = f"{req_text}-mid"
-        for token in text.split():
-            yield f"Mid: {token}"
-
 
 @service(
     resources={"cpu": "2"},
@@ -118,6 +97,28 @@ class Backend2:
         text = f"{req_text}-mid2"
         next_request = RequestType(text=text).model_dump_json()
         print(next_request)
+
+
+@service(
+    resources={"cpu": "1"},
+    traffic={"timeout": 30},
+    dynamo={"enabled": True, "namespace": "inference"},
+)
+class Middle:
+    backend = depends(Backend)
+    backend2 = depends(Backend2)
+
+    def __init__(self) -> None:
+        print("Starting middle")
+
+    @dynamo_endpoint()
+    async def generate(self, req: RequestType):
+        """Forward requests to backend."""
+        req_text = req.text
+        print(f"Middle received: {req_text}")
+        text = f"{req_text}-mid"
+        for token in text.split():
+            yield f"Mid: {token}"
 
 
 @service(resources={"cpu": "1"}, traffic={"timeout": 60})
