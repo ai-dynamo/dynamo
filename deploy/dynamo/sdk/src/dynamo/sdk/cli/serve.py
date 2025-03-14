@@ -332,12 +332,14 @@ def build_serve_command() -> click.Group:
         from dynamo.sdk.lib.service import LinkedServices
 
         # Process service-specific options
-        service_configs = _parse_service_args(ctx.args)
+        service_configs: t.Optional[t.Dict[str, t.Any]] = _parse_service_args(ctx.args)
 
         # Load and merge config file if provided
         if file:
             with open(file) as f:
                 yaml_configs = yaml.safe_load(f)
+                # Initialize service_configs as empty dict if it's None
+                service_configs = dict(service_configs or {})
                 # Convert nested YAML structure to flat dict with dot notation
                 for service, configs in yaml_configs.items():
                     for key, value in configs.items():

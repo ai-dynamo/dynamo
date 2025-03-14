@@ -35,7 +35,7 @@ class RuntimeLinkedServices:
     """
 
     def __init__(self) -> None:
-        self.edges = defaultdict(set)
+        self.edges: Dict[DynamoService, Set[DynamoService]] = defaultdict(set)
 
     def add(self, edge: Tuple[DynamoService, DynamoService]):
         src, dest = edge

@@ -76,30 +76,6 @@ class Backend:
         for token in text.split():
             yield f"Backend: {token}"
 
-
-@service(
-    resources={"cpu": "2"},
-    traffic={"timeout": 30},
-    dynamo={
-        "enabled": True,
-        "namespace": "inference",
-    },
-    workers=1,
-)
-class Backend2:
-    def __init__(self) -> None:
-        print("Starting backend")
-
-    @dynamo_endpoint()
-    async def generate(self, req: RequestType):
-        """Generate tokens."""
-        req_text = req.text
-        print(f"Backend received: {req_text}")
-        text = f"{req_text}-back"
-        for token in text.split():
-            yield f"Backend: {token}"
-
-
 @service(
     resources={"cpu": "1"},
     traffic={"timeout": 30},
