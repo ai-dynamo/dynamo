@@ -22,6 +22,7 @@ import uvicorn
 from db.api import router
 from db.storage import create_db_and_tables_async
 from fastapi import FastAPI
+from fastapi.routing import APIRoute
 
 # Configure logging to write to stdout
 logging.basicConfig(
@@ -47,18 +48,14 @@ async def main():
 
     app = FastAPI(title="Dynamo API Database Server")
     app.include_router(router)
-    for route in router.routes:
-        logger.info(f"  {route.path} {route.methods}")
+    for app_route in router.routes:
+        if isinstance(
+            app_route, APIRoute
+        ):  # Ensure it's an APIRoute before accessing attributes
+            route: APIRoute = app_route
+            logger.info(f"  {route.path} {route.methods} {route.name}")
 
     await init_db()
-
-    # Log all registered routes more verbosely
-    logger.info("=== REGISTERED ROUTES ===")
-    for route in app.routes:
-        logger.info(f"PATH: {route.path}")
-        logger.info(f"METHODS: {route.methods}")
-        logger.info(f"NAME: {route.name}")
-        logger.info("=====================")
 
     # Get port from environment or default to 8001
     port = int(os.getenv("API_DATABASE_PORT", "8001"))
