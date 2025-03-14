@@ -120,6 +120,7 @@ class DynamoService(Service[T]):
         if key not in self.dependencies:
             raise ValueError(f"Dependency with key {key} not found")
         del self.dependencies[key]
+        return self
 
     def link(self, next_service: DynamoService):
         """Link this service to another service, creating a pipeline."""
