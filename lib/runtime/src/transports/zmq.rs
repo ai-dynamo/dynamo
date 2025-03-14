@@ -307,7 +307,7 @@ impl ServerExecutionHandle {
 }
 
 // Client implementation
-struct Client {
+pub struct Client {
     dealer: Dealer<IntoIter<Vec<u8>>, Vec<u8>>,
 }
 

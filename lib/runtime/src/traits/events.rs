@@ -24,12 +24,12 @@ use crate::Result;
 //     async fn publish(&self, event: &(impl Serialize + Send + Sync)) -> Result<()>;
 // }
 
-/// A [EventPlane] is a component that can publish and/or subscribe to events.
+/// An [EventPublisher] is an object that can publish events.
 ///
-/// Each implementation of [EventPlane] will define the root subject.
+/// Each implementation of [EventPublisher] will define the root subject.
 #[async_trait]
 pub trait EventPublisher {
-    /// The base subject used for this implementation of the [EventPlane].
+    /// The base subject used for this implementation of the [EventPublisher].
     fn subject(&self) -> String;
 
     /// Publish a single event to the event plane. The `event_name` will be `.` concatenated with the
@@ -57,7 +57,7 @@ pub trait EventPublisher {
     // fn publisher_bytes(&self, event_name: impl AsRef<str>) -> &PublisherBytes;
 }
 
-/// A trait for subscribing to events in the event plane.
+/// An [EventSubscriber] is an object that can subscribe to events.
 ///
 /// This trait provides methods to subscribe to events published on specific subjects.
 #[async_trait]
