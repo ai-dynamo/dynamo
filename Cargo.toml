@@ -63,3 +63,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
 strum = { version = "0.27", features = ["derive"] }
 prometheus = { version = "0.13" }
+
+[profile.dev.package]
+insta.opt-level = 3

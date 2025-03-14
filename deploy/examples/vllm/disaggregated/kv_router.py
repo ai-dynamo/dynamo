@@ -20,11 +20,12 @@ import random
 from argparse import Namespace
 from typing import AsyncIterator
 
+from disaggregated.worker import VllmWorker
 from utils.protocol import Tokens
 from vllm.logger import logger as vllm_logger
 
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
-from dynamo.sdk import async_onstart, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_onstart, depends, dynamo_context, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
 WorkerId = str
@@ -76,10 +77,11 @@ class Router:
     Request handler for the generate endpoint
     """
 
+    worker = depends(VllmWorker)
+
     def __init__(self):
         vllm_logger.info("Initializing Custom Router")
         self.args = parse_args(self.__class__.__name__, "")
-        print("[ROUTER] args = ", self.args)
 
     @async_onstart
     async def async_init(self):

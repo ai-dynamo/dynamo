@@ -79,7 +79,7 @@ class PrefillWorker:
         if self.engine_args.enforce_eager is not True:
             print("Prefill must be done eagerly, setting to True")
             self.engine_args.enforce_eager = True
-            print("PrefillWorker initialized")
+        print("PrefillWorker initialized")
 
     @async_onstart
     async def async_init(self):

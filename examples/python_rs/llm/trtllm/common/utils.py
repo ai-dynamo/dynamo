@@ -23,6 +23,8 @@ from typing import Callable, Optional, Union
 
 from tensorrt_llm.logger import logger
 
+logger.set_level("info")
+
 
 class ManagedThread(threading.Thread):
     def __init__(
