@@ -48,8 +48,10 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 
 [project.scripts]
 dynamo = "dynamo.sdk.cli.cli:cli"
-dynamo-run = "dynamo.sdk.cli.run:main"
-llmctl = "dynamo.sdk.cli.llmctl:main"
+dynamo-run = "dynamo.sdk.cli.run_executable:dynamo_run"
+llmctl = "dynamo.sdk.cli.run_executable:llmctl"
+http = "dynamo.sdk.cli.run_executable:http"
+metrics = "dynamo.sdk.cli.run_executable:metrics"
 
 [build-system]
 requires = ["hatchling"]
@@ -61,8 +63,10 @@ packages = ["deploy/dynamo/sdk/src/dynamo"]
 # This section is for including the binaries in the wheel package
 # but doesn't make them executable scripts in the venv bin directory
 [tool.hatch.build.targets.wheel.force-include]
-"target/release/dynamo-run" = "dynamo/sdk/bin/dynamo-run"
-"target/release/llmctl" = "dynamo/sdk/bin/llmctl"
+"target/release/dynamo-run" = "dynamo/sdk/cli/bin/dynamo-run"
+"target/release/llmctl" = "dynamo/sdk/cli/bin/llmctl"
+"target/release/http" = "dynamo/sdk/cli/bin/http"
+"target/release/metrics" = "dynamo/sdk/cli/bin/metrics"
 
 [tool.codespell]
 # note: pre-commit passes explicit lists of files here, which this skip file list doesn't override -
