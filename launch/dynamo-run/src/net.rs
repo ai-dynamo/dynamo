@@ -208,7 +208,7 @@ mod unix {
         })
         .try_collect()
         .await
-        .map_err(super::LinkDataError::communication)
+        .map_err(|err| super::LinkDataError::communication(err.to_string()))
     }
 
     fn extract_interface_name(link_message: &LinkMessage) -> Option<String> {
