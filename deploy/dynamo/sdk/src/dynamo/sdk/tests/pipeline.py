@@ -55,6 +55,24 @@ class ResponseType(BaseModel):
 
 GPU_ENABLED = False
 
+@service(
+    resources={"cpu": "2"},
+    traffic={"timeout": 30},
+    dynamo={
+        "enabled": True,
+        "namespace": "inference",
+    },
+    workers=1,
+)
+class End:
+    def __init__(self) -> None:
+        print("Starting end")
+
+    @dynamo_endpoint()
+    async def generate(self, req: RequestType):
+        """Generate tokens."""
+        req_text = req.text
+
 
 @service(
     resources={"cpu": "2"},
@@ -63,9 +81,33 @@ GPU_ENABLED = False
         "enabled": True,
         "namespace": "inference",
     },
-    workers=3,
+    workers=1,
 )
 class Backend:
+    end = depends(End)
+
+    def __init__(self) -> None:
+        print("Starting backend")
+
+    @dynamo_endpoint()
+    async def generate(self, req: RequestType):
+        """Generate tokens."""
+        req_text = req.text
+        print(f"Backend received: {req_text}")
+        text = f"{req_text}-back"
+        for token in text.split():
+            yield f"Backend: {token}"
+
+@service(
+    resources={"cpu": "2"},
+    traffic={"timeout": 30},
+    dynamo={
+        "enabled": True,
+        "namespace": "inference",
+    },
+    workers=1,
+)
+class Backend2:
     def __init__(self) -> None:
         print("Starting backend")
 
@@ -86,6 +128,7 @@ class Backend:
 )
 class Middle:
     backend = depends(Backend)
+    backend2 = depends(Backend2)
 
     def __init__(self) -> None:
         print("Starting middle")
@@ -102,8 +145,27 @@ class Middle:
             print(f"Middle received response: {response}")
             yield f"Middle: {response}"
 
+@service(
+    resources={"cpu": "2"},
+    traffic={"timeout": 30},
+    dynamo={"enabled": True, "namespace": "inference"},
+)
+class Backend2:
+    backend = depends(Backend)
 
-@service(resources={"cpu": "1"}, traffic={"timeout": 60})  # Regular HTTP API
+    def __init__(self) -> None:
+        print("Starting middle2")
+
+    @dynamo_endpoint()
+    async def generate(self, req: RequestType):
+        """Forward requests to backend."""
+
+        req_text = req.text
+        print(f"Middle2 received: {req_text}")
+        text = f"{req_text}-mid2"
+        next_request = RequestType(text=text).model_dump_json()
+
+@service(resources={"cpu": "1"}, traffic={"timeout": 60})
 class Frontend:
     middle = depends(Middle)
 

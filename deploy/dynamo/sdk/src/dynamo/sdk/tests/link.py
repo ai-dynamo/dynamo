@@ -1,20 +1,20 @@
+# linking syntax example
+
 import sys
-from dynamo.sdk.tests.pipeline import Frontend, Middle, Backend
+from dynamo.sdk.tests.pipeline import Frontend, Middle, Backend, Backend2, End
 
-print("INITIAL DEPENDENCIES")
-print("Frontend dependencies", Frontend.dependencies)
-print("Middle dependencies", Middle.dependencies)
-print("Backend dependencies", Backend.dependencies)
+# print("INITIAL DEPENDENCIES")
+# print("Frontend dependencies", Frontend.dependencies)
+# print("Middle dependencies", Middle.dependencies)
+# print("Backend dependencies", Backend.dependencies)
 
-# print("--------------------------------")
+# print("\n\n\n")
 
-pipeline = Frontend.link(Middle).link(Backend)
-pipeline.apply()
+print(Middle.dependencies)
+print()
+Frontend.link(Middle).link(Backend).build()
 
-print("FINAL DEPENDENCIES")
-print("Frontend dependencies", Frontend.dependencies)
-print("Middle dependencies", Middle.dependencies)
-print("Backend dependencies", Backend.dependencies)
-
-
-# dynamo serve pipeline:Frontend --kv-mode="random"
+Middle.link(Backend2).build()
+print()
+print(Middle.dependencies)
+print(Backend.dependencies)
