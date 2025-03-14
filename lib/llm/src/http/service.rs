@@ -28,7 +28,7 @@
 //! TODO(): Add support for model-specific metadata and status. Status will allow us to return a 503 when the model is supposed
 //! to be ready, but there is a problem with the model.
 //!
-//! The [`service::HttpService`] can be further extended to host any [`axum::Router`] using the [`service::HttpServiceBuilder`].
+//! The [`service_v2::HttpService`] can be further extended to host any [`axum::Router`] using the [`service_v2::HttpServiceConfigBuilder`].
 
 mod openai;
 

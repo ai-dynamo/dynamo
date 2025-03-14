@@ -39,6 +39,7 @@ impl LinkDataError {
         Self { kind, interface }
     }
 
+    #[cfg(target_os = "linux")]
     fn communication(communication_error: rtnetlink::Error) -> Self {
         let kind = LinkDataErrorKind::Communication(communication_error);
         let interface = None;
@@ -61,6 +62,7 @@ impl std::error::Error for LinkDataError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self.kind {
             LinkDataErrorKind::Connection(ref e) => Some(e),
+            #[cfg(target_os = "linux")]
             LinkDataErrorKind::Communication(ref e) => Some(e),
         }
     }
@@ -69,6 +71,7 @@ impl std::error::Error for LinkDataError {
 #[derive(Debug)]
 pub enum LinkDataErrorKind {
     Connection(std::io::Error),
+    #[cfg(target_os = "linux")]
     Communication(rtnetlink::Error),
 }
 

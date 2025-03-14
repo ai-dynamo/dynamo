@@ -167,7 +167,7 @@ impl DeltaGenerator {
     }
 }
 
-/// Implements the [`DeltaGeneratorExt`] trait for [`DeltaGenerator`], allowing
+/// Implements the [`crate::protocols::openai::DeltaGeneratorExt`] trait for [`DeltaGenerator`], allowing
 /// it to transform backend responses into OpenAI-style streaming responses.
 impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamResponse>
     for DeltaGenerator
