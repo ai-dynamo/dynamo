@@ -34,7 +34,9 @@ use crate::kv_router::{
     scoring::ProcessedEndpoints,
 };
 
-// this should be discovered from the backend
+use dynamo_runtime::traits::events::{EventPublisher, EventSubscriber};
+
+// this should be discovered from the component
 pub const KV_EVENT_SUBJECT: &str = "kv_events";
 pub const KV_HIT_RATE_SUBJECT: &str = "kv-hit-rate";
 
@@ -54,21 +56,20 @@ pub struct KvRouter {
 impl KvRouter {
     pub async fn from_runtime(
         runtime: DistributedRuntime,
-        backend: Component,
+        component: Component,
         kv_block_size: usize,
     ) -> Result<Arc<Self>> {
         let nats_client = runtime.nats_client();
-        let service_name = backend.service_name();
-        let kv_subject = backend.event_subject(KV_EVENT_SUBJECT);
-        let namespace = runtime.namespace(backend.namespace())?;
+        let service_name = component.service_name();
+        let namespace = runtime.namespace(component.namespace().name())?;
 
-        tracing::info!("Component Namespace {}", backend.namespace());
+        tracing::info!("Component Namespace {}", component.namespace());
         tracing::info!("Component Service Name {}", service_name);
-        tracing::info!("KV Subject {}", kv_subject);
+        tracing::info!("KV Subject {}.{}", component.subject(), KV_EVENT_SUBJECT);
         Self::new(
             nats_client,
             service_name,
-            kv_subject,
+            component,
             namespace,
             kv_block_size,
         )
@@ -76,9 +77,11 @@ impl KvRouter {
     }
 
     pub async fn new(
+        // [gluo TODO] shouldn't need 'nats_client' and 'service_name',
+        // replace by 'component'
         nats_client: dynamo_runtime::transports::nats::Client,
         service_name: String,
-        kv_subject: String,
+        component: Component,
         namespace: Namespace,
         kv_block_size: usize,
     ) -> Result<Arc<Self>> {
@@ -95,8 +98,9 @@ impl KvRouter {
         let indexer = KvIndexer::new(cancellation_token.clone(), kv_block_size);
         let scheduler = KvScheduler::start(ep_rx, namespace, kv_block_size).await?;
 
-        tracing::debug!("subscribing to kv events: {}", kv_subject);
-        let mut kv_events_rx = nats_client.client().subscribe(kv_subject).await?;
+        // [gluo TODO] try subscribe_with_type::<RouterEvent>,
+        // error checking below will be different.
+        let mut kv_events_rx = component.subscribe(KV_EVENT_SUBJECT).await?;
         let kv_events_tx = indexer.event_sender();
 
         tokio::spawn(async move {

@@ -227,10 +227,6 @@ impl Component {
             Ok(())
         })
     }
-
-    fn event_subject(&self, name: String) -> String {
-        self.inner.event_subject(name)
-    }
 }
 
 #[pymethods]

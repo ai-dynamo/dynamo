@@ -15,6 +15,7 @@
 
 use crate::kv_router::{indexer::RouterEvent, protocols::*, KV_EVENT_SUBJECT};
 use async_trait::async_trait;
+use dynamo_runtime::traits::events::EventPublisher;
 use dynamo_runtime::{
     component::Component,
     pipeline::{
@@ -37,14 +38,14 @@ pub struct KvEventPublisher {
 impl KvEventPublisher {
     pub fn new(
         drt: DistributedRuntime,
-        backend: Component,
+        component: Component,
         worker_id: i64,
         kv_block_size: usize,
     ) -> Result<Self> {
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
         let p = KvEventPublisher { tx, kv_block_size };
 
-        start_publish_task(drt, backend, worker_id, rx);
+        start_publish_task(drt, component, worker_id, rx);
         Ok(p)
     }
 
@@ -60,20 +61,18 @@ impl KvEventPublisher {
 
 fn start_publish_task(
     drt: DistributedRuntime,
-    backend: Component,
+    component: Component,
     worker_id: i64,
     mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
 ) {
-    let client = drt.nats_client().client().clone();
-    let kv_subject = backend.event_subject(KV_EVENT_SUBJECT);
-    log::info!("Publishing KV Events to subject: {}", kv_subject);
+    let component_clone = component.clone();
+    log::info!("Publishing KV Events to subject: {}", KV_EVENT_SUBJECT);
 
     _ = drt.runtime().secondary().spawn(async move {
         while let Some(event) = rx.recv().await {
             let router_event = RouterEvent::new(worker_id, event);
-            let data = serde_json::to_string(&router_event).unwrap();
-            client
-                .publish(kv_subject.to_string(), data.into())
+            component_clone
+                .publish(KV_EVENT_SUBJECT, &router_event)
                 .await
                 .unwrap();
         }

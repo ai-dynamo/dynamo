@@ -17,6 +17,7 @@ use std::collections::HashMap;
 
 use super::*;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
+use rs::traits::events::{EventPublisher, EventSubscriber};
 use tracing;
 
 #[pyclass]
@@ -149,21 +150,17 @@ impl KvIndexer {
     fn new(component: Component, kv_block_size: usize) -> PyResult<Self> {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async {
-            let kv_subject = component
-                .inner
-                .event_subject(llm_rs::kv_router::KV_EVENT_SUBJECT);
             let inner: Arc<llm_rs::kv_router::indexer::KvIndexer> =
                 llm_rs::kv_router::indexer::KvIndexer::new(
                     component.inner.drt().runtime().child_token(),
                     kv_block_size,
                 )
                 .into();
+            // [gluo TODO] try subscribe_with_type::<RouterEvent>,
+            // error checking below will be different.
             let mut kv_events_rx = component
                 .inner
-                .drt()
-                .nats_client()
-                .client()
-                .subscribe(kv_subject)
+                .subscribe(llm_rs::kv_router::KV_EVENT_SUBJECT)
                 .await
                 .map_err(to_pyerr)?;
             let kv_events_tx = inner.event_sender();

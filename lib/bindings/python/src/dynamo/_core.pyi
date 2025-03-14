@@ -97,11 +97,6 @@ class Component:
         """
         ...
 
-    def event_subject(self, name: str) -> str:
-        """
-        Create an event subject
-        """
-        ...
 
 class Endpoint:
     """

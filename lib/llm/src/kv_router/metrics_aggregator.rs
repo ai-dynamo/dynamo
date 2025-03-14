@@ -22,6 +22,8 @@ use crate::kv_router::ProcessedEndpoints;
 use dynamo_runtime::component::Component;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+// [FIXME] shouldn't need to refer 'drt' directly
+use dynamo_runtime::traits::DistributedRuntimeProvider;
 
 pub struct KvMetricsAggregator {
     pub service_name: String,
