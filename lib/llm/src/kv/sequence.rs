@@ -12,25 +12,3 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-//! # Dynamo LLM
-//!
-//! The `dynamo.llm` crate is a Rust library that provides a set of traits and types for building
-//! distributed LLM inference solutions.
-
-pub mod backend;
-pub mod common;
-pub mod disagg_router;
-pub mod engines;
-pub mod http;
-pub mod kv_router;
-pub mod model_card;
-pub mod model_type;
-pub mod preprocessor;
-pub mod protocols;
-pub mod tokenizers;
-pub mod tokens;
-pub mod types;
-
-#[cfg(feature = "cuda_kv")]
-pub mod kv;

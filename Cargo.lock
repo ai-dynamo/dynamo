@@ -193,7 +193,7 @@ dependencies = [
  "once_cell",
  "pin-project",
  "portable-atomic",
- "rand",
+ "rand 0.8.5",
  "regex",
  "ring",
  "rustls-native-certs 0.7.3",
@@ -232,7 +232,7 @@ dependencies = [
  "derive_builder",
  "eventsource-stream",
  "futures",
- "rand",
+ "rand 0.8.5",
  "reqwest 0.12.14",
  "reqwest-eventsource",
  "secrecy",
@@ -496,7 +496,7 @@ dependencies = [
  "getrandom 0.2.15",
  "instant",
  "pin-project-lite",
- "rand",
+ "rand 0.8.5",
  "tokio",
 ]
 
@@ -535,9 +535,9 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "base64ct"
-version = "1.7.1"
+version = "1.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb97d56060ee67d285efb8001fec9d2a4c710c32efd2e14b5cbb5ba71930fc2d"
+checksum = "89e25b6adfb930f02d1981565a6e5d9c547ac15a96606256d3b59040e5cd4ca3"
 
 [[package]]
 name = "bindgen"
@@ -747,12 +747,12 @@ dependencies = [
 [[package]]
 name = "candle-core"
 version = "0.8.0"
-source = "git+https://github.com/EricLBuehler/candle.git?rev=76819e8#76819e867e6c8464485980677cf188d10e47213f"
+source = "git+https://github.com/EricLBuehler/candle.git?rev=fb5cc8c#fb5cc8c0175bc2999ed9fb75b13886aade453dbe"
 dependencies = [
  "byteorder",
  "candle-kernels",
  "candle-metal-kernels",
- "cudarc",
+ "cudarc 0.13.9 (registry+https://github.com/rust-lang/crates.io-index)",
  "float8",
  "gemm",
  "half",
@@ -760,7 +760,7 @@ dependencies = [
  "metal",
  "num-traits",
  "num_cpus",
- "rand",
+ "rand 0.8.5",
  "rand_distr",
  "rayon",
  "safetensors",
@@ -781,7 +781,7 @@ dependencies = [
  "indicatif",
  "log",
  "num_cpus",
- "rand",
+ "rand 0.8.5",
  "reqwest 0.12.14",
  "rustls 0.23.23",
  "serde",
@@ -794,7 +794,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.8.0"
-source = "git+https://github.com/EricLBuehler/candle.git?rev=76819e8#76819e867e6c8464485980677cf188d10e47213f"
+source = "git+https://github.com/EricLBuehler/candle.git?rev=fb5cc8c#fb5cc8c0175bc2999ed9fb75b13886aade453dbe"
 dependencies = [
  "bindgen_cuda 0.1.5",
 ]
@@ -802,7 +802,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.8.0"
-source = "git+https://github.com/EricLBuehler/candle.git?rev=76819e8#76819e867e6c8464485980677cf188d10e47213f"
+source = "git+https://github.com/EricLBuehler/candle.git?rev=fb5cc8c#fb5cc8c0175bc2999ed9fb75b13886aade453dbe"
 dependencies = [
  "metal",
  "once_cell",
@@ -813,7 +813,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.8.0"
-source = "git+https://github.com/EricLBuehler/candle.git?rev=76819e8#76819e867e6c8464485980677cf188d10e47213f"
+source = "git+https://github.com/EricLBuehler/candle.git?rev=fb5cc8c#fb5cc8c0175bc2999ed9fb75b13886aade453dbe"
 dependencies = [
  "candle-core",
  "candle-metal-kernels",
@@ -1213,6 +1213,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cudarc"
+version = "0.13.9"
+source = "git+https://github.com/coreylowman/cudarc.git?rev=8c52e735b55bf8e979e1a16bd85e3dfe4f87c9fe#8c52e735b55bf8e979e1a16bd85e3dfe4f87c9fe"
+dependencies = [
+ "libloading",
+]
+
+[[package]]
 name = "curve25519-dalek"
 version = "4.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1495,12 +1503,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "doctest-file"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aac81fa3e28d21450aa4d2ac065992ba96a1d7303efbce51a95f4fd175b67562"
-
-[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1535,9 +1537,12 @@ dependencies = [
  "bindgen 0.70.1",
  "blake3",
  "bs62",
+ "bytemuck",
  "bytes",
  "chrono",
  "cmake",
+ "cudarc 0.13.9 (git+https://github.com/coreylowman/cudarc.git?rev=8c52e735b55bf8e979e1a16bd85e3dfe4f87c9fe)",
+ "derive-getters",
  "derive_builder",
  "dynamo-runtime",
  "either",
@@ -1553,11 +1558,14 @@ dependencies = [
  "minijinja",
  "minijinja-contrib",
  "mistralrs",
+ "ndarray",
  "prometheus",
  "proptest",
  "pyo3",
  "pyo3-async-runtimes",
  "pythonize",
+ "rand 0.9.0",
+ "rayon",
  "regex",
  "reqwest 0.12.14",
  "rstest 0.18.2",
@@ -1639,7 +1647,7 @@ dependencies = [
  "nuid",
  "once_cell",
  "prometheus",
- "rand",
+ "rand 0.8.5",
  "regex",
  "rstest 0.23.0",
  "serde",
@@ -1963,10 +1971,10 @@ version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a14d1c3d88fdab81b5886c34b2a424b3fba5123564ea415ff98b160cf44c432f"
 dependencies = [
- "cudarc",
+ "cudarc 0.13.9 (registry+https://github.com/rust-lang/crates.io-index)",
  "half",
  "num-traits",
- "rand",
+ "rand 0.8.5",
  "rand_distr",
 ]
 
@@ -2401,7 +2409,7 @@ dependencies = [
  "cfg-if 1.0.0",
  "crunchy",
  "num-traits",
- "rand",
+ "rand 0.8.5",
  "rand_distr",
 ]
 
@@ -2440,13 +2448,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
-name = "hello_world"
-version = "0.1.0"
-dependencies = [
- "dynamo-runtime",
-]
-
-[[package]]
 name = "hermit-abi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2466,7 +2467,7 @@ dependencies = [
  "log",
  "native-tls",
  "num_cpus",
- "rand",
+ "rand 0.8.5",
  "reqwest 0.12.14",
  "serde",
  "serde_json",
@@ -2984,19 +2985,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "interprocess"
-version = "2.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d941b405bd2322993887859a8ee6ac9134945a24ec5ec763a8a962fc64dfec2d"
-dependencies = [
- "doctest-file",
- "libc",
- "recvmsg",
- "widestring",
- "windows-sys 0.52.0",
-]
-
-[[package]]
 name = "inventory"
 version = "0.3.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3395,6 +3383,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
+name = "matrixmultiply"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9380b911e3e96d10c1f415da0876389aaf1b56759054eeb0de7df940c456ba1a"
+dependencies = [
+ "autocfg",
+ "rawpointer",
+]
+
+[[package]]
 name = "memchr"
 version = "2.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3453,7 +3451,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-prometheus",
  "prometheus",
- "rand",
+ "rand 0.8.5",
  "reqwest 0.11.27",
  "serde",
  "serde_json",
@@ -3573,7 +3571,7 @@ dependencies = [
 [[package]]
 name = "mistralrs"
 version = "0.4.0"
-source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=a691154bb#a691154bbe924d8a4717c156ae14a751b6a95980"
+source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=5e689c9#5e689c97653cdb1a631ca6fcd53ff447095bd8e5"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -3584,7 +3582,7 @@ dependencies = [
  "image",
  "indexmap 2.8.0",
  "mistralrs-core",
- "rand",
+ "rand 0.8.5",
  "reqwest 0.12.14",
  "serde",
  "serde_json",
@@ -3594,7 +3592,7 @@ dependencies = [
 [[package]]
 name = "mistralrs-core"
 version = "0.4.0"
-source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=a691154bb#a691154bbe924d8a4717c156ae14a751b6a95980"
+source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=5e689c9#5e689c97653cdb1a631ca6fcd53ff447095bd8e5"
 dependencies = [
  "akin",
  "anyhow",
@@ -3622,7 +3620,6 @@ dependencies = [
  "image",
  "indexmap 2.8.0",
  "indicatif",
- "interprocess",
  "itertools 0.13.0",
  "llguidance",
  "lrtable",
@@ -3635,7 +3632,7 @@ dependencies = [
  "objc",
  "once_cell",
  "radix_trie",
- "rand",
+ "rand 0.8.5",
  "rand_isaac",
  "rayon",
  "regex",
@@ -3645,7 +3642,6 @@ dependencies = [
  "safetensors",
  "schemars",
  "serde",
- "serde-big-array",
  "serde_json",
  "serde_plain",
  "serde_yaml",
@@ -3668,7 +3664,7 @@ dependencies = [
 [[package]]
 name = "mistralrs-paged-attn"
 version = "0.4.0"
-source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=a691154bb#a691154bbe924d8a4717c156ae14a751b6a95980"
+source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=5e689c9#5e689c97653cdb1a631ca6fcd53ff447095bd8e5"
 dependencies = [
  "anyhow",
  "bindgen_cuda 0.1.6",
@@ -3683,7 +3679,7 @@ dependencies = [
 [[package]]
 name = "mistralrs-quant"
 version = "0.4.0"
-source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=a691154bb#a691154bbe924d8a4717c156ae14a751b6a95980"
+source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=5e689c9#5e689c97653cdb1a631ca6fcd53ff447095bd8e5"
 dependencies = [
  "bindgen_cuda 0.1.5",
  "byteorder",
@@ -3709,7 +3705,7 @@ dependencies = [
 [[package]]
 name = "mistralrs-vision"
 version = "0.4.0"
-source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=a691154bb#a691154bbe924d8a4717c156ae14a751b6a95980"
+source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=5e689c9#5e689c97653cdb1a631ca6fcd53ff447095bd8e5"
 dependencies = [
  "candle-core",
  "image",
@@ -3757,6 +3753,21 @@ dependencies = [
  "security-framework 2.11.1",
  "security-framework-sys",
  "tempfile",
+]
+
+[[package]]
+name = "ndarray"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "882ed72dce9365842bf196bdeedf5055305f11fc8c03dee7bb0194a6cad34841"
+dependencies = [
+ "matrixmultiply",
+ "num-complex",
+ "num-integer",
+ "num-traits",
+ "portable-atomic",
+ "portable-atomic-util",
+ "rawpointer",
 ]
 
 [[package]]
@@ -3874,7 +3885,7 @@ version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4abdf1789932b85dc39446e27f45a1064a30f9e19a2b872b1d09bd59283f85f3"
 dependencies = [
- "rand",
+ "rand 0.8.5",
  "serde",
  "thiserror 1.0.69",
 ]
@@ -3913,7 +3924,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.15",
  "log",
- "rand",
+ "rand 0.8.5",
  "signatory",
 ]
 
@@ -3952,7 +3963,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc895af95856f929163a0aa20c26a78d26bfdc839f51b9d5aa7a5b79e52b7e83"
 dependencies = [
- "rand",
+ "rand 0.8.5",
 ]
 
 [[package]]
@@ -4087,9 +4098,9 @@ dependencies = [
 
 [[package]]
 name = "once_cell"
-version = "1.21.0"
+version = "1.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cde51589ab56b20a6f686b2c68f7a0bd6add753d697abf720d63f8db3ab7b1ad"
+checksum = "d75b0bedcc4fe52caa0e03d9f1151a323e4aa5e2d78ba3580400cd3c9e2bc4bc"
 
 [[package]]
 name = "onig"
@@ -4211,7 +4222,7 @@ dependencies = [
  "opentelemetry_api",
  "ordered-float",
  "percent-encoding",
- "rand",
+ "rand 0.8.5",
  "regex",
  "thiserror 1.0.69",
 ]
@@ -4479,9 +4490,9 @@ dependencies = [
 
 [[package]]
 name = "prettyplease"
-version = "0.2.30"
+version = "0.2.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1ccf34da56fc294e7d4ccf69a85992b7dfb826b7cf57bac6a70bba3494cc08a"
+checksum = "5316f57387668042f561aae71480de936257848f9c43ce528e311d89a07cadeb"
 dependencies = [
  "proc-macro2",
  "syn 2.0.100",
@@ -4566,8 +4577,8 @@ dependencies = [
  "bitflags 2.9.0",
  "lazy_static",
  "num-traits",
- "rand",
- "rand_chacha",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
  "rand_xorshift",
  "regex-syntax 0.8.5",
  "rusty-fork",
@@ -4816,7 +4827,7 @@ checksum = "a2fe5ef3495d7d2e377ff17b1a8ce2ee2ec2a18cde8b6ad6619d65d0701c135d"
 dependencies = [
  "bytes",
  "getrandom 0.2.15",
- "rand",
+ "rand 0.8.5",
  "ring",
  "rustc-hash 2.1.1",
  "rustls 0.23.23",
@@ -4868,8 +4879,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34af8d1a0e25924bc5b7c43c079c942339d8f0a8b57c39049bef581b46327404"
 dependencies = [
  "libc",
- "rand_chacha",
- "rand_core",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3779b94aeb87e8bd4e834cee3650289ee9e0d5677f976ecdb6d219e5f4f6cd94"
+dependencies = [
+ "rand_chacha 0.9.0",
+ "rand_core 0.9.3",
+ "zerocopy 0.8.23",
 ]
 
 [[package]]
@@ -4879,7 +4901,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
 dependencies = [
  "ppv-lite86",
- "rand_core",
+ "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand_chacha"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
+dependencies = [
+ "ppv-lite86",
+ "rand_core 0.9.3",
 ]
 
 [[package]]
@@ -4892,13 +4924,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand_core"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99d9a13982dcf210057a8a78572b2217b667c3beacbf3a0d8b454f6f82837d38"
+dependencies = [
+ "getrandom 0.3.1",
+]
+
+[[package]]
 name = "rand_distr"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32cb0b9bc82b0a0876c2dd994a7e7a2683d3e7390ca40e6886785ef0c7e3ee31"
 dependencies = [
  "num-traits",
- "rand",
+ "rand 0.8.5",
 ]
 
 [[package]]
@@ -4907,7 +4948,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fac4373cd91b4f55722c553fb0f286edbb81ef3ff6eec7b99d1898a4110a0b28"
 dependencies = [
- "rand_core",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -4916,7 +4957,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d25bf25ec5ae4a3f1b92f929810509a2f53d7dca2f50b794ff57e3face536c8f"
 dependencies = [
- "rand_core",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -4927,6 +4968,12 @@ checksum = "6c297679cb867470fa8c9f67dbba74a78d78e3e98d7cf2b08d6d71540f797332"
 dependencies = [
  "bitflags 1.3.2",
 ]
+
+[[package]]
+name = "rawpointer"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3"
 
 [[package]]
 name = "rayon"
@@ -4964,12 +5011,6 @@ name = "reborrow"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
-
-[[package]]
-name = "recvmsg"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3edd4d5d42c92f0a659926464d4cce56b562761267ecf0f469d85b7de384175"
 
 [[package]]
 name = "redox_syscall"
@@ -5268,7 +5309,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b3a8fb4672e840a587a66fc577a5491375df51ddb88f2a2c2a792598c326fe14"
 dependencies = [
  "quote",
- "rand",
+ "rand 0.8.5",
  "syn 2.0.100",
 ]
 
@@ -5640,15 +5681,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde-big-array"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11fc7cc2c76d73e0f27ee52abbd64eec84d46f370c88371120433196934e4b7f"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "serde-pickle"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5770,17 +5802,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "service_metrics"
-version = "0.1.0"
-dependencies = [
- "dynamo-runtime",
- "futures",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "sha2"
 version = "0.10.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5849,7 +5870,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1e303f8205714074f6068773f0e29527e0453937fe837c9717d066635b65f31"
 dependencies = [
  "pkcs8",
- "rand_core",
+ "rand_core 0.6.4",
  "signature",
  "zeroize",
 ]
@@ -5861,7 +5882,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
  "digest",
- "rand_core",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -6346,7 +6367,7 @@ dependencies = [
  "monostate",
  "onig",
  "paste",
- "rand",
+ "rand 0.8.5",
  "rayon",
  "rayon-cond",
  "regex",
@@ -6465,7 +6486,7 @@ dependencies = [
  "futures-sink",
  "http 1.3.1",
  "httparse",
- "rand",
+ "rand 0.8.5",
  "ring",
  "rustls-native-certs 0.8.1",
  "rustls-pki-types",
@@ -6617,7 +6638,7 @@ dependencies = [
  "indexmap 1.9.3",
  "pin-project",
  "pin-project-lite",
- "rand",
+ "rand 0.8.5",
  "slab",
  "tokio",
  "tokio-util",
@@ -7186,12 +7207,6 @@ dependencies = [
  "once_cell",
  "rustix 0.38.44",
 ]
-
-[[package]]
-name = "widestring"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7219d36b6eac893fa81e84ebe06485e7dcbb616177469b142df14f1f4deb1311"
 
 [[package]]
 name = "winapi"
