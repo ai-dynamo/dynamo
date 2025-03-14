@@ -25,25 +25,13 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.workflow_run.conclusion != 'skipped'
 
-    permissions:
-      checks: write
-
-      # required by download step to access artifacts API
-      actions: read
-      # needed unless run with comment_mode: off
-      pull-requests: write
-
-      # only needed for private repository
-      contents: read
-      issues: read
-
     steps:
       - name: Download and Extract Artifacts
         uses: dawidd6/action-download-artifact@20319c5641d495c8a52e688b7dc5fada6c3a9fbc # v8
         with:
            run_id: ${{ github.event.workflow_run.id }}
            path: artifacts
-      
+
       - name: Process Test Results
         id: test-results
         run: |
@@ -76,7 +64,7 @@ jobs:
           event_file: artifacts/Event File/event.json
           event_name: ${{ github.event.workflow_run.event }}
           files: "artifacts/**/*.xml"
-      
+
       - name: Summarize Test Results as Markdown Table
         run: |
           echo "## Unit Test Results Summary" >> $GITHUB_STEP_SUMMARY
