@@ -244,7 +244,7 @@ def create_dynamo_deployment(
         scaling_min=scaling_min,
         instance_type=instance_type,
         strategy=strategy,
-        envs=convert_env_to_dict(env),
+        envs=convert_env_to_dict(tuple(env) if env else None),
         secrets=list(secret) if secret is not None else None,
         config_file=config_file,
         config_dict=cfg_dict,
@@ -254,8 +254,9 @@ def create_dynamo_deployment(
 
     try:
         config_params.verify()
-    except BentoMLException as e:
-        raise_deployment_config_error(e, "create")
+    except BentoMLException as exc:
+        error_message = str(exc)
+        raise_deployment_config_error(error_message, "create")
 
     # Fix the deployment name generation
     deployment_name = name
