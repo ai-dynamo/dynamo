@@ -783,6 +783,7 @@ async def convert_dynamo_nim_version_model_to_schema(
                 else None
             )
             build_at = make_aware(entity.build_at)
+            deleted_at = make_aware(entity.deleted_at) if entity.deleted_at else None
 
             dynamo_nim_version_schema = DynamoNimVersionSchema(
                 description=entity.description,
@@ -793,10 +794,11 @@ async def convert_dynamo_nim_version_model_to_schema(
                 uid=entity.id,
                 name=dynamo_nim.name,
                 created_at=created_at,
+                updated_at=updated_at,
+                deleted_at=deleted_at,
                 resource_type=ResourceType.DynamoNimVersion,
                 labels=[],
                 manifest=entity.manifest,
-                updated_at=updated_at,
                 bento_repository_uid=dynamo_nim.id,
                 upload_started_at=upload_started_at,
                 upload_finished_at=upload_finished_at,
