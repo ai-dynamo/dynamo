@@ -39,7 +39,7 @@ impl LinkDataError {
         Self { kind, interface }
     }
 
-    fn communication(communication_error: rtnetlink::Error) -> Self {
+    fn communication(communication_error: String) -> Self {
         let kind = LinkDataErrorKind::Communication(communication_error);
         let interface = None;
         Self { kind, interface }
@@ -69,7 +69,7 @@ impl std::error::Error for LinkDataError {
 #[derive(Debug)]
 pub enum LinkDataErrorKind {
     Connection(std::io::Error),
-    Communication(rtnetlink::Error),
+    Communication(String),
 }
 
 #[cfg(target_os = "linux")]
@@ -183,7 +183,7 @@ mod unix {
             })
             .try_collect()
             .await
-            .map_err(super::LinkDataError::communication)?;
+            .map_err(|err| super::LinkDataError::communication(err.to_string()))?;
 
         let link_handle = rtnetlink_handle.link().get().execute();
         link_handle
