@@ -169,7 +169,6 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 # rebuilds from unrelated source code changes
 ARG VLLM_REF="v0.7.2"
 ARG VLLM_PATCH="vllm_${VLLM_REF}-dynamo-kv-disagg-patch.patch"
-
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     git clone https://github.com/vllm-project/vllm.git vllm && \
     cd vllm && \
