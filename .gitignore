@@ -78,3 +78,8 @@ __pycache__/
 *.so
 
 **/.devcontainer
+
+### Helm ###
+*.tgz
+Chart.lock
+generated-values.yaml

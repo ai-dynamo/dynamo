@@ -38,7 +38,7 @@ use tracing;
 pub struct ModelEntry {
     /// Public name of the model
     /// This will be used to identify the model in the HTTP service and the value used in an
-    /// an [OAI ChatRequest][crate::protocols::openai::chat_completions::ChatCompletionRequest].
+    /// an [OAI ChatRequest][crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest].
     pub name: String,
 
     /// Component of the endpoint.

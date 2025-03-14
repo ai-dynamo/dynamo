@@ -29,7 +29,7 @@ pub struct ForwardPassMetrics {
     pub gpu_prefix_cache_hit_rate: f32,
 }
 
-/// A [`BlockHash`] is a hash computed from the tokens_ids, extra_token_ids and the optional
+/// A [`LocalBlockHash`] is a hash computed from the tokens_ids, extra_token_ids and the optional
 /// lora_id of a block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct LocalBlockHash(pub u64);

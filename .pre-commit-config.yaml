@@ -56,7 +56,7 @@ repos:
     exclude: .devcontainer
   - id: check-toml
   - id: check-yaml
-    exclude: ^deploy/Kubernetes/.+/templates/.+\.yaml
+    exclude: ^.*/templates/.*\.yaml$ #ignore all yaml files in helm chart templates
   - id: check-shebang-scripts-are-executable
   - id: end-of-file-fixer
     types_or: [c, c++, cuda, proto, textproto, java, python]
