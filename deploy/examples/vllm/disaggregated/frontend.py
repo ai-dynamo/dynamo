@@ -34,6 +34,8 @@ class FrontendConfig(BaseModel):
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
 )
+
+# todo this should be called ApiServer
 class Frontend:
     worker = depends(VllmWorker)
     processor = depends(Processor)
