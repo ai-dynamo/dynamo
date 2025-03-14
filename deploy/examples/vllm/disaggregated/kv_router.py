@@ -20,11 +20,12 @@ import random
 from argparse import Namespace
 from typing import AsyncIterator
 
+from disaggregated.worker import VllmWorker
 from utils.protocol import Tokens
 from vllm.logger import logger as vllm_logger
 
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
-from dynamo.sdk import async_onstart, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_onstart, depends, dynamo_context, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
 WorkerId = str
@@ -76,10 +77,11 @@ class Router:
     Request handler for the generate endpoint
     """
 
+    worker = depends(VllmWorker)
+
     def __init__(self):
         vllm_logger.info("Initializing Custom Router")
         self.args = parse_args(self.__class__.__name__, "")
-        print("[ROUTER] args = ", self.args)
 
     @async_onstart
     async def async_init(self):
@@ -127,20 +129,20 @@ class Router:
             print("[ROUTER] metrics.endpoint ", metrics.endpoints)
             for endpoint in metrics.endpoints:
                 worker_id = endpoint.worker_id
-            worker_metrics[worker_id] = {
-                "gpu_cache_usage_perc": endpoint.gpu_cache_usage_perc
-                if hasattr(endpoint, "gpu_cache_usage_perc")
-                else 0.0,
-                "num_requests_waiting": endpoint.num_requests_waiting
-                if hasattr(endpoint, "num_requests_waiting")
-                else 0.0,
-                "gpu_prefix_cache_hit_rate": endpoint.gpu_prefix_cache_hit_rate
-                if hasattr(endpoint, "gpu_prefix_cache_hit_rate")
-                else 0.0,
-            }
-            max_waiting = max(
-                max_waiting, worker_metrics[worker_id]["num_requests_waiting"]
-            )
+                worker_metrics[worker_id] = {
+                    "gpu_cache_usage_perc": endpoint.gpu_cache_usage_perc
+                    if hasattr(endpoint, "gpu_cache_usage_perc")
+                    else 0.0,
+                    "num_requests_waiting": endpoint.num_requests_waiting
+                    if hasattr(endpoint, "num_requests_waiting")
+                    else 0.0,
+                    "gpu_prefix_cache_hit_rate": endpoint.gpu_prefix_cache_hit_rate
+                    if hasattr(endpoint, "gpu_prefix_cache_hit_rate")
+                    else 0.0,
+                }
+                max_waiting = max(
+                    max_waiting, worker_metrics[worker_id]["num_requests_waiting"]
+                )
 
         # Get all worker IDs from the client. This is needed because scores / metrics may not have values for all workers
         # and we want all workers to be considered in the logit calculation

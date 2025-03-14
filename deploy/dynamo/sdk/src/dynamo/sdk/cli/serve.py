@@ -24,6 +24,7 @@ import typing as t
 
 import click
 import rich
+import yaml
 
 if t.TYPE_CHECKING:
     P = t.ParamSpec("P")  # type: ignore
@@ -126,6 +127,12 @@ def build_serve_command() -> click.Group:
         cls=AliasCommand,
     )
     @click.argument("bento", type=click.STRING, default=".")
+    @click.option(
+        "-f",
+        "--file",
+        type=click.Path(exists=True),
+        help="Path to YAML config file for service configuration",
+    )
     @click.option(
         "--development",
         type=click.BOOL,
@@ -266,6 +273,7 @@ def build_serve_command() -> click.Group:
         development: bool,
         port: int,
         host: str,
+        file: str | None,
         api_workers: int,
         timeout: int | None,
         backlog: int,
@@ -321,8 +329,25 @@ def build_serve_command() -> click.Group:
         from bentoml import Service
         from bentoml._internal.service.loader import load
 
+        from dynamo.sdk.lib.service import LinkedServices
+
         # Process service-specific options
-        service_configs = _parse_service_args(ctx.args)
+        service_configs: t.Optional[t.Dict[str, t.Any]] = _parse_service_args(ctx.args)
+
+        # Load and merge config file if provided
+        if file:
+            with open(file) as f:
+                yaml_configs = yaml.safe_load(f)
+                # Initialize service_configs as empty dict if it's None
+                service_configs = dict(service_configs or {})
+                # Convert nested YAML structure to flat dict with dot notation
+                for service, configs in yaml_configs.items():
+                    for key, value in configs.items():
+                        if service not in service_configs:
+                            service_configs[service] = {}
+                        service_configs[service][key] = value
+
+        # print("service_configs", service_configs)
 
         # Set environment variable with service configuration
         if service_configs:
@@ -337,6 +362,8 @@ def build_serve_command() -> click.Group:
         if sys.path[0] != working_dir:
             sys.path.insert(0, working_dir)
         svc = load(bento_identifier=bento, working_dir=working_dir)
+
+        LinkedServices.remove_unused_edges()
         if isinstance(svc, Service):
             # bentoml<1.2
             from bentoml.serving import serve_http_production

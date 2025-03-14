@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::env;
 use std::ops::Deref;
 use std::path::Path;
 use std::process::Stdio;
@@ -169,6 +170,9 @@ pub async fn start(
     tensor_parallel_size: u32,
 ) -> anyhow::Result<VllmWorker> {
     pyo3::prepare_freethreaded_python(); // or enable feature "auto-initialize"
+    if let Ok(venv) = env::var("VIRTUAL_ENV") {
+        Python::with_gil(|py| crate::engines::fix_venv(venv, py));
+    }
 
     let py_imports = Arc::new(python_imports());
     let Sockets {
@@ -339,7 +343,7 @@ async fn start_vllm(
             let mut log_level = line_parts.next().unwrap_or_default();
             // Skip date (0) and time (1). Print last (2) which is everything else.
             let line = line_parts.nth(2).unwrap_or_default();
-            if line.starts_with("custom_op.py:68") || line.trim().len() == 0 {
+            if line.starts_with("custom_op.py:68") || line.trim().is_empty() {
                 // Skip a noisy line
                 // custom_op.py:68] custom op <the op> enabled
                 continue;
@@ -359,7 +363,7 @@ async fn start_vllm(
     tokio::spawn(async move {
         let mut lines = stderr.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            if line.trim().len() == 0 {
+            if line.trim().is_empty() {
                 continue;
             }
             tracing::warn!("VLLM: {line}");

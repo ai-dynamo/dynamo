@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use std::ffi::CStr;
-use std::{path::Path, sync::Arc};
+use std::{env, path::Path, sync::Arc};
 
 use anyhow::Context;
 use dynamo_runtime::pipeline::error as pipeline_error;
@@ -76,6 +76,9 @@ pub async fn make_string_engine(
     py_args: Vec<String>,
 ) -> pipeline_error::Result<OpenAIChatCompletionsStreamingEngine> {
     pyo3::prepare_freethreaded_python();
+    if let Ok(venv) = env::var("VIRTUAL_ENV") {
+        Python::with_gil(|py| super::fix_venv(venv, py));
+    }
 
     let engine = new_engine(cancel_token, py_file, py_args).await?;
     let engine: OpenAIChatCompletionsStreamingEngine = Arc::new(engine);
@@ -89,6 +92,9 @@ pub async fn make_token_engine(
     py_args: Vec<String>,
 ) -> pipeline_error::Result<ExecutionContext> {
     pyo3::prepare_freethreaded_python();
+    if let Ok(venv) = env::var("VIRTUAL_ENV") {
+        Python::with_gil(|py| super::fix_venv(venv, py));
+    }
 
     let engine = new_engine(cancel_token, py_file, py_args).await?;
     let engine: ExecutionContext = Arc::new(engine);

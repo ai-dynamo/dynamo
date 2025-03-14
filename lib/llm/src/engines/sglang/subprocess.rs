@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use pyo3::{types::IntoPyDict, Python};
-use std::{os::fd::RawFd, path::Path};
+use std::{env, os::fd::RawFd, path::Path};
 
 use crate::engines::MultiNodeConfig;
 
@@ -93,6 +93,9 @@ pub fn run_subprocess(
     gpu_config: super::MultiGPUConfig,
 ) -> anyhow::Result<()> {
     pyo3::prepare_freethreaded_python(); // or enable feature "auto-initialize"
+    if let Ok(venv) = env::var("VIRTUAL_ENV") {
+        Python::with_gil(|py| crate::engines::fix_venv(venv, py));
+    }
     let dir = model_path.display().to_string();
     Python::with_gil(|py| {
         let locals = [
