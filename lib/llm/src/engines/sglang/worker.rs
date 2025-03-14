@@ -447,7 +447,8 @@ async fn start_sglang(
     // This pipe is how sglang tells us it's ready
     let mut pipe_fds: [libc::c_int; 2] = [-1, -1];
     unsafe {
-        let err = libc::pipe2(pipe_fds.as_mut_ptr() as *mut c_int, 0); // libc::O_NONBLOCK);
+        // Seems to be OK without libc::O_NONBLOCK
+        let err = libc::pipe(pipe_fds.as_mut_ptr() as *mut c_int);
         if err != 0 {
             anyhow::bail!("libc::pipe error {err}");
         }
