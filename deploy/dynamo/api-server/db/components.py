@@ -30,10 +30,12 @@ from sqlmodel import SQLModel
 
 class TimeCreatedUpdated(SQLModel):
     created_at: datetime = SQLField(
-        default_factory=lambda: datetime.now(timezone.utc), nullable=False
+        default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
+        nullable=False,
     )
     updated_at: datetime = SQLField(
-        default_factory=lambda: datetime.now(timezone.utc), nullable=False
+        default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
+        nullable=False,
     )
 
 

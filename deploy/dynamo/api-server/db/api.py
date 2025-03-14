@@ -39,7 +39,7 @@ from db.components import (
 )
 from db.storage import get_session, s3_storage
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, responses
-from model import DynamoNim, DynamoNimVersion
+from model import DynamoNim, DynamoNimVersion, make_aware
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlmodel import col, desc, func, select
@@ -723,16 +723,17 @@ async def convert_dynamo_nim_model_to_schema(
                 )
             )
 
+            # Add timezone info for API responses
+            created_at = make_aware(entity.created_at)
+            updated_at = make_aware(entity.updated_at)
+            deleted_at = make_aware(entity.deleted_at) if entity.deleted_at else None
+
             dynamo_nim_schemas.append(
                 DynamoNimSchema(
                     uid=entity.id,
-                    created_at=entity.created_at.replace(tzinfo=timezone.utc),
-                    updated_at=entity.updated_at.replace(tzinfo=timezone.utc),
-                    deleted_at=(
-                        None
-                        if not entity.deleted_at
-                        else entity.deleted_at.replace(tzinfo=timezone.utc)
-                    ),
+                    created_at=created_at,
+                    updated_at=updated_at,
+                    deleted_at=deleted_at,
                     name=entity.name,
                     resource_type=ResourceType.DynamoNim,
                     labels=[],
@@ -768,6 +769,21 @@ async def convert_dynamo_nim_version_model_to_schema(
             dynamo_nim = results.first()
 
         if dynamo_nim:
+            # Add timezone info for API responses
+            created_at = make_aware(entity.created_at)
+            updated_at = make_aware(entity.updated_at)
+            upload_started_at = (
+                make_aware(entity.upload_started_at)
+                if entity.upload_started_at
+                else None
+            )
+            upload_finished_at = (
+                make_aware(entity.upload_finished_at)
+                if entity.upload_finished_at
+                else None
+            )
+            build_at = make_aware(entity.build_at)
+
             dynamo_nim_version_schema = DynamoNimVersionSchema(
                 description=entity.description,
                 version=entity.version,
@@ -776,24 +792,16 @@ async def convert_dynamo_nim_version_model_to_schema(
                 upload_finished_reason=entity.upload_finished_reason,
                 uid=entity.id,
                 name=dynamo_nim.name,
-                created_at=entity.created_at.replace(tzinfo=timezone.utc),
+                created_at=created_at,
                 resource_type=ResourceType.DynamoNimVersion,
                 labels=[],
                 manifest=entity.manifest,
-                updated_at=entity.updated_at.replace(tzinfo=timezone.utc),
+                updated_at=updated_at,
                 bento_repository_uid=dynamo_nim.id,
-                upload_started_at=(
-                    entity.upload_started_at.replace(tzinfo=timezone.utc)
-                    if entity.upload_started_at
-                    else None
-                ),
-                upload_finished_at=(
-                    entity.upload_finished_at.replace(tzinfo=timezone.utc)
-                    if entity.upload_finished_at
-                    else None
-                ),
+                upload_started_at=upload_started_at,
+                upload_finished_at=upload_finished_at,
                 transmission_strategy=TransmissionStrategy.Proxy,
-                build_at=entity.build_at.replace(tzinfo=timezone.utc),
+                build_at=build_at,
             )
 
             dynamo_nim_version_schemas.append(dynamo_nim_version_schema)
