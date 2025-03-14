@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import subprocess
 
 from disaggregated.processor import Processor
@@ -44,7 +43,6 @@ class Frontend:
         config = ServiceConfig.get_instance()
         frontend_config = FrontendConfig(**config.get("Frontend", {}))
 
-        os.environ["TRT_LOG"] = "DEBUG"
         subprocess.run(
             ["llmctl", "http", "remove", "chat-models", frontend_config.model]
         )
