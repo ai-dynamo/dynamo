@@ -29,7 +29,7 @@ pub trait ReturnHandle<T: Returnable>: Send + Sync + 'static {
     fn return_to_pool(&self, value: PoolValue<T>);
 }
 
-/// Enum to hold either a Box<T> or T directly
+/// Enum to hold either a `Box<T>` or `T` directly
 pub enum PoolValue<T: Returnable> {
     Boxed(Box<T>),
     Direct(T),

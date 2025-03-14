@@ -164,7 +164,9 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
         }
         None => {
             let default_engine = Output::default(); // smart default based on feature flags
-            tracing::debug!("Using engine: {default_engine}");
+            tracing::info!(
+                "Using default engine: {default_engine}. Use out=<engine> to specify an engine."
+            );
             default_engine
         }
     };

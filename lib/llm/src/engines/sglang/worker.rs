@@ -15,7 +15,7 @@
 
 use std::{
     collections::HashMap,
-    fmt,
+    env, fmt,
     os::fd::{FromRawFd as _, RawFd},
     path::Path,
     process::Stdio,
@@ -293,7 +293,10 @@ pub async fn start(
     tp_size: u32,
     base_gpu_id: u32,
 ) -> anyhow::Result<SgLangWorker> {
-    pyo3::prepare_freethreaded_python(); // or enable feature "auto-initialize"
+    pyo3::prepare_freethreaded_python();
+    if let Ok(venv) = env::var("VIRTUAL_ENV") {
+        Python::with_gil(|py| crate::engines::fix_venv(venv, py));
+    }
 
     let Sockets {
         context,
@@ -447,7 +450,8 @@ async fn start_sglang(
     // This pipe is how sglang tells us it's ready
     let mut pipe_fds: [libc::c_int; 2] = [-1, -1];
     unsafe {
-        let err = libc::pipe2(pipe_fds.as_mut_ptr() as *mut c_int, 0); // libc::O_NONBLOCK);
+        // Seems to be OK without libc::O_NONBLOCK
+        let err = libc::pipe(pipe_fds.as_mut_ptr() as *mut c_int);
         if err != 0 {
             anyhow::bail!("libc::pipe error {err}");
         }

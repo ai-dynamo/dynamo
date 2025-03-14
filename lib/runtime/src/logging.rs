@@ -25,7 +25,7 @@
 //!
 //! Filters can be configured using the `DYN_LOG` environment variable or by setting the `filters`
 //! key in the TOML configuration file. Filters are comma-separated key-value pairs where the key
-//! is the crate or module name and the value is the log level. The default log level is `error`.
+//! is the crate or module name and the value is the log level. The default log level is `info`.
 //!
 //! Example:
 //! ```toml
@@ -56,7 +56,7 @@ use tracing_subscriber::{filter::Directive, fmt};
 const FILTER_ENV: &str = "DYN_LOG";
 
 /// Default log level
-const DEFAULT_FILTER_LEVEL: &str = "error";
+const DEFAULT_FILTER_LEVEL: &str = "info";
 
 /// ENV used to set the path to the logging configuration file
 const CONFIG_PATH_ENV: &str = "DYN_LOGGING_CONFIG_PATH";

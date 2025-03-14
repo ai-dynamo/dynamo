@@ -88,7 +88,7 @@ impl OpenAIPreprocessor {
         }))
     }
 
-    /// Translate a [`ChatCompletionRequest`] request to a common completion request.
+    /// Translate a [`NvCreateChatCompletionRequest`] request to a common completion request.
     /// Returns both the common completion request and a hashmap of annotations.
     ///
     /// Annotations evaluated by this method include:

@@ -115,7 +115,7 @@ fn get_config(args: &Args) -> Result<LLMWorkerLoadCapacityConfig> {
 async fn app(runtime: Runtime) -> Result<()> {
     let args = Args::parse();
     let config = get_config(&args)?;
-    tracing::info!("Config: {config:?}");
+    tracing::debug!("Config: {config:?}");
 
     let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
 
@@ -124,7 +124,7 @@ async fn app(runtime: Runtime) -> Result<()> {
 
     // Create unique instance of Count
     let key = format!("{}/instance", component.etcd_path());
-    tracing::info!("Creating unique instance of Count at {key}");
+    tracing::debug!("Creating unique instance of Count at {key}");
     drt.etcd_client()
         .kv_create(
             key,
@@ -178,7 +178,7 @@ async fn app(runtime: Runtime) -> Result<()> {
     tokio::spawn(async move {
         match namespace_clone.subscribe(kv_hit_rate_subject).await {
             Ok(mut subscriber) => {
-                tracing::info!("Successfully subscribed to KV hit rate events");
+                tracing::debug!("Successfully subscribed to KV hit rate events");
 
                 while let Some(msg) = subscriber.next().await {
                     match serde_json::from_slice::<KVHitRateEvent>(&msg.payload) {

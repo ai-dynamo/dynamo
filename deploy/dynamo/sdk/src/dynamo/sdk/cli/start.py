@@ -27,8 +27,6 @@ import rich
 
 logger = logging.getLogger(__name__)
 
-print("this module was loaded")
-
 
 def build_start_command() -> click.Group:
     from bentoml._internal.utils import add_experimental_docstring
