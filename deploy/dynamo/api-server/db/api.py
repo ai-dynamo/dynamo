@@ -414,12 +414,18 @@ async def create_dynamo_nim_version(
     Create a new nim
     """
     try:
+        # Add timestamp fields
+        now = datetime.now(timezone.utc)
+
         # Create without validation
         db_dynamo_nim_version = DynamoNimVersion(
             **request.model_dump(),
             dynamo_nim_id=dynamo_nim.id,
             upload_status=DynamoNimUploadStatus.Pending,
             image_build_status=ImageBuildStatus.Pending,
+            created_at=now,  # Add created_at
+            updated_at=now,  # Add updated_at
+            deleted_at=None,  # Add deleted_at
         )
         DynamoNimVersion.model_validate(db_dynamo_nim_version)
         tag = f"{dynamo_nim.name}:{db_dynamo_nim_version.version}"
