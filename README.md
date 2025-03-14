@@ -48,7 +48,7 @@ Dynamo development and examples are container based.
 You can build the Dynamo container using the build scripts
 in `container/` (or directly with `docker build`).
 
-We provide 3 types of builds:
+We provide 2 types of builds:
 
 1. `VLLM` which includes our VLLM backend using new NIXL communication library.
 2. `TENSORRTLLM` which includes our TRT-LLM backend
