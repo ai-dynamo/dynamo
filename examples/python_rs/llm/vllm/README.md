@@ -105,12 +105,12 @@ CUDA_VISIBLE_DEVICES=0 python3 routerless/worker.py \
 CUDA_VISIBLE_DEVICES=0 python routerless/prefill_worker.py \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
-    --kv-transfer-config '{"kv_connector":"DynamoNixlConnector"}'
+    --kv-transfer-config '{"kv_connector":"DynamoNixlConnector","use_prepped_xfer":true}'
 CUDA_VISIBLE_DEVICES=1 python3 routerless/worker.py \
     --remote-prefill \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --enforce-eager \
-    --kv-transfer-config '{"kv_connector":"DynamoNixlConnector"}'
+    --kv-transfer-config '{"kv_connector":"DynamoNixlConnector","use_prepped_xfer":true}'
 ```
 
 ### Kv Router
