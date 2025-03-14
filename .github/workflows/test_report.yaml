@@ -44,41 +44,10 @@ jobs:
            run_id: ${{ github.event.workflow_run.id }}
            path: artifacts
 
-      - name: Process Test Results
-        id: test-results
-        run: |
-          total_count=0
-          sudo apt-get update -y
-          sudo apt-get install -y libxml2-utils
-          echo "Files to process:"
-          find artifacts/**/*.xml
-          for file in artifacts/**/*.xml; do
-            if [ -f "$file" ]; then
-              if [ -f "$file" ]; then
-                echo "Processing file: $file"
-                # Count the number of <testcase> elements in the file
-                count=$(xmllint --xpath "count(//testcase)" "$file")
-                echo "Count from $file: $count"
-                # Add to the total count
-                total_count=$((total_count + count))
-              else
-                echo "No file found for pattern: $file"
-              fi
-            fi
-          done
-          echo "total_count=$total_count" >> $GITHUB_OUTPUT
-
-      - name: Publish Test Results
-        if: ${{ steps.test-results.outputs.total_count > 0 }}
-        uses: EnricoMi/publish-unit-test-result-action@170bf24d20d201b842d7a52403b73ed297e6645b # v2.18.0
-        with:
-          commit: ${{ github.event.workflow_run.head_sha }}
-          event_file: artifacts/Event File/event.json
-          event_name: ${{ github.event.workflow_run.event }}
-          files: "artifacts/**/*.xml"
-
       - name: Summarize Test Results as Markdown Table
         run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libxml2-utils
           echo "## Unit Test Results Summary" >> $GITHUB_STEP_SUMMARY
           echo "# This test report is a summary of the test run in workflow run: [${{ steps.set_test_run_url.outputs.test_run_url }}](${{ steps.set_test_run_url.outputs.test_run_url }})" >> $GITHUB_STEP_SUMMARY
           echo "| Test Suite | Tests | Passed | Failed | Skipped | Duration |" >> $GITHUB_STEP_SUMMARY
