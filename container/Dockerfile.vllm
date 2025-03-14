@@ -4,6 +4,16 @@
 ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS nixl_base
+WORKDIR /opt/nixl
+# Add a cache hint that only changes when the nixl commit changes
+ARG NIXL_COMMIT
+# This line acts as a cache key - it only changes when NIXL_COMMIT changes
+RUN echo "NIXL commit: ${NIXL_COMMIT}" > /opt/nixl/commit.txt
+# Copy the nixl source
+COPY --from=nixl . .
+
+# Main build stage
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS dev
 
 USER root
@@ -117,8 +127,9 @@ ENV CPATH=/usr/local/ompi/include:$CPATH
 ENV PATH=/usr/local/ompi/bin:$PATH
 ENV PKG_CONFIG_PATH=/usr/local/ompi/lib/pkgconfig:$PKG_CONFIG_PATH
 
-COPY --from=nixl . /opt/nixl
-
+# Copy nixl source, and use commit hash as cache hint
+COPY --from=nixl_base /opt/nixl /opt/nixl
+COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
 RUN cd /opt/nixl && \
     mkdir build && \
     meson setup build/ --prefix=/usr/local/nixl && \
