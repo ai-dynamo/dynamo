@@ -149,22 +149,7 @@ class DynamoService(Service[T]):
         """Link this service to another service, creating a pipeline."""
         self._linked_services.append(next_service)
         LinkedServices.add((self, next_service)) 
-        # Get all direct dependencies from depends() statements
-        print(f"Linked {self} to {next_service}")
         return next_service
-
-    # def build(self) -> DynamoService:
-    #     """Mark this service as the end of the chain and clear its dependencies."""
-    #     if len(self._linked_services) > 0:
-    #         raise ValueError("Cannot mark as end - service has downstream links")
-            
-    #     # Clear all dependencies since this is the final node
-    #     for dep_key in list(self.dependencies.keys()):
-    #         self.unlink(dep_key)
-            
-    #     print(f"Marked {self} as end of chain")
-    #     return self
-
 
 def service(
     inner: Optional[type[T]] = None,

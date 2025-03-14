@@ -13,15 +13,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import subprocess
 from dynamo.sdk import service
+from dynamo.sdk import depends
+from disaggregated.processor import Processor
+from disaggregated.worker import VllmWorker
+from dynamo.sdk.lib.config import ServiceConfig
+from pydantic import BaseModel
+
+class FrontendConfig(BaseModel):
+    model: str
+    endpoint: str
+    port: int = 8080
 
 @service(
-    resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
+    resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
 )
 class Frontend:
+    worker = depends(VllmWorker)
+    processor = depends(Processor)
+
     def __init__(self):
-        subprocess.run(["llmctl", "http", "add", "chat-models", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "dynamo-init.vllm.generate"])
+        config = ServiceConfig.get_instance()
+        frontend_config = FrontendConfig(**config.get("Frontend", {}))
         
-        subprocess.run(["http"], stdout=None, stderr=None)
+        os.environ["TRT_LOG"] = "DEBUG"
+        subprocess.run(["llmctl", "http", "remove", "chat-models", frontend_config.model])
+        subprocess.run(["llmctl", "http", "add", "chat-models", frontend_config.model, frontend_config.endpoint])
+        
+        subprocess.run(["http", "-p", str(frontend_config.port)], stdout=None, stderr=None)

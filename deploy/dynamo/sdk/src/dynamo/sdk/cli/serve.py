@@ -21,6 +21,7 @@ import logging
 import os
 import sys
 import typing as t
+import yaml
 
 import click
 import rich
@@ -126,6 +127,12 @@ def build_serve_command() -> click.Group:
         cls=AliasCommand,
     )
     @click.argument("bento", type=click.STRING, default=".")
+    @click.option(
+        "-f",
+        "--file",
+        type=click.Path(exists=True),
+        help="Path to YAML config file for service configuration",
+    )
     @click.option(
         "--development",
         type=click.BOOL,
@@ -266,6 +273,7 @@ def build_serve_command() -> click.Group:
         development: bool,
         port: int,
         host: str,
+        file: str | None,
         api_workers: int,
         timeout: int | None,
         backlog: int,
@@ -324,6 +332,19 @@ def build_serve_command() -> click.Group:
 
         # Process service-specific options
         service_configs = _parse_service_args(ctx.args)
+        
+        # Load and merge config file if provided
+        if file:
+            with open(file) as f:
+                yaml_configs = yaml.safe_load(f)
+                # Convert nested YAML structure to flat dict with dot notation
+                for service, configs in yaml_configs.items():
+                    for key, value in configs.items():
+                        if service not in service_configs:
+                            service_configs[service] = {}
+                        service_configs[service][key] = value
+
+        # print("service_configs", service_configs)
 
         # Set environment variable with service configuration
         if service_configs:

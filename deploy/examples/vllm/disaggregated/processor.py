@@ -60,7 +60,6 @@ class Processor(ProcessMixIn):
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
         self.model_config = self.engine_args.create_model_config()
-        print(f"[Processor] self.engine_args: {self.engine_args}")
         self.tokenizer = self._create_tokenizer(self.engine_args)
         self.chat_processor = ChatProcessor(self.tokenizer, self.model_config)
         self.completions_processor = CompletionsProcessor(
@@ -191,7 +190,7 @@ class Processor(ProcessMixIn):
                     f"Request type {request_type} not implemented"
                 )
 
-    @dynamo_endpoint()
+    @dynamo_endpoint(name="chat/completions")
     async def chat_completions(self, raw_request: ChatCompletionRequest):
         async for response in self._generate(raw_request, RequestType.CHAT):
             yield response

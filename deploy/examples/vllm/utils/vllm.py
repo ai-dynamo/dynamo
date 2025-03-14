@@ -22,9 +22,7 @@ from dynamo.sdk.lib.config import ServiceConfig
 
 def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     config = ServiceConfig.get_instance()
-    print(f"[DEBUG] config: {config}")
     vllm_args = config.as_args(service_name, prefix=prefix)
-    print(f"[DEBUG] service_name: {service_name}, vllm_args: {vllm_args}")
     parser = FlexibleArgumentParser()
     parser.add_argument(
         "--router",
