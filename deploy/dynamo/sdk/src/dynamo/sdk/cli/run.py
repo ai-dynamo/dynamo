@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 
@@ -36,8 +37,21 @@ def build_run_command() -> click.Group:
     )
     def run() -> None:
         """Call dynamo-run with remaining arguments"""
+        # Check if dynamo-run is available in PATH
+        if shutil.which("dynamo-run") is None:
+            click.echo(
+                "Error: 'dynamo-run' is needed but not found.\n"
+                "Please install it using: cargo install dynamo-run",
+                err=True,
+            )
+            sys.exit(1)
+
         command = ["dynamo-run"] + sys.argv[2:]
-        subprocess.run(command)
+        try:
+            subprocess.run(command)
+        except Exception as e:
+            click.echo(f"Error executing dynamo-run: {str(e)}", err=True)
+            sys.exit(1)
 
     return cli
 
