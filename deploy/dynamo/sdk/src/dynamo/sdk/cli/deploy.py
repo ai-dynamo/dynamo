@@ -235,6 +235,8 @@ def create_dynamo_deployment(
     if config_dict is not None and config_dict != "":
         cfg_dict = json.loads(config_dict)
 
+    env_tuple = tuple(env) if env is not None else None
+
     config_params = DeploymentConfigParameters(
         name=name,
         bento=bento,
@@ -244,7 +246,7 @@ def create_dynamo_deployment(
         scaling_min=scaling_min,
         instance_type=instance_type,
         strategy=strategy,
-        envs=convert_env_to_dict(env),
+        envs=convert_env_to_dict(env_tuple),
         secrets=list(secret) if secret is not None else None,
         config_file=config_file,
         config_dict=cfg_dict,
@@ -416,21 +418,27 @@ def create_dynamo_deployment(
                             spinner.log("[bold green]Deployment ready![/]")
                             spinner.log(f"[bold]Ingress URL: {ingress_url}[/]")
                             return deployment
-                    except Exception as e:
+                    except Exception:
                         logger.error("Timeout check failed", exc_info=True)
 
-                    # Add timeout debug information
-                    pods = api.list_namespaced_pod(
-                        namespace, label_selector=f"app={deployment_name}"
-                    )
-                    logger.error(
-                        f"Timeout reached. Pod statuses: {json.dumps([p.status for p in pods.items], indent=2)}"
-                    )
+                    try:
+                        pods = api.list_namespaced_pod(
+                            namespace, label_selector=f"app={deployment_name}"
+                        )
+                        pod_statuses = json.dumps(
+                            [p.status for p in pods.items], indent=2
+                        )
+                        logger.error(f"Timeout reached. Pod statuses: {pod_statuses}")
 
-                    raise click.ClickException(
-                        f"Deployment timeout reached\n"
-                        f"Pod statuses: {json.dumps([p.status for p in pods.items], indent=2)}"
-                    )
+                        raise click.ClickException(
+                            f"Deployment timeout reached\n"
+                            f"Pod statuses: {pod_statuses}"
+                        )
+                    except Exception as pod_error:
+                        logger.error("Failed to get pod statuses", exc_info=True)
+                        raise click.ClickException(
+                            f"Deployment timeout reached and failed to get pod statuses: {str(pod_error)}"
+                        )
 
             return deployment
 
