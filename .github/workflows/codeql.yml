@@ -32,3 +32,9 @@ jobs:
         with:
             category: "/language:${{matrix.language}}"
 
+      # Upload results only if the branch is main
+      - name: Upload CodeQL results
+        if: github.ref == 'refs/heads/main'  # Check if the branch is 'main'
+        uses: github/codeql-action/upload-artifact@v3
+        with:
+            category: "/language:${{matrix.language}}"
