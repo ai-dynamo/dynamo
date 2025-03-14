@@ -210,30 +210,20 @@ WORKDIR /workspace
 COPY pyproject.toml /workspace/
 COPY README.md /workspace/
 COPY LICENSE /workspace/
+COPY Cargo.toml /workspace/
+COPY Cargo.lock /workspace/
+COPY rust-toolchain.toml /workspace/
 
-# Build Rust runtime
-COPY lib/runtime /workspace/lib/runtime
-RUN cd lib/runtime && \
-    cargo build --jobs 2 --release --locked && cargo doc --no-deps
-
-# Build OpenAI HTTP Service binaries
-COPY lib/llm /workspace/lib/llm
+COPY lib/ /workspace/lib/
 COPY components /workspace/components
-RUN cd components && \
-    cargo build --jobs 2 --release && \
-    cp target/release/http /usr/local/bin/
-
-# Build Dynamo Run binaries
 COPY launch /workspace/launch
-RUN cd launch && \
-    cargo build --jobs 2 --release --features mistralrs,sglang,vllm,python && \
-    cp target/release/dynamo-run /usr/local/bin/ && \
-    cp target/release/llmctl /usr/local/bin/
 
-# Generate C bindings for kv cache routing in vLLM
-COPY lib/bindings /workspace/lib/bindings
-RUN cd lib/bindings/c && \
-    cargo build --jobs 2 --release --locked && cargo doc --no-deps
+ARG CARGO_BUILD_JOBS
+
+ENV CARGO_TARGET_DIR=/workspace/target
+
+RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
+    cargo doc --no-deps
 
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 # Build dynamo wheel
@@ -248,7 +238,7 @@ RUN source /opt/dynamo/venv/bin/activate && \
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
     mkdir /opt/dynamo/bindings/lib && \
     cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
-    cp lib/bindings/c/target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
+    cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
     cp -r lib/bindings/c/include /opt/dynamo/bindings/.
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing

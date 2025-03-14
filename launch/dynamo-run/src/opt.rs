@@ -117,6 +117,9 @@ pub enum Output {
     /// tokens. We do the pre-processing.
     #[cfg(feature = "python")]
     PythonTok(String),
+    //
+    // DEVELOPER NOTE
+    // If you add an engine add it to `available_engines` below, and to Default if it makes sense
 }
 
 impl TryFrom<&str> for Output {
@@ -192,10 +195,10 @@ impl fmt::Display for Output {
             Output::Endpoint(path) => path,
 
             #[cfg(feature = "python")]
-            Output::PythonStr(path) => path,
+            Output::PythonStr(_) => "pystr",
 
             #[cfg(feature = "python")]
-            Output::PythonTok(path) => path,
+            Output::PythonTok(_) => "pytok",
         };
         write!(f, "{s}")
     }
@@ -228,6 +231,45 @@ impl Default for Output {
         #[cfg(feature = "vllm")]
         {
             out = Output::Vllm;
+        }
+
+        out
+    }
+}
+
+impl Output {
+    #[allow(unused_mut)]
+    pub fn available_engines() -> Vec<String> {
+        let mut out = vec!["echo_core".to_string(), "echo_full".to_string()];
+        #[cfg(feature = "mistralrs")]
+        {
+            out.push(Output::MistralRs.to_string());
+        }
+
+        #[cfg(feature = "llamacpp")]
+        {
+            out.push(Output::LlamaCpp.to_string());
+        }
+
+        #[cfg(feature = "sglang")]
+        {
+            out.push(Output::SgLang.to_string());
+        }
+
+        #[cfg(feature = "vllm")]
+        {
+            out.push(Output::Vllm.to_string());
+        }
+
+        #[cfg(feature = "python")]
+        {
+            out.push(Output::PythonStr("file.py".to_string()).to_string());
+            out.push(Output::PythonTok("file.py".to_string()).to_string());
+        }
+
+        #[cfg(feature = "trtllm")]
+        {
+            out.push(Output::TrtLLM.to_string());
         }
 
         out
