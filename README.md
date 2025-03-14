@@ -50,12 +50,10 @@ in `container/` (or directly with `docker build`).
 
 We provide 3 types of builds:
 
-1. `STANDARD` which includes our default set of backends (onnx, openvino...)
+1. `VLLM` which includes our VLLM backend using new NIXL communication library.
 2. `TENSORRTLLM` which includes our TRT-LLM backend
-3. `VLLM` which includes our VLLM backend using NCCL communication library.
-4. `VLLM_NIXL` which includes our VLLM backend using new NIXL communication library.
 
-For example, if you want to build a container for the `STANDARD` backends you can run
+For example, if you want to build a container for the `VLLM` backend you can run
 
 <!--pytest.mark.skip-->
 ```bash
