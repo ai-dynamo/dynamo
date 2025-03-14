@@ -75,7 +75,7 @@ class End:
 
 
 @service(
-    resources={"cpu": "2"},
+    resources={"cpu": "1"},
     traffic={"timeout": 30},
     dynamo={
         "enabled": True,
@@ -84,7 +84,7 @@ class End:
     workers=1,
 )
 class Backend:
-    end = depends(End)
+    # end = depends(End)
 
     def __init__(self) -> None:
         print("Starting backend")
@@ -122,13 +122,13 @@ class Backend2:
 
 
 @service(
-    resources={"cpu": "2"},
+    resources={"cpu": "1"},
     traffic={"timeout": 30},
     dynamo={"enabled": True, "namespace": "inference"},
 )
 class Middle:
-    backend = depends(Backend)
-    backend2 = depends(Backend2)
+    # backend = depends(Backend)
+    # backend2 = depends(Backend2)
 
     def __init__(self) -> None:
         print("Starting middle")
@@ -136,14 +136,11 @@ class Middle:
     @dynamo_endpoint()
     async def generate(self, req: RequestType):
         """Forward requests to backend."""
-
         req_text = req.text
         print(f"Middle received: {req_text}")
         text = f"{req_text}-mid"
-        next_request = RequestType(text=text).model_dump_json()
-        async for response in self.backend.generate(next_request):
-            print(f"Middle received response: {response}")
-            yield f"Middle: {response}"
+        for token in text.split():
+            yield f"Mid: {token}"
 
 @service(
     resources={"cpu": "2"},
@@ -165,9 +162,12 @@ class Backend2:
         text = f"{req_text}-mid2"
         next_request = RequestType(text=text).model_dump_json()
 
+from typing import Optional
+
 @service(resources={"cpu": "1"}, traffic={"timeout": 60})
 class Frontend:
     middle = depends(Middle)
+    backend = depends(Backend)
 
     def __init__(self) -> None:
         print("Starting frontend")
@@ -179,5 +179,11 @@ class Frontend:
         print(f"Frontend received type: {type(text)}")
         txt = RequestType(text=text)
         print(f"Frontend sending: {type(txt)}")
-        async for response in self.middle.generate(txt.model_dump_json()):
-            yield f"Frontend: {response}"
+        if self.backend:
+            async for back_resp in self.backend.generate(mid_resp):
+                print(f"Frontend received back_resp: {back_resp}")
+                yield f"Frontend: {back_resp}"
+        else:
+            async for mid_resp in self.middle.generate(txt.model_dump_json()):
+                print(f"Frontend received mid_resp: {mid_resp}")
+                yield f"Frontend: {mid_resp}"

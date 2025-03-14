@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import json
 import os
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, TypeVar, Union
+from typing import Any, Dict, List, Set, Optional, Tuple, TypeVar, Union
 
 from _bentoml_sdk import Service, ServiceConfig
 from _bentoml_sdk.images import Image
@@ -26,6 +27,30 @@ from dynamo.sdk.lib.decorators import DynamoEndpoint
 
 T = TypeVar("T", bound=object)
 
+
+class RuntimeLinkedServices:
+    """
+    A class to track the linked services in the runtime.
+    """
+    def __init__(self) -> None:
+        self.edges = defaultdict(set)
+    
+    def add(self, edge: Tuple[DynamoService, DynamoService]):
+        src, dest = edge
+        self.edges[src].add(dest.inner)
+        # track the dest node as well so we can cleanup later
+        self.edges[dest]
+    
+    def remove_unused_edges(self):
+        # this method is idempotent
+        if not self.edges:
+            return
+        # remove edges that are not in the current service
+        for u, vertices in self.edges.items():
+            u.remove_unused_edges(used_edges=vertices) 
+
+
+LinkedServices = RuntimeLinkedServices()
 
 @dataclass
 class DynamoConfig:
@@ -113,41 +138,32 @@ class DynamoService(Service[T]):
         """List names of all registered Dynamo endpoints"""
         return list(self._dynamo_endpoints.keys())
     
-    def unlink(self, key = None):
+    def remove_unused_edges(self, used_edges: Set[DynamoService]):
         """Remove a dependancy from the current service based on the key"""
-        if key is None:
-            raise ValueError("Key is required to unlink a dependency")
-        if key not in self.dependencies:
-            raise ValueError(f"Dependency with key {key} not found")
-        del self.dependencies[key]
-        return self
+        current_deps = dict(self.dependencies)
+        for dep_key, dep_value in current_deps.items():
+            if dep_value.on.inner not in used_edges:
+                del self.dependencies[dep_key]
 
     def link(self, next_service: DynamoService):
         """Link this service to another service, creating a pipeline."""
         self._linked_services.append(next_service)
-        
+        LinkedServices.add((self, next_service)) 
         # Get all direct dependencies from depends() statements
-        current_deps = dict(self.dependencies)
-        
-        # Keep only the dependency that matches our next service
-        for dep_key, dep_value in current_deps.items():
-            if dep_value.on.inner != next_service.inner:
-                self.unlink(dep_key)
-        
         print(f"Linked {self} to {next_service}")
         return next_service
 
-    def build(self) -> DynamoService:
-        """Mark this service as the end of the chain and clear its dependencies."""
-        if len(self._linked_services) > 0:
-            raise ValueError("Cannot mark as end - service has downstream links")
+    # def build(self) -> DynamoService:
+    #     """Mark this service as the end of the chain and clear its dependencies."""
+    #     if len(self._linked_services) > 0:
+    #         raise ValueError("Cannot mark as end - service has downstream links")
             
-        # Clear all dependencies since this is the final node
-        for dep_key in list(self.dependencies.keys()):
-            self.unlink(dep_key)
+    #     # Clear all dependencies since this is the final node
+    #     for dep_key in list(self.dependencies.keys()):
+    #         self.unlink(dep_key)
             
-        print(f"Marked {self} as end of chain")
-        return self
+    #     print(f"Marked {self} as end of chain")
+    #     return self
 
 
 def service(

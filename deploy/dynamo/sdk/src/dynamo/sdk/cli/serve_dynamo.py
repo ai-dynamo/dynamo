@@ -29,6 +29,8 @@ import click
 
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 from dynamo.sdk import dynamo_context
+from dynamo.sdk.lib.service import LinkedServices
+
 
 logger = logging.getLogger("dynamo.sdk.serve.dynamo")
 logger.setLevel(logging.INFO)
@@ -99,6 +101,8 @@ def main(
             t.cast(t.Dict[str, str], json.loads(runner_map))
         )
 
+    # TODO: test this with a deep chain of services
+    LinkedServices.remove_unused_edges()
     # Check if Dynamo is enabled for this service
     if service.is_dynamo_component():
         if worker_id is not None:

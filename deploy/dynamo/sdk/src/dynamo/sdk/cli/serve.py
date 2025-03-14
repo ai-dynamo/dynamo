@@ -320,6 +320,7 @@ def build_serve_command() -> click.Group:
         """
         from bentoml import Service
         from bentoml._internal.service.loader import load
+        from dynamo.sdk.lib.service import LinkedServices
 
         # Process service-specific options
         service_configs = _parse_service_args(ctx.args)
@@ -337,6 +338,8 @@ def build_serve_command() -> click.Group:
         if sys.path[0] != working_dir:
             sys.path.insert(0, working_dir)
         svc = load(bento_identifier=bento, working_dir=working_dir)
+
+        LinkedServices.remove_unused_edges()
         if isinstance(svc, Service):
             # bentoml<1.2
             from bentoml.serving import serve_http_production
