@@ -191,17 +191,15 @@ func bentoRoutes(grp *gin.RouterGroup) {
 func createDynamoNimRoutes(grp *gin.RouterGroup) {
 	grp = grp.Group("/dynamo_nims")
 
-	resourceGrp := grp.Group("/:dynamoNimName")
-
-	resourceGrp.GET("", controllers.ProxyController.ReverseProxy)
-
-	resourceGrp.PATCH("", controllers.ProxyController.ReverseProxy)
-
-	resourceGrp.GET("/deployments", controllers.DeploymentController.ListDynamoNimDeployments)
-
+	// Register the list endpoint first
 	grp.GET("", controllers.ProxyController.ReverseProxy)
-
 	grp.POST("", controllers.ProxyController.ReverseProxy)
+
+	// Then register the specific routes
+	resourceGrp := grp.Group("/:dynamoNimName")
+	resourceGrp.GET("", controllers.ProxyController.ReverseProxy)
+	resourceGrp.PATCH("", controllers.ProxyController.ReverseProxy)
+	resourceGrp.GET("/deployments", controllers.DeploymentController.ListDynamoNimDeployments)
 
 	dynamoNimVersionRoutes(resourceGrp)
 }
