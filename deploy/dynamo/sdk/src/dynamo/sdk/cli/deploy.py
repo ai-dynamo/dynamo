@@ -25,7 +25,7 @@ from datetime import datetime
 
 import click
 from bentoml._internal.cloud.base import Spinner
-from bentoml.exceptions import BentoMLException
+from bentoml.exceptions import BentoMLException, CLIException
 from rich.console import Console
 from simple_di import inject
 
@@ -38,6 +38,23 @@ logger = logging.getLogger(__name__)
 def deploy_command_group():
     """Deploy 🍱 to a cluster"""
     pass
+
+
+def convert_env_to_dict(env: tuple[str, ...] | None) -> list[dict[str, str]] | None:
+    if env is None:
+        return None
+    collected_envs: list[dict[str, str]] = []
+    if env:
+        for item in env:
+            if "=" in item:
+                name, value = item.split("=", 1)
+            else:
+                name = item
+                if name not in os.environ:
+                    raise CLIException(f"Environment variable {name} not found")
+                value = os.environ[name]
+            collected_envs.append({"name": name, "value": value})
+    return collected_envs
 
 
 def build_deploy_command() -> click.Command:
@@ -225,17 +242,15 @@ def create_dynamo_deployment(
     dev: bool = False,
 ) -> DynamoDeployment:
     from bentoml._internal.cloud.deployment import DeploymentConfigParameters
-    from bentoml_cli.deployment import (
-        convert_env_to_dict,
-        raise_deployment_config_error,
-    )
+    from bentoml_cli.deployment import raise_deployment_config_error
     from kubernetes import client, config
 
     cfg_dict = None
     if config_dict is not None and config_dict != "":
         cfg_dict = json.loads(config_dict)
 
-    env_tuple = tuple(env) if env is not None else None
+    # Always pass a tuple[str, ...] to convert_env_to_dict
+    env_tuple: tuple[str, ...] = env if env is not None else ()
 
     config_params = DeploymentConfigParameters(
         name=name,
@@ -256,8 +271,8 @@ def create_dynamo_deployment(
 
     try:
         config_params.verify()
-    except BentoMLException as e:
-        raise_deployment_config_error(e, "create")
+    except BentoMLException as bentoml_ex:
+        raise_deployment_config_error(bentoml_ex, "create")
 
     # Fix the deployment name generation
     deployment_name = name
@@ -274,10 +289,10 @@ def create_dynamo_deployment(
 
     # Convert env tuple to k8s env format
     env_vars = []
-    if env:
-        for e in env:
-            if "=" in e:
-                k, v = e.split("=", 1)
+    if env_tuple:
+        for item in env_tuple:
+            if "=" in item:
+                k, v = item.split("=", 1)
                 env_vars.append({"name": k, "value": v})
 
     # Get the CRD payload
@@ -360,7 +375,10 @@ def create_dynamo_deployment(
                         "available",
                         "complete",
                     ]:
-                        ingress_url = f"https://{namespace}.dev.aire.nvidia.com/api/v2/deployments/{deployment_name}?cluster={namespace}"
+                        ingress_url = (
+                            f"https://{namespace}.dev.aire.nvidia.com/api/v2/deployments/"
+                            f"{deployment_name}?cluster={namespace}"
+                        )
                         spinner.log("[bold green]Deployment ready![/]")
                         spinner.log(f"[bold]Ingress URL: {ingress_url}[/]")
                         return deployment
@@ -397,8 +415,9 @@ def create_dynamo_deployment(
 
                     time.sleep(5)
 
+                # Timed out waiting for a success state
                 if time.time() - start_time >= timeout:
-                    # Check if deployment exists but we just timed out waiting
+                    # Check final status once more
                     try:
                         final_status = api.get_namespaced_custom_object(
                             group=group,
@@ -414,7 +433,10 @@ def create_dynamo_deployment(
                             "available",
                             "complete",
                         ]:
-                            ingress_url = f"https://{namespace}.dev.aire.nvidia.com/api/v2/deployments/{deployment_name}?cluster={namespace}"
+                            ingress_url = (
+                                f"https://{namespace}.dev.aire.nvidia.com/api/v2/deployments/"
+                                f"{deployment_name}?cluster={namespace}"
+                            )
                             spinner.log("[bold green]Deployment ready![/]")
                             spinner.log(f"[bold]Ingress URL: {ingress_url}[/]")
                             return deployment
@@ -442,9 +464,9 @@ def create_dynamo_deployment(
 
             return deployment
 
-        except Exception as e:
+        except Exception as exc:
             logger.error("Deployment failed", exc_info=True)
-            spinner.log(f"[bold red]Deployment failed: {str(e)}[/]")
+            spinner.log(f"[bold red]Deployment failed: {str(exc)}[/]")
             raise SystemExit(1)
 
 
