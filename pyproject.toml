@@ -21,30 +21,52 @@ readme = "README.md"
 authors = [
     { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
 ]
-license = { file = "LICENSE" }
+license = { text = "Apache-2.0" }
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "pytest>=8.3.4",
-    "pydantic>=2.10.6",
-    "uvloop>=0.21.0",
-    "nats-py>=2.6.0",
+    "bentoml==1.4.1",
+    "types-psutil==7.0.0.20250218",
+    "ai-dynamo-runtime==0.1.0",
 ]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Operating System :: POSIX :: Linux",
+]
+keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 
-[tool.maturin]
-module-name = "dynamo._core"
-# Point to the Rust crate directory
-manifest-path = "lib/bindings/python/Cargo.toml"
-# Include all Python packages
-python-packages = ["dynamo"]
-# Specify the Python source directory
-python-source = "lib/bindings/python/src"
-
-[tool.uv]
-config-settings = { build-args = '--auditwheel repair --manylinux' }
+[project.scripts]
+dynamo = "dynamo.sdk.cli.cli:cli"
+dynamo-run = "dynamo.sdk.cli.run_executable:dynamo_run"
+llmctl = "dynamo.sdk.cli.run_executable:llmctl"
+http = "dynamo.sdk.cli.run_executable:http"
+metrics = "dynamo.sdk.cli.run_executable:metrics"
 
 [build-system]
-requires = ["maturin>=1.0,<2.0", "patchelf"]
-build-backend = "maturin"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["deploy/dynamo/sdk/src/dynamo"]
+
+# This section is for including the binaries in the wheel package
+# but doesn't make them executable scripts in the venv bin directory
+[tool.hatch.build.targets.wheel.force-include]
+"target/release/dynamo-run" = "dynamo/sdk/cli/bin/dynamo-run"
+"target/release/llmctl" = "dynamo/sdk/cli/bin/llmctl"
+"target/release/http" = "dynamo/sdk/cli/bin/http"
+"target/release/metrics" = "dynamo/sdk/cli/bin/metrics"
 
 [tool.codespell]
 # note: pre-commit passes explicit lists of files here, which this skip file list doesn't override -
@@ -95,20 +117,20 @@ addopts = [
 xfail_strict = true
 log_cli_level = "INFO"
 filterwarnings = [
-  "error",
-  "ignore:.*cuda*:DeprecationWarning", # Need this to avoid deprecation warnings from CUDA in tensorrt_llm.
-  "ignore:.*pkg_resources.*:DeprecationWarning",
-  "ignore:.*multipart.*:PendingDeprecationWarning"
+    "error",
+    "ignore:.*cuda*:DeprecationWarning", # Need this to avoid deprecation warnings from CUDA in tensorrt_llm.
+    "ignore:.*pkg_resources.*:DeprecationWarning",
+    "ignore:.*multipart.*:PendingDeprecationWarning"
 ]
 
 
 # NOTE: Can also manually mark tests with @pytest.mark.asyncio
 asyncio_mode = "auto"
 markers = [
-  "pre_merge: marks tests to run before merging",
-  "nightly: marks tests to run nightly",
-  "weekly: marks tests to run weekly",
-  "gpu: marks tests to run on GPU"
+    "pre_merge: marks tests to run before merging",
+    "nightly: marks tests to run nightly",
+    "weekly: marks tests to run weekly",
+    "gpu: marks tests to run on GPU"
 ]
 
 # Linting/formatting
@@ -144,7 +166,3 @@ check_untyped_defs = true
 module = ["vllm.*", "bentoml.*", "fs.*", "_bentoml_sdk.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
-
-# declare namespace packages
-[tool.setuptools]
-namespace-packages = ["dynamo", "dynamo.sdk"]

@@ -13,77 +13,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use futures_util::TryStreamExt;
-use netlink_packet_route::address::AddressAttribute;
-use netlink_packet_route::link::LinkLayerType;
-use netlink_packet_route::link::State as LinkState;
-use netlink_packet_route::link::{LinkAttribute, LinkMessage};
-use netlink_packet_route::AddressFamily;
-use std::collections::HashSet;
-use std::collections::VecDeque;
-use std::{collections::HashMap, error::Error};
+// Mac build uses none of this
+#![allow(dead_code)]
 
+#[cfg(target_os = "linux")]
 pub async fn get_primary_interface() -> Result<Option<String>, LinkDataError> {
-    let mut candidates: VecDeque<String> = get_ipv4_interface_links()
-        .await?
-        .into_iter()
-        .filter(|(k, v)| v.is_ethernet() && v.link_is_up() && v.has_carrier() && k.starts_with("e"))
-        .map(|(k, _)| k)
-        .collect();
-
-    Ok(candidates.pop_front())
+    unix::get_primary_interface().await
 }
 
-#[derive(Clone, Debug)]
-// Most of the fields are Option<T> because the netlink protocol allows them
-// to be absent (even though we have no reason to believe they'd ever actually
-// be missing).
-struct InterfaceLinkData {
-    link_type: LinkLayerType,
-    state: Option<LinkState>,
-    has_carrier: bool,
-}
-
-impl InterfaceLinkData {
-    pub fn link_is_up(&self) -> bool {
-        self.state
-            .map(|state| matches!(state, LinkState::Up))
-            .unwrap_or(false)
-    }
-
-    pub fn is_ethernet(&self) -> bool {
-        matches!(self.link_type, LinkLayerType::Ether)
-    }
-
-    pub fn has_carrier(&self) -> bool {
-        self.has_carrier
-    }
-}
-
-impl From<LinkMessage> for InterfaceLinkData {
-    fn from(link_message: LinkMessage) -> Self {
-        let link_type = link_message.header.link_layer_type;
-        let state = link_message
-            .attributes
-            .iter()
-            .find_map(|attribute| match attribute {
-                LinkAttribute::OperState(state) => Some(*state),
-                _ => None,
-            });
-        let has_carrier = link_message
-            .attributes
-            .iter()
-            .find_map(|attribute| match attribute {
-                LinkAttribute::Carrier(1) => Some(true),
-                _ => None,
-            })
-            .unwrap_or(false);
-        InterfaceLinkData {
-            link_type,
-            state,
-            has_carrier,
-        }
-    }
+#[cfg(target_os = "macos")]
+pub async fn get_primary_interface() -> Result<Option<String>, LinkDataError> {
+    Ok(None)
 }
 
 #[derive(Debug)]
@@ -99,6 +39,7 @@ impl LinkDataError {
         Self { kind, interface }
     }
 
+    #[cfg(target_os = "linux")]
     fn communication(communication_error: rtnetlink::Error) -> Self {
         let kind = LinkDataErrorKind::Communication(communication_error);
         let interface = None;
@@ -117,10 +58,11 @@ impl std::fmt::Display for LinkDataError {
     }
 }
 
-impl Error for LinkDataError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
+impl std::error::Error for LinkDataError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self.kind {
             LinkDataErrorKind::Connection(ref e) => Some(e),
+            #[cfg(target_os = "linux")]
             LinkDataErrorKind::Communication(ref e) => Some(e),
         }
     }
@@ -129,45 +71,125 @@ impl Error for LinkDataError {
 #[derive(Debug)]
 pub enum LinkDataErrorKind {
     Connection(std::io::Error),
+    #[cfg(target_os = "linux")]
     Communication(rtnetlink::Error),
 }
 
-// Retrieve the link data (state, MTU, etc.) for all interfaces, and return
-// them as a HashMap keyed by interface name. This is roughly equivalent to `ip
-// link show` since we're using the same netlink interface under the hood as
-// that command.
-async fn get_ipv4_interface_links() -> Result<HashMap<String, InterfaceLinkData>, LinkDataError> {
-    let (netlink_connection, rtnetlink_handle, _receiver) =
-        rtnetlink::new_connection().map_err(LinkDataError::connection)?;
+#[cfg(target_os = "linux")]
+mod unix {
 
-    // We have to spawn off the netlink connection because of the architecture
-    // of `netlink_proto::Connection`, which runs in the background and owns
-    // the socket. We communicate with it via channel messages, and it will exit
-    // when both `rtnetlink_handle` and `_receiver` go out of scope.
-    tokio::spawn(netlink_connection);
+    use futures_util::TryStreamExt;
+    use netlink_packet_route::address::AddressAttribute;
+    use netlink_packet_route::link::LinkLayerType;
+    use netlink_packet_route::link::State as LinkState;
+    use netlink_packet_route::link::{LinkAttribute, LinkMessage};
+    use netlink_packet_route::AddressFamily;
+    use std::collections::HashMap;
+    use std::collections::HashSet;
+    use std::collections::VecDeque;
 
-    let address_handle = rtnetlink_handle.address().get().execute();
-    let ipv4s: HashSet<String> = address_handle
-        .try_filter_map(|addr_message| async move {
-            if matches!(addr_message.header.family, AddressFamily::Inet) {
-                Ok(addr_message
-                    .attributes
-                    .into_iter()
-                    .find(|attr| matches!(attr, AddressAttribute::Label(_)))
-                    .and_then(|x| match x {
-                        AddressAttribute::Label(label) => Some(label),
-                        _ => None,
-                    }))
-            } else {
-                Ok(None)
+    pub async fn get_primary_interface() -> Result<Option<String>, super::LinkDataError> {
+        let mut candidates: VecDeque<String> = get_ipv4_interface_links()
+            .await?
+            .into_iter()
+            .filter(|(k, v)| {
+                v.is_ethernet() && v.link_is_up() && v.has_carrier() && k.starts_with("e")
+            })
+            .map(|(k, _)| k)
+            .collect();
+
+        Ok(candidates.pop_front())
+    }
+
+    #[derive(Clone, Debug)]
+    // Most of the fields are Option<T> because the netlink protocol allows them
+    // to be absent (even though we have no reason to believe they'd ever actually
+    // be missing).
+    struct InterfaceLinkData {
+        link_type: LinkLayerType,
+        state: Option<LinkState>,
+        has_carrier: bool,
+    }
+
+    impl InterfaceLinkData {
+        pub fn link_is_up(&self) -> bool {
+            self.state
+                .map(|state| matches!(state, LinkState::Up))
+                .unwrap_or(false)
+        }
+
+        pub fn is_ethernet(&self) -> bool {
+            matches!(self.link_type, LinkLayerType::Ether)
+        }
+
+        pub fn has_carrier(&self) -> bool {
+            self.has_carrier
+        }
+    }
+
+    impl From<LinkMessage> for InterfaceLinkData {
+        fn from(link_message: LinkMessage) -> Self {
+            let link_type = link_message.header.link_layer_type;
+            let state = link_message
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    LinkAttribute::OperState(state) => Some(*state),
+                    _ => None,
+                });
+            let has_carrier = link_message
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    LinkAttribute::Carrier(1) => Some(true),
+                    _ => None,
+                })
+                .unwrap_or(false);
+            InterfaceLinkData {
+                link_type,
+                state,
+                has_carrier,
             }
-        })
-        .try_collect()
-        .await
-        .map_err(LinkDataError::communication)?;
+        }
+    }
 
-    let link_handle = rtnetlink_handle.link().get().execute();
-    link_handle
+    // Retrieve the link data (state, MTU, etc.) for all interfaces, and return
+    // them as a HashMap keyed by interface name. This is roughly equivalent to `ip
+    // link show` since we're using the same netlink interface under the hood as
+    // that command.
+    async fn get_ipv4_interface_links(
+    ) -> Result<HashMap<String, InterfaceLinkData>, super::LinkDataError> {
+        let (netlink_connection, rtnetlink_handle, _receiver) =
+            rtnetlink::new_connection().map_err(super::LinkDataError::connection)?;
+
+        // We have to spawn off the netlink connection because of the architecture
+        // of `netlink_proto::Connection`, which runs in the background and owns
+        // the socket. We communicate with it via channel messages, and it will exit
+        // when both `rtnetlink_handle` and `_receiver` go out of scope.
+        tokio::spawn(netlink_connection);
+
+        let address_handle = rtnetlink_handle.address().get().execute();
+        let ipv4s: HashSet<String> = address_handle
+            .try_filter_map(|addr_message| async move {
+                if matches!(addr_message.header.family, AddressFamily::Inet) {
+                    Ok(addr_message
+                        .attributes
+                        .into_iter()
+                        .find(|attr| matches!(attr, AddressAttribute::Label(_)))
+                        .and_then(|x| match x {
+                            AddressAttribute::Label(label) => Some(label),
+                            _ => None,
+                        }))
+                } else {
+                    Ok(None)
+                }
+            })
+            .try_collect()
+            .await
+            .map_err(super::LinkDataError::communication)?;
+
+        let link_handle = rtnetlink_handle.link().get().execute();
+        link_handle
         .try_filter_map(|link_message| async {
             let maybe_interface_data = match extract_interface_name(&link_message) {
                 Some(interface_name) => {
@@ -189,15 +211,16 @@ async fn get_ipv4_interface_links() -> Result<HashMap<String, InterfaceLinkData>
         })
         .try_collect()
         .await
-        .map_err(LinkDataError::communication)
-}
+        .map_err(super::LinkDataError::communication)
+    }
 
-fn extract_interface_name(link_message: &LinkMessage) -> Option<String> {
-    link_message
-        .attributes
-        .iter()
-        .find_map(|attribute| match attribute {
-            LinkAttribute::IfName(name) => Some(name.clone()),
-            _ => None,
-        })
+    fn extract_interface_name(link_message: &LinkMessage) -> Option<String> {
+        link_message
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                LinkAttribute::IfName(name) => Some(name.clone()),
+                _ => None,
+            })
+    }
 }

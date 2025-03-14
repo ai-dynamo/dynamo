@@ -41,15 +41,32 @@ use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine
 
 /// Python snippet to import a file as a module
 const PY_IMPORT: &CStr = cr#"
-import importlib.util
+import runpy
 import sys
+import os
+import functools
+import types
 
-spec = importlib.util.spec_from_file_location("__main__", file_path)
-module = importlib.util.module_from_spec(spec)
+module_dir = os.path.dirname(file_path)
+if module_dir not in sys.path:
+    sys.path.insert(0, module_dir)
 
 sys.argv = sys_argv
-sys.modules["__main__"] = module
-spec.loader.exec_module(module)
+module_dict = runpy.run_path(file_path, run_name='__main__')
+
+# Create a module class with the generate function
+class Module:
+    def __init__(self, module_dict):
+        self.__dict__.update(module_dict)
+        self._generate_func = module_dict['generate']
+
+    async def generate(self, request):
+        async for response in self._generate_func(request):
+            yield response
+
+# Create module instance and store it in globals
+module = Module(module_dict)
+globals()['module'] = module
 "#;
 
 /// An engine that takes and returns strings, feeding them to a python written engine

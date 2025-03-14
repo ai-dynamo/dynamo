@@ -38,7 +38,14 @@ impl<S: Stream + Unpin> Stream for DeadlineStream<S> {
         }
 
         // Otherwise, poll the underlying stream
-        self.as_mut().stream.poll_next_unpin(cx)
+        let val = self.as_mut().stream.poll_next_unpin(cx);
+        // Log the poll result and return it
+        match &val {
+            Poll::Ready(Some(_)) => tracing::trace!("DeadlineStream: received item"),
+            Poll::Ready(None) => tracing::trace!("DeadlineStream: underlying stream ended"),
+            Poll::Pending => tracing::trace!("DeadlineStream: waiting for next item"),
+        }
+        val
     }
 }
 

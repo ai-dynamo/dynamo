@@ -84,6 +84,10 @@ pub type WorkerId = i64;
 /// A shared reference to a [`RadixBlock`].
 type SharedRadixBlock = Rc<RefCell<RadixBlock>>;
 
+pub fn compute_hash(data: &[u8]) -> u64 {
+    xxh3::xxh3_64_with_seed(data, XXH3_SEED)
+}
+
 /// Compute the hash of a local block.
 ///
 /// ### Arguments
@@ -94,7 +98,7 @@ type SharedRadixBlock = Rc<RefCell<RadixBlock>>;
 ///
 /// A `LocalBlockHash` representing the computed hash.
 pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
-    LocalBlockHash(xxh3::xxh3_64_with_seed(data, XXH3_SEED))
+    LocalBlockHash(compute_hash(data))
 }
 
 // /// Updated version of the `compute_block_hash` function that included the lora_id

@@ -22,16 +22,59 @@ const IGNORED: [&str; 3] = [".gitattributes", "LICENSE", "README.md"];
 /// Returns the directory it is in
 pub async fn from_hf(name: &Path) -> anyhow::Result<PathBuf> {
     let api = ApiBuilder::new().with_progress(true).build()?;
+    let model_name = name.display().to_string();
 
-    let repo = api.model(name.display().to_string());
-    let info = repo.info().await?;
+    let repo = api.model(model_name.clone());
+
+    let info = match repo.info().await {
+        Ok(info) => info,
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "Failed to fetch model '{}' from HuggingFace: {}. Is this a valid HuggingFace ID?",
+                model_name,
+                e
+            ));
+        }
+    };
+
+    if info.siblings.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Model '{}' exists but contains no downloadable files.",
+            model_name
+        ));
+    }
+
     let mut p = PathBuf::new();
+    let mut files_downloaded = false;
+
     for sib in info.siblings {
         if IGNORED.contains(&sib.rfilename.as_str()) || is_image(&sib.rfilename) {
             continue;
         }
-        p = repo.get(&sib.rfilename).await?;
+
+        match repo.get(&sib.rfilename).await {
+            Ok(path) => {
+                p = path;
+                files_downloaded = true;
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to download file '{}' from model '{}': {}",
+                    sib.rfilename,
+                    model_name,
+                    e
+                ));
+            }
+        }
     }
+
+    if !files_downloaded {
+        return Err(anyhow::anyhow!(
+            "No valid files found for model '{}'.",
+            model_name
+        ));
+    }
+
     match p.parent() {
         Some(p) => Ok(p.to_path_buf()),
         None => Err(anyhow::anyhow!("Invalid HF cache path: {}", p.display())),
@@ -39,5 +82,10 @@ pub async fn from_hf(name: &Path) -> anyhow::Result<PathBuf> {
 }
 
 fn is_image(s: &str) -> bool {
-    s.ends_with(".png") || s.ends_with("PNG") || s.ends_with(".jpg") || s.ends_with("JPG")
+    s.ends_with(".png")
+        || s.ends_with("PNG")
+        || s.ends_with(".jpg")
+        || s.ends_with("JPG")
+        || s.ends_with(".jpeg")
+        || s.ends_with("JPEG")
 }

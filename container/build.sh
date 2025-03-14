@@ -43,7 +43,7 @@ PYTHON_PACKAGE_VERSION=${current_tag:-$latest_tag.dev+$commit_id}
 # dependencies are specified in the /container/deps folder and
 # installed within framework specific sections of the Dockerfile.
 
-declare -A FRAMEWORKS=(["STANDARD"]=1 ["TENSORRTLLM"]=2 ["VLLM"]=3 ["VLLM_NIXL"]=4)
+declare -A FRAMEWORKS=(["VLLM"]=1 ["TENSORRTLLM"]=2)
 DEFAULT_FRAMEWORK=VLLM
 
 SOURCE_DIR=$(dirname "$(readlink -f "$0")")
@@ -51,12 +51,8 @@ DOCKERFILE=${SOURCE_DIR}/Dockerfile
 BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
-
-STANDARD_BASE_VERSION=25.01
-STANDARD_BASE_IMAGE=nvcr.io/nvidia/tritonserver
-STANDARD_BASE_IMAGE_TAG=${STANDARD_BASE_VERSION}-py3
-
 TENSORRTLLM_BASE_VERSION=25.01
+# FIXME: Need a public image for public consumption
 TENSORRTLLM_BASE_IMAGE="gitlab-master.nvidia.com:5005/dl/dgx/tritonserver/tensorrt-llm/amd64"
 TENSORRTLLM_BASE_IMAGE_TAG=krish-fix-trtllm-build.23766174
 TENSORRTLLM_PIP_WHEEL_PATH=""
@@ -192,10 +188,6 @@ get_options() {
 
     if [ -z "$FRAMEWORK" ]; then
         FRAMEWORK=$DEFAULT_FRAMEWORK
-    fi
-
-    if [[ ${FRAMEWORK^^} == "VLLM_NIXL" ]]; then
-	FRAMEWORK="VLLM"
     fi
 
     if [ ! -z "$FRAMEWORK" ]; then

@@ -16,57 +16,59 @@ ARG NSYS_URL=https://developer.nvidia.com/downloads/assets/tools/secure/nsight-s
 ARG NSYS_PKG=NsightSystems-linux-cli-public-2025.1.1.131-3554042.deb
 
 RUN apt-get update -y && apt-get -y install curl \
-                                            git \
-                                            libnuma-dev \
-                                            numactl \
-                                            wget \
-                                            autotools-dev \
-                                            automake \
-                                            libtool \
-                                            libz-dev \
-                                            libiberty-dev \
-                                            flex \
-                                            build-essential \
-                                            cmake \
-                                            libibverbs-dev \
-                                            libgoogle-glog-dev \
-                                            libgtest-dev \
-                                            libjsoncpp-dev \
-                                            libpython3-dev \
-                                            libboost-all-dev \
-                                            libssl-dev \
-                                            libgrpc-dev \
-                                            libgrpc++-dev \
-                                            libprotobuf-dev \
-                                            protobuf-compiler-grpc \
-                                            pybind11-dev \
-                                            python3-full \
-                                            python3-pip \
-                                            python3-numpy \
-                                            etcd-server \
-                                            net-tools \
-                                            pciutils \
-                                            libpci-dev \
-                                            vim \
-                                            tmux \
-                                            screen \
-                                            ibverbs-utils \
-                                            libibmad-dev
+    git \
+    libnuma-dev \
+    numactl \
+    wget \
+    autotools-dev \
+    automake \
+    libtool \
+    libz-dev \
+    libiberty-dev \
+    flex \
+    build-essential \
+    cmake \
+    libibverbs-dev \
+    libgoogle-glog-dev \
+    libgtest-dev \
+    libjsoncpp-dev \
+    libpython3-dev \
+    libboost-all-dev \
+    libssl-dev \
+    libgrpc-dev \
+    libgrpc++-dev \
+    libprotobuf-dev \
+    protobuf-compiler-grpc \
+    pybind11-dev \
+    python3-full \
+    python3-pip \
+    python3-numpy \
+    etcd-server \
+    net-tools \
+    pciutils \
+    libpci-dev \
+    vim \
+    tmux \
+    screen \
+    ibverbs-utils \
+    libibmad-dev
 
 RUN apt-get install -y linux-tools-common linux-tools-generic ethtool iproute2
 RUN apt-get install -y dkms linux-headers-generic
 RUN apt-get install -y meson ninja-build uuid-dev gdb
 
-RUN apt-get update && apt install -y wget libglib2.0-0
-RUN wget ${NSYS_URL}${NSYS_PKG} && dpkg -i $NSYS_PKG && rm $NSYS_PKG
+RUN apt install -y libglib2.0-0
+RUN wget ${NSYS_URL}${NSYS_PKG} &&\
+    apt install -y ./${NSYS_PKG} &&\
+    rm ${NSYS_PKG}
 
 RUN cd /usr/local/src && \
     curl -fSsL "https://content.mellanox.com/ofed/MLNX_OFED-${MOFED_VERSION}/MLNX_OFED_LINUX-${MOFED_VERSION}-ubuntu24.04-x86_64.tgz" -o mofed.tgz && \
     tar -xf /usr/local/src/mofed.tgz && \
     cd MLNX_OFED_LINUX-* && \
     apt-get update && apt-get install -y --no-install-recommends \
-        ./DEBS/libibverbs* ./DEBS/ibverbs-providers* ./DEBS/librdmacm* ./DEBS/libibumad* && \
-    rm -rf /var/lib/apt/lists/* /usr/local/src/*
+    ./DEBS/libibverbs* ./DEBS/ibverbs-providers* ./DEBS/librdmacm* ./DEBS/libibumad* && \
+    rm -rf /var/lib/apt/lists/* /usr/local/src/* mofed.tgz
 
 ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/cuda/lib64 \
     LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
@@ -86,18 +88,18 @@ RUN cd /usr/local/src && \
     curl -fSsL "https://github.com/openucx/ucx/tarball/${UCX_VERSION}" | tar xz && \
     cd openucx-ucx* && \
     ./autogen.sh && ./configure     \
-        --enable-shared             \
-        --disable-static            \
-        --disable-doxygen-doc       \
-        --enable-optimizations      \
-        --enable-cma                \
-        --enable-devel-headers      \
-        --with-cuda=/usr/local/cuda \
-        --with-verbs                \
-        --with-dm                   \
-        --with-gdrcopy=/usr/local   \
-        --enable-mt                 \
-        --with-mlx5-dv &&           \
+    --enable-shared             \
+    --disable-static            \
+    --disable-doxygen-doc       \
+    --enable-optimizations      \
+    --enable-cma                \
+    --enable-devel-headers      \
+    --with-cuda=/usr/local/cuda \
+    --with-verbs                \
+    --with-dm                   \
+    --with-gdrcopy=/usr/local   \
+    --enable-mt                 \
+    --with-mlx5-dv &&           \
     make -j &&                      \
     make -j install-strip &&        \
     ldconfig
@@ -138,12 +140,13 @@ RUN ls /opt/nixl
 # Install utilities
 RUN apt update -y && apt install -y git wget curl nvtop tmux vim
 # nats
-RUN wget https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-amd64.deb && dpkg -i nats-server-v2.10.24-amd64.deb
+RUN wget https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-amd64.deb && dpkg -i nats-server-v2.10.24-amd64.deb && rm nats-server-v2.10.24-amd64.deb
 # etcd
 ENV ETCD_VERSION="v3.5.18"
 RUN wget https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-amd64.tar.gz -O /tmp/etcd.tar.gz && \
-mkdir -p /usr/local/bin/etcd && \
-tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1
+    mkdir -p /usr/local/bin/etcd && \
+    tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
+    rm /tmp/etcd.tar.gz
 ENV PATH=/usr/local/bin/etcd/:$PATH
 
 
@@ -208,45 +211,40 @@ WORKDIR /workspace
 COPY pyproject.toml /workspace/
 COPY README.md /workspace/
 COPY LICENSE /workspace/
+COPY Cargo.toml /workspace/
+COPY Cargo.lock /workspace/
+COPY rust-toolchain.toml /workspace/
 
-# Build Rust runtime
-COPY lib/runtime /workspace/lib/runtime
-RUN cd lib/runtime && \
-    cargo build --release --locked && cargo doc --no-deps
-
-# Build OpenAI HTTP Service binaries
-COPY lib/llm /workspace/lib/llm
+COPY lib/ /workspace/lib/
 COPY components /workspace/components
-RUN cd components && \
-    cargo build --release && \
-    cp target/release/http /usr/local/bin/
-
-# Build Dynamo Run binaries
 COPY launch /workspace/launch
-RUN cd launch && \
-    cargo build --release --features mistralrs,sglang,vllm,python && \
-    cp target/release/dynamo-run /usr/local/bin/ && \
-    cp target/release/llmctl /usr/local/bin/
 
-# Generate C bindings for kv cache routing in vLLM
-COPY lib/bindings /workspace/lib/bindings
-RUN cd lib/bindings/c && \
-    cargo build --release --locked && cargo doc --no-deps
+ARG CARGO_BUILD_JOBS
+
+ENV CARGO_TARGET_DIR=/workspace/target
+
+RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
+    cargo doc --no-deps && \
+    cp target/release/dynamo-run /usr/local/bin && \
+    cp target/release/http /usr/local/bin && \
+    cp target/release/llmctl /usr/local/bin && \
+    cp target/release/metrics /usr/local/bin
 
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 # Build dynamo wheel
 RUN source /opt/dynamo/venv/bin/activate && \
+    cd /workspace/lib/bindings/python && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/ai_dynamo*cp312*.whl && \
-    cd /workspace/deploy/dynamo/sdk && \
+    uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
+    cd /workspace && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/ai_dynamo_sdk*any.whl
+    uv pip install /workspace/dist/ai_dynamo*any.whl
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
     mkdir /opt/dynamo/bindings/lib && \
     cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
-    cp lib/bindings/c/target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
+    cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
     cp -r lib/bindings/c/include /opt/dynamo/bindings/.
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
