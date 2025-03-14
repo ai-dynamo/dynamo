@@ -22,5 +22,6 @@ from dynamo.sdk import service
 )
 class Frontend:
     def __init__(self):
-        subprocess.run(["http"]),
         subprocess.run(["llmctl", "http", "add", "chat-models", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "dynamo-init.vllm.generate"])
+        
+        subprocess.run(["http"], stdout=None, stderr=None)
