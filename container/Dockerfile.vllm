@@ -176,7 +176,8 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     git checkout ${VLLM_REF} && \
     git apply /tmp/deps/vllm/${VLLM_PATCH} && \
     VLLM_USE_PRECOMPILED=1 uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/vllm*cp312*.whl
+    uv pip install /workspace/dist/vllm*cp312*.whl && \
+    cd .. && rm -rf vllm
 
 # # Install genai-perf for benchmarking
 ARG GENAI_PERF_TAG="25d0188713adc47868d6b3f22426375237a90529"
