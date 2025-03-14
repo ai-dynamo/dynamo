@@ -123,8 +123,8 @@ class ResourceType(str, Enum):
 
 class BaseSchema(BaseModel):
     uid: str
-    created_at: datetime
-    updated_at: datetime
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
     deleted_at: Optional[datetime] = None
 
 
