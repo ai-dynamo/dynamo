@@ -84,7 +84,7 @@ jobs:
       working-directory: ${{ matrix.dir }}
       run: |
         cargo-deny --version || cargo install cargo-deny@0.16.4
-        cargo-deny check --hide-inclusion-graph licenses --config ${{ github.workspace }}/deny.toml
+        cargo-deny --no-default-features check --hide-inclusion-graph licenses --config ${{ github.workspace }}/deny.toml
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
       run: cargo test --locked --all-targets

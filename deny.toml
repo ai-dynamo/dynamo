@@ -31,19 +31,17 @@ allow = [
     "MPL-2.0",
     "MIT-0"
 ]
-# Crate with empty "licence" field in Cargo.toml
-exclude = [
-	# MIT: https://github.com/guidance-ai/llguidance
-	"llguidance",
-	# MIT: https://github.com/guidance-ai/llguidance/toktrie
-	"toktrie",
-	# MIT: https://github.com/guidance-ai/llguidance/toktrie_hf_tokenizers
-	"toktrie_hf_tokenizers",
-]
 
-
+# TODO exceptions
+# MIT: https://github.com/guidance-ai/llguidance
+#  "llguidance",
+# MIT: https://github.com/guidance-ai/llguidance/toktrie
+#  "toktrie",
+# MIT: https://github.com/guidance-ai/llguidance/toktrie_hf_tokenizers
+#  "toktrie_hf_tokenizers",
 
 [[licenses.clarify]]
+
 name = "ring"
 expression = "MIT AND ISC AND OpenSSL"
 license-files = [
