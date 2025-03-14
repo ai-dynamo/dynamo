@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-# linking syntax example
-
-
 from dynamo.sdk.tests.pipeline import Backend, Frontend, Middle
+import pytest
 
-# print("INITIAL DEPENDENCIES")
+pytestmark = pytest.mark.pre_merge
+
+def test_link():
+    assert Frontend.dependencies == []
 # print("Frontend dependencies", Frontend.dependencies)
 # print("Middle dependencies", Middle.dependencies)
 # print("Backend dependencies", Backend.dependencies)
@@ -27,7 +27,7 @@ from dynamo.sdk.tests.pipeline import Backend, Frontend, Middle
 # print("\n\n\n")
 
 print()
-Frontend.link(Middle).build()
+Frontend.link(Middle)
 
 print("Frontend dependencies", Frontend.dependencies)
 print("Middle dependencies", Middle.dependencies)
