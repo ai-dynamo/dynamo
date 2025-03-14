@@ -160,6 +160,3 @@ insta = { version = "1.41", features = [
 [build-dependencies]
 bindgen = "0.70"
 cmake = "0.1"
-
-[profile.dev.package]
-insta.opt-level = 3

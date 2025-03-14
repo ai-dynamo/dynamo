@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+existingImagePullSecret: nvcrimagepullsecret
+
+# Global values used across charts
+global:
+  NGC_API_KEY: ${NGC_TOKEN}
+
+dynamo-operator:
+  enabled: true
+  natsAddr: "nats://${RELEASE_NAME}-nats:4222"
+  etcdAddr: "${RELEASE_NAME}-etcd:2379"
+  namespaceRestriction:
+    enabled: true
+    targetNamespace: ${NAMESPACE}
+  controllerManager:
+    manager:
+      image:
+        repository: gitlab-master.nvidia.com:5005/aire/microservices/compoundai/dynamo-operator
+        tag: ${CI_COMMIT_SHA}
+      args:
+        - --health-probe-bind-address=:8081
+        - --metrics-bind-address=127.0.0.1:8080
+        - --leader-elect=false
+        - --natsAddr=nats://my-nats:4222
+        - --etcdAddr=etcd:2379
+
+  dynamo:
+    yatai:
+    # todo: only use dns name
+      endpoint: http://dynamo-server
+      clusterName: default
+
+    yataiSystem:
+    # can we just infer this, or change scheme to use default until overridden
+      namespace: ""
+
+    internalImages:
+      bentoDownloader: quay.io/bentoml/bento-downloader:0.0.5
+      kaniko: quay.io/bentoml/kaniko:debug
+      buildkit: quay.io/bentoml/buildkit:master
+      buildkitRootless: quay.io/bentoml/buildkit:master-rootless
+      metricsTransformer: quay.io/bentoml/yatai-bento-metrics-transformer:0.0.4
+      debugger: quay.io/bentoml/bento-debugger:0.0.8
+      monitorExporter: quay.io/bentoml/bentoml-monitor-exporter:0.0.3
+      proxy: quay.io/bentoml/bentoml-proxy:0.0.1
+
+    disableAutomateBentoImageBuilder: false
+    enableRestrictedSecurityContext: false
+    disableYataiComponentRegistration: false
+
+    dockerRegistry:
+      server: 'nvcr.io/nvidian/nim-llm-dev'
+      inClusterServer: ''
+      username: '$oauthtoken'
+      # Password will use global.NGC_API_KEY by default
+      password: ""
+      passwordExistingSecretName: ''
+      passwordExistingSecretKey: ''
+      secure: true
+      bentoRepositoryName: yatai-bentos
+
+    bentoImageBuildEngine: kaniko
+    addNamespacePrefixToImageName: false
+
+    estargz:
+      enabled: false
+
+    kaniko:
+      cacheRepo: ''
+      snapshotMode: ''
+
+dynamo-api-server:
+  enabled: true
+  namespaceRestriction:
+    enabled: true
+    targetNamespace: ${NAMESPACE}
+  istio:
+    host:
+      ${NAMESPACE}.dev.aire.nvidia.com
+  dynamo:
+    # need to be set to deployment-management
+    env:
+      resource_scope: "user"
+  image:
+    repository: gitlab-master.nvidia.com:5005/aire/microservices/compoundai/dynamo-api-server
+    tag: ${CI_COMMIT_SHA}
+    pullPolicy: Always
+  imagePullSecrets:
+    - name: nvcrimagepullsecret
+    - name: gitlab-imagepull
+  postgresql:
+    primary:
+      persistence:
+        enabled: false
+  minio:
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: ""
+    apiIngress:
+      enabled: false
+      ingressClassName: nginx
+      hostname: minio.example.com
+      pathType: Prefix
+
+etcd:
+  enabled: true
+
+nats:
+  enabled: true
