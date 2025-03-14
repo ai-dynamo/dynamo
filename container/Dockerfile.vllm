@@ -181,13 +181,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 ARG VLLM_REF="v0.7.2"
 ARG VLLM_PATCH="vllm_${VLLM_REF}-dynamo-kv-disagg-patch.patch"
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
-    git clone https://github.com/vllm-project/vllm.git vllm && \
-    cd vllm && \
-    git checkout ${VLLM_REF} && \
-    git apply /tmp/deps/vllm/${VLLM_PATCH} && \
-    VLLM_USE_PRECOMPILED=1 uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/vllm*cp312*.whl && \
-    cd .. && rm -rf vllm
+    bash /tmp/deps/vllm/install.sh --patch /tmp/deps/vllm/${VLLM_PATCH} --ref ${VLLM_REF} --install-cmd "uv pip install --editable" --use-precompiled --installation-dir /opt/vllm
 
 # Install genai-perf for benchmarking
 ARG GENAI_PERF_TAG="25d0188713adc47868d6b3f22426375237a90529"
