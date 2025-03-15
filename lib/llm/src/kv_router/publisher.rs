@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::kv_router::{indexer::RouterEvent, protocols::*, KV_EVENT_SUBJECT};
+use crate::kv_router::{indexer::RouterEvent, protocols::*, KV_EVENT_SUBJECT, KV_METRICS_ENDPOINT};
 use async_trait::async_trait;
 use dynamo_runtime::traits::events::EventPublisher;
 use dynamo_runtime::{
@@ -104,7 +104,7 @@ impl KvMetricsPublisher {
         let handler = Ingress::for_engine(handler)?;
 
         component
-            .endpoint("load_metrics")
+            .endpoint(KV_METRICS_ENDPOINT)
             .endpoint_builder()
             .stats_handler(move |_| {
                 let metrics = metrics_rx.borrow_and_update().clone();

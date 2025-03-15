@@ -29,16 +29,18 @@ pub mod scoring;
 
 use crate::kv_router::{
     indexer::{KvIndexer, KvIndexerInterface, RouterEvent},
-    metrics_aggregator::collect_endpoints,
+    metrics_aggregator::collect_endpoints_task,
     scheduler::KvScheduler,
     scoring::ProcessedEndpoints,
 };
 
 use dynamo_runtime::traits::events::{EventPublisher, EventSubscriber};
 
+// [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
 pub const KV_EVENT_SUBJECT: &str = "kv_events";
 pub const KV_HIT_RATE_SUBJECT: &str = "kv-hit-rate";
+pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 
 pub struct KvRouter {
     // properties of request plane
@@ -59,28 +61,15 @@ impl KvRouter {
         component: Component,
         kv_block_size: usize,
     ) -> Result<Arc<Self>> {
-        let nats_client = runtime.nats_client();
-        let service_name = component.service_name();
         let namespace = runtime.namespace(component.namespace().name())?;
 
         tracing::info!("Component Namespace {}", component.namespace());
-        tracing::info!("Component Service Name {}", service_name);
+        tracing::info!("Component Service Name {}", component.service_name());
         tracing::info!("KV Subject {}.{}", component.subject(), KV_EVENT_SUBJECT);
-        Self::new(
-            nats_client,
-            service_name,
-            component,
-            namespace,
-            kv_block_size,
-        )
-        .await
+        Self::new(component, namespace, kv_block_size).await
     }
 
     pub async fn new(
-        // [gluo TODO] shouldn't need 'nats_client' and 'service_name',
-        // replace by 'component'
-        nats_client: dynamo_runtime::transports::nats::Client,
-        service_name: String,
         component: Component,
         namespace: Namespace,
         kv_block_size: usize,
@@ -88,9 +77,8 @@ impl KvRouter {
         let cancellation_token = CancellationToken::new();
         let (ep_tx, ep_rx) = tokio::sync::mpsc::channel(128);
 
-        tokio::spawn(collect_endpoints(
-            nats_client.clone(),
-            service_name.clone(),
+        tokio::spawn(collect_endpoints_task(
+            component.clone(),
             ep_tx,
             cancellation_token.clone(),
         ));
@@ -124,7 +112,7 @@ impl KvRouter {
         });
 
         Ok(Arc::new(Self {
-            service_name,
+            service_name: component.service_name(),
             cancellation_token,
             scheduler,
             indexer,
