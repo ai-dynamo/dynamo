@@ -25,7 +25,7 @@ This directory contains configuration for visualizing metrics from the metrics a
   ```
 
 5. Web servers started:
-   - Grafana: `http://localhost:3000` (default login: admin/admin) (started by docker compose)
+   - Grafana: `http://localhost:3001` (default login: admin/admin) (started by docker compose)
    - Prometheus Server: `http://localhost:9090` (started by docker compose)
    - Prometheus Metrics Endpoint: `http://localhost:9091/metrics` (started by `components/metrics` application)
 
