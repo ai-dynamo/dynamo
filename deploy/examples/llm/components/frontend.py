@@ -17,8 +17,8 @@ import os
 import subprocess
 
 from components.processor import Processor
-from components.worker import VllmWorker
 from components.routerless.worker import VllmWorkerRouterLess
+from components.worker import VllmWorker
 from pydantic import BaseModel
 
 from dynamo.sdk import depends, service

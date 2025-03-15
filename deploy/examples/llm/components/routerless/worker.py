@@ -22,15 +22,13 @@ from utils.vllm import parse_vllm_args
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
 )
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionStreamResponse,
-)
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 
-from dynamo.sdk import service, dynamo_endpoint, async_onstart, dynamo_context
+from dynamo.sdk import async_onstart, dynamo_context, dynamo_endpoint, service
+
 
 @service(
     dynamo={
@@ -127,6 +125,6 @@ class VllmWorkerRouterLess:
             remote_prefill_params=remote_prefill_params,
         ):
             if raw_response.startswith("data: [DONE]"):
-                    break
+                break
             response = json.loads(raw_response.lstrip("data: "))
             yield response
