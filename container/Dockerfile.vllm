@@ -83,6 +83,16 @@ RUN cd /usr/local/src && \
     ./DEBS/libibverbs* ./DEBS/ibverbs-providers* ./DEBS/librdmacm* ./DEBS/libibumad* && \
     rm -rf /var/lib/apt/lists/* /usr/local/src/* mofed.tgz
 
+# Build and install Perf Analyzer for benchmarking\
+RUN apt-get update -y && apt-get -y install rapidjson-dev zlib1g-dev
+RUN git clone https://github.com/triton-inference-server/perf_analyzer.git
+ARG GENAI_PERF_TAG="25d0188713adc47868d6b3f22426375237a90529"
+RUN git -C perf_analyzer checkout ${GENAI_PERF_TAG}
+RUN mkdir perf_analyzer/build
+RUN cmake -B perf_analyzer/build -S perf_analyzer -D TRITON_ENABLE_PERF_ANALYZER_OPENAI=ON
+RUN cmake --build perf_analyzer/build -- -j8
+ENV PATH="$(pwd)/perf_analyzer/build/perf_analyzer/src/perf-analyzer-build:${PATH}"
+
 ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/cuda/lib64 \
     LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
 
