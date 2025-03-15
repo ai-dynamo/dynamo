@@ -15,7 +15,7 @@
 
 use crate::kv_router::{indexer::RouterEvent, protocols::*, KV_EVENT_SUBJECT, KV_METRICS_ENDPOINT};
 use async_trait::async_trait;
-use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
+use dynamo_runtime::traits::{events::EventPublisher, DistributedRuntimeProvider};
 use dynamo_runtime::{
     component::Component,
     pipeline::{
@@ -36,11 +36,7 @@ pub struct KvEventPublisher {
 }
 
 impl KvEventPublisher {
-    pub fn new(
-        component: Component,
-        worker_id: i64,
-        kv_block_size: usize,
-    ) -> Result<Self> {
+    pub fn new(component: Component, worker_id: i64, kv_block_size: usize) -> Result<Self> {
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
         let p = KvEventPublisher { tx, kv_block_size };
 

@@ -69,14 +69,14 @@ async def test_event_handler(distributed_runtime):
     kv_block_size = 32
     namespace = "kv_test"
     component = "event"
+    kv_listener = distributed_runtime.namespace(namespace).component(component)
+    await kv_listener.create_service()
 
     # publisher
     worker_id = 233
-    event_publisher = EventPublisher(namespace, component, worker_id, kv_block_size)
+    event_publisher = EventPublisher(kv_listener, worker_id, kv_block_size)
 
     # indexer
-    kv_listener = distributed_runtime.namespace(namespace).component(component)
-    await kv_listener.create_service()
     indexer = KvIndexer(kv_listener, kv_block_size)
 
     test_token = [3] * kv_block_size

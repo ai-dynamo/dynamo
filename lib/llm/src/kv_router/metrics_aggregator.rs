@@ -83,7 +83,6 @@ impl KvMetricsAggregator {
 /// [gluo TODO] 'collect_endpoints' is from component/metrics,
 /// should consolidate these functions into generic metrics aggregator
 /// functions and shared by KvMetricsAggregator and component/metrics.
-
 /// Collect endpoints from a component
 pub async fn collect_endpoints(
     component: &Component,
@@ -144,7 +143,7 @@ pub async fn collect_endpoints_task(
                             Ok(data) => Some(Endpoint {
                                 name: s.name,
                                 subject: s.subject,
-                                data: data,
+                                data,
                             }),
                             Err(e) => {
                                 tracing::debug!("skip endpoint data that can't be parsed as ForwardPassMetrics: {:?}", e);
