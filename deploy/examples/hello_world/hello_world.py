@@ -98,7 +98,7 @@ class Middle:
 @service(
     resources={"cpu": "1"},
     traffic={"timeout": 60},
-    image=DYNAMO_IMAGE
+    image=DYNAMO_IMAGE,
 )  # Regular HTTP API
 class Frontend:
     middle = depends(Middle)
