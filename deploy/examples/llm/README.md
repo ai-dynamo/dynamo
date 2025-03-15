@@ -28,7 +28,7 @@ This directory contains examples and reference implementations for deploying Lar
 ## Deployment Architectures
 
 ### Monolith
-Single-instance deployment where all components run in the same process.
+Single-instance deployment where both prefill and decode are done by the same worker.
 
 ### Disaggregated
 Distributed deployment where components are separated and can scale independently.
