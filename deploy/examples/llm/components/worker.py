@@ -17,8 +17,8 @@
 import asyncio
 import os
 
-from disaggregated.disagg_router import PyDisaggregatedRouter
-from disaggregated.prefill_worker import PrefillWorker
+from components.disagg_router import PyDisaggregatedRouter
+from components.prefill_worker import PrefillWorker
 from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
 from utils.protocol import MyRequestOutput, vLLMGenerateRequest
@@ -32,15 +32,13 @@ from vllm.sampling_params import RequestOutputKind
 
 from dynamo.llm import KvMetricsPublisher
 from dynamo.sdk import (
-    async_onstart,
+    async_on_start,
     depends,
     dynamo_context,
     dynamo_endpoint,
     server_context,
     service,
 )
-
-os.environ["VLLM_LOG_LEVEL"] = "DEBUG"
 
 
 @service(
@@ -101,7 +99,7 @@ class VllmWorker:
             os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_idx}"
             self.metrics_publisher = KvMetricsPublisher()
 
-    @async_onstart
+    @async_on_start
     async def async_init(self):
         self._engine_context = build_async_engine_client_from_engine_args(
             self.engine_args

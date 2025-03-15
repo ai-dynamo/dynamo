@@ -43,9 +43,8 @@ Users/Clients (HTTP)
 1. Launch all three services using a single command -
 
 ```bash
-cd /workspace/deploy/examples
-
-dynamo hello_world.hello_world:Frontend
+cd /workspace/deploy/examples/hello_world
+dynamo serve hello_world:Frontend
 ```
 
 2. Send request to frontend using curl -

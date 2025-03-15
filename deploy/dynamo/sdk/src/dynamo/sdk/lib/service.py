@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple, TypeVar, Union
 
 from _bentoml_sdk import Service, ServiceConfig
@@ -94,6 +94,10 @@ class DynamoService(Service[T]):
         )
         if self._dynamo_config.name is None:
             self._dynamo_config.name = inner.__name__
+
+        # Add dynamo configuration to the service config
+        # this allows for the config to be part of the service in bento.yaml
+        self.config["dynamo"] = asdict(self._dynamo_config)
 
         # Register Dynamo endpoints
         self._dynamo_endpoints: Dict[str, DynamoEndpoint] = {}
