@@ -317,7 +317,7 @@ pub async fn run(
             if !model_path.is_file() {
                 anyhow::bail!("--model-path should refer to a GGUF file. llama_cpp does not support safetensors.");
             }
-            let Some(card) = maybe_card else {
+            let Some(card) = maybe_card.clone() else {
                 anyhow::bail!(
                     "Pass --model-config so we can find the tokenizer, should be an HF checkout."
                 );
@@ -398,6 +398,16 @@ pub async fn run(
                 runtime.clone(),
                 cancel_token.clone(),
                 Some(prompt),
+                engine_config,
+            )
+            .await?;
+        }
+        Input::Batch(path) => {
+            crate::input::batch::run(
+                runtime.clone(),
+                cancel_token.clone(),
+                maybe_card,
+                path,
                 engine_config,
             )
             .await?;

@@ -15,34 +15,49 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-## Prerequisites
+# LLM Deployment Examples
 
-Start required services (etcd and NATS):
+This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations.
 
-   Option A: Using [Docker Compose](/deploy/docker-compose.yml) (Recommended)
-   ```bash
-   docker compose -f deploy/docker-compose.yml up -d
-   ```
+## Components
 
-   Option B: Manual Setup
+- workers: Prefill and decode worker handles actual LLM inference
+- router: Handles API requests and routes them to appropriate workers based on specified strategy
+- frontend: OpenAI compatible http server handles incoming requests
 
-    - [NATS.io](https://docs.nats.io/running-a-nats-service/introduction/installation) server with [Jetstream](https://docs.nats.io/nats-concepts/jetstream)
-        - example: `nats-server -js --trace`
-    - [etcd](https://etcd.io) server
-        - follow instructions in [etcd installation](https://etcd.io/docs/v3.5/install/) to start an `etcd-server` locally
+## Deployment Architectures
 
-## Build docker
+### Monolith
+Single-instance deployment where both prefill and decode are done by the same worker.
+
+### Disaggregated
+Distributed deployment where prefill and decode are done by separate workers that can scale independently.
+
+## Getting Started
+
+1. Choose a deployment architecture based on your requirements
+2. Configure the components as needed
+3. Deploy using the provided scripts
+
+### Prerequisites
+
+Start required services (etcd and NATS) using [Docker Compose](/deploy/docker-compose.yml)
+```bash
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+### Build docker
 
 ```
 ./container/build.sh
 ```
 
-## Run container
+### Run container
 
 ```
 ./container/run.sh -it
 ```
-## Run deployment
+## Run Deployment
 
 This figure shows an overview of the major components to deploy:
 
@@ -66,64 +81,39 @@ This figure shows an overview of the major components to deploy:
 
 ```
 
-### Disaggregated vLLM deployment
+### Example architectures
 
-Serve following components:
-
-- processor: Processor routes the requests to the (decode) workers. Three scheduling strategies are supported: random and kv.
-- kv router: The KV Router is a component that aggregates KV Events from all the workers and maintains
-a prefix tree of the cached tokens. It makes decisions on which worker to route requests
-to based on the length of the prefix match and the load on the workers.
-
-- decode worker: runs on gpu = 0
-- prefill worker: runs on gpu = 1
-
+#### Router based worker
 ```bash
-
-cd /workspace/deploy/examples/vllm
-
-dynamo serve disaggregated.processor:Processor  \
-   --Processor.model=deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-   --Processor.tokenizer=deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-   --Processor.block-size=64 \
-   --Processor.max-model-len=16384 \
-   --Processor.router=kv \
-   --Router.min-workers=1 \
-   --Router.block-size=64 \
-   --Router.model-name=deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-   --VllmWorker.remote-prefill=true \
-   --VllmWorker.model=deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-   --VllmWorker.enforce-eager=true \
-   --VllmWorker.tensor-parallel-size=1 \
-   --VllmWorker.kv-transfer-config='{"kv_connector": "DynamoNixlConnector"}' \
-   --VllmWorker.block-size=64  \
-   --VllmWorker.max-num-batched-tokens=16384 \
-   --VllmWorker.max-model-len=16384 \
-   --VllmWorker.router=kv \
-   --VllmWorker.enable-prefix-caching=true \
-   --PrefillWorker.model=deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-   --PrefillWorker.enforce-eager=true \
-   --PrefillWorker.block-size=64 \
-   --PrefillWorker.max-model-len=16384 \
-   --PrefillWorker.max-num-batched-tokens=16384 \
-   --PrefillWorker.kv-transfer-config='{"kv_connector": "DynamoNixlConnector"}' \
-   --PrefillWorker.cuda-visible-device-offset=1
+cd /workspace/deploy/examples/llm
+dynamo serve monolith.router_based_deployment:Frontend -f ./configs/monolith/router_based_deployment.yaml
 ```
 
-
-Add model to dynamo and start http server.
+#### Routerless monolith
+```bash
+cd /workspace/deploy/examples/llm
+dynamo serve monolith.routerless_deployment:Frontend -f ./configs/monolith/routerless_deployment.yaml
 ```
-llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo-init.Processor.chat_completions
 
-TRT_LOG=DEBUG http --port 8181
+#### Router based disaggregated serving
+```bash
+cd /workspace/deploy/examples/llm
+dynamo serve disaggregated.router_based_deployment:Frontend -f ./configs/disaggregated/router_based_deployment.yaml
 ```
+
+#### Routerless disaggregated serving
+```bash
+cd /workspace/deploy/examples/llm
+dynamo serve disaggregated.routerless_deployment:Frontend -f ./configs/disaggregated/routerles_deployment.yaml
+```
+
 ### Client
 
 In another terminal:
 ```bash
 # this test request has around 200 tokens isl
 
-curl localhost:8181/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "messages": [
     {
@@ -134,12 +124,24 @@ curl localhost:8181/v1/chat/completions   -H "Content-Type: application/json"   
     "stream":false,
     "max_tokens": 30
   }'
+
 ```
 
 ### Close deployment
 
-Kill all python processes and clean up metadata files:
+Kill all dynamo processes managed by circusd.
 
 ```
-pkill -9 -f python
+function kill_tree() {
+    local parent=$1
+    local children=$(ps -o pid= --ppid $parent)
+    for child in $children; do
+        kill_tree $child
+    done
+    echo "Killing process $parent"
+    kill -9 $parent
+}
+
+# kill process-tree of circusd
+kill_tree $(pgrep circusd)
 ```

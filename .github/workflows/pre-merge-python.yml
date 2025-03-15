@@ -69,7 +69,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
         run: |
-          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --framework ${{ matrix.framework }} ${{ steps.which_caches.outputs.cache_from_location }} ${{ steps.which_caches.outputs.cache_to_location }}
+          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target dev --framework ${{ matrix.framework }} ${{ steps.which_caches.outputs.cache_from_location }} ${{ steps.which_caches.outputs.cache_to_location }}
       - name: Run pytest
         env:
           PYTEST_MARKS: "pre_merge or mypy"

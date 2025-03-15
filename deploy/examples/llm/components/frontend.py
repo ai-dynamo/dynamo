@@ -15,8 +15,9 @@
 
 import subprocess
 
-from disaggregated.processor import Processor
-from disaggregated.worker import VllmWorker
+from components.processor import Processor
+from components.routerless.worker import VllmWorkerRouterLess
+from components.worker import VllmWorker
 from pydantic import BaseModel
 
 from dynamo.sdk import depends, service
@@ -37,6 +38,7 @@ class FrontendConfig(BaseModel):
 # todo this should be called ApiServer
 class Frontend:
     worker = depends(VllmWorker)
+    worker_routerless = depends(VllmWorkerRouterLess)
     processor = depends(Processor)
 
     def __init__(self):

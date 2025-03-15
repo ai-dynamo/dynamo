@@ -13,13 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import uuid
 from enum import Enum
 from typing import AsyncIterator, Tuple, Union
 
-from disaggregated.kv_router import Router
-from disaggregated.worker import VllmWorker
+from components.kv_router import Router
+from components.worker import VllmWorker
 from transformers import AutoTokenizer
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.protocol import MyRequestOutput, Tokens, vLLMGenerateRequest
@@ -31,8 +30,6 @@ from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from dynamo.sdk import depends, dynamo_context, dynamo_endpoint, service
-
-os.environ["VLLM_LOG_LEVEL"] = "DEBUG"
 
 
 class RequestType(Enum):

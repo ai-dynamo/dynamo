@@ -51,11 +51,14 @@ impl Default for MultiNodeConfig {
     }
 }
 
-#[cfg(feature = "python")]
+#[cfg(any(feature = "sglang", feature = "vllm", feature = "python"))]
 use pyo3::prelude::*;
 
 /// On Mac embedded Python interpreters do not pick up the virtual env.
-#[cfg(all(target_os = "macos", feature = "python"))]
+#[cfg(all(
+    target_os = "macos",
+    any(feature = "sglang", feature = "vllm", feature = "python")
+))]
 fn fix_venv(venv: String, py: pyo3::Python<'_>) -> anyhow::Result<()> {
     let version_info = py.version_info();
     let sys: PyObject = py.import("sys")?.into();
@@ -69,5 +72,8 @@ fn fix_venv(venv: String, py: pyo3::Python<'_>) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(all(target_os = "linux", feature = "python"))]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "sglang", feature = "vllm", feature = "python")
+))]
 fn fix_venv(_venv: String, _py: Python<'_>) {}
