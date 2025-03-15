@@ -14,7 +14,7 @@
 #  limitations under the License.
 
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from kubernetes import config as k8s_config
 
@@ -28,6 +28,7 @@ class DynamoDeployment:
         created_at: str,
         created_by: str,
         _schema: str = "v1",
+        ingress_base_url: Optional[str] = None,
     ):
         self.name = name
         self.cluster = cluster
@@ -35,7 +36,11 @@ class DynamoDeployment:
         self.created_at = created_at
         self.created_by = created_by
         self._schema = _schema
-        self.ingress_url = f"https://{cluster}.dev.aire.nvidia.com/api/v2/deployments/{name}?cluster={cluster}"
+        self.ingress_url = (
+            f"{ingress_base_url}/api/v2/deployments/{name}?cluster={cluster}"
+            if ingress_base_url
+            else None
+        )
 
     @classmethod
     def create_deployment(
@@ -56,6 +61,7 @@ class DynamoDeployment:
             created_at=datetime.now().isoformat(),
             created_by=username,
             _schema="v1alpha1",
+            ingress_base_url=config.get("ingress_base_url"),
         )
 
     def get_crd_payload(

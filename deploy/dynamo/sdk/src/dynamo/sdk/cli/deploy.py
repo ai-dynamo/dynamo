@@ -249,9 +249,6 @@ def create_dynamo_deployment(
     if config_dict is not None and config_dict != "":
         cfg_dict = json.loads(config_dict)
 
-    # Always pass a tuple[str, ...] to convert_env_to_dict
-    env_tuple: tuple[str, ...] = env if env is not None else ()
-
     config_params = DeploymentConfigParameters(
         name=name,
         bento=bento,
@@ -261,7 +258,7 @@ def create_dynamo_deployment(
         scaling_min=scaling_min,
         instance_type=instance_type,
         strategy=strategy,
-        envs=convert_env_to_dict(env_tuple),
+        envs=convert_env_to_dict(tuple(env) if env else None),
         secrets=list(secret) if secret is not None else None,
         config_file=config_file,
         config_dict=cfg_dict,
@@ -271,8 +268,9 @@ def create_dynamo_deployment(
 
     try:
         config_params.verify()
-    except BentoMLException as bentoml_ex:
-        raise_deployment_config_error(bentoml_ex, "create")
+    except BentoMLException as exc:
+        error_message = str(exc)
+        raise_deployment_config_error(error_message, "create")
 
     # Fix the deployment name generation
     deployment_name = name
@@ -289,10 +287,10 @@ def create_dynamo_deployment(
 
     # Convert env tuple to k8s env format
     env_vars = []
-    if env_tuple:
-        for item in env_tuple:
-            if "=" in item:
-                k, v = item.split("=", 1)
+    if env:
+        for e in env:
+            if "=" in e:
+                k, v = e.split("=", 1)
                 env_vars.append({"name": k, "value": v})
 
     # Get the CRD payload
@@ -311,11 +309,6 @@ def create_dynamo_deployment(
             spinner.update("Creating deployment via Kubernetes operator")
             config.load_kube_config()
             api = client.CustomObjectsApi()
-
-            # Add debug logging for CRD payload
-            logger.debug(
-                f"Creating CRD with payload: {json.dumps(crd_payload, indent=2)}"
-            )
 
             # Create the CRD
             group = "nvidia.com"
@@ -358,7 +351,6 @@ def create_dynamo_deployment(
                     conditions = status_data.get("status", {}).get("conditions", [])
                     events = status_data.get("status", {}).get("events", [])
 
-                    # Enhanced debug logging
                     logger.debug(f"Current deployment state: {state}")
                     logger.debug(f"Conditions: {json.dumps(conditions, indent=2)}")
                     logger.debug(f"Events: {json.dumps(events, indent=2)}")
@@ -375,12 +367,13 @@ def create_dynamo_deployment(
                         "available",
                         "complete",
                     ]:
-                        ingress_url = (
-                            f"https://{namespace}.dev.aire.nvidia.com/api/v2/deployments/"
-                            f"{deployment_name}?cluster={namespace}"
-                        )
-                        spinner.log("[bold green]Deployment ready![/]")
-                        spinner.log(f"[bold]Ingress URL: {ingress_url}[/]")
+                        if deployment.ingress_url:
+                            spinner.log("[bold green]Deployment ready![/]")
+                            spinner.log(
+                                f"[bold]Ingress URL: {deployment.ingress_url}[/]"
+                            )
+                        else:
+                            spinner.log("[bold green]Deployment ready![/]")
                         return deployment
                     # Check for failed states
                     elif state.lower() in [
@@ -415,9 +408,8 @@ def create_dynamo_deployment(
 
                     time.sleep(5)
 
-                # Timed out waiting for a success state
                 if time.time() - start_time >= timeout:
-                    # Check final status once more
+                    # Check if deployment exists but we just timed out waiting
                     try:
                         final_status = api.get_namespaced_custom_object(
                             group=group,
@@ -433,40 +425,35 @@ def create_dynamo_deployment(
                             "available",
                             "complete",
                         ]:
-                            ingress_url = (
-                                f"https://{namespace}.dev.aire.nvidia.com/api/v2/deployments/"
-                                f"{deployment_name}?cluster={namespace}"
-                            )
-                            spinner.log("[bold green]Deployment ready![/]")
-                            spinner.log(f"[bold]Ingress URL: {ingress_url}[/]")
+                            if deployment.ingress_url:
+                                spinner.log("[bold green]Deployment ready![/]")
+                                spinner.log(
+                                    f"[bold]Ingress URL: {deployment.ingress_url}[/]"
+                                )
+                            else:
+                                spinner.log("[bold green]Deployment ready![/]")
                             return deployment
-                    except Exception:
+                    except Exception as e:
                         logger.error("Timeout check failed", exc_info=True)
 
-                    try:
-                        pods = api.list_namespaced_pod(
-                            namespace, label_selector=f"app={deployment_name}"
-                        )
-                        pod_statuses = json.dumps(
-                            [p.status for p in pods.items], indent=2
-                        )
-                        logger.error(f"Timeout reached. Pod statuses: {pod_statuses}")
+                    # Add timeout debug information
+                    pods = api.list_namespaced_pod(
+                        namespace, label_selector=f"app={deployment_name}"
+                    )
+                    logger.error(
+                        f"Timeout reached. Pod statuses: {json.dumps([p.status for p in pods.items], indent=2)}"
+                    )
 
-                        raise click.ClickException(
-                            f"Deployment timeout reached\n"
-                            f"Pod statuses: {pod_statuses}"
-                        )
-                    except Exception as pod_error:
-                        logger.error("Failed to get pod statuses", exc_info=True)
-                        raise click.ClickException(
-                            f"Deployment timeout reached and failed to get pod statuses: {str(pod_error)}"
-                        )
+                    raise click.ClickException(
+                        f"Deployment timeout reached\n"
+                        f"Pod statuses: {json.dumps([p.status for p in pods.items], indent=2)}"
+                    )
 
             return deployment
 
-        except Exception as exc:
+        except Exception as e:
             logger.error("Deployment failed", exc_info=True)
-            spinner.log(f"[bold red]Deployment failed: {str(exc)}[/]")
+            spinner.log(f"[bold red]Deployment failed: {str(e)}[/]")
             raise SystemExit(1)
 
 
