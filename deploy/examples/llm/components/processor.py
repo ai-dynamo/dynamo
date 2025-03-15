@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import uuid
 from enum import Enum
 from typing import AsyncIterator, Tuple, Union
@@ -29,7 +30,7 @@ from vllm.logger import logger as vllm_logger
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from dynamo.sdk import depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
 
 class RequestType(Enum):
@@ -63,6 +64,7 @@ class Processor(ProcessMixIn):
             self.tokenizer, self.model_config
         )
         self.router_mode = self.engine_args.router
+        self.min_workers = 1
 
     def _create_tokenizer(self, engine_args: AsyncEngineArgs) -> AnyTokenizer:
         """Create a TokenizerGroup using engine arguments similar to VLLM's approach"""
@@ -78,6 +80,25 @@ class Processor(ProcessMixIn):
         )
         return base_tokenizer
 
+    @async_on_start
+    async def async_init(self):
+        runtime = dynamo_context["runtime"]
+        comp_ns, comp_name = VllmWorker.dynamo_address()  # type: ignore
+        print(f"[Processor] comp_ns: {comp_ns}, comp_name: {comp_name}")
+        self.worker_client = (
+            await runtime.namespace(comp_ns)
+            .component(comp_name)
+            .endpoint("generate")
+            .client()
+        )
+        while len(self.worker_client.endpoint_ids()) < self.min_workers:
+            print(
+                f"Waiting for workers to be ready.\n"
+                f" Current: {len(self.worker_client.endpoint_ids())},"
+                f" Required: {self.min_workers}"
+            )
+            await asyncio.sleep(2)
+
     async def _generate(
         self,
         raw_request: Union[CompletionRequest, ChatCompletionRequest],
@@ -92,15 +113,6 @@ class Processor(ProcessMixIn):
             engine_prompt,
             sampling_params,
         ) = await self._parse_raw_request(raw_request)
-        runtime = dynamo_context["runtime"]
-        comp_ns, comp_name = VllmWorker.dynamo_address()  # type: ignore
-        print(f"[Processor] comp_ns: {comp_ns}, comp_name: {comp_name}")
-        worker_client = (
-            await runtime.namespace(comp_ns)
-            .component(comp_name)
-            .endpoint("generate")
-            .client()
-        )
         if self.router_mode == "kv":
             async for route_response in self.router.generate(
                 Tokens(tokens=engine_prompt["prompt_token_ids"]).model_dump_json()
@@ -113,7 +125,7 @@ class Processor(ProcessMixIn):
                 break
 
             if worker_id == "":
-                engine_generator = await worker_client.generate(
+                engine_generator = await self.worker_client.generate(
                     vLLMGenerateRequest(
                         engine_prompt=engine_prompt,
                         sampling_params=sampling_params,
@@ -122,7 +134,7 @@ class Processor(ProcessMixIn):
                     ).model_dump_json()
                 )
             else:
-                engine_generator = await worker_client.direct(
+                engine_generator = await self.worker_client.direct(
                     vLLMGenerateRequest(
                         engine_prompt=engine_prompt,
                         sampling_params=sampling_params,
@@ -132,22 +144,21 @@ class Processor(ProcessMixIn):
                     int(worker_id),
                 )
         elif self.router_mode == "random":
-            engine_generator = await worker_client.generate(
+            engine_generator = await self.worker_client.generate(
                 vLLMGenerateRequest(
                     engine_prompt=engine_prompt,
                     sampling_params=sampling_params,
                     request_id=request_id,
                 ).model_dump_json()
             )
-        # TODO: add round-robin mode
-        # elif self.router_mode == "round-robin":
-        #     engine_generator = await self.worker.round_robin(
-        #         vLLMGenerateRequest(
-        #             engine_prompt=engine_prompt,
-        #             sampling_params=sampling_params,
-        #             request_id=request_id,
-        #         ).model_dump_json()
-        #     )
+        elif self.router_mode == "round-robin":
+            engine_generator = await self.worker_client.round_robin(
+                vLLMGenerateRequest(
+                    engine_prompt=engine_prompt,
+                    sampling_params=sampling_params,
+                    request_id=request_id,
+                ).model_dump_json()
+            )
 
         output = self._generate_responses(engine_generator, request_type)
 
