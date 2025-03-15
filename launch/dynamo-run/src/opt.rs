@@ -204,19 +204,14 @@ impl fmt::Display for Output {
     }
 }
 
-/// Returns the engine to use if user did not say on cmd line
-/// Uses whatever was compiled in, with a priority ordering.
+/// Returns the engine to use if user did not say on cmd line.
+/// Nearly always defaults to mistralrs which has no dependencies and we include by default.
+/// If built with --no-default-features and a specific engine, default to that.
 #[allow(unused_assignments, unused_mut)]
 impl Default for Output {
     fn default() -> Self {
         // Default if no engines
         let mut out = Output::EchoFull;
-
-        // Runs everywhere but needs local CUDA to build
-        #[cfg(feature = "mistralrs")]
-        {
-            out = Output::MistralRs;
-        }
 
         #[cfg(feature = "llamacpp")]
         {
@@ -231,6 +226,11 @@ impl Default for Output {
         #[cfg(feature = "vllm")]
         {
             out = Output::Vllm;
+        }
+
+        #[cfg(feature = "mistralrs")]
+        {
+            out = Output::MistralRs;
         }
 
         out

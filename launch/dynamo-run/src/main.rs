@@ -108,6 +108,25 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
+    #[cfg(any(feature = "mistralrs", feature = "llamacpp"))]
+    {
+        #[cfg(feature = "cuda")]
+        {
+            tracing::info!("CUDA on");
+        }
+        #[cfg(feature = "metal")]
+        {
+            tracing::info!("Metal on");
+        }
+        #[cfg(feature = "vulkan")]
+        {
+            tracing::info!("Vulkan on");
+        }
+        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+        tracing::info!(
+            "CPU mode. Rebuild with `--features cuda|metal|vulkan` for better performance"
+        );
+    }
 
     // max_worker_threads and max_blocking_threads from env vars or config file.
     let rt_config = dynamo_runtime::RuntimeConfig::from_settings()?;
@@ -165,7 +184,8 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
         None => {
             let default_engine = Output::default(); // smart default based on feature flags
             tracing::info!(
-                "Using default engine: {default_engine}. Use out=<engine> to specify an engine."
+                "Using default engine: {default_engine}. Use out=<engine> to specify one of {}",
+                Output::available_engines().join(", ")
             );
             default_engine
         }
