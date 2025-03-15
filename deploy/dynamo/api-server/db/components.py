@@ -16,9 +16,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from fastapi import Query
 from pydantic import BaseModel, ValidationError, field_validator
@@ -30,12 +30,10 @@ from sqlmodel import SQLModel
 
 class TimeCreatedUpdated(SQLModel):
     created_at: datetime = SQLField(
-        default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
-        nullable=False,
+        default_factory=lambda: datetime.now(UTC), nullable=False
     )
     updated_at: datetime = SQLField(
-        default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
-        nullable=False,
+        default_factory=lambda: datetime.now(UTC), nullable=False
     )
 
 
@@ -66,9 +64,6 @@ class CreateDynamoNimRequest(BaseModel):
     name: str
     description: str
     labels: Optional[Dict[str, str]] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-    deleted_at: Optional[datetime] = None
 
 
 class CreateDynamoNimVersionRequest(BaseModel):
@@ -76,23 +71,19 @@ class CreateDynamoNimVersionRequest(BaseModel):
     version: str
     manifest: DynamoNimVersionManifestSchema
     build_at: datetime
-    labels: Optional[List[Dict[str, str]]] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-    deleted_at: Optional[datetime] = None
+    labels: Optional[list[Dict[str, str]]] = None
 
 
 class UpdateDynamoNimVersionRequest(BaseModel):
     manifest: DynamoNimVersionManifestSchema
-    labels: Optional[List[Dict[str, str]]] = None
+    labels: Optional[list[Dict[str, str]]] = None
 
 
 class ListQuerySchema(BaseModel):
-    start: int = Query(default=0, ge=0, alias="start")
-    count: int = Query(default=20, ge=0, alias="count")
+    start: int = Query(0, alias="start")
+    count: int = Query(0, alias="count")
     search: Optional[str] = Query(None, alias="search")
-    q: Optional[str] = Query(default="", alias="q")
-    sort_asc: bool = Query(default=False)
+    q: Optional[str] = Query(None, alias="q")
 
     def get_query_map(self) -> Dict[str, Any]:
         if not self.q:
@@ -129,8 +120,8 @@ class ResourceType(str, Enum):
 
 class BaseSchema(BaseModel):
     uid: str
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
     deleted_at: Optional[datetime] = None
 
 
@@ -190,15 +181,15 @@ class DynamoNimVersionSchema(ResourceSchema):
     description: str
     image_build_status: ImageBuildStatus
     upload_status: str
-    upload_started_at: Optional[datetime] = None
-    upload_finished_at: Optional[datetime] = None
+    upload_started_at: Optional[datetime]
+    upload_finished_at: Optional[datetime]
     upload_finished_reason: str
     presigned_upload_url: str = ""
     presigned_download_url: str = ""
     presigned_urls_deprecated: bool = False
     transmission_strategy: TransmissionStrategy
     upload_id: str = ""
-    manifest: Optional[Union[DynamoNimVersionManifestSchema, Dict[str, Any]]]
+    manifest: Optional[DynamoNimVersionManifestSchema | dict[str, Any]]
     build_at: datetime
 
     @field_validator("manifest")
@@ -254,9 +245,7 @@ class DynamoNimVersionBase(BaseDynamoNimModel):
     upload_started_at: Optional[datetime] = SQLField(default=None)
     upload_finished_at: Optional[datetime] = SQLField(default=None)
     upload_finished_reason: str = SQLField(default="")
-    manifest: Optional[
-        Union[DynamoNimVersionManifestSchema, Dict[str, Any]]
-    ] = SQLField(
+    manifest: Optional[DynamoNimVersionManifestSchema | dict[str, Any]] = SQLField(
         default=None, sa_column=Column(JSON)
     )  # JSON-like field for the manifest
     build_at: datetime = SQLField()

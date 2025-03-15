@@ -15,13 +15,14 @@
 
 import logging
 import os
-from typing import Any, AsyncGenerator
+from typing import AsyncGenerator
 
 import boto3
 from botocore.exceptions import ClientError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
-from sqlmodel.ext.asyncio.session import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -56,27 +57,37 @@ if not database_url:  # default to sqlite in-memory
     )  # noqa: T201
 
 os.environ["API_DATABASE_URL"] = database_url
-engine = create_async_engine(
-    url=database_url, echo=True, pool_pre_ping=True, connect_args=connect_args
-)
+engine = create_engine(database_url, echo=True)
+async_engine = create_async_engine(database_url, echo=True)
 
 
-async def get_session() -> AsyncGenerator[AsyncSession, Any]:
+def get_session():
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    return SessionLocal()
+
+
+async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
     async_session = async_sessionmaker(
-        bind=engine, class_=AsyncSession, expire_on_commit=False
+        async_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
     )
     async with async_session() as session:
         yield session
 
 
+def create_db_and_tables():
+    SQLModel.metadata.create_all(engine)
+
+
 async def create_db_and_tables_async():
-    async with engine.begin() as conn:
+    async with async_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
 
 ### S3 storage
 
-DYNAMO_CONTAINER_NAME = os.getenv("DYNAMO_CONTAINER_NAME", "dynamo-storage").lower()
+DYNAMO_CONTAINER_NAME = "DYNAMO_CONTAINER_NAME"
 
 
 def get_s3_client():
@@ -98,25 +109,14 @@ def get_s3_client():
 class S3Storage:
     def __init__(self):
         self.s3_client = get_s3_client()
-        self.bucket_name = DYNAMO_CONTAINER_NAME.replace("_", "-").lower()
+        self.bucket_name = DYNAMO_CONTAINER_NAME
         self.ensure_bucket_exists()
 
     def ensure_bucket_exists(self):
         try:
             self.s3_client.head_bucket(Bucket=self.bucket_name)
-        except ClientError as e:
-            if e.response["Error"]["Code"] == "404":
-                # Bucket doesn't exist, create it
-                try:
-                    self.s3_client.create_bucket(Bucket=self.bucket_name)
-                except ClientError as create_error:
-                    logger.error(
-                        f"Failed to create bucket {self.bucket_name}: {create_error}"
-                    )
-                    raise
-            else:
-                logger.error(f"Error checking bucket {self.bucket_name}: {e}")
-                raise
+        except ClientError:
+            self.s3_client.create_bucket(Bucket=self.bucket_name)
 
     def upload_file(self, file_data, object_name):
         try:
