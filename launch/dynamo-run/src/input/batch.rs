@@ -66,7 +66,7 @@ pub async fn run(
     // Check if the path exists and is a directory
     if !input_jsonl.exists() || !input_jsonl.is_file() {
         anyhow::bail!(
-            "Missing or not a file: {}. Should be a JSON list file.",
+            "Missing or not a file: {}. Should be a JSON Lines file.",
             input_jsonl.display()
         );
     }
