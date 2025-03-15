@@ -16,14 +16,4 @@
 from disaggregated.frontend import Frontend
 from disaggregated.routerless.worker import VllmWorkerRouterLess
 
-# example 2 and 3: kv aware routing + worker
-# kv.yaml
 Frontend.link(VllmWorkerRouterLess)
-
-# example 4 and 5: only disag - issue with endpoint (probably because of routerless)
-# disag.yaml
-# Frontend.link(VllmWorker).link(PrefillWorker)
-
-# example 6: disag with kv
-# kv_with_disag.yaml
-# Frontend.link(Processor).link(Router).link(VllmWorker).link(PrefillWorker)

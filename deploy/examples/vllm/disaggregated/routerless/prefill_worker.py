@@ -79,8 +79,6 @@ class PrefillWorker:
         metadata = self.engine_client.nixl_metadata
         self._metadata_store = NixlMetadataStore("dynamo-init", runtime)
         await self._metadata_store.put(metadata.engine_id, metadata)
-        # task = asyncio.create_task(self.prefill_queue_handler())
-        # task.add_done_callback(lambda _: print("prefill queue handler created"))
 
     @dynamo_endpoint()
     async def generate(self, raw_request: str):
