@@ -45,7 +45,7 @@ Users/Clients (HTTP)
 ```bash
 cd /workspace/deploy/examples
 
-dynamo hello_world.hello_world:Frontend
+dynamo serve hello_world.hello_world:Frontend
 ```
 
 2. Send request to frontend using curl -

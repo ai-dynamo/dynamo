@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,23 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-fastapi==0.115.6
-ftfy
-grpcio-tools==1.66.0
-httpx
-msgspec
-mypy
-numpy
-opentelemetry-api
-opentelemetry-sdk
-pip
-pre-commit
-protobuf==5.27.3
-pydantic==2.7.1
-pyright
-PyYAML
-sentencepiece
-transformers
-tritonclient==2.53.0
-types-PyYAML
-uvicorn
+from disaggregated.frontend import Frontend
+from disaggregated.routerless.worker import VllmWorkerRouterLess
+
+# example 2 and 3: kv aware routing + worker
+# kv.yaml
+Frontend.link(VllmWorkerRouterLess)
+
+# example 4 and 5: only disag - issue with endpoint (probably because of routerless)
+# disag.yaml
+# Frontend.link(VllmWorker).link(PrefillWorker)
+
+# example 6: disag with kv
+# kv_with_disag.yaml
+# Frontend.link(Processor).link(Router).link(VllmWorker).link(PrefillWorker)

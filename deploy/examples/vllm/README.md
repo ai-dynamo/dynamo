@@ -117,13 +117,29 @@ llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo-init
 
 TRT_LOG=DEBUG http --port 8181
 ```
+
+
+### Running examples with link syntax
+
+```bash
+# Monolith with Router
+dynamo serve disaggregated.ex1:Frontend \
+    -f ./disaggregated/configs/kv.yaml
+
+
+# Routerless monolith
+dynamo serve disaggregated.ex_routerless:Frontend  \
+    -f ./disaggregated/configs/routerless_monolith.yaml
+
+```
+
 ### Client
 
 In another terminal:
 ```bash
 # this test request has around 200 tokens isl
 
-curl localhost:8181/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "messages": [
     {
@@ -134,6 +150,7 @@ curl localhost:8181/v1/chat/completions   -H "Content-Type: application/json"   
     "stream":false,
     "max_tokens": 30
   }'
+
 ```
 
 ### Close deployment
