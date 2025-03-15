@@ -95,6 +95,12 @@ cd /workspace/deploy/examples/llm
 dynamo serve monolith.routerless_deployment:Frontend -f ./configs/monolith/routerless_deployment.yaml
 ```
 
+#### Routerless processor based monolith
+```bash
+dynamo serve monolith.routerless_processor_deployment:Frontend -f ./configs/monolith/routerless_processor_deployment.yaml
+```
+
+
 #### Router based disaggregated serving
 ```bash
 cd /workspace/deploy/examples/llm
