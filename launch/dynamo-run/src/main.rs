@@ -32,7 +32,7 @@ Example:
 
 const ZMQ_SOCKET_PREFIX: &str = "dyn";
 
-const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|none] out=[mistralrs|sglang|llamacpp|vllm|trtllm|echo_full|echo_core|pystr:<engine.py>|pytok:<engine.py>] [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0]";
+const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>|none] out=[mistralrs|sglang|llamacpp|vllm|trtllm|echo_full|echo_core|pystr:<engine.py>|pytok:<engine.py>] [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0]";
 
 fn main() -> anyhow::Result<()> {
     logging::init();
@@ -108,6 +108,25 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
+    #[cfg(any(feature = "mistralrs", feature = "llamacpp"))]
+    {
+        #[cfg(feature = "cuda")]
+        {
+            tracing::info!("CUDA on");
+        }
+        #[cfg(feature = "metal")]
+        {
+            tracing::info!("Metal on");
+        }
+        #[cfg(feature = "vulkan")]
+        {
+            tracing::info!("Vulkan on");
+        }
+        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+        tracing::info!(
+            "CPU mode. Rebuild with `--features cuda|metal|vulkan` for better performance"
+        );
+    }
 
     // max_worker_threads and max_blocking_threads from env vars or config file.
     let rt_config = dynamo_runtime::RuntimeConfig::from_settings()?;
@@ -165,7 +184,8 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
         None => {
             let default_engine = Output::default(); // smart default based on feature flags
             tracing::info!(
-                "Using default engine: {default_engine}. Use out=<engine> to specify an engine."
+                "Using default engine: {default_engine}. Use out=<engine> to specify one of {}",
+                Output::available_engines().join(", ")
             );
             default_engine
         }
