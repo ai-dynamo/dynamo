@@ -26,7 +26,7 @@ from vllm.inputs.data import TokensPrompt
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 
 from dynamo.sdk import (
-    async_onstart,
+    async_on_start,
     dynamo_context,
     dynamo_endpoint,
     server_context,
@@ -71,7 +71,7 @@ class PrefillWorkerRouterLess:
             self.engine_args.enforce_eager = True
         print("PrefillWorkerRouterLess initialized")
 
-    @async_onstart
+    @async_on_start
     async def async_init(self):
         self._engine_context = build_async_engine_client_from_engine_args(
             self.engine_args

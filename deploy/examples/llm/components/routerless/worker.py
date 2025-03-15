@@ -17,6 +17,7 @@
 import json
 
 import msgspec
+from components.routerless.prefill_worker import PrefillWorkerRouterLess
 from utils.nixl import NixlMetadataStore
 from utils.vllm import parse_vllm_args
 from vllm.entrypoints.openai.api_server import (
@@ -27,7 +28,14 @@ from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 
-from dynamo.sdk import async_onstart, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import (
+    async_on_shutdown,
+    async_on_start,
+    depends,
+    dynamo_context,
+    dynamo_endpoint,
+    service,
+)
 
 
 @service(
@@ -39,6 +47,8 @@ from dynamo.sdk import async_onstart, dynamo_context, dynamo_endpoint, service
     workers=1,
 )
 class VllmWorkerRouterLess:
+    prefill_client = depends(PrefillWorkerRouterLess)
+
     def __init__(self):
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
@@ -65,7 +75,7 @@ class VllmWorkerRouterLess:
         self.initialized = False
         print("VllmWorkerRouterLess initialized")
 
-    @async_onstart
+    @async_on_start
     async def async_init(self):
         self._engine_context = build_async_engine_client_from_engine_args(
             self.engine_args
@@ -101,10 +111,17 @@ class VllmWorkerRouterLess:
         )
         self.initialized = True
 
+    @async_on_shutdown
+    async def async_shutdown(self):
+        if self._engine_context is not None:
+            await self._engine_context.__aexit__(None, None, None)
+        print("VllmWorkerRouterLess shutting down")
+
     def get_remote_prefill_request_callback(self):
         async def callback(request: RemotePrefillRequest):
             json_request = msgspec.json.encode(request).decode("utf-8")
-            self.prefill_client.round_robin(json_request)
+            async for _ in self.prefill_client.generate(json_request):
+                pass
 
         return callback
 

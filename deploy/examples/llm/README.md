@@ -41,19 +41,10 @@ Distributed deployment where prefill and decode are done by separate workers tha
 
 ### Prerequisites
 
-Start required services (etcd and NATS):
-
-   Option A: Using [Docker Compose](/deploy/docker-compose.yml) (Recommended)
-   ```bash
-   docker compose -f deploy/docker-compose.yml up -d
-   ```
-
-   Option B: Manual Setup
-
-    - [NATS.io](https://docs.nats.io/running-a-nats-service/introduction/installation) server with [Jetstream](https://docs.nats.io/nats-concepts/jetstream)
-        - example: `nats-server -js --trace`
-    - [etcd](https://etcd.io) server
-        - follow instructions in [etcd installation](https://etcd.io/docs/v3.5/install/) to start an `etcd-server` locally
+Start required services (etcd and NATS) using [Docker Compose](/deploy/docker-compose.yml)
+```bash
+docker compose -f deploy/docker-compose.yml up -d
+```
 
 ### Build docker
 
@@ -66,7 +57,7 @@ Start required services (etcd and NATS):
 ```
 ./container/run.sh -it
 ```
-## Run Deployment Architecture Locally
+## Run Deployment
 
 This figure shows an overview of the major components to deploy:
 
@@ -92,28 +83,28 @@ This figure shows an overview of the major components to deploy:
 
 ### Example architectures
 
-#### Router based monolith
+#### Router based worker
 ```bash
 cd /workspace/deploy/examples/llm
-dynamo serve monolith.ex_router:Frontend -f ./configs/monolith/router.yaml
+dynamo serve monolith router:Frontend -f ./configs/monolith/router.yaml
 ```
 
 #### Routerless monolith
 ```bash
 cd /workspace/deploy/examples/llm
-dynamo serve monolith.ex_routerless:Frontend -f ./configs/monolith/routerless.yaml
+dynamo serve monolith.routerless:Frontend -f ./configs/monolith/routerless.yaml
 ```
 
 #### Router based disaggregated serving
 ```bash
 cd /workspace/deploy/examples/llm
-dynamo serve disaggregated.ex_router:Frontend -f ./configs/disaggregated/router.yaml
+dynamo serve disaggregated.router:Frontend -f ./configs/disaggregated/router.yaml
 ```
 
 #### Routerless disaggregated serving
 ```bash
 cd /workspace/deploy/examples/llm
-dynamo serve disaggregated.ex_routerless:Frontend -f ./configs/disaggregated/routerless.yaml
+dynamo serve disaggregated.routerless:Frontend -f ./configs/disaggregated/routerless.yaml
 ```
 
 ### Client
@@ -138,8 +129,19 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ### Close deployment
 
-Kill all python processes and clean up metadata files:
+Kill all dynamo processes managed by circusd.
 
 ```
-pkill -9 -f python
+function kill_tree() {
+    local parent=$1
+    local children=$(ps -o pid= --ppid $parent)
+    for child in $children; do
+        kill_tree $child
+    done
+    echo "Killing process $parent"
+    kill -9 $parent
+}
+
+# kill process-tree of circusd
+kill_tree $(pgrep circusd)
 ```

@@ -26,23 +26,18 @@ VllmWorkerRouterLess:
   block-size: 64
   max-model-len: 16384
   max-num-batched-tokens: 16384
-  conditional-disagg: true
   remote-prefill: true
   ServiceArgs:
     workers: 1
-    envs:
-      - CUDA_VISIBLE_DEVICES: '0'
 
 
-PrefillWorker:
+PrefillWorkerRouterLess:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   enforce-eager: true
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
   block-size: 64
   max-model-len: 16384
   max-num-batched-tokens: 16384
+  cuda-visible-device-offset: 1
   ServiceArgs:
     workers: 1
-    envs:
-      - CUDA_VISIBLE_DEVICES: '1'
-
