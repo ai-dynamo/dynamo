@@ -191,8 +191,8 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 
 # Install patched vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
-ARG VLLM_REF="0.7.2"
-ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
+ARG VLLM_REF="v0.7.2"
+ARG VLLM_PATCH="vllm_${VLLM_REF}-dynamo-kv-disagg-patch.patch"
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     mkdir /tmp/vllm && \
     uv pip install pip wheel && \
