@@ -17,7 +17,7 @@ Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo 
 /deploy/Kubernetes/ @whoisj @hutm @biswapanda
 
 # Dynamo deploy
-/deploy/Kubernetes/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 
+/deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 
 
 # CI/CD
 /.github/ @ai-dynamo/Devops @nnshah1
