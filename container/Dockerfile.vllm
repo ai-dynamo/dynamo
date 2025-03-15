@@ -201,6 +201,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     wheel unpack *.whl && \
     cd vllm-*/ && \
     patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
+    sed -i "s/__version__ = version = '\(.*\)'/__version__ = version = '\1.dynamo_patch'/g; s/__version_tuple__ = version_tuple = (\(.*\))/__version_tuple__ = version_tuple = (\1, 'dynamo_patch')/g" vllm/_version.py && \
     mkdir -p /workspace/dist && \
     wheel pack . --dest-dir /workspace/dist && \
     uv pip install /workspace/dist/vllm-*.whl
