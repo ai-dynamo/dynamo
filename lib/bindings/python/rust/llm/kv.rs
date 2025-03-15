@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use super::*;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
-use rs::traits::events::{EventPublisher, EventSubscriber};
+use rs::traits::events::EventSubscriber;
 use tracing;
 
 #[pyclass]
