@@ -15,7 +15,31 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-## Prerequisites
+# LLM Deployment Examples
+
+This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations.
+
+## Components
+
+- workers: Prefill and decode worker handles actual LLM inference
+- router: Handles API requests and routes them to appropriate workers based on specified strategy
+- frontend: OpenAI compatible http server handles incoming requests
+
+## Deployment Architectures
+
+### Monolith
+Single-instance deployment where all components run in the same process.
+
+### Disaggregated
+Distributed deployment where components are separated and can scale independently.
+
+## Getting Started
+
+1. Choose a deployment architecture based on your requirements
+2. Configure the components as needed
+3. Deploy using the provided scripts
+
+### Prerequisites
 
 Start required services (etcd and NATS):
 
@@ -31,18 +55,18 @@ Start required services (etcd and NATS):
     - [etcd](https://etcd.io) server
         - follow instructions in [etcd installation](https://etcd.io/docs/v3.5/install/) to start an `etcd-server` locally
 
-## Build docker
+### Build docker
 
 ```
 ./container/build.sh
 ```
 
-## Run container
+### Run container
 
 ```
 ./container/run.sh -it
 ```
-## Run deployment
+## Run Deployment Architecture Locally
 
 This figure shows an overview of the major components to deploy:
 
@@ -66,71 +90,19 @@ This figure shows an overview of the major components to deploy:
 
 ```
 
-### Disaggregated vLLM deployment
-
-Serve following components:
-
-- processor: Processor routes the requests to the (decode) workers. Three scheduling strategies are supported: random and kv.
-- kv router: The KV Router is a component that aggregates KV Events from all the workers and maintains
-a prefix tree of the cached tokens. It makes decisions on which worker to route requests
-to based on the length of the prefix match and the load on the workers.
-
-- decode worker: runs on gpu = 0
-- prefill worker: runs on gpu = 1
-
-```bash
-
-cd /workspace/deploy/examples/vllm
-
-dynamo serve disaggregated.processor:Processor  \
-   --Processor.model=deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-   --Processor.tokenizer=deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-   --Processor.block-size=64 \
-   --Processor.max-model-len=16384 \
-   --Processor.router=kv \
-   --Router.min-workers=1 \
-   --Router.block-size=64 \
-   --Router.model-name=deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-   --VllmWorker.remote-prefill=true \
-   --VllmWorker.model=deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-   --VllmWorker.enforce-eager=true \
-   --VllmWorker.tensor-parallel-size=1 \
-   --VllmWorker.kv-transfer-config='{"kv_connector": "DynamoNixlConnector"}' \
-   --VllmWorker.block-size=64  \
-   --VllmWorker.max-num-batched-tokens=16384 \
-   --VllmWorker.max-model-len=16384 \
-   --VllmWorker.router=kv \
-   --VllmWorker.enable-prefix-caching=true \
-   --PrefillWorker.model=deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-   --PrefillWorker.enforce-eager=true \
-   --PrefillWorker.block-size=64 \
-   --PrefillWorker.max-model-len=16384 \
-   --PrefillWorker.max-num-batched-tokens=16384 \
-   --PrefillWorker.kv-transfer-config='{"kv_connector": "DynamoNixlConnector"}' \
-   --PrefillWorker.cuda-visible-device-offset=1
-```
-
-
-Add model to dynamo and start http server.
-```
-llmctl http add chat-models deepseek-ai/DeepSeek-R1-Distill-Llama-8B dynamo-init.Processor.chat_completions
-
-TRT_LOG=DEBUG http --port 8181
-```
-
-
-### Running examples with link syntax
+### Example architectures
 
 #### Router based monolith
 ```bash
-dynamo serve monolith.ex_router:Frontend \
-    -f ./monolith/configs/router.yaml
+cd /workspace/deploy/examples/llm
+
+dynamo serve monolith.ex_router:Frontend -f ./monolith/configs/router.yaml
 ```
 
 #### Routerless monolith
 ```bash
-dynamo serve  monolith.ex_routerless:Frontend \
-    -f ./monolith/configs/routerless.yaml
+cd /workspace/deploy/examples/llm
+dynamo serve  monolith.ex_routerless:Frontend -f ./monolith/configs/routerless.yaml
 ```
 
 ### Client
