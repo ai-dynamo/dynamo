@@ -31,7 +31,7 @@ This directory contains examples and reference implementations for deploying Lar
 Single-instance deployment where both prefill and decode are done by the same worker.
 
 ### Disaggregated
-Distributed deployment where components are separated and can scale independently.
+Distributed deployment where prefill and decode are done by separate workers that can scale independently.
 
 ## Getting Started
 
