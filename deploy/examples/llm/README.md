@@ -121,16 +121,16 @@ TRT_LOG=DEBUG http --port 8181
 
 ### Running examples with link syntax
 
+#### Router based monolith
 ```bash
-# Monolith with Router
-dynamo serve disaggregated.ex1:Frontend \
-    -f ./disaggregated/configs/kv.yaml
+dynamo serve monolith.ex_router:Frontend \
+    -f ./monolith/configs/router.yaml
+```
 
-
-# Routerless monolith
-dynamo serve disaggregated.ex_routerless:Frontend  \
-    -f ./disaggregated/configs/routerless_monolith.yaml
-
+#### Routerless monolith
+```bash
+dynamo serve  monolith.ex_routerless:Frontend \
+    -f ./monolith/configs/routerless.yaml
 ```
 
 ### Client
