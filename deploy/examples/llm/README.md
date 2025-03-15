@@ -110,7 +110,7 @@ dynamo serve disaggregated.router_based_deployment:Frontend -f ./configs/disaggr
 #### Routerless disaggregated serving
 ```bash
 cd /workspace/deploy/examples/llm
-dynamo serve disaggregated.routerless_deployment:Frontend -f ./configs/disaggregated/routerles_deployment.yaml
+dynamo serve disaggregated.routerless_deployment:Frontend -f ./configs/disaggregated/routerless_deployment.yaml
 ```
 
 ### Client
