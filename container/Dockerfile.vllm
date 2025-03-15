@@ -83,7 +83,7 @@ RUN cd /usr/local/src && \
     ./DEBS/libibverbs* ./DEBS/ibverbs-providers* ./DEBS/librdmacm* ./DEBS/libibumad* && \
     rm -rf /var/lib/apt/lists/* /usr/local/src/* mofed.tgz
 
-# Build and install Perf Analyzer for benchmarking\
+Build and install Perf Analyzer for benchmarking\
 RUN apt-get update -y && apt-get -y install rapidjson-dev zlib1g-dev
 RUN git clone https://github.com/triton-inference-server/perf_analyzer.git
 ARG GENAI_PERF_TAG="25d0188713adc47868d6b3f22426375237a90529"
@@ -198,8 +198,8 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     uv pip install pip wheel && \
     python -m pip download --only-binary=:all: --no-deps --dest /tmp/vllm vllm==${VLLM_REF} && \
     cd /tmp/vllm && \
-    wheel unpack vllm-*.whl && \
-    cd vllm-${VLLM_REF} && \
+    wheel unpack *.whl && \
+    cd vllm-*/ && \
     patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
     mkdir -p /workspace/dist && \
     wheel pack . --dest-dir /workspace/dist && \
