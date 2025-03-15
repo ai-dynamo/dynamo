@@ -63,7 +63,7 @@ def deprecated_option(*param_decls: str, **attrs: t.Any):
     return decorator
 
 
-def _parse_service_arg(arg_name: str, arg_value: str) -> tuple[str, str, t.Any] | None:
+def _parse_service_arg(arg_name: str, arg_value: str) -> tuple[str, str, t.Any]:
     """Parse a single CLI argument into service name, key, and value."""
 
     service, key = arg_name.split(".", 1)
@@ -86,7 +86,7 @@ def _parse_service_arg(arg_name: str, arg_value: str) -> tuple[str, str, t.Any] 
     return service, key, value
 
 
-def _parse_service_args(args: list[str]) -> t.Dict[str, t.Any] | None:
+def _parse_service_args(args: list[str]) -> t.Dict[str, t.Any]:
     service_configs: t.DefaultDict[str, t.Dict[str, t.Any]] = collections.defaultdict(
         dict
     )
@@ -346,7 +346,7 @@ def build_serve_command() -> click.Group:
 
         from dynamo.sdk.lib.service import LinkedServices
 
-        service_configs = {}
+        service_configs: dict[str, dict[str, t.Any]] = {}
 
         # Load file if provided
         if file:
@@ -363,9 +363,7 @@ def build_serve_command() -> click.Group:
         # Process Overrides
 
         # Process service-specific options
-        cmdline_overrides: t.Optional[t.Dict[str, t.Any]] = _parse_service_args(
-            ctx.args
-        )
+        cmdline_overrides: t.Dict[str, t.Any] = _parse_service_args(ctx.args)
         for service, configs in cmdline_overrides.items():
             for key, value in configs.items():
                 if service not in service_configs:
