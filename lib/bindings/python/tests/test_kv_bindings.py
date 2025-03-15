@@ -98,8 +98,6 @@ async def test_event_handler(distributed_runtime):
     scores = await indexer.find_matches_for_request(test_token, lora_id)
     assert not scores.scores
 
-    event_publisher.shutdown()
-
 
 class EventPublisher:
     def __init__(self, component: Component, worker_id: int, kv_block_size: int):
