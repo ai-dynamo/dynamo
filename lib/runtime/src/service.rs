@@ -169,28 +169,28 @@ mod tests {
                     EndpointInfo {
                         name: "endpoint1".to_string(),
                         subject: "subject1".to_string(),
-                        data: Some(Metrics{
-                                average_processing_time: 0.1,
-                                last_error: "none".to_string(),
-                                num_errors: 0,
-                                num_requests: 10,
-                                processing_time: 100,
-                                queue_group: "group1".to_string(),
-                                data: serde_json::json!({"key": "value1"})
+                        data: Some(Metrics {
+                            average_processing_time: 0.1,
+                            last_error: "none".to_string(),
+                            num_errors: 0,
+                            num_requests: 10,
+                            processing_time: 100,
+                            queue_group: "group1".to_string(),
+                            data: serde_json::json!({"key": "value1"}),
                         }),
                     },
                     EndpointInfo {
                         name: "endpoint2-foo".to_string(),
                         subject: "subject2".to_string(),
-                        data: Some(Metrics{
+                        data: Some(Metrics {
                             average_processing_time: 0.1,
-                                last_error: "none".to_string(),
-                                num_errors: 0,
-                                num_requests: 10,
-                                processing_time: 100,
-                                queue_group: "group1".to_string(),
-                                data:
-                            serde_json::json!({"key": "value1"})}),
+                            last_error: "none".to_string(),
+                            num_errors: 0,
+                            num_requests: 10,
+                            processing_time: 100,
+                            queue_group: "group1".to_string(),
+                            data: serde_json::json!({"key": "value1"}),
+                        }),
                     },
                 ],
             },
@@ -203,28 +203,28 @@ mod tests {
                     EndpointInfo {
                         name: "endpoint1".to_string(),
                         subject: "subject1".to_string(),
-                        data: Some(Metrics{
+                        data: Some(Metrics {
                             average_processing_time: 0.1,
                             last_error: "none".to_string(),
                             num_errors: 0,
                             num_requests: 10,
                             processing_time: 100,
                             queue_group: "group1".to_string(),
-                            data: serde_json::json!({"key": "value1"})
-                    }),
+                            data: serde_json::json!({"key": "value1"}),
+                        }),
                     },
                     EndpointInfo {
                         name: "endpoint2-bar".to_string(),
                         subject: "subject2".to_string(),
-                        data: Some(Metrics{
+                        data: Some(Metrics {
                             average_processing_time: 0.1,
-                                last_error: "none".to_string(),
-                                num_errors: 0,
-                                num_requests: 10,
-                                processing_time: 100,
-                                queue_group: "group1".to_string(),
-                                data:
-                            serde_json::json!({"key": "value2"})}),
+                            last_error: "none".to_string(),
+                            num_errors: 0,
+                            num_requests: 10,
+                            processing_time: 100,
+                            queue_group: "group1".to_string(),
+                            data: serde_json::json!({"key": "value2"}),
+                        }),
                     },
                 ],
             },
