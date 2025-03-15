@@ -31,8 +31,7 @@ VllmWorker:
   max-model-len: 16384
   max-num-batched-tokens: 16384
   enable-prefix-caching: true
+  router: random
   tensor-parallel-size: 1
   ServiceArgs:
     workers: 2
-    envs:
-      - CUDA_VISIBLE_DEVICES: '0,1'
