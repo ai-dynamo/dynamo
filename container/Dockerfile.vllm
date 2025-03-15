@@ -4,6 +4,16 @@
 ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS nixl_base
+WORKDIR /opt/nixl
+# Add a cache hint that only changes when the nixl commit changes
+ARG NIXL_COMMIT
+# This line acts as a cache key - it only changes when NIXL_COMMIT changes
+RUN echo "NIXL commit: ${NIXL_COMMIT}" > /opt/nixl/commit.txt
+# Copy the nixl source
+COPY --from=nixl . .
+
+# Main build stage
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS dev
 
 USER root
@@ -117,8 +127,9 @@ ENV CPATH=/usr/local/ompi/include:$CPATH
 ENV PATH=/usr/local/ompi/bin:$PATH
 ENV PKG_CONFIG_PATH=/usr/local/ompi/lib/pkgconfig:$PKG_CONFIG_PATH
 
-COPY --from=nixl . /opt/nixl
-
+# Copy nixl source, and use commit hash as cache hint
+COPY --from=nixl_base /opt/nixl /opt/nixl
+COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
 RUN cd /opt/nixl && \
     mkdir build && \
     meson setup build/ --prefix=/usr/local/nixl && \
@@ -170,13 +181,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 ARG VLLM_REF="v0.7.2"
 ARG VLLM_PATCH="vllm_${VLLM_REF}-dynamo-kv-disagg-patch.patch"
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
-    git clone https://github.com/vllm-project/vllm.git vllm && \
-    cd vllm && \
-    git checkout ${VLLM_REF} && \
-    git apply /tmp/deps/vllm/${VLLM_PATCH} && \
-    VLLM_USE_PRECOMPILED=1 uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/vllm*cp312*.whl && \
-    cd .. && rm -rf vllm
+    bash /tmp/deps/vllm/install.sh --patch /tmp/deps/vllm/${VLLM_PATCH} --ref ${VLLM_REF} --install-cmd "uv pip install --editable" --use-precompiled --installation-dir /opt/vllm
 
 # Install genai-perf for benchmarking
 ARG GENAI_PERF_TAG="25d0188713adc47868d6b3f22426375237a90529"

@@ -23,14 +23,18 @@ license.workspace = true
 repository.workspace = true
 
 [features]
+# Build with `--no-default-features` to disable these defaults
+default = ["mistralrs", "vllm", "sglang"]
 mistralrs = ["dynamo-llm/mistralrs"]
 sglang = ["dynamo-llm/sglang", "dep:netlink-packet-route", "dep:rtnetlink"]
 vllm = ["dynamo-llm/vllm", "dep:netlink-packet-route", "dep:rtnetlink"]
+# We don't include llamacpp by default until we figure out when it needs external libraries
 llamacpp = ["dynamo-llm/llamacpp"]
 trtllm = ["dynamo-llm/trtllm"]
 python = ["dynamo-llm/python"]
 cuda = ["dynamo-llm/cuda"]
 metal = ["dynamo-llm/metal"]
+vulkan = ["dynamo-llm/vulkan"]
 
 [dependencies]
 dynamo-llm = { workspace = true }
@@ -51,6 +55,7 @@ candle-hf-hub = { version = "0.3.3", default-features = false, features = ["toki
 clap = { version = "4.5", features = ["derive", "env"] }
 dialoguer = { version = "0.11", default-features = false, features = ["editor", "history"] }
 futures-util = { version = "0.3" }
+humantime = "2.2.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]

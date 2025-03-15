@@ -1,6 +1,6 @@
 # Dynamo service runner
 
-`dynamo-run` is a tool for exploring the dynamo components.
+`dynamo-run` is a tool for exploring the dynamo components, and an example of how to use them from Rust.
 
 ## Setup
 
@@ -393,9 +393,30 @@ DYN_TOKEN_ECHO_DELAY_MS=1 dynamo-run in=http out=echo_full
 
 The default delay is 10ms, which produces approximately 100 tokens per second.
 
+## Batch mode
+
+dynamo-run can take a jsonl file full of prompts and evaluate them all:
+
+```
+dynamo-run in=batch:prompts.jsonl out=llamacpp <model>
+```
+
+The input file should look like this:
+```
+{"text": "What is the capital of France?"}
+{"text": "What is the capital of Spain?"}
+```
+
+Each one is passed as a prompt to the model. The output is written back to the same folder in `output.jsonl`. At the end of the run some statistics are printed.
+The output looks like this:
+```
+{"text":"What is the capital of France?","response":"The capital of France is Paris.","tokens_in":7,"tokens_out":7,"elapsed_ms":1566}
+{"text":"What is the capital of Spain?","response":".The capital of Spain is Madrid.","tokens_in":7,"tokens_out":7,"elapsed_ms":855}
+```
+
 ## Defaults
 
 The input defaults to `in=text`.
 
-The output will default to whatever engine you have compiled in (so depending on `--features`). If all features
-are enabled at build time, then the default is currently `out=vllm`.
+The output will default to `mistralrs` engine. If not available whatever engine you have compiled in (so depending on `--features`).
+

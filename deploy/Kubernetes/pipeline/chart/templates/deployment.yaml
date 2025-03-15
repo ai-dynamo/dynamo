@@ -16,29 +16,31 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: poc-{{ .name | lower }}
+  name: {{ $.Release.Name }}-{{ .name | lower }}
   labels:
-    app: {{ .name | lower }}
+    app: {{ $.Release.Name }}-{{ .name | lower }}
 spec:
-  replicas: 1
+  replicas: {{ .config.workers | default 1 }}
   selector:
     matchLabels:
-      app: poc-{{ .name | lower }}
+      app: {{ $.Release.Name }}-{{ .name | lower }}
   template:
     metadata:
       labels:
-        app: poc-{{ .name | lower }}
+        app: {{ $.Release.Name }}-{{ .name | lower }}
     spec:
       # pull secrets
       imagePullSecrets:
-      - name: yatai-regcred
+      {{- range $.Values.imagePullSecrets }}
+        - name: {{ .name }}
+      {{- end }}
       securityContext:
         runAsUser: 0
       containers:
-      - name: poc-{{ .name | lower }}
+      - name: {{ $.Release.Name }}-{{ .name | lower }}
         image: {{ $.Values.image }}
         args:
-        - uv run compoundai start --service-name {{ .name }}
+        - uv run dynamo start --service-name {{ .name }} src.{{ $.Values.dynamoIdentifier }}
         command:
         - sh
         - -c
@@ -50,11 +52,11 @@ spec:
         env:
         - name: TRAFFIC_TIMEOUT
           value: "{{ .config.traffic.timeout }}"
-      {{- if and .config.nova .config.nova.enabled }}
-        - name: NOVA_NAMESPACE
-          value: "{{ .config.nova.namespace }}"
-        - name: NOVA_NAME
-          value: "{{ .config.nova.name }}"
+      {{- if and .config.dynamo .config.dynamo.enabled }}
+        - name: DYNAMO_NAMESPACE
+          value: "{{ .config.dynamo.namespace }}"
+        - name: DYNAMO_NAME
+          value: "{{ .config.dynamo.name }}"
       {{- end }}
       {{- if .config.workers }}
         - name: WORKERS
@@ -62,9 +64,13 @@ spec:
       {{- end }}
         - name: PORT
           value: "3000"
+        {{- if $.Values.natsAddr }}
         - name: NATS_SERVER
-          value: nats://my-nats:4222
+          value: {{ $.Values.natsAddr }}
+        {{- end }}
+        {{- if $.Values.etcdAddr }}
         - name: ETCD_ENDPOINTS
-          value: etcd:2379
+          value: {{ $.Values.etcdAddr }}
+        {{- end }}
 ---
 {{- end }}
