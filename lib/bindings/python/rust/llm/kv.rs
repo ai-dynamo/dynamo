@@ -142,6 +142,7 @@ impl KvEventPublisher {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (event_id, token_ids, num_block_tokens, block_hashes, lora_id, parent_hash=None))]
     fn publish_stored(
         &self,

@@ -24,8 +24,8 @@ from pydantic import BaseModel, ValidationError
 # import * causes "unable to detect undefined names"
 from dynamo._core import Backend as Backend
 from dynamo._core import Client as Client
+from dynamo._core import Component as Component
 from dynamo._core import DistributedRuntime as DistributedRuntime
-from dynamo._core import KvRouter as KvRouter
 from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
 from dynamo._core import OAIChatPreprocessor as OAIChatPreprocessor
 

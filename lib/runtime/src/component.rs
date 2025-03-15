@@ -61,6 +61,7 @@ use std::{collections::HashMap, sync::Arc};
 use validator::{Validate, ValidationError};
 
 mod client;
+#[allow(clippy::module_inception)]
 mod component;
 mod endpoint;
 mod namespace;
