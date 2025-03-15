@@ -34,4 +34,4 @@ VllmWorker:
   router: random
   tensor-parallel-size: 1
   ServiceArgs:
-    workers: 2
+    workers: 1
