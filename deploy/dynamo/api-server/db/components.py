@@ -66,6 +66,9 @@ class CreateDynamoNimRequest(BaseModel):
     name: str
     description: str
     labels: Optional[Dict[str, str]] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    deleted_at: Optional[datetime] = None
 
 
 class CreateDynamoNimVersionRequest(BaseModel):
@@ -73,12 +76,15 @@ class CreateDynamoNimVersionRequest(BaseModel):
     version: str
     manifest: DynamoNimVersionManifestSchema
     build_at: datetime
-    labels: Optional[list[Dict[str, str]]] = None
+    labels: Optional[List[Dict[str, str]]] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    deleted_at: Optional[datetime] = None
 
 
 class UpdateDynamoNimVersionRequest(BaseModel):
     manifest: DynamoNimVersionManifestSchema
-    labels: Optional[list[Dict[str, str]]] = None
+    labels: Optional[List[Dict[str, str]]] = None
 
 
 class ListQuerySchema(BaseModel):
@@ -184,8 +190,8 @@ class DynamoNimVersionSchema(ResourceSchema):
     description: str
     image_build_status: ImageBuildStatus
     upload_status: str
-    upload_started_at: Optional[datetime]
-    upload_finished_at: Optional[datetime]
+    upload_started_at: Optional[datetime] = None
+    upload_finished_at: Optional[datetime] = None
     upload_finished_reason: str
     presigned_upload_url: str = ""
     presigned_download_url: str = ""

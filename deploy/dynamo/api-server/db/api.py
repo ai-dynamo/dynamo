@@ -202,7 +202,14 @@ async def create_dynamo_nim(
     Create a new respository
     """
     try:
-        db_dynamo_nim = DynamoNim.model_validate(request)
+        # Add timestamp fields
+        now = datetime.now(timezone.utc)
+        db_dynamo_nim = DynamoNim(
+            **request.model_dump(exclude={"created_at", "updated_at", "deleted_at"}),
+            created_at=now.replace(tzinfo=None),  # Convert to timezone-naive
+            updated_at=now.replace(tzinfo=None),  # Convert to timezone-naive
+            deleted_at=None,
+        )
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=json.loads(e.json()))  # type: ignore
 
