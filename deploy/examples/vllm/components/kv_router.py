@@ -20,7 +20,7 @@ import random
 from argparse import Namespace
 from typing import AsyncIterator
 
-from disaggregated.worker import VllmWorker
+from components.worker import VllmWorker
 from utils.protocol import Tokens
 from vllm.logger import logger as vllm_logger
 

@@ -37,7 +37,7 @@ from dynamo.sdk import depends, dynamo_context, dynamo_endpoint, service, server
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
 )
-class PrefillWorker:
+class PrefillWorkerRouterLess:
     def __init__(self):
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
@@ -64,7 +64,7 @@ class PrefillWorker:
         if self.engine_args.enforce_eager is not True:
             print("Prefill must be done eagerly, setting to True")
             self.engine_args.enforce_eager = True
-        print("PrefillWorker initialized")
+        print("PrefillWorkerRouterLess initialized")
 
     @async_onstart
     async def async_init(self):

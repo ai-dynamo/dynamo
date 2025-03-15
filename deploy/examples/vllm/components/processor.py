@@ -18,8 +18,8 @@ import uuid
 from enum import Enum
 from typing import AsyncIterator, Tuple, Union
 
-from disaggregated.kv_router import Router
-from disaggregated.worker import VllmWorker
+from components.kv_router import Router
+from components.worker import VllmWorker
 from transformers import AutoTokenizer
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.protocol import MyRequestOutput, Tokens, vLLMGenerateRequest

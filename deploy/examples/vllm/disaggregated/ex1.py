@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from disaggregated.frontend import Frontend
-from disaggregated.kv_router import Router
-from disaggregated.processor import Processor
-from disaggregated.worker import VllmWorker
+from components.frontend import Frontend
+from components.kv_router import Router
+from components.processor import Processor
+from components.worker import VllmWorker
 
+# Monolith with Router
 Frontend.link(Processor).link(Router).link(VllmWorker)

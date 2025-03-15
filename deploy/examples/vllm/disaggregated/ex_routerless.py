@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from disaggregated.frontend import Frontend
-from disaggregated.routerless.worker import VllmWorkerRouterLess
+from components.frontend import Frontend
+from components.routerless.worker import VllmWorkerRouterLess
 
+# Monolith without Router
 Frontend.link(VllmWorkerRouterLess)

@@ -65,7 +65,7 @@ class VllmWorkerRouterLess:
                 self.engine_args.pipeline_parallel_size = 1
         self.openai_serving_chat = None
         self.initialized = False
-        print("VllmWorker initialized")
+        print("VllmWorkerRouterLess initialized")
 
     @async_onstart
     async def async_init(self):

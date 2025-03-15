@@ -16,9 +16,9 @@
 import os
 import subprocess
 
-from disaggregated.processor import Processor
-from disaggregated.worker import VllmWorker
-from disaggregated.routerless.worker import VllmWorkerRouterLess
+from components.processor import Processor
+from components.worker import VllmWorker
+from components.routerless.worker import VllmWorkerRouterLess
 from pydantic import BaseModel
 
 from dynamo.sdk import depends, service

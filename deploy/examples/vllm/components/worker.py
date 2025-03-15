@@ -17,8 +17,8 @@
 import asyncio
 import os
 
-from disaggregated.disagg_router import PyDisaggregatedRouter
-from disaggregated.prefill_worker import PrefillWorker
+from components.disagg_router import PyDisaggregatedRouter
+from components.prefill_worker import PrefillWorker
 from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
 from utils.protocol import MyRequestOutput, vLLMGenerateRequest
