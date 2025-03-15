@@ -92,7 +92,7 @@ fi
 echo "Installing using: $INSTALL_CMD"
 if [ "$USE_PRECOMPILED" = true ]; then
     echo "Using precompiled kernels"
-    export VLLM_USE_PRECOMPILED=1
+    export VLLM_PRECOMPILED_WHEEL_LOCATION="https://files.pythonhosted.org/packages/e7/c0/5b7f019aa798dedfb44c30971e9becf3c6a2db7dde311570178fa66c49c8/vllm-0.7.2-cp38-abi3-manylinux1_x86_64.whl"
 fi
 $INSTALL_CMD .
 
