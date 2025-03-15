@@ -55,6 +55,7 @@ candle-hf-hub = { version = "0.3.3", default-features = false, features = ["toki
 clap = { version = "4.5", features = ["derive", "env"] }
 dialoguer = { version = "0.11", default-features = false, features = ["editor", "history"] }
 futures-util = { version = "0.3" }
+humantime = "2.2.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
