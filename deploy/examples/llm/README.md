@@ -86,25 +86,25 @@ This figure shows an overview of the major components to deploy:
 #### Router based worker
 ```bash
 cd /workspace/deploy/examples/llm
-dynamo serve monolith router:Frontend -f ./configs/monolith/router.yaml
+dynamo serve monolith.router_based_deployment:Frontend -f ./configs/monolith/router_based_deployment.yaml
 ```
 
 #### Routerless monolith
 ```bash
 cd /workspace/deploy/examples/llm
-dynamo serve monolith.routerless:Frontend -f ./configs/monolith/routerless.yaml
+dynamo serve monolith.routerless_deployment:Frontend -f ./configs/monolith/routerless_deployment.yaml
 ```
 
 #### Router based disaggregated serving
 ```bash
 cd /workspace/deploy/examples/llm
-dynamo serve disaggregated.router:Frontend -f ./configs/disaggregated/router.yaml
+dynamo serve disaggregated.router_based_deployment:Frontend -f ./configs/disaggregated/router_based_deployment.yaml
 ```
 
 #### Routerless disaggregated serving
 ```bash
 cd /workspace/deploy/examples/llm
-dynamo serve disaggregated.routerless:Frontend -f ./configs/disaggregated/routerless.yaml
+dynamo serve disaggregated.routerless_deployment:Frontend -f ./configs/disaggregated/routerles_deployment.yaml
 ```
 
 ### Client
