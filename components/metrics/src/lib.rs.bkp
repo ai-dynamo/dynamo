@@ -77,7 +77,7 @@
 //! }
 
 use axum::{routing::get, Router};
-use prometheus::{register_counter_vec, register_gauge_vec, Encoder, TextEncoder};
+use prometheus::{register_gauge_vec, Encoder, TextEncoder};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -340,17 +340,17 @@ impl PrometheusMetricsCollector {
         self.metrics.update(config, processed);
     }
 
-    /// Update KV hit rate metrics
-    pub fn update_kv_hit_rate(
-        &mut self,
-        config: &LLMWorkerLoadCapacityConfig,
-        worker_id: i64,
-        isl_blocks: usize,
-        overlap_blocks: usize,
-    ) {
-        self.metrics
-            .update_kv_hit_rate(config, worker_id, isl_blocks, overlap_blocks);
-    }
+    ///// Update KV hit rate metrics
+    //pub fn update_kv_hit_rate(
+    //    &mut self,
+    //    config: &LLMWorkerLoadCapacityConfig,
+    //    worker_id: i64,
+    //    isl_blocks: usize,
+    //    overlap_blocks: usize,
+    //) {
+    //    self.metrics
+    //        .update_kv_hit_rate(config, worker_id, isl_blocks, overlap_blocks);
+    //}
 }
 
 /// Prometheus metrics collection
@@ -363,9 +363,8 @@ pub struct PrometheusMetrics {
     load_std: prometheus::GaugeVec,
     // KV hit rate metrics
     kv_hit_rate_percent: prometheus::GaugeVec,
-    // FIXME: These are currently unused outside of mock_worker
-    kv_hit_rate_isl_blocks: prometheus::CounterVec,
-    kv_hit_rate_overlap_blocks: prometheus::CounterVec,
+    //kv_hit_rate_isl_blocks: prometheus::CounterVec,
+    //kv_hit_rate_overlap_blocks: prometheus::CounterVec,
 }
 
 impl PrometheusMetrics {
@@ -392,6 +391,7 @@ impl PrometheusMetrics {
                 "Total request slots",
                 &["component", "endpoint", "worker_id"]
             )?,
+            // TODO: Better define load metrics
             load_avg: register_gauge_vec!(
                 "llm_load_avg",
                 "Average load across workers",
@@ -402,25 +402,23 @@ impl PrometheusMetrics {
                 "Load standard deviation across workers",
                 &["component", "endpoint"]
             )?,
-            // KV hit rate (ForwardPassMetrics)
+            // KV hit rate metrics
             kv_hit_rate_percent: register_gauge_vec!(
                 "llm_kv_hit_rate_percent",
                 "KV hit rate percentage per worker",
                 &["component", "endpoint", "worker_id"]
             )?,
-            // FIXME: Cleanup/remove event based metrics after finalizaing
-            //        metrics collection approach with vllm/trtllm workers.
-            // Event-based KV hit rate metrics (not currently used outside mock worker)
-            kv_hit_rate_isl_blocks: register_counter_vec!(
-                "llm_kv_hit_rate_isl_blocks",
-                "Cumulative count of ISL blocks in KV hit rate events",
-                &["component", "endpoint", "worker_id"]
-            )?,
-            kv_hit_rate_overlap_blocks: register_counter_vec!(
-                "llm_kv_hit_rate_overlap_blocks",
-                "Cumulative count of overlapping blocks in KV hit rate events",
-                &["component", "endpoint", "worker_id"]
-            )?,
+            // TODO: Revisit cumulative counter metrics for KV hit rate
+            // kv_hit_rate_isl_blocks: register_counter_vec!(
+            //     "llm_kv_hit_rate_isl_blocks",
+            //     "Cumulative count of ISL blocks in KV hit rate events",
+            //     &["component", "endpoint", "worker_id"]
+            // )?,
+            // kv_hit_rate_overlap_blocks: register_counter_vec!(
+            //     "llm_kv_hit_rate_overlap_blocks",
+            //     "Cumulative count of overlapping blocks in KV hit rate events",
+            //     &["component", "endpoint", "worker_id"]
+            // )?,
         })
     }
 
@@ -438,17 +436,17 @@ impl PrometheusMetrics {
     }
 
     /// Helper method to increment a counter with worker-specific labels (3 labels)
-    fn increment_worker_counter(
-        &self,
-        counter: &prometheus::CounterVec,
-        config: &LLMWorkerLoadCapacityConfig,
-        worker_id: &str,
-        value: f64,
-    ) {
-        counter
-            .with_label_values(&[&config.component_name, &config.endpoint_name, worker_id])
-            .inc_by(value);
-    }
+    //fn increment_worker_counter(
+    //    &self,
+    //    counter: &prometheus::CounterVec,
+    //    config: &LLMWorkerLoadCapacityConfig,
+    //    worker_id: &str,
+    //    value: f64,
+    //) {
+    //    counter
+    //        .with_label_values(&[&config.component_name, &config.endpoint_name, worker_id])
+    //        .inc_by(value);
+    //}
 
     /// Helper method to set a gauge with component/endpoint labels only (2 labels)
     fn set_endpoint_gauge(
@@ -506,60 +504,59 @@ impl PrometheusMetrics {
         self.set_endpoint_gauge(&self.load_std, config, processed.load_std);
     }
 
-    /// Update KV hit rate metrics
-    pub fn update_kv_hit_rate(
-        &self,
-        config: &LLMWorkerLoadCapacityConfig,
-        worker_id: i64,
-        isl_blocks: usize,
-        overlap_blocks: usize,
-    ) {
-        let worker_id_str = worker_id.to_string();
+    ///// Update KV hit rate metrics
+    //pub fn update_kv_hit_rate(
+    //    &self,
+    //    config: &LLMWorkerLoadCapacityConfig,
+    //    worker_id: i64,
+    //    isl_blocks: usize,
+    //    overlap_blocks: usize,
+    //) {
+    //    let worker_id_str = worker_id.to_string();
+    //
+    //    // Increment the ISL blocks and overlap blocks counters
+    //    self.increment_worker_counter(
+    //        &self.kv_hit_rate_isl_blocks,
+    //        config,
+    //        &worker_id_str,
+    //        isl_blocks as f64,
+    //    );
+    //    self.increment_worker_counter(
+    //        &self.kv_hit_rate_overlap_blocks,
+    //        config,
+    //        &worker_id_str,
+    //        overlap_blocks as f64,
+    //    );
 
-        // Increment the ISL blocks and overlap blocks counters
-        self.increment_worker_counter(
-            &self.kv_hit_rate_isl_blocks,
-            config,
-            &worker_id_str,
-            isl_blocks as f64,
-        );
+    //    // TODO: The cumulative hit rate percentage can probably be computed by consumers
+    //    // of Prometheus metrics like Grafana instead, but we'll compute it here for now
+    //    // for convenient debugging/logging.
+    //    // Calculate and set the cumulative hit rate percentage
+    //    let cumulative_isl = self
+    //        .kv_hit_rate_isl_blocks
+    //        .with_label_values(&[
+    //            &config.component_name,
+    //            &config.endpoint_name,
+    //            &worker_id_str,
+    //        ])
+    //        .get();
 
-        self.increment_worker_counter(
-            &self.kv_hit_rate_overlap_blocks,
-            config,
-            &worker_id_str,
-            overlap_blocks as f64,
-        );
+    //    let cumulative_overlap = self
+    //        .kv_hit_rate_overlap_blocks
+    //        .with_label_values(&[
+    //            &config.component_name,
+    //            &config.endpoint_name,
+    //            &worker_id_str,
+    //        ])
+    //        .get();
 
-        // TODO: The cumulative hit rate percentage can probably be computed by consumers
-        // of Prometheus metrics like Grafana instead, but we'll compute it here for now
-        // for convenient debugging/logging.
-        // Calculate and set the cumulative hit rate percentage
-        let cumulative_isl = self
-            .kv_hit_rate_isl_blocks
-            .with_label_values(&[
-                &config.component_name,
-                &config.endpoint_name,
-                &worker_id_str,
-            ])
-            .get();
-
-        let cumulative_overlap = self
-            .kv_hit_rate_overlap_blocks
-            .with_label_values(&[
-                &config.component_name,
-                &config.endpoint_name,
-                &worker_id_str,
-            ])
-            .get();
-
-        if cumulative_isl > 0.0 {
-            let cumulative_hit_rate = (cumulative_overlap / cumulative_isl) * 100.0;
-            tracing::info!(
-                "Estimated Cumulative KV hit rate: {cumulative_hit_rate:.2}% (Overlap: {cumulative_overlap} / ISL: {cumulative_isl})"
-            );
-        }
-    }
+    //    if cumulative_isl > 0.0 {
+    //        let cumulative_hit_rate = (cumulative_overlap / cumulative_isl) * 100.0;
+    //        tracing::info!(
+    //            "Estimated Cumulative KV hit rate: {cumulative_hit_rate:.2}% (Overlap: {cumulative_overlap} / ISL: {cumulative_isl})"
+    //        );
+    //    }
+    //}
 }
 
 /// Collect endpoints from a component

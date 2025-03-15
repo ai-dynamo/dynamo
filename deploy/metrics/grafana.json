@@ -371,74 +371,6 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 50
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 4,
-        "x": 8,
-        "y": 8
-      },
-      "id": 7,
-      "options": {
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
-      },
-      "pluginVersion": "10.0.0",
-      "title": "Cumulative KV Cache Hit Rate",
-      "type": "gauge",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "100 * sum(llm_kv_hit_rate_overlap_blocks{component=\"$component\", endpoint=\"$endpoint\"}) / sum(llm_kv_hit_rate_isl_blocks{component=\"$component\", endpoint=\"$endpoint\"})",
-          "legendFormat": "__auto",
-          "range": true,
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
             "mode": "palette-classic"
           },
           "custom": {
@@ -620,7 +552,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "100 * llm_kv_hit_rate_overlap_blocks{component=\"$component\", endpoint=\"$endpoint\"} / llm_kv_hit_rate_isl_blocks{component=\"$component\", endpoint=\"$endpoint\"}",
+          "expr": "100 * llm_kv_hit_rate_percent{component=\"$component\", endpoint=\"$endpoint\"}",
           "legendFormat": "Worker {{worker_id}}",
           "range": true,
           "refId": "A"
@@ -702,22 +634,7 @@
           "mode": "multi",
           "sort": "none"
         }
-      },
-      "title": "Cumulative KV Cache Hit Rate",
-      "type": "timeseries",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "100 * sum(llm_kv_hit_rate_overlap_blocks{component=\"$component\", endpoint=\"$endpoint\"}) / sum(llm_kv_hit_rate_isl_blocks{component=\"$component\", endpoint=\"$endpoint\"})",
-          "legendFormat": "Overall Hit Rate",
-          "range": true,
-          "refId": "A"
-        }
-      ]
+      }
     },
     {
       "datasource": {
