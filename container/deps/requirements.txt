@@ -22,6 +22,7 @@ mypy
 numpy
 opentelemetry-api
 opentelemetry-sdk
+pip==25.0.1
 pre-commit
 protobuf==5.27.3
 pydantic==2.7.1
@@ -32,4 +33,3 @@ transformers
 tritonclient==2.53.0
 types-PyYAML
 uvicorn
-pip==25.0.1

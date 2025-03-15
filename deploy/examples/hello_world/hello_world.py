@@ -15,7 +15,7 @@
 
 from pydantic import BaseModel
 
-from dynamo.sdk import api, depends, dynamo_endpoint, service, DYNAMO_IMAGE
+from dynamo.sdk import DYNAMO_IMAGE, api, depends, dynamo_endpoint, service
 
 """
 Pipeline Architecture:
@@ -95,7 +95,11 @@ class Middle:
             yield f"Middle: {response}"
 
 
-@service(resources={"cpu": "1"}, traffic={"timeout": 60},image=DYNAMO_IMAGE)  # Regular HTTP API
+@service(
+    resources={"cpu": "1"},
+    traffic={"timeout": 60},
+    image=DYNAMO_IMAGE
+)  # Regular HTTP API
 class Frontend:
     middle = depends(Middle)
 
