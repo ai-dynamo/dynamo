@@ -20,6 +20,8 @@ use llm_rs::kv_router::indexer::KvIndexerInterface;
 use rs::traits::events::EventSubscriber;
 use tracing;
 
+use llm_rs::kv_router::{indexer::compute_block_hash_for_seq, protocols::*};
+
 #[pyclass]
 pub(crate) struct KvRouter {
     inner: Arc<llm_rs::kv_router::KvRouter>,
@@ -117,6 +119,110 @@ impl KvMetricsPublisher {
                 .into(),
             )
             .map_err(to_pyerr)
+    }
+}
+
+#[pyclass]
+pub(crate) struct KvEventPublisher {
+    inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
+}
+
+#[pymethods]
+impl KvEventPublisher {
+    #[new]
+    fn new(component: Component, worker_id: i64, kv_block_size: usize) -> PyResult<Self> {
+        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
+            component.inner.clone(),
+            worker_id,
+            kv_block_size,
+        )
+        .map_err(to_pyerr)?;
+        Ok(Self {
+            inner: inner.into(),
+        })
+    }
+
+    #[pyo3(signature = (event_id, token_ids, num_block_tokens, block_hashes, lora_id, parent_hash=None))]
+    fn publish_stored(
+        &self,
+        _py: Python,
+        event_id: u64,
+        token_ids: Vec<u32>,
+        num_block_tokens: Vec<u64>,
+        block_hashes: Vec<u64>,
+        lora_id: u64,
+        parent_hash: Option<u64>,
+    ) -> PyResult<()> {
+        let event = KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: parent_hash.map(ExternalSequenceBlockHash),
+                blocks: self.create_stored_blocks(
+                    &token_ids,
+                    &num_block_tokens,
+                    &block_hashes,
+                    lora_id,
+                ),
+            }),
+        };
+
+        self.inner.publish(event).map_err(to_pyerr)
+    }
+
+    fn publish_removed(&self, _py: Python, event_id: u64, block_hashes: Vec<u64>) -> PyResult<()> {
+        let block_hashes: Vec<ExternalSequenceBlockHash> = block_hashes
+            .iter()
+            .map(|&v| ExternalSequenceBlockHash(v))
+            .collect();
+        let event = KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
+        };
+
+        self.inner.publish(event).map_err(to_pyerr)
+    }
+}
+
+impl KvEventPublisher {
+    fn create_stored_block_from_parts(
+        &self,
+        block_hash: u64,
+        token_ids: &[u32],
+        _lora_id: u64,
+    ) -> KvCacheStoredBlockData {
+        let tokens_hash = compute_block_hash_for_seq(token_ids, self.inner.kv_block_size())[0];
+        KvCacheStoredBlockData {
+            block_hash: ExternalSequenceBlockHash(block_hash),
+            tokens_hash,
+        }
+    }
+
+    fn create_stored_blocks(
+        &self,
+        token_ids: &[u32],
+        num_block_tokens: &[u64],
+        block_hashes: &[u64],
+        lora_id: u64,
+    ) -> Vec<KvCacheStoredBlockData> {
+        let mut blocks: Vec<KvCacheStoredBlockData> = Vec::new();
+
+        let mut token_offset: usize = 0;
+        for (num_tokens_it, block_hash_it) in num_block_tokens.iter().zip(block_hashes.iter()) {
+            if *num_tokens_it != self.inner.kv_block_size() as u64 {
+                tracing::warn!(
+                    "Block not published. Block size must be {} tokens to be published. Block size is: {}",
+                    self.inner.kv_block_size(),
+                    *num_tokens_it
+                );
+                break;
+            }
+
+            let tokens = &token_ids[token_offset..(token_offset + *num_tokens_it as usize)];
+            blocks.push(self.create_stored_block_from_parts(*block_hash_it, tokens, lora_id));
+            token_offset += *num_tokens_it as usize;
+        }
+
+        blocks
     }
 }
 
