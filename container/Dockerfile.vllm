@@ -83,16 +83,6 @@ RUN cd /usr/local/src && \
     ./DEBS/libibverbs* ./DEBS/ibverbs-providers* ./DEBS/librdmacm* ./DEBS/libibumad* && \
     rm -rf /var/lib/apt/lists/* /usr/local/src/* mofed.tgz
 
-# Build and install Perf Analyzer for benchmarking\
-RUN apt-get update -y && apt-get -y install rapidjson-dev zlib1g-dev
-RUN git clone https://github.com/triton-inference-server/perf_analyzer.git
-ARG GENAI_PERF_TAG="25d0188713adc47868d6b3f22426375237a90529"
-RUN git -C perf_analyzer checkout ${GENAI_PERF_TAG}
-RUN mkdir perf_analyzer/build
-RUN cmake -B perf_analyzer/build -S perf_analyzer -D TRITON_ENABLE_PERF_ANALYZER_OPENAI=ON
-RUN cmake --build perf_analyzer/build -- -j8
-ENV PATH="$(pwd)/perf_analyzer/build/perf_analyzer/src/perf-analyzer-build:${PATH}"
-
 ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/cuda/lib64 \
     LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
 
@@ -191,10 +181,19 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 
 # Install patched vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
-ARG VLLM_REF="v0.7.2"
-ARG VLLM_PATCH="vllm_${VLLM_REF}-dynamo-kv-disagg-patch.patch"
+ARG VLLM_REF="0.7.2"
+ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
-    bash /tmp/deps/vllm/install.sh --patch /tmp/deps/vllm/${VLLM_PATCH} --ref ${VLLM_REF} --install-cmd "uv pip install --editable" --use-precompiled --installation-dir /opt/vllm
+    mkdir /tmp/vllm && \
+    uv pip install pip wheel && \
+    python -m pip download --only-binary=:all: --no-deps --dest /tmp/vllm vllm==${VLLM_REF} && \
+    cd /tmp/vllm && \
+    wheel unpack vllm-*.whl && \
+    cd vllm-${VLLM_REF} && \
+    patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
+    mkdir -p /workspace/dist && \
+    wheel pack . --dest-dir /workspace/dist && \
+    uv pip install /workspace/dist/vllm-*.whl
 
 # Install genai-perf for benchmarking
 RUN uv pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
@@ -303,7 +302,7 @@ RUN uv venv $VIRTUAL_ENV --python 3.12 && \
 COPY --from=dev /workspace/dist/*.whl whls/
 RUN uv pip install $(find whls -name ai_dynamo_runtime-*.whl) && \
     uv pip install $(find whls -name ai_dynamo-*.whl) && \
-    uv pip install $(find whls -name vllm*cp312*.whl) && \
+    uv pip install $(find whls -name vllm-*.whl) && \
     rm -r whls
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
