@@ -32,3 +32,4 @@ transformers
 tritonclient==2.53.0
 types-PyYAML
 uvicorn
+pip==25.0.1

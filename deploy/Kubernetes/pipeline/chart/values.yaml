@@ -1,0 +1,7 @@
+imagePullSecrets:
+- name: yatai-regcred
+- name: nvcrimagepullsecret
+- name: gitlab-imagepull
+
+natsAddr: nats://dynamo-platform-nats:4222
+etcdAddr: dynamo-platform-etcd:2379
