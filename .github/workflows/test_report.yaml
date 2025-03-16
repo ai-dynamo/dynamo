@@ -44,10 +44,65 @@ jobs:
            run_id: ${{ github.event.workflow_run.id }}
            path: artifacts
 
-      - name: Publish Test Results
-        uses: EnricoMi/publish-unit-test-result-action@170bf24d20d201b842d7a52403b73ed297e6645b # v2.18.0
+      - name: Report test status
+        id: report_test_status
+        uses: LouisBrunner/checks-action@v2.0.0
         with:
-          commit: ${{ github.event.workflow_run.head_sha }}
-          event_file: artifacts/Event File/event.json
-          event_name: ${{ github.event.workflow_run.event }}
-          files: "artifacts/**/*.xml"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: "Summarize test report"
+          status: "in_progress"
+          sha: ${{ github.event.workflow_run.head_commit.id }}
+
+      - name: Set Test Run URL
+        id: set_test_run_url
+        run: echo "test_run_url=${{ github.event.workflow_run.html_url }}" >> $GITHUB_OUTPUT
+
+      - name: Summarize Test Results as Markdown Table
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libxml2-utils
+          echo "## Unit Test Results Summary" >> $GITHUB_STEP_SUMMARY
+          echo "# This test report is a summary of the test run in workflow run: [${{ steps.set_test_run_url.outputs.test_run_url }}](${{ steps.set_test_run_url.outputs.test_run_url }})" >> $GITHUB_STEP_SUMMARY
+          echo "| Test Suite | Tests | Passed | Failed | Skipped | Duration |" >> $GITHUB_STEP_SUMMARY
+          echo "|------------|-------|--------|--------|---------|----------|" >> $GITHUB_STEP_SUMMARY
+          total_tests=0
+          total_passed=0
+          total_failed=0
+          total_skipped=0
+          total_duration=0
+          for file in artifacts/**/*.xml; do
+            if [ -f "$file" ]; then
+              suite_name=$(basename "$(dirname "$file")")
+              tests=$(xmllint --xpath "count(//testcase)" "$file")
+              passed=$(xmllint --xpath "count(//testcase[not(failure) and not(error) and not(skipped)])" "$file")
+              failed=$(xmllint --xpath "count(//testcase[failure or error])" "$file")
+              skipped=$(xmllint --xpath "count(//testcase[skipped])" "$file")
+              duration=$(xmllint --xpath "sum(//testcase/@time)" "$file")
+              # Debugging: Output values for each file
+              echo "Processing file: $file"
+              echo "Suite: $suite_name, Tests: $tests, Passed: $passed, Failed: $failed, Skipped: $skipped, Duration: $duration"
+              echo "| $suite_name | $tests | $passed | $failed | $skipped | ${duration}s |" >> $GITHUB_STEP_SUMMARY
+              total_tests=$((total_tests + tests))
+              total_passed=$((total_passed + passed))
+              total_failed=$((total_failed + failed))
+              total_skipped=$((total_skipped + skipped))
+              total_duration=$(echo "$total_duration + $duration" | bc)
+            fi
+          done
+          echo "Total tests: $total_tests"
+          echo "Total passed: $total_passed"
+          echo "Total failed: $total_failed"
+          echo "Total skipped: $total_skipped"
+          echo "Total duration: $total_duration"
+          echo "|------------|-------|--------|--------|---------|----------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Total** | $total_tests | $total_passed | $total_failed | $total_skipped | ${total_duration}s |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Complete report test status
+        if: always()
+        uses: LouisBrunner/checks-action@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: "Summarize test report"
+          status: "completed"
+          conclusion: ${{ job.status }}
+          sha: ${{ github.event.workflow_run.head_commit.id }}
