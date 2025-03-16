@@ -1137,7 +1137,7 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context
 	if dynamoNimDeployment.Spec.Ingress.HostPrefix != nil {
 		vsName = *dynamoNimDeployment.Spec.Ingress.HostPrefix + vsName
 	}
-	ingressSuffix, found := os.LookupEnv("INGRESS_SUFFIX")
+	ingressSuffix, found := os.LookupEnv("DYNAMO_INGRESS_SUFFIX")
 	if !found || ingressSuffix == "" {
 		ingressSuffix = kDefaultIngressSuffix
 	}

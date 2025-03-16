@@ -133,7 +133,7 @@ func ToDeploymentSchemaV2(ctx context.Context, cluster *models.Cluster, deployme
 	}
 
 	urls := make([]string, 0)
-	ingressSuffix, found := os.LookupEnv("INGRESS_SUFFIX")
+	ingressSuffix, found := os.LookupEnv("DYNAMO_INGRESS_SUFFIX")
 	if !found || ingressSuffix == "" {
 		ingressSuffix = kDefaultIngressSuffix
 	}

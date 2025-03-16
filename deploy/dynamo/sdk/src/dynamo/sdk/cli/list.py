@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import os
 import typing as t
 
 import bentoml
@@ -95,6 +96,8 @@ def build_list_command() -> click.Group:
         table.add_column("Resources", overflow="fold")
         table.add_column("URL", overflow="fold")
 
+        ingress_suffix = os.getenv("DYNAMO_INGRESS_SUFFIX", "local")
+
         for item in deployments.get("items", []):
             metadata = item.get("metadata", {})
             spec = item.get("spec", {})
@@ -111,7 +114,7 @@ def build_list_command() -> click.Group:
 
             # Format URL
             url = (
-                f"https://{ingress.get('hostPrefix', 'N/A')}.dev.aire.nvidia.com"
+                f"https://{ingress.get('hostPrefix', 'N/A')}.{ingress_suffix}"
                 if ingress.get("enabled", False)
                 else "N/A"
             )
