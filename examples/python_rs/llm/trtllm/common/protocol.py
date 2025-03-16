@@ -23,10 +23,21 @@ from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.serve.openai_protocol import (
     ChatCompletionRequest,
     ChatCompletionStreamResponse,
+    CompletionRequest,
     CompletionResponseStreamChoice,
     DisaggregatedParams,
     UsageInfo,
 )
+
+
+# The max_tokens is being deprecated in favor of max_completion_tokens.
+# However, TRTLLM protocol might still refer it as max_tokens.
+class AdaptedCompletionRequest(CompletionRequest):
+    max_completion_tokens: Optional[int] = None
+
+
+class AdaptedChatCompletionRequest(ChatCompletionRequest):
+    max_completion_tokens: Optional[int] = None
 
 
 class Tokens(BaseModel):

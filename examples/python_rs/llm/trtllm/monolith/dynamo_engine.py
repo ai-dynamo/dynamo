@@ -23,10 +23,7 @@ import sys
 from pathlib import Path
 
 from tensorrt_llm.logger import logger
-from tensorrt_llm.serve.openai_protocol import (
-    ChatCompletionRequest,
-    ChatCompletionStreamResponse,
-)
+from tensorrt_llm.serve.openai_protocol import ChatCompletionStreamResponse
 
 from dynamo.runtime import dynamo_endpoint
 
@@ -41,6 +38,7 @@ from common.base_engine import (  # noqa: E402
 )
 from common.generators import chat_generator  # noqa: E402
 from common.parser import parse_dynamo_run_args  # noqa: E402
+from common.protocol import AdaptedChatCompletionRequest  # noqa: E402
 
 logger.set_level("info")
 
@@ -67,8 +65,10 @@ def init_global_engine(args, engine_config):
     engine = DynamoTRTLLMEngine(trt_llm_engine_config)
 
 
-@dynamo_endpoint(ChatCompletionRequest, ChatCompletionStreamResponse)
+@dynamo_endpoint(AdaptedChatCompletionRequest, ChatCompletionStreamResponse)
 async def generate(request):
+    if request.max_completion_tokens is not None:
+        request.max_tokens = request.max_completion_tokens
     async for response in chat_generator(engine, request):
         yield response
 

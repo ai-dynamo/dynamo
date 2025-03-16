@@ -19,11 +19,10 @@ import uvloop
 from common.base_engine import BaseTensorrtLLMEngine, TensorrtLLMEngineConfig
 from common.generators import chat_generator, completion_generator
 from common.parser import LLMAPIConfig, parse_tensorrt_llm_args
+from common.protocol import AdaptedChatCompletionRequest, AdaptedCompletionRequest
 from tensorrt_llm.logger import logger
 from tensorrt_llm.serve.openai_protocol import (
-    ChatCompletionRequest,
     ChatCompletionStreamResponse,
-    CompletionRequest,
     CompletionStreamResponse,
 )
 
@@ -41,14 +40,18 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
     def __init__(self, trt_llm_engine_config: TensorrtLLMEngineConfig):
         super().__init__(trt_llm_engine_config)
 
-    @dynamo_endpoint(ChatCompletionRequest, ChatCompletionStreamResponse)
+    @dynamo_endpoint(AdaptedChatCompletionRequest, ChatCompletionStreamResponse)
     async def generate_chat(self, request):
+        if request.max_completion_tokens is not None:
+            request.max_tokens = request.max_completion_tokens
         async for response in chat_generator(self, request):
             yield response
         self._start_threads()
 
-    @dynamo_endpoint(CompletionRequest, CompletionStreamResponse)
+    @dynamo_endpoint(AdaptedCompletionRequest, CompletionStreamResponse)
     async def generate_completion(self, request):
+        if request.max_completion_tokens is not None:
+            request.max_tokens = request.max_completion_tokens
         async for response in completion_generator(self, request):
             yield response
         self._start_threads()

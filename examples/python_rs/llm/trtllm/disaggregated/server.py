@@ -160,7 +160,7 @@ class DisaggServer(ChatProcessorMixin):
 
         gen_req = copy.deepcopy(request)
 
-        request.max_completion_tokens = 1
+        request.max_tokens = 1
         ctx_resp = await self._get_ctx_resp(request, self.ctx_chat_client)
         ctx_resp_obj = DisaggChatCompletionStreamResponse.model_validate_json(ctx_resp)
 

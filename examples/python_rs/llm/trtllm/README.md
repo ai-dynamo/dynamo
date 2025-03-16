@@ -39,47 +39,58 @@ Start required services (etcd and NATS):
 
 ## Building the Environment
 
-TODO: Remove the internal references below.
+### Build the Dynamo container with TensorRT-LLM
 
+#### Step 1: Build TensorRT-LLM base container image
 
-### Build the Dynamo container with latest TRT-LLM
+Because of the known issue of C++11 ABI compatibility, we rebuild the TensorRT-LLM from source within NGC pytorch container.
+See [here](https://nvidia.github.io/TensorRT-LLM/installation/linux.html) for more informantion.
 
-#### Step 1:Build TRT-LLM wheel using latest tensorrt_llm main
+Use the helper script to build a TensorRT-LLM container base image. The script uses a specific commit id from TensorRT-LLM main branch.
 
-```
-git clone https://github.com/NVIDIA/TensorRT-LLM.git
-cd TensorRT-LLM
-
-# Start a dev docker container. Dont forget to mount your home directory to /home in the docker run command.
-make -C docker jenkins_run LOCAL_USER=1 DOCKER_RUN_ARGS="-v /user/home:/home"
-
-# Build wheel for the GPU architecture you are currently using ("native").
-# We use -f to run fast build which should speed up the build process. But it might not work for all GPUs and for full functionality you should disable it.
-python3 scripts/build_wheel.py --clean --trt_root /usr/local/tensorrt -a native -i -p -ccache
-
-# Copy wheel to your local directory
-cp build/tensorrt_llm-*.whl /home
-```
-
-####Step 2: Copy the TRT-LLM wheel to dynamo repository.
 ```bash
-cp /home/tensorrt_llm-*.whl /<path-to-repo>/dynamo/trtllm_wheel/
+./container/build_trtllm_base_image.sh
 ```
 
-####Step 3: Build the container
+For more information see [here](https://nvidia.github.io/TensorRT-LLM/installation/build-from-source-linux.html#option-1-build-tensorrt-llm-in-one-step) for more details on building from source.
+If you already have a TensorRT-LLM container image, you can skip this step.
+
+#### Step 2: Build the Dynamo container
+
 ```bash
 # Build image
-./container/build.sh --framework TENSORRTLLM --tensorrtllm-pip-wheel-path trtllm_wheel
+./container/build.sh --framework TENSORRTLLM
 ```
 
-We need to copy the TRT-LLM wheel to repository and point the build script to the path within
-the repository so that it can be picked by the docker build context.
+This build script internally points to the base container image built with step 1. If you skipped previous step because you already have the container image available, you can run the build script with that image as a base.
+
+```bash
+# Build dynamo image with other TRTLLM base image.
+./container/build.sh --framework TENSORRTLLM --base-image <trtllm-base-image> --base-image-tag <trtllm-base-image-tag>
+```
 
 ## Launching the Environment
-```
+```bash
 # Run image interactively from with the Dynamo root directory.
 ./container/run.sh --framework TENSORRTLLM -it
 ```
+
+## Quick Start using dynamo run
+
+```bash
+# Run the server
+dynamo run out=pystr:./monolith/dynamo_engine.py -- --engine_args llm_api_config.yaml
+```
+
+The above command should load the model specified in `llm_api_config.yaml` and start accepting
+text input from the client. For more details on the `dynamo run` command, please refer to the
+[dynamo run](/launch/README.md#python-bring-your-own-engine) documentation.
+
+Currently only monolithic deployment option is supported by `dynamo run` for TensorRT-LLM.
+Adding support for disaggregated deployment is under development. This does *not* require
+any other pre-requisites mentioned in the [Prerequisites](#prerequisites) section.
+
+
 
 ## Deployment Options
 
