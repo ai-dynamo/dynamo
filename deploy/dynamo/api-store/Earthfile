@@ -1,0 +1,26 @@
+VERSION 0.8
+
+uv-source:
+    FROM ghcr.io/astral-sh/uv:latest
+    SAVE ARTIFACT /uv
+
+uv-base:
+    FROM python:3.12-slim
+    COPY +uv-source/uv /bin/uv
+    RUN uv venv
+    ENV PATH="/app/.venv/bin:$PATH"
+    RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+    WORKDIR /app
+    COPY uv.lock pyproject.toml /app
+    RUN uv sync --frozen --no-install-project --no-dev --no-install-workspace --no-editable
+
+docker:
+    ARG CI_REGISTRY_IMAGE=my-registry
+    ARG CI_COMMIT_SHA=latest
+    ARG IMAGE=ai-dynamo-store
+    FROM +uv-base
+    # Copy project files
+    COPY ai_dynamo_store ai_dynamo_store
+    RUN uv pip install .
+    ENTRYPOINT ["ai-dynamo-store"]
+    SAVE IMAGE --push $CI_REGISTRY_IMAGE/$IMAGE:$CI_COMMIT_SHA
