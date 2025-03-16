@@ -66,14 +66,16 @@ def deprecated_option(*param_decls: str, **attrs: t.Any):
 def _parse_service_arg(arg_name: str, arg_value: str) -> tuple[str, str, t.Any]:
     """Parse a single CLI argument into service name, key, and value."""
 
-    service, key = arg_name.split(".", 1)
-
+    parts = arg_name.split(".")
+    service = parts[0]
+    
+    # Handle nested keys (e.g., ServiceArgs.workers or ServiceArgs.envs.CUDA_VISIBLE_DEVICES)
+    nested_keys = parts[1:]
+    
     # Parse value based on type
     try:
-        # Try as JSON for complex types
         value = json.loads(arg_value)
     except json.JSONDecodeError:
-        # Handle basic types
         if arg_value.isdigit():
             value = int(arg_value)
         elif arg_value.replace(".", "", 1).isdigit() and arg_value.count(".") <= 1:
@@ -83,20 +85,40 @@ def _parse_service_arg(arg_name: str, arg_value: str) -> tuple[str, str, t.Any]:
         else:
             value = arg_value
 
-    return service, key, value
+    # Build nested dict structure
+    result = value
+    for key in reversed(nested_keys[1:]):
+        result = {key: result}
+    
+    return service, nested_keys[0], result
 
 
 def _parse_service_args(args: list[str]) -> t.Dict[str, t.Any]:
-    service_configs: t.DefaultDict[str, t.Dict[str, t.Any]] = collections.defaultdict(
-        dict
-    )
+    service_configs: t.DefaultDict[str, t.Dict[str, t.Any]] = collections.defaultdict(dict)
+    
+    def deep_update(d: dict, key: str, value: t.Any):
+        """
+        Recursively updates nested dictionaries. We use this to process arguments like 
+
+        ---Worker.ServiceArgs.env.CUDA_VISIBLE_DEVICES="0,1"
+
+        The _parse_service_arg function will parse this into:
+        service = "Worker"
+        nested_keys = ["ServiceArgs", "envs", "CUDA_VISIBLE_DEVICES"]
+
+        And returns returns: ("VllmWorker", "ServiceArgs", {"envs": {"CUDA_VISIBLE_DEVICES": "0,1"}})
+
+        We then use deep_update to update the service_configs dictionary with this nested value.
+        """
+        if isinstance(value, dict) and key in d and isinstance(d[key], dict):
+            for k, v in value.items():
+                deep_update(d[key], k, v)
+        else:
+            d[key] = value
 
     index = 0
     while index < len(args):
         next_arg = args[index]
-
-        arg_name = ""
-        arg_value = ""
 
         if not (next_arg.startswith("--") or "." not in next_arg):
             continue
@@ -115,9 +137,8 @@ def _parse_service_args(args: list[str]) -> t.Dict[str, t.Any]:
             if arg_value.startswith("-"):
                 raise ValueError("Service arg value can not start with -")
             arg_name = arg_name[2:]
-            parsed = _parse_service_arg(arg_name, arg_value)
-            service, key, value = parsed
-            service_configs[service][key] = value
+            service, key, value = _parse_service_arg(arg_name, arg_value)
+            deep_update(service_configs[service], key, value)
         except Exception:
             raise ValueError(f"Error parsing service arg: {args[index]}")
 
@@ -280,11 +301,18 @@ def build_serve_command() -> click.Group:
         show_default=True,
         hidden=True,
     )
+    @click.option(
+        "--dry-run",
+        is_flag=True,
+        help="Print the final service configuration and exit without starting the server",
+        default=False,
+    )
     @click.pass_context
     @env_manager
     def serve(
         ctx: click.Context,
         bento: str,
+        dry_run: bool,
         development: bool,
         port: int,
         host: str,
@@ -360,8 +388,6 @@ def build_serve_command() -> click.Group:
                             service_configs[service] = {}
                         service_configs[service][key] = value
 
-        # Process Overrides
-
         # Process service-specific options
         cmdline_overrides: t.Dict[str, t.Any] = _parse_service_args(ctx.args)
         for service, configs in cmdline_overrides.items():
@@ -369,6 +395,13 @@ def build_serve_command() -> click.Group:
                 if service not in service_configs:
                     service_configs[service] = {}
                 service_configs[service][key] = value
+
+        if dry_run:
+            rich.print("[bold]Service Configuration:[/bold]")
+            rich.print(json.dumps(service_configs, indent=2))
+            rich.print("\n[bold]Environment Variable that would be set:[/bold]")
+            rich.print(f"DYNAMO_SERVICE_CONFIG={json.dumps(service_configs)}")
+            sys.exit(0)
 
         # Set environment variable with service configuration
         if service_configs:

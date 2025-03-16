@@ -21,3 +21,6 @@ Frontend:
 VllmWorkerRouterLess:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   enforce-eager: true
+  max-model-len: 16384
+  max-num-batched-tokens: 16384
+  block-size: 64
