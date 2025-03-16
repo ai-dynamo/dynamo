@@ -20,8 +20,8 @@ Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo 
 /deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16
 
 # CI/CD
-/.github/ @ai-dynamo/Devops
-CODEOWNERS @ai-dynamo/Devops
+/.github/ @ai-dynamo/Devops @nnshah1
+CODEOWNERS @ai-dynamo/Devops @nnshah1
 
 # Legal
 /LICENSE @ai-dynamo/Devops
