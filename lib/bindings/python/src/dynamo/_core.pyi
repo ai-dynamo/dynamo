@@ -351,7 +351,7 @@ class KvEventPublisher:
         Create a `KvEventPublisher` object
         """
 
-    def publish_stored(self, event_id, int, token_ids: List[int], num_block_tokens: List[int], block_hashes: List[int], lora_id: int, parent_hash: int = None) -> None:
+    def publish_stored(self, event_id, int, token_ids: List[int], num_block_tokens: List[int], block_hashes: List[int], lora_id: int, parent_hash: Optional[int] = None) -> None:
         """
         Publish a KV stored event.
         """
