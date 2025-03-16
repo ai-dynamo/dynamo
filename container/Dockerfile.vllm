@@ -322,7 +322,7 @@ ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
 # Copy runtime README
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
     echo "cat << EOF" >> ~/.bashrc && \
-    cat launch_message.txt >> ~/.bashrc && \
+    sed '/^\/\//d' ./launch_message.txt >> ~/.bashrc && \
     echo "EOF" >> ~/.bashrc
 
 # dynamo run in=text out=mistralrs Qwen/Qwen2.5-3B-Instruct
