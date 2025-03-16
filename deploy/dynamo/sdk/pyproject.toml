@@ -27,6 +27,7 @@ dependencies = [
     # "dynamo=={dynamo_version}",
     "bentoml==1.4.1",
     "types-psutil==7.0.0.20250218",
+    "kubernetes==32.0.1",
 ]
 
 [project.scripts]
