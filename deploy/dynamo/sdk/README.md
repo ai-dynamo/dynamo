@@ -18,12 +18,12 @@ Users/Clients (HTTP)
 ┌─────────────┐
 │  Frontend   │  HTTP API endpoint (/generate)
 └─────────────┘
-      │ 
+      │
       ▼
 ┌─────────────┐
 │   Middle    │
 └─────────────┘
-      │ 
+      │
       ▼
 ┌─────────────┐
 │  Backend    │
