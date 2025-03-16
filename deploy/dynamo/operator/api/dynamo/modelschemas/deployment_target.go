@@ -238,8 +238,8 @@ type BentoRequestOverrides struct {
 
 	ImageBuilderExtraPodMetadata   *dynamoCommon.ExtraPodMetadata `json:"imageBuilderExtraPodMetadata,omitempty"`
 	ImageBuilderExtraPodSpec       *dynamoCommon.ExtraPodSpec     `json:"imageBuilderExtraPodSpec,omitempty"`
-	ImageBuilderExtraContainerEnv  []corev1.EnvVar                    `json:"imageBuilderExtraContainerEnv,omitempty"`
-	ImageBuilderContainerResources *corev1.ResourceRequirements       `json:"imageBuilderContainerResources,omitempty"`
+	ImageBuilderExtraContainerEnv  []corev1.EnvVar                `json:"imageBuilderExtraContainerEnv,omitempty"`
+	ImageBuilderContainerResources *corev1.ResourceRequirements   `json:"imageBuilderContainerResources,omitempty"`
 
 	DockerConfigJSONSecretName string `json:"dockerConfigJsonSecretName,omitempty"`
 

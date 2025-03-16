@@ -34,6 +34,7 @@ use tracing;
 
 use crate::model_card::model::{ModelDeploymentCard, ModelInfo, TokenizerKind};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
+use crate::tokenizers::Encoding;
 
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{
@@ -88,7 +89,12 @@ impl OpenAIPreprocessor {
         }))
     }
 
-    /// Translate a [`ChatCompletionRequest`] request to a common completion request.
+    /// Encode a string to it's tokens
+    pub fn tokenize(&self, s: &str) -> anyhow::Result<Encoding> {
+        self.tokenizer.encode(s)
+    }
+
+    /// Translate a [`NvCreateChatCompletionRequest`] request to a common completion request.
     /// Returns both the common completion request and a hashmap of annotations.
     ///
     /// Annotations evaluated by this method include:

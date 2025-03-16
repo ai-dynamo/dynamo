@@ -13,7 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{cmp::min, num::NonZero, path::Path, sync::Arc};
+use std::collections::HashMap;
+use std::{num::NonZero, path::Path, sync::Arc};
 
 use async_openai::types::FinishReason;
 use async_stream::stream;
@@ -24,7 +25,7 @@ use mistralrs::{
     AutoDeviceMapParams, Constraint, DefaultSchedulerMethod, Device, DeviceMapSetting,
     GGUFLoaderBuilder, GGUFSpecificConfig, MemoryGpuConfig, MistralRs, MistralRsBuilder,
     ModelDType, NormalLoaderBuilder, NormalRequest, NormalSpecificConfig, PagedAttentionConfig,
-    Pipeline, Request, RequestMessage, ResponseOk, SamplingParams, SchedulerConfig, TokenSource,
+    Request, RequestMessage, ResponseOk, SamplingParams, SchedulerConfig, StopTokens, TokenSource,
 };
 use tokio::sync::mpsc::channel;
 
@@ -38,16 +39,6 @@ use crate::protocols::openai::chat_completions::{
 };
 use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 
-/// If user does not provide a max_tokens limit prompt+output to this many
-const DEFAULT_MAX_TOKENS: i32 = 8192;
-
-/// TODO: tune. Presumably we read it from model's config.json?
-const MAX_SEQ_LEN: usize = 4096;
-
-// TODO: tune, maybe implement batching.
-const MAX_BATCH_SIZE: usize = 2;
-
-/// TODO: tune
 const PAGED_ATTENTION_MAX_NUM_SEQS: usize = 5;
 
 pub async fn make_engine(
@@ -72,7 +63,6 @@ fn best_device() -> pipeline_error::Result<Device> {
 
 struct MistralRsEngine {
     mistralrs: Arc<MistralRs>,
-    pipeline: Arc<tokio::sync::Mutex<dyn Pipeline + Send + Sync + 'static>>,
 }
 
 impl MistralRsEngine {
@@ -117,12 +107,14 @@ impl MistralRsEngine {
             .build(None)?
         };
 
+        let max_seq_len = AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN;
+
         // Paged attention requires cuda
         let paged_attention_config = if cfg!(feature = "cuda") {
             Some(PagedAttentionConfig::new(
-                Some(32),
-                1024,
-                MemoryGpuConfig::Utilization(0.9),
+                None, // Block size, default 32
+                512,  // CPU memory in MiB
+                MemoryGpuConfig::ContextSize(max_seq_len),
             )?)
         } else {
             None
@@ -130,13 +122,13 @@ impl MistralRsEngine {
         // Load, into a Pipeline
         let pipeline = loader.load_model_from_hf(
             None,
-            TokenSource::CacheToken,
+            TokenSource::None, // The model was already downloaded
             &ModelDType::Auto,
             &best_device()?,
             false,
             DeviceMapSetting::Auto(AutoDeviceMapParams::Text {
-                max_seq_len: MAX_SEQ_LEN,
-                max_batch_size: MAX_BATCH_SIZE,
+                max_seq_len,
+                max_batch_size: AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
             }),
             None,
             paged_attention_config,
@@ -157,14 +149,13 @@ impl MistralRsEngine {
             tracing::debug!("Using mistralrs DefaultScheduler");
             SchedulerConfig::DefaultScheduler {
                 // Safety: unwrap trivially safe here
-                method: DefaultSchedulerMethod::Fixed(NonZero::new(5).unwrap()),
+                method: DefaultSchedulerMethod::Fixed(NonZero::new(max_seq_len).unwrap()),
             }
         };
         // Create the MistralRs, which is a runner
-        let builder = MistralRsBuilder::new(pipeline.clone(), scheduler);
+        let builder = MistralRsBuilder::new(pipeline.clone(), scheduler).with_prefix_cache_n(16);
         Ok(MistralRsEngine {
             mistralrs: builder.build(),
-            pipeline,
         })
     }
 }
@@ -184,27 +175,16 @@ impl
         let (request, context) = request.transfer(());
         let ctx = context.context();
         let (tx, mut rx) = channel(10_000);
-        let maybe_tok = self.pipeline.lock().await.tokenizer();
 
-        let mut prompt_tokens = 0i32;
         let mut messages = vec![];
         for m in request.inner.messages {
             let async_openai::types::ChatCompletionRequestMessage::User(inner_m) = m else {
                 continue;
             };
-            let content = match inner_m.content {
-                async_openai::types::ChatCompletionRequestUserMessageContent::Text(prompt) => {
-                    if let Some(tok) = maybe_tok.as_ref() {
-                        prompt_tokens = tok
-                            .encode(prompt.clone(), false)
-                            .map(|e| e.len() as i32)
-                            .unwrap_or(0);
-                    }
-                    prompt
-                }
-                _ => {
-                    anyhow::bail!("Only Text type is supported");
-                }
+            let async_openai::types::ChatCompletionRequestUserMessageContent::Text(content) =
+                inner_m.content
+            else {
+                anyhow::bail!("Only Text type chat completion supported");
             };
             let r = IndexMap::from([
                 ("role".to_string(), Either::Left("user".to_string())),
@@ -215,21 +195,47 @@ impl
         if messages.is_empty() {
             anyhow::bail!("Empty request");
         }
-        // TODO tracing::trace print the latest prompt, which should be the last message at user
-        // level.
-        //tracing::info!(prompt_tokens, "Received prompt");
-        let limit = DEFAULT_MAX_TOKENS - prompt_tokens;
-        #[allow(deprecated)]
-        let max_output_tokens = min(
-            request.inner.max_tokens.map(|x| x as i32).unwrap_or(limit),
-            limit,
-        );
 
+        let det = SamplingParams::deterministic();
+        // allow deprecated because max_tokens
+        #[allow(deprecated)]
+        let sampling_params = SamplingParams {
+            temperature: request
+                .inner
+                .temperature
+                .map(|t| t as f64)
+                .or(det.temperature),
+            top_p: request.inner.top_p.map(|t| t as f64).or(det.top_p),
+            top_n_logprobs: request
+                .inner
+                .top_logprobs
+                .map(|t| t as usize)
+                .unwrap_or(det.top_n_logprobs),
+            frequency_penalty: request.inner.frequency_penalty.or(det.frequency_penalty),
+            presence_penalty: request.inner.presence_penalty.or(det.presence_penalty),
+            stop_toks: request.inner.stop.map(to_stop_tokens).or(det.stop_toks),
+            max_len: request
+                .inner
+                .max_completion_tokens
+                .or(request.inner.max_tokens)
+                .map(|m| m as usize)
+                .or(det.max_len),
+            logits_bias: request
+                .inner
+                .logit_bias
+                .map(to_logit_bias)
+                .or(det.logits_bias),
+            // These are not in async-openai yet
+            top_k: det.top_k,
+            min_p: det.min_p,
+            n_choices: 1,
+            dry_params: det.dry_params,
+        };
         let mistralrs_request = Request::Normal(NormalRequest {
             messages: RequestMessage::Chat(messages),
-            sampling_params: SamplingParams::deterministic(),
+            sampling_params,
             response: tx,
-            return_logprobs: false,
+            return_logprobs: request.inner.logprobs.unwrap_or_default(),
             is_streaming: true,
             id: self.mistralrs.next_request_id(),
             constraint: Constraint::None,
@@ -243,7 +249,6 @@ impl
 
         self.mistralrs.get_sender()?.send(mistralrs_request).await?;
 
-        let mut used_output_tokens = 0;
         let output = stream! {
             while let Some(response) = rx.recv().await {
                 let response = match response.as_result() {
@@ -259,17 +264,16 @@ impl
                             tracing::warn!("No content from mistralrs. Abandoning request.");
                             break;
                         };
-                        if let Some(tok) = maybe_tok.as_ref() {
-                            used_output_tokens += tok
-                                .encode(from_assistant.clone(), false)
-                                .map(|e| e.len() as i32)
-                                .unwrap_or(0);
-                        }
-                        let finish_reason = match &c.choices[0].finish_reason {
-                            Some(_fr) => Some(FinishReason::Stop), //Some(fr.parse::<FinishReason>().unwrap_or(FinishReason::Stop)),
-                            None if used_output_tokens >= max_output_tokens => {
-                                tracing::debug!(used_output_tokens, max_output_tokens, "Met or exceed max_tokens. Stopping.");
+                        let finish_reason = match &c.choices[0].finish_reason.as_deref() {
+                            Some("stop") | Some("canceled") => {
+                                Some(FinishReason::Stop)
+                            }
+                            Some("length") => {
                                 Some(FinishReason::Length)
+                            }
+                            Some(s) => {
+                                tracing::warn!(stop_reason = s, "Unknow stop reason");
+                                Some(FinishReason::Stop)
                             }
                             None => None,
                         };
@@ -318,4 +322,35 @@ impl
         };
         Ok(ResponseStream::new(Box::pin(output), ctx))
     }
+}
+
+/// openai stop tokens to mistralrs stop tokens
+fn to_stop_tokens(t: async_openai::types::Stop) -> StopTokens {
+    match t {
+        async_openai::types::Stop::String(s) => StopTokens::Seqs(vec![s]),
+        async_openai::types::Stop::StringArray(v) => StopTokens::Seqs(v),
+    }
+}
+
+/// openai logit bias (strings/json) to mistralrs (u32/f32)
+/// I think the input looks like this: {"3721": -100, "17765": 100}
+fn to_logit_bias(lb: HashMap<String, serde_json::Value>) -> HashMap<u32, f32> {
+    let mut out = HashMap::new();
+    for (key, value) in &lb {
+        let token_id: u32 = match key.parse() {
+            Ok(t) => t,
+            Err(err) => {
+                tracing::warn!(
+                    "Unexpected logit_bias map. Key '{key}' is not an int: {lb:?}. {err}."
+                );
+                return HashMap::new();
+            }
+        };
+        let Some(bias) = value.as_f64() else {
+            tracing::warn!("Unexpected logit_bias map. Value '{value}' is not a float: {lb:?}");
+            return HashMap::new();
+        };
+        out.insert(token_id, bias as f32);
+    }
+    out
 }

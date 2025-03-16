@@ -25,7 +25,7 @@ import (
 
 type DynamoNimRequestData struct {
 	DynamoNimVersionTag string `json:"bentoTag"`
-	DownloadURL           string `json:"downloadUrl,omitempty"`
+	DownloadURL         string `json:"downloadUrl,omitempty"`
 
 	ImageBuildTimeout *time.Duration `json:"imageBuildTimeout,omitempty"`
 
@@ -41,5 +41,5 @@ type DynamoNimRequestData struct {
 
 type DynamoNimRequestConfigurationV1Alpha1 struct {
 	Data    DynamoNimRequestData `json:"data,omitempty"`
-	Version string                 `json:"version"`
+	Version string               `json:"version"`
 }

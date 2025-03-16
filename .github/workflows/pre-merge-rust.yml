@@ -31,7 +31,7 @@ on:
     - 'lib/llm/**'
     - 'lib/bindings/**'
     - 'launch/**'
-    - 'examples/rust/**'
+    - 'components/**'
     - '**.rs'
     - 'Cargo.toml'
     - 'Cargo.lock'
@@ -40,7 +40,7 @@ jobs:
   pre-merge-rust:
     runs-on: ubuntu-latest
     strategy:
-      matrix: { dir: ['lib/runtime', 'lib/llm', 'lib/bindings/c', 'lib/bindings/python', 'launch/dynamo-run', 'components/metrics', 'examples/rust'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
     permissions:
       contents: read
     steps:
@@ -84,7 +84,7 @@ jobs:
       working-directory: ${{ matrix.dir }}
       run: |
         cargo-deny --version || cargo install cargo-deny@0.16.4
-        cargo-deny check --hide-inclusion-graph licenses --config ${{ github.workspace }}/deny.toml
+        cargo-deny --no-default-features check --hide-inclusion-graph licenses --config ${{ github.workspace }}/deny.toml
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
       run: cargo test --locked --all-targets

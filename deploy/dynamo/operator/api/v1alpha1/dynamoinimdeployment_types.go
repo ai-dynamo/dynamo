@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	DynamoDeploymentConditionTypeAvailable                 = "Available"
+	DynamoDeploymentConditionTypeAvailable             = "Available"
 	DynamoDeploymentConditionTypeDynamoNimFound        = "DynamoNimFound"
 	DynamoDeploymentConditionTypeDynamoNimRequestFound = "DynamoNimRequestFound"
 )
@@ -45,7 +45,7 @@ type DynamoNimDeploymentSpec struct {
 	// contains the name of the service
 	ServiceName string `json:"serviceName,omitempty"`
 
-	Resources        *dynamoCommon.Resources `json:"resources,omitempty"`
+	Resources        *dynamoCommon.Resources    `json:"resources,omitempty"`
 	Autoscaling      *Autoscaling               `json:"autoscaling,omitempty"`
 	Envs             []corev1.EnvVar            `json:"envs,omitempty"`
 	EnvFromSecret    *string                    `json:"envFromSecret,omitempty"`

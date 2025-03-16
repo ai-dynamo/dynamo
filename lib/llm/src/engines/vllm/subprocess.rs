@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use pyo3::{types::IntoPyDict, Python};
+use std::env;
 use std::path::Path;
 
 use crate::engines::MultiNodeConfig;
@@ -56,6 +57,9 @@ pub fn run_subprocess(
     tp_size: u32,
 ) -> anyhow::Result<()> {
     pyo3::prepare_freethreaded_python(); // or enable feature "auto-initialize"
+    if let Ok(venv) = env::var("VIRTUAL_ENV") {
+        Python::with_gil(|py| crate::engines::fix_venv(venv, py));
+    }
     let card = model_card_path.display().to_string();
     let model_path_str = model_path.display().to_string();
     Python::with_gil(|py| {

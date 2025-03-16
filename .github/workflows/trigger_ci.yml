@@ -46,12 +46,13 @@ jobs:
         filters: |
           vllm:
             - 'container/Dockerfile.vllm'
+            - 'container/Dockerfile.vllm_nixl'
             - 'examples/python/llm/**'
             - 'examples/python_rs/llm/**'
             - 'container/deps/requirements.vllm.txt'
             - 'container/deps/vllm/**'
           sdk:
-            - 'deploy/dynamo/**'
+            - 'deploy/**'
     - name: Check if Validation Workflow has run
       id: check_workflow
       uses: actions/github-script@v6

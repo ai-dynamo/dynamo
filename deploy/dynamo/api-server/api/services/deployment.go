@@ -61,18 +61,18 @@ type UpdateDeploymentStatusOption struct {
 
 type ListDeploymentOption struct {
 	BaseListOption
-	ClusterId             *uint
-	CreatorId             *string
-	LastUpdaterId         *uint
-	OrganizationId        *string
-	ClusterIds            *[]string
-	CreatorIds            *[]uint
-	LastUpdaterIds        *[]uint
-	OrganizationIds       *[]string
-	Ids                   *[]uint
+	ClusterId           *uint
+	CreatorId           *string
+	LastUpdaterId       *uint
+	OrganizationId      *string
+	ClusterIds          *[]string
+	CreatorIds          *[]uint
+	LastUpdaterIds      *[]uint
+	OrganizationIds     *[]string
+	Ids                 *[]uint
 	DynamoNimVersionIds *[]uint
-	Statuses              *[]schemas.DeploymentStatus
-	Order                 *string
+	Statuses            *[]schemas.DeploymentStatus
+	Order               *string
 	DynamoNimName       *string
 	DynamoNimTag        *string
 }

@@ -4,11 +4,11 @@
 # https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
 # Rust
-*.rs @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4
+*.rs @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @alec-flowers
 Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4
 
 # Python Libraries
-*.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @nv-blazejkubiak @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4
+*.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers
 
 # Container/Environments
 /container/ @rmccorm4 @tanmayv25 @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @nv-anants
@@ -16,10 +16,13 @@ Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo 
 # Kubernetes
 /deploy/Kubernetes/ @whoisj @hutm @biswapanda
 
+# Dynamo deploy
+/deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16
+
 # CI/CD
 /.github/ @ai-dynamo/Devops @nnshah1
 CODEOWNERS @ai-dynamo/Devops @nnshah1
 
 # Legal
-/LICENSE @nv-anants @nvda-mesharma @glos-nv @dmitry-tokarev-nv
-/ATTRIBUTIONS.md @nv-anants @nvda-mesharma @glos-nv @dmitry-tokarev-nv
+/LICENSE @nv-anants @nvda-mesharma @dmitry-tokarev-nv
+/ATTRIBUTIONS.md @nv-anants @nvda-mesharma @dmitry-tokarev-nv

@@ -193,6 +193,9 @@ async def test_metrics_aggregator(distributed_runtime):
         "request_total_slots": 1024,
         "kv_active_blocks": 523,
         "kv_total_blocks": 777,
+        "num_requests_waiting": 10,
+        "gpu_cache_usage_perc": 0.5,
+        "gpu_prefix_cache_hit_rate": 0.75,
     }
 
     # need 'create_task' to put publisher task in the background
@@ -222,5 +225,8 @@ async def metrics_publisher_task(kv_listener, expected_metrics):
         expected_metrics["request_total_slots"],
         expected_metrics["kv_active_blocks"],
         expected_metrics["kv_total_blocks"],
+        expected_metrics["num_requests_waiting"],
+        expected_metrics["gpu_cache_usage_perc"],
+        expected_metrics["gpu_prefix_cache_hit_rate"],
     )
     await metrics_publisher.create_endpoint(kv_listener)

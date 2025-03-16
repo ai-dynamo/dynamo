@@ -35,7 +35,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"emperror.dev/errors"
-	"github.com/cisco-open/k8s-objectmatcher/patch"
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/modelschemas"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemasv1"
@@ -46,6 +45,7 @@ import (
 	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/config"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/consts"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/system"
+	"github.com/cisco-open/k8s-objectmatcher/patch"
 	"github.com/huandu/xstrings"
 	"github.com/jinzhu/copier"
 	"github.com/prometheus/common/version"
@@ -90,6 +90,7 @@ const (
 	ContainerPortNameHTTPProxy                                = "http-proxy"
 	ServicePortNameHTTPNonProxy                               = "http-non-proxy"
 	HeaderNameDebug                                           = "X-Yatai-Debug"
+	kDefaultIngressSuffix                                     = "local"
 )
 
 var ServicePortHTTPNonProxy = commonconsts.BentoServicePort + 1
@@ -342,10 +343,10 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	// create or update api-server deployment
 	modified_, err := r.createOrUpdateOrDeleteDeployments(ctx, createOrUpdateOrDeleteDeploymentsOption{
-		yataiClient:             yataiClient,
+		yataiClient:         yataiClient,
 		dynamoNimDeployment: dynamoNimDeployment,
 		dynamoNim:           dynamoNimCR,
-		clusterName:             clusterName,
+		clusterName:         clusterName,
 	})
 	if err != nil {
 		return
@@ -380,7 +381,7 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	// create or update api-server ingresses
 	modified_, err = r.createOrUpdateIngresses(ctx, createOrUpdateIngressOption{
-		yataiClient:             yataiClient,
+		yataiClient:         yataiClient,
 		dynamoNimDeployment: dynamoNimDeployment,
 		dynamoNim:           dynamoNimCR,
 	})
@@ -677,10 +678,10 @@ func (r *DynamoNimDeploymentReconciler) getYataiClientWithAuth(ctx context.Conte
 }
 
 type createOrUpdateOrDeleteDeploymentsOption struct {
-	yataiClient             **yataiclient.YataiClient
+	yataiClient         **yataiclient.YataiClient
 	dynamoNimDeployment *v1alpha1.DynamoNimDeployment
 	dynamoNim           *v1alpha1.DynamoNim
-	clusterName             *string
+	clusterName         *string
 }
 
 //nolint:nakedret
@@ -738,8 +739,8 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateDeployment(ctx context.Con
 	logs := log.FromContext(ctx)
 
 	deployment, err := r.generateDeployment(ctx, generateDeploymentOption{
-		dynamoNimDeployment:                 opt.dynamoNimDeployment,
-		dynamoNim:                           opt.dynamoNim,
+		dynamoNimDeployment:                     opt.dynamoNimDeployment,
+		dynamoNim:                               opt.dynamoNim,
 		yataiClient:                             opt.yataiClient,
 		clusterName:                             opt.clusterName,
 		isStealingTrafficDebugModeEnabled:       opt.isStealingTrafficDebugModeEnabled,
@@ -953,8 +954,8 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateOrDeleteServices(ctx conte
 	isDebugPodReceiveProductionTrafficEnabled := checkIfIsDebugPodReceiveProductionTrafficEnabled(resourceAnnotations)
 	containsStealingTrafficDebugModeEnabled := checkIfContainsStealingTrafficDebugModeEnabled(opt.dynamoNimDeployment)
 	modified, err = r.createOrUpdateService(ctx, createOrUpdateServiceOption{
-		dynamoNimDeployment:                 opt.dynamoNimDeployment,
-		dynamoNim:                           opt.dynamoNim,
+		dynamoNimDeployment:                     opt.dynamoNimDeployment,
+		dynamoNim:                               opt.dynamoNim,
 		isStealingTrafficDebugModeEnabled:       false,
 		isDebugPodReceiveProductionTraffic:      isDebugPodReceiveProductionTrafficEnabled,
 		containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
@@ -966,8 +967,8 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateOrDeleteServices(ctx conte
 	if containsStealingTrafficDebugModeEnabled {
 		var modified_ bool
 		modified_, err = r.createOrUpdateService(ctx, createOrUpdateServiceOption{
-			dynamoNimDeployment:                 opt.dynamoNimDeployment,
-			dynamoNim:                           opt.dynamoNim,
+			dynamoNimDeployment:                     opt.dynamoNimDeployment,
+			dynamoNim:                               opt.dynamoNim,
 			isStealingTrafficDebugModeEnabled:       false,
 			isDebugPodReceiveProductionTraffic:      isDebugPodReceiveProductionTrafficEnabled,
 			containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
@@ -980,8 +981,8 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateOrDeleteServices(ctx conte
 			modified = true
 		}
 		modified_, err = r.createOrUpdateService(ctx, createOrUpdateServiceOption{
-			dynamoNimDeployment:                 opt.dynamoNimDeployment,
-			dynamoNim:                           opt.dynamoNim,
+			dynamoNimDeployment:                     opt.dynamoNimDeployment,
+			dynamoNim:                               opt.dynamoNim,
 			isStealingTrafficDebugModeEnabled:       true,
 			isDebugPodReceiveProductionTraffic:      isDebugPodReceiveProductionTrafficEnabled,
 			containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
@@ -1032,8 +1033,8 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateOrDeleteServices(ctx conte
 }
 
 type createOrUpdateServiceOption struct {
-	dynamoNimDeployment                 *v1alpha1.DynamoNimDeployment
-	dynamoNim                           *v1alpha1.DynamoNim
+	dynamoNimDeployment                     *v1alpha1.DynamoNimDeployment
+	dynamoNim                               *v1alpha1.DynamoNim
 	isStealingTrafficDebugModeEnabled       bool
 	isDebugPodReceiveProductionTraffic      bool
 	containsStealingTrafficDebugModeEnabled bool
@@ -1136,6 +1137,10 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context
 	if dynamoNimDeployment.Spec.Ingress.HostPrefix != nil {
 		vsName = *dynamoNimDeployment.Spec.Ingress.HostPrefix + vsName
 	}
+	ingressSuffix, found := os.LookupEnv("DYNAMO_INGRESS_SUFFIX")
+	if !found || ingressSuffix == "" {
+		ingressSuffix = kDefaultIngressSuffix
+	}
 	vs := &networkingv1beta1.VirtualService{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      dynamoNimDeployment.Name,
@@ -1143,7 +1148,7 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context
 		},
 		Spec: istioNetworking.VirtualService{
 			Hosts: []string{
-				fmt.Sprintf("%s.dev.aire.nvidia.com", vsName),
+				fmt.Sprintf("%s.%s", vsName, ingressSuffix),
 			},
 			Gateways: []string{"istio-system/ingress-alb"},
 			Http: []*istioNetworking.HTTPRoute{
@@ -1215,7 +1220,7 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context
 }
 
 type createOrUpdateIngressOption struct {
-	yataiClient             **yataiclient.YataiClient
+	yataiClient         **yataiclient.YataiClient
 	dynamoNimDeployment *v1alpha1.DynamoNimDeployment
 	dynamoNim           *v1alpha1.DynamoNim
 }
@@ -1239,7 +1244,7 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateIngresses(ctx context.Cont
 	}
 
 	ingresses, err := r.generateIngresses(ctx, generateIngressesOption{
-		yataiClient:             opt.yataiClient,
+		yataiClient:         opt.yataiClient,
 		dynamoNimDeployment: dynamoNimDeployment,
 		dynamoNim:           dynamoNim,
 	})
@@ -1401,8 +1406,8 @@ func (r *DynamoNimDeploymentReconciler) getKubeAnnotations(dynamoNimDeployment *
 }
 
 type generateDeploymentOption struct {
-	dynamoNimDeployment                 *v1alpha1.DynamoNimDeployment
-	dynamoNim                           *v1alpha1.DynamoNim
+	dynamoNimDeployment                     *v1alpha1.DynamoNimDeployment
+	dynamoNim                               *v1alpha1.DynamoNim
 	yataiClient                             **yataiclient.YataiClient
 	clusterName                             *string
 	isStealingTrafficDebugModeEnabled       bool
@@ -1588,8 +1593,8 @@ func getDynamoNimRepositoryNameAndDynamoNimVersion(dynamoNim *v1alpha1.DynamoNim
 }
 
 type generatePodTemplateSpecOption struct {
-	dynamoNimDeployment                 *v1alpha1.DynamoNimDeployment
-	dynamoNim                           *v1alpha1.DynamoNim
+	dynamoNimDeployment                     *v1alpha1.DynamoNimDeployment
+	dynamoNim                               *v1alpha1.DynamoNim
 	yataiClient                             **yataiclient.YataiClient
 	clusterName                             *string
 	isStealingTrafficDebugModeEnabled       bool
@@ -2499,8 +2504,8 @@ func getResourcesConfig(resources *dynamoCommon.Resources) (corev1.ResourceRequi
 }
 
 type generateServiceOption struct {
-	dynamoNimDeployment                 *v1alpha1.DynamoNimDeployment
-	dynamoNim                           *v1alpha1.DynamoNim
+	dynamoNimDeployment                     *v1alpha1.DynamoNimDeployment
+	dynamoNim                               *v1alpha1.DynamoNim
 	isStealingTrafficDebugModeEnabled       bool
 	isDebugPodReceiveProductionTraffic      bool
 	containsStealingTrafficDebugModeEnabled bool
@@ -2713,7 +2718,7 @@ func (r *DynamoNimDeploymentReconciler) GetIngressConfig(ctx context.Context) (i
 }
 
 type generateIngressesOption struct {
-	yataiClient             **yataiclient.YataiClient
+	yataiClient         **yataiclient.YataiClient
 	dynamoNimDeployment *v1alpha1.DynamoNimDeployment
 	dynamoNim           *v1alpha1.DynamoNim
 }

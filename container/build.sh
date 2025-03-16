@@ -43,39 +43,25 @@ PYTHON_PACKAGE_VERSION=${current_tag:-$latest_tag.dev+$commit_id}
 # dependencies are specified in the /container/deps folder and
 # installed within framework specific sections of the Dockerfile.
 
-declare -A FRAMEWORKS=(["STANDARD"]=1 ["TENSORRTLLM"]=2 ["VLLM"]=3 ["VLLM_NIXL"]=4)
-DEFAULT_FRAMEWORK=STANDARD
+declare -A FRAMEWORKS=(["VLLM"]=1 ["TENSORRTLLM"]=2)
+DEFAULT_FRAMEWORK=VLLM
 
 SOURCE_DIR=$(dirname "$(readlink -f "$0")")
 DOCKERFILE=${SOURCE_DIR}/Dockerfile
 BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
-
-STANDARD_BASE_VERSION=25.01
-STANDARD_BASE_IMAGE=nvcr.io/nvidia/tritonserver
-STANDARD_BASE_IMAGE_TAG=${STANDARD_BASE_VERSION}-py3
-
 TENSORRTLLM_BASE_VERSION=25.01
-TENSORRTLLM_BASE_IMAGE=nvcr.io/nvidia/tritonserver
-TENSORRTLLM_BASE_IMAGE_TAG=${TENSORRTLLM_BASE_VERSION}-trtllm-python-py3
-# IMPORTANT NOTE: Ensure the repo tag complies with the TRTLLM backend version
-# used in the base image above.
-TENSORRTLLM_BACKEND_REPO_TAG=triton-llm/v0.17.0
-# Set this as 1 to rebuild and replace trtllm backend bits in the container.
-# This will allow building Dynamo container image with custom
-# trt-llm backend repo branch.
-TENSORRTLLM_BACKEND_REBUILD=0
-# Set this as 1 to skip cloning the trt-llm backend repo. If cloning is skipped, trt-llm
-# backend repo tag and rebuild flag will be ignored. Use this option if you are using
-# trtllm llmapi worker.
-TENSORRTLLM_SKIP_CLONE=0
+# FIXME: Need a public image for public consumption
+TENSORRTLLM_BASE_IMAGE="gitlab-master.nvidia.com:5005/dl/dgx/tritonserver/tensorrt-llm/amd64"
+TENSORRTLLM_BASE_IMAGE_TAG=krish-fix-trtllm-build.23766174
+TENSORRTLLM_PIP_WHEEL_PATH=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-VLLM_NIXL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-VLLM_NIXL_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+NIXL_COMMIT=d7a2c571a60d76a3d6c8458140eaaa5025fa48c4
+NIXL_REPO=ai-dynamo/nixl.git
 
 get_options() {
     while :; do
@@ -100,25 +86,9 @@ get_options() {
                 missing_requirement $1
             fi
             ;;
-        --tensorrtllm-backend-repo-tag)
+        --tensorrtllm-pip-wheel-path)
             if [ "$2" ]; then
-                TRTLLM_BACKEND_COMMIT=$2
-                shift
-            else
-                missing_requirement $1
-            fi
-            ;;
-        --tensorrtllm-backend-rebuild)
-            if [ "$2" ]; then
-                TRTLLM_BACKEND_REBUILD=$2
-                shift
-            else
-                missing_requirement $1
-            fi
-            ;;
-        --skip-clone-tensorrtllm)
-            if [ "$2" ]; then
-                TENSORRTLLM_SKIP_CLONE=$2
+                TENSORRTLLM_PIP_WHEEL_PATH=$2
                 shift
             else
                 missing_requirement $1
@@ -248,7 +218,7 @@ get_options() {
 
     if [ -z "$TAG" ]; then
         TAG="--tag dynamo:${VERSION}-${FRAMEWORK,,}"
-        if [ ! -z ${TARGET} ]; then
+        if [ ! -z "${TARGET}" ]; then
             TAG="${TAG}-${TARGET}"
         fi
     fi
@@ -259,6 +229,8 @@ get_options() {
 
     if [ ! -z "$TARGET" ]; then
         TARGET_STR="--target ${TARGET}"
+    else
+        TARGET_STR="--target runtime"
     fi
 }
 
@@ -270,9 +242,7 @@ show_image_options() {
     echo "   Base: '${BASE_IMAGE}'"
     echo "   Base_Image_Tag: '${BASE_IMAGE_TAG}'"
     if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
-        echo "   Tensorrtllm Backend Repo Tag: '${TENSORRTLLM_BACKEND_REPO_TAG}'"
-        echo "   Tensorrtllm Backend Rebuild: '${TENSORRTLLM_BACKEND_REBUILD}'"
-        echo "   Tensorrtllm Skip Clone: '${TENSORRTLLM_SKIP_CLONE}'"
+        echo "   Tensorrtllm_Pip_Wheel_Path: '${TENSORRTLLM_PIP_WHEEL_PATH}'"
     fi
     echo "   Build Context: '${BUILD_CONTEXT}'"
     echo "   Build Arguments: '${BUILD_ARGS}'"
@@ -286,9 +256,7 @@ show_help() {
     echo "  [--base-imge-tag base image tag]"
     echo "  [--platform platform for docker build"
     echo "  [--framework framework one of ${!FRAMEWORKS[@]}]"
-    echo "  [--tensorrtllm-backend-repo-tag commit or tag]"
-    echo "  [--tensorrtllm-backend-rebuild whether or not to rebuild the backend]"
-    echo "  [--skip-clone-tensorrtllm whether or not to skip cloning the trt-llm backend repo]"
+    echo "  [--tensorrtllm-pip-wheel-path path to tensorrtllm pip wheel]"
     echo "  [--build-arg additional build args to pass to docker build]"
     echo "  [--cache-from cache location to start from]"
     echo "  [--cache-to location where to cache the build output]"
@@ -310,12 +278,42 @@ error() {
 
 get_options "$@"
 
-
 # Update DOCKERFILE if framework is VLLM
 if [[ $FRAMEWORK == "VLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
-elif [[ $FRAMEWORK == "VLLM_NIXL" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm_nixl
+elif [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
+    DOCKERFILE=${SOURCE_DIR}/Dockerfile.tensorrt_llm
+fi
+
+if [[ $FRAMEWORK == "VLLM" ]]; then
+    NIXL_DIR="/tmp/nixl/nixl_src"
+
+    # Clone original NIXL to temp directory
+    if [ -d "$NIXL_DIR" ]; then
+        echo "Warning: $NIXL_DIR already exists, skipping clone"
+    else
+        if [ ! -z ${GITHUB_TOKEN} ]; then
+            git clone https://oauth2:${GITHUB_TOKEN}@github.com/${NIXL_REPO} "$NIXL_DIR"
+        else
+            # Try HTTPS first with credential prompting disabled, fall back to SSH if it fails
+            if ! GIT_TERMINAL_PROMPT=0 git clone https://github.com/${NIXL_REPO} "$NIXL_DIR"; then
+                echo "HTTPS clone failed, falling back to SSH..."
+                git clone git@github.com:${NIXL_REPO} "$NIXL_DIR"
+            fi
+        fi
+    fi
+
+    cd "$NIXL_DIR"
+    if ! git checkout ${NIXL_COMMIT}; then
+        echo "ERROR: Failed to checkout NIXL commit ${NIXL_COMMIT}. The cached directory may be out of date."
+        echo "Please delete $NIXL_DIR and re-run the build script."
+        exit 1
+    fi
+
+    BUILD_CONTEXT_ARG+=" --build-context nixl=$NIXL_DIR"
+
+    # Add NIXL_COMMIT as a build argument to enable caching
+    BUILD_ARGS+=" --build-arg NIXL_COMMIT=${NIXL_COMMIT} "
 fi
 
 # BUILD DEV IMAGE
@@ -330,10 +328,10 @@ if [ ! -z ${GITLAB_TOKEN} ]; then
     BUILD_ARGS+=" --build-arg GITLAB_TOKEN=${GITLAB_TOKEN} "
 fi
 
-if [[ $FRAMEWORK == "TENSORRTLLM" ]] && [ ! -z ${TENSORRTLLM_BACKEND_REPO_TAG} ]; then
-    BUILD_ARGS+=" --build-arg TENSORRTLLM_BACKEND_REPO_TAG=${TENSORRTLLM_BACKEND_REPO_TAG} "
-    BUILD_ARGS+=" --build-arg TENSORRTLLM_BACKEND_REBUILD=${TENSORRTLLM_BACKEND_REBUILD} "
-    BUILD_ARGS+=" --build-arg TENSORRTLLM_SKIP_CLONE=${TENSORRTLLM_SKIP_CLONE} "
+if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
+    if [ ! -z ${TENSORRTLLM_PIP_WHEEL_PATH} ]; then
+        BUILD_ARGS+=" --build-arg TENSORRTLLM_PIP_WHEEL_PATH=${TENSORRTLLM_PIP_WHEEL_PATH} "
+    fi
 fi
 
 if [ ! -z ${HF_TOKEN} ]; then

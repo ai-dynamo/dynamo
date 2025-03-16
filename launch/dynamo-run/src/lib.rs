@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io::Read;
 #[cfg(any(feature = "vllm", feature = "sglang"))]
 use std::{future::Future, pin::Pin};
 
@@ -24,6 +25,7 @@ use dynamo_runtime::protocols::Endpoint;
 
 mod flags;
 pub use flags::Flags;
+mod hub;
 mod input;
 #[cfg(any(feature = "vllm", feature = "sglang"))]
 mod net;
@@ -35,6 +37,10 @@ pub use opt::{Input, Output};
 /// Technically the '://' is not part of the scheme but it eliminates several string
 /// concatenations.
 const ENDPOINT_SCHEME: &str = "dyn://";
+
+/// When `in=text` the user doesn't need to know the model name, and doesn't need to provide it on
+/// the command line. Hence it's optional, and defaults to this.
+const INVISIBLE_MODEL_NAME: &str = "dynamo-run";
 
 /// How we identify a python string endpoint
 #[cfg(feature = "python")]
@@ -76,17 +82,47 @@ pub async fn run(
     let cancel_token = runtime.primary_token();
 
     // Turn relative paths into absolute paths
-    let model_path = flags
+    let mut model_path = flags
         .model_path_pos
-        .or(flags.model_path_flag)
-        .and_then(|p| p.canonicalize().ok());
+        .clone()
+        .or(flags.model_path_flag.clone())
+        .and_then(|p| {
+            if p.exists() {
+                p.canonicalize().ok()
+            } else {
+                Some(p)
+            }
+        });
+
     // Serve the model under the name provided, or the name of the GGUF file or HF repo.
-    let model_name = flags.model_name.or_else(|| {
-        model_path
-            .as_ref()
-            .and_then(|p| p.iter().last())
-            .map(|n| n.to_string_lossy().into_owned())
-    });
+    let mut model_name = flags
+        .model_name
+        .clone()
+        .or_else(|| {
+            model_path
+                .as_ref()
+                .and_then(|p| p.iter().last())
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+        .or_else(|| {
+            if in_opt == Input::Text {
+                Some(INVISIBLE_MODEL_NAME.to_string())
+            } else {
+                None
+            }
+        });
+
+    // If it's an HF repo download it
+    if let Some(inner_model_path) = model_path.as_ref() {
+        if !inner_model_path.exists() {
+            model_name = inner_model_path
+                .iter()
+                .last()
+                .map(|s| s.to_string_lossy().to_string());
+            model_path = Some(hub::from_hf(inner_model_path).await?);
+        }
+    }
+
     // Load the model deployment card, if any
     // Only used by some engines, so without those feature flags it's unused.
     #[allow(unused_variables)]
@@ -281,7 +317,7 @@ pub async fn run(
             if !model_path.is_file() {
                 anyhow::bail!("--model-path should refer to a GGUF file. llama_cpp does not support safetensors.");
             }
-            let Some(card) = maybe_card else {
+            let Some(card) = maybe_card.clone() else {
                 anyhow::bail!(
                     "Pass --model-config so we can find the tokenizer, should be an HF checkout."
                 );
@@ -319,8 +355,9 @@ pub async fn run(
             let Some(model_name) = model_name else {
                 anyhow::bail!("Provide model service name as `--model-name <this>`");
             };
+            let py_args = flags.as_vec(&path_str, &model_name);
             let p = std::path::PathBuf::from(path_str);
-            let engine = python::make_string_engine(cancel_token.clone(), &p).await?;
+            let engine = python::make_string_engine(cancel_token.clone(), &p, py_args).await?;
             EngineConfig::StaticFull {
                 service_name: model_name,
                 engine,
@@ -335,8 +372,9 @@ pub async fn run(
             let Some(model_name) = model_name else {
                 unreachable!("If we have a card we must have a model name");
             };
+            let py_args = flags.as_vec(&path_str, &model_name);
             let p = std::path::PathBuf::from(path_str);
-            let engine = python::make_token_engine(cancel_token.clone(), &p).await?;
+            let engine = python::make_token_engine(cancel_token.clone(), &p, py_args).await?;
             EngineConfig::StaticCore {
                 service_name: model_name.clone(),
                 engine,
@@ -350,7 +388,29 @@ pub async fn run(
             crate::input::http::run(runtime.clone(), flags.http_port, engine_config).await?;
         }
         Input::Text => {
-            crate::input::text::run(runtime.clone(), cancel_token.clone(), engine_config).await?;
+            crate::input::text::run(runtime.clone(), cancel_token.clone(), None, engine_config)
+                .await?;
+        }
+        Input::Stdin => {
+            let mut prompt = String::new();
+            std::io::stdin().read_to_string(&mut prompt).unwrap();
+            crate::input::text::run(
+                runtime.clone(),
+                cancel_token.clone(),
+                Some(prompt),
+                engine_config,
+            )
+            .await?;
+        }
+        Input::Batch(path) => {
+            crate::input::batch::run(
+                runtime.clone(),
+                cancel_token.clone(),
+                maybe_card,
+                path,
+                engine_config,
+            )
+            .await?;
         }
         Input::Endpoint(path) => {
             crate::input::endpoint::run(runtime.clone(), path, engine_config).await?;

@@ -13,121 +13,55 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use dynamo_llm::{
-    backend::Backend,
-    preprocessor::OpenAIPreprocessor,
-    types::{
-        openai::chat_completions::{
-            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-            OpenAIChatCompletionsStreamingEngine,
-        },
-        Annotated,
-    },
+use dynamo_llm::types::openai::chat_completions::{
+    NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
 };
-use dynamo_runtime::{
-    pipeline::{Context, ManyOut, Operator, ServiceBackend, ServiceFrontend, SingleIn, Source},
-    runtime::CancellationToken,
-    DistributedRuntime, Runtime,
-};
+use dynamo_runtime::{pipeline::Context, runtime::CancellationToken, Runtime};
 use futures::StreamExt;
-use std::{
-    io::{ErrorKind, Read, Write},
-    sync::Arc,
-};
+use std::io::{ErrorKind, Write};
 
+use crate::input::common;
 use crate::EngineConfig;
 
 /// Max response tokens for each single query. Must be less than model context size.
 const MAX_TOKENS: u32 = 8192;
 
-/// Output of `isatty` if the fd is indeed a TTY
-const IS_A_TTY: i32 = 1;
-
 pub async fn run(
     runtime: Runtime,
     cancel_token: CancellationToken,
+    single_prompt: Option<String>,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
     let (service_name, engine, inspect_template): (
         String,
         OpenAIChatCompletionsStreamingEngine,
         bool,
-    ) = match engine_config {
-        EngineConfig::Dynamic(endpoint_id) => {
-            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
-
-            let endpoint = distributed_runtime
-                .namespace(endpoint_id.namespace)?
-                .component(endpoint_id.component)?
-                .endpoint(endpoint_id.name);
-
-            let client = endpoint.client::<NvCreateChatCompletionRequest, Annotated<NvCreateChatCompletionStreamResponse>>().await?;
-            tracing::info!("Waiting for remote model..");
-            client.wait_for_endpoints().await?;
-            tracing::info!("Model discovered");
-
-            // The service_name isn't used for text chat outside of logs,
-            // so use the path. That avoids having to listen on etcd for model registration.
-            let service_name = endpoint.subject();
-            (service_name, Arc::new(client), false)
-        }
-        EngineConfig::StaticFull {
-            service_name,
-            engine,
-        } => {
-            tracing::info!("Model: {service_name}");
-            (service_name, engine, false)
-        }
-        EngineConfig::StaticCore {
-            service_name,
-            engine: inner_engine,
-            card,
-        } => {
-            let frontend = ServiceFrontend::<
-                SingleIn<NvCreateChatCompletionRequest>,
-                ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-            >::new();
-            let preprocessor = OpenAIPreprocessor::new(*card.clone())
-                .await?
-                .into_operator();
-            let backend = Backend::from_mdc(*card.clone()).await?.into_operator();
-            let engine = ServiceBackend::from_engine(inner_engine);
-
-            let pipeline = frontend
-                .link(preprocessor.forward_edge())?
-                .link(backend.forward_edge())?
-                .link(engine)?
-                .link(backend.backward_edge())?
-                .link(preprocessor.backward_edge())?
-                .link(frontend)?;
-
-            tracing::info!("Model: {service_name} with pre-processing");
-            (service_name, pipeline, true)
-        }
-        EngineConfig::None => unreachable!(),
-    };
-    main_loop(cancel_token, &service_name, engine, inspect_template).await
+    ) = common::prepare_engine(runtime.clone(), engine_config).await?;
+    main_loop(
+        cancel_token,
+        &service_name,
+        engine,
+        single_prompt,
+        inspect_template,
+    )
+    .await
 }
 
-#[allow(deprecated)]
 async fn main_loop(
     cancel_token: CancellationToken,
     service_name: &str,
     engine: OpenAIChatCompletionsStreamingEngine,
+    mut initial_prompt: Option<String>,
     _inspect_template: bool,
 ) -> anyhow::Result<()> {
-    tracing::info!("Ctrl-c to exit");
+    if initial_prompt.is_none() {
+        tracing::info!("Ctrl-c to exit");
+    }
     let theme = dialoguer::theme::ColorfulTheme::default();
 
-    let mut initial_prompt = if unsafe { libc::isatty(libc::STDIN_FILENO) == IS_A_TTY } {
-        None
-    } else {
-        // Something piped in, use that as initial prompt
-        let mut input = String::new();
-        std::io::stdin().read_to_string(&mut input).unwrap();
-        Some(input)
-    };
-
+    // Initial prompt is the pipe case: `echo "Hello" | dynamo-run ..`
+    // We run that single prompt and exit
+    let single = initial_prompt.is_some();
     let mut history = dialoguer::BasicHistory::default();
     let mut messages = vec![];
     while !cancel_token.is_cancelled() {
@@ -170,7 +104,9 @@ async fn main_loop(
             .messages(messages.clone())
             .model(service_name)
             .stream(true)
-            .max_tokens(MAX_TOKENS)
+            .max_completion_tokens(MAX_TOKENS)
+            .temperature(0.7)
+            .n(1) // only generate one response
             .build()?;
 
         // TODO We cannot set min_tokens with async-openai
@@ -188,17 +124,36 @@ async fn main_loop(
         let mut stdout = std::io::stdout();
         let mut assistant_message = String::new();
         while let Some(item) = stream.next().await {
-            let data = item.data.as_ref().unwrap();
-            let entry = data.inner.choices.first();
-            let chat_comp = entry.as_ref().unwrap();
-            if let Some(c) = &chat_comp.delta.content {
-                let _ = stdout.write(c.as_bytes());
-                let _ = stdout.flush();
-                assistant_message += c;
-            }
-            if chat_comp.finish_reason.is_some() {
-                tracing::trace!("finish reason: {:?}", chat_comp.finish_reason.unwrap());
+            if cancel_token.is_cancelled() {
                 break;
+            }
+            match (item.data.as_ref(), item.event.as_deref()) {
+                (Some(data), _) => {
+                    // Normal case
+                    let entry = data.inner.choices.first();
+                    let chat_comp = entry.as_ref().unwrap();
+                    if let Some(c) = &chat_comp.delta.content {
+                        let _ = stdout.write(c.as_bytes());
+                        let _ = stdout.flush();
+                        assistant_message += c;
+                    }
+                    if chat_comp.finish_reason.is_some() {
+                        tracing::trace!("finish reason: {:?}", chat_comp.finish_reason.unwrap());
+                        break;
+                    }
+                }
+                (None, Some("error")) => {
+                    // There's only one error but we loop in case that changes
+                    for err in item.comment.unwrap_or_default() {
+                        tracing::error!("Engine error: {err}");
+                    }
+                }
+                (None, Some(annotation)) => {
+                    tracing::debug!("Annotation. {annotation}: {:?}", item.comment);
+                }
+                _ => {
+                    unreachable!("Event from engine with no data, no error, no annotation.");
+                }
             }
         }
         println!();
@@ -208,18 +163,17 @@ async fn main_loop(
                 assistant_message,
             );
 
-        // ALLOW: function_call is deprecated
         let assistant_message = async_openai::types::ChatCompletionRequestMessage::Assistant(
             async_openai::types::ChatCompletionRequestAssistantMessage {
                 content: Some(assistant_content),
-                refusal: None,
-                name: None,
-                audio: None,
-                tool_calls: None,
-                function_call: None,
+                ..Default::default()
             },
         );
         messages.push(assistant_message);
+
+        if single {
+            break;
+        }
     }
     println!();
     Ok(())

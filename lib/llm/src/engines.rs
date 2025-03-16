@@ -50,3 +50,30 @@ impl Default for MultiNodeConfig {
         }
     }
 }
+
+#[cfg(any(feature = "sglang", feature = "vllm", feature = "python"))]
+use pyo3::prelude::*;
+
+/// On Mac embedded Python interpreters do not pick up the virtual env.
+#[cfg(all(
+    target_os = "macos",
+    any(feature = "sglang", feature = "vllm", feature = "python")
+))]
+fn fix_venv(venv: String, py: pyo3::Python<'_>) -> anyhow::Result<()> {
+    let version_info = py.version_info();
+    let sys: PyObject = py.import("sys")?.into();
+    let sys_path = sys.getattr(py, "path")?;
+    let venv_path = format!(
+        "{venv}/lib/python{}.{}/site-packages",
+        version_info.major, version_info.minor
+    );
+    // TODO: This should go _before_ the site-packages
+    sys_path.call_method1(py, "append", (venv_path,))?;
+    Ok(())
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "sglang", feature = "vllm", feature = "python")
+))]
+fn fix_venv(_venv: String, _py: Python<'_>) {}

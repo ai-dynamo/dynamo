@@ -28,20 +28,11 @@ Example:
 - cd target/release
 - ./dynamo-run hf_checkouts/Llama-3.2-3B-Instruct/
 - OR: ./dynamo-run Llama-3.2-1B-Instruct-Q4_K_M.gguf
-
 "#;
-
-const DEFAULT_IN: Input = Input::Text;
-
-#[cfg(feature = "mistralrs")]
-const DEFAULT_OUT: Output = Output::MistralRs;
-
-#[cfg(not(feature = "mistralrs"))]
-const DEFAULT_OUT: Output = Output::EchoFull;
 
 const ZMQ_SOCKET_PREFIX: &str = "dyn";
 
-const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|none] out=[mistralrs|sglang|llamacpp|vllm|trtllm|echo_full|echo_core|pystr:<engine.py>|pytok:<engine.py>] [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0]";
+const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>|none] out=[mistralrs|sglang|llamacpp|vllm|trtllm|echo_full|echo_core|pystr:<engine.py>|pytok:<engine.py>] [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0]";
 
 fn main() -> anyhow::Result<()> {
     logging::init();
@@ -117,6 +108,25 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
+    #[cfg(any(feature = "mistralrs", feature = "llamacpp"))]
+    {
+        #[cfg(feature = "cuda")]
+        {
+            tracing::info!("CUDA on");
+        }
+        #[cfg(feature = "metal")]
+        {
+            tracing::info!("Metal on");
+        }
+        #[cfg(feature = "vulkan")]
+        {
+            tracing::info!("Vulkan on");
+        }
+        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+        tracing::info!(
+            "CPU mode. Rebuild with `--features cuda|metal|vulkan` for better performance"
+        );
+    }
 
     // max_worker_threads and max_blocking_threads from env vars or config file.
     let rt_config = dynamo_runtime::RuntimeConfig::from_settings()?;
@@ -134,6 +144,11 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
     if args.is_empty() || args[0] == "-h" || args[0] == "--help" {
         println!("{USAGE}");
         println!("{HELP}");
+        println!(
+            "Available engines: {}",
+            Output::available_engines().join(", ")
+        );
+
         return Ok(());
     }
     for arg in env::args().skip(1).take(2) {
@@ -159,14 +174,21 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
             non_flag_params += 1;
             x
         }
-        None => DEFAULT_IN,
+        None => Input::default(),
     };
     let out_opt = match out_opt {
         Some(x) => {
             non_flag_params += 1;
             x
         }
-        None => DEFAULT_OUT,
+        None => {
+            let default_engine = Output::default(); // smart default based on feature flags
+            tracing::info!(
+                "Using default engine: {default_engine}. Use out=<engine> to specify one of {}",
+                Output::available_engines().join(", ")
+            );
+            default_engine
+        }
     };
 
     // Clap skips the first argument expecting it to be the binary name, so add it back

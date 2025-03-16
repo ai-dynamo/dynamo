@@ -5,6 +5,8 @@ build:
     FROM golang:1.23
     ARG TARGETOS
     ARG TARGETARCH
+    WORKDIR /
+    COPY ../../../+operator-src/operator ./operator
     WORKDIR /workspace
     COPY go.mod go.mod
     COPY go.sum go.sum
@@ -15,21 +17,24 @@ build:
     SAVE ARTIFACT /workspace/server
     SAVE ARTIFACT /workspace/.env
 
-#TODO: mkhadkevich earthly tests fail https://gitlab-master.nvidia.com/aire/microservices/dynamo/-/jobs/144475821
-#test:
-#    FROM +build
-#    # copy test files
-#    COPY tests/ tests/
-#    RUN go test ./...
+test:
+    FROM +build
+    COPY tests/ tests/
+    WITH DOCKER
+        RUN --privileged go test ./...
+    END
 
 docker:
     ARG CI_REGISTRY_IMAGE=my-registry
     ARG CI_COMMIT_SHA=latest
     ARG IMAGE=dynamo-api-server
-    FROM gcr.io/distroless/static:nonroot
+    FROM python:3.9-slim
     WORKDIR /
     COPY +build/server .
     COPY +build/.env .
+    COPY db/ db/
+    RUN pip install -r db/requirements.txt
+    ENV PYTHONPATH="/:${PYTHONPATH}"
     USER 65532:65532
     ENTRYPOINT ["/server"]
     SAVE IMAGE --push $CI_REGISTRY_IMAGE/$IMAGE:$CI_COMMIT_SHA

@@ -80,70 +80,71 @@ impl KvMetricsAggregator {
     }
 }
 
-async fn collect_endpoints(
+pub async fn collect_endpoints(
     nats_client: dynamo_runtime::transports::nats::Client,
     service_name: String,
     ep_tx: tokio::sync::mpsc::Sender<ProcessedEndpoints>,
     cancel: CancellationToken,
 ) {
+    let backoff_delay = Duration::from_millis(100);
+
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
                 tracing::debug!("cancellation token triggered");
                 break;
             }
-            _ = tokio::time::sleep(Duration::from_secs(1)) => {
+            _ = tokio::time::sleep(backoff_delay) => {
                 tracing::trace!("collecting endpoints for service: {}", service_name);
-            }
-        }
+                let values = match nats_client
+                    .get_endpoints(&service_name, Duration::from_millis(300))
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("Failed to retrieve endpoints for {}: {:?}", service_name, e);
+                        continue;
+                    }
+                };
 
-        let values = match nats_client
-            .get_endpoints(&service_name, Duration::from_secs(1))
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("Failed to retrieve endpoints for {}: {:?}", service_name, e);
-                continue;
-            }
-        };
+                tracing::debug!("values: {:?}", values);
+                let services: Vec<Service> = values
+                    .into_iter()
+                    .filter(|v| !v.is_empty())
+                    .filter_map(|v| match serde_json::from_slice::<Service>(&v) {
+                        Ok(service) => Some(service),
+                        Err(e) => {
+                            tracing::warn!("For value: {:?} \nFailed to parse service: {:?}", v, e);
+                            None
+                        }
+                    })
+                    .collect();
+                tracing::debug!("services: {:?}", services);
 
-        tracing::debug!("values: {:?}", values);
-        let services: Vec<Service> = values
-            .into_iter()
-            .filter(|v| !v.is_empty())
-            .filter_map(|v| match serde_json::from_slice::<Service>(&v) {
-                Ok(service) => Some(service),
-                Err(e) => {
-                    tracing::warn!("For value: {:?} \nFailed to parse service: {:?}", v, e);
-                    None
+                let endpoints: Vec<Endpoint> = services
+                    .into_iter()
+                    .flat_map(|s| s.endpoints)
+                    .filter(|s| s.data.is_some())
+                    .map(|s| Endpoint {
+                        name: s.name,
+                        subject: s.subject,
+                        data: s.data.unwrap(),
+                    })
+                    .collect();
+                tracing::debug!("endpoints: {:?}", endpoints);
+
+                tracing::trace!(
+                    "found {} endpoints for service: {}",
+                    endpoints.len(),
+                    service_name
+                );
+
+                let processed = ProcessedEndpoints::new(endpoints);
+                if ep_tx.send(processed).await.is_err() {
+                    tracing::trace!("failed to send processed endpoints; shutting down");
+                    break;
                 }
-            })
-            .collect();
-        tracing::debug!("services: {:?}", services);
-
-        let endpoints: Vec<Endpoint> = services
-            .into_iter()
-            .flat_map(|s| s.endpoints)
-            .filter(|s| s.data.is_some())
-            .map(|s| Endpoint {
-                name: s.name,
-                subject: s.subject,
-                data: s.data.unwrap(),
-            })
-            .collect();
-        tracing::debug!("endpoints: {:?}", endpoints);
-
-        tracing::trace!(
-            "found {} endpoints for service: {}",
-            endpoints.len(),
-            service_name
-        );
-
-        let processed = ProcessedEndpoints::new(endpoints);
-        if ep_tx.send(processed).await.is_err() {
-            tracing::trace!("failed to send processed endpoints; shutting down");
-            break;
+            }
         }
     }
 }

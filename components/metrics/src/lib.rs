@@ -14,17 +14,131 @@
 // limitations under the License.
 
 //! Library functions for the metrics application.
+//!
+//! This library provides functionality to expose Prometheus metrics either through a local HTTP server
+//! or by pushing to a Prometheus PushGateway.
+//!
+//! # Examples
+//!
+//! ## Using the metrics pull mode
+//! ```no_run
+//! use metrics::{PrometheusMetricsCollector, MetricsMode};
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let mut collector = PrometheusMetricsCollector::new()?;
+//!
+//!     // Start a metrics server with default values
+//!     collector.start(MetricsMode::default())?;
+//!
+//!     // Or explicitly specify values
+//!     collector.start(MetricsMode::Pull {
+//!         host: "127.0.0.1".to_string(),
+//!         port: 9090,
+//!     })?;
+//!
+//!     // Or use the convenience constructor
+//!     collector.start(MetricsMode::new_pull())?;
+//!
+//!     // Your application code here
+//!     tokio::signal::ctrl_c().await?;
+//!
+//!     // Stop the metrics server gracefully
+//!     collector.stop();
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## Using the Push mode
+//! ```no_run
+//! use metrics::{PrometheusMetricsCollector, MetricsMode};
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let mut collector = PrometheusMetricsCollector::new()?;
+//!
+//!     // Start pushing metrics to a Prometheus PushGateway with default values
+//!     collector.start(MetricsMode::new_push())?;
+//!
+//!     // Or explicitly specify values
+//!     collector.start(MetricsMode::Push {
+//!         host: "127.0.0.1".to_string(),
+//!         port: 9091,
+//!         job: "custom_job".to_string(),
+//!         interval: 5, // Push every 5 seconds
+//!     })?;
+//!
+//!     // Your application code here
+//!     tokio::signal::ctrl_c().await?;
+//!
+//!     // Stop pushing metrics gracefully
+//!     collector.stop();
+//!     Ok(())
+//! }
 
 use axum::{routing::get, Router};
-use prometheus::{register_counter_vec, register_gauge_vec};
+use prometheus::{register_counter_vec, register_gauge_vec, Encoder, TextEncoder};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::time::Duration as StdDuration;
 
 use dynamo_llm::kv_router::protocols::ForwardPassMetrics;
 use dynamo_llm::kv_router::scheduler::Endpoint;
 use dynamo_llm::kv_router::scoring::ProcessedEndpoints;
 
-use dynamo_runtime::{distributed::Component, service::EndpointInfo, utils::Duration, Result};
+use dynamo_runtime::{
+    distributed::Component, error, service::EndpointInfo, utils::Duration, Result,
+};
+
+/// Configuration for metrics collection mode
+#[derive(Debug, Clone)]
+pub enum MetricsMode {
+    /// Host a Prometheus metrics server for pull-based collection
+    Pull {
+        /// Host to listen on (e.g. "0.0.0.0")
+        host: String,
+        /// Port to listen on (e.g. 9091)
+        port: u16,
+    },
+    /// Push to a Prometheus PushGateway
+    Push {
+        /// PushGateway host (e.g. "http://localhost")
+        host: String,
+        /// PushGateway port (e.g. 9091)
+        port: u16,
+        /// Job name for the metrics
+        job: String,
+        /// Push interval in seconds
+        interval: u64,
+    },
+}
+
+impl Default for MetricsMode {
+    fn default() -> Self {
+        Self::new_pull()
+    }
+}
+
+impl MetricsMode {
+    /// Create a new Pull mode with default values
+    pub fn new_pull() -> Self {
+        Self::Pull {
+            host: "0.0.0.0".to_string(),
+            port: 9091,
+        }
+    }
+
+    /// Create a new Push mode with default values
+    pub fn new_push() -> Self {
+        Self::Push {
+            host: "127.0.0.1".to_string(),
+            port: 9091,
+            job: "dynamo_metrics".to_string(),
+            interval: 2,
+        }
+    }
+}
 
 /// Configuration for LLM worker load capacity metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,28 +165,53 @@ pub struct StatsWithData {
     pub data: serde_json::Value,
 }
 
-/// Prometheus metrics server for exposing metrics
-pub struct PrometheusMetricsServer {
+/// Metrics collector for exposing metrics to prometheus/grafana
+pub struct PrometheusMetricsCollector {
     metrics: PrometheusMetrics,
+    mode: Option<MetricsMode>,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
-impl PrometheusMetricsServer {
-    /// Initialize the metrics server
+impl PrometheusMetricsCollector {
     pub fn new() -> Result<Self> {
         Ok(Self {
             metrics: PrometheusMetrics::new()?,
+            mode: None,
+            shutdown_tx: None,
         })
     }
 
-    /// Start the metrics server on the specified port
-    pub fn start(&mut self, port: u16) {
+    /// Start metrics collection with the specified mode
+    pub fn start(&mut self, mode: MetricsMode) -> Result<()> {
+        // Store the mode
+        self.mode = Some(mode.clone());
+
+        match mode {
+            MetricsMode::Pull { host, port } => self.start_pull_mode(host, port),
+            MetricsMode::Push {
+                host,
+                port,
+                job,
+                interval,
+            } => self.start_push_mode(host, port, job, interval),
+        }
+    }
+
+    /// Stop metrics collection
+    pub fn stop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+
+    /// Start a metrics server for pull-based collection on the specified port
+    fn start_pull_mode(&mut self, host: String, port: u16) -> Result<()> {
         // Create an axum router with a metrics endpoint
         let app = Router::new().route(
             "/metrics",
             get(|| async {
                 // Gather and encode metrics
-                use prometheus::Encoder;
-                let encoder = prometheus::TextEncoder::new();
+                let encoder = TextEncoder::new();
                 let mut buffer = Vec::new();
                 encoder.encode(&prometheus::gather(), &mut buffer).unwrap();
                 String::from_utf8(buffer).unwrap()
@@ -80,17 +219,120 @@ impl PrometheusMetricsServer {
         );
 
         // Create a socket address to listen on
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        let ip_addr = host.parse().map_err(|e| {
+            error!("Failed to parse host '{}' as IP address: {}. Use a valid IPv4 or IPv6 address (e.g. '0.0.0.0' or '127.0.0.1')", host, e)
+        })?;
+        let addr = SocketAddr::new(ip_addr, port);
+
+        // Create shutdown channel
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.shutdown_tx = Some(tx);
+
+        // Try to bind to the address first to fail early if it's not available
+        let server = match axum::Server::try_bind(&addr) {
+            Ok(server) => server,
+            Err(e) => {
+                return Err(error!(
+                    "Failed to bind to address {}: {}. The port may be in use.",
+                    addr, e
+                ));
+            }
+        };
 
         // Spawn the server in a background task
         tokio::spawn(async move {
-            axum::Server::bind(&addr)
-                .serve(app.into_make_service())
-                .await
-                .unwrap();
+            let server = server.serve(app.into_make_service());
+
+            // Create a future that completes when shutdown signal is received
+            let shutdown_future = async {
+                rx.await.ok();
+            };
+
+            // Run the server with graceful shutdown
+            tokio::select! {
+                result = server => {
+                    if let Err(e) = result {
+                        tracing::error!("Metrics server error: {}", e);
+                    }
+                },
+                _ = shutdown_future => {
+                    tracing::info!("Metrics server shutting down gracefully");
+                },
+            }
         });
 
-        tracing::info!("Prometheus metrics server started at {addr:?}/metrics");
+        tracing::info!("Prometheus metrics server started at {addr}/metrics");
+        Ok(())
+    }
+
+    /// Start pushing metrics to a Prometheus PushGateway
+    fn start_push_mode(
+        &mut self,
+        host: String,
+        port: u16,
+        job: String,
+        interval: u64,
+    ) -> Result<()> {
+        // Create shutdown channel
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        self.shutdown_tx = Some(tx);
+
+        // Create HTTP client
+        let client = Client::new();
+        let url = format!("http://{host}:{port}/metrics/job/{job}");
+        let url_clone = url.clone();
+        let interval_duration = StdDuration::from_secs(interval);
+
+        // Spawn background task to periodically push metrics
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(interval_duration);
+
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        // Gather and encode metrics
+                        let encoder = TextEncoder::new();
+                        let mut buffer = Vec::new();
+                        if let Err(e) = encoder.encode(&prometheus::gather(), &mut buffer) {
+                            tracing::error!("Failed to encode metrics: {}", e);
+                            continue;
+                        }
+
+                        // Push metrics to the gateway
+                        match client.post(&url)
+                            .header("Content-Type", encoder.format_type())
+                            .body(buffer)
+                            .send()
+                            .await
+                        {
+                            Ok(response) => {
+                                if response.status().is_success() {
+                                    tracing::debug!("Successfully pushed metrics to PushGateway");
+                                } else {
+                                    tracing::error!(
+                                        "Failed to push metrics to PushGateway. Status: {}, Error: {:?}",
+                                        response.status(),
+                                        response.text().await
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to push metrics to PushGateway: {}", e);
+                            }
+                        }
+                    }
+                    _ = &mut rx => {
+                        tracing::info!("Stopping metrics push task");
+                        break;
+                    }
+                }
+            }
+        });
+
+        tracing::info!(
+            "Started pushing metrics to PushGateway at '{url_clone}' with job name '{job}'"
+        );
+        Ok(())
     }
 
     /// Update metrics with current values

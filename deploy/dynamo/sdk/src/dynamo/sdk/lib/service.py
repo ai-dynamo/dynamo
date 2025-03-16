@@ -16,15 +16,43 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, TypeVar, Union
+from collections import defaultdict
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List, Optional, Set, Tuple, TypeVar, Union
 
 from _bentoml_sdk import Service, ServiceConfig
 from _bentoml_sdk.images import Image
+from _bentoml_sdk.service.config import validate
 
 from dynamo.sdk.lib.decorators import DynamoEndpoint
 
 T = TypeVar("T", bound=object)
+
+
+class RuntimeLinkedServices:
+    """
+    A class to track the linked services in the runtime.
+    """
+
+    def __init__(self) -> None:
+        self.edges: Dict[DynamoService, Set[DynamoService]] = defaultdict(set)
+
+    def add(self, edge: Tuple[DynamoService, DynamoService]):
+        src, dest = edge
+        self.edges[src].add(dest.inner)
+        # track the dest node as well so we can cleanup later
+        self.edges[dest]
+
+    def remove_unused_edges(self):
+        # this method is idempotent
+        if not self.edges:
+            return
+        # remove edges that are not in the current service
+        for u, vertices in self.edges.items():
+            u.remove_unused_edges(used_edges=vertices)
+
+
+LinkedServices = RuntimeLinkedServices()
 
 
 @dataclass
@@ -47,6 +75,15 @@ class DynamoService(Service[T]):
         envs: Optional[list[dict[str, Any]]] = None,
         dynamo_config: Optional[DynamoConfig] = None,
     ):
+        service_name = inner.__name__
+        service_args = self._get_service_args(service_name)
+
+        if service_args:
+            # Validate and merge service args with existing config
+            validated_args = validate(service_args)
+            config.update(validated_args)
+            self._remove_service_args(service_name)
+
         super().__init__(config=config, inner=inner, image=image, envs=envs or [])
 
         # Initialize Dynamo configuration
@@ -58,12 +95,27 @@ class DynamoService(Service[T]):
         if self._dynamo_config.name is None:
             self._dynamo_config.name = inner.__name__
 
+        # Add dynamo configuration to the service config
+        # this allows for the config to be part of the service in bento.yaml
+        self.config["dynamo"] = asdict(self._dynamo_config)
+
         # Register Dynamo endpoints
         self._dynamo_endpoints: Dict[str, DynamoEndpoint] = {}
         for field in dir(inner):
             value = getattr(inner, field)
             if isinstance(value, DynamoEndpoint):
                 self._dynamo_endpoints[value.name] = value
+
+        self._linked_services: List[DynamoService] = []  # Track linked services
+
+    def _get_service_args(self, service_name: str) -> Optional[dict]:
+        """Get ServiceArgs from environment config if specified"""
+        config_str = os.environ.get("DYNAMO_SERVICE_CONFIG")
+        if config_str:
+            config = json.loads(config_str)
+            service_config = config.get(service_name, {})
+            return service_config.get("ServiceArgs")
+        return None
 
     def is_dynamo_component(self) -> bool:
         """Check if this service is configured as a Dynamo component"""
@@ -111,7 +163,27 @@ class DynamoService(Service[T]):
         """List names of all registered Dynamo endpoints"""
         return list(self._dynamo_endpoints.keys())
 
-    # todo: add another function to bind an instance of the inner to the self within these methods
+    def remove_unused_edges(self, used_edges: Set[DynamoService]):
+        """Remove a dependancy from the current service based on the key"""
+        current_deps = dict(self.dependencies)
+        for dep_key, dep_value in current_deps.items():
+            if dep_value.on.inner not in used_edges:
+                del self.dependencies[dep_key]
+
+    def link(self, next_service: DynamoService):
+        """Link this service to another service, creating a pipeline."""
+        self._linked_services.append(next_service)
+        LinkedServices.add((self, next_service))
+        return next_service
+
+    def _remove_service_args(self, service_name: str):
+        """Remove ServiceArgs from the environment config after using them"""
+        config_str = os.environ.get("DYNAMO_SERVICE_CONFIG")
+        if config_str:
+            config = json.loads(config_str)
+            if service_name in config and "ServiceArgs" in config[service_name]:
+                del config[service_name]["ServiceArgs"]
+                os.environ["DYNAMO_SERVICE_CONFIG"] = json.dumps(config)
 
 
 def service(

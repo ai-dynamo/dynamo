@@ -20,12 +20,17 @@ use std::str::FromStr;
 #[derive(clap::Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 pub struct Flags {
-    /// Full path to the model, which can be either a GGUF file or a checked out HF repository.
-    /// For the `echo_full` engine omit the flag.
+    /// The model. The options depend on the engine.
+    ///
+    /// The full list - only mistralrs supports all three currently:
+    /// - Full path to a GGUF file
+    /// - Full path of a checked out Hugging Face repository containing safetensor files
+    /// - Name of a Hugging Face repository, e.g 'google/flan-t5-small'. The model will be
+    ///   downloaded and cached.
     #[arg(index = 1)]
     pub model_path_pos: Option<PathBuf>,
 
-    // `--model-path`. The one above is `tio <positional-model-path>`
+    // `--model-path`. The one above is `dynamo-run <positional-model-path>`
     #[arg(long = "model-path")]
     pub model_path_flag: Option<PathBuf>,
 
@@ -88,8 +93,7 @@ pub struct Flags {
 
     /// Internal use only.
     // Start the python vllm engine sub-process.
-    #[arg(long)]
-    #[clap(hide = true, default_value = "false")]
+    #[arg(long, hide = true, default_value = "false")]
     pub internal_vllm_process: bool,
 
     /// Internal use only.
@@ -99,9 +103,52 @@ pub struct Flags {
     /// - the node rank (0 for first host, 1 for second host, etc)
     /// - the workers' rank (globally unique)
     /// - the GPU to use (locally unique)
-    #[arg(long)]
-    #[clap(hide = true, value_parser = parse_sglang_flags)]
+    #[arg(long, hide = true, value_parser = parse_sglang_flags)]
     pub internal_sglang_process: Option<SgLangFlags>,
+
+    /// Everything after a `--`.
+    /// These are the command line arguments to the python engine when using `pystr` or `pytok`.
+    #[arg(index = 2, last = true, hide = true, allow_hyphen_values = true)]
+    pub last: Vec<String>,
+}
+
+impl Flags {
+    /// Convert the flags back to a command line. Including only the non-null values, but
+    /// include the defaults. Includes the canonicalized model path and normalized model name.
+    ///
+    /// Used to pass arguments to python engines via `pystr` and `pytok`.
+    pub fn as_vec(&self, path: &str, name: &str) -> Vec<String> {
+        let mut out = vec![
+            "--model-path".to_string(),
+            path.to_string(),
+            "--model-name".to_string(),
+            name.to_string(),
+            "--http-port".to_string(),
+            self.http_port.to_string(),
+            // Default 1
+            "--tensor-parallel-size".to_string(),
+            self.tensor_parallel_size.to_string(),
+            // Default 0
+            "--base-gpu-id".to_string(),
+            self.base_gpu_id.to_string(),
+            // Default 1
+            "--num-nodes".to_string(),
+            self.num_nodes.to_string(),
+            // Default 0
+            "--node-rank".to_string(),
+            self.node_rank.to_string(),
+        ];
+        if let Some(model_config_path) = self.model_config.as_ref() {
+            out.push("--model-config".to_string());
+            out.push(model_config_path.display().to_string());
+        }
+        if let Some(leader) = self.leader_addr.as_ref() {
+            out.push("--leader-addr".to_string());
+            out.push(leader.to_string());
+        }
+        out.extend(self.last.clone());
+        out
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -188,13 +188,18 @@ def create_dynamo_watcher(
     if worker_envs:
         args.extend(["--worker-env", json.dumps(worker_envs)])
 
+    # Update env to include ServiceConfig
+    worker_env = env.copy() if env else {}
+    if "DYNAMO_SERVICE_CONFIG" in os.environ:
+        worker_env["DYNAMO_SERVICE_CONFIG"] = os.environ["DYNAMO_SERVICE_CONFIG"]
+
     # Create the watcher with dependency map in environment
     watcher = create_watcher(
         name=f"dynamo_service_{svc.name}",
         args=args,
         numprocesses=num_workers,
         working_dir=working_dir,
-        env=env,  # Dependency map will be injected by serve_http
+        env=worker_env,  # Use updated environment
     )
 
     return watcher, socket, uri
@@ -473,9 +478,14 @@ def serve_http(
         arbiter.exit_stack.callback(shutil.rmtree, uds_path, ignore_errors=True)
         arbiter.start(
             cb=lambda _: logger.info(  # type: ignore
-                "Starting Dynamo Service %s (%s/%s) listening on %s://%s:%d (Press CTRL+C to quit)"
-                if (hasattr(svc, "is_dynamo_component") and svc.is_dynamo_component())
-                else 'Starting production %s BentoServer from "%s" (Press CTRL+C to quit)',
+                (
+                    "Starting Dynamo Service %s (%s/%s) listening on %s://%s:%d (Press CTRL+C to quit)"
+                    if (
+                        hasattr(svc, "is_dynamo_component")
+                        and svc.is_dynamo_component()
+                    )
+                    else 'Starting production %s BentoServer from "%s" (Press CTRL+C to quit)'
+                ),
                 *(
                     (svc.name, *svc.dynamo_address(), scheme, log_host, port)
                     if (

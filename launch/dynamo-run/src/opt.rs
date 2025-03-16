@@ -13,19 +13,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
+use std::{fmt, io::IsTerminal as _, path::PathBuf};
 
 use crate::ENDPOINT_SCHEME;
 
+const BATCH_PREFIX: &str = "batch:";
+
+#[derive(PartialEq)]
 pub enum Input {
     /// Run an OpenAI compatible HTTP server
     Http,
 
-    /// Read prompt from stdin
+    /// Single prompt on stdin
+    Stdin,
+
+    /// Interactive chat
     Text,
 
     /// Pull requests from a namespace/component/endpoint path.
     Endpoint(String),
+
+    /// Batch mode. Run all the prompts, write the outputs, exit.
+    Batch(PathBuf),
 
     /// Start the engine but don't provide any way to talk to it.
     /// For multi-node sglang, where the engine connects directly
@@ -40,10 +49,15 @@ impl TryFrom<&str> for Input {
         match s {
             "http" => Ok(Input::Http),
             "text" => Ok(Input::Text),
+            "stdin" => Ok(Input::Stdin),
             "none" => Ok(Input::None),
             endpoint_path if endpoint_path.starts_with(ENDPOINT_SCHEME) => {
                 let path = endpoint_path.strip_prefix(ENDPOINT_SCHEME).unwrap();
                 Ok(Input::Endpoint(path.to_string()))
+            }
+            batch_patch if batch_patch.starts_with(BATCH_PREFIX) => {
+                let path = batch_patch.strip_prefix(BATCH_PREFIX).unwrap();
+                Ok(Input::Batch(PathBuf::from(path)))
             }
             e => Err(anyhow::anyhow!("Invalid in= option '{e}'")),
         }
@@ -55,10 +69,22 @@ impl fmt::Display for Input {
         let s = match self {
             Input::Http => "http",
             Input::Text => "text",
+            Input::Stdin => "stdin",
             Input::Endpoint(path) => path,
+            Input::Batch(path) => &path.display().to_string(),
             Input::None => "none",
         };
         write!(f, "{s}")
+    }
+}
+
+impl Default for Input {
+    fn default() -> Self {
+        if std::io::stdin().is_terminal() {
+            Input::Text
+        } else {
+            Input::Stdin
+        }
     }
 }
 
@@ -101,6 +127,9 @@ pub enum Output {
     /// tokens. We do the pre-processing.
     #[cfg(feature = "python")]
     PythonTok(String),
+    //
+    // DEVELOPER NOTE
+    // If you add an engine add it to `available_engines` below, and to Default if it makes sense
 }
 
 impl TryFrom<&str> for Output {
@@ -176,11 +205,83 @@ impl fmt::Display for Output {
             Output::Endpoint(path) => path,
 
             #[cfg(feature = "python")]
-            Output::PythonStr(path) => path,
+            Output::PythonStr(_) => "pystr",
 
             #[cfg(feature = "python")]
-            Output::PythonTok(path) => path,
+            Output::PythonTok(_) => "pytok",
         };
         write!(f, "{s}")
+    }
+}
+
+/// Returns the engine to use if user did not say on cmd line.
+/// Nearly always defaults to mistralrs which has no dependencies and we include by default.
+/// If built with --no-default-features and a specific engine, default to that.
+#[allow(unused_assignments, unused_mut)]
+impl Default for Output {
+    fn default() -> Self {
+        // Default if no engines
+        let mut out = Output::EchoFull;
+
+        #[cfg(feature = "llamacpp")]
+        {
+            out = Output::LlamaCpp;
+        }
+
+        #[cfg(feature = "sglang")]
+        {
+            out = Output::SgLang;
+        }
+
+        #[cfg(feature = "vllm")]
+        {
+            out = Output::Vllm;
+        }
+
+        #[cfg(feature = "mistralrs")]
+        {
+            out = Output::MistralRs;
+        }
+
+        out
+    }
+}
+
+impl Output {
+    #[allow(unused_mut)]
+    pub fn available_engines() -> Vec<String> {
+        let mut out = vec!["echo_core".to_string(), "echo_full".to_string()];
+        #[cfg(feature = "mistralrs")]
+        {
+            out.push(Output::MistralRs.to_string());
+        }
+
+        #[cfg(feature = "llamacpp")]
+        {
+            out.push(Output::LlamaCpp.to_string());
+        }
+
+        #[cfg(feature = "sglang")]
+        {
+            out.push(Output::SgLang.to_string());
+        }
+
+        #[cfg(feature = "vllm")]
+        {
+            out.push(Output::Vllm.to_string());
+        }
+
+        #[cfg(feature = "python")]
+        {
+            out.push(Output::PythonStr("file.py".to_string()).to_string());
+            out.push(Output::PythonTok("file.py".to_string()).to_string());
+        }
+
+        #[cfg(feature = "trtllm")]
+        {
+            out.push(Output::TrtLLM.to_string());
+        }
+
+        out
     }
 }
