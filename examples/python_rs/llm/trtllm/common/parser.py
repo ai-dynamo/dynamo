@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import yaml
+from common.kv_router import RoutingStrategy
 from tensorrt_llm._torch.pyexecutor.config import PyTorchConfig
 from tensorrt_llm.llmapi import KvCacheConfig
 
@@ -129,10 +130,23 @@ def parse_tensorrt_llm_args() -> Tuple[Any, Tuple[Dict[str, Any], Dict[str, Any]
         help="Publish stats from TensorRT-LLM. Currently, only supported for context worker in Disaggregated mode.",
     )
     parser.add_argument(
+        "--min-workers",
+        type=int,
+        default=1,
+        help="Minimum number of workers for aggregated (monolith) server",
+    )
+    parser.add_argument(
         "--kv-block-size",
         type=int,
-        help="KV block size for TensorRT-LLM. Currently, only supported for context worker in Disaggregated mode.",
-        default=64,
+        default=32,
+        help="Number of tokens per KV block in TRTLLM worker. Default is 32 for pytorch backend.",
+    )
+    parser.add_argument(
+        "--routing-strategy",
+        type=RoutingStrategy,
+        default=RoutingStrategy.RANDOM,
+        help="Routing strategy for the router",
+        choices=list(RoutingStrategy),
     )
 
     args = parser.parse_args()

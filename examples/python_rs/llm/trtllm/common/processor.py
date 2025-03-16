@@ -28,6 +28,7 @@ from typing import (
 )
 
 from common.protocol import (
+    DisaggChatCompletionStreamResponse,
     DisaggCompletionResponseStreamChoice,
     DisaggCompletionStreamResponse,
     DisaggregatedTypeConverter,
@@ -40,14 +41,9 @@ from tensorrt_llm.serve.openai_protocol import (
     ChatCompletionLogProbsContent,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
-    ChatCompletionResponse,
-    ChatCompletionResponseChoice,
     ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse,
-    ChatMessage,
     CompletionRequest,
-    CompletionResponse,
-    CompletionResponseChoice,
     DeltaMessage,
     FunctionCall,
     ToolCall,
@@ -55,7 +51,7 @@ from tensorrt_llm.serve.openai_protocol import (
 )
 from transformers import AutoTokenizer
 
-logger.set_level("debug")
+logger.set_level("info")
 
 
 class ConversationMessage(TypedDict):
@@ -87,7 +83,7 @@ def parse_chat_message_content(
     return [ConversationMessage(role=role, content=text_prompt)]
 
 
-class ChatProcessor:
+class BaseChatProcessor:
     def __init__(self, model: str, tokenizer: AutoTokenizer):
         self.model = model
         self.tokenizer = tokenizer
@@ -128,12 +124,18 @@ class ChatProcessor:
             # returning multiple logprobs is not supported
             first_logprob = ChatCompletionLogProbsContent(
                 token=token,
+                # NOTE: min logprob -9999.0 for probabilities extremely close to 0
                 logprob=max(logprob, -9999.0),
                 bytes=list(token.encode("utf-8", errors="replace")),
             )
             content.append(first_logprob)
         chat_logprobs = ChatCompletionLogProbs(content=content)
         return chat_logprobs
+
+
+class ChatProcessor(BaseChatProcessor):
+    def __init__(self, model: str, tokenizer: AutoTokenizer):
+        super().__init__(model, tokenizer)
 
     async def _chat_stream_generator(
         self,
@@ -270,72 +272,120 @@ class ChatProcessor:
             response = json.loads(raw_response.lstrip("data: "))
             yield response
 
-    async def create_chat_response(
+
+class DisaggChatProcessor(BaseChatProcessor):
+    def __init__(
+        self, model: str, tokenizer: AutoTokenizer, request: ChatCompletionRequest
+    ):
+        super().__init__(model, tokenizer)
+
+        self.request = request
+        self.num_choices = 1 if self.request.n is None else self.request.n
+        self.finish_reason_sent = [False] * self.num_choices
+        self.role = self._get_role(self.request)
+
+    # TODO (shreyasm): combine this with the chat processor
+    def get_chat_stream_response(
         self,
-        request: ChatCompletionRequest,
-        conversation: List[Dict[str, Any]],
-        model: str,
-        promise: RequestOutput,
-    ) -> ChatCompletionResponse:
-        await promise.aresult()
-        choices: List[ChatCompletionResponseChoice] = []
-        role = self._get_role(request)
-        for output in promise.outputs:
-            if request.tool_choice and isinstance(
-                request.tool_choice, ChatCompletionNamedToolChoiceParam
+        request_id: str,
+        res: RequestOutput,
+        first_iteration: bool,
+    ) -> DisaggChatCompletionStreamResponse:
+        def get_first_chat(
+            num_tokens: int, role: str | None = None, content: str | None = None
+        ):
+            for i in range(self.num_choices):
+                choice_data = ChatCompletionResponseStreamChoice(
+                    index=i,
+                    delta=DeltaMessage(role=role, content=content),
+                    finish_reason=None,
+                )
+                chunk = DisaggChatCompletionStreamResponse(
+                    id=request_id,
+                    created=int(time.time()),
+                    object="chat.completion.chunk",
+                    choices=[choice_data],
+                    model=self.model,
+                )
+                chunk.usage = self._stream_usage_info(
+                    self.request, num_tokens, completion_tokens=0
+                )
+
+                return chunk
+
+        prompt_tokens = len(res.prompt_token_ids)
+        if first_iteration:
+            return get_first_chat(prompt_tokens, role=self.role)
+
+        for output in res.outputs:
+            i = output.index
+
+            if self.finish_reason_sent[i]:
+                continue
+
+            delta_text = output.text_diff
+            if (
+                self.request.tool_choice
+                and type(self.request.tool_choice) is ChatCompletionNamedToolChoiceParam
             ):
-                message = ChatMessage(
-                    role=role,
-                    content="",
+                delta_message = DeltaMessage(
                     tool_calls=[
                         ToolCall(
                             function=FunctionCall(
-                                name=request.tool_choice.function.name,
-                                arguments=output.text,
+                                name=self.request.tool_choice.function.name,
+                                arguments=delta_text,
                             )
                         )
-                    ],
+                    ]
                 )
             else:
-                message = ChatMessage(role=role, content=output.text)
-            choice = ChatCompletionResponseChoice(
-                index=output.index,
-                message=message,
-                finish_reason=output.finish_reason,
-                stop_reason=output.stop_reason,
+                delta_message = DeltaMessage(content=delta_text)
+
+            choice = ChatCompletionResponseStreamChoice(
+                index=i, delta=delta_message, finish_reason=None
             )
+            if self.request.logprobs:
+                logprobs = output.logprobs_diff
+                token_ids = output.token_ids_diff
+                choice.logprobs = self._create_logprobs(token_ids, logprobs)
+            if output.finish_reason is not None:
+                choice.finish_reason = output.finish_reason
+                choice.stop_reason = output.stop_reason
+                self.finish_reason_sent[i] = True
+            chunk = DisaggChatCompletionStreamResponse(
+                id=request_id,
+                created=int(time.time()),
+                object="chat.completion.chunk",
+                choices=[choice],
+                model=self.model,
+            )
+            chunk.usage = self._stream_usage_info(
+                self.request, prompt_tokens, output.length
+            )
+            return chunk
 
-            if request.logprobs:
-                choice.logprobs = self._create_logprobs(
-                    output.token_ids, output.logprobs
-                )
-            choices.append(choice)
-
-        if request.echo:
-            last_msg_content = ""
-            if (
-                conversation
-                and conversation[-1].get("content")
-                and conversation[-1].get("role") == role
-            ):
-                last_msg_content = conversation[-1]["content"]
-            for choice in choices:
-                full_message = last_msg_content + choice.message.content
-                choice.message.content = full_message
-
-        num_prompt_tokens = len(promise.prompt_token_ids)
-        num_generated_tokens = sum(len(output.token_ids) for output in promise.outputs)
-        usage = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            completion_tokens=num_generated_tokens,
-            total_tokens=num_prompt_tokens + num_generated_tokens,
+    def create_final_stream_response(
+        self,
+        request_id: str,
+        final_result: RequestOutput,
+    ) -> DisaggChatCompletionStreamResponse:
+        prompt_tokens = len(final_result.prompt_token_ids)
+        completion_tokens = sum(output.length for output in final_result.outputs)
+        final_usage = UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
         )
-        response = ChatCompletionResponse(
-            model=model,
-            choices=choices,
-            usage=usage,
+
+        final_usage_chunk = DisaggChatCompletionStreamResponse(
+            id=request_id,
+            created=int(time.time()),
+            object="chat.completion",
+            choices=[],
+            model=self.model,
+            usage=final_usage,
         )
-        return response
+        return final_usage_chunk
 
 
 def merge_promises(
@@ -405,45 +455,3 @@ class CompletionsProcessor:
             pp_res = self._post_process(request, prompt_idx, num_choices, requst_output)
             for _p in pp_res:
                 yield _p
-
-    async def create_completion_response(
-        self,
-        request: CompletionRequest,
-        generator: AsyncIterator[Tuple[int, RequestOutput]],
-        num_choices: int,
-    ):
-        choices = [None] * num_choices
-        num_repsonse_per_request = 1 if request.n is None else request.n
-        num_prompt_tokens = num_gen_tokens = 0
-        async for prompt_idx, request_output in generator:
-            num_prompt_tokens += len(request_output.prompt_token_ids)
-            for gen_idx, output in enumerate(request_output.outputs):
-                num_gen_tokens += len(output.token_ids)
-                output_text = output.text
-                if request.echo:
-                    output_text = request_output.prompt + output_text
-                idx = prompt_idx * num_repsonse_per_request + gen_idx
-
-                disaggregated_params = CompletionResponseChoice.to_disaggregated_params(
-                    output.disaggregated_params
-                )
-                choice = CompletionResponseChoice(
-                    index=idx,
-                    text=output_text,
-                    stop_reason=output.stop_reason,
-                    finish_reason=output.finish_reason,
-                    disaggregated_params=disaggregated_params,
-                )
-                choices[idx] = choice
-
-        usage_info = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            completion_tokens=num_gen_tokens,
-            total_tokens=num_gen_tokens + num_prompt_tokens,
-        )
-        response = CompletionResponse(
-            model=self.model,
-            choices=choices,
-            usage=usage_info,
-        )
-        return response

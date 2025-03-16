@@ -51,10 +51,8 @@ DOCKERFILE=${SOURCE_DIR}/Dockerfile
 BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
-TENSORRTLLM_BASE_VERSION=25.01
-# FIXME: Need a public image for public consumption
-TENSORRTLLM_BASE_IMAGE="gitlab-master.nvidia.com:5005/dl/dgx/tritonserver/tensorrt-llm/amd64"
-TENSORRTLLM_BASE_IMAGE_TAG=krish-fix-trtllm-build.23766174
+TENSORRTLLM_BASE_IMAGE=tensorrt_llm/release
+TENSORRTLLM_BASE_IMAGE_TAG=latest
 TENSORRTLLM_PIP_WHEEL_PATH=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"

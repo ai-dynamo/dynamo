@@ -79,3 +79,23 @@ class ManagedThread(threading.Thread):
 
     def stop(self):
         self.stop_event.set()
+
+
+async def wait_for_workers(client, min_workers: int):
+    wait_task = client.wait_for_endpoints()
+    await asyncio.sleep(1)
+
+    while not wait_task.done():
+        logger.info("Waiting for workers to be ready...")
+        await asyncio.sleep(5)
+
+    while len(client.endpoint_ids()) < min_workers:
+        logger.info(
+            f"Waiting for more workers... Current: {len(client.endpoint_ids())}, Required: {min_workers}"
+        )
+        await asyncio.sleep(5)
+
+    logger.info(
+        f"Required number of workers ({min_workers}) are ready:\n"
+        + "\n".join(f"id: {id}" for id in client.endpoint_ids())
+    )

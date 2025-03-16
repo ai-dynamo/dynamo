@@ -20,9 +20,12 @@ import signal
 
 import uvloop
 from common.base_engine import BaseTensorrtLLMEngine, TensorrtLLMEngineConfig
-from common.disagg_processor import ChatProcessor, parse_chat_message_content
 from common.parser import LLMAPIConfig, parse_tensorrt_llm_args
-from common.processor import merge_promises
+from common.processor import (
+    DisaggChatProcessor,
+    merge_promises,
+    parse_chat_message_content,
+)
 from common.protocol import (
     DisaggChatCompletionRequest,
     DisaggChatCompletionStreamResponse,
@@ -46,7 +49,7 @@ from tensorrt_llm.serve.openai_protocol import CompletionRequest
 from dynamo.llm import KvMetricsPublisher
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
-logger.set_level("debug")
+logger.set_level("info")
 
 
 def update_args_from_disagg_config(
@@ -76,10 +79,9 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
         self.server_config: CtxGenServerConfig = disagg_config.server_configs[
             instance_idx
         ]
-        engine_config = update_args_from_disagg_config(
+        trt_llm_engine_config.engine_config = update_args_from_disagg_config(
             trt_llm_engine_config.engine_config, self.server_config
         )
-        trt_llm_engine_config.engine_config = engine_config
 
         # needed for disagg
         self._mpi_session = MpiCommSession(sub_comm, n_workers=sub_comm.Get_size())
@@ -100,7 +102,7 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
             raise error
 
         logger.debug(f"Received request: {request}")
-        chat_processor = ChatProcessor(self._model, self._tokenizer, request)
+        chat_processor = DisaggChatProcessor(self._model, self._tokenizer, request)
 
         self._ongoing_request_count += 1
 
@@ -172,16 +174,7 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
             raise RuntimeError("Failed to generate: " + str(e))
 
         # Start the publishing threads with first request submission
-        self._stats_loop = asyncio.get_running_loop()
-        if (
-            self.publish_kv_cache_events_thread
-            and not self.publish_kv_cache_events_thread.is_alive()
-        ):
-            self.publish_kv_cache_events_thread.start()
-
-        if self.publish_stats_thread and not self.publish_stats_thread.is_alive():
-            self.publish_stats_thread.start()
-
+        self._start_threads()
         self._ongoing_request_count -= 1
 
     @dynamo_endpoint(CompletionRequest, DisaggCompletionStreamResponse)
@@ -209,46 +202,36 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
                     "Disaggregated server currently only supports single string prompt or list of integers in request"
                 )
 
-        sampling_params = request.to_sampling_params()
-        llm_disaggregated_params = (
-            DisaggregatedTypeConverter.to_llm_disaggregated_params(
-                request.disaggregated_params
+        try:
+            sampling_params = request.to_sampling_params()
+            llm_disaggregated_params = (
+                DisaggregatedTypeConverter.to_llm_disaggregated_params(
+                    request.disaggregated_params
+                )
             )
-        )
 
-        # only 1 prompt is supported for now
-        promise = self._llm_engine.generate_async(
-            request.prompt,
-            sampling_params,
-            streaming=request.stream,
-            disaggregated_params=llm_disaggregated_params,
-        )
-        generator = merge_promises([promise])
-        num_choices = 1 if request.n is None else request.n
-        if request.stream:
+            # only 1 prompt is supported for now
+            promise = self._llm_engine.generate_async(
+                request.prompt,
+                sampling_params,
+                streaming=request.stream,
+                disaggregated_params=llm_disaggregated_params,
+            )
+            generator = merge_promises([promise])
+            num_choices = 1 if request.n is None else request.n
             response_generator = self.completions_processor.create_completion_generator(
                 request, generator, num_choices
             )
             async for response in response_generator:
                 yield json.loads(response)
-        else:
-            raise RuntimeError("Non-streaming is not supported")
+        except CppExecutorError:
+            # If internal executor error is raised, shutdown the server
+            signal.raise_signal(signal.SIGINT)
+        except Exception as e:
+            raise RuntimeError("Failed to generate: " + str(e))
 
         # Start the publishing threads with first request submission
-        if (
-            self.publish_kv_cache_events_thread
-            and not self.publish_kv_cache_events_thread.is_alive()
-        ):
-            # [NOTE:] TRTLLM needs the stats to be collected on the same loop as the request handler.
-            self._stats_loop = asyncio.get_running_loop()
-            self.publish_kv_cache_events_thread.set_loop(self._stats_loop)
-            self.publish_kv_cache_events_thread.start()
-
-        if self.publish_stats_thread and not self.publish_stats_thread.is_alive():
-            self._stats_loop = asyncio.get_running_loop()
-            self.publish_stats_thread.set_loop(self._stats_loop)
-            self.publish_stats_thread.start()
-
+        self._start_threads()
         self._ongoing_request_count -= 1
 
 
@@ -259,8 +242,7 @@ async def worker(
     disagg_config: DisaggServerConfig,
     instance_idx: int,
     sub_comm,
-    publish_stats: bool,
-    publish_kv_cache_events: bool,
+    args,
 ):
     """
     Instantiate a `backend` component and serve the `generate` endpoint
@@ -278,29 +260,22 @@ async def worker(
     completions_endpoint = component.endpoint("completions")
     chat_endpoint = component.endpoint("chat/completions")
 
-    if server_type == "gen":
-        if publish_stats:
-            logger.warning("Stats can only be published for ctx server")
-            publish_stats = False
-        if publish_kv_cache_events:
-            logger.warning("KV cache events can only be published for ctx server")
-            publish_kv_cache_events = False
+    if server_type == "gen" and args.publish_kv_cache_events:
+        logger.warning("KV routing is not supported for gen server")
 
     trt_llm_engine_config = TensorrtLLMEngineConfig(
         namespace_str=namespace_str,
         component_str=component_str,
         engine_config=engine_config,
-        publish_stats=publish_stats,
-        publish_kv_cache_events=publish_kv_cache_events,
+        publish_stats=args.publish_stats,
+        publish_kv_cache_events=args.publish_kv_cache_events,
+        kv_block_size=args.kv_block_size,
     )
 
-    # NOTE: Current implementation adds two endpoints. We can refactor this code to expose only one endpoint.
-    # and handle both completions and chat in the same endpoint.
-    # Currently, we are using completions endpoint lease id as worker id.
-    # I believe this might cause some issues using smart routing with chat completions endpoint.
+    # TODO: fix
     trt_llm_engine_config.worker_id = completions_endpoint.lease_id()
 
-    if publish_stats:
+    if args.publish_stats:
         trt_llm_engine_config.kv_metrics_publisher = KvMetricsPublisher()
 
     engine = TensorrtLLMEngine(
@@ -314,7 +289,7 @@ async def worker(
         completions_endpoint.serve_endpoint(engine.generate_completions),
         chat_endpoint.serve_endpoint(engine.generate_chat),
     ]
-    if publish_stats:
+    if args.publish_stats:
         coros.append(
             trt_llm_engine_config.kv_metrics_publisher.create_endpoint(component)
         )
@@ -352,8 +327,7 @@ if __name__ == "__main__":
                 disagg_config,
                 instance_idx,
                 sub_comm,
-                args.publish_stats,
-                args.publish_kv_cache_events,
+                args,
             )
         )
     else:

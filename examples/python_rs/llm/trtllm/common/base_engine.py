@@ -32,6 +32,8 @@ from dynamo.llm import KvMetricsPublisher
 
 from .kv_cache_event_publisher import KVCacheEventPublisher
 
+logger.set_level("info")
+
 
 class ChatProcessorMixin:
     def __init__(self, engine_config: LLMAPIConfig):
@@ -73,6 +75,8 @@ class TensorrtLLMEngineConfig:
     kv_metrics_publisher: Optional[KvMetricsPublisher] = None
     publish_stats: bool = False
     publish_kv_cache_events: bool = False
+    # default block size is 32 for pytorch backend
+    kv_block_size: int = 32
 
 
 class BaseTensorrtLLMEngine(ChatProcessorMixin):
@@ -87,6 +91,7 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
         self._kv_metrics_publisher = trt_llm_engine_config.kv_metrics_publisher
         self._publish_stats = trt_llm_engine_config.publish_stats
         self._publish_kv_cache_events = trt_llm_engine_config.publish_kv_cache_events
+        self._kv_block_size = trt_llm_engine_config.kv_block_size
         self._error_queue: Optional[Queue] = None
 
         self._init_engine()
@@ -137,6 +142,9 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
         request_total_slots = 4
         kv_active_block = 0
         kv_total_blocks = 4
+        num_requests_waiting = 0
+        gpu_cache_usage_perc = 0.0
+        gpu_prefix_cache_hit_rate = 0.0
 
         num_requests_waiting = 0
         gpu_cache_usage_perc = 0.0
@@ -174,7 +182,11 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
         # are available.
         lib_path = "/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
         self._kv_cache_events_publisher = KVCacheEventPublisher(
-            self._namespace_str, self._component_str, int(self._worker_id), lib_path
+            self._namespace_str,
+            self._component_str,
+            int(self._worker_id),
+            lib_path,
+            self._kv_block_size,
         )
 
         # Prepare threads for publishing kv cache events but don't start them yet.
@@ -194,21 +206,31 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
             logger.error("LLM engine not initialized!")
             return
 
+        if self._kv_metrics_publisher is None:
+            logger.error("KV metrics publisher not initialized!")
+            return False
+
         stats = self._llm_engine.get_stats_async(timeout=5)
         async for stat in stats:
             request_active_slots = stat["numActiveRequests"]
             request_total_slots = stat["maxNumActiveRequests"]
             kv_active_block = stat["kvCacheStats"]["usedNumBlocks"]
             kv_total_blocks = stat["kvCacheStats"]["maxNumBlocks"]
-            if self._kv_metrics_publisher is None:
-                logger.error("KV metrics publisher not initialized!")
-                return False
+            reused_blocks = stat["kvCacheStats"]["reusedBlocks"]
+            freeNumBlocks = stat["kvCacheStats"]["freeNumBlocks"]
+            allocTotalBlocks = stat["kvCacheStats"]["allocTotalBlocks"]
+            allocNewBlocks = stat["kvCacheStats"]["allocNewBlocks"]
+            # NOTE: num paused requests is always 0 when using guarantee no evict scheduler (default).
+            num_requests_waiting = (
+                stat["numQueuedRequests"]
+                + stat["inflightBatchingStats"]["numPausedRequests"]
+            )
+            gpu_cache_usage_perc = allocTotalBlocks / kv_total_blocks
+            gpu_prefix_cache_hit_rate = stat["kvCacheStats"]["cacheHitRate"]
 
-            # TODO: Remove this once we have the actual values.
-            # Adding dummy values for now so it doesn't break the metrics.
-            num_requests_waiting = 0
-            gpu_cache_usage_perc = 0.0
-            gpu_prefix_cache_hit_rate = 0.0
+            logger.debug(
+                f"Publishing stats: request_active_slots: {request_active_slots}, request_total_slots: {request_total_slots}, kv_active_block: {kv_active_block}, kv_total_blocks: {kv_total_blocks}, num_requests_waiting: {num_requests_waiting}, reused_blocks: {reused_blocks}, freeNumBlocks: {freeNumBlocks}, allocTotalBlocks: {allocTotalBlocks}, allocNewBlocks: {allocNewBlocks}, gpu_cache_usage_perc: {gpu_cache_usage_perc}, gpu_prefix_cache_hit_rate: {gpu_prefix_cache_hit_rate}"
+            )
 
             self._kv_metrics_publisher.publish(
                 request_active_slots,
@@ -218,9 +240,6 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
                 num_requests_waiting,
                 gpu_cache_usage_perc,
                 gpu_prefix_cache_hit_rate,
-            )
-            logger.debug(
-                f"Published stats: request_active_slots: {request_active_slots}, request_total_slots: {request_total_slots}, kv_active_block: {kv_active_block}, kv_total_blocks: {kv_total_blocks}"
             )
 
         return True
@@ -236,40 +255,45 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
         events = self._llm_engine.get_kv_cache_events_async(timeout=5)
         async for event_list in events:
             for event in event_list:
-                logger.debug(f"Received event from llmapi: {event}")
-                id = event["event_id"]
                 data = event["data"]
                 if data["type"] == "stored":
                     parent_hash = data["parent_hash"]
-                    token_ids = []
-                    block_hashes = []
                     for block in data["blocks"]:
-                        block_hash = block["block_hash"]
-                        block_hashes.append(block_hash)
+                        tokens = []
                         for token in block["tokens"]:
-                            # TODO: How to handle token_extra_id?
-                            token_ids.append(token["token_id"])
-                    # Note: Currently data does not have lora_id.
-                    # Using 0 as default value. If later data has
-                    # lora_id, we need to verify if this is correct.
-                    lora_id = data.get("lora_id", 0)
-                    # Publish the stored event
-                    self._kv_cache_events_publisher.stored_event(
-                        id, parent_hash, block_hashes, token_ids, lora_id
-                    )
-                    logger.debug(
-                        f"Published stored event: {id}, parent_hash: {parent_hash}, block_hashes: {block_hashes}, token_ids: {token_ids}"
-                    )
+                            tokens.append(int(token["token_id"]))
+
+                        # Note: Currently data does not have lora_id.
+                        # Using 0 as default value. If later data has
+                        # lora_id, we need to verify if this is correct.
+                        lora_id = data.get("lora_id", 0)
+                        self._kv_cache_events_publisher.stored_event(
+                            parent_hash,
+                            block["block_hash"],
+                            tokens,
+                            lora_id,
+                        )
                 elif data["type"] == "removed":
-                    # Publish the removed event
-                    block_hashes = []
                     for block_hash in data["block_hashes"]:
-                        block_hashes.append(block_hash)
-                    self._kv_cache_events_publisher.removed_event(id, block_hashes)
-                    logger.debug(
-                        f"Published removed event: {id}, block_hashes: {block_hashes}"
-                    )
+                        self._kv_cache_events_publisher.removed_event(block_hash)
         return True
+
+    def _start_threads(self):
+        if (
+            self.publish_kv_cache_events_thread
+            and not self.publish_kv_cache_events_thread.is_alive()
+        ):
+            # [NOTE:] TRTLLM needs the stats to be collected on the same loop as the request handler.
+            self._stats_loop = asyncio.get_running_loop()
+            self.publish_kv_cache_events_thread.set_loop(self._stats_loop)
+            self.publish_kv_cache_events_thread.start()
+            logger.debug("Started kv cache events thread")
+
+        if self.publish_stats_thread and not self.publish_stats_thread.is_alive():
+            self._stats_loop = asyncio.get_running_loop()
+            self.publish_stats_thread.set_loop(self._stats_loop)
+            self.publish_stats_thread.start()
+            logger.debug("Started stats thread")
 
     async def _run_llm_engine(self):
         # Counter to keep track of ongoing request counts.

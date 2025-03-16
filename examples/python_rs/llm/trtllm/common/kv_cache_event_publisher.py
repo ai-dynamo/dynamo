@@ -18,7 +18,7 @@ from ctypes import c_char_p, c_int64, c_uint32
 
 from tensorrt_llm.logger import logger
 
-logger.set_level("debug")
+logger.set_level("info")
 
 
 class DynamoResult:
@@ -27,7 +27,14 @@ class DynamoResult:
 
 
 class KVCacheEventPublisher:
-    def __init__(self, namespace: str, component: str, worker_id: int, lib_path: str):
+    def __init__(
+        self,
+        namespace: str,
+        component: str,
+        worker_id: int,
+        lib_path: str,
+        kv_block_size: int,
+    ):
         self.lib = None
 
         try:
@@ -36,7 +43,7 @@ class KVCacheEventPublisher:
             self.lib.dynamo_llm_init.restype = c_uint32
 
             result = self.lib.dynamo_llm_init(
-                namespace.encode(), component.encode(), worker_id
+                namespace.encode(), component.encode(), worker_id, kv_block_size
             )
             if result == DynamoResult.OK:
                 logger.info(
@@ -71,51 +78,53 @@ class KVCacheEventPublisher:
             ctypes.c_uint32
         )  # dynamo_llm_result_t
 
-    def stored_event(self, event_id, parent_hash, block_hashes, token_ids, lora_id):
+        self._event_counter = 0
+
+    def stored_event(self, parent_hash, block_hash, token_ids, lora_id):
         if self.lib is None:
             logger.error("KVCacheEventPublisher not initialized!")
             return
 
         logger.debug(
-            f"Stored event: {event_id}, parent_hash: {parent_hash}, block_hashes: {block_hashes}, token_ids: {token_ids}"
+            f"Stored parent_hash: {parent_hash}, block_hash: {block_hash}, token_ids: {token_ids}"
         )
         parent_hash = (
             (ctypes.c_uint64 * 1)(parent_hash) if parent_hash is not None else None
         )
-        block_hash_arr = (ctypes.c_uint64 * len(block_hashes))(*block_hashes)
-        block_hash_len = len(block_hashes)
         token_ids_arr = (ctypes.c_uint32 * len(token_ids))(*token_ids)
         num_block_tokens = (ctypes.c_size_t * 1)(len(token_ids))
+        block_hash = (ctypes.c_uint64 * 1)(block_hash)
 
-        # Publish the event
-        # TODO: Currently, lora_id is not available in the stored events.
         result = self.lib.dynamo_kv_event_publish_stored(
-            event_id,  # uint64_t event_id
+            self._event_counter,  # uint64_t event_id
             token_ids_arr,  # const uint32_t *token_ids
             num_block_tokens,  # const uintptr_t *num_block_tokens
-            block_hash_arr,  # const uint64_t *block_ids
-            block_hash_len,  # uintptr_t num_blocks
+            block_hash,  # const uint64_t *block_ids
+            1,  # uintptr_t num_blocks
             parent_hash,  # const uint64_t *parent_hash
             lora_id,  # uint64_t lora_id
         )
+        self._event_counter += 1
 
         if result == DynamoResult.OK:
-            logger.debug(f"Store - Published KV Event: {block_hashes}")
+            logger.debug(f"Store - Published KV Event: {block_hash}")
         else:
-            logger.error(f"Store - Failed to Publish KV Event: {block_hashes}")
+            logger.error(f"Store - Failed to Publish KV Event: {block_hash}")
 
-    def removed_event(self, event_id, block_hashes):
+    def removed_event(self, block_hash):
         if self.lib is None:
             logger.error("KVCacheEventPublisher not initialized!")
             return
 
         result = self.lib.dynamo_kv_event_publish_removed(
-            event_id,
-            (ctypes.c_uint64 * len(block_hashes))(*block_hashes),
-            (ctypes.c_size_t * 1)(len(block_hashes)),
+            self._event_counter,
+            (ctypes.c_uint64 * 1)(block_hash),
+            1,
         )
 
+        self._event_counter += 1
+
         if result == DynamoResult.OK:
-            logger.debug(f"Remove - Published KV Event: {block_hashes}")
+            logger.debug(f"Remove - Published KV Event: {block_hash}")
         else:
-            logger.error(f"Remove - Failed to Publish KV Event: {block_hashes}")
+            logger.error(f"Remove - Failed to Publish KV Event: {block_hash}")

@@ -39,47 +39,58 @@ Start required services (etcd and NATS):
 
 ## Building the Environment
 
-TODO: Remove the internal references below.
+### Build the Dynamo container with TensorRT-LLM
 
+#### Step 1: Build TensorRT-LLM base container image
 
-### Build the Dynamo container with latest TRT-LLM
+Because of the known issue of C++11 ABI compatibility, we rebuild the TensorRT-LLM from source within NGC pytorch container.
+See [here](https://nvidia.github.io/TensorRT-LLM/installation/linux.html) for more informantion.
 
-#### Step 1:Build TRT-LLM wheel using latest tensorrt_llm main
+Use the helper script to build a TensorRT-LLM container base image. The script uses a specific commit id from TensorRT-LLM main branch.
 
-```
-git clone https://github.com/NVIDIA/TensorRT-LLM.git
-cd TensorRT-LLM
-
-# Start a dev docker container. Dont forget to mount your home directory to /home in the docker run command.
-make -C docker jenkins_run LOCAL_USER=1 DOCKER_RUN_ARGS="-v /user/home:/home"
-
-# Build wheel for the GPU architecture you are currently using ("native").
-# We use -f to run fast build which should speed up the build process. But it might not work for all GPUs and for full functionality you should disable it.
-python3 scripts/build_wheel.py --clean --trt_root /usr/local/tensorrt -a native -i -p -ccache
-
-# Copy wheel to your local directory
-cp build/tensorrt_llm-*.whl /home
-```
-
-####Step 2: Copy the TRT-LLM wheel to dynamo repository.
 ```bash
-cp /home/tensorrt_llm-*.whl /<path-to-repo>/dynamo/trtllm_wheel/
+./container/build_trtllm_base_image.sh
 ```
 
-####Step 3: Build the container
+For more information see [here](https://nvidia.github.io/TensorRT-LLM/installation/build-from-source-linux.html#option-1-build-tensorrt-llm-in-one-step) for more details on building from source.
+If you already have a TensorRT-LLM container image, you can skip this step.
+
+#### Step 2: Build the Dynamo container
+
 ```bash
 # Build image
-./container/build.sh --framework TENSORRTLLM --tensorrtllm-pip-wheel-path trtllm_wheel
+./container/build.sh --framework TENSORRTLLM
 ```
 
-We need to copy the TRT-LLM wheel to repository and point the build script to the path within
-the repository so that it can be picked by the docker build context.
+This build script internally points to the base container image built with step 1. If you skipped previous step because you already have the container image available, you can run the build script with that image as a base.
+
+```bash
+# Build dynamo image with other TRTLLM base image.
+./container/build.sh --framework TENSORRTLLM --base-image <trtllm-base-image> --base-image-tag <trtllm-base-image-tag>
+```
 
 ## Launching the Environment
-```
+```bash
 # Run image interactively from with the Dynamo root directory.
 ./container/run.sh --framework TENSORRTLLM -it
 ```
+
+## Quick Start using dynamo run
+
+```bash
+# Run the server
+dynamo run out=pystr:./monolith/dynamo_engine.py -- --engine_args llm_api_config.yaml
+```
+
+The above command should load the model specified in `llm_api_config.yaml` and start accepting
+text input from the client. For more details on the `dynamo run` command, please refer to the
+[dynamo run](/launch/README.md#python-bring-your-own-engine) documentation.
+
+Currently only monolithic deployment option is supported by `dynamo run` for TensorRT-LLM.
+Adding support for disaggregated deployment is under development. This does *not* require
+any other pre-requisites mentioned in the [Prerequisites](#prerequisites) section.
+
+
 
 ## Deployment Options
 
@@ -103,14 +114,12 @@ llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.tensorrt-ll
 
 #### 2. Workers
 
-Note: The following commands are tested on machines withH100x8 GPUs
-
 ##### Option 2.1 Single-Node Single-GPU
 
 ```bash
 # Launch worker
 cd /workspace/examples/python_rs/llm/trtllm
-mpirun --allow-run-as-root -n 1 --oversubscribe python3 -m monolith.launch --engine_args llm_api_config.yaml 1>agg_worker.log 2>&1 &
+mpirun --allow-run-as-root -n 1 --oversubscribe python3 -m monolith.worker --engine_args llm_api_config.yaml 1>agg_worker.log 2>&1 &
 ```
 
 Upon successful launch, the output should look similar to:
@@ -130,6 +139,12 @@ Upon successful launch, the output should look similar to:
 
 Update `tensor_parallel_size` in the `llm_api_config.yaml` to load the model with the desired number of GPUs.
 `nvidia-smi` can be used to check the GPU usage and the model is loaded on 4 GPUs.
+
+When launching the workers, prepend `trtllm-llmapi-launch` to the command.
+```bash
+# Note: -n should still be 1
+trtllm-llmapi-launch mpirun --allow-run-as-root -n 1 --oversubscribe python3 -m monolith.worker ...
+```
 
 ##### Option 2.3 Multi-Node Multi-GPU
 
@@ -201,6 +216,8 @@ Output:
 }
 ```
 
+Note: For KV cache aware routing, please refer to the [KV Aware Routing](./docs/kv_aware_routing.md) section.
+
 ### Disaggregated Deployment
 
 **Environment**
@@ -221,8 +238,8 @@ By default the server will run on port 8080.
 
 Add model to the server:
 ```bash
-llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.router.chat/completions
-llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.router.completions
+llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.disaggregated_server.chat/completions
+llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.disaggregated_server.completions
 ```
 
 #### 2. Workers
@@ -233,11 +250,11 @@ llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.router.comp
 Define disaggregated config file similar to the example [single_node_config.yaml](disaggregated/llmapi_disaggregated_configs/single_node_config.yaml). The important sections are the model, context_servers and generation_servers.
 
 
-1. **Launch the servers**
+1. **Launch the workers**
 
-Launch context and generation servers.\
+Launch context and generation workers.\
 WORLD_SIZE is the total number of workers covering all the servers described in disaggregated configuration.\
-For example, 2 TP2 generation servers are 2 servers but 4 workers/mpi executor.
+For example, 2 TP2 generation servers are 2 workers but 4 mpi executors.
 
 ```bash
 cd /workspace/examples/python_rs/llm/trtllm/
@@ -245,11 +262,11 @@ mpirun --allow-run-as-root --oversubscribe -n WORLD_SIZE python3 -m disaggregate
 ```
 If using the provided [single_node_config.yaml](disaggregated/llmapi_disaggregated_configs/single_node_config.yaml), WORLD_SIZE should be 2 as it has 1 context servers(TP=1) and 1 generation server(TP=1).
 
-2. **Launch the router**
+2. **Launch the disaggregated server**
 
 ```bash
 cd /workspace/examples/python_rs/llm/trtllm/
-python3 -m disaggregated.router 1>router.log 2>&1 &
+python3 -m disaggregated.server --engine_args llm_api_config.yaml 1>disagg_server.log 2>&1 &
 ```
 
 Note: For KV cache aware routing, please refer to the [KV Aware Routing](./docs/kv_aware_routing.md) section.
@@ -271,29 +288,13 @@ The following command allocates nodes for the job and returns the allocated node
 salloc -A ACCOUNT -N NUM_NODES -p batch -J JOB_NAME -t HH:MM:SS
 ```
 
-You can use `squeue -u $USER` to check the URLs of the allocated nodes. These URLs should be added to the TRTLLM LLMAPI disaggregated config file as shown below.
-```yaml
-model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
-...
-context_servers:
-  num_instances: 2
-  gpu_fraction: 0.25
-  tp_size: 2
-  pp_size: 1
-  urls:
-      - "node1:8001"
-      - "node2:8002"
-generation_servers:
-  num_instances: 2
-  gpu_fraction: 0.25
-  tp_size: 2
-  pp_size: 1
-  urls:
-      - "node2:8003"
-      - "node2:8004"
-```
+You can use `squeue -u $USER` to check the URLs of the allocated nodes.
 
-2. Start the NATS and ETCD endpoints
+2. Update the TRTLLM LLMAPI disaggregated config file
+
+An example is provided in [multi_node_config.yaml](disaggregated/llmapi_disaggregated_configs/multi_node_config.yaml).
+
+3. Start the NATS and ETCD endpoints
 
 Use the following commands. These commands will require downloading [NATS.io](https://docs.nats.io/running-a-nats-service/introduction/installation) and [ETCD](https://etcd.io/docs/v3.5/install/):
 ```bash
@@ -307,9 +308,9 @@ export NATS_SERVER="nats://node1:4222"
 export ETCD_ENDPOINTS="http://node1:2379,http://node2:2379"
 ```
 
-3. Launch the workers from node1 or login node. WORLD_SIZE is similar to single node deployment.
+4. Launch the workers from node1 or login node. WORLD_SIZE is similar to single node deployment.
 ```bash
-srun --mpi pmix -N NUM_NODES --ntasks WORLD_SIZE --ntasks-per-node=WORLD_SIZE --no-container-mount-home --overlap --container-image IMAGE --output batch_%x_%j.log --err batch_%x_%j.err --container-mounts PATH_TO_DYNAMO:/workspace --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/trtllm && python3 -m disaggregated.worker --engine_args llm_api_config.yaml -c disaggregated/llmapi_disaggregated_configs/multi_node_config.yaml' &
+srun --mpi pmix -N NUM_NODES --ntasks WORLD_SIZE --ntasks-per-node=GPUS_PER_NODE --no-container-mount-home --overlap --container-image IMAGE --output batch_%x_%j.log --err batch_%x_%j.err --container-mounts PATH_TO_DYNAMO:/workspace --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/trtllm && python3 -m disaggregated.worker --engine_args llm_api_config.yaml -c disaggregated/llmapi_disaggregated_configs/multi_node_config.yaml' &
 ```
 
 Once the workers are launched, you should see the output similar to the following in the worker logs.
@@ -324,10 +325,10 @@ Once the workers are launched, you should see the output similar to the followin
 [02/20/2025-07:10:33] [TRT-LLM] [I] Engine loaded and ready to serve...
 ```
 
-4. Launch the router from node1 or login node.
+4. Launch the disaggregated server from node1 or login node.
 ```bash
-srun --mpi pmix -N 1 --ntasks 1 --ntasks-per-node=1 --overlap --container-image IMAGE --output batch_router_%x_%j.log --err batch_router_%x_%j.err --container-mounts PATH_TO_DYNAMO:/workspace  --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/trtllm && python3 -m disaggregated.router' &
+srun --mpi pmix -N 1 --ntasks 1 --ntasks-per-node=1 --overlap --container-image IMAGE --output batch_disagg_server_%x_%j.log --err batch_disagg_server_%x_%j.err --container-mounts PATH_TO_DYNAMO:/workspace  --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/trtllm && python3 -m disaggregated.server --engine_args llm_api_config.yaml --routing-strategy round_robin' &
 ```
 
-5. Send requests to the router.
-The router will connect to the OAI compatible server. You can send requests to the router using the standard OAI format as shown in previous sections.
+5. Send requests to the disaggregated server.
+The disaggregated server will connect to the OAI compatible server. You can send requests to the disaggregated server using the standard OAI format as shown in previous sections.

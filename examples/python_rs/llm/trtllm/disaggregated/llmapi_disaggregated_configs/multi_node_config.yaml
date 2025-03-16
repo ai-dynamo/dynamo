@@ -13,24 +13,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
 hostname: localhost
-port: 8000
-backend: "pytorch"
+port: 8001
 context_servers:
   num_instances: 2
-  gpu_fraction: 0.25
-  tp_size: 2
-  pp_size: 1
+  tensor_parallel_size: 2
+  enable_chunked_prefill: true
+  max_num_tokens: 8192
+  max_batch_size: 256
+  kv_cache_config:
+    free_gpu_memory_fraction: 0.90
+  pytorch_backend_config:
+    enable_overlap_scheduler: false
+    use_cuda_graph: true
   urls:
-      - "node1:8001"
       - "node1:8002"
+      - "node2:8003"
+
 generation_servers:
   num_instances: 2
-  gpu_fraction: 0.25
-  tp_size: 2
-  pp_size: 1
+  tensor_parallel_size: 2
+  enable_chunked_prefill: true
+  max_num_tokens: 1024
+  max_batch_size: 1024
+  kv_cache_config:
+    free_gpu_memory_fraction: 0.90
+  pytorch_backend_config:
+    enable_overlap_scheduler: true
+    use_cuda_graph: true
   urls:
-      - "node2:8003"
       - "node2:8004"
+      - "node2:8005"

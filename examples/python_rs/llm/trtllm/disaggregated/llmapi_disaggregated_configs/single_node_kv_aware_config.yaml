@@ -23,7 +23,7 @@ context_servers:
   moe_expert_parallel_size: 1
   kv_cache_config:
     free_gpu_memory_fraction: 0.45
-    event_buffer_max_size: 1024
+    event_buffer_max_size: 4096
     enable_block_reuse: true
   pytorch_backend_config:
     enable_overlap_scheduler: false

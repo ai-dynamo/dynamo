@@ -23,9 +23,10 @@ from common.processor import merge_promises, parse_chat_message_content
 from tensorrt_llm.executor import CppExecutorError
 from tensorrt_llm.logger import logger
 
-logger.set_level("debug")
+logger.set_level("info")
 
 
+# TODO: support disaggregated as well
 async def chat_generator(engine: BaseTensorrtLLMEngine, request):
     if engine._llm_engine is None:
         raise RuntimeError("Engine not initialized")
@@ -59,7 +60,6 @@ async def chat_generator(engine: BaseTensorrtLLMEngine, request):
             sampling_params,
             streaming=request.stream,
         )
-        # NOTE: somehow stream and non-stream is working with the same path
         response_generator = engine.chat_processor.stream_response(
             request, request_id, conversation, promise
         )
