@@ -41,7 +41,7 @@ from dynamo.sdk import (
 @service(
     dynamo={
         "enabled": True,
-        "namespace": "dynamo-init",
+        "namespace": "dynamo",
     },
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -87,7 +87,7 @@ class VllmWorkerRouterLess:
         runtime = dynamo_context["runtime"]
         if self.engine_args.remote_prefill:
             metadata = self.engine_client.nixl_metadata
-            metadata_store = NixlMetadataStore("dynamo-init", runtime)
+            metadata_store = NixlMetadataStore("dynamo", runtime)
             await metadata_store.put(metadata.engine_id, metadata)
 
         models = OpenAIServingModels(

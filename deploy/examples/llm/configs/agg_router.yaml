@@ -15,7 +15,7 @@
 
 Frontend:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  endpoint: dynamo-init.Processor.chat/completions
+  endpoint: dynamo.Processor.chat/completions
   port: 8000
 
 Processor:
@@ -39,6 +39,4 @@ VllmWorker:
   router: kv
   tensor-parallel-size: 1
   ServiceArgs:
-    workers: 2
-    envs:
-      - CUDA_VISIBLE_DEVICES: '0,1'
+    workers: 1
