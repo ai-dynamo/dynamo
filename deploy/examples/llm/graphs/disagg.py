@@ -14,8 +14,8 @@
 # limitations under the License.
 
 from components.frontend import Frontend
+from components.prefill_worker import PrefillWorker
 from components.processor import Processor
 from components.worker import VllmWorker
-from components.prefill_worker import PrefillWorker
 
 Frontend.link(Processor).link(VllmWorker).link(PrefillWorker)
