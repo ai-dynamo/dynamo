@@ -307,6 +307,11 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv
 
 RUN rm /bin/sh && ln -s /bin/bash /bin/sh
 
+# Copy NIXL
+COPY --from=dev /usr/local/nixl /usr/local/nixl
+ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
+ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/:$PYTHONPATH
+
 # Setup the python environment
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN uv venv $VIRTUAL_ENV --python 3.12 && \
