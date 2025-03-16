@@ -46,7 +46,8 @@ For quick testing and debugging, there is a Rust-based
 
 ```bash
 # Can run multiple workers in separate shells to see aggregation as well.
-cargo run --bin mock_worker
+# Or to build/run from source: cargo run --bin mock_worker
+mock_worker
 ```
 
 To monitor the metrics of these mock workers, run:
