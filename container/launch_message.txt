@@ -50,8 +50,8 @@ Try the following to begin interacting with a model:
 > dynamo --help
 > dynamo run Qwen/Qwen2.5-3B-Instruct
 
-For more complete deployment configurations, check out the examples.
-Note you will need to have
+For more complete deployment configurations, check out the examples folder.
+To run the examples instances of etcd and nats are needed from the host system.
 > cd examples/hello_world
 > dynamo serve hello_world:Frontend
 
