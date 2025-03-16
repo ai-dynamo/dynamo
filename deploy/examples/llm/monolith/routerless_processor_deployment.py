@@ -13,26 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-Frontend:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  endpoint: dynamo-init.VllmWorker.generate
-  port: 8000
+from components.frontend import Frontend
+from components.processor import Processor
+from components.worker import VllmWorker
 
-VllmWorker:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  enforce-eager: true
-  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-  block-size: 64
-  max-model-len: 16384
-  max-num-batched-tokens: 16384
-  conditional-disagg: true
-  remote-prefill: true
-
-PrefillWorker:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  enforce-eager: true
-  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-  block-size: 64
-  max-model-len: 16384
-  max-num-batched-tokens: 16384
-  cuda-visible-device-offset: 1
+Frontend.link(Processor).link(VllmWorker)

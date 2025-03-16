@@ -94,7 +94,7 @@ def dynamo_api(func: t.Callable) -> t.Callable:
     return bentoml.api(func)
 
 
-def async_onstart(func: t.Callable) -> t.Callable:
+def async_on_start(func: t.Callable) -> t.Callable:
     """Decorator for async onstart functions."""
     # Mark the function as a startup hook
     setattr(func, "__bentoml_startup_hook__", True)

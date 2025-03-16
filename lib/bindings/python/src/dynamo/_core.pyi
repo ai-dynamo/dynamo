@@ -47,13 +47,18 @@ class EtcdClient:
     """
     Etcd is used for discovery in the DistributedRuntime
     """
-    async def kv_create_or_validate(self, key: str, value: bytes, lease_id: Optional[int] = None) -> None:
+
+    async def kv_create_or_validate(
+        self, key: str, value: bytes, lease_id: Optional[int] = None
+    ) -> None:
         """
         Atomically create a key if it does not exist, or validate the values are identical if the key exists.
         """
         ...
 
-    async def kv_put(self, key: str, value: bytes, lease_id: Optional[int] = None) -> None:
+    async def kv_put(
+        self, key: str, value: bytes, lease_id: Optional[int] = None
+    ) -> None:
         """
         Put a key-value pair into etcd
         """
@@ -174,7 +179,12 @@ class DisaggregatedRouter:
     sequence length thresholds.
     """
 
-    def __init__(self, drt: DistributedRuntime, model_name: str, default_max_local_prefill_length: int) -> None:
+    def __init__(
+        self,
+        drt: DistributedRuntime,
+        model_name: str,
+        default_max_local_prefill_length: int,
+    ) -> None:
         """
         Create a `DisaggregatedRouter` object.
 
@@ -234,31 +244,30 @@ class KvMetricsPublisher:
         this method will interact with KV router of the same component.
         """
 
-    def publish(self, request_active_slots: int,
+    def publish(
+        self,
+        request_active_slots: int,
         request_total_slots: int,
         kv_active_blocks: int,
         kv_total_blocks: int,
-        num_requests_waiting: int,
-        gpu_cache_usage_perc: float,
-        gpu_prefix_cache_hit_rate: float
     ) -> None:
         """
         Update the KV metrics being reported.
         """
         ...
 
-
 class ModelDeploymentCard:
     """
     A model deployment card is a collection of model information
     """
-    ...
 
+    ...
 
 class OAIChatPreprocessor:
     """
     A preprocessor for OpenAI chat completions
     """
+
     ...
 
     async def start(self) -> None:
@@ -267,12 +276,12 @@ class OAIChatPreprocessor:
         """
         ...
 
-
 class Backend:
     """
     LLM Backend engine manages resources and concurrency for executing inference
     requests in LLM engines (trtllm, vllm, sglang etc)
     """
+
     ...
 
     async def start(self, handler: RequestHandler) -> None:
@@ -280,7 +289,6 @@ class Backend:
         Start the backend engine and requests to the downstream LLM engine
         """
         ...
-
 
 class OverlapScores:
     """
@@ -302,7 +310,9 @@ class KvIndexer:
         Create a `KvIndexer` object
         """
 
-    def find_matches_for_request(self, token_ids: List[int], lora_id: int) -> OverlapScores:
+    def find_matches_for_request(
+        self, token_ids: List[int], lora_id: int
+    ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
         """
@@ -363,17 +373,19 @@ class KvEventPublisher:
         """
         ...
 
-
 class HttpService:
     """
     A HTTP service for dynamo applications.
     It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
     """
+
     ...
+
 class HttpError:
     """
     An error that occurred in the HTTP service
     """
+
     ...
 
 class HttpAsyncEngine:
@@ -382,4 +394,5 @@ class HttpAsyncEngine:
     python based AsyncEngine that handles HttpError exceptions from Python and
     converts them to the Rust version of HttpError
     """
+
     ...
