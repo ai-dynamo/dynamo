@@ -17,11 +17,13 @@ fastapi==0.115.6
 ftfy
 grpcio-tools==1.66.0
 httpx
+kubernetes==32.0.1
 msgspec
 mypy
 numpy
 opentelemetry-api
 opentelemetry-sdk
+pip==25.0.1
 pre-commit
 protobuf==5.27.3
 pydantic==2.7.1

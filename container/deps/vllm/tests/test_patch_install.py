@@ -27,4 +27,4 @@ pytestmark = pytest.mark.pre_merge
 @pytest.mark.skipif(vllm is None, reason="Skipping vllm tests, vllm not installed")
 def test_version():
     # Verify that the image has the patched version of vllm
-    assert vllm.__version__.startswith("0.7.3.dev")  # type: ignore
+    assert vllm.__version__.endswith("+dynamo")  # type: ignore

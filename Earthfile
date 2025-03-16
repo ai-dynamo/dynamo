@@ -24,6 +24,11 @@ golang-base:
     FROM golang:1.23
     RUN apt-get update && apt-get install -y git && apt-get clean && rm -rf /var/lib/apt/lists/* && curl -sSfL https://github.com/golangci/golangci-lint/releases/download/v1.61.0/golangci-lint-1.61.0-linux-amd64.tar.gz | tar -xzv && mv golangci-lint-1.61.0-linux-amd64/golangci-lint /usr/local/bin/
 
+operator-src:
+    FROM +golang-base
+    COPY ./deploy/dynamo/operator /artifacts/operator
+    SAVE ARTIFACT /artifacts/operator
+
 ############### ALL TARGETS ##############################
 all-test:
     BUILD ./deploy/dynamo/operator+test

@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import subprocess
 
-from disaggregated.processor import Processor
-from disaggregated.worker import VllmWorker
+from components.processor import Processor
+from components.routerless.worker import VllmWorkerRouterLess
+from components.worker import VllmWorker
 from pydantic import BaseModel
 
 from dynamo.sdk import depends, service
@@ -34,17 +34,16 @@ class FrontendConfig(BaseModel):
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
 )
-
 # todo this should be called ApiServer
 class Frontend:
     worker = depends(VllmWorker)
+    worker_routerless = depends(VllmWorkerRouterLess)
     processor = depends(Processor)
 
     def __init__(self):
         config = ServiceConfig.get_instance()
         frontend_config = FrontendConfig(**config.get("Frontend", {}))
 
-        os.environ["TRT_LOG"] = "DEBUG"
         subprocess.run(
             ["llmctl", "http", "remove", "chat-models", frontend_config.model]
         )

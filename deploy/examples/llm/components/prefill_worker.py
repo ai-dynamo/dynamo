@@ -29,7 +29,7 @@ from vllm.logger import logger as vllm_logger
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 
 from dynamo.sdk import (
-    async_onstart,
+    async_on_start,
     dynamo_context,
     dynamo_endpoint,
     server_context,
@@ -39,9 +39,6 @@ from dynamo.sdk import (
 
 class RequestType(BaseModel):
     text: str
-
-
-os.environ["VLLM_LOG_LEVEL"] = "DEBUG"
 
 
 @service(
@@ -81,7 +78,7 @@ class PrefillWorker:
             self.engine_args.enforce_eager = True
         print("PrefillWorker initialized")
 
-    @async_onstart
+    @async_on_start
     async def async_init(self):
         self._engine_context = build_async_engine_client_from_engine_args(
             self.engine_args

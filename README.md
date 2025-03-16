@@ -15,29 +15,40 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Dynamo
-
-<h4> A Datacenter Scale Distributed Inference Serving Framework </h4>
+# NVIDIA Dynamo
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
 
+NVIDIA Dynamo is a new modular inference framework designed for serving large language models (LLMs) in multi-node
+distributed environments. It enables seamless scaling of inference workloads across GPU nodes and the dynamic allocation
+of GPU workers to address traffic bottlenecks at various stages of the model pipeline.
 
-Dynamo is a flexible, component based, data center scale inference
-serving framework designed to meet the demands of complex use cases
-including those of Generative AI. It is designed to enable developers
-to implement and customize routing, load balancing, scaling and
-workflow definitions at the data center scale without sacrificing
-performance or ease of use.
+NVIDIA Dynamo also features LLM-specific capabilities, such as disaggregated serving, which separates the context
+(prefill) and generation (decode) steps of inference requests onto distinct GPUs and GPU nodes to optimize performance.
+
+NVIDIA Dynamo includes four key innovations:
+
+* **Smart Router**: An LLM-aware router that directs requests across large GPU fleets to minimize costly key-value (KV)
+cache recomputations for repeat or overlapping requests, freeing up GPUs to respond to new incoming requests
+* **Low-Latency Communication Library**: An inference optimized library that supports state-of-the-art GPU-to-GPU
+communication and abstracts complexity of data exchange across heterogenous devices and networking protocols,
+accelerating data transfers
+* **Memory Manager**: An engine that intelligently offloads and reloads inference data (KV cache) to and from lower-cost memory and storage devices using NVIDIA NIXL without impacting user experiences
 
 > [!NOTE]
 > This project is currently in the alpha / experimental /
 > rapid-prototyping stage and we are actively looking for feedback and
 > collaborators.
 
+## Quick Start
+
+TODO add quick start guide here
+
 ## Building Dynamo
 
 ### Requirements
+
 Dynamo development and examples are container based.
 
 * [Docker](https://docs.docker.com/get-started/get-docker/)

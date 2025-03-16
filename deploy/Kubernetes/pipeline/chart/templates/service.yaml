@@ -16,10 +16,10 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .name | lower }}
+  name: {{ $.Release.Name }}-{{ .name | lower }}
 spec:
   selector:
-    app: {{ .name | lower }}
+    app: {{ $.Release.Name }}-{{ .name | lower }}
   ports:
   - protocol: TCP
     port: 80

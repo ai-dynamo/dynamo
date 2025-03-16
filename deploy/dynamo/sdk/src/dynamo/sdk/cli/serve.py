@@ -63,48 +63,86 @@ def deprecated_option(*param_decls: str, **attrs: t.Any):
     return decorator
 
 
-def _parse_service_arg(arg: str) -> tuple[str, str, t.Any] | None:
+def _parse_service_arg(arg_name: str, arg_value: str) -> tuple[str, str, t.Any]:
     """Parse a single CLI argument into service name, key, and value."""
-    if not (arg.startswith("--") and "=" in arg):
-        return None
 
-    # Remove leading dashes
-    param = arg[2:]
-    key_path, value_str = param.split("=", 1)
+    parts = arg_name.split(".")
+    service = parts[0]
 
-    if "." not in key_path:
-        return None
-
-    service, key = key_path.split(".", 1)
+    # Handle nested keys (e.g., ServiceArgs.workers or ServiceArgs.envs.CUDA_VISIBLE_DEVICES)
+    nested_keys = parts[1:]
 
     # Parse value based on type
     try:
-        # Try as JSON for complex types
-        value = json.loads(value_str)
+        value = json.loads(arg_value)
     except json.JSONDecodeError:
-        # Handle basic types
-        if value_str.isdigit():
-            value = int(value_str)
-        elif value_str.replace(".", "", 1).isdigit() and value_str.count(".") <= 1:
-            value = float(value_str)
-        elif value_str.lower() in ("true", "false"):
-            value = value_str.lower() == "true"
+        if arg_value.isdigit():
+            value = int(arg_value)
+        elif arg_value.replace(".", "", 1).isdigit() and arg_value.count(".") <= 1:
+            value = float(arg_value)
+        elif arg_value.lower() in ("true", "false"):
+            value = arg_value.lower() == "true"
         else:
-            value = value_str
+            value = arg_value
 
-    return service, key, value
+    # Build nested dict structure
+    result = value
+    for key in reversed(nested_keys[1:]):
+        result = {key: result}
+
+    return service, nested_keys[0], result
 
 
-def _parse_service_args(args: list[str]) -> t.Dict[str, t.Any] | None:
+def _parse_service_args(args: list[str]) -> t.Dict[str, t.Any]:
     service_configs: t.DefaultDict[str, t.Dict[str, t.Any]] = collections.defaultdict(
         dict
     )
 
-    for arg in args:
-        parsed = _parse_service_arg(arg)
-        if parsed:
-            service, key, value = parsed
-            service_configs[service][key] = value
+    def deep_update(d: dict, key: str, value: t.Any):
+        """
+        Recursively updates nested dictionaries. We use this to process arguments like
+
+        ---Worker.ServiceArgs.env.CUDA_VISIBLE_DEVICES="0,1"
+
+        The _parse_service_arg function will parse this into:
+        service = "Worker"
+        nested_keys = ["ServiceArgs", "envs", "CUDA_VISIBLE_DEVICES"]
+
+        And returns returns: ("VllmWorker", "ServiceArgs", {"envs": {"CUDA_VISIBLE_DEVICES": "0,1"}})
+
+        We then use deep_update to update the service_configs dictionary with this nested value.
+        """
+        if isinstance(value, dict) and key in d and isinstance(d[key], dict):
+            for k, v in value.items():
+                deep_update(d[key], k, v)
+        else:
+            d[key] = value
+
+    index = 0
+    while index < len(args):
+        next_arg = args[index]
+
+        if not (next_arg.startswith("--") or "." not in next_arg):
+            continue
+        try:
+            if "=" in next_arg:
+                arg_name, arg_value = next_arg.split("=", 1)
+                index += 1
+            elif args[index + 1] == "=":
+                arg_name = next_arg
+                arg_value = args[index + 2]
+                index += 3
+            else:
+                arg_name = next_arg
+                arg_value = args[index + 1]
+                index += 2
+            if arg_value.startswith("-"):
+                raise ValueError("Service arg value can not start with -")
+            arg_name = arg_name[2:]
+            service, key, value = _parse_service_arg(arg_name, arg_value)
+            deep_update(service_configs[service], key, value)
+        except Exception:
+            raise ValueError(f"Error parsing service arg: {args[index]}")
 
     return service_configs
 
@@ -265,11 +303,18 @@ def build_serve_command() -> click.Group:
         show_default=True,
         hidden=True,
     )
+    @click.option(
+        "--dry-run",
+        is_flag=True,
+        help="Print the final service configuration and exit without starting the server",
+        default=False,
+    )
     @click.pass_context
     @env_manager
     def serve(
         ctx: click.Context,
         bento: str,
+        dry_run: bool,
         development: bool,
         port: int,
         host: str,
@@ -331,15 +376,13 @@ def build_serve_command() -> click.Group:
 
         from dynamo.sdk.lib.service import LinkedServices
 
-        # Process service-specific options
-        service_configs: t.Optional[t.Dict[str, t.Any]] = _parse_service_args(ctx.args)
+        service_configs: dict[str, dict[str, t.Any]] = {}
 
-        # Load and merge config file if provided
+        # Load file if provided
         if file:
             with open(file) as f:
                 yaml_configs = yaml.safe_load(f)
                 # Initialize service_configs as empty dict if it's None
-                service_configs = dict(service_configs or {})
                 # Convert nested YAML structure to flat dict with dot notation
                 for service, configs in yaml_configs.items():
                     for key, value in configs.items():
@@ -347,7 +390,20 @@ def build_serve_command() -> click.Group:
                             service_configs[service] = {}
                         service_configs[service][key] = value
 
-        # print("service_configs", service_configs)
+        # Process service-specific options
+        cmdline_overrides: t.Dict[str, t.Any] = _parse_service_args(ctx.args)
+        for service, configs in cmdline_overrides.items():
+            for key, value in configs.items():
+                if service not in service_configs:
+                    service_configs[service] = {}
+                service_configs[service][key] = value
+
+        if dry_run:
+            rich.print("[bold]Service Configuration:[/bold]")
+            rich.print(json.dumps(service_configs, indent=2))
+            rich.print("\n[bold]Environment Variable that would be set:[/bold]")
+            rich.print(f"DYNAMO_SERVICE_CONFIG={json.dumps(service_configs)}")
+            sys.exit(0)
 
         # Set environment variable with service configuration
         if service_configs:

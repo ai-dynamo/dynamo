@@ -25,16 +25,15 @@ def create_bentoml_cli() -> click.Command:
     from bentoml_cli.bentos import bento_command
     from bentoml_cli.cloud import cloud_command
     from bentoml_cli.containerize import containerize_command
-    from bentoml_cli.deployment import (
-        deploy_command,
-        deployment_command,
-        develop_command,
-    )
+    from bentoml_cli.deployment import deployment_command, develop_command
     from bentoml_cli.env import env_command
     from bentoml_cli.models import model_command
     from bentoml_cli.secret import secret_command
     from bentoml_cli.utils import BentoMLCommandGroup, get_entry_points
 
+    from dynamo.sdk.cli.delete import delete_command
+    from dynamo.sdk.cli.deploy import deploy_command
+    from dynamo.sdk.cli.list import list_command
     from dynamo.sdk.cli.run import run_command
     from dynamo.sdk.cli.serve import serve_command
     from dynamo.sdk.cli.start import start_command
@@ -61,6 +60,8 @@ def create_bentoml_cli() -> click.Command:
     bentoml_cli.add_command(develop_command)
     bentoml_cli.add_command(deployment_command)
     bentoml_cli.add_command(secret_command)
+    bentoml_cli.add_command(list_command)
+    bentoml_cli.add_command(delete_command)
     # Load commands from extensions
     for ep in get_entry_points("bentoml.commands"):
         bentoml_cli.add_command(ep.load())
