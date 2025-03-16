@@ -19,19 +19,26 @@ Frontend:
   endpoint: dynamo-init.VllmWorkerRouterLess.generate
   port: 8000
 
-VllmWorkerRouterLess:
+Processor:
+  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  block-size: 64
+  max-model-len: 16384
+  router: random
+
+VllmWorker:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   enforce-eager: true
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
   block-size: 64
   max-model-len: 16384
   max-num-batched-tokens: 16384
-  remote-prefill: true
-  ServiceArgs:
-    workers: 1
+  conditional-disagg: true
+  tensor-parallel-size: 1
+  router: kv
+  enable-prefix-caching: true
 
-
-PrefillWorkerRouterLess:
+# TODO - set all of these but model as default
+PrefillWorker:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   enforce-eager: true
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
@@ -39,5 +46,3 @@ PrefillWorkerRouterLess:
   max-model-len: 16384
   max-num-batched-tokens: 16384
   cuda-visible-device-offset: 1
-  ServiceArgs:
-    workers: 1
