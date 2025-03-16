@@ -44,6 +44,19 @@ jobs:
            run_id: ${{ github.event.workflow_run.id }}
            path: artifacts
 
+      - name: Report test status
+        id: report_test_status
+        uses: LouisBrunner/checks-action@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: "Summarize test report"
+          status: "in_progress"
+          sha: ${{ github.event.workflow_run.head_commit.id }}
+
+      - name: Set Test Run URL
+        id: set_test_run_url
+        run: echo "test_run_url=${{ github.event.workflow_run.html_url }}" >> $GITHUB_OUTPUT
+
       - name: Summarize Test Results as Markdown Table
         run: |
           sudo apt-get update -y
@@ -83,3 +96,13 @@ jobs:
           echo "Total duration: $total_duration"
           echo "|------------|-------|--------|--------|---------|----------|" >> $GITHUB_STEP_SUMMARY
           echo "| **Total** | $total_tests | $total_passed | $total_failed | $total_skipped | ${total_duration}s |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Complete report test status
+        if: always()
+        uses: LouisBrunner/checks-action@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: "Summarize test report"
+          status: "completed"
+          conclusion: ${{ job.status }}
+          sha: ${{ github.event.workflow_run.head_commit.id }}
