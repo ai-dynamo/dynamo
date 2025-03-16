@@ -193,7 +193,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 # rebuilds from unrelated source code changes
 ARG VLLM_REF="0.7.2"
 ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
-ARG VERSION_PATCH_SUFFIX="dynamo"
+ARG VLLM_VERSION_PATCH_SUFFIX="dynamo"
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     mkdir /tmp/vllm && \
     uv pip install pip wheel && \
@@ -202,10 +202,10 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     wheel unpack *.whl && \
     cd vllm-${VLLM_REF}/ && \
     patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
-    sed -i "s/__version__ = version = '\(.*\)'/__version__ = version = '\1+${VERSION_PATCH_SUFFIX}'/g; s/__version_tuple__ = version_tuple = (\(.*\))/__version_tuple__ = version_tuple = (\1, '${VERSION_PATCH_SUFFIX}')/g" vllm/_version.py && \
-    mv vllm-${VLLM_REF}.dist-info vllm-${VLLM_REF}+${VERSION_PATCH_SUFFIX}.dist-info && \
-    sed -i "s/${VLLM_REF}/${VLLM_REF}+${VERSION_PATCH_SUFFIX}/g" vllm-${VLLM_REF}+${VERSION_PATCH_SUFFIX}.dist-info/METADATA && \
-    sed -i "s/vllm-${VLLM_REF}/vllm-${VLLM_REF}+${VERSION_PATCH_SUFFIX}/g" vllm-${VLLM_REF}+${VERSION_PATCH_SUFFIX}.dist-info/RECORD && \
+    sed -i "s/__version__ = version = '\(.*\)'/__version__ = version = '\1+${VLLM_VERSION_PATCH_SUFFIX}'/g; s/__version_tuple__ = version_tuple = (\(.*\))/__version_tuple__ = version_tuple = (\1, '${VLLM_VERSION_PATCH_SUFFIX}')/g" vllm/_version.py && \
+    mv vllm-${VLLM_REF}.dist-info vllm-${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}.dist-info && \
+    sed -i "s/${VLLM_REF}/${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}/g" vllm-${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}.dist-info/METADATA && \
+    sed -i "s/vllm-${VLLM_REF}/vllm-${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}/g" vllm-${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}.dist-info/RECORD && \
     mkdir -p /workspace/dist && \
     wheel pack . --dest-dir /workspace/dist && \
     uv pip install /workspace/dist/vllm-*.whl
