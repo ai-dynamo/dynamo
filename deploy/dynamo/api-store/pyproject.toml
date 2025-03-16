@@ -3,5 +3,22 @@ name = "ai-dynamo-store"
 version = "0.1.0"
 description = "AI Dynamo Store for managing Dynamo artifacts"
 readme = "README.md"
-requires-python = ">=3.10"
-dependencies = []
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.11",
+    "uvicorn>=0.34.0",
+    "sqlalchemy>=2.0.39",
+    "pydantic>=2.10.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.0.0",
+    "ruff>=0.0.270",
+]
+
+[project.scripts]
+ai-dynamo-store = "ai_dynamo_store.__main__:main"
