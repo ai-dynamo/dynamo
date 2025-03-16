@@ -52,7 +52,6 @@ async def main():
         if isinstance(
             route, APIRoute
         ):  # Ensure it's an APIRoute before accessing attributes
-            route: APIRoute  # Explicitly tell MyPy that route is an APIRoute
             logger.info(f"  {route.path} {route.methods} {route.name}")
 
     await init_db()
@@ -60,10 +59,13 @@ async def main():
     # Log all registered routes more verbosely
     logger.info("=== REGISTERED ROUTES ===")
     for route in app.routes:
-        logger.info(f"PATH: {route.path}")
-        logger.info(f"METHODS: {route.methods}")
-        logger.info(f"NAME: {route.name}")
-        logger.info("=====================")
+        if isinstance(
+            route, APIRoute
+        ):  # Ensure it's an APIRoute before accessing attributes
+            logger.info(f"PATH: {route.path}")
+            logger.info(f"METHODS: {route.methods}")
+            logger.info(f"NAME: {route.name}")
+            logger.info("=====================")
 
     # Get port from environment or default to 8001
     port = int(os.getenv("API_DATABASE_PORT", "8001"))
