@@ -43,7 +43,7 @@
 
 Dynamo: A Datacenter Scale Distributed Inference Serving Framework
 
-This is a minimum runtime container for interacting with Dynamo via our CLI 
+This is a minimum runtime container for interacting with Dynamo via our CLI
 tools.
 
 Try the following to begin interacting with a model:
