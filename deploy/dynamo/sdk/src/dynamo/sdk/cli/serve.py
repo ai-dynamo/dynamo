@@ -65,31 +65,32 @@ def deprecated_option(*param_decls: str, **attrs: t.Any):
 
 def _parse_service_arg(arg_name: str, arg_value: str) -> tuple[str, str, t.Any]:
     """Parse a single CLI argument into service name, key, and value."""
-
     parts = arg_name.split(".")
     service = parts[0]
-
-    # Handle nested keys (e.g., ServiceArgs.workers or ServiceArgs.envs.CUDA_VISIBLE_DEVICES)
     nested_keys = parts[1:]
-
-    # Parse value based on type
-    try:
-        value = json.loads(arg_value)
-    except json.JSONDecodeError:
-        if arg_value.isdigit():
-            value = int(arg_value)
-        elif arg_value.replace(".", "", 1).isdigit() and arg_value.count(".") <= 1:
-            value = float(arg_value)
-        elif arg_value.lower() in ("true", "false"):
-            value = arg_value.lower() == "true"
-        else:
-            value = arg_value
+    
+    # Special handling for environment variables - keep them as strings
+    if "env" in nested_keys:
+        value = arg_value
+    else:
+        # Parse value based on type
+        try:
+            value = json.loads(arg_value)
+        except json.JSONDecodeError:
+            if arg_value.isdigit():
+                value = int(arg_value)
+            elif arg_value.replace(".", "", 1).isdigit() and arg_value.count(".") <= 1:
+                value = float(arg_value)
+            elif arg_value.lower() in ("true", "false"):
+                value = arg_value.lower() == "true"
+            else:
+                value = arg_value
 
     # Build nested dict structure
     result = value
     for key in reversed(nested_keys[1:]):
         result = {key: result}
-
+    
     return service, nested_keys[0], result
 
 

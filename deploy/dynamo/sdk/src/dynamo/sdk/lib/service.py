@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple, TypeVar, Union
 from _bentoml_sdk import Service, ServiceConfig
 from _bentoml_sdk.images import Image
 from _bentoml_sdk.service.config import validate
+from bentoml._internal.bento.build_config import BentoEnvSchema
+from _bentoml_sdk.service.factory import convert_envs
 
 from dynamo.sdk.lib.decorators import DynamoEndpoint
 
@@ -78,13 +80,26 @@ class DynamoService(Service[T]):
         service_name = inner.__name__
         service_args = self._get_service_args(service_name)
 
+        # Initialize envs list if not provided
+        env_list = list(envs or [])
+
         if service_args:
-            # Validate and merge service args with existing config
+            # Extract environment variables from ServiceArgs if present
+            if "env" in service_args:
+                env_dict = service_args.pop("env")
+                print("env_dict", env_dict)
+                # Add environment variables in the format expected by convert_envs
+                env_list.extend([
+                    {"name": env_name, "value": env_value}
+                    for env_name, env_value in env_dict.items()
+                ])
+
+            # Validate and merge remaining service args with existing config
             validated_args = validate(service_args)
             config.update(validated_args)
             self._remove_service_args(service_name)
 
-        super().__init__(config=config, inner=inner, image=image, envs=envs or [])
+        super().__init__(config=config, inner=inner, image=image, envs=env_list)
 
         # Initialize Dynamo configuration
         self._dynamo_config = (
