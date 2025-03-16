@@ -29,15 +29,12 @@ NVIDIA Dynamo also features LLM-specific capabilities, such as disaggregated ser
 
 NVIDIA Dynamo includes four key innovations:
 
-* **GPU Planner**: A planning engine that dynamically adds and removes GPUs and shifts them between prefill and decode
-stages to adjust to fluctuating user demand, avoiding over- or under provisioning GPUs
 * **Smart Router**: An LLM-aware router that directs requests across large GPU fleets to minimize costly key-value (KV)
 cache recomputations for repeat or overlapping requests, freeing up GPUs to respond to new incoming requests
 * **Low-Latency Communication Library**: An inference optimized library that supports state-of-the-art GPU-to-GPU
 communication and abstracts complexity of data exchange across heterogenous devices and networking protocols,
 accelerating data transfers
-* **Memory Manager**: An engine that intelligently offloads and reloads inference data (KV cache) to and from lower-cost
-memory and storage devices without impacting user experiences
+* **Memory Manager**: An engine that intelligently offloads and reloads inference data (KV cache) to and from lower-cost memory and storage devices using NVIDIA NIXL without impacting user experiences
 
 > [!NOTE]
 > This project is currently in the alpha / experimental /
