@@ -90,6 +90,7 @@ const (
 	ContainerPortNameHTTPProxy                                = "http-proxy"
 	ServicePortNameHTTPNonProxy                               = "http-non-proxy"
 	HeaderNameDebug                                           = "X-Yatai-Debug"
+	kDefaultIngressSuffix                                     = "local"
 )
 
 var ServicePortHTTPNonProxy = commonconsts.BentoServicePort + 1
@@ -1136,6 +1137,10 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context
 	if dynamoNimDeployment.Spec.Ingress.HostPrefix != nil {
 		vsName = *dynamoNimDeployment.Spec.Ingress.HostPrefix + vsName
 	}
+	ingressSuffix, found := os.LookupEnv("DYNAMO_INGRESS_SUFFIX")
+	if !found || ingressSuffix == "" {
+		ingressSuffix = kDefaultIngressSuffix
+	}
 	vs := &networkingv1beta1.VirtualService{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      dynamoNimDeployment.Name,
@@ -1143,7 +1148,7 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context
 		},
 		Spec: istioNetworking.VirtualService{
 			Hosts: []string{
-				fmt.Sprintf("%s.dev.aire.nvidia.com", vsName),
+				fmt.Sprintf("%s.%s", vsName, ingressSuffix),
 			},
 			Gateways: []string{"istio-system/ingress-alb"},
 			Http: []*istioNetworking.HTTPRoute{
