@@ -61,7 +61,7 @@ struct Args {
     endpoint: String,
 
     /// Polling interval in seconds for scraping dynamo endpoint stats (minimum 1 second)
-    #[arg(long, default_value = "2")]
+    #[arg(long, default_value = "1")]
     poll_interval: u64,
 
     /// Host for serving or pushing prometheus metrics (default: 0.0.0.0)
@@ -165,9 +165,10 @@ async fn app(runtime: Runtime) -> Result<()> {
 
     metrics_collector.lock().await.start(metrics_mode)?;
 
+    // TODO: Consider removing event subscription until metrics are more standardized
     // Subscribe to KV hit rate events
     let kv_hit_rate_subject = KV_HIT_RATE_SUBJECT;
-    tracing::info!("Subscribing to KV hit rate events on subject: {kv_hit_rate_subject}");
+    tracing::debug!("Subscribing to KV hit rate events on subject: {kv_hit_rate_subject}");
 
     // Clone fields for the event subscription task
     let config_clone = config.clone();
