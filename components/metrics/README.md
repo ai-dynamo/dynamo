@@ -157,7 +157,7 @@ To view the metrics hosted on the PushGateway:
 ```bash
 # View all metrics
 # curl http://<pushgateway_ip>:<pushgateway_port>/metrics
-curl localhost:9091/metrics
+curl 127.0.0.1:9091/metrics
 ```
 
 ## Building/Running from Source
