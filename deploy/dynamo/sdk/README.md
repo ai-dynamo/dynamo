@@ -76,9 +76,17 @@ class Backend:
             yield f"Backend: {token}"
 ```
 
-You can run this pipeline locally using
+You can run this pipeline locally by spinning up ETCD and NATS and then running the pipeline:
 
 ```bash
+# Spin up ETCD and NATS
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+then
+
+```bash
+# Run the pipeline
 dynamo serve pipeline:Frontend
 ```
 
