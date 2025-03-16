@@ -20,6 +20,7 @@ package converters
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/mocks"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/models"
@@ -27,6 +28,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemasv2"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/services"
 )
+
+const kDefaultIngressSuffix = "local"
 
 func ToDeploymentSchema(ctx context.Context, deployment *models.Deployment) (*schemas.DeploymentSchema, error) {
 	if deployment == nil {
@@ -130,9 +133,14 @@ func ToDeploymentSchemaV2(ctx context.Context, cluster *models.Cluster, deployme
 	}
 
 	urls := make([]string, 0)
+	ingressSuffix, found := os.LookupEnv("INGRESS_SUFFIX")
+	if !found || ingressSuffix == "" {
+		ingressSuffix = kDefaultIngressSuffix
+	}
 	if deployment.KubeNamespace != "" && cluster != nil {
-		urls = append(urls, fmt.Sprintf("https://%s.dev.aire.nvidia.com/api/v2/deployments/%s?cluster=%s",
+		urls = append(urls, fmt.Sprintf("https://%s.%s/api/v2/deployments/%s?cluster=%s",
 			deployment.KubeNamespace,
+			ingressSuffix,
 			deployment.Name,
 			cluster.Name))
 	}
