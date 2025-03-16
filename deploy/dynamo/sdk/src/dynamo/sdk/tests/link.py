@@ -16,12 +16,13 @@
 import pytest
 
 from dynamo.sdk.lib.service import LinkedServices
-from dynamo.sdk.tests.pipeline import Backend, Backend2, Frontend, Middle
 
 pytestmark = pytest.mark.pre_merge
 
 
-def test_link():
+def test_remove_backend2():
+    from dynamo.sdk.tests.pipeline import Backend, Backend2, Frontend, Middle
+
     # Initial state assertions
     assert set(Frontend.dependencies.keys()) == {"backend", "middle"}
     assert Frontend.dependencies["backend"].on == Backend

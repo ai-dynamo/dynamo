@@ -68,10 +68,10 @@ def _parse_service_arg(arg_name: str, arg_value: str) -> tuple[str, str, t.Any]:
 
     parts = arg_name.split(".")
     service = parts[0]
-    
+
     # Handle nested keys (e.g., ServiceArgs.workers or ServiceArgs.envs.CUDA_VISIBLE_DEVICES)
     nested_keys = parts[1:]
-    
+
     # Parse value based on type
     try:
         value = json.loads(arg_value)
@@ -89,16 +89,18 @@ def _parse_service_arg(arg_name: str, arg_value: str) -> tuple[str, str, t.Any]:
     result = value
     for key in reversed(nested_keys[1:]):
         result = {key: result}
-    
+
     return service, nested_keys[0], result
 
 
 def _parse_service_args(args: list[str]) -> t.Dict[str, t.Any]:
-    service_configs: t.DefaultDict[str, t.Dict[str, t.Any]] = collections.defaultdict(dict)
-    
+    service_configs: t.DefaultDict[str, t.Dict[str, t.Any]] = collections.defaultdict(
+        dict
+    )
+
     def deep_update(d: dict, key: str, value: t.Any):
         """
-        Recursively updates nested dictionaries. We use this to process arguments like 
+        Recursively updates nested dictionaries. We use this to process arguments like
 
         ---Worker.ServiceArgs.env.CUDA_VISIBLE_DEVICES="0,1"
 
