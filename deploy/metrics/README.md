@@ -57,12 +57,11 @@ The following configuration files should be present in this directory:
 The prometheus service exposes the following metrics:
 - `llm_load_avg`: Average load across workers
 - `llm_load_std`: Load standard deviation across workers
-- `llm_requests_active_slots`: Number of currently active request slots
-- `llm_requests_total_slots`: Total available request slots
-- `llm_kv_blocks_active`: Number of active KV blocks
-- `llm_kv_blocks_total`: Total KV blocks available
-- `llm_kv_hit_rate_isl_blocks`: Cumulative count of ISL blocks in KV hit rate events
-- `llm_kv_hit_rate_overlap_blocks`: Cumulative count of overlapping blocks in KV hit rate events
+- `llm_requests_active_slots`: Number of currently active request slots per worker
+- `llm_requests_total_slots`: Total available request slots per worker
+- `llm_kv_blocks_active`: Number of active KV blocks per worker
+- `llm_kv_blocks_total`: Total KV blocks available per worker
+- `llm_kv_hit_rate`: Cumulative KV Cache hit rate per worker
 
 ## Troubleshooting
 
