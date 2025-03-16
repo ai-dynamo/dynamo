@@ -284,10 +284,14 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
 
+# Copy launch banner
+RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
+    sed '/^\/\//d' /workspace/launch_message.txt > ~/.launch_screen && \
+    echo "cat ~/.launch_screen" >> ~/.bashrc
+
 # FIXME: Copy more specific folders in for dev/debug after directory restructure
 COPY . /workspace
 
-# FIXME: May want a modification with dynamo banner on entry
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
 CMD []
@@ -319,11 +323,13 @@ RUN uv pip install $(find whls -name ai_dynamo_runtime-*.whl) && \
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
 
-# Copy runtime README
+# Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
-    echo "cat << EOF" >> ~/.bashrc && \
-    sed '/^\/\//d' ./launch_message.txt >> ~/.bashrc && \
-    echo "EOF" >> ~/.bashrc
+    sed '/^\/\//d' /workspace/launch_message.txt > ~/.launch_screen && \
+    echo "cat ~/.launch_screen" >> ~/.bashrc
+
+# Copy examples 
+COPY --from=dev /workspace/deploy/examples examples/
 
 # dynamo run in=text out=mistralrs Qwen/Qwen2.5-3B-Instruct
 CMD []
