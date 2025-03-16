@@ -68,6 +68,7 @@ impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for MockRe
     }
 }
 
+// FIXME: These events are just for testing and may not currently be used.
 /// Spawns a background task that periodically publishes mock KV hit rate events
 async fn mock_event_publisher(namespace: Namespace) {
     // NOTE: These events are just for testing, and shouldn't be interpreted
@@ -143,11 +144,11 @@ async fn backend(runtime: DistributedRuntime) -> Result<()> {
     // make the ingress discoverable via a component service
     // we must first create a service, then we can attach one more more endpoints
     namespace
-        .component("backend")?
+        .component("my_component")?
         .service_builder()
         .create()
         .await?
-        .endpoint("generate")
+        .endpoint("my_endpoint")
         .endpoint_builder()
         // Dummy stats handler to demonstrate how to attach a custom stats handler
         .stats_handler(mock_stats_handler)
