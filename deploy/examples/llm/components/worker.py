@@ -90,14 +90,14 @@ class VllmWorker:
             os.environ["VLLM_KV_NAMESPACE"] = "dynamo-init"
             os.environ["VLLM_KV_COMPONENT"] = class_name
             vllm_logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
-            # note: worker_index is 1-based, but CUDA_VISIBLE_DEVICES is 0-based
-            gpu_idx = (
-                self.engine_args.cuda_visible_device_offset
-                + server_context.worker_index
-                - 1
-            )
-            os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_idx}"
-            self.metrics_publisher = KvMetricsPublisher()
+        # note: worker_index is 1-based, but CUDA_VISIBLE_DEVICES is 0-based
+        gpu_idx = (
+            self.engine_args.cuda_visible_device_offset
+            + server_context.worker_index
+            - 1
+        )
+        os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_idx}"
+        self.metrics_publisher = KvMetricsPublisher()
 
     @async_on_start
     async def async_init(self):

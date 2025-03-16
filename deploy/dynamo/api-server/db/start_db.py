@@ -16,11 +16,18 @@
 import asyncio
 import logging
 import os
+import sys
 
 import uvicorn
+from db.api import router
+from db.storage import create_db_and_tables_async
+from fastapi import FastAPI
+from fastapi.routing import APIRoute
 
-from .api import app
-from .db import create_db_and_tables_async
+# Configure logging to write to stdout
+logging.basicConfig(
+    level=logging.INFO, format="PYTHON_APP: %(message)s", stream=sys.stdout
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +42,37 @@ async def init_db():
 
 
 async def main():
-    # Initialize the database
+    # Add debug logging for import verification
+    logger.info("Imported app from api.py")
+    logger.info("Router routes:")
+
+    app = FastAPI(title="Dynamo API Database Server")
+    app.include_router(router)
+    for route in router.routes:
+        if isinstance(
+            route, APIRoute
+        ):  # Ensure it's an APIRoute before accessing attributes
+            logger.info(f"  {route.path} {route.methods} {route.name}")
+
     await init_db()
+
+    # Log all registered routes more verbosely
+    logger.info("=== REGISTERED ROUTES ===")
+    for route in app.routes:
+        if isinstance(
+            route, APIRoute
+        ):  # Ensure it's an APIRoute before accessing attributes
+            logger.info(f"PATH: {route.path}")
+            logger.info(f"METHODS: {route.methods}")
+            logger.info(f"NAME: {route.name}")
+            logger.info("=====================")
 
     # Get port from environment or default to 8001
     port = int(os.getenv("API_DATABASE_PORT", "8001"))
-    os.environ["API_BACKEND_URL"] = f"http://0.0.0.0:{port}"
+
+    # Log the backend URL for debugging
+    backend_url = os.getenv("API_BACKEND_URL")
+    logger.info(f"Starting FastAPI server with backend URL: {backend_url}")
 
     # Start the FastAPI server
     config = uvicorn.Config(app=app, host="0.0.0.0", port=port, log_level="info")

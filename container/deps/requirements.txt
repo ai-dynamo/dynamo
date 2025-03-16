@@ -17,6 +17,7 @@ fastapi==0.115.6
 ftfy
 grpcio-tools==1.66.0
 httpx
+kubernetes==32.0.1
 msgspec
 mypy
 numpy

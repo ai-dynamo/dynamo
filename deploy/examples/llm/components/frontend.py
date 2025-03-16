@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import subprocess
 
 from components.processor import Processor
@@ -35,7 +34,6 @@ class FrontendConfig(BaseModel):
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
 )
-
 # todo this should be called ApiServer
 class Frontend:
     worker = depends(VllmWorker)
@@ -46,7 +44,6 @@ class Frontend:
         config = ServiceConfig.get_instance()
         frontend_config = FrontendConfig(**config.get("Frontend", {}))
 
-        os.environ["TRT_LOG"] = "DEBUG"
         subprocess.run(
             ["llmctl", "http", "remove", "chat-models", frontend_config.model]
         )

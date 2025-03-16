@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,13 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoDeployment
-metadata:
-  labels:
-    app.kubernetes.io/name: dynamo-kubernetes-operator
-    app.kubernetes.io/managed-by: kustomize
-  name: dynamodeployment-sample
-spec:
-  # TODO(user): Add fields here
-  # EXAMPLE: dynamoNim: basic:dev
+from components.frontend import Frontend
+from components.processor import Processor
+from components.worker import VllmWorker
+
+Frontend.link(Processor).link(VllmWorker)
