@@ -27,7 +27,7 @@ This directory contains examples and reference implementations for deploying Lar
 
 ## Deployment Architectures
 
-### Monolith
+### Aggregated
 Single-instance deployment where both prefill and decode are done by the same worker.
 
 ### Disaggregated
