@@ -60,6 +60,7 @@ Once you've confirmed your platform and architecture are compatible, you can ins
 ### Steps for Wheel Installation:
 
 Python 3.10, 3.11, and 3.12 are supported Python Versions for Wheel Installation.
+> **Note***: The recommended version is Python 3.12.
 
 1. **Install the base version of ai-dynamo**:
 ```bash
