@@ -4,7 +4,6 @@ The Dynamo CLI is a powerful tool for serving, containerizing, and deploying Dyn
 Overview
 At a high level, the Dynamo CLI allows you to:
 - `run` - quickly chat with a model
-- `start` - run an individual service locally
 - `serve` - run a set of services locally (via `depends()` or `.link()`)
 - `build` - create an archive of your services (called a `bento`)
 
@@ -13,24 +12,6 @@ At a high level, the Dynamo CLI allows you to:
 ## `run`
 
 The `run` command allows you to quickly chat with a model. Under the hood - it is running the `dynamo-run` Rust binary. You can find the arguments that it takes here: [dynamo-run docs](../../../../../launch/README.md)
-
-## `start`
-
-The `start` command allows you to run an individual service locally. It is useful for development and testing and is similar to just running `python3 service.py`
-
-**Usage**
-```bash
-dynamo start [SERVICE]
-```
-
-**Arguments**
-- `SERVICE` - The service to start. You use file:Class syntax to specify the service.
-
-**Flags**
-- `--file`/`-f` - Path to optional YAML configuration file.
-- `--dry-run` - Print out the dependency graph and values without starting any services.
-- `--working-dir` - Specify the directory to find the Service instance
-- Any additional flags that follow `--Class.key=value` will be passed to the service constructor and parsed. Please see the [SDK docs](../sdk/README.md) for more details on how this works
 
 ## `serve`
 
