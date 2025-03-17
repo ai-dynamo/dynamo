@@ -5,7 +5,7 @@ metrics from a Dynamo deployment for use in other applications or visualization
 tools like Prometheus and Grafana.
 
 <div align="center">
-  <img src="images/dynamo_metrics_grafana.png" alt="Dynamo Metrics Dashboard" width="800"/>
+  <img src="images/dynamo_metrics_grafana.png" alt="Dynamo Metrics Dashboard"/>
 </div>
 
 ## Quickstart
