@@ -91,6 +91,6 @@ First, clone the `dynamo` repository to your local machine:
    ```bash
    ./container/build.sh --framework vllm
    ```
-> **Note***: The default framework is Standard.
+> **Note***: The default framework is vllm.
 
 
