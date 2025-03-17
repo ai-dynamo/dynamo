@@ -60,11 +60,11 @@ A key aspect of our implementation is the introduction of multiple parallel queu
 
 This multi-queue design is crucial because it:
 
-1. Enables true asynchronous execution by decoupling blocking operations.
-2. Maximizes parallelism, allowing multiple requests to be processed concurrently.
-3. Fully utilizes different hardware resources, such as CPU, GPU, and storage, without bottlenecks.
-4. Decouples slow operations (e.g., SSD writes) from the critical path of responding to user queries, improving responsiveness.
-5. Ensures the correctness of index updates and data transfers, even under high-throughput, concurrent workloads.
+- Enables true asynchronous execution by decoupling blocking operations.
+- Maximizes parallelism, allowing multiple requests to be processed concurrently.
+- Fully utilizes different hardware resources, such as CPU, GPU, and storage, avoid bottlenecks.
+- Decouples slow operations (e.g., SSD writes) from the critical path of responding to user queries, to improve responsiveness.
+- Ensures the correctness of index updates and data transfers, even under high-throughput, concurrent workloads.
 
 Looking ahead, V1 architecture will integrate with NIXL to enable KV reuse across multiple nodes. Additionally, we will add GPUDirect Storage capabilities to reduce the  get_async()  latency and minimize the CPU overhead while facilitating direct data transfers between GPU memory and SSD. These enhancements will be made available post-GTC in a few weeks.
 
