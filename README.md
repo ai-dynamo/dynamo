@@ -30,7 +30,7 @@ NVIDIA Dynamo is a high-throughput low-latency inference framework designed for 
 
 Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach.
 
-| [Quick Start](#quick-start) | [Distributed LLM Serving](#serving-a-distributed-llm-serving-solution) | [Architecture](docs/architecture.md)| [Disaggregated Serving and KV Routing Examples](examples/llm) |
+| [Quick Start](#quick-start) | [LLM Serving](#serving-a-distributed-llm-serving-solution) | [Disaggregated Serving and KV Routing](examples/llm) | [Architecture](docs/architecture.md) | [Additional Resources]
 
 ## Quick Start
 
@@ -98,7 +98,7 @@ Capturing CUDA graph shapes: 100%|██████████| 35/35 [00:17<0
 Okay, so I'm trying to figure out how to respond to the user's greeting. They said, "Hello, how are you?" and then followed it with "Hello! I'm just a program, but thanks for asking." Hmm, I need to come up with a suitable reply. ...
 ```
 
-### Serving a Distributed LLM Serving Solution
+### LLM Serving
 
 Dynamo provides a simple way to spin up a local set of inference
 components including:
@@ -201,3 +201,7 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 }
 ```
 
+## Additional Resources
+
+- [TODO] ()
+- [TODO] ()
