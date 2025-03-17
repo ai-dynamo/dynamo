@@ -37,18 +37,12 @@ Built in Rust for performance and in Python for extensibility, Dynamo is fully o
 ### Installation
 
 The following examples require a few system level packages.
-We also leverage `uv` to manage a Python virtual environment.
-
-#### System Packages
 
 ```
+# System Packages
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev libucx0
-```
-
-#### Install Dynamo
-
-```bash
+# Pip Install
 pip install ai-dynamo[all]
 ```
 
