@@ -315,8 +315,6 @@ def serve_http(
 
     if service_name and service_name != svc.name:
         svc = svc.find_dependent_by_name(service_name)
-    # Disabling Bento manual GPU allocation for maximum flexibility when serving locally
-    os.environ["BENTOML_DISABLE_GPU_ALLOCATION"] = "1"
     num_workers, worker_envs = allocator.get_worker_env(svc)
     server_on_deployment(svc)
     uds_path = tempfile.mkdtemp(prefix="bentoml-uds-")
