@@ -38,6 +38,8 @@ jobs:
     needs: mirror_repo
     runs-on: self-hosted
     steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
     - name: Detect source code changes
       id: src_changes
       uses: dorny/paths-filter@v3

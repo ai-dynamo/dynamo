@@ -342,8 +342,6 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 WORKDIR /workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 
-RUN rm /bin/sh && ln -s /bin/bash /bin/sh
-
 # Copy NIXL
 COPY --from=build /usr/local/nixl /usr/local/nixl
 ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
@@ -351,7 +349,9 @@ ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/
 
 # Setup the python environment
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN RUN apt-get install python3-dev && \
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3-dev && \
+    rm -rf /var/lib/apt/lists/* && \
     uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
@@ -369,7 +369,7 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
 # Copy examples
-COPY ./deploy/examples examples/
+COPY ./examples examples/
 
-ENTRYPOINT [/bin/sh]
+ENTRYPOINT [ "/usr/bin/bash" ]
 CMD []
