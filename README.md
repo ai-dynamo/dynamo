@@ -74,6 +74,9 @@ Loading safetensors checkpoint shards: 100% Completed | 2/2 [00:02<00:00,  1.15s
 Loading safetensors checkpoint shards: 100% Completed | 2/2 [00:02<00:00,  1.14s/it]
 Capturing CUDA graph shapes: 100%|██████████| 35/35 [00:17<00:00,  2.04it/s]
 2025-03-17T14:03:50.190381Z  INFO dynamo_run::input::text: Ctrl-c to exit
+```
+
+```
 ? User › Hello, how are you?
 ✔ User · Hello, how are you?
 Okay, so I'm trying to figure out how to respond to the user's greeting. They said, "Hello, how are you?" and then followed it with "Hello! I'm just a program, but thanks for asking." Hmm, I need to come up with a suitable reply. ...
@@ -115,13 +118,10 @@ Next serve a minimal configuration with an http server, basic
 round-robin router, and a single worker.
 
 ```bash
-
 cd examples/llm
-
 dynamo serve graphs.agg:Frontend -f configs/agg.yaml
-
 ```
-<details>
+
 #### Example Output
 ```bash
 Added new chat model deepseek-ai/DeepSeek-R1-Distill-Llama-8B
@@ -137,8 +137,6 @@ Added new chat model deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 ...
 ```
 
-</details>
-
 Finally Send a Request
 
 ```bash
@@ -147,6 +145,33 @@ curl -N -d '{"model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", \
 			 -H 'Content-Type: application/json' http://localhost:8000/v1/chat/completions
 ```
 
+#### Example Output
+```
+{
+  "id": "d5996599-dc77-4a94-b48a-67f169b1e9ae",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": "Okay, so I'm trying to figure out how to respond to the user's greeting. They said, \"Hello, how are you?\" and then followed it with \"Hello! I'm just a program, but thanks for asking.\" Hmm, I need to come up with a suitable reply.\n\nFirst, I should acknowledge their greeting. Maybe start with a thank you. Then, I should mention that I'm here to help. Since I'm an AI, it's important to clarify that I don't have feelings, but I can still be friendly. I should keep the response open-ended so the user feels comfortable asking more questions.\n\nLet me think about the structure. Perhaps something like, \"Thank you for your message! I'm just a computer program, so I don't have feelings, but I'm here and ready to help you with whatever you need. How can I assist you today?\"\n\nWait, maybe I should make it a bit more natural. Instead of saying \"I'm just a computer program,\" I could rephrase it to sound a bit friendlier. How about, \"Hello! I'm an AI, so I don't have feelings, but I'm here and excited to help you. How can I assist you today?\"\n\nHmm, that sounds better. It's friendly and clarifies my nature without being too technical. I think that should work.\n</think>\n\nHello! I'm an AI, so I don't have feelings, but I'm here and excited to help you. How can I assist you today?",
+        "refusal": null,
+        "tool_calls": null,
+        "role": "assistant",
+        "function_call": null,
+        "audio": null
+      },
+      "finish_reason": "stop",
+      "logprobs": null
+    }
+  ],
+  "created": 1742223643,
+  "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+  "service_tier": null,
+  "system_fingerprint": null,
+  "object": "chat.completion",
+  "usage": null
+}
+```
 
 
 ####
