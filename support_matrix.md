@@ -29,7 +29,8 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 | **Operating System**   | **Architecture**   | **Status**              |
 |------------------------|--------------------|-------------------------|
-| **Linux**              | x86_64, ARM64      | Supported, Experimental |
+| **Linux**              | x86_64             | Supported               |
+| **Linux**              | ARM64              | Experimental            |
 
 > **Note**:
 > - **Linux**: The **ARM64** support is experimental and may have limitations.
@@ -43,7 +44,8 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 |**TensorRT-LLM**  |    0.19.0*  |
 |**NIXL**          |    0.1.0    |
 
-> **Note**: *The specific version of TensorRT-LLM (planned v0.19.0) that will be supported by Dynamo is subject to change.
+> **Note**: 
+> *The specific version of TensorRT-LLM (planned v0.19.0) that will be supported by Dynamo is subject to change.
 
 ## Build Support
 **Dynamo** currently provides build support in the following ways:
@@ -51,42 +53,4 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 - **Wheels**: Pre-built Python wheels are only available for **x86_64 Linux**. No wheels are available for other platforms at this time.
 - **Container Images**: We distribute only the source code for container images, and only **x86_64 Linux** is supported for these. Users must build the container image from source if they require it.
 
-## Wheel Installation Commands
-
-Once you've confirmed your platform and architecture are compatible, you can install **Dynamo** using the Python wheel.
-
-### Steps for Wheel Installation:
-
-Python 3.10, 3.11, and 3.12 are supported Python Versions for Wheel Installation.
-> **Note**: The recommended version is Python 3.12.
-
-1. **Install the base version of ai-dynamo**:
-```bash
-pip install ai-dynamo==0.1.0
-```
-2. **For the patched version of vLLM**:
-```bash
-pip install ai-dynamo vllm==0.7.2+dynamo
-```
-3. **For NIXL support, To install ai-dynamo with NIXL support, run the following:**:
-```bash
-pip install ai-dynamo nixl vllm==0.7.2+dynamo
-```
-> **Note**: NIXL support is available only for Python 3.12.
-
-### Steps for Container Build in Local:
-
-First, clone the `dynamo` repository to your local machine:
-   ```bash
-   git clone https://github.com/ai-dynamo/dynamo.git
-   cd dynamo
-   ./container/build.sh
-   ```
-
-   For building dockerfile for vllm framework run,
-   ```bash
-   ./container/build.sh --framework vllm
-   ```
-> **Note**: The default framework is vllm.
-
-
+Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the instructions in the [Quick Start Guide](https://github.com/ai-dynamo/dynamo/?tab=readme-ov-file#quick-start).
