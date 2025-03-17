@@ -1,9 +1,10 @@
 from fastapi import APIRouter
 
-router = APIRouter(prefix="/api")
+router = APIRouter()
 
 
-@router.get("/health")
+@router.get("/healthz")
+@router.get("/readyz")
 async def health_check():
     """Health check endpoint.
 
