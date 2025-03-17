@@ -324,10 +324,7 @@ RUN uv venv $VIRTUAL_ENV --python 3.12 && \
 
 # Install the wheels
 COPY --from=dev /workspace/dist/*.whl whls/
-RUN uv pip install $(find whls -name ai_dynamo_runtime-*.whl) && \
-    uv pip install $(find whls -name ai_dynamo-*.whl) && \
-    uv pip install $(find whls -name vllm-*.whl) && \
-    rm -r whls
+RUN uv pip install ai-dynamo[vllm] --find-links whls
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"

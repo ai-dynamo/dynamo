@@ -30,6 +30,7 @@ dependencies = [
     "types-psutil==7.0.0.20250218",
     "ai-dynamo-runtime==0.1.0",
 ]
+
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -45,6 +46,11 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
 ]
 keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
+
+[project.optional-dependencies]
+vllm = [
+    "vllm==0.7.2+dynamo"
+]
 
 [project.scripts]
 dynamo = "dynamo.sdk.cli.cli:cli"
