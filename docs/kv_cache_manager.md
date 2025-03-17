@@ -72,6 +72,8 @@ V1 architecture is an excellent design for quick enablement and execution. Howev
 
 ## V2 Implementation
 
+The V2 implementation introduces a distributed KV pool across worker instances and storage, incorporating all features outlined in the design. Development is still in progress, and we welcome collaborators to share their feedback. This documentation aims to offer a high-level overview of the V2 implementation and gather input.
+
 The V2 BlockManager changes the ownership patterns to RAII objects. The primary object will be a KvBlock object which defines the contents of the tokens in the block and the unique sequence hash associated with that block. In Rust, the KvBlock is a generic KvBlock<S: BlockStorage>.  This means each KvBlock is strongly typed to the storage type (S) which must conform to the behavior defined in the BlockStorage trait.
 
 KvBlocks are allocated and ownership is transferred to a ReusePool object. The ReusePool object is used to provide free blocks in user defined priority. This specialized Pool is a compound collective, so it can also lookup and extract blocks from the pool by matching on the sequence hash.
