@@ -13,14 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dynamo._core import AggregatedMetrics as AggregatedMetrics
-from dynamo._core import DisaggregatedRouter as DisaggregatedRouter
-from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
-from dynamo._core import HttpError as HttpError
-from dynamo._core import HttpService as HttpService
-from dynamo._core import KvEventPublisher as KvEventPublisher
-from dynamo._core import KvIndexer as KvIndexer
-from dynamo._core import KvMetricsAggregator as KvMetricsAggregator
-from dynamo._core import KvMetricsPublisher as KvMetricsPublisher
-from dynamo._core import KvRouter as KvRouter
-from dynamo._core import OverlapScores as OverlapScores
+from components.frontend import Frontend
+from components.prefill_worker import PrefillWorker
+from components.processor import Processor
+from components.worker import VllmWorker
+
+Frontend.link(Processor).link(VllmWorker).link(PrefillWorker)

@@ -41,7 +41,7 @@ class RequestType(Enum):
 @service(
     dynamo={
         "enabled": True,
-        "namespace": "dynamo-init",
+        "namespace": "dynamo",
     },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,

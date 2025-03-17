@@ -27,7 +27,7 @@ This directory contains examples and reference implementations for deploying Lar
 
 ## Deployment Architectures
 
-### Monolith
+### Aggregated
 Single-instance deployment where both prefill and decode are done by the same worker.
 
 ### Disaggregated
@@ -106,34 +106,28 @@ This figure shows an overview of the major components to deploy:
 
 ### Example architectures
 
-#### Router based worker
+#### Aggregated serving
 ```bash
 cd /workspace/deploy/examples/llm
-dynamo serve monolith.router_based_deployment:Frontend -f ./configs/monolith/router_based_deployment.yaml
+dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
 ```
 
-#### Routerless monolith
+#### Aggregated serving with KV Routing
 ```bash
 cd /workspace/deploy/examples/llm
-dynamo serve monolith.routerless_deployment:Frontend -f ./configs/monolith/routerless_deployment.yaml
+dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
 ```
 
-#### Routerless processor based monolith
-```bash
-dynamo serve monolith.routerless_processor_deployment:Frontend -f ./configs/monolith/routerless_processor_deployment.yaml
-```
-
-
-#### Router based disaggregated serving
+#### Disaggregated serving
 ```bash
 cd /workspace/deploy/examples/llm
-dynamo serve disaggregated.router_based_deployment:Frontend -f ./configs/disaggregated/router_based_deployment.yaml
+dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
 ```
 
-#### Routerless disaggregated serving
+#### Disaggregated serving with KV Routing
 ```bash
 cd /workspace/deploy/examples/llm
-dynamo serve disaggregated.routerless_deployment:Frontend -f ./configs/disaggregated/routerless_deployment.yaml
+dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
 ```
 
 ### Client

@@ -73,12 +73,28 @@ impl EndpointInfo {
         i64::from_str_radix(id, 16).map_err(|e| error!("Invalid id format: {}", e))
     }
 }
+
+// TODO: This is _really_ close to the async_nats::service::Stats object,
+// but it's missing a few fields like "name", so use a temporary struct
+// for easy deserialization. Ideally, this type already exists or can
+// be exposed in the library somewhere.
+/// Stats structure returned from NATS service API
 #[derive(Debug, Clone, Serialize, Deserialize, Dissolve)]
-pub struct Metrics(pub serde_json::Value);
+pub struct Metrics {
+    // Standard NATS Service API fields
+    pub average_processing_time: f64,
+    pub last_error: String,
+    pub num_errors: u64,
+    pub num_requests: u64,
+    pub processing_time: u64,
+    pub queue_group: String,
+    // Field containing custom stats handler data
+    pub data: serde_json::Value,
+}
 
 impl Metrics {
     pub fn decode<T: for<'de> Deserialize<'de>>(self) -> Result<T> {
-        serde_json::from_value(self.0).map_err(Into::into)
+        serde_json::from_value(self.data).map_err(Into::into)
     }
 }
 
@@ -153,12 +169,28 @@ mod tests {
                     EndpointInfo {
                         name: "endpoint1".to_string(),
                         subject: "subject1".to_string(),
-                        data: Some(Metrics(serde_json::json!({"key": "value1"}))),
+                        data: Some(Metrics {
+                            average_processing_time: 0.1,
+                            last_error: "none".to_string(),
+                            num_errors: 0,
+                            num_requests: 10,
+                            processing_time: 100,
+                            queue_group: "group1".to_string(),
+                            data: serde_json::json!({"key": "value1"}),
+                        }),
                     },
                     EndpointInfo {
                         name: "endpoint2-foo".to_string(),
                         subject: "subject2".to_string(),
-                        data: Some(Metrics(serde_json::json!({"key": "value1"}))),
+                        data: Some(Metrics {
+                            average_processing_time: 0.1,
+                            last_error: "none".to_string(),
+                            num_errors: 0,
+                            num_requests: 10,
+                            processing_time: 100,
+                            queue_group: "group1".to_string(),
+                            data: serde_json::json!({"key": "value1"}),
+                        }),
                     },
                 ],
             },
@@ -171,12 +203,28 @@ mod tests {
                     EndpointInfo {
                         name: "endpoint1".to_string(),
                         subject: "subject1".to_string(),
-                        data: Some(Metrics(serde_json::json!({"key": "value1"}))),
+                        data: Some(Metrics {
+                            average_processing_time: 0.1,
+                            last_error: "none".to_string(),
+                            num_errors: 0,
+                            num_requests: 10,
+                            processing_time: 100,
+                            queue_group: "group1".to_string(),
+                            data: serde_json::json!({"key": "value1"}),
+                        }),
                     },
                     EndpointInfo {
                         name: "endpoint2-bar".to_string(),
                         subject: "subject2".to_string(),
-                        data: Some(Metrics(serde_json::json!({"key": "value2"}))),
+                        data: Some(Metrics {
+                            average_processing_time: 0.1,
+                            last_error: "none".to_string(),
+                            num_errors: 0,
+                            num_requests: 10,
+                            processing_time: 100,
+                            queue_group: "group1".to_string(),
+                            data: serde_json::json!({"key": "value2"}),
+                        }),
                     },
                 ],
             },
