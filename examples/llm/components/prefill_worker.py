@@ -25,7 +25,6 @@ from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
 )
 from vllm.inputs.data import TokensPrompt
-from vllm.logger import logger as vllm_logger
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 
 from dynamo.sdk import (
@@ -76,7 +75,6 @@ class PrefillWorker:
         if self.engine_args.enforce_eager is not True:
             print("Prefill must be done eagerly, setting to True")
             self.engine_args.enforce_eager = True
-        print("PrefillWorker initialized")
 
     @async_on_start
     async def async_init(self):
@@ -93,6 +91,7 @@ class PrefillWorker:
         await self._metadata_store.put(metadata.engine_id, metadata)
         task = asyncio.create_task(self.prefill_queue_handler())
         task.add_done_callback(lambda _: print("prefill queue handler created"))
+        print("PrefillWorker initialized")
 
     async def prefill_queue_handler(self):
         print("[DEBUG] prefill queue handler entered")
@@ -115,7 +114,7 @@ class PrefillWorker:
                 # need to test and check how much overhead it is
                 prefill_request = await prefill_queue.dequeue_prefill_request()
                 if prefill_request is not None:
-                    vllm_logger.info(f"Dequeued prefill request: {prefill_request}")
+                    print(f"Dequeued prefill request: {prefill_request.request_id}")
                     async for _ in self.generate(prefill_request):
                         pass
 

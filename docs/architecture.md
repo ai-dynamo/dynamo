@@ -36,8 +36,8 @@ To address the growing demands of distributed inference serving, NVIDIA introduc
 The following diagram outlines Dynamo's high-level architecture. To enable large-scale distributed and disaggregated inference serving, Dynamo includes four key features.
 
 - [Dynamo Disaggregated Serving](dynamo_disagg_serving.md)
-- [Dynamo Smart Router]()
-- [Dynamo Distributed KV Cache Manager]()
+- [Dynamo Smart Router](dynamo_kv_cache_routing.md)
+- [Dynamo Distributed KV Cache Manager](kv_cache_manager.md)
 - [NVIDIA Inference Transfer Library (NIXL)](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)
 
 Every component in the Dynamo architecture is independently scalable and portable. The API server can adapt to task-specific deployment. A smart router processes user requests to route them to the optimal worker for performance. Specifically, for Large Language Models (LLMs), Dynamo employs KV cache-aware routing, which directs requests to the worker with the highest cache hit rate while maintaining load balance, expediting decoding. This routing strategy leverages a KV cache manager that maintains a global radix tree registry for hit rate calculation. The KV cache manager also oversees a multi-tiered memory system, enabling rapid KV cache storage and eviction. This design results in substantial TTFT reductions, increased throughput, and the ability to process extensive context lengths.
