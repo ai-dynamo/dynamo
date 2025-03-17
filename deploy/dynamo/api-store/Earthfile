@@ -17,7 +17,7 @@ uv-base:
 docker:
     ARG CI_REGISTRY_IMAGE=my-registry
     ARG CI_COMMIT_SHA=latest
-    ARG IMAGE=ai-dynamo-store
+    ARG IMAGE=dynamo-api-store
     FROM +uv-base
     # Copy project files
     COPY ai_dynamo_store ai_dynamo_store
