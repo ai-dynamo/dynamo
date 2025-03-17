@@ -2,9 +2,9 @@
 
 # Introduction 
 
-Nvidia Dynamo is a flexible and performant distributed inferencing solution for large-scale deployments. It is an ecosystems of tools, frameworks, and abstractions that makes the design, customization, and deployment of frontier-level models onto datacenter-scale infrastructure easy to reason about and optimized for your specific inferencing workloads. Dynamo's core is written in Rust and contains a set of well-define Python bindings. Examples for those can be found [here](../../../../README.md). 
+Nvidia Dynamo is a flexible and performant distributed inferencing solution for large-scale deployments. It is an ecosystem of tools, frameworks, and abstractions that makes the design, customization, and deployment of frontier-level models onto datacenter-scale infrastructure easy to reason about and optimized for your specific inferencing workloads. Dynamo's core is written in Rust and contains a set of well-defined Python bindings. Docs and examples for those can be found [here](../../../../README.md). 
 
-Dynamo SDK is a layer on top of the core. It is a Python framework that aims to make it easy to create inference graphs and deploy them locally and onto a target K8s cluster. The SDK was heavily inspired by [BentoML](https://github.com/bentoml/BentoML) and we leverage many of its core primatives throughout the SDK. The Dynamo CLI is a companion tool that allows you to spin up an inference pipeline locally, containerize it, and then also deploy it. You can find a toy hello-world example [here](../README.md)
+Dynamo SDK is a layer on top of the core. It is a Python framework that makes it easy to create inference graphs and deploy them locally and onto a target K8s cluster. The SDK was heavily inspired by [BentoML's](https://github.com/bentoml/BentoML) open source deployment patterns and leverages many of its core primitives. The Dynamo CLI is a companion tool that allows you to spin up an inference pipeline locally, containerize it, and deploy it. You can find a toy hello-world example [here](../README.md).
 
 # Installation 
 
@@ -15,97 +15,119 @@ pip install ai-dynamo
 ```
 
 # Core Concepts 
+As you read about each concept, it is helpful to have the basic example up as well so you can refer back to it. 
 
 ## Defining a Service
 
-Services in Dynamo are easily defined using the `@service` decorator and `@dynamo_endpoint` decorator. Here, we define a "Hello World" Dynamo service and chain it to an HTTP frontend to interact with it:
+A Service is a core building block for a project. You can think of it as a logical unit of work. For example, you might have a service responsible for preprocessing and tokenizing and another service running the model worker itself.
 
 ```python
-from pydantic import BaseModel
-from dynamo.sdk import DYNAMO_IMAGE, api, depends, dynamo_endpoint, service
-
-class RequestType(BaseModel):
-    text: str
-
-class ResponseType(BaseModel):
-    text: str
-
 @service(
-    resources={"cpu": "2"},
     dynamo={
-        "enabled": True,
-        "namespace": "inference",
+        "enabled": True, 
+        "namespace": "dynamo", 
     },
-    workers=3,
-    image=DYNAMO_IMAGE,
+    resources={"gpu": 2, "cpu": "10", "memory": "20Gi"}, 
+    workers=1, 
 )
-class Backend:
-    def __init__(self) -> None:
-        print("Init tasks...")
+```
+
+Key configuration options:
+1. `dynamo`: Dictionary that defines the Dynamo configuration and enables/disables it. When enabled, a dynamo worker is created under the hood which can register with the Distributed Runtime [TODO:link]
+2. `resources`: Dictionary defining resource requirements. Used primarily when deploying to K8s, but gpu is also used for local execution.
+3. `workers`: Number of parallel instances of the service to spin up.
+
+## Writing a Service
+
+Lets walk through a dummy service to understand how you write a dynamo service.
+
+```python
+import ServiceB
+
+@service(dynamo={"enabled": True, "namespace": "dynamo"}, resources={"gpu": 1})
+class ServiceA:
+    # Define service dependencies
+    service_b = depends(ServiceB)
+
+    def __init__(self, model_name="meta-llama/Llama-3.1-8B-Instruct"):
+        self.model_name = model_name
+        self.engine = None
+
+    @async_on_start
+    async def async_init(self):
+        # Initialize resources that require async operations
+        self.engine = await initialize_model_engine(self.model_name)
+        print(f"ServiceA initialized with model: {self.model_name}")
+
+    @async_on_shutdown
+    async def async_shutdown(self):
+        # Clean up resources
+        if self.engine:
+            await self.engine.shutdown()
+            print("ServiceA engine shut down")
 
     @dynamo_endpoint()
-    async def generate(self, req: RequestType):
-        for token in req.text.split():
-            yield f"Echo: {token}"
-
-@service(
-    resources={"cpu": "1"},
-    traffic={"timeout": 60},
-    image=DYNAMO_IMAGE,
-)
-class Frontend:
-    backend = depends(Backend)
-
-    @api
-    async def generate(self, text):
-        txt = RequestType(text=text)
-        async for response in self.backend.generate(txt.model_dump_json()):
-            yield response
+    async def generate(self, request: ChatCompletionRequest):
+        # Call dependent service
+        processed_request = await self.service_b.preprocess(request)
+        
+        # Use the engine to generate a response
+        response = await self.engine.generate(processed_request)
+        return response
 ```
 
-If we save this file as hello_world.py, we can then test our dynamo service locally using the following:
+### Class-Based Architecture 
+Dynamo follows a class-based architecture similar to BentoML making it intuitive for users familiar with those frameworks. Each service is defined as a Python class, with the following components:
+1. Class attributes for dependencies using depends()
+2. An __init__ method for standard initialization
+3. Optional lifecycle hooks like @async_on_start and @async_on_shutdown
+4. Endpoints defined with @dynamo_endpoint()
 
-```bash
-dynamo serve hello_world:Frontend # name of the module:entrypoint of the graph
+This approach provides a clean separation of concerns and makes the service structure easy to understand.
 
-# In another terminal, we can test our service using curl
-curl -X POST http://localhost:8000/generate -d '{"text": "Hello World"}'
+### Service Dependencies with `depends()`
+The `depends()` function is a powerful BentoML feature that lets you create a dependency between services. When you use `depends(ServiceB)`, several things happen:
+1. It ensures that `ServiceB` is deployed when `ServiceA` is deployed by adding it to an internal service dependency graph
+2. It creates a client to the endpoints of `ServiceB` that is being served under the hood. 
+3. You are able to access `ServiceB` endpoints as if it were a local function!
 
-# We should see the following output:
-Echo: Hello
-Echo: World
-```
+This abstraction dramatically simplifies building distributed applications, as you can write code that looks local but actually communicates across service boundaries via the Dynamo's core distributed service primatives. You can findn more docs on depends [here](https://docs.bentoml.com/en/latest/build-with-bentoml/distributed-services.html#interservice-communication)
 
-Let's break down the example:
+### Lifecycle Hooks
+Dynamo supports key lifecycle hooks to manage service initialization and cleanup. We currently only support a subset of BentoML's lifecycle hooks but are working on adding support for the rest.
 
-### Decorators
+#### `@async_on_start`
 
-The `@service` class decorator is used to define a service. It takes in a set of keyword arguments that are used to configure the service. 
-
-- `dynamo`: A dictionary that defines the Dynamo configuration for the service and whether it is enabled or not.
-- `resources`: A dictionary that defines the resources for the service when deployed onto a K8s cluster. These do not apply locally.
-- `workers`: Parallelism of the service
-- `image`: The base image to use when building a container for the service (experimental)
-
-Decorating a method of a service with `@dynamo_endpoint` will expose that method as an endpoint of that Dynamo service and will enable other services to create clients to that endpoint.
-
-> **Note:** Frontend has no dynamo configuration defined and as such is a regular HTTP service. To expose an HTTP endpoint, we can simply decorate a method of that service with `@api`.
-
-### How serve works?
-
-When running with `Dynamo serve`, each service will be spun up in its own process. 
-
-### Dependencies
-
-Dependencies are defined using the `depends` function. This function takes in a service class and returns a client to that service. This client can be used to call the service's endpoints.
+The `@async_on_start` hook is called when the service is started and is used to run an async process outside of the main `__init__` function.
 
 ```python
-backend = depends(Backend)
+@async_on_start
+async def async_init(self):
+    # Perfect for operations that need to be awaited
+    self.db = await connect_to_db()
+    self.tokenizer = await load_tokenizer()
+    self.engine = await initialize_engine(self.model)
+```
+This is especially useful for:
+- Initializing external connections
+- Setting up runtime resources that require async operations
+
+#### `@async_on_shutdown`
+The `@async_on_shutdown` hook is called when the service is shutdown handles cleanup.
+
+```python
+@async_on_shutdown
+async def async_shutdown(self):
+    if self._engine_context is not None:
+        await self._engine_context.__aexit__(None, None, None)
+    print("VllmWorkerRouterLess shutting down")
 ```
 
-In our simple example, Frontend uses its client to call the `generate` endpoint of the Backend service as if it were a local python function, abstracting away that this is taking place over the Dynamo transport.
+This ensures resources are properly released, preventing memory leaks and making sure external connections are properly closed. This is helpful to clean up VLLM engines that have been started outside of the main process.
 
+## Configuring a Service
 
+sccratch
 servicedecorator, decorator values, dynamo section 
 endpoint decorator link this and above to the python bindings docs
 class based (similar to bento and ray)
