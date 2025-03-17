@@ -5,7 +5,7 @@ Dynamo is a python based SDK for building and deploying distributed inference ap
 ## Installation
 
 ```bash
-pip install ai-dynamo-sdk
+pip install ai-dynamo
 ```
 
 ## Quickstart
