@@ -46,7 +46,7 @@ apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev curl libucx0
 ```
 
-#### Install uv Package Manager [Optional]
+#### Install uv Package Manager
 
 ```
 curl -LsSf https://astral.sh/uv/install.sh | sh
