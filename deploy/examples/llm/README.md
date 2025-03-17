@@ -98,7 +98,7 @@ dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
 #### Disaggregated serving
 ```bash
 cd /workspace/deploy/examples/llm
-dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
+dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg.yaml
 ```
 
 #### Disaggregated serving with KV Routing
