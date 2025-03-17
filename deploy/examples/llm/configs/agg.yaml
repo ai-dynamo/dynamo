@@ -22,7 +22,7 @@ Processor:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   block-size: 64
   max-model-len: 16384
-  router: random
+  router: round-robin
 
 VllmWorker:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B

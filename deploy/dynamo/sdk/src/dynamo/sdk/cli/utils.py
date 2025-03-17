@@ -67,7 +67,7 @@ class DynamoCommandGroup(click.Group):
         if not isinstance(group, click.MultiCommand):
             raise TypeError("Only accepts click.MultiCommand")
 
-        ctx = click.get_current_context()
+        ctx = click.Context(group)
         cmd = group.get_command(ctx, command_name)
         if cmd is None:
             raise ValueError(f"Command '{command_name}' not found in group")
