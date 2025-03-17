@@ -10,7 +10,7 @@ This document provides the support matrix for Dynamo, including hardware, softwa
 | **x86_64**            | Supported     |
 | **ARM64**             | Experimental  |
 
-> **Note**: While **x86_64** architecture is fully supported, **ARM64** support is experimental and may have limitations.
+> **Note**: While **x86_64** architecture is supported on systems with a minimum of 32 GB RAM and at least 4 CPU cores. The **ARM64** support is experimental and may have limitations.
 
 ### GPU Compatibility
 
@@ -29,12 +29,10 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 | **Operating System**   | **Architecture**   | **Status**              |
 |------------------------|--------------------|-------------------------|
-| **Linux**              | x86_64, aarch64    | Supported, Experimental |
-| **macOS**              | x86_64, ARM64      | Supported*, Experimental|
+| **Linux**              | x86_64, ARM64      | Supported, Experimental |
 
 > **Note**:
-> - **Linux**: **x86_64** architecture is supported.
-> - **macOS**: Dynamo is supported on **x86_64** architecture, but the installation requires building from binaries on **macOS**. There is no pre-built wheel for macOS.
+> - **Linux**: The **ARM64** support is experimental and may have limitations.
 
 ## Software Compatibility
 
@@ -42,7 +40,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 |------------------|-------------|
 |**Base Container**|    25.01    |
 | **vLLM**         |    0.7.2    |
-|**TensorrtLLM**   |    TBD*     |
+|**TensorrtLLM**   |    0.18.0   |
 |**NIXL**          |    0.1.0    |
 
 > **Note***: The specific version of TensorRT-LLM that will be supported by Dynamo is yet to be determined (TBD).
