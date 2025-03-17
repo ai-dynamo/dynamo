@@ -28,7 +28,7 @@ current_tag=$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//') || t
 # Get latest TAG and add COMMIT_ID for dev
 latest_tag=$(git describe --tags --abbrev=0 $(git rev-list --tags --max-count=1 main) | sed 's/^v//') || true
 if [[ -z ${latest_tag} ]]; then
-    latest_tag="0.0.1"
+    latest_tag="0.1.0"
     echo "No git release tag found, setting to unknown version: ${latest_tag}"
 fi
 
@@ -58,7 +58,7 @@ TENSORRTLLM_BASE_IMAGE_TAG=krish-fix-trtllm-build.23766174
 TENSORRTLLM_PIP_WHEEL_PATH=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+VLLM_BASE_IMAGE_TAG="25.02-cuda12.8-devel-ubuntu24.04"
 
 NIXL_COMMIT=d7a2c571a60d76a3d6c8458140eaaa5025fa48c4
 NIXL_REPO=ai-dynamo/nixl.git
@@ -124,6 +124,14 @@ get_options() {
                 shift
             else
                 missing_requirement $1
+            fi
+            ;;
+        --cargo-build-jobs)
+            if [ "$2" ]; then
+                CARGO_BUILD_JOBS=$2
+                shift
+            else
+                echo "CARGO_BUILD_JOBS was not set, defaulting to number of CPU cores available"
             fi
             ;;
         --tag)
@@ -217,10 +225,11 @@ get_options() {
     fi
 
     if [ -z "$TAG" ]; then
-        TAG="--tag dynamo:${VERSION}-${FRAMEWORK,,}"
+        IMAGE_TAG="dynamo:${VERSION}-${FRAMEWORK,,}"
         if [ ! -z "${TARGET}" ]; then
-            TAG="${TAG}-${TARGET}"
+            IMAGE_TAG="${IMAGE_TAG}-${TARGET}"
         fi
+        TAG="--tag ${IMAGE_TAG}"
     fi
 
     if [ ! -z "$PLATFORM" ]; then
@@ -349,7 +358,61 @@ if [ -z "$RUN_PREFIX" ]; then
     set -x
 fi
 
-$RUN_PREFIX docker buildx build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --output type=docker $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+
+$RUN_PREFIX \
+docker buildx build \
+    --network=host \
+    -f $DOCKERFILE \
+    --target=dev \
+    $PLATFORM \
+    $BUILD_ARGS \
+    $CACHE_FROM $CACHE_TO \
+    --output type=docker \
+    $TAG $LATEST_TAG \
+    $BUILD_CONTEXT_ARG $BUILD_CONTEXT \
+    $NO_CACHE
+
+# This part needs GPU access and will be built with "docker run --gpus all"
+
+CARGO_BUILD_JOBS="8"
+script="
+nvidia-smi
+export CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS
+export CARGO_TARGET_DIR=/workspace/target
+pwd
+ls -lah
+cargo build --release --locked --features cuda,sglang,vllm,python
+echo $?
+ls -lah /workspace/target/release
+cargo doc --no-deps
+echo $?
+echo 'Finished building dynamo-run'
+"
+pwd
+echo "============================================="
+echo $SOURCE_DIR
+echo "============================================="
+mkdir -p "${SOURCE_DIR}/target"
+docker run -v "${SOURCE_DIR}/target:/workspace/target" --gpus all --network=host $IMAGE_TAG bash -c "$script"
+
+echo "============================================="
+echo $SOURCE_DIR
+echo "============================================="
+cd $SOURCE_DIR
+cd ..
+
+$RUN_PREFIX \
+docker buildx build \
+    --network=host \
+    -f $DOCKERFILE \
+    --target=runtime \
+    $PLATFORM \
+    $BUILD_ARGS \
+    --output type=docker \
+    $TAG $LATEST_TAG \
+    $BUILD_CONTEXT_ARG $BUILD_CONTEXT \
+    $NO_CACHE
+
 
 { set +x; } 2>/dev/null
 
