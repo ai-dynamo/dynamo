@@ -12,3 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from components.frontend import Frontend
+from components.kv_router import Router
+from components.processor import Processor
+from components.worker import VllmWorker
+
+Frontend.link(Processor).link(Router).link(VllmWorker)

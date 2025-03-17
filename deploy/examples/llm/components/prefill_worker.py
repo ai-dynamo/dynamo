@@ -44,7 +44,7 @@ class RequestType(BaseModel):
 @service(
     dynamo={
         "enabled": True,
-        "namespace": "dynamo-init",
+        "namespace": "dynamo",
     },
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -89,7 +89,7 @@ class PrefillWorker:
             raise RuntimeError("Failed to initialize engine client")
         runtime = dynamo_context["runtime"]
         metadata = self.engine_client.nixl_metadata
-        self._metadata_store = NixlMetadataStore("dynamo-init", runtime)
+        self._metadata_store = NixlMetadataStore("dynamo", runtime)
         await self._metadata_store.put(metadata.engine_id, metadata)
         task = asyncio.create_task(self.prefill_queue_handler())
         task.add_done_callback(lambda _: print("prefill queue handler created"))

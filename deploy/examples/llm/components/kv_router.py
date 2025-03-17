@@ -67,7 +67,7 @@ def parse_args(service_name, prefix) -> Namespace:
 @service(
     dynamo={
         "enabled": True,
-        "namespace": "dynamo-init",
+        "namespace": "dynamo",
     },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -87,7 +87,7 @@ class Router:
     async def async_init(self):
         self.runtime = dynamo_context["runtime"]
         self.workers_client = (
-            await self.runtime.namespace("dynamo-init")
+            await self.runtime.namespace("dynamo")
             .component("VllmWorker")
             .endpoint("generate")
             .client()
@@ -101,7 +101,7 @@ class Router:
             )
             await asyncio.sleep(2)
 
-        kv_listener = self.runtime.namespace("dynamo-init").component("VllmWorker")
+        kv_listener = self.runtime.namespace("dynamo").component("VllmWorker")
         await kv_listener.create_service()
         self.indexer = KvIndexer(kv_listener, self.args.block_size)
         self.metrics_aggregator = KvMetricsAggregator(kv_listener)

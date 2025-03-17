@@ -13,29 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This will overwrite the llm_api_config.yaml
+from components.frontend import Frontend
+from components.prefill_worker import PrefillWorker
+from components.processor import Processor
+from components.worker import VllmWorker
 
-hostname: localhost
-port: 8000
-context_servers:
-  num_instances: 1
-  tensor_parallel_size: 1
-  moe_expert_parallel_size: 1
-  kv_cache_config:
-    free_gpu_memory_fraction: 0.45
-  pytorch_backend_config:
-    enable_overlap_scheduler: false
-    use_cuda_graph: false
-  urls:
-      - "localhost:8001"
-generation_servers:
-  num_instances: 1
-  tensor_parallel_size: 1
-  moe_expert_parallel_size: 1
-  kv_cache_config:
-    free_gpu_memory_fraction: 0.95
-  pytorch_backend_config:
-    enable_overlap_scheduler: true
-    use_cuda_graph: true
-  urls:
-      - "localhost:8002"
+Frontend.link(Processor).link(VllmWorker).link(PrefillWorker)
