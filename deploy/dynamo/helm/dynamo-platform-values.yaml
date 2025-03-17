@@ -122,14 +122,17 @@ dynamo-api-server:
 
 etcd:
   enabled: true
+  persistence:
+    enabled: true
+    storageClass: "local-path"
+    size: 1Gi
 
 nats:
   enabled: true
-
-nats:
-  enabled: false
+  config:
     jetstream:
+      enabled: true
       fileStore:
         pvc:
-          size: 5Gi
+          size: 1Gi
           storageClassName: "local-path"
