@@ -68,6 +68,7 @@ impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for MockRe
     }
 }
 
+// FIXME: These events are just for testing and may not currently be used.
 /// Spawns a background task that periodically publishes mock KV hit rate events
 async fn mock_event_publisher(namespace: Namespace) {
     // NOTE: These events are just for testing, and shouldn't be interpreted
@@ -97,7 +98,7 @@ async fn mock_event_publisher(namespace: Namespace) {
         if let Err(e) = namespace.publish(KV_HIT_RATE_SUBJECT, &event).await {
             tracing::warn!("Failed to publish KV hit rate event: {e}");
         } else {
-            tracing::info!(
+            tracing::debug!(
                 "Published KV hit rate event: worker_id={worker_id}, isl_blocks={isl_blocks}, overlap_blocks={overlap_blocks}, hit_rate={:.2}%",
                 (overlap_blocks as f64 / isl_blocks as f64) * 100.0
             );
@@ -107,7 +108,6 @@ async fn mock_event_publisher(namespace: Namespace) {
 
 /// Generates mock forward pass metrics for stats handler
 fn mock_stats_handler(_stats: Stats) -> serde_json::Value {
-    println!("stats in: {:?}", _stats);
     let request_total_slots = 100;
     let request_active_slots = rand::thread_rng().gen_range(0..=request_total_slots);
     let kv_total_blocks = 100;
@@ -124,12 +124,20 @@ fn mock_stats_handler(_stats: Stats) -> serde_json::Value {
         gpu_cache_usage_perc,
         gpu_prefix_cache_hit_rate,
     };
-    println!("stats out: {:?}", stats);
+    tracing::info!("Stats: {stats:?}");
     serde_json::to_value(stats).unwrap()
 }
 
 async fn backend(runtime: DistributedRuntime) -> Result<()> {
     let namespace = runtime.namespace("dynamo")?;
+    // we must first create a service, then we can attach one more more endpoints
+    let component = namespace
+        .component("my_component")?
+        .service_builder()
+        .create()
+        .await?;
+    let endpoint = component.endpoint("my_endpoint");
+    tracing::info!("Starting Mock Worker on Endpoint: {}", endpoint.path());
 
     // Spawn background task for publishing KV hit rate events
     let namespace_clone = namespace.clone();
@@ -137,17 +145,11 @@ async fn backend(runtime: DistributedRuntime) -> Result<()> {
         mock_event_publisher(namespace_clone).await;
     });
 
-    // attach an ingress to an engine
+    // Attach an ingress to the engine
     let ingress = Ingress::for_engine(MockRequestHandler::new())?;
 
-    // make the ingress discoverable via a component service
-    // we must first create a service, then we can attach one more more endpoints
-    namespace
-        .component("backend")?
-        .service_builder()
-        .create()
-        .await?
-        .endpoint("generate")
+    // Make the ingress discoverable via a component service
+    endpoint
         .endpoint_builder()
         // Dummy stats handler to demonstrate how to attach a custom stats handler
         .stats_handler(mock_stats_handler)
