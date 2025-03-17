@@ -26,7 +26,7 @@ The Dynamo KV Cache Manager is designed to be framework-agnostic to support vari
     - A radix tree provides a clean, structured approach for organizing KV storage in distributed inference. A local tree can be built per node, with a global tree  at the cluster level, ensuring an efficient abstraction.
     - The hierarchy spans HBM, local node KV stores, and external storage, with each layer caching data for the next to optimize lookups. Data movements across the tiers are handled using NIXL APIs for seamless communication. The data flow is fully asynchronous and is transparent to worker instances.
     - Multiple backends are supported as long as they are compatible with KV manager APIs.
-    - RDMA transfers are preferred for optimal performance
+    - RDMA transfers are preferred for optimal performance.
 
 - Registration with runtimes
     - Distributed KV manager registers with inference engine runtimes to enable KV  offloading to the pool.
