@@ -31,13 +31,7 @@ from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
 from dynamo.llm import KvMetricsPublisher
-from dynamo.sdk import (
-    async_on_start,
-    depends,
-    dynamo_context,
-    dynamo_endpoint,
-    service,
-)
+from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
 
 @service(
