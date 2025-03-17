@@ -33,7 +33,7 @@ dynamo start [SERVICE]
 - `--file`/`-f` - Path to optional YAML configuration file.
 - `--dry-run` - Print out the dependency graph and values without starting any services.
 - `--working-dir` - Specify the directory to find the Service instance
-- Any additional flags that follow Class.key=value will be passed to the service constructor and parsed. Please see the [SDK docs](../sdk/README.md) for more details.
+- Any additional flags that follow `--Class.key=value` will be passed to the service constructor and parsed. Please see the [SDK docs](../sdk/README.md) for more details on how this works
 
 ## `serve`
 
@@ -66,46 +66,5 @@ dynamo build [SERVICE]
 - `SERVICE` - The service to build. You use file:Class syntax to specify the service.
 
 **Flags**
-build
-Build a new Bento from current directory.
-
-bentoml build [OPTIONS] [BUILD_CTX]
-Options
-
--f, --bentofile <bentofile>
-Path to bentofile. Default to ‘bentofile.yaml’
-
---version <version>
-Bento version. By default the version will be generated.
-
---label <KEY=VALUE>
-(multiple)Bento labels
-
--o, --output <output>
-Output log format. ‘-o tag’ to display only bento tag.
-
-Default:
-'default'
-
-Options:
-tag | default
-
---containerize
-Whether to containerize the Bento after building. ‘–containerize’ is the shortcut of ‘bentoml build && bentoml containerize’.
-
-## `containerize`
-
-Containerize your services for deployment. 
-
-## `deploy`
-
-Deploy your services to a Kubernetes cluster running the Dynamo Server. 
-
-## `server`
-
-Authenticate and connect to your Dynamo Server running on a cluster. 
-
-
-
-
-
+- `--working-dir` - Specify the directory to find the Service instance
+- `--containerize` - Whether to containerize the Bento after building
