@@ -48,6 +48,9 @@ classifiers = [
 ]
 keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 
+[project.urls]
+Repository = "https://github.com/ai-dynamo/dynamo.git"
+
 [project.optional-dependencies]
 all = [
     "vllm==0.7.2+dynamo",
