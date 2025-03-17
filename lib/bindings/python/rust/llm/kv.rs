@@ -125,6 +125,7 @@ impl KvMetricsPublisher {
 #[pyclass]
 pub(crate) struct KvEventPublisher {
     inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
+    warning_count: u32,
 }
 
 #[pymethods]
@@ -139,6 +140,7 @@ impl KvEventPublisher {
         .map_err(to_pyerr)?;
         Ok(Self {
             inner: inner.into(),
+            warning_count: 0,
         })
     }
 
@@ -199,7 +201,7 @@ impl KvEventPublisher {
     }
 
     fn create_stored_blocks(
-        &self,
+        &mut self,
         token_ids: &[u32],
         num_block_tokens: &[u64],
         block_hashes: &[u64],
@@ -209,12 +211,13 @@ impl KvEventPublisher {
 
         let mut token_offset: usize = 0;
         for (num_tokens_it, block_hash_it) in num_block_tokens.iter().zip(block_hashes.iter()) {
-            if *num_tokens_it != self.inner.kv_block_size() as u64 {
+            if (self.warning_count < 3) && (*num_tokens_it != self.inner.kv_block_size() as u64) {
                 tracing::warn!(
                     "Block not published. Block size must be {} tokens to be published. Block size is: {}",
                     self.inner.kv_block_size(),
                     *num_tokens_it
                 );
+                self.warning_count += 1;
                 break;
             }
 
