@@ -35,9 +35,17 @@ Colloquially, we will refer to a dynamo component that serves an endpoint for LL
 ## Basic Routing in Dynamo
 Dynamo supports several routing strategies when sending requests from one component to another component's endpoint.
 
-- **Random routing**: Default strategy, available via `component.generate()` or `component.random()`
-- **Round-robin routing**: Cycles through available workers via `component.round_robin()`
-- **Direct routing**: Explicitly targets a specific worker via `component.direct(input, component_id)`
+First, we must create a client tied to a components endpoint, we can do this using the labels defined above. Here we are getting a client tied to the `generate` endpoint of the `VllmWorker` component.
+
+```python
+client = namespace('dynamo').component('VllmWorker').endpoint('generate').client()
+```
+
+We can then use the default routing methods exposed by the client class to send requests to the `VllmWorker` component.
+
+- **Random routing**: Default strategy, available via `client.generate()` or `client.random()`
+- **Round-robin routing**: Cycles through available workers via `client.round_robin()`
+- **Direct routing**: Explicitly targets a specific worker via `client.direct(input, component_id)`
 
 KV Cache routing uses direct routing with a special worker selection algorithm.
 
@@ -169,9 +177,9 @@ Example usage:
 metrics_aggregator = KvMetricsAggregator()
 for endpoint in metrics_aggregator.get_metrics().endpoints:
     print(endpoint.worker_id)
-	print(endpoint.gpu_cache_usage_perc)
-	print(endpoint.num_requests_waiting)
-	print(endpoint.gpu_prefix_cache_hit_rate)
+    print(endpoint.gpu_cache_usage_perc)
+    print(endpoint.num_requests_waiting)
+    print(endpoint.gpu_prefix_cache_hit_rate)
 ```
 
 ### [KV Router](../deploy/examples/llm/components/kv_router.py)
