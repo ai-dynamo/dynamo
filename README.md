@@ -37,19 +37,22 @@ Built in Rust for performance and in Python for extensibility, Dynamo is fully o
 The following examples require a few system level packages.
 We also leverage `uv` to manage a Python virtual environment.
 
+#### System Packages
+
 ```
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev curl libucx0
 ```
 
-Install `uv`:
+#### Install uv Package Manager [Optional]
 
 ```
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
 ```
 
-Install Dynamo via `uv pip`.
+#### Install Dynamo
+
 
 ```bash
 uv venv dynamo-venv
