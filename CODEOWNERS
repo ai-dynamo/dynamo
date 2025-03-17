@@ -11,7 +11,7 @@ Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo 
 *.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers
 
 # Container/Environments
-/container/ @rmccorm4 @tanmayv25 @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @nv-anants
+/container/ @rmccorm4 @tanmayv25 @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @ai-dynamo/Devops
 
 # Kubernetes
 /deploy/Kubernetes/ @whoisj @hutm @biswapanda
@@ -24,5 +24,5 @@ Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo 
 CODEOWNERS @ai-dynamo/Devops @nnshah1
 
 # Legal
-/LICENSE @nv-anants @nvda-mesharma @dmitry-tokarev-nv
-/ATTRIBUTIONS.md @nv-anants @nvda-mesharma @dmitry-tokarev-nv
+/LICENSE @ai-dynamo/Devops
+/ATTRIBUTIONS.md @ai-dynamo/Devops
