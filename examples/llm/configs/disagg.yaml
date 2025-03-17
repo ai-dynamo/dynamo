@@ -21,28 +21,24 @@ Frontend:
 
 Processor:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  block-size: 64
-  max-model-len: 16384
   router: round-robin
 
 VllmWorker:
+  # vllm enging args
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  enforce-eager: true
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-  block-size: 64
   max-model-len: 16384
-  max-num-batched-tokens: 16384
-  conditional-disagg: true
-  tensor-parallel-size: 1
-  remote_prefill: true
-  max_local_prefill_length: 10
 
-# TODO - set all of these but model as default
+  # dynamo args
+  remote-prefill: true
+  conditional-disagg: true
+  max-local-prefill-length: 10
+
 PrefillWorker:
+  # vllm enging args
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  enforce-eager: true
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-  block-size: 64
   max-model-len: 16384
-  max-num-batched-tokens: 16384
+
+  # dynamo arg for local deployment
   cuda-visible-device-offset: 1
