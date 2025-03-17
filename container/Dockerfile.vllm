@@ -338,7 +338,7 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv
 RUN rm /bin/sh && ln -s /bin/bash /bin/sh
 
 # Copy NIXL
-COPY --from=dev /usr/local/nixl /usr/local/nixl
+COPY --from=build /usr/local/nixl /usr/local/nixl
 ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
 ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/:$PYTHONPATH
 
@@ -349,7 +349,7 @@ RUN uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 # Install the wheels
-COPY --from=dev /workspace/dist/*.whl wheelhouse/
+COPY --from=build /workspace/dist/*.whl wheelhouse/
 RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
     rm -r wheelhouse
 
@@ -362,7 +362,7 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
 # Copy examples
-COPY --from=dev /workspace/deploy/examples examples/
+COPY ./deploy/examples examples/
 
 # dynamo run in=text out=mistralrs Qwen/Qwen2.5-3B-Instruct
 CMD []
