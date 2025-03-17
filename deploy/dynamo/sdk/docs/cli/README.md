@@ -7,9 +7,6 @@ At a high level, the Dynamo CLI allows you to:
 - `start` - run an individual service locally
 - `serve` - run a set of services locally (via `depends()` or `.link()`)
 - `build` - create an archive of your services (called a `bento`)
-- `containerize` - containerize your services for deployment
-- `deploy` - deploy your services to a Kubernetes cluster running the Dynamo Server
-- `server` - interact with your Dynamo Server
 
 # Commands
 
