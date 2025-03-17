@@ -146,7 +146,7 @@ The publisher can be initialized and used through C bindings or Python bindings.
 ### KVIndexer
 The KVIndexer builds and maintains a global view of cached blocks in a prefix tree. We modify the original prefix tree by also storing the worker id on each node. This is so we can return the number of matched blocks for each worker.
 
-The KVIndexer has a method find_matches_for_request, which takes in tokens and returns a dictionary with keys of worker id and values of the number of matched KV Blocks.
+The KVIndexer has a method `find_matches_for_request`, which takes in tokens and returns a dictionary with keys of worker id and values of the number of matched KV Blocks.
 
 Example output:
 ```python
@@ -170,7 +170,7 @@ We added a KvMetrics Publisher which sends these metrics but can be further exte
 Currently, the KvMetricsPublisher exists as a Python binding.
 
 ### KvMetricsAggregator
-The KvMetricsAggregator receives these metrics and aggregates them. It has a method get_metrics which returns an object of AggregatedMetrics.
+The KvMetricsAggregator receives these metrics and aggregates them. It has a method `get_metrics` which returns an object of `AggregatedMetrics`.
 
 Example usage:
 ```python
