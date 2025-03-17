@@ -29,7 +29,7 @@ The Dynamo KV Cache Manager is designed to be framework-agnostic to support vari
     - RDMA transfers are preferred for optimal performance.
 
 - Registration with runtimes
-    - Distributed KV manager registers with inference engine runtimes to enable KV  offloading to the pool.
+    - Distributed KV manager registers with inference engine runtimes to enable KV offloading to the pool.
     - Registration creates a two-way communication queue between the runtime and the pool.
 
 - Management and transfer granularities
