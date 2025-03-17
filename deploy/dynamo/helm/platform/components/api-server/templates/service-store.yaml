@@ -22,7 +22,7 @@ spec:
   type: {{ .Values.service.type }}
   ports:
     - port: {{ .Values.service.port }}
-      targetPort: {{ .Values.dynamo.apiServer.port }}
+      targetPort: {{ .Values.dynamo.apiStore.port }}
       protocol: TCP
       name: http
   selector:
