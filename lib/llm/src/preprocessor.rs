@@ -143,12 +143,6 @@ impl OpenAIPreprocessor {
         }
 
         let mut stop_conditions = request.extract_stop_conditions()?;
-
-        // todo - pull this from the mdc default sampling/stop params
-        if stop_conditions.max_tokens.is_none() {
-            stop_conditions.max_tokens = Some(64);
-        }
-
         if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
             for eos_token in self.model_info.eos_token_ids() {
                 if !stop_tokens.contains(&eos_token) {
