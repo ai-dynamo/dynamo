@@ -40,7 +40,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 |------------------|-------------|
 |**Base Container**|    25.01    |
 | **vLLM**         |    0.7.2    |
-|**TensorrtLLM**   |    0.19.0*  |
+|**TensorRT-LLM**  |    0.19.0*  |
 |**NIXL**          |    0.1.0    |
 
 > **Note**: *The specific version of TensorRT-LLM (planned v0.19.0) that will be supported by Dynamo is subject to change.
