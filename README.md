@@ -111,8 +111,9 @@ example.
 > [!NOTE]
 > The following assumes docker and docker-compose are installed.
 
-First start the Dynamo Distributed Runtime infrastructure
-services:
+#### Start Dynamo Distributed Runtime Services
+
+First start the Dynamo Distributed Runtime services:
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -127,9 +128,11 @@ docker compose -f deploy/docker-compose.yml up -d
  ✔ Container deploy-nats-server-1  Started   0.7s
 ```
 
+
+#### Start Dynamo LLM Serving Components
+
 Next serve a minimal configuration with an http server, basic
 round-robin router, and a single worker.
-
 
 
 ```bash
@@ -152,7 +155,7 @@ Added new chat model deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 ...
 ```
 
-Send a Request
+#### Send a Request
 
 ```bash
 curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
