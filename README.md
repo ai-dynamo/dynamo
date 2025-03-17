@@ -63,6 +63,8 @@ To run a model and interact with it locally you can call `dynamo
 run` with a hugging face model. `dynamo run` supports several backends
 including: `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
 
+#### Example Command
+
 ```
 dynamo run out=vllm deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 ```
