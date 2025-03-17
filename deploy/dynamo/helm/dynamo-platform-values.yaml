@@ -112,8 +112,8 @@ dynamo-api-server:
   minio:
     persistence:
       enabled: true
-      size: 10Gi
-      storageClass: ""
+      size: 5Gi
+      storageClass: "local-path"
     apiIngress:
       enabled: false
       ingressClassName: nginx
@@ -125,3 +125,11 @@ etcd:
 
 nats:
   enabled: true
+
+nats:
+  enabled: false
+    jetstream:
+      fileStore:
+        pvc:
+          size: 5Gi
+          storageClassName: "local-path"
