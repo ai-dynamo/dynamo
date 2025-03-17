@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use candle_hf_hub::api::tokio::ApiBuilder;
+use hf_hub::api::tokio::ApiBuilder;
 use std::path::{Path, PathBuf};
 
 const IGNORED: [&str; 3] = [".gitattributes", "LICENSE", "README.md"];

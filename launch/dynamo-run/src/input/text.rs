@@ -24,6 +24,7 @@ use crate::input::common;
 use crate::EngineConfig;
 
 /// Max response tokens for each single query. Must be less than model context size.
+/// TODO: Cmd line flag to overwrite this
 const MAX_TOKENS: u32 = 8192;
 
 pub async fn run(
