@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import click
-import difflib
-import functools
 import typing as t
-from click import Command, Context, HelpFormatter, UsageError
+
+import click
+from click import Command, Context
+
 
 class DynamoCommandGroup(click.Group):
     """Simplified version of BentoMLCommandGroup for Dynamo CLI"""
@@ -39,7 +39,7 @@ class DynamoCommandGroup(click.Group):
             self._commands[cmd.name] = aliases
             self._aliases.update({alias: cmd.name for alias in aliases})
         return super().add_command(cmd, name)
-    
+
     def add_subcommands(self, group: click.Group) -> None:
         if not isinstance(group, click.MultiCommand):
             raise TypeError(
