@@ -46,7 +46,7 @@ pip install ai-dynamo nixl vllm==0.7.2+dynamo
 ```
 
 > [!NOTE]
-> TensorRT-LLM Support is currently available on a [branch](https://github.com/ai-dynamo/dynamo/tree/dynamo/trtllm_llmapi_v1/examples/python_rs/llm/trtllm#building-the-environment))
+> TensorRT-LLM Support is currently available on a [branch](https://github.com/ai-dynamo/dynamo/tree/dynamo/trtllm_llmapi_v1/examples/python_rs/llm/trtllm#building-the-environment)
 
 ### Running and Interacting with an LLM Locally
 
