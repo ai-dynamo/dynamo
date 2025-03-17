@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 @click.group(name="deploy")
 def deploy_command_group():
-    """Deploy 🍱 to a cluster"""
+    """Deploy to a cluster"""
     pass
 
 
@@ -58,6 +58,8 @@ def convert_env_to_dict(env: tuple[str, ...] | None) -> list[dict[str, str]] | N
 
 
 def build_deploy_command() -> click.Command:
+    from bentoml._internal.utils import add_experimental_docstring
+
     @click.command(name="deploy")
     @click.argument("bento", type=click.STRING, default=".")
     @click.option("-n", "--name", type=click.STRING, help="Deployment name")
@@ -117,6 +119,7 @@ def build_deploy_command() -> click.Command:
     )
     @click.option("--strategy", type=click.STRING, default="rolling-update")
     @click.option("--version", type=click.STRING, help="Version tag for the Bento")
+    @add_experimental_docstring
     def deploy_command(
         bento: str | None,
         name: str | None,
@@ -136,12 +139,11 @@ def build_deploy_command() -> click.Command:
         version: str | None = None,
     ):
         """
-        Deploy 🍱 to a cluster
+        Deploy a set of Dynamo services in a Bento to a K8s cluster
 
         \b
         BENTO is the serving target, it can be:
         - a tag to a Bento in local Bento store
-        - a folder containing a valid 'bentofile.yaml'
         - a path to a built Bento
         """
         from bentoml._internal.log import configure_server_logging

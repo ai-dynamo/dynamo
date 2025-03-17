@@ -37,7 +37,7 @@ from dynamo.sdk import (
 @service(
     dynamo={
         "enabled": True,
-        "namespace": "dynamo-init",
+        "namespace": "dynamo",
     },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -82,7 +82,7 @@ class PrefillWorkerRouterLess:
             raise RuntimeError("Failed to initialize engine client")
         runtime = dynamo_context["runtime"]
         metadata = self.engine_client.nixl_metadata
-        self._metadata_store = NixlMetadataStore("dynamo-init", runtime)
+        self._metadata_store = NixlMetadataStore("dynamo", runtime)
         await self._metadata_store.put(metadata.engine_id, metadata)
 
     @dynamo_endpoint()

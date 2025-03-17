@@ -191,17 +191,21 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 
 # Install patched vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
-ARG VLLM_REF="v0.7.2"
-ARG VLLM_PATCH="vllm_${VLLM_REF}-dynamo-kv-disagg-patch.patch"
+ARG VLLM_REF="0.7.2"
+ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
+ARG VLLM_VERSION_PATCH_SUFFIX="dynamo"
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     mkdir /tmp/vllm && \
     uv pip install pip wheel && \
-    python -m pip download --only-binary=:all: --no-deps --dest /tmp/vllm vllm==${VLLM_REF} && \
+    python -m pip download --only-binary=:all: --no-deps --dest /tmp/vllm vllm==v${VLLM_REF} && \
     cd /tmp/vllm && \
     wheel unpack *.whl && \
-    cd vllm-*/ && \
+    cd vllm-${VLLM_REF}/ && \
     patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
-    sed -i "s/__version__ = version = '\(.*\)'/__version__ = version = '\1.dynamo_patch'/g; s/__version_tuple__ = version_tuple = (\(.*\))/__version_tuple__ = version_tuple = (\1, 'dynamo_patch')/g" vllm/_version.py && \
+    sed -i "s/__version__ = version = '\(.*\)'/__version__ = version = '\1+${VLLM_VERSION_PATCH_SUFFIX}'/g; s/__version_tuple__ = version_tuple = (\(.*\))/__version_tuple__ = version_tuple = (\1, '${VLLM_VERSION_PATCH_SUFFIX}')/g" vllm/_version.py && \
+    mv vllm-${VLLM_REF}.dist-info vllm-${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}.dist-info && \
+    sed -i "s/${VLLM_REF}/${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}/g" vllm-${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}.dist-info/METADATA && \
+    sed -i "s/vllm-${VLLM_REF}/vllm-${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}/g" vllm-${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}.dist-info/RECORD && \
     mkdir -p /workspace/dist && \
     wheel pack . --dest-dir /workspace/dist && \
     uv pip install /workspace/dist/vllm-*.whl
@@ -262,7 +266,8 @@ RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
     cp target/release/dynamo-run /usr/local/bin && \
     cp target/release/http /usr/local/bin && \
     cp target/release/llmctl /usr/local/bin && \
-    cp target/release/metrics /usr/local/bin
+    cp target/release/metrics /usr/local/bin && \
+    cp target/release/mock_worker /usr/local/bin
 
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 # Build dynamo wheel
@@ -284,10 +289,14 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
 
+# Copy launch banner
+RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
+    sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
+    echo "cat ~/.launch_screen" >> ~/.bashrc
+
 # FIXME: Copy more specific folders in for dev/debug after directory restructure
 COPY . /workspace
 
-# FIXME: May want a modification with dynamo banner on entry
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
 CMD []
@@ -303,6 +312,11 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv
 
 RUN rm /bin/sh && ln -s /bin/bash /bin/sh
 
+# Copy NIXL
+COPY --from=dev /usr/local/nixl /usr/local/nixl
+ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
+ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/:$PYTHONPATH
+
 # Setup the python environment
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN uv venv $VIRTUAL_ENV --python 3.12 && \
@@ -310,14 +324,20 @@ RUN uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 # Install the wheels
-COPY --from=dev /workspace/dist/*.whl whls/
-RUN uv pip install $(find whls -name ai_dynamo_runtime-*.whl) && \
-    uv pip install $(find whls -name ai_dynamo-*.whl) && \
-    uv pip install $(find whls -name vllm-*.whl) && \
-    rm -r whls
+COPY --from=dev /workspace/dist/*.whl wheelhouse/
+RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
+    rm -r wheelhouse
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
+
+# Copy launch banner
+RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
+    sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
+    echo "cat ~/.launch_screen" >> ~/.bashrc
+
+# Copy examples
+COPY --from=dev /workspace/deploy/examples examples/
 
 # dynamo run in=text out=mistralrs Qwen/Qwen2.5-3B-Instruct
 CMD []

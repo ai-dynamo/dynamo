@@ -59,6 +59,8 @@ services:
       - ./metrics/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
       - ./metrics/grafana-dashboard-providers.yml:/etc/grafana/provisioning/dashboards/dashboard-providers.yml
     environment:
+      # Port 3000 is used by "dynamo serve", so use 3001
+      - GF_SERVER_HTTP_PORT=3001
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_USERS_ALLOW_SIGN_UP=false
@@ -68,7 +70,7 @@ services:
     restart: unless-stopped
     # TODO: Use more explicit networking setup when metrics is containerized
     #ports:
-    #  - "3000:3000"
+    #  - "3001:3001"
     #networks:
     #  - monitoring
     network_mode: "host"

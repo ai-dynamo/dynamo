@@ -13,24 +13,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+Frontend:
+  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  endpoint: dynamo.Processor.chat/completions
+  port: 8000
 
-model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
-hostname: localhost
-port: 8000
-backend: "pytorch"
-context_servers:
-  num_instances: 2
-  gpu_fraction: 0.25
-  tp_size: 2
-  pp_size: 1
-  urls:
-      - "node1:8001"
-      - "node1:8002"
-generation_servers:
-  num_instances: 2
-  gpu_fraction: 0.25
-  tp_size: 2
-  pp_size: 1
-  urls:
-      - "node2:8003"
-      - "node2:8004"
+Processor:
+  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  block-size: 64
+  max-model-len: 16384
+  router: kv
+
+Router:
+  model-name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  min-workers: 1
+
+VllmWorker:
+  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  enforce-eager: true
+  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
+  block-size: 64
+  max-model-len: 16384
+  max-num-batched-tokens: 16384
+  enable-prefix-caching: true
+  router: kv
+  tensor-parallel-size: 1
+  ServiceArgs:
+    workers: 1
