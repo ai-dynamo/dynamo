@@ -42,7 +42,7 @@ The following examples require a few system level packages.
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev libucx0
 
-pip install ai-dynamo[all]
+pip install ai-dynamo nixl vllm==0.7.2+dynamo
 ```
 
 ### Running and Interacting with an LLM Locally
