@@ -14,7 +14,8 @@
 # limitations under the License.
 
 from components.frontend import Frontend
-from components.routerless.prefill_worker import PrefillWorkerRouterLess
-from components.routerless.worker import VllmWorkerRouterLess
+from components.prefill_worker import PrefillWorker
+from components.processor import Processor
+from components.worker import VllmWorker
 
-Frontend.link(VllmWorkerRouterLess).link(PrefillWorkerRouterLess)
+Frontend.link(Processor).link(VllmWorker).link(PrefillWorker)

@@ -484,7 +484,7 @@ def serve_http(
                         hasattr(svc, "is_dynamo_component")
                         and svc.is_dynamo_component()
                     )
-                    else 'Starting production %s BentoServer from "%s" (Press CTRL+C to quit)'
+                    else "Starting %s (Press CTRL+C to quit)"
                 ),
                 *(
                     (svc.name, *svc.dynamo_address(), scheme, log_host, port)
@@ -492,7 +492,7 @@ def serve_http(
                         hasattr(svc, "is_dynamo_component")
                         and svc.is_dynamo_component()
                     )
-                    else (scheme.upper(), bento_identifier)
+                    else (bento_identifier,)
                 ),
             ),
         )

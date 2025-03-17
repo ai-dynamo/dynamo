@@ -15,23 +15,37 @@
 
 Frontend:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  endpoint: dynamo-init.Processor.chat/completions
+  endpoint: dynamo.Processor.chat/completions
   port: 8000
 
 Processor:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   block-size: 64
   max-model-len: 16384
-  router: random
+  router: kv
+
+Router:
+  model-name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  min-workers: 1
 
 VllmWorker:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   enforce-eager: true
+  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
   block-size: 64
   max-model-len: 16384
   max-num-batched-tokens: 16384
-  enable-prefix-caching: true
-  router: random
+  conditional-disagg: true
   tensor-parallel-size: 1
-  ServiceArgs:
-    workers: 1
+  router: kv
+  enable-prefix-caching: true
+
+# TODO - set all of these but model as default
+PrefillWorker:
+  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  enforce-eager: true
+  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
+  block-size: 64
+  max-model-len: 16384
+  max-num-batched-tokens: 16384
+  cuda-visible-device-offset: 1

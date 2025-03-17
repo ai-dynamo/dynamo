@@ -44,7 +44,7 @@ from dynamo.sdk import (
 @service(
     dynamo={
         "enabled": True,
-        "namespace": "dynamo-init",
+        "namespace": "dynamo",
     },
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -87,7 +87,7 @@ class VllmWorker:
         if self.engine_args.router == "kv":
             VLLM_WORKER_ID = dynamo_context["endpoints"][0].lease_id()
             os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
-            os.environ["VLLM_KV_NAMESPACE"] = "dynamo-init"
+            os.environ["VLLM_KV_NAMESPACE"] = "dynamo"
             os.environ["VLLM_KV_COMPONENT"] = class_name
             vllm_logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
         # note: worker_index is 1-based, but CUDA_VISIBLE_DEVICES is 0-based
@@ -131,7 +131,7 @@ class VllmWorker:
 
         if self.engine_args.remote_prefill:
             metadata = self.engine_client.nixl_metadata
-            metadata_store = NixlMetadataStore("dynamo-init", runtime)
+            metadata_store = NixlMetadataStore("dynamo", runtime)
             await metadata_store.put(metadata.engine_id, metadata)
 
         if self.engine_args.conditional_disagg:

@@ -13,14 +13,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 Frontend:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  endpoint: dynamo-init.VllmWorkerRouterLess.generate
+  endpoint: dynamo.Processor.chat/completions
   port: 8000
 
-VllmWorkerRouterLess:
+Processor:
+  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  block-size: 64
+  max-model-len: 16384
+  router: round-robin
+
+VllmWorker:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   enforce-eager: true
+  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
+  block-size: 64
   max-model-len: 16384
   max-num-batched-tokens: 16384
+  conditional-disagg: true
+  tensor-parallel-size: 1
+  remote_prefill: true
+  max_local_prefill_length: 10
+
+# TODO - set all of these but model as default
+PrefillWorker:
+  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  enforce-eager: true
+  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
   block-size: 64
+  max-model-len: 16384
+  max-num-batched-tokens: 16384
+  cuda-visible-device-offset: 1

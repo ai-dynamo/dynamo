@@ -23,9 +23,7 @@ import click
 
 
 def build_run_command() -> click.Group:
-    from bentoml_cli.utils import BentoMLCommandGroup
-
-    @click.group(name="run", cls=BentoMLCommandGroup)
+    @click.group(name="run")
     def cli():
         pass
 

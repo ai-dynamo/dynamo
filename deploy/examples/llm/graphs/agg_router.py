@@ -18,5 +18,4 @@ from components.kv_router import Router
 from components.processor import Processor
 from components.worker import VllmWorker
 
-# Monolith with Router
 Frontend.link(Processor).link(Router).link(VllmWorker)

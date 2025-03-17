@@ -258,7 +258,8 @@ RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
     cp target/release/dynamo-run /usr/local/bin && \
     cp target/release/http /usr/local/bin && \
     cp target/release/llmctl /usr/local/bin && \
-    cp target/release/metrics /usr/local/bin
+    cp target/release/metrics /usr/local/bin && \
+    cp target/release/mock_worker /usr/local/bin
 
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 # Build dynamo wheel
