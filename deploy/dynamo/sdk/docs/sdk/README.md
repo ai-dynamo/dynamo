@@ -426,7 +426,7 @@ Our `.link()` syntax is an flexible and experimental way to compose various serv
 ### Understanding the `.link()` syntax
 Lets take the example of a `Processor` component. This component can currently do 2 things:
 1. Process a request and send it to a `Router` to decide what worker to send it to.
-2. Process a request and send it to a `Worker` directly
+2. Process a request and send it to a `Worker` directly.
 
 A snippet of the Processor is shown below:
 
