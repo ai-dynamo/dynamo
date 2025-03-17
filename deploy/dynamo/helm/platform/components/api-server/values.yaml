@@ -145,7 +145,10 @@ resources: {}
   #   memory: 128Mi
 
 dynamo:
-  port: 8181
+  apiServer:
+    port: 8181
+  apiStore:
+    port: 8000
 
 postgresql:
   auth:

@@ -44,7 +44,7 @@ spec:
           imagePullPolicy: {{ .Values.storeImage.pullPolicy }}
           ports:
             - name: http
-              containerPort: {{ .Values.dynamo.port }}
+              containerPort: {{ .Values.dynamo.apiStore.port }}
               protocol: TCP
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}

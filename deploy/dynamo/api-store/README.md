@@ -4,8 +4,8 @@ uv venv
 # Activate the virtual environment
 source .venv/bin/activate 
 
-# Install from the lock file
-uv pip install -r uv.lock
+# Install service
+uv pip install . 
 
 # Start the service
 ai-dynamo-store
