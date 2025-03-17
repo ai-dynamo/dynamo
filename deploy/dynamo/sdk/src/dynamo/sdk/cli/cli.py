@@ -29,6 +29,7 @@ def create_bentoml_cli() -> click.Command:
     from dynamo.sdk.cli.deploy import deploy_command
     from dynamo.sdk.cli.run import run_command
     from dynamo.sdk.cli.serve import serve_command
+    from dynamo.sdk.cli.server import cloud_command
     from dynamo.sdk.cli.start import start_command
     from dynamo.sdk.cli.utils import DynamoCommandGroup
 
@@ -43,13 +44,13 @@ def create_bentoml_cli() -> click.Command:
         The Dynamo CLI is a CLI for serving, containerizing, and deploying Dynamo applications.
         It takes inspiration from and leverages core pieces of the BentoML deployment stack.
 
-        At a high level you interact with our stack via
-        - serve: run a set of dynamo services locally
-        - containerize: containerize a set of dynamo services
-        - deploy: deploy a set of dynamo services onto a K8s cluster
+        At a high level, you use `serve` to run a set of dynamo services locally,
+        `build` and `containerize` to package them  up for deployment, and then `server`
+        and `deploy` to deploy them to a K8s cluster running the Dynamo Server
         """
 
     # Add top-level CLI commands
+    bentoml_cli.add_command(cloud_command)
     bentoml_cli.add_single_command(bento_command, "build")
     bentoml_cli.add_subcommands(start_command)
     bentoml_cli.add_subcommands(serve_command)
