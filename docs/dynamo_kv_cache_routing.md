@@ -148,7 +148,7 @@ The KVIndexer builds and maintains a global view of cached blocks in a prefix tr
 
 The KVIndexer has a method `find_matches_for_request`, which takes in tokens and returns a dictionary with keys of worker id and values of the number of matched KV Blocks.
 
-Example output:
+Example:
 ```python
 from dynamo.llm import KvIndexer
 from dynamo.sdk import dynamo_context
@@ -161,7 +161,7 @@ indexer = KvIndexer(kv_listener, block_size=16)
 indexer.find_matches_for_request([INPUT SEQUENCE OF TOKEN IDs])
 ```
 
-Output:
+Sample Output:
 ```
 {
 	123456789: 10,
@@ -169,6 +169,8 @@ Output:
 	543219876: 7,
 }
 ```
+> **Note**: This example is for building understanding, it will not run outside of the context of dynamo serve. See the examples/ folder for runnable examples.
+
 ### KvMetricsPublisher
 We added a KvMetrics Publisher which sends the following metrics to the KvMetricsAggregator:
 - num_requests_waiting
@@ -184,7 +186,7 @@ Currently, the KvMetricsPublisher exists as a Python binding.
 ### KvMetricsAggregator
 The KvMetricsAggregator receives these metrics and aggregates them. It has a method `get_metrics` which returns an object of `AggregatedMetrics`.
 
-Example usage:
+Example:
 ```python
 from dynamo.llm import KvMetricsAggregator
 from dynamo.sdk import dynamo_context
@@ -202,7 +204,7 @@ for endpoint in metrics_aggregator.get_metrics().endpoints:
     print("***")
 ```
 
-Output:
+Sample Output:
 ```
 Worker ID: 123456789
 GPU Cache Usage: 0.5
@@ -215,6 +217,7 @@ Number of Requests Waiting: 1
 GPU Prefix Cache Hit Rate: 0.1
 ***
 ```
+> **Note**: This example is for building understanding, it will not run outside of the context of dynamo serve. See the examples/ folder for runnable examples.
 
 
 ### [KV Router](../examples/llm/components/kv_router.py)
