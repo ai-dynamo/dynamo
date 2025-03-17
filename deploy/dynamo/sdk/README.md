@@ -103,3 +103,6 @@ You should see the following output:
 ```bash
 federer-mid-back
 ```
+
+You can find in-depth documentation for the Dynamo CLI and the SDK in our [docs](./docs/README.md)
+
