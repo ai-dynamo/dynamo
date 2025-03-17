@@ -43,7 +43,7 @@ Users/Clients (HTTP)
 1. Launch all three services using a single command -
 
 ```bash
-cd /workspace/deploy/examples/hello_world
+cd /workspace/examples/hello_world
 dynamo serve hello_world:Frontend
 ```
 
