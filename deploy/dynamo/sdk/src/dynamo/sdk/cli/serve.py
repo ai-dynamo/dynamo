@@ -68,22 +68,28 @@ def _parse_service_arg(arg_name: str, arg_value: str) -> tuple[str, str, t.Any]:
 
     parts = arg_name.split(".")
     service = parts[0]
-
-    # Handle nested keys (e.g., ServiceArgs.workers or ServiceArgs.envs.CUDA_VISIBLE_DEVICES)
     nested_keys = parts[1:]
 
-    # Parse value based on type
-    try:
-        value = json.loads(arg_value)
-    except json.JSONDecodeError:
-        if arg_value.isdigit():
-            value = int(arg_value)
-        elif arg_value.replace(".", "", 1).isdigit() and arg_value.count(".") <= 1:
-            value = float(arg_value)
-        elif arg_value.lower() in ("true", "false"):
-            value = arg_value.lower() == "true"
-        else:
-            value = arg_value
+    # Special case: if this is a ServiceArgs.envs.* path, keep value as string
+    if (
+        len(nested_keys) >= 2
+        and nested_keys[0] == "ServiceArgs"
+        and nested_keys[1] == "envs"
+    ):
+        value = arg_value
+    else:
+        # Parse value based on type for non-env vars
+        try:
+            value = json.loads(arg_value)
+        except json.JSONDecodeError:
+            if arg_value.isdigit():
+                value = int(arg_value)
+            elif arg_value.replace(".", "", 1).isdigit() and arg_value.count(".") <= 1:
+                value = float(arg_value)
+            elif arg_value.lower() in ("true", "false"):
+                value = arg_value.lower() == "true"
+            else:
+                value = arg_value
 
     # Build nested dict structure
     result = value
