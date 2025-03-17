@@ -26,7 +26,8 @@ on:
 
 jobs:
   build-test:
-    runs-on: Fastchecker
+    runs-on:
+        group: Fastchecker
     strategy:
       matrix:
         framework:
