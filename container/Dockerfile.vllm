@@ -287,8 +287,15 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
 
 CMD []
 
+#######################################
+########## CI Minimum Image ###########
+#######################################
+FROM build AS ci_minimum
+
+COPY . /workspace
+
 ##########################################
-########## Perf Analyzer Build ###########
+########## Perf Analyzer Image ###########
 ##########################################
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS perf_analyzer
 
@@ -326,9 +333,9 @@ ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
 CMD []
 
-########################################
-########## RUNTIME CONTAINER ###########
-########################################
+####################################
+########## Runtime Image ###########
+####################################
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
