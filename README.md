@@ -75,9 +75,6 @@ components including:
 To run a minimal configuration you can use a pre-configured
 example.
 
-> [!NOTE]
-> The following assumes docker and docker-compose are installed.
-
 #### Start Dynamo Distributed Runtime Services
 
 First start the Dynamo Distributed Runtime services:
