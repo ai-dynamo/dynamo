@@ -36,7 +36,6 @@ from dynamo.sdk import (
     depends,
     dynamo_context,
     dynamo_endpoint,
-    server_context,
     service,
 )
 
