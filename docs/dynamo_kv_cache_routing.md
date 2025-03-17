@@ -17,7 +17,7 @@ limitations under the License.
 
 
 # KV Cache Routing in Dynamo
-This documentation explains how KV (Key-Value) cache routing works in Dynamo, providing optimized inference for large language models by intelligently directing requests to workers with the most relevant cached data while simultaneously load balancing based on utilization metrics sent by the workers.
+This documentation explains how Key-Value (KV) cache routing works in Dynamo, providing optimized inference for large language models by intelligently directing requests to workers with the most relevant cached data while simultaneously load balancing based on utilization metrics sent by the workers.
 
 ## Dynamo Architecture
 Dynamo's architecture consists of three key concepts:
@@ -50,7 +50,7 @@ We can then use the default routing methods exposed by the client class to send 
 KV Cache routing uses direct routing with a special worker selection algorithm.
 
 ## Understanding KV Cache
-The leading Large Language Models (LLMs) today are auto-regressive and based off of the [transformer architecture](https://proceedings.neurips.cc/paper_files/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf). One key inference optimization technique is to cache the already computed keys and values and to reuse them for the future tokens. This is called the [Key-Value (KV) Cache](https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/#key-value_caching).
+The leading Large Language Models (LLMs) today are auto-regressive and based off of the [transformer architecture](https://proceedings.neurips.cc/paper_files/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf). One key inference optimization technique is to cache the already computed keys and values and to reuse them for the future tokens. This is called the [KV Cache](https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/#key-value_caching).
 
 ### KV Cache Optimizations
 Every inference framework will have a KV Cache for each worker. A popular inference framework library is [vLLM](https://github.com/vllm-project/vllm) where a key contribution was [PagedAttention](https://arxiv.org/abs/2309.06180), which allowed them to manage KV Cache in an efficient way by chunking requests into blocks.
@@ -150,7 +150,19 @@ The KVIndexer has a method `find_matches_for_request`, which takes in tokens and
 
 Example output:
 ```python
-find_matches_for_request([sequence of token IDs])
+from dynamo.llm import KvIndexer
+from dynamo.sdk import dynamo_context
+
+runtime = dynamo_context["runtime"]
+kv_listener = runtime.namespace("dynamo").component("VllmWorker")
+await kv_listener.create_service()
+
+indexer = KvIndexer(kv_listener, block_size=16)
+indexer.find_matches_for_request([INPUT SEQUENCE OF TOKEN IDs])
+```
+
+Output:
+```
 {
 	123456789: 10,
 	987654321: 3,
@@ -158,7 +170,7 @@ find_matches_for_request([sequence of token IDs])
 }
 ```
 ### KvMetricsPublisher
-We added a KvMetrics Publisher which sends these metrics but can be further extended:
+We added a KvMetrics Publisher which sends the following metrics to the KvMetricsAggregator:
 - num_requests_waiting
 - gpu_cache_usage_perc
 - gpu_prefix_cache_hit_rate
@@ -174,15 +186,38 @@ The KvMetricsAggregator receives these metrics and aggregates them. It has a met
 
 Example usage:
 ```python
-metrics_aggregator = KvMetricsAggregator()
+from dynamo.llm import KvMetricsAggregator
+from dynamo.sdk import dynamo_context
+
+runtime = dynamo_context["runtime"]
+kv_listener = runtime.namespace("dynamo").component("VllmWorker")
+await kv_listener.create_service()
+metrics_aggregator = KvMetricsAggregator(kv_listener)
+
 for endpoint in metrics_aggregator.get_metrics().endpoints:
-    print(endpoint.worker_id)
-    print(endpoint.gpu_cache_usage_perc)
-    print(endpoint.num_requests_waiting)
-    print(endpoint.gpu_prefix_cache_hit_rate)
+    print("Worker ID: ", endpoint.worker_id)
+    print("GPU Cache Usage: ", endpoint.gpu_cache_usage_perc)
+    print("Number of Requests Waiting: ", endpoint.num_requests_waiting)
+    print("GPU Prefix Cache Hit Rate: ", endpoint.gpu_prefix_cache_hit_rate)
+    print("***")
 ```
 
-### [KV Router](../deploy/examples/llm/components/kv_router.py)
+Output:
+```
+Worker ID: 123456789
+GPU Cache Usage: 0.5
+Number of Requests Waiting: 2
+GPU Prefix Cache Hit Rate: 0.1
+***
+Worker ID: 987654321
+GPU Cache Usage: 0.5
+Number of Requests Waiting: 1
+GPU Prefix Cache Hit Rate: 0.1
+***
+```
+
+
+### [KV Router](../examples/llm/components/kv_router.py)
 The Router component makes intelligent worker selection decisions
 1. Receives incoming requests as tokens
 2. Queries the KVIndexer to find potential cache hits across workers
