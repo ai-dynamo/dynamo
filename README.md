@@ -34,13 +34,22 @@ Built in Rust for performance and in Python for extensibility, Dynamo is fully o
 
 ### Installation
 
-> [!NOTE]
-> The following assumes python3.12 and python3-dev are installed
-> in the system. We also provide instructions for building and running
-> dynamo in containers.
+The following examples require a few system level packages.
+We also leverage `uv` to manage a Python virtual environment.
 
-To get started with Dynamo you can install it via pip or your favorite
-virtual environment setup. Here we use `uv`.
+```
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev curl libucx0
+```
+
+Install `uv`:
+
+```
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+```
+
+Install Dynamo via `uv pip`.
 
 ```bash
 uv venv dynamo-venv
@@ -84,10 +93,6 @@ Okay, so I'm trying to figure out how to respond to the user's greeting. They sa
 
 ### Serving a Distributed LLM Inference Solution
 
-> [!NOTE]
-> The following assumes docker and docker-compose are installed.
-
-
 Dynamo provides a simple way to spin up a local set of inference
 components including:
 
@@ -97,6 +102,9 @@ components including:
 
 To run a minimal configuration you can use a pre-configured
 example.
+
+> [!NOTE]
+> The following assumes docker and docker-compose are installed.
 
 First start the Dynamo Distributed Runtime infrastructure
 services:
@@ -116,6 +124,8 @@ docker compose -f deploy/docker-compose.yml up -d
 
 Next serve a minimal configuration with an http server, basic
 round-robin router, and a single worker.
+
+
 
 ```bash
 cd examples/llm
@@ -140,20 +150,28 @@ Added new chat model deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 Send a Request
 
 ```bash
-curl -N -d '{"model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", \
-             "messages":[{"role":"user", "content": "Hello, how are you?" }]}' \
-			 -H 'Content-Type: application/json' http://localhost:8000/v1/chat/completions
+curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "messages": [
+    {
+        "role": "user",
+        "content": "Hello, how are you?"
+    }
+    ],
+    "stream":false,
+    "max_tokens": 300
+  }' | jq
 ```
 
 #### Example Output
 ```
 {
-  "id": "d5996599-dc77-4a94-b48a-67f169b1e9ae",
+  "id": "5a8b4199-d005-47e2-83ed-bd8a6ec64b43",
   "choices": [
     {
       "index": 0,
       "message": {
-        "content": "Okay, so I'm trying to figure out how to respond to the user's greeting. They said, \"Hello, how are you?\" and then followed it with \"Hello! I'm just a program, but thanks for asking.\" Hmm, I need to come up with a suitable reply.\n\nFirst, I should acknowledge their greeting. Maybe start with a thank you. Then, I should mention that I'm here to help. Since I'm an AI, it's important to clarify that I don't have feelings, but I can still be friendly. I should keep the response open-ended so the user feels comfortable asking more questions.\n\nLet me think about the structure. Perhaps something like, \"Thank you for your message! I'm just a computer program, so I don't have feelings, but I'm here and ready to help you with whatever you need. How can I assist you today?\"\n\nWait, maybe I should make it a bit more natural. Instead of saying \"I'm just a computer program,\" I could rephrase it to sound a bit friendlier. How about, \"Hello! I'm an AI, so I don't have feelings, but I'm here and excited to help you. How can I assist you today?\"\n\nHmm, that sounds better. It's friendly and clarifies my nature without being too technical. I think that should work.\n</think>\n\nHello! I'm an AI, so I don't have feelings, but I'm here and excited to help you. How can I assist you today?",
+        "content": "Alright, the user said, \"Hello, how are you?\" and then mentioned \"How can I assist you today?\".\n\nI should respond in a friendly and open manner to encourage them to ask for help.\n\nMaybe something like, \"I'm doing well, thank you! How can I assist you today?\"\n\nThat should cover it and keep the conversation going.\n</think>\n\nI'm doing well, thank you! How can I assist you today?",
         "refusal": null,
         "tool_calls": null,
         "role": "assistant",
@@ -164,7 +182,7 @@ curl -N -d '{"model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", \
       "logprobs": null
     }
   ],
-  "created": 1742223643,
+  "created": 1742234675,
   "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
   "service_tier": null,
   "system_fingerprint": null,
@@ -173,31 +191,3 @@ curl -N -d '{"model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", \
 }
 ```
 
-
-### Hello World
-
-[Hello World](./lib/bindings/python/examples/hello_world)
-
-A basic example demonstrating the rust based runtime and python
-bindings.
-
-### LLM
-
-[VLLM](./examples/python_rs/llm/vllm)
-
-An intermediate example expanding further on the concepts introduced
-in the Hello World example. In this example, we demonstrate
-[Disaggregated Serving](https://arxiv.org/abs/2401.09670) as an
-application of the components defined in Dynamo.
-
-# Disclaimers
-
-> [!NOTE]
-> This project is currently in the alpha / experimental /
-> rapid-prototyping stage and we will be adding new features incrementally.
-
-1. The `TENSORRTLLM` and `VLLM` containers are WIP and not expected to
-   work out of the box.
-
-2. Testing has primarily been on single node systems with processes
-   launched within a single container.
