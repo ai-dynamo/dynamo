@@ -90,7 +90,7 @@ def parse_delete_targets_argument_callback(
     value: t.Any,  # pylint: disable=unused-argument
 ) -> list[str]:
     if value is None:
-        return value
+        return []
     value = " ".join(value)
     if "," in value:
         delete_targets = value.split(",")
@@ -134,7 +134,7 @@ def bento_management_commands() -> click.Group:
         bento_tag: str,
         output: str,
         bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
-    ) -> None:  # type: ignore (not accessed)
+    ) -> None:  # type: ignore
         """Print Bento details by providing the bento_tag.
 
         \b
@@ -165,7 +165,7 @@ def bento_management_commands() -> click.Group:
         bento_name: str,
         output: str,
         bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
-    ) -> None:  # type: ignore (not accessed)
+    ) -> None:  # type: ignore
         """List Bentos in local store
 
         \b
@@ -232,7 +232,7 @@ def bento_management_commands() -> click.Group:
         delete_targets: list[str],
         yes: bool,
         bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
-    ) -> None:  # type: ignore (not accessed)
+    ) -> None:  # type: ignore
         """Delete Bento in local bento store.
 
         \b
@@ -278,7 +278,7 @@ def bento_management_commands() -> click.Group:
         bento_tag: str,
         out_path: str,
         bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
-    ) -> None:  # type: ignore (not accessed)
+    ) -> None:  # type: ignore
         """Export a Bento to an external file archive
 
         \b
@@ -302,7 +302,7 @@ def bento_management_commands() -> click.Group:
 
     @bentos.command(name="import")
     @click.argument("bento_path", type=click.STRING)
-    def import_bento_(bento_path: str) -> None:  # type: ignore (not accessed)
+    def import_bento_(bento_path: str) -> None:  # type: ignore
         """Import a previously exported Bento archive file
 
         \b
@@ -333,7 +333,7 @@ def bento_management_commands() -> click.Group:
         force: bool,
         with_models: bool,
         cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
-    ) -> None:  # type: ignore (not accessed)
+    ) -> None:  # type: ignore
         """Pull Bento from a remote Bento store server."""
         cloud_client.bento.pull(bento_tag, force=force, with_models=with_models)
 
@@ -359,7 +359,7 @@ def bento_management_commands() -> click.Group:
         threads: int,
         bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
         cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
-    ) -> None:  # type: ignore (not accessed)
+    ) -> None:  # type: ignore
         """Push Bento to a remote Bento store server."""
         bento_obj = bento_store.get(bento_tag)
         if not bento_obj:
@@ -418,7 +418,7 @@ def bento_management_commands() -> click.Group:
         help="Platform to build for",
         type=click.Choice(ALLOWED_PLATFORMS),
     )
-    def build(  # type: ignore (not accessed)
+    def build(  # type: ignore
         build_ctx: str,
         bentofile: str | None,
         version: str | None,

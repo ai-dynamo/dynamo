@@ -76,7 +76,7 @@ def _parse_service_arg(arg_name: str, arg_value: str) -> tuple[str, str, t.Any]:
         and nested_keys[0] == "ServiceArgs"
         and nested_keys[1] == "envs"
     ):
-        value = arg_value
+        value: t.Union[str, int, float, bool, dict, list] = arg_value
     else:
         # Parse value based on type for non-env vars
         try:
