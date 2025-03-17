@@ -43,23 +43,13 @@ We also leverage `uv` to manage a Python virtual environment.
 
 ```
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev curl libucx0
-```
-
-#### Install uv Package Manager
-
-```
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
+DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev libucx0
 ```
 
 #### Install Dynamo
 
-
 ```bash
-uv venv dynamo-venv
-source dynamo-venv/bin/activate
-uv pip install ai-dynamo[all]
+pip install ai-dynamo[all]
 ```
 
 ### Running and Interacting with an LLM Locally
