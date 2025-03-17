@@ -157,7 +157,6 @@ ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/x86_64-linux-gnu/plugins
 
 RUN ls -l /usr/local/nixl/
 RUN ls -l /usr/local/nixl/include/
-RUN ls -l /usr/local/nixl/include/internal/
 
 RUN ls /opt/nixl
 
