@@ -1,6 +1,6 @@
 # Dynamo Distributed KV Cache Manager
 
-Calculating KV cache for user requests is resource-intensive and thus expensive. Reusing KV cache to minimize the need for its recomputation is common practice. However, as AI demand increases, the volume of KV cache that must be stored in GPU memory for reuse can quickly become prohibitively costly. This creates a significant challenge for AI inference teams trying to efficiently manage KV cache reuse without exceeding their budget.
+Calculating LLM KV values for user requests is resource-intensive and thus expensive. Leveraging KV cache to minimize the need for its recomputation is common practice. However, as AI demand increases, solely relying on GPU memory for KV cache would not be sustainable to meet SLA under fixed budget. It poses a significant demand to a more effective KV cache reuse management mechanism.
 
 The Dynamo KV Cache Manager feature addresses this challenge by enabling the offloading of older or less frequently accessed KV cache blocks to more cost-effective memory and storage solutions, such as CPU memory, local storage or networked object or file storage. This capability enables organizations to store up to petabytes of KV cache data at a fraction of the cost of keeping it in GPU memory. By offloading KV cache to alternative memory hierarchies, developers can free up valuable GPU resources while still retaining and reusing historical KV cache to reduce inference computation costs.
 
