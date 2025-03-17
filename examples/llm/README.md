@@ -108,25 +108,25 @@ This figure shows an overview of the major components to deploy:
 
 #### Aggregated serving
 ```bash
-cd /workspace/deploy/examples/llm
+cd /workspace/examples/llm
 dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
 ```
 
 #### Aggregated serving with KV Routing
 ```bash
-cd /workspace/deploy/examples/llm
+cd /workspace/examples/llm
 dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
 ```
 
 #### Disaggregated serving
 ```bash
-cd /workspace/deploy/examples/llm
+cd /workspace/examples/llm
 dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
 ```
 
 #### Disaggregated serving with KV Routing
 ```bash
-cd /workspace/deploy/examples/llm
+cd /workspace/examples/llm
 dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
 ```
 

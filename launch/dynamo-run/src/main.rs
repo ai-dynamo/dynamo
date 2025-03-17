@@ -108,25 +108,6 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
-    #[cfg(any(feature = "mistralrs", feature = "llamacpp"))]
-    {
-        #[cfg(feature = "cuda")]
-        {
-            tracing::info!("CUDA on");
-        }
-        #[cfg(feature = "metal")]
-        {
-            tracing::info!("Metal on");
-        }
-        #[cfg(feature = "vulkan")]
-        {
-            tracing::info!("Vulkan on");
-        }
-        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
-        tracing::info!(
-            "CPU mode. Rebuild with `--features cuda|metal|vulkan` for better performance"
-        );
-    }
 
     // max_worker_threads and max_blocking_threads from env vars or config file.
     let rt_config = dynamo_runtime::RuntimeConfig::from_settings()?;
@@ -190,6 +171,7 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
             default_engine
         }
     };
+    print_cuda(&out_opt);
 
     // Clap skips the first argument expecting it to be the binary name, so add it back
     // Note `--model-path` has index=1 (in lib.rs) so that doesn't need a flag.
@@ -208,3 +190,39 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
     )
     .await
 }
+
+/// If the user will benefit from CUDA/Metal/Vulkan, remind them to build with it.
+/// If they have it, celebrate!
+// Only mistralrs and llamacpp need to be built with CUDA.
+// The Python engines only need it at runtime.
+#[cfg(any(feature = "mistralrs", feature = "llamacpp"))]
+fn print_cuda(output: &Output) {
+    // These engines maybe be compiled in, but are they the chosen one?
+    match output {
+        #[cfg(feature = "mistralrs")]
+        Output::MistralRs => {}
+        #[cfg(feature = "llamacpp")]
+        Output::LlamaCpp => {}
+        _ => {
+            return;
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    {
+        tracing::info!("CUDA on");
+    }
+    #[cfg(feature = "metal")]
+    {
+        tracing::info!("Metal on");
+    }
+    #[cfg(feature = "vulkan")]
+    {
+        tracing::info!("Vulkan on");
+    }
+    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+    tracing::info!("CPU mode. Rebuild with `--features cuda|metal|vulkan` for better performance");
+}
+
+#[cfg(not(any(feature = "mistralrs", feature = "llamacpp")))]
+fn print_cuda(_output: Output) {}
