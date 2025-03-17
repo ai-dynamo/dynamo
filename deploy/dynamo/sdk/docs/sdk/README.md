@@ -1,4 +1,4 @@
-# Documentation for the Dynamo SDK and CLI 
+# Documentation for the Dynamo SDK and CLI
 
 # Table of Contents
 
@@ -9,13 +9,13 @@
 - [Configuring a Service](#configuring-a-service)
 - [Composing Services into an Graph](#composing-services-into-an-graph)
 
-# Introduction 
+# Introduction
 
-Dynamo is a flexible and performant distributed inferencing solution for large-scale deployments. It is an ecosystem of tools, frameworks, and abstractions that makes the design, customization, and deployment of frontier-level models onto datacenter-scale infrastructure easy to reason about and optimized for your specific inferencing workloads. Dynamo's core is written in Rust and contains a set of well-defined Python bindings. Docs and examples for those can be found [here](../../../../README.md). 
+Dynamo is a flexible and performant distributed inferencing solution for large-scale deployments. It is an ecosystem of tools, frameworks, and abstractions that makes the design, customization, and deployment of frontier-level models onto datacenter-scale infrastructure easy to reason about and optimized for your specific inferencing workloads. Dynamo's core is written in Rust and contains a set of well-defined Python bindings. Docs and examples for those can be found [here](../../../../README.md).
 
 Dynamo SDK is a layer on top of the core. It is a Python framework that makes it easy to create inference graphs and deploy them locally and onto a target K8s cluster. The SDK was heavily inspired by [BentoML's](https://github.com/bentoml/BentoML) open source deployment patterns and leverages many of its core primitives. The Dynamo CLI is a companion tool that allows you to spin up an inference pipeline locally, containerize it, and deploy it. You can find a toy hello-world example [here](../README.md).
 
-# Installation 
+# Installation
 
 The SDK can be installed using pip:
 
@@ -23,8 +23,8 @@ The SDK can be installed using pip:
 pip install ai-dynamo
 ```
 
-# Core Concepts 
-As you read about each concept, it is helpful to have the basic example up as well so you can refer back to it. 
+# Core Concepts
+As you read about each concept, it is helpful to have the basic example up as well so you can refer back to it.
 
 ## Defining a Service
 
@@ -33,11 +33,11 @@ A Service is a core building block for a project. You can think of it as a logic
 ```python
 @service(
     dynamo={
-        "enabled": True, 
-        "namespace": "dynamo", 
+        "enabled": True,
+        "namespace": "dynamo",
     },
-    resources={"gpu": 2, "cpu": "10", "memory": "20Gi"}, 
-    workers=1, 
+    resources={"gpu": 2, "cpu": "10", "memory": "20Gi"},
+    workers=1,
 )
 ```
 
@@ -79,13 +79,13 @@ class ServiceA:
     async def generate(self, request: ChatCompletionRequest):
         # Call dependent service
         processed_request = await self.service_b.preprocess(request)
-        
+
         # Use the engine to generate a response
         response = await self.engine.generate(processed_request)
         return response
 ```
 
-### Class-Based Architecture 
+### Class-Based Architecture
 Dynamo follows a class-based architecture similar to BentoML making it intuitive for users familiar with those frameworks. Each service is defined as a Python class, with the following components:
 1. Class attributes for dependencies using `depends()`
 2. An `__init__` method for standard initialization
@@ -97,7 +97,7 @@ This approach provides a clean separation of concerns and makes the service stru
 ### Service Dependencies with `depends()`
 The `depends()` function is a powerful BentoML feature that lets you create a dependency between services. When you use `depends(ServiceB)`, several things happen:
 1. It ensures that `ServiceB` is deployed when `ServiceA` is deployed by adding it to an internal service dependency graph
-2. It creates a client to the endpoints of `ServiceB` that is being served under the hood. 
+2. It creates a client to the endpoints of `ServiceB` that is being served under the hood.
 3. You are able to access `ServiceB` endpoints as if it were a local function!
 
 ```python
@@ -111,10 +111,10 @@ service_b = depends(ServiceB)
 result = await service_b.preprocess(data)
 ```
 
-**NOTE** - through the SDK, we also provide you with a way to access the underlying bindings if you need. Sometimes you might want to write complicated logic that causes you to directly create a client to another Service without depending on it. You can do this via: 
+**NOTE** - through the SDK, we also provide you with a way to access the underlying bindings if you need. Sometimes you might want to write complicated logic that causes you to directly create a client to another Service without depending on it. You can do this via:
 
 ```python
-import VllmWorker 
+import VllmWorker
 
 runtime = dynamo_context["runtime"]
 comp_ns, comp_name = VllmWorker.dynamo_address() # dynamo://{namespace}/{name}
@@ -127,7 +127,7 @@ self.worker_client = (
 )
 ```
 
-This is used in some of our prebuilt examples and is a powerful way to leverage the benefits of the SDK while being able to access Dynamo's core primitives. 
+This is used in some of our prebuilt examples and is a powerful way to leverage the benefits of the SDK while being able to access Dynamo's core primitives.
 
 You can findn more docs on depends [here](https://docs.bentoml.com/en/latest/build-with-bentoml/distributed-services.html#interservice-communication)
 
@@ -204,7 +204,7 @@ MyService:
     workers: 4
     resources:
       gpu: 4
-  
+
   # Service instance parameters
   model_name: "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
   temperature: 0.8
@@ -245,14 +245,14 @@ from dynamo.sdk.lib.config import ServiceConfig
 class MyService:
     def __init__(self):
         config = ServiceConfig.get_instance()
-        
+
         # Get with default value
         self.model_name = config.get("MyService", {}).get("model_name", "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
         self.temperature = config.get("MyService", {}).get("temperature", 0.7)
 
         # Require a config value (raises error if missing)
         self.api_key = config.require("MyService", "api_key")
-        
+
         # Get all config for this service
         all_my_config = config.get("MyService", {})
 ```
@@ -266,11 +266,11 @@ from dynamo.sdk.lib.config import ServiceConfig
 
 def setup_my_lib():
     config = ServiceConfig.get_instance()
-    
+
     # Get all MyService config with prefix "lib_" as CLI args
     cli_args = config.as_args("MyService", prefix="lib_")
     # Returns: ["--option1", "value1", "--flag2", "--option3", "value3"]
-    
+
     # Pass to an external library's argument parser
     lib_parser = MyLibArgumentParser()
     lib_args = lib_parser.parse_args(cli_args)
@@ -284,24 +284,24 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     config = ServiceConfig.get_instance()
     vllm_args = config.as_args(service_name, prefix=prefix)
     parser = FlexibleArgumentParser()
-    
+
     # Add custom arguments
     parser.add_argument("--router", type=str, choices=["random", "round-robin", "kv"], default="random")
     parser.add_argument("--remote-prefill", action="store_true")
-    
+
     # Add VLLM's arguments
     parser = AsyncEngineArgs.add_cli_args(parser)
-    
+
     # Parse both custom and VLLM arguments
     args = parser.parse_args(vllm_args)
-    
+
     # Convert to engine arguments
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    
+
     # Add custom args to the engine args
     engine_args.router = args.router
     engine_args.remote_prefill = args.remote_prefill
-    
+
     return engine_args
 ```
 
@@ -353,11 +353,11 @@ class LLMService:
         self.model_name = model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
-        
+
         # Get additional configuration
         config = ServiceConfig.get_instance()
         service_config = config.get("LLMService", {})
-        
+
         # Extract service-specific parameters
         self.cache_size = service_config.get("cache_size", 1000)
         self.use_kv_cache = service_config.get("use_kv_cache", True)
@@ -375,12 +375,12 @@ LLMService:
       gpu: 4
       memory: "64Gi"
     workers: 8
-  
+
   # Constructor parameters
   model_name: "llama-3-70b-instruct"
   temperature: 0.8
   max_tokens: 2048
-  
+
   # Service-specific parameters
   cache_size: 10000
   use_kv_cache: true
@@ -421,12 +421,12 @@ The depends() approach is the recommended way for production deployments:
 - Provides type hints and better IDE support
 
 2. Use `.link()` (Experimental)
-Our `.link()` syntax is an flexible and experimental way to compose various services. Linking allows you to compose checks at runtime and view behavior. Under the hood - we are editing the dependency graph between various services. This is useful for experimentation and development but we suggest writing a static graph for your final production deployment. 
+Our `.link()` syntax is an flexible and experimental way to compose various services. Linking allows you to compose checks at runtime and view behavior. Under the hood - we are editing the dependency graph between various services. This is useful for experimentation and development but we suggest writing a static graph for your final production deployment.
 
 ### Understanding the `.link()` syntax
 Lets take the example of a `Processor` component. This component can currently do 2 things:
-1. Process a request and send it to a `Router` to decide what worker to send it to. 
-2. Process a request and send it to a `Worker` directly via round-robin or random routing. 
+1. Process a request and send it to a `Router` to decide what worker to send it to.
+2. Process a request and send it to a `Worker` directly via round-robin or random routing.
 
 A snippet of the Processor is shown below:
 
@@ -448,4 +448,4 @@ You can think of all of the depends statements as the maximal set of edges for t
 Processor.link(Router)
 ```
 
-This will remove the `worker` dependency from the Processor and only spin up the Router. 
+This will remove the `worker` dependency from the Processor and only spin up the Router.

@@ -3,7 +3,7 @@ The Dynamo CLI is a powerful tool for serving, containerizing, and deploying Dyn
 
 Overview
 At a high level, the Dynamo CLI allows you to:
-- `run` - quickly chat with a model 
+- `run` - quickly chat with a model
 - `start` - run an individual service locally
 - `serve` - run a set of services locally (via `depends()` or `.link()`)
 - `build` - create an archive of your services (called a `bento`)
