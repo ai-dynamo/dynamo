@@ -98,6 +98,10 @@ dynamo-api-server:
     repository: gitlab-master.nvidia.com:5005/aire/microservices/compoundai/dynamo-api-server
     tag: ${CI_COMMIT_SHA}
     pullPolicy: Always
+  storeImage:
+    repository: gitlab-master.nvidia.com:5005/aire/microservices/compoundai/dynamo-api-store
+    tag: ${CI_COMMIT_SHA}
+    pullPolicy: Always
   imagePullSecrets:
     - name: nvcrimagepullsecret
     - name: gitlab-imagepull

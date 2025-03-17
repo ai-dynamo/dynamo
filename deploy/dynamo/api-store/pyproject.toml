@@ -21,4 +21,4 @@ dev = [
 ]
 
 [project.scripts]
-ai-dynamo-store = "ai_dynamo_store.__main__:main"
+ai-dynamo-store = "ai_dynamo_store.main:main"
