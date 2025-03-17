@@ -57,7 +57,7 @@ Dynamo prioritizes seamless integration. Its modular design allows it to work ha
 Disaggregating prefill and decode significantly boosts performance, gaining efficiency the more GPUs that are involved in inference. For example, for Llama 70B, single-node tests show a 30% throughput/GPU improvement, while two-node setups achieve over 2X gains due to better parallelization.
 
 <figure>
-    <img src='images/disagg_perf_benefit.png' alt='missing' />
+    <img src='images/disagg_perf_benefit.png' alt='missing' width="1200" height="400" />
     <p>Tested on H100s with R1 Distilled Llama 70B model FP8 using vLLM. 3K ISL/ 150 OSL</p>
 </figure>
 
@@ -94,7 +94,7 @@ Dynamo's design enables KV cache offloading to system CPU memory, and will be ex
 
 
 <figure>
-    <img src='images/nixl.png' alt='missing' />
+    <img src='images/kv_manager.png' alt='missing' />
     <p>Tested with 100K requests to R1 using R1 Distilled Llama 70B FP8 on 2 nodes of H100s. Avg 4K ISL / 800 OSL</p>
 </figure>
 
