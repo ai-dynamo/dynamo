@@ -20,42 +20,62 @@ limitations under the License.
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
 
-NVIDIA Dynamo is a new modular inference framework designed for serving large language models (LLMs) in multi-node
-distributed environments. It enables seamless scaling of inference workloads across GPU nodes and the dynamic allocation
-of GPU workers to address traffic bottlenecks at various stages of the model pipeline.
+NVIDIA Dynamo is high-throughput low-latency inference framework designed for serving generative AI and reasoning models in multi-node distributed environments. Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLang or others) and captures LLM-specific capabilities such as
 
-NVIDIA Dynamo also features LLM-specific capabilities, such as disaggregated serving, which separates the context
-(prefill) and generation (decode) steps of inference requests onto distinct GPUs and GPU nodes to optimize performance.
+- **Disaggregated prefill & decode inference** – Maximizes GPU throughput and facilitates trade off between throughput and latency.
+- **Dynamic GPU scheduling** – Optimizes performance based on fluctuating demand
+- **LLM-aware request routing** – Eliminates unnecessary KV cache re-computation
+- **Accelerated data transfer** – Reduces inference response time using NIXL.
+- **KV cache offloading** – Leverages multiple memory hierarchies for higher system throughput
 
-NVIDIA Dynamo includes four key innovations:
-
-* **Smart Router**: An LLM-aware router that directs requests across large GPU fleets to minimize costly key-value (KV)
-cache recomputations for repeat or overlapping requests, freeing up GPUs to respond to new incoming requests
-* **Low-Latency Communication Library**: An inference optimized library that supports state-of-the-art GPU-to-GPU
-communication and abstracts complexity of data exchange across heterogenous devices and networking protocols,
-accelerating data transfers
-* **Memory Manager**: An engine that intelligently offloads and reloads inference data (KV cache) to and from lower-cost memory and storage devices using NVIDIA NIXL without impacting user experiences
-
-
+Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach.
 
 > [!NOTE]
-> This project is currently in the alpha / experimental /
-> rapid-prototyping stage and we are actively looking for feedback and
-> collaborators.
+> We are actively looking for feedback and collaborators.
 
 ## Quick Start
 
-### Serving an LLM Locally with Dynamo
+### Installation
+
+> [!NOTE]
+> The following assumes python3.12 and python3-dev are installed
+> in the system. We also provide instructions for building and running
+> dynamo in containers.
 
 To get started with Dynamo you can install it via pip or your favorite
 virtual environment setup. Here we use `uv`.
 
 ```bash
-uv venv --python 3.12 dynamo-venv
+uv venv dynamo-venv
 source dynamo-venv/bin/activate
-uv pip install
+uv pip install ai-dynamo[all]
 ```
 
+### Serving and Interactive with an LLM Locally
+
+```
+dynamo run out=vllm deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+```
+
+#### Expected Output
+```
+dynamo run out=vllm deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+2025-03-17T14:03:14.122652Z  INFO dynamo_run: CPU mode. Rebuild with `--features cuda|metal|vulkan` for better performance
+2025-03-17T14:03:14.124227Z  INFO candle_hf_hub: Token file not found "/root/.cache/huggingface/token"
+INFO 03-17 14:03:16 __init__.py:190] Automatically detected platform cuda.
+INFO 03-17 14:03:16 nixl.py:16] NIXL is available
+Loading safetensors checkpoint shards:   0% Completed | 0/2 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  50% Completed | 1/2 [00:01<00:01,  1.02s/it]
+Loading safetensors checkpoint shards: 100% Completed | 2/2 [00:02<00:00,  1.15s/it]
+Loading safetensors checkpoint shards: 100% Completed | 2/2 [00:02<00:00,  1.14s/it]
+Capturing CUDA graph shapes: 100%|██████████| 35/35 [00:17<00:00,  2.04it/s]
+2025-03-17T14:03:50.190381Z  INFO dynamo_run::input::text: Ctrl-c to exit
+? User › Hello, how are you?
+✔ User · Hello, how are you?
+Okay, so I'm trying to figure out how to respond to the user's greeting. They said, "Hello, how are you?" and then followed it with "Hello! I'm just a program, but thanks for asking." Hmm, I need to come up with a suitable reply. ...
+```
+
+####
 
 ## Building Dynamo
 
