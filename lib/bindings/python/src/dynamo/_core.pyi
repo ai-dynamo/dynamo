@@ -102,11 +102,6 @@ class Component:
         """
         ...
 
-    def event_subject(self, name: str) -> str:
-        """
-        Create an event subject
-        """
-        ...
 
 class Endpoint:
     """
@@ -351,6 +346,30 @@ class KvMetricsAggregator:
     def get_metrics(self) -> AggregatedMetrics:
         """
         Return the aggregated metrics of the endpoints.
+        """
+        ...
+
+class KvEventPublisher:
+    """
+    A KV event publisher will publish KV events corresponding to the component.
+    """
+
+    ...
+
+    def __init__(self, component: Component, worker_id: int, kv_block_size: int) -> None:
+        """
+        Create a `KvEventPublisher` object
+        """
+
+    def publish_stored(self, event_id, int, token_ids: List[int], num_block_tokens: List[int], block_hashes: List[int], lora_id: int, parent_hash: Optional[int] = None) -> None:
+        """
+        Publish a KV stored event.
+        """
+        ...
+
+    def publish_removed(self, event_id, int, block_hashes: List[int]) -> None:
+        """
+        Publish a KV removed event.
         """
         ...
 
