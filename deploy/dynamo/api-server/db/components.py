@@ -184,8 +184,8 @@ class DynamoNimVersionSchema(ResourceSchema):
     description: str
     image_build_status: ImageBuildStatus
     upload_status: str
-    upload_started_at: Optional[datetime]
-    upload_finished_at: Optional[datetime]
+    # upload_started_at: Optional[datetime]
+    # upload_finished_at: Optional[datetime]
     upload_finished_reason: str
     presigned_upload_url: str = ""
     presigned_download_url: str = ""
