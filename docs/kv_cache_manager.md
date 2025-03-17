@@ -18,7 +18,7 @@ The Dynamo KV Cache Manager is designed to be framework-agnostic to support vari
 
 - Separation of Mechanism and Policy
     - Mechanism: Manages memory allocation, caching hierarchy, and data flow.
-    - Policy: Determines caching strategies, including the choice of data structures (e.g., radix tree,     distributed hash tables) and eviction algorithms.
+    - Policy: Determines caching strategies, including the choice of data structures (e.g., radix tree, distributed hash tables) and eviction algorithms.
 
   This separation ensures that the underlying infrastructure can evolve without disrupting the caching logic. This design decision was created to enable each customer to come up with their own policies and mechanisms to manage memory that fits their access pattern.
 
