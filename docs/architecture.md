@@ -99,15 +99,6 @@ Dynamo's design enables KV cache offloading to system CPU memory, and will be ex
 
 NIXL streamlines data transfer through simplified synchronization and batching and simplified source and destination abstractions. NIXL is able to abstract data movement across different types of memory and fast storage, whereas other data transfer libraries typically support only one tier of memory. These enhancements yield significant performance gains, accelerating both time-to-first-token (TTFT) and overall throughput.
 
-
-## Future plans
-
-The next release of Dynamo plans to open-source the KV cache manager as a standalone repository under the ai-dynamo organization. This release will provide functionality for storing and evicting KV cache across multiple memory tiers, including GPU, system memory, local SSD, and object storage.
-
-In that release, we will include an early version of the Dynamo Planner, another core component. This initial release will feature heuristic-based dynamic allocation of GPU workers between prefill and decode tasks, as well as model and fleet configuration adjustments based on user traffic patterns. Our vision is to evolve the Planner into a reinforcement learning platform, which will allow users to define objectives and then tune and optimize performance policies automatically based on system feedback.
-
-Dynamo is designed as the ideal next generation inference server, building upon the foundations of the Triton Inference Server. While Triton focuses on single-node inference deployments, we are committed to integrating its robust single-node capabilities into Dynamo within the next several months. We will maintain ongoing support for Triton while ensuring a seamless migration path for existing users to Dynamo once feature parity is achieved.
-
 ## Acknowledgement
 
 We would like to acknowledge several open source software stacks for motivating us to create Dynamo.
