@@ -7,6 +7,8 @@ ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 
+ARG GENAI_PERF_TAG="25d0188713adc47868d6b3f22426375237a90529"
+
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS nixl_base
 WORKDIR /opt/nixl
 # Add a cache hint that only changes when the nixl commit changes
@@ -16,8 +18,11 @@ RUN echo "NIXL commit: ${NIXL_COMMIT}" > /opt/nixl/commit.txt
 # Copy the nixl source
 COPY --from=nixl . .
 
-# Main build stage
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS dev
+##################################
+########## Build Image ###########
+##################################
+
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS build
 
 USER root
 
@@ -83,16 +88,6 @@ RUN cd /usr/local/src && \
     ./DEBS/libibverbs* ./DEBS/ibverbs-providers* ./DEBS/librdmacm* ./DEBS/libibumad* && \
     rm -rf /var/lib/apt/lists/* /usr/local/src/* mofed.tgz
 
-# Build and install Perf Analyzer for benchmarking
-RUN apt-get update -y && apt-get -y install rapidjson-dev zlib1g-dev
-RUN git clone https://github.com/triton-inference-server/perf_analyzer.git
-ARG GENAI_PERF_TAG="25d0188713adc47868d6b3f22426375237a90529"
-RUN git -C perf_analyzer checkout ${GENAI_PERF_TAG}
-RUN mkdir perf_analyzer/build
-RUN cmake -B perf_analyzer/build -S perf_analyzer -D TRITON_ENABLE_PERF_ANALYZER_OPENAI=ON
-RUN cmake --build perf_analyzer/build -- -j8
-ENV PATH="$(pwd)/perf_analyzer/build/perf_analyzer/src/perf-analyzer-build:${PATH}"
-
 ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/cuda/lib64 \
     LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
 
@@ -157,14 +152,14 @@ ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/x86_64-linux-gnu/plugins
 
 RUN ls -l /usr/local/nixl/
 RUN ls -l /usr/local/nixl/include/
-RUN ls -l /usr/local/nixl/include/internal/
 
 RUN ls /opt/nixl
 
 # Install utilities
 RUN apt update -y && apt install -y git wget curl nvtop tmux vim
 # nats
-RUN wget https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-amd64.deb && dpkg -i nats-server-v2.10.24-amd64.deb && rm nats-server-v2.10.24-amd64.deb
+RUN wget https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-amd64.deb && \
+    dpkg -i nats-server-v2.10.24-amd64.deb && rm nats-server-v2.10.24-amd64.deb
 # etcd
 ENV ETCD_VERSION="v3.5.18"
 RUN wget https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-amd64.tar.gz -O /tmp/etcd.tar.gz && \
@@ -209,10 +204,6 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     mkdir -p /workspace/dist && \
     wheel pack . --dest-dir /workspace/dist && \
     uv pip install /workspace/dist/vllm-*.whl
-
-# Install genai-perf for benchmarking
-RUN uv pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
-RUN uv pip uninstall tritonclient
 
 # Install test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
@@ -294,37 +285,78 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
-# FIXME: Copy more specific folders in for dev/debug after directory restructure
+CMD []
+
+#######################################
+########## CI Minimum Image ###########
+#######################################
+FROM build AS ci_minimum
+
+COPY . /workspace
+
+##########################################
+########## Perf Analyzer Image ###########
+##########################################
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS perf_analyzer
+
+ARG GENAI_PERF_TAG
+
+WORKDIR /workspace
+
+# Build and install Perf Analyzer for benchmarking
+RUN apt-get update -y && apt-get -y install cmake g++ libssl-dev python3 rapidjson-dev zlib1g-dev
+RUN git clone https://github.com/triton-inference-server/perf_analyzer.git
+RUN git -C perf_analyzer checkout ${GENAI_PERF_TAG}
+RUN mkdir perf_analyzer/build
+RUN cmake -B perf_analyzer/build -S perf_analyzer -D TRITON_ENABLE_PERF_ANALYZER_OPENAI=ON
+RUN cmake --build perf_analyzer/build -- -j8
+RUN mkdir bin &&  \
+    cp -r perf_analyzer/build/perf_analyzer/src/perf-analyzer-build /workspace/bin/
+
+########################################
+########## Development Image ###########
+########################################
+FROM build AS dev
+
+ARG GENAI_PERF_TAG
+
+COPY --from=perf_analyzer /workspace/bin/perf-analyzer-build /workspace/benchmarking
+
+# Install genai-perf for benchmarking
+ENV PATH="/workspace/benchmarking:${PATH}"
+RUN uv pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
+RUN uv pip uninstall tritonclient
+
 COPY . /workspace
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
 CMD []
 
-########################################
-########## RUNTIME CONTAINER ###########
-########################################
+####################################
+########## Runtime Image ###########
+####################################
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
 WORKDIR /workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 
-RUN rm /bin/sh && ln -s /bin/bash /bin/sh
-
 # Copy NIXL
-COPY --from=dev /usr/local/nixl /usr/local/nixl
+COPY --from=build /usr/local/nixl /usr/local/nixl
 ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
 ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/:$PYTHONPATH
 
 # Setup the python environment
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN uv venv $VIRTUAL_ENV --python 3.12 && \
-    ln -s $(find / -name libpython3.12.so*) /usr/lib && \
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3-dev && \
+    rm -rf /var/lib/apt/lists/* && \
+    uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 # Install the wheels
-COPY --from=dev /workspace/dist/*.whl wheelhouse/
+COPY --from=build /workspace/dist/*.whl wheelhouse/
 RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
     rm -r wheelhouse
 
@@ -337,7 +369,7 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
 # Copy examples
-COPY --from=dev /workspace/deploy/examples examples/
+COPY ./examples examples/
 
-# dynamo run in=text out=mistralrs Qwen/Qwen2.5-3B-Instruct
+ENTRYPOINT [ "/usr/bin/bash" ]
 CMD []

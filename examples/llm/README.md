@@ -33,6 +33,29 @@ Single-instance deployment where both prefill and decode are done by the same wo
 ### Disaggregated
 Distributed deployment where prefill and decode are done by separate workers that can scale independently.
 
+```mermaid
+sequenceDiagram
+    participant D as VllmWorker
+    participant Q as PrefillQueue
+    participant P as PrefillWorker
+
+    Note over D: Request is routed to decode
+    D->>D: Decide if prefill should be done locally or remotely
+
+        D->>D: Allocate KV blocks
+        D->>Q: Put RemotePrefillRequest on the queue
+
+        P->>Q: Pull request from the queue
+        P-->>D: Read cached KVs from Decode
+
+        D->>D: Decode other requests
+        P->>P: Run prefill
+        P-->>D: Write prefilled KVs into allocated blocks
+        P->>D: Send completion notification
+        Note over D: Notification received when prefill is done
+        D->>D: Schedule decoding
+```
+
 ## Getting Started
 
 1. Choose a deployment architecture based on your requirements
@@ -85,25 +108,25 @@ This figure shows an overview of the major components to deploy:
 
 #### Aggregated serving
 ```bash
-cd /workspace/deploy/examples/llm
+cd /workspace/examples/llm
 dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
 ```
 
 #### Aggregated serving with KV Routing
 ```bash
-cd /workspace/deploy/examples/llm
+cd /workspace/examples/llm
 dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
 ```
 
 #### Disaggregated serving
 ```bash
-cd /workspace/deploy/examples/llm
+cd /workspace/examples/llm
 dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
 ```
 
 #### Disaggregated serving with KV Routing
 ```bash
-cd /workspace/deploy/examples/llm
+cd /workspace/examples/llm
 dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
 ```
 
