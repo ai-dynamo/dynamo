@@ -66,7 +66,7 @@ This multi-queue design is crucial because it:
 - Decouples slow operations (e.g., SSD writes) from the critical path of responding to user queries, to improve responsiveness.
 - Ensures the correctness of index updates and data transfers, even under high-throughput, concurrent workloads.
 
-Looking ahead, V1 architecture will integrate with NIXL to enable KV reuse across multiple nodes. Additionally, we will add GPUDirect Storage capabilities to reduce the  get_async()  latency and minimize the CPU overhead while facilitating direct data transfers between GPU memory and SSD. These enhancements will be made available post-GTC in a few weeks.
+Looking ahead, V1 architecture will integrate with NIXL to enable KV reuse across multiple nodes. Additionally, we will add GPUDirect Storage capabilities to reduce the get_async() latency and minimize the CPU overhead while facilitating direct data transfers between GPU memory and SSD. These enhancements will be made available post-GTC.
 
 V1 architecture is an excellent design for quick enablement and execution. However, it does not offer much finer control on memory management and interactions with the NVIDIA Dynamo ecosystem. To address this, we are parallelly implementing V2 architecture providing a notion of distributed KV pool across workers and storage. V2 architecture will be released in coming weeks.
 
