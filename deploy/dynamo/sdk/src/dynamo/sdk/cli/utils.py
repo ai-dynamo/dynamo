@@ -61,3 +61,14 @@ class DynamoCommandGroup(click.Group):
     def get_command(self, ctx: Context, cmd_name: str) -> Command | None:
         cmd_name = self.resolve_alias(cmd_name)
         return super().get_command(ctx, cmd_name)
+
+    def add_single_command(self, group: click.Group, command_name: str) -> None:
+        """Add a single command from a group by name."""
+        if not isinstance(group, click.MultiCommand):
+            raise TypeError("Only accepts click.MultiCommand")
+
+        cmd = group.get_command(None, command_name)
+        if cmd is None:
+            raise ValueError(f"Command '{command_name}' not found in group")
+
+        self.add_command(cmd, command_name)
