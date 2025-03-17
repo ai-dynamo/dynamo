@@ -110,7 +110,3 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
   }' | jq
 ```
 
-## Additional Resources
-
-- [TODO] ()
-- [TODO] ()
