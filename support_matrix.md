@@ -32,7 +32,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | **Linux**              | x86_64             | Supported               |
 | **Linux**              | ARM64              | Experimental            |
 
-> **Note**: **Linux**: The **ARM64** support is experimental and may have limitations.
+> **Note**: For **Linux**, the **ARM64** support is experimental and may have limitations.
 
 ## Software Compatibility
 
