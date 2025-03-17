@@ -167,7 +167,7 @@ for endpoint in metrics_aggregator.get_metrics().endpoints:
 	print(endpoint.gpu_prefix_cache_hit_rate)
 ```
 
-### KV Router
+### [KV Router](../deploy/examples/llm/components/kv_router.py)
 The Router component makes intelligent worker selection decisions
 1. Receives incoming requests as tokens
 2. Queries the KVIndexer to find potential cache hits across workers
