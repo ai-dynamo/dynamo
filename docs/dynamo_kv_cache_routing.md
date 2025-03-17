@@ -22,9 +22,9 @@ This documentation explains how KV (Key-Value) cache routing works in Dynamo, pr
 ## Dynamo Architecture
 Dynamo's architecture consists of three key concepts:
 
-- **Namespace**: Groups related components (similar to directories in a file system). In our examples, we use dynamo. This avoids collisions between two different dynamo graphs.
-- **Component**: The deployable unit in Dynamo. Components are self-contained and typically map to separate Docker containers. Components can be created in Python or Rust.
-- **Endpoint**: Functions attached to components that transform inputs into outputs. Endpoints are discoverable and callable by other components.
+- **Namespace**: Groups related components (similar to directories in a file system). In our examples, we use the label `dynamo`. This avoids collisions between two different dynamo graphs.
+- **Component**: The deployable unit in Dynamo. Components are self-contained and typically map to separate Docker containers. In our examples, we use labels like `VllmWorker `, `Router`, `Processor` for the components. Components can be created in Python or Rust.
+- **Endpoint**: Functions attached to components that transform inputs into outputs. Endpoints are discoverable and callable by other components. In our examples we use the label `generate` for most of the endpoints.
 
 A Dynamo graph is a collection of components that are linked together to form a graph. There are two paths through the graphs. The request path and the response path. For LLMs the request path is single-in (a single message) and the response path is many-out (streamed output).
 
@@ -62,13 +62,13 @@ To get a feel for how KV Cache management works on a single worker with KV Cache
     - If no match is found, the system proceeds to the next step
 5. Resource allocation:
     - For blocks without matches, the system attempts to allocate new memory space
-    - If sufficient memory is available, allocation proceeds
+    - If sufficient memory is available, allocate memory space and proceed to step 7
     - If memory is constrained, proceed to step 6
 6. Cache eviction (when necessary):
     - The system applies an eviction policy (e.g., LRU, LFU) to identify blocks for removal
     - Selected blocks are evicted from the cache
     - **KVPublisher emits a KV removed event notifying KVIndexer about the removed block.**
-    - Alternatively, some systems may offload less-frequently used blocks to CPU memory
+    - Alternatively, some systems may offload less-frequently used blocks to CPU memory. See [KV Offloading in Dynamo](kv_cache_manager.md).
 7. KV computation:
     - For new blocks, the model computes key and value tensors
     - These tensors are stored in the newly allocated cache blocks
@@ -88,7 +88,7 @@ Further details can be found for: [TRT-LLM](https://developer.nvidia.com/blog/in
           v                  v                  v
    +----------------+  +----------------+  +----------------+
    |   Worker 1     |  |   Worker 2     |  |   Worker 3     |
-   |  (Load: 30%)   |  |  (Load: 50%)   |  |  (Load: 70%)   |
+   |  (Load: 30%)   |  |  (Load: 50%)   |  |  (Load: 80%)   |
    +----------------+  +----------------+  +----------------+
 ```
 
@@ -98,9 +98,16 @@ Load balancing in LLM serving becomes complex when enabling KV Cache reuse. Whil
 
 The best way to solve these issues is for the router to have a global view of KV Cache and load. With this view, the router can use a cost function to score the workers and make decisions to maximize cache hits while keeping the system balanced and throughput high.
 
-In Dynamo, we want to support KV Cache Routing and load balancing for many backends that have different implementations of KV Cache and record different metrics. To that end, we built a KVPublisher that can be plugged into any framework to publish KV Events and a KvMetricsPublisher that can publish metrics.
+In the above image, our cost function is (KV match - Load) so we select Worker 2 even though Worker 3 would offer the best KV match.
+- Worker 1 = (0.15 - 0.30) = -0.15
+- **Worker 2 = (0.50 - 0.50) = 0**
+- Worker 3 = (0.75 - 0.80) = -0.05
 
-On the receiving side we have a KVIndexer which accepts events from the KVPublisher and puts them into a global prefix tree and a KvMetricsAggregator which aggregates metrics by worker.
+## Dynamo Events
+
+In Dynamo, we want to support KV Cache Routing and load balancing for many backends that have different implementations of KV Cache and record different metrics. To that end, we built a KVPublisher that can be plugged into any framework to publish KV Events and a KvMetricsPublisher that can publish Metric Events.
+
+On the receiving side we have a KVIndexer which accepts events from the KVPublisher and puts them into a global prefix tree and a KvMetricsAggregator which aggregates metric events by worker.
 
 ```text
 +----------------+                         +-----------------+
@@ -135,7 +142,7 @@ The KVIndexer has a method find_matches_for_request, which takes in tokens and r
 
 Example output:
 ```python
-find_matches_for_request([sequence of ints])
+find_matches_for_request([sequence of token IDs])
 {
 	123456789: 10,
 	987654321: 3,
