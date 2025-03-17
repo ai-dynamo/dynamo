@@ -29,13 +29,14 @@ docker:
     ARG CI_COMMIT_SHA=latest
     ARG IMAGE=dynamo-api-server
     FROM python:3.9-slim
-    RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+    RUN apt-get update && apt-get install -y curl htop && rm -rf /var/lib/apt/lists/*
     WORKDIR /
     COPY +build/server .
     COPY +build/.env .
     COPY db/ db/
     RUN pip install -r db/requirements.txt
     ENV PYTHONPATH="/:${PYTHONPATH}"
-    USER 65532:65532
+    # TODO: uncomment this when we have a non-root use
+    # USER 65532:65532
     ENTRYPOINT ["/server"]
     SAVE IMAGE --push $CI_REGISTRY_IMAGE/$IMAGE:$CI_COMMIT_SHA
