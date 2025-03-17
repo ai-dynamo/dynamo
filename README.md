@@ -30,7 +30,7 @@ NVIDIA Dynamo is a high-throughput low-latency inference framework designed for 
 
 Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach.
 
-| [Quick Start](#quick-start) | [LLM Serving](#llm-serving) | [Disaggregated Serving and KV Routing](examples/llm) | [Architecture](docs/architecture.md) | [Additional Resources](#additional-resources) |
+| [Quick Start](#quick-start) | [LLM Serving](#llm-serving) | [Disaggregated Serving and KV Routing](examples/llm) | [Architecture](docs/architecture.md) | [APIs](lib/bindings/python) | [Additional Resources](#additional-resources) |
 
 ## Quick Start
 
@@ -46,7 +46,7 @@ pip install ai-dynamo nixl vllm==0.7.2+dynamo
 ```
 
 > [!NOTE]
-> TensorRT-LLM Support is currently available on a [branch](https://github.com/ai-dynamo/dynamo/tree/dynamo/trtllm_llmapi_v1)
+> TensorRT-LLM Support is currently available on a [branch](https://github.com/ai-dynamo/dynamo/tree/dynamo/trtllm_llmapi_v1/examples/python_rs/llm/trtllm#building-the-environment))
 
 ### Running and Interacting with an LLM Locally
 
