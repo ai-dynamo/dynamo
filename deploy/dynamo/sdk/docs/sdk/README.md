@@ -1,5 +1,14 @@
 # Documentation for the Dynamo SDK and CLI 
 
+# Table of Contents
+
+- [Introduction](#introduction)
+- [Installation](#installation)
+- [Core Concepts](#core-concepts)
+- [Writing a Service](#writing-a-service)
+- [Configuring a Service](#configuring-a-service)
+- [Composing Services into an Graph](#composing-services-into-an-graph)
+
 # Introduction 
 
 Nvidia Dynamo is a flexible and performant distributed inferencing solution for large-scale deployments. It is an ecosystem of tools, frameworks, and abstractions that makes the design, customization, and deployment of frontier-level models onto datacenter-scale infrastructure easy to reason about and optimized for your specific inferencing workloads. Dynamo's core is written in Rust and contains a set of well-defined Python bindings. Docs and examples for those can be found [here](../../../../README.md). 
@@ -438,20 +447,3 @@ Processor.link(Router)
 ```
 
 This will remove the `worker` dependency from the Processor and only spin up the Router. 
-
-sccratch
-passing in arguments + configuring with a YAML (and how to read those args in the service class)
-
-### Composing services into an inference graph
-2 ways
-- using the depends. this is the most supported way and is the recommended way when you are looking to deploy. 
-- depends for us means edges that will spin up BUT ALSO are an astraction over creating a client for a dynemo endpoint (from above)
-- deploy is the maximal set of edges. link lets you define that at runtime for experimentation. our examples using this experimental link syntax
-
-### Learning by example. Aggregated KV routing. 
-
-### CLI flows
-
-1. serve is your go to 
-2. then you build a `bento`. explain slightly and share the structure 
-3. this is what is used to deploy onto a cluster 

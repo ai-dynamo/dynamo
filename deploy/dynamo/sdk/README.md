@@ -104,5 +104,5 @@ You should see the following output:
 federer-mid-back
 ```
 
-You can find in-depth documentation for the Dynamo CLI and the SDK in our [docs](./docs/README.md)
+You can find in-depth documentation for the Dynamo SDK [here](./docs/sdk/README.md) and the Dynamo CLI [here](./docs/cli/README.md)
 
