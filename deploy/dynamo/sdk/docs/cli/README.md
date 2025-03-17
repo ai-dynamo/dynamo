@@ -44,7 +44,7 @@ dynamo serve hello_world:Frontend
 
 ## `build`
 
-The `build` commmand allows you to package up your inference graph and its dependancies and create an archive of it. This is commonly paired with the `--containerize` flag to create a single docker container that runs your inference graph. As with serve, you point toward the first service in your dependency graph.
+The `build` commmand allows you to package up your inference graph and its dependancies and create an archive of it. This is commonly paired with the `--containerize` flag to create a single docker container that runs your inference graph. As with `serve`, you point toward the first service in your dependency graph.
 
 **Usage**
 ```bash
