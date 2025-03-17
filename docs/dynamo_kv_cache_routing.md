@@ -35,9 +35,9 @@ Colloquially, we will refer to a dynamo component that serves an endpoint for LL
 ## Basic Routing in Dynamo
 Dynamo supports several routing strategies when sending requests from one component to another component's endpoint.
 
-- **Random routing**: Default strategy, available via component.generate() or component.random()
-- **Round-robin routing**: Cycles through available workers via component.round_robin()
-- **Direct routing**: Explicitly targets a specific worker via component.direct(input, component_id)
+- **Random routing**: Default strategy, available via `component.generate()` or `component.random()`
+- **Round-robin routing**: Cycles through available workers via `component.round_robin()`
+- **Direct routing**: Explicitly targets a specific worker via `component.direct(input, component_id)`
 
 KV Cache routing uses direct routing with a special worker selection algorithm.
 
