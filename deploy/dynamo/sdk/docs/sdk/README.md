@@ -129,7 +129,7 @@ self.worker_client = (
 
 This is used in some of our prebuilt examples and is a powerful way to leverage the benefits of the SDK while being able to access Dynamo's core primitives.
 
-You can findn more docs on depends [here](https://docs.bentoml.com/en/latest/build-with-bentoml/distributed-services.html#interservice-communication)
+You can find more docs on depends [here](https://docs.bentoml.com/en/latest/build-with-bentoml/distributed-services.html#interservice-communication)
 
 ### Lifecycle Hooks
 Dynamo supports key lifecycle hooks to manage service initialization and cleanup. We currently only support a subset of BentoML's lifecycle hooks but are working on adding support for the rest.
