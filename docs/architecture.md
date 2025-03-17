@@ -6,14 +6,14 @@ Dynamo is high-throughput low-latency inference framework designed for serving g
 - **Disaggregated prefill & decode inference** – Maximizes GPU throughput and facilitates trade off between throughput and latency.
 - **Dynamic GPU scheduling** – Optimizes performance based on fluctuating demand
 - **LLM-aware request routing** – Eliminates unnecessary KV cache re-computation
-- **Accelerated data transfer** – Reduces inference response time using NIXL. 
+- **Accelerated data transfer** – Reduces inference response time using NIXL.
 - **KV cache offloading** – Leverages multiple memory hierarchies for higher system throughput
 
 Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach
 
 ## Motivation
 
-Scaling inference for generative AI and reasoning models are fundamentally hard problems—not just in terms of performance, but also in correctness and efficiency. Today, most inference serving frameworks struggle to handle the sheer complexity of large-scale distributed execution. 
+Scaling inference for generative AI and reasoning models are fundamentally hard problems—not just in terms of performance, but also in correctness and efficiency. Today, most inference serving frameworks struggle to handle the sheer complexity of large-scale distributed execution.
 
 There are multi-faceted challenges:
 
@@ -44,7 +44,7 @@ Every component in the Dynamo architecture is independently scalable and portabl
 
 ![](images/architecture.png "Dynamo Architecture")
 
-Dynamo enables dynamic worker scaling, responding to real-time deployment signals. These signals, captured and communicated through an event plane, empower the Planner to make intelligent, zero-downtime adjustments. For instance, if an increase in requests with long input sequences is detected, the Planner automatically scales up prefill workers to meet the heightened demand. 
+Dynamo enables dynamic worker scaling, responding to real-time deployment signals. These signals, captured and communicated through an event plane, empower the Planner to make intelligent, zero-downtime adjustments. For instance, if an increase in requests with long input sequences is detected, the Planner automatically scales up prefill workers to meet the heightened demand.
 
 Beyond efficient event communication, data transfer across multi-node deployments is crucial at scale. To address this, Dynamo utilizes NIXL, a technology designed to expedite transfers through reduced synchronization and intelligent batching. This acceleration is particularly vital for disaggregated serving, ensuring minimal latency when prefill workers pass KV cache data to decode workers.
 
@@ -101,7 +101,7 @@ Dynamo's design enables KV cache offloading to system CPU memory, and will be ex
 <!--
 ![](images/nixl.png)[3]
 
-[3]: Tested with 80 users and 10 multi-turns for each user using 1K ISL / 100 OSL. R1 Distilled Llama 8B model running on single node H100s 
+[3]: Tested with 80 users and 10 multi-turns for each user using 1K ISL / 100 OSL. R1 Distilled Llama 8B model running on single node H100s
 -->
 
 NIXL streamlines data transfer through simplified synchronization and batching and simplified source and destination abstractions. NIXL is able to abstract data movement across different types of memory and fast storage, whereas other data transfer libraries typically support only one tier of memory. These enhancements yield significant performance gains, accelerating both time-to-first-token (TTFT) and overall throughput.
@@ -117,11 +117,11 @@ Dynamo is designed as the ideal next generation inference server, building upon 
 
 ## Acknowledgement
 
-We would like to acknowledge several open source software stacks for motivating us to create Dynamo. 
+We would like to acknowledge several open source software stacks for motivating us to create Dynamo.
 
 - vLLM and vLLM-project
-- SGLang 
+- SGLang
 - DistServe
-- Mooncake 
-- AIBrix 
+- Mooncake
+- AIBrix
 - BentoML
