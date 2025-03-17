@@ -30,7 +30,7 @@ NVIDIA Dynamo is a high-throughput low-latency inference framework designed for 
 
 Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach.
 
-| [Quick Start](#quick-start) | [LLM Serving](#llm-serving) | [Disaggregated Serving and KV Routing](examples/llm) | [Architecture](docs/architecture.md) | [APIs](lib/bindings/python) | [Additional Resources](#additional-resources) |
+| [Quick Start](#quick-start) | [LLM Serving](#llm-serving) | [Disaggregated Serving and KV Routing](examples/llm/readme.md) | [Architecture](docs/architecture.md) | [APIs](lib/bindings/python/readme.md) | [Additional Resources](#additional-resources) |
 
 ## Quick Start
 
