@@ -137,9 +137,9 @@ async fn app(runtime: Runtime) -> Result<()> {
     let target_component = namespace.component(&config.component_name)?;
     let target_endpoint = target_component.endpoint(&config.endpoint_name);
 
-    let service_name = target_component.service_name();
+    let service_path = target_endpoint.path();
     let service_subject = target_endpoint.subject();
-    tracing::info!("Scraping service {service_name} and filtering on subject {service_subject}");
+    tracing::info!("Scraping endpoint {service_path} for stats");
 
     let token = drt.primary_lease().child_token();
     let event_name = format!("l2c.{}.{}", config.component_name, config.endpoint_name);
@@ -187,7 +187,7 @@ async fn app(runtime: Runtime) -> Result<()> {
                             // TODO: Lower to debug
                             let cache_hit_pct =
                                 (event.overlap_blocks as f64 / event.isl_blocks as f64) * 100.0;
-                            tracing::info!(
+                            tracing::debug!(
                                 "Received KV hit rate event: worker_id={}, isl_blocks={}, overlap_blocks={}, cache_hit_pct={:.2}%",
                                 event.worker_id,
                                 event.isl_blocks,
@@ -227,7 +227,11 @@ async fn app(runtime: Runtime) -> Result<()> {
             collect_endpoints(&target_component, &service_subject, scrape_timeout).await?;
         let metrics = extract_metrics(&endpoints);
         let processed = postprocess_metrics(&metrics, &endpoints);
-        tracing::debug!("Aggregated metrics: {processed:?}");
+        if processed.endpoints.is_empty() {
+            tracing::warn!("No endpoints found matching {service_path}");
+        } else {
+            tracing::info!("Aggregated metrics: {processed:?}");
+        }
 
         // Update Prometheus metrics
         metrics_collector.lock().await.update(&config, &processed);

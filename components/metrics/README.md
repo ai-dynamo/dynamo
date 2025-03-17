@@ -20,13 +20,14 @@ For example:
 # For more detailed output, try setting the env var: DYN_LOG=debug
 metrics --component my_component --endpoint my_endpoint
 
-# 2025-02-26T18:45:05.472146Z  INFO metrics: Scraping service dynamo_my_component_720278f8 and filtering on subject dynamo_my_component_720278f8.my_endpoint
+# 2025-03-17T00:07:05.202558Z  INFO metrics: Scraping endpoint dynamo/my_component/my_endpoint for stats
+# 2025-03-17T00:07:05.202955Z  INFO metrics: Prometheus metrics server started at 0.0.0.0:9091/metrics
 # ...
 ```
 
 With no matching endpoints running to collect stats from, you should see warnings in the logs:
 ```bash
-2025-02-26T18:45:06.474161Z  WARN metrics: No endpoints found matching subject dynamo_my_component_720278f8.my_endpoint
+2025-03-17T00:07:06.204756Z  WARN metrics: No endpoints found matching dynamo/my_component/my_endpoint
 ```
 
 After a worker with a matching endpoint gets started, the endpoint
@@ -48,6 +49,8 @@ For quick testing and debugging, there is a Rust-based
 # Can run multiple workers in separate shells to see aggregation as well.
 # Or to build/run from source: cargo run --bin mock_worker
 mock_worker
+
+# 2025-03-16T23:49:28.101668Z  INFO mock_worker: Starting Mock Worker on Endpoint: dynamo/my_component/my_endpoint
 ```
 
 To monitor the metrics of these mock workers, run:

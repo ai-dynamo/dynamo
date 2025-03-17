@@ -555,7 +555,7 @@ impl PrometheusMetrics {
 
         if cumulative_isl > 0.0 {
             let cumulative_hit_rate = (cumulative_overlap / cumulative_isl) * 100.0;
-            tracing::info!(
+            tracing::debug!(
                 "Estimated Cumulative KV hit rate: {cumulative_hit_rate:.2}% (Overlap: {cumulative_overlap} / ISL: {cumulative_isl})"
             );
         }
@@ -577,11 +577,6 @@ pub async fn collect_endpoints(
         .filter(|e| e.subject.starts_with(subject))
         .collect::<Vec<_>>();
     tracing::debug!("Endpoints: {endpoints:?}");
-
-    if endpoints.is_empty() {
-        tracing::warn!("No endpoints found matching subject {subject}");
-    }
-
     Ok(endpoints)
 }
 
