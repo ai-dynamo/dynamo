@@ -29,6 +29,7 @@ from bentoml._internal.configuration.containers import BentoMLContainer
 from bentoml._internal.utils.cattr import bentoml_cattr
 from bentoml.exceptions import CLIException, CloudRESTApiClientError
 
+
 @click.group(name="server")
 def cloud_command():
     """Interact with your Dynamo Server"""

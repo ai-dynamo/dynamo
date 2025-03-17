@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 @click.group(name="deploy")
 def deploy_command_group():
-    """Deploy 🍱 to a cluster"""
+    """Deploy to a cluster"""
     pass
 
 
@@ -139,12 +139,11 @@ def build_deploy_command() -> click.Command:
         version: str | None = None,
     ):
         """
-        Deploy a set of Dynamo services to a K8s cluster
+        Deploy a set of Dynamo services in a Bento to a K8s cluster
 
         \b
         BENTO is the serving target, it can be:
         - a tag to a Bento in local Bento store
-        - a folder containing a valid 'bentofile.yaml'
         - a path to a built Bento
         """
         from bentoml._internal.log import configure_server_logging
