@@ -54,7 +54,7 @@ def cloud_command():
     show_envvar=True,
     required=True,
 )
-def login(endpoint: str, api_token: str) -> None:  # type: ignore (not accessed)
+def login(endpoint: str, api_token: str) -> None:  # type: ignore
     """Connect to your Dynamo Server. You can find deployment instructions for this in our docs"""
     try:
         cloud_rest_client = RestApiClient(endpoint, api_token)
@@ -99,7 +99,7 @@ def login(endpoint: str, api_token: str) -> None:  # type: ignore (not accessed)
 
 
 @cloud_command.command()
-def current_context() -> None:  # type: ignore (not accessed)
+def current_context() -> None:  # type: ignore
     """Get current cloud context."""
     rich.print_json(
         data=bentoml_cattr.unstructure(CloudClientConfig.get_config().get_context())
@@ -107,7 +107,7 @@ def current_context() -> None:  # type: ignore (not accessed)
 
 
 @cloud_command.command()
-def list_context() -> None:  # type: ignore (not accessed)
+def list_context() -> None:  # type: ignore
     """List all available context."""
     config = CloudClientConfig.get_config()
     rich.print_json(data=bentoml_cattr.unstructure([i.name for i in config.contexts]))
@@ -115,7 +115,7 @@ def list_context() -> None:  # type: ignore (not accessed)
 
 @cloud_command.command()
 @click.argument("context_name", type=click.STRING)
-def update_current_context(context_name: str) -> None:  # type: ignore (not accessed)
+def update_current_context(context_name: str) -> None:  # type: ignore
     """Update current context"""
     ctx = CloudClientConfig.get_config().set_current_context(context_name)
     rich.print(f"Successfully switched to context: {ctx.name}")
