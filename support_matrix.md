@@ -32,7 +32,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | **Linux**              | x86_64, aarch64    | Supported, Experimental |
 | **macOS**              | x86_64, ARM64      | Supported*, Experimental|
 
-> **Note**: 
+> **Note**:
 > - **Linux**: **x86_64** architecture is supported.
 > - **macOS**: Dynamo is supported on **x86_64** architecture, but the installation requires building from binaries on **macOS**. There is no pre-built wheel for macOS.
 
