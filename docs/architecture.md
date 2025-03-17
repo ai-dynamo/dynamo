@@ -19,13 +19,13 @@ There are multi-faceted challenges:
 
 - *Extremely hard UX*: User experience is critical for distributed inference runtimes because managing large-scale inference systems is already complex, and poor usability further amplifies inefficiencies. Developers need a clear, intuitive way to define, optimize, and modify inference execution without wrestling with low-level infrastructure details. Without simple UX, inference runtimes remain inaccessible, prone to errors, and inefficient, slowing down model deployment and innovation. A modern distributed inference stack must be designed with usability at its core—empowering developers to scale AI effortlessly for agentic workflows while ensuring correctness and performance.
 
-- *GPU underutilization*: Traditional monolithic inference pipelines often leave GPUs idle due to the imbalance between prefill and decode stages. Prefill (where large prompt embeddings are generated) is highly compute-intensive, while decode (where tokens are generated) is latency-sensitive. A disaggregated approach is needed to separate prefill and decode, ensuring optimal GPU utilization and increasing overall throughput [DistServe](https://arxiv.org/abs/2401.09670).
+- *GPU underutilization*: Traditional monolithic inference pipelines often leave GPUs idle due to the imbalance between prefill and decode stages. Prefill (where large prompt embeddings are generated) is highly compute-intensive, while decode (where tokens are generated) is latency-sensitive. A disaggregated approach is needed to separate prefill and decode, ensuring optimal GPU utilization and increasing overall throughput ([DistServe](https://arxiv.org/abs/2401.09670)).
 
-- *Expensive KV cache re-computation*: When requests are not efficiently routed, KV caches (intermediate states of transformer model) often get flushed and recomputed, leading to wasted computation cycles and increased latency. KV-aware request routing eliminates redundant KV cache regeneration, significantly boosting efficiency.[DeepSeek](https://arxiv.org/abs/2501.12948)
+- *Expensive KV cache re-computation*: When requests are not efficiently routed, KV caches (intermediate states of transformer model) often get flushed and recomputed, leading to wasted computation cycles and increased latency. KV-aware request routing eliminates redundant KV cache regeneration, significantly boosting efficiency.([DeepSeek](https://arxiv.org/abs/2501.12948))
 
-- *Memory bottlenecks*: Large-scale inference workloads demand extensive KV cache storage, which can quickly overwhelm GPU memory capacity. KV cache offloading across memory hierarchies (HBM, DDR, NVMe or remote storage) enables models to scale beyond GPU memory limits and speeds up latency. [Mooncake](https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/mooncake-store-preview.md), [AIBrix](https://blog.vllm.ai/2025/02/21/aibrix-release.html), [LMCache](https://lmcache.ai/)
+- *Memory bottlenecks*: Large-scale inference workloads demand extensive KV cache storage, which can quickly overwhelm GPU memory capacity. KV cache offloading across memory hierarchies (HBM, DDR, NVMe or remote storage) enables models to scale beyond GPU memory limits and speeds up latency. ([Mooncake](https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/mooncake-store-preview.md), [AIBrix](https://blog.vllm.ai/2025/02/21/aibrix-release.html), [LMCache](https://lmcache.ai/))
 
-- *Fluctuating demand and inefficient GPU allocation*: Inference workloads are use case specific and are inherently dynamic—demand surges unpredictably, yet traditional serving stacks allocate GPUs statically. Dynamic GPU scheduling ensures that resources are allocated based on real-time demand, preventing over-provisioning and improving utilization [AzureTrace](https://github.com/Azure/AzurePublicDataset)
+- *Fluctuating demand and inefficient GPU allocation*: Inference workloads are use case specific and are inherently dynamic—demand surges unpredictably, yet traditional serving stacks allocate GPUs statically. Dynamic GPU scheduling ensures that resources are allocated based on real-time demand, preventing over-provisioning and improving utilization ([AzureTrace](https://github.com/Azure/AzurePublicDataset))
 
 - *Inefficient data transfer*: Distributed inference workloads introduce unique and highly dynamic communication patterns that differ fundamentally from training. Unlike training, where worker roles remain largely static, inference requires real-time worker scaling, dynamic load balancing, and adaptive memory management—necessitating a communication layer that can efficiently handle these evolving requirements. Existing contemporary libraries are built for static, synchronous operations and lack the dynamicity needed for inference serving. While UCX provides high-performance networking, it demands deep networking expertise to configure correctly, making it impractical for broad inference use cases. What developers really need is a library, optimized for inference workloads that can abstract heterogeneous memory (remote memory, or storage) and dynamically selects the best transport backend via a unified API.
 
@@ -36,8 +36,8 @@ To address the growing demands of distributed inference serving, NVIDIA introduc
 The following diagram outlines Dynamo's high-level architecture. To enable large-scale distributed and disaggregated inference serving, Dynamo includes four key features.
 
 - [Dynamo Disaggregated Serving](dynamo_disagg_serving.md)
-- [Dynamo Smart Router]()
-- [Dynamo Distributed KV Cache Manager]()
+- [Dynamo Smart Router](dynamo_kv_cache_routing.md)
+- [Dynamo Distributed KV Cache Manager](kv_cache_manager.md)
 - [NVIDIA Inference Transfer Library (NIXL)](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)
 
 Every component in the Dynamo architecture is independently scalable and portable. The API server can adapt to task-specific deployment. A smart router processes user requests to route them to the optimal worker for performance. Specifically, for Large Language Models (LLMs), Dynamo employs KV cache-aware routing, which directs requests to the worker with the highest cache hit rate while maintaining load balance, expediting decoding. This routing strategy leverages a KV cache manager that maintains a global radix tree registry for hit rate calculation. The KV cache manager also oversees a multi-tiered memory system, enabling rapid KV cache storage and eviction. This design results in substantial TTFT reductions, increased throughput, and the ability to process extensive context lengths.
@@ -90,30 +90,14 @@ Existing routing methods, including load-based routing, overlook the specific pr
 
 Dynamo's design enables KV cache offloading to system CPU memory, and will be extended to support SSDs and networked object storage in subsequent releases. In many accelerated servers, the CPU (system) memory is much larger than the GPU memory and fast enough to store and serve KV cache data. The following plot highlights the performance gains achieved through system memory offloading, even with prefix caching enabled via inference engine. In a scenario involving 10 multi-turn conversations with 80 users, system memory offloading resulted in a 40% improvement in TTFT, demonstrating additional benefits beyond basic prefix caching.
 
-### NIXL
-
-
 <figure>
     <img src='images/kv_manager.png' alt='missing' />
     <p>Tested with 100K requests to R1 using R1 Distilled Llama 70B FP8 on 2 nodes of H100s. Avg 4K ISL / 800 OSL</p>
 </figure>
 
-<!--
-![](images/nixl.png)[3]
-
-[3]: Tested with 80 users and 10 multi-turns for each user using 1K ISL / 100 OSL. R1 Distilled Llama 8B model running on single node H100s
--->
+### NIXL
 
 NIXL streamlines data transfer through simplified synchronization and batching and simplified source and destination abstractions. NIXL is able to abstract data movement across different types of memory and fast storage, whereas other data transfer libraries typically support only one tier of memory. These enhancements yield significant performance gains, accelerating both time-to-first-token (TTFT) and overall throughput.
-
-
-## Future plans
-
-The next release of Dynamo plans to open-source the KV cache manager as a standalone repository under the ai-dynamo organization. This release will provide functionality for storing and evicting KV cache across multiple memory tiers, including GPU, system memory, local SSD, and object storage.
-
-In that release, we will include an early version of the Dynamo Planner, another core component. This initial release will feature heuristic-based dynamic allocation of GPU workers between prefill and decode tasks, as well as model and fleet configuration adjustments based on user traffic patterns. Our vision is to evolve the Planner into a reinforcement learning platform, which will allow users to define objectives and then tune and optimize performance policies automatically based on system feedback.
-
-Dynamo is designed as the ideal next generation inference server, building upon the foundations of the Triton Inference Server. While Triton focuses on single-node inference deployments, we are committed to integrating its robust single-node capabilities into Dynamo within the next several months. We will maintain ongoing support for Triton while ensuring a seamless migration path for existing users to Dynamo once feature parity is achieved.
 
 ## Acknowledgement
 

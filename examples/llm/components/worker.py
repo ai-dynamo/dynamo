@@ -161,12 +161,12 @@ class VllmWorker:
                 is_remote_prefill=True,
                 remote_prefill_request_callback=self.get_remote_prefill_request_callback(),
             )
-            vllm_logger.info(
+            print(
                 f"Prefilling remotely for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
             )
         else:
             remote_prefill_params = None
-            vllm_logger.info(
+            print(
                 f"Prefilling locally for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
             )
 
