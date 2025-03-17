@@ -30,9 +30,6 @@ NVIDIA Dynamo is high-throughput low-latency inference framework designed for se
 
 Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach.
 
-> [!NOTE]
-> We are actively looking for feedback and collaborators.
-
 ## Quick Start
 
 ### Installation
@@ -51,13 +48,20 @@ source dynamo-venv/bin/activate
 uv pip install ai-dynamo[all]
 ```
 
-### Serving and Interactive with an LLM Locally
+### Running and Interacting with an LLM Locally
+
+To run a model and interact with it locally you can call `dynamo
+run` with a hugging face model. `dynamo run` supports several backends
+including: `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
 
 ```
 dynamo run out=vllm deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 ```
 
-#### Expected Output
+Once launched you'll be able to directly chat with the model from the
+command line.
+
+#### Example Output
 ```
 dynamo run out=vllm deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 2025-03-17T14:03:14.122652Z  INFO dynamo_run: CPU mode. Rebuild with `--features cuda|metal|vulkan` for better performance
@@ -74,6 +78,76 @@ Capturing CUDA graph shapes: 100%|██████████| 35/35 [00:17<0
 ✔ User · Hello, how are you?
 Okay, so I'm trying to figure out how to respond to the user's greeting. They said, "Hello, how are you?" and then followed it with "Hello! I'm just a program, but thanks for asking." Hmm, I need to come up with a suitable reply. ...
 ```
+
+### Serving a Distributed LLM Inference Solution
+
+> [!NOTE]
+> The following assumes docker and docker-compose are installed.
+
+
+Dynamo provides a simple way to spin up a local set of inference
+components including:
+
+- **OpenAI Compatible Frontend** – High performance OpenAI compatible http api server written in Rust.
+- **Basic and Kv Aware Router** – Route and load balance traffic to a set of workers.
+- **Workers** – Set of pre-configured LLM serving engines.
+
+To run a minimal configuration you can use a pre-configured
+example.
+
+First start the Dynamo Distributed Runtime infrastructure
+services:
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+#### Example Output
+
+```bash
+[+] Running 3/3
+ ✔ Network deploy_default          Created   0.1s
+ ✔ Container deploy-etcd-server-1  Started   0.7s
+ ✔ Container deploy-nats-server-1  Started   0.7s
+```
+
+Next serve a minimal configuration with an http server, basic
+round-robin router, and a single worker.
+
+```bash
+
+cd examples/llm
+
+dynamo serve graphs.agg:Frontend -f configs/agg.yaml
+
+```
+<details>
+#### Example Output
+```bash
+Added new chat model deepseek-ai/DeepSeek-R1-Distill-Llama-8B
++------------+------------------------------------------+-----------+-----------+------------------+
+| MODEL TYPE | MODEL NAME                               | NAMESPACE | COMPONENT | ENDPOINT         |
++------------+------------------------------------------+-----------+-----------+------------------+
+| chat       | deepseek-ai/DeepSeek-R1-Distill-Llama-8B | dynamo    | Processor | chat/completions |
++------------+------------------------------------------+-----------+-----------+------------------+
+2025-03-17T14:48:51.223378Z  INFO dynamo_llm::http::service::discovery: added Chat model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+2025-03-17T14:48:51.811831Z  INFO dynamo_runtime::pipeline::network::tcp::server: tcp transport service on 10.20.56.81:44999
+2025-03-17T14:48:51.812385Z  INFO dynamo_llm::http::service::discovery: added Chat model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+2025-03-17T14:48:51.812451Z  INFO dynamo_llm::http::service::service_v2: Starting HTTP service on: 0.0.0.0:8000 address="0.0.0.0:8000"
+...
+```
+
+</details>
+
+Finally Send a Request
+
+```bash
+curl -N -d '{"model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", \
+             "messages":[{"role":"user", "content": "Hello, how are you?" }]}' \
+			 -H 'Content-Type: application/json' http://localhost:8000/v1/chat/completions
+```
+
+
 
 ####
 
