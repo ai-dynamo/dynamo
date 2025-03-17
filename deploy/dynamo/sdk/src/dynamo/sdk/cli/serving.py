@@ -197,16 +197,12 @@ def create_dynamo_watcher(
 
     # Get service-specific environment variables from DYNAMO_SERVICE_ENVS
     if "DYNAMO_SERVICE_ENVS" in os.environ:
-        print(f"DYNAMO_SERVICE_ENVS: {os.environ['DYNAMO_SERVICE_ENVS']}")
         try:
             service_envs = json.loads(os.environ["DYNAMO_SERVICE_ENVS"])
             if svc.name in service_envs:
                 service_args = service_envs[svc.name].get("ServiceArgs", {})
                 if "envs" in service_args:
                     worker_env.update(service_args["envs"])
-                    print(
-                        f"Added service-specific environment variables for {svc.name}"
-                    )
                     logger.info(
                         f"Added service-specific environment variables for {svc.name}"
                     )
@@ -219,7 +215,7 @@ def create_dynamo_watcher(
         args=args,
         numprocesses=num_workers,
         working_dir=working_dir,
-        env=worker_env,  # Use updated environment with both configs and service envs
+        env=worker_env,  
     )
 
     return watcher, socket, uri
@@ -319,7 +315,7 @@ def serve_http(
 
     if service_name and service_name != svc.name:
         svc = svc.find_dependent_by_name(service_name)
-    # We want manual GPU allocation for maximum flexibility when serving locally
+    # Disabling Bento manual GPU allocation for maximum flexibility when serving locally
     os.environ["BENTOML_DISABLE_GPU_ALLOCATION"] = "1"
     num_workers, worker_envs = allocator.get_worker_env(svc)
     server_on_deployment(svc)
