@@ -46,7 +46,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 |**NIXL**          |    0.1.0    |
 |**CompoundAI**    |    0.0.11   |
 
-> **Note***: The specific version of TensorRT-LLM that will be supported by Dynamo is yet to be determined (TBD). 
+> **Note***: The specific version of TensorRT-LLM that will be supported by Dynamo is yet to be determined (TBD).
 
 ## Build Support
 **Dynamo** currently provides build support in the following ways:
@@ -75,8 +75,6 @@ pip install ai-dynamo vllm==0.7.2+dynamo
 pip install ai-dynamo nixl vllm==0.7.2+dynamo
 ```
 > **Note***: NIXL support is available only for Python 3.12.
-
-### Steps for Container Build in local:
 
 ### Steps for Container Build in Local:
 
