@@ -1,4 +1,4 @@
-# Documentation for the Dynamo SDK and CLI
+# Documentation for the Dynamo SDK
 
 # Table of Contents
 
