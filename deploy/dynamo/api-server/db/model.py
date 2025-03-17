@@ -83,16 +83,16 @@ class DynamoNimVersion(DynamoNimVersionBase, table=True):
     id: str = SQLField(default_factory=new_compound_entity_id, primary_key=True)
 
     # Override the datetime fields to explicitly use timezone-naive datetimes
-    created_at: datetime = SQLField(
-        sa_column=Column(DateTime, nullable=False, default=utc_now_naive)
-    )
-    updated_at: datetime = SQLField(
-        sa_column=Column(
-            DateTime, nullable=False, default=utc_now_naive, onupdate=utc_now_naive
-        )
-    )
-    upload_started_at: datetime = SQLField(sa_column=Column(DateTime, nullable=True))
-    upload_finished_at: datetime = SQLField(sa_column=Column(DateTime, nullable=True))
+    # created_at: datetime = SQLField(
+    #     sa_column=Column(DateTime, nullable=False, default=utc_now_naive)
+    # )
+    # updated_at: datetime = SQLField(
+    #     sa_column=Column(
+    #         DateTime, nullable=False, default=utc_now_naive, onupdate=utc_now_naive
+    #     )
+    # )
+    # upload_started_at: datetime = SQLField(sa_column=Column(DateTime, nullable=True))
+    # upload_finished_at: datetime = SQLField(sa_column=Column(DateTime, nullable=True))
     build_at: datetime = SQLField(sa_column=Column(DateTime, nullable=False))
 
     dynamo_nim_id: str = SQLField(foreign_key="dynamonim.id")
@@ -106,12 +106,12 @@ class DynamoNim(DynamoNimBase, table=True):
     id: str = SQLField(default_factory=new_compound_entity_id, primary_key=True)
 
     # Override the datetime fields to explicitly use timezone-naive datetimes
-    created_at: datetime = SQLField(
-        sa_column=Column(DateTime, nullable=False, default=utc_now_naive)
-    )
-    updated_at: datetime = SQLField(
-        sa_column=Column(
-            DateTime, nullable=False, default=utc_now_naive, onupdate=utc_now_naive
-        )
-    )
-    deleted_at: datetime = SQLField(sa_column=Column(DateTime, nullable=True))
+    # created_at: datetime = SQLField(
+    #     sa_column=Column(DateTime, nullable=False, default=utc_now_naive)
+    # )
+    # updated_at: datetime = SQLField(
+    #     sa_column=Column(
+    #         DateTime, nullable=False, default=utc_now_naive, onupdate=utc_now_naive
+    #     )
+    # )
+    # deleted_at: datetime = SQLField(sa_column=Column(DateTime, nullable=True))
