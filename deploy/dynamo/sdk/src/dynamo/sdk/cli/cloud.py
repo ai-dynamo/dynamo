@@ -1,29 +1,39 @@
+#  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-License-Identifier: Apache-2.0
+#  #
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#  #
+#  http://www.apache.org/licenses/LICENSE-2.0
+#  #
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
 from __future__ import annotations
 
-import contextlib
 import sys
-import urllib.parse
-import webbrowser
 
 import click
 import rich
-
 from bentoml._internal.cloud.client import RestApiClient
-from bentoml._internal.cloud.config import DEFAULT_ENDPOINT
-from bentoml._internal.cloud.config import CloudClientConfig
-from bentoml._internal.cloud.config import CloudClientContext
+from bentoml._internal.cloud.config import (
+    DEFAULT_ENDPOINT,
+    CloudClientConfig,
+    CloudClientContext,
+)
 from bentoml._internal.configuration.containers import BentoMLContainer
-from bentoml._internal.utils import reserve_free_port
 from bentoml._internal.utils.cattr import bentoml_cattr
-from bentoml.exceptions import CLIException
-from bentoml.exceptions import CloudRESTApiClientError
-from bentoml_cli.auth_server import AuthCallbackHttpServer
+from bentoml.exceptions import CLIException, CloudRESTApiClientError
 from bentoml_cli.utils import BentoMLCommandGroup
 
 
 @click.group(name="cloud", cls=BentoMLCommandGroup)
 def cloud_command():
-    """BentoCloud Subcommands Groups."""
+    """Dynamo Cloud Subcommands Groups."""
 
 
 @cloud_command.command()
