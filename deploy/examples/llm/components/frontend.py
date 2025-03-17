@@ -24,6 +24,7 @@ from dynamo.sdk import depends, service
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
 
+
 class FrontendConfig(BaseModel):
     model: str
     endpoint: str

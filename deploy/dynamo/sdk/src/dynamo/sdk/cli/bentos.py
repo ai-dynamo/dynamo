@@ -9,25 +9,20 @@ import click
 import click_option_group as cog
 import rich
 import yaml
+from bentoml_cli.utils import is_valid_bento_name, is_valid_bento_tag
 from rich.syntax import Syntax
 from rich.table import Table
-from simple_di import Provide
-from simple_di import inject
-
-from bentoml_cli.utils import is_valid_bento_name
-from bentoml_cli.utils import is_valid_bento_tag
+from simple_di import Provide, inject
 
 if t.TYPE_CHECKING:
-    from click import Context
-    from click import Parameter
-
     from bentoml._internal.bento import BentoStore
     from bentoml._internal.cloud import BentoCloudClient
     from bentoml._internal.container import DefaultBuilder
+    from click import Context, Parameter
 
 
 DYNAMO_FIGLET = """
-██████╗ ██╗   ██╗███╗   ██╗ █████╗ ███╗   ███╗ ██████╗ 
+██████╗ ██╗   ██╗███╗   ██╗ █████╗ ███╗   ███╗ ██████╗
 ██╔══██╗╚██╗ ██╔╝████╗  ██║██╔══██╗████╗ ████║██╔═══██╗
 ██║  ██║ ╚████╔╝ ██╔██╗ ██║███████║██╔████╔██║██║   ██║
 ██║  ██║  ╚██╔╝  ██║╚██╗██║██╔══██║██║╚██╔╝██║██║   ██║
@@ -103,8 +98,7 @@ def bento_management_commands() -> click.Group:
     from bentoml._internal.configuration import get_quiet_mode
     from bentoml._internal.configuration.containers import BentoMLContainer
     from bentoml._internal.utils import human_readable_size
-    from bentoml.bentos import build_bentofile
-    from bentoml.bentos import import_bento
+    from bentoml.bentos import build_bentofile, import_bento
     from bentoml_cli.utils import BentoMLCommandGroup
 
     @click.group(cls=BentoMLCommandGroup)
@@ -449,7 +443,7 @@ def bento_management_commands() -> click.Group:
         )
 
         containerize_cmd = f"dynamo containerize {bento.tag}"
-        push_cmd = f"dynamo push {bento.tag}"
+        # push_cmd = f"dynamo push {bento.tag}"
 
         # NOTE: Don't remove the return statement here, since we will need this
         # for usage stats collection if users are opt-in.
