@@ -98,7 +98,7 @@ curl -X POST http://localhost:3000/generate \
     -d '{"text": "federer"}'
 ```
 
-You should see the following output:
+You should see the following output
 
 ```bash
 federer-mid-back
