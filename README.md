@@ -43,7 +43,17 @@ accelerating data transfers
 
 ## Quick Start
 
-TODO add quick start guide here
+### Serving an LLM Locally with Dynamo
+
+To get started with Dynamo you can install it via pip or your favorite
+virtual environment setup. Here we use `uv`.
+
+```bash
+uv venv --python 3.12 dynamo-venv
+source dynamo-venv/bin/activate
+uv pip install
+```
+
 
 ## Building Dynamo
 
