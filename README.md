@@ -21,16 +21,16 @@ limitations under the License.
   <tr>
     <td align="left">
       <a href="https://opensource.org/licenses/Apache-2.0">
-        <img src="https://img.shields.io/badge/Your-Badge-blue" alt="License">
+        <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License">
       </a>
     </td>
     <td align="left">
-      <a href="https://opensource.org/licenses/Apache-2.0">
+      <a href="https://github.com/ai-dynamo/dynamo/releases/latest">
         <img src="https://img.shields.io/github/v/release/ai-dynamo/dynamo" alt="GitHub Release">
       </a>
     </td>
     <td align="right">
-      <a href="https://github.com/ai-dynamo/dynamo/releases/latest">
+      <a href="https://discord.gg/nvidia-dynamo">
         <img src="https://discord.com/api/guilds/1351250028588437504/widget.png?style=banner2" alt="Discord">
       </a>
     </td>
