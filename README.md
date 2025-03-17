@@ -137,7 +137,7 @@ Added new chat model deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 ...
 ```
 
-Finally Send a Request
+Send a Request
 
 ```bash
 curl -N -d '{"model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", \
@@ -173,87 +173,6 @@ curl -N -d '{"model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", \
 }
 ```
 
-
-####
-
-## Building Dynamo
-
-### Requirements
-
-Dynamo development and examples are container based.
-
-* [Docker](https://docs.docker.com/get-started/get-docker/)
-* [buildx](https://github.com/docker/buildx)
-
-### Development
-
-You can build the Dynamo container using the build scripts
-in `container/` (or directly with `docker build`).
-
-We provide 2 types of builds:
-
-1. `VLLM` which includes our VLLM backend using new NIXL communication library.
-2. `TENSORRTLLM` which includes our TRT-LLM backend
-
-For example, if you want to build a container for the `VLLM` backend you can run
-
-<!--pytest.mark.skip-->
-```bash
-./container/build.sh
-```
-
-Please see the instructions in the corresponding example for specific build instructions.
-
-## Running Dynamo for Local Testing and Development
-
-You can run the Dynamo container using the run scripts in
-`container/` (or directly with `docker run`).
-
-The run script offers a few common workflows:
-
-1. Running a command in a container and exiting.
-
-<!--pytest.mark.skip-->
-```bash
-./container/run.sh -- python3 -c "import dynamo.runtime; help(dynamo.runtime)"
-```
-<!--
-
-# This tests the above the line but from within the container
-# using pytest-codeblocks
-
-```bash
-python3 -c "import dynamo.runtime; help(dynamo.runtime)"
-```
--- >
-
-2. Starting an interactive shell.
-
-<!--pytest.mark.skip-->
-```bash
-./container/run.sh -it
-```
-
-3. Mounting the local workspace and Starting an interactive shell.
-
-<!--pytest.mark.skip-->
-```bash
-./container/run.sh -it --mount-workspace
-```
-
-The last command also passes common environment variables ( `-e
-HF_TOKEN` ) and mounts common directories such as `/tmp:/tmp`,
-`/mnt:/mnt`.
-
-Please see the instructions in the corresponding example for specific
-deployment instructions.
-
-## Rust Based Runtime
-
-Dynamo has a new rust based distributed runtime with
-implementation under development. The rust based runtime enables
-serving arbitrary python code as well as native rust. Please note the
-APIs are subject to change.
 
 ### Hello World
 
