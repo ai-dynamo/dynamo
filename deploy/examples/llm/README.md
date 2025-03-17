@@ -36,23 +36,22 @@ Distributed deployment where prefill and decode are done by separate workers tha
 ```mermaid
 sequenceDiagram
     participant D as VllmWorker
-    participant Q as PrefillQueue 
+    participant Q as PrefillQueue
     participant P as PrefillWorker
-    
+
     Note over D: Request is routed to decode
     D->>D: Decide if prefill should be done locally or remotely
-    
+
         D->>D: Allocate KV blocks
         D->>Q: Put RemotePrefillRequest on the queue
-        
+
         P->>Q: Pull request from the queue
         P-->>D: Read cached KVs from Decode
-        
+
         D->>D: Decode other requests
         P->>P: Run prefill
         P-->>D: Write prefilled KVs into allocated blocks
         P->>D: Send completion notification
-        
         Note over D: Notification received when prefill is done
         D->>D: Schedule decoding
 ```
