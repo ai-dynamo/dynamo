@@ -38,7 +38,7 @@ The Dynamo KV Cache Manager is designed to be framework-agnostic to support vari
 
 ## V1 Implementation
 
-Dynamo Distributed KV Manager has two implementations: V1 and V2. V1 serves as a proof-of-concept design, providing a lightweight KV offloading framework with simple, asynchronous APIs—GET() and PUT()—allowing inference engines to offload KV caches efficiently. These APIs are designed to be fully asynchronous, enabling seamless overlap with inference computation.
+Dynamo Distributed KV Manager has two implementations: V1 and V2. V1 serves as a proof-of-concept design, providing a lightweight KV offloading framework with simple, asynchronous APIs — GET() and PUT(), allowing inference engines to offload KV caches efficiently. These APIs are designed to be fully asynchronous, enabling seamless overlap with inference computation.
 
 <figure>
     <img src='images/kv_cache_mgr_design.png' alt='missing' />
