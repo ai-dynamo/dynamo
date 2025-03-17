@@ -36,6 +36,8 @@ communication and abstracts complexity of data exchange across heterogenous devi
 accelerating data transfers
 * **Memory Manager**: An engine that intelligently offloads and reloads inference data (KV cache) to and from lower-cost memory and storage devices using NVIDIA NIXL without impacting user experiences
 
+
+
 > [!NOTE]
 > This project is currently in the alpha / experimental /
 > rapid-prototyping stage and we are actively looking for feedback and
