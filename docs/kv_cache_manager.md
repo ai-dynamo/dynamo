@@ -33,7 +33,7 @@ The Dynamo KV Cache Manager is designed to be framework-agnostic to support vari
     - Registration creates a two-way communication queue between the runtime and the pool.
 
 - Management and transfer granularities
-    - KV blocks are managed in block level (group of tokens) however transfer of KV states can be performed at layer level
+    - KV blocks are managed in block level (group of tokens) however transfer of KV states can be performed at layer level.
     - If multiple tokens are needed to be fetched, then these layer transfers are parallelized to ensure maximum throughput from the KV pool.
 
 ## V1 Implementation
