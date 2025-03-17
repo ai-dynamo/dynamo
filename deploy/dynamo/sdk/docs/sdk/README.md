@@ -42,7 +42,7 @@ A Service is a core building block for a project. You can think of it as a logic
 ```
 
 Key configuration options:
-1. `dynamo`: Dictionary that defines the Dynamo configuration and enables/disables it. When enabled, a dynamo worker is created under the hood which can register with the Distributed Runtime [TODO:link]
+1. `dynamo`: Dictionary that defines the Dynamo configuration and enables/disables it. When enabled, a dynamo worker is created under the hood which can register with the [Distributed Runtime](../../../../../docs/architecture.md)
 2. `resources`: Dictionary defining resource requirements. Used primarily when deploying to K8s, but gpu is also used for local execution.
 3. `workers`: Number of parallel instances of the service to spin up.
 
