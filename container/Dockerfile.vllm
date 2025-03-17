@@ -33,59 +33,65 @@ ARG PYTHON_VERSION=3.12
 ARG NSYS_URL=https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_1/
 ARG NSYS_PKG=NsightSystems-linux-cli-public-2025.1.1.131-3554042.deb
 
-RUN apt-get update -y && apt-get -y install curl \
-    git \
-    libnuma-dev \
-    numactl \
-    wget \
-    autotools-dev \
-    automake \
-    libtool \
-    libz-dev \
-    libiberty-dev \
-    flex \
-    build-essential \
-    cmake \
-    libibverbs-dev \
-    libgoogle-glog-dev \
-    libgtest-dev \
-    libjsoncpp-dev \
-    libpython3-dev \
-    libboost-all-dev \
-    libssl-dev \
-    libgrpc-dev \
-    libgrpc++-dev \
-    libprotobuf-dev \
-    protobuf-compiler-grpc \
-    pybind11-dev \
-    python3-full \
-    python3-pip \
-    python3-numpy \
-    etcd-server \
-    net-tools \
-    pciutils \
-    libpci-dev \
-    vim \
-    tmux \
-    screen \
-    ibverbs-utils \
-    libibmad-dev
+RUN apt-get update -y && \
+    apt-get -y --no-install-recommends install \
+        curl \
+        git \
+        libnuma-dev \
+        numactl \
+        wget \
+        autotools-dev \
+        automake \
+        libtool \
+        libz-dev \
+        libiberty-dev \
+        flex \
+        build-essential \
+        cmake \
+        libibverbs-dev \
+        libgoogle-glog-dev \
+        libgtest-dev \
+        libjsoncpp-dev \
+        libpython3-dev \
+        libboost-all-dev \
+        libssl-dev \
+        libgrpc-dev \
+        libgrpc++-dev \
+        libprotobuf-dev \
+        protobuf-compiler-grpc \
+        pybind11-dev \
+        python3-full \
+        python3-pip \
+        python3-numpy \
+        etcd-server \
+        net-tools \
+        pciutils \
+        libpci-dev \
+        vim \
+        tmux \
+        screen \
+        ibverbs-utils \
+        libibmad-dev
 
-RUN apt-get install -y linux-tools-common linux-tools-generic ethtool iproute2
-RUN apt-get install -y dkms linux-headers-generic
-RUN apt-get install -y meson ninja-build uuid-dev gdb
+RUN apt-get install -y --no-install-recommends linux-tools-common linux-tools-generic ethtool iproute2
+RUN apt-get install -y --no-install-recommends dkms linux-headers-generic
+RUN apt-get install -y --no-install-recommends meson ninja-build uuid-dev gdb
 
-RUN apt install -y libglib2.0-0
-RUN wget ${NSYS_URL}${NSYS_PKG} &&\
-    apt install -y ./${NSYS_PKG} &&\
+RUN apt install -y --no-install-recommends libglib2.0-0
+RUN wget --tries=3 --waitretry=5 ${NSYS_URL}${NSYS_PKG} &&\
+    apt install -y --no-install-recommends ./${NSYS_PKG} &&\
     rm ${NSYS_PKG}
 
 RUN cd /usr/local/src && \
     curl -fSsL "https://content.mellanox.com/ofed/MLNX_OFED-${MOFED_VERSION}/MLNX_OFED_LINUX-${MOFED_VERSION}-ubuntu24.04-x86_64.tgz" -o mofed.tgz && \
     tar -xf /usr/local/src/mofed.tgz && \
     cd MLNX_OFED_LINUX-* && \
-    apt-get update && apt-get install -y --no-install-recommends \
-    ./DEBS/libibverbs* ./DEBS/ibverbs-providers* ./DEBS/librdmacm* ./DEBS/libibumad* && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ./DEBS/libibverbs* \
+        ./DEBS/ibverbs-providers* \
+        ./DEBS/librdmacm* \
+        ./DEBS/libibumad* && \
     rm -rf /var/lib/apt/lists/* /usr/local/src/* mofed.tgz
 
 ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/cuda/lib64 \
@@ -102,24 +108,26 @@ RUN ldconfig
 
 ARG UCX_VERSION=v1.18.0
 
-RUN cd /usr/local/src && \
-    curl -fSsL "https://github.com/openucx/ucx/tarball/${UCX_VERSION}" | tar xz && \
-    cd openucx-ucx* && \
-    ./autogen.sh && ./configure     \
-    --enable-shared             \
-    --disable-static            \
-    --disable-doxygen-doc       \
-    --enable-optimizations      \
-    --enable-cma                \
-    --enable-devel-headers      \
-    --with-cuda=/usr/local/cuda \
-    --with-verbs                \
-    --with-dm                   \
-    --with-gdrcopy=/usr/local   \
-    --enable-mt                 \
-    --with-mlx5-dv &&           \
-    make -j &&                      \
-    make -j install-strip &&        \
+# UCX scripts use git history and thus we need to clone the repo
+RUN cd /usr/local/src &&\
+    git clone --branch="${UCX_VERSION}" --single-branch https://github.com/openucx/ucx.git &&\
+    cd ucx &&\
+    ./autogen.sh &&\
+    ./configure \
+        --enable-shared \
+        --disable-static \
+        --disable-doxygen-doc \
+        --enable-optimizations \
+        --enable-cma \
+        --enable-devel-headers \
+        --with-cuda=/usr/local/cuda \
+        --with-verbs \
+        --with-dm \
+        --with-gdrcopy=/usr/local \
+        --enable-mt \
+        --with-mlx5-dv &&\
+    make -j && \
+    make -j install-strip &&\
     ldconfig
 
 ENV LD_LIBRARY_PATH=/usr/lib:$LD_LIBRARY_PATH
@@ -156,13 +164,20 @@ RUN ls -l /usr/local/nixl/include/
 RUN ls /opt/nixl
 
 # Install utilities
-RUN apt update -y && apt install -y git wget curl nvtop tmux vim
+RUN apt update -y && apt install -y --no-install-recommends \
+    git \
+    wget \
+    curl \
+    nvtop \
+    tmux \
+    vim
 # nats
-RUN wget https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-amd64.deb && \
-    dpkg -i nats-server-v2.10.24-amd64.deb && rm nats-server-v2.10.24-amd64.deb
+RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-amd64.deb && \
+    dpkg -i nats-server-v2.10.24-amd64.deb && \
+    rm nats-server-v2.10.24-amd64.deb
 # etcd
 ENV ETCD_VERSION="v3.5.18"
-RUN wget https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-amd64.tar.gz -O /tmp/etcd.tar.gz && \
+RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-amd64.tar.gz -O /tmp/etcd.tar.gz && \
     mkdir -p /usr/local/bin/etcd && \
     tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
     rm /tmp/etcd.tar.gz
@@ -182,7 +197,7 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 # Common dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
+    uv pip install --no-cache --requirement /tmp/requirements.txt
 
 # Install patched vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
@@ -191,7 +206,7 @@ ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
 ARG VLLM_VERSION_PATCH_SUFFIX="dynamo"
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     mkdir /tmp/vllm && \
-    uv pip install pip wheel && \
+    uv pip install --no-cache pip wheel && \
     python -m pip download --only-binary=:all: --no-deps --dest /tmp/vllm vllm==v${VLLM_REF} && \
     cd /tmp/vllm && \
     wheel unpack *.whl && \
@@ -203,11 +218,11 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     sed -i "s/vllm-${VLLM_REF}/vllm-${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}/g" vllm-${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}.dist-info/RECORD && \
     mkdir -p /workspace/dist && \
     wheel pack . --dest-dir /workspace/dist && \
-    uv pip install /workspace/dist/vllm-*.whl
+    uv pip install --no-cache /workspace/dist/vllm-*.whl
 
 # Install test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
+    uv pip install --no-cache --requirement /tmp/requirements.txt
 
 # ### MISC UTILITY SETUP ###
 
@@ -223,12 +238,12 @@ RUN ln -sf /bin/bash /bin/sh
 
 # Rust build/dev dependencies
 RUN apt update -y && \
-    apt install -y \
-    build-essential \
-    protobuf-compiler \
-    cmake \
-    libssl-dev \
-    pkg-config && \
+    apt install -y --no-install-recommends \
+        build-essential \
+        protobuf-compiler \
+        cmake \
+        libssl-dev \
+        pkg-config && \
     curl https://sh.rustup.rs -sSf | bash -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN rustup toolchain install 1.85.0-x86_64-unknown-linux-gnu
@@ -265,10 +280,10 @@ COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 RUN source /opt/dynamo/venv/bin/activate && \
     cd /workspace/lib/bindings/python && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
+    uv pip install --no-cache /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     cd /workspace && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/ai_dynamo*any.whl
+    uv pip install --no-cache /workspace/dist/ai_dynamo*any.whl
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
@@ -304,7 +319,14 @@ ARG GENAI_PERF_TAG
 WORKDIR /workspace
 
 # Build and install Perf Analyzer for benchmarking
-RUN apt-get update -y && apt-get -y install cmake g++ libssl-dev python3 rapidjson-dev zlib1g-dev
+RUN apt-get update -y && \
+    apt-get -y --no-install-recommends install \
+        cmake \
+        g++ \
+        libssl-dev \
+        python3 \
+        rapidjson-dev \
+        zlib1g-dev
 RUN git clone https://github.com/triton-inference-server/perf_analyzer.git
 RUN git -C perf_analyzer checkout ${GENAI_PERF_TAG}
 RUN mkdir perf_analyzer/build
@@ -324,8 +346,8 @@ COPY --from=perf_analyzer /workspace/bin/perf-analyzer-build /workspace/benchmar
 
 # Install genai-perf for benchmarking
 ENV PATH="/workspace/benchmarking:${PATH}"
-RUN uv pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
-RUN uv pip uninstall tritonclient
+RUN uv pip install --no-cache "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf" &&\
+    uv pip uninstall tritonclient
 
 COPY . /workspace
 
@@ -357,7 +379,7 @@ RUN apt-get update && \
 
 # Install the wheels
 COPY --from=build /workspace/dist/*.whl wheelhouse/
-RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
+RUN uv pip install --no-cache ai-dynamo[vllm] --find-links wheelhouse && \
     rm -r wheelhouse
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
