@@ -188,18 +188,34 @@ def create_dynamo_watcher(
     if worker_envs:
         args.extend(["--worker-env", json.dumps(worker_envs)])
 
-    # Update env to include ServiceConfig
+    # Update env to include ServiceConfig and service-specific environment variables
     worker_env = env.copy() if env else {}
+
+    # Pass through the main service config
     if "DYNAMO_SERVICE_CONFIG" in os.environ:
         worker_env["DYNAMO_SERVICE_CONFIG"] = os.environ["DYNAMO_SERVICE_CONFIG"]
 
-    # Create the watcher with dependency map in environment
+    # Get service-specific environment variables from DYNAMO_SERVICE_ENVS
+    if "DYNAMO_SERVICE_ENVS" in os.environ:
+        try:
+            service_envs = json.loads(os.environ["DYNAMO_SERVICE_ENVS"])
+            if svc.name in service_envs:
+                service_args = service_envs[svc.name].get("ServiceArgs", {})
+                if "envs" in service_args:
+                    worker_env.update(service_args["envs"])
+                    logger.info(
+                        f"Added service-specific environment variables for {svc.name}"
+                    )
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse DYNAMO_SERVICE_ENVS: {e}")
+
+    # Create the watcher with updated environment
     watcher = create_watcher(
         name=f"dynamo_service_{svc.name}",
         args=args,
         numprocesses=num_workers,
         working_dir=working_dir,
-        env=worker_env,  # Use updated environment
+        env=worker_env,
     )
 
     return watcher, socket, uri

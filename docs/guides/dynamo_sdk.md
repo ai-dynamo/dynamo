@@ -98,11 +98,11 @@ curl -X POST http://localhost:3000/generate \
     -d '{"text": "federer"}'
 ```
 
-You should see the following output
+You should see the following output:
 
 ```bash
 federer-mid-back
 ```
 
-You can find in-depth documentation for the Dynamo SDK [here](./docs/sdk/README.md) and the Dynamo CLI [here](./docs/cli/README.md)
+You can find in-depth documentation for the Dynamo SDK [here](../../deploy/dynamo/sdk/docs/sdk/README.md) and the Dynamo CLI [here](../../deploy/dynamo/sdk/docs/cli/README.md)
 
