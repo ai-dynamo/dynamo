@@ -1,11 +1,11 @@
 # Dynamo Support Matrix
 
-This document provides the support matrix for Dynamo, including build,  hardware and software, like GPU architectures, and Python versions.
+This document provides the support matrix for Dynamo, including hardware, software and build instructions.
 
 ## Hardware Compatibility
 
 
-| **CPU Architecture**  | **Supported** |
+| **CPU Architecture**  | **Status**    |
 |-----------------------|---------------|
 | **x86_64**            | Supported     |
 | **ARM64**             | Experimental  |
