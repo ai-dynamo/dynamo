@@ -57,24 +57,6 @@ including: `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
 dynamo run out=vllm deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 ```
 
-Once launched you'll be able to chat directly with the model from the
-command line.
-
-#### Example Output
-```
-dynamo run out=vllm deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-2025-03-17T14:03:14.122652Z  INFO dynamo_run: CPU mode. Rebuild with `--features cuda|metal|vulkan` for better performance
-2025-03-17T14:03:14.124227Z  INFO candle_hf_hub: Token file not found "/root/.cache/huggingface/token"
-INFO 03-17 14:03:16 __init__.py:190] Automatically detected platform cuda.
-INFO 03-17 14:03:16 nixl.py:16] NIXL is available
-Loading safetensors checkpoint shards:   0% Completed | 0/2 [00:00<?, ?it/s]
-Loading safetensors checkpoint shards:  50% Completed | 1/2 [00:01<00:01,  1.02s/it]
-Loading safetensors checkpoint shards: 100% Completed | 2/2 [00:02<00:00,  1.15s/it]
-Loading safetensors checkpoint shards: 100% Completed | 2/2 [00:02<00:00,  1.14s/it]
-Capturing CUDA graph shapes: 100%|██████████| 35/35 [00:17<00:00,  2.04it/s]
-2025-03-17T14:03:50.190381Z  INFO dynamo_run::input::text: Ctrl-c to exit
-```
-
 ```
 ? User › Hello, how are you?
 ✔ User · Hello, how are you?
@@ -104,40 +86,14 @@ First start the Dynamo Distributed Runtime services:
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-#### Example Output
-
-```bash
-[+] Running 3/3
- ✔ Network deploy_default          Created   0.1s
- ✔ Container deploy-etcd-server-1  Started   0.7s
- ✔ Container deploy-nats-server-1  Started   0.7s
-```
-
-
 #### Start Dynamo LLM Serving Components
 
 Next serve a minimal configuration with an http server, basic
 round-robin router, and a single worker.
 
-
 ```bash
 cd examples/llm
 dynamo serve graphs.agg:Frontend -f configs/agg.yaml
-```
-
-#### Example Output
-```bash
-Added new chat model deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-+------------+------------------------------------------+-----------+-----------+------------------+
-| MODEL TYPE | MODEL NAME                               | NAMESPACE | COMPONENT | ENDPOINT         |
-+------------+------------------------------------------+-----------+-----------+------------------+
-| chat       | deepseek-ai/DeepSeek-R1-Distill-Llama-8B | dynamo    | Processor | chat/completions |
-+------------+------------------------------------------+-----------+-----------+------------------+
-2025-03-17T14:48:51.223378Z  INFO dynamo_llm::http::service::discovery: added Chat model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-2025-03-17T14:48:51.811831Z  INFO dynamo_runtime::pipeline::network::tcp::server: tcp transport service on 10.20.56.81:44999
-2025-03-17T14:48:51.812385Z  INFO dynamo_llm::http::service::discovery: added Chat model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-2025-03-17T14:48:51.812451Z  INFO dynamo_llm::http::service::service_v2: Starting HTTP service on: 0.0.0.0:8000 address="0.0.0.0:8000"
-...
 ```
 
 #### Send a Request
@@ -154,34 +110,6 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
     "stream":false,
     "max_tokens": 300
   }' | jq
-```
-
-#### Example Output
-```
-{
-  "id": "5a8b4199-d005-47e2-83ed-bd8a6ec64b43",
-  "choices": [
-    {
-      "index": 0,
-      "message": {
-        "content": "Alright, the user said, \"Hello, how are you?\" and then mentioned \"How can I assist you today?\".\n\nI should respond in a friendly and open manner to encourage them to ask for help.\n\nMaybe something like, \"I'm doing well, thank you! How can I assist you today?\"\n\nThat should cover it and keep the conversation going.\n</think>\n\nI'm doing well, thank you! How can I assist you today?",
-        "refusal": null,
-        "tool_calls": null,
-        "role": "assistant",
-        "function_call": null,
-        "audio": null
-      },
-      "finish_reason": "stop",
-      "logprobs": null
-    }
-  ],
-  "created": 1742234675,
-  "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-  "service_tier": null,
-  "system_fingerprint": null,
-  "object": "chat.completion",
-  "usage": null
-}
 ```
 
 ## Additional Resources
