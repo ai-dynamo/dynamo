@@ -43,7 +43,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 |**TensorrtLLM**   |    0.19.0*  |
 |**NIXL**          |    0.1.0    |
 
-> **Note**: The specific version of TensorRT-LLM (planned v0.19.0) that will be supported by Dynamo is subject to change.
+> **Note**: *The specific version of TensorRT-LLM (planned v0.19.0) that will be supported by Dynamo is subject to change.
 
 ## Build Support
 **Dynamo** currently provides build support in the following ways:
