@@ -13,7 +13,7 @@
 
 Dynamo is a flexible and performant distributed inferencing solution for large-scale deployments. It is an ecosystem of tools, frameworks, and abstractions that makes the design, customization, and deployment of frontier-level models onto datacenter-scale infrastructure easy to reason about and optimized for your specific inferencing workloads. Dynamo's core is written in Rust and contains a set of well-defined Python bindings. Docs and examples for those can be found [here](../../../../README.md).
 
-Dynamo SDK is a layer on top of the core. It is a Python framework that makes it easy to create inference graphs and deploy them locally and onto a target K8s cluster. The SDK was heavily inspired by [BentoML's](https://github.com/bentoml/BentoML) open source deployment patterns and leverages many of its core primitives. The Dynamo CLI is a companion tool that allows you to spin up an inference pipeline locally, containerize it, and deploy it. You can find a toy hello-world example [here](../README.md).
+Dynamo SDK is a layer on top of the core. It is a Python framework that makes it easy to create inference graphs and deploy them locally and onto a target K8s cluster. The SDK was heavily inspired by [BentoML's](https://github.com/bentoml/BentoML) open source deployment patterns and leverages many of its core primitives. The Dynamo CLI is a companion tool that allows you to spin up an inference pipeline locally, containerize it, and deploy it. You can find a toy hello-world example [here](../../README.md).
 
 # Installation
 
@@ -24,7 +24,7 @@ pip install ai-dynamo
 ```
 
 # Core Concepts
-As you read about each concept, it is helpful to have the basic example up as well so you can refer back to it.
+As you read about each concept, it is helpful to have the [basic example](../../README.md) up as well so you can refer back to it.
 
 ## Defining a Service
 
@@ -48,7 +48,7 @@ Key configuration options:
 
 ## Writing a Service
 
-Lets walk through an example to understand how you write a dynamo service.
+Let's walk through an example to understand how you write a dynamo service.
 
 ```python
 import ServiceB
@@ -161,7 +161,7 @@ async def async_shutdown(self):
     print("VllmWorkerRouterLess shutting down")
 ```
 
-This ensures resources are properly released, preventing memory leaks and making sure external connections are properly closed. This is helpful to clean up VLLM engines that have been started outside of the main process.
+This ensures resources are properly released, preventing memory leaks and making sure external connections are properly closed. This is helpful to clean up vLLM engines that have been started outside of the main process.
 
 ## Configuring a Service
 
@@ -277,7 +277,7 @@ def setup_my_lib():
     return lib_args
 ```
 
-This pattern is used in the example VLLM integration:
+This pattern is used in the example vLLM integration:
 
 ```python
 def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
@@ -426,7 +426,7 @@ Our `.link()` syntax is an flexible and experimental way to compose various serv
 ### Understanding the `.link()` syntax
 Lets take the example of a `Processor` component. This component can currently do 2 things:
 1. Process a request and send it to a `Router` to decide what worker to send it to.
-2. Process a request and send it to a `Worker` directly via round-robin or random routing.
+2. Process a request and send it to a `Worker` directly
 
 A snippet of the Processor is shown below:
 
@@ -442,7 +442,7 @@ class Processor(ProcessMixIn):
     # logic for processing a request based on router or worker
 ```
 
-You can think of all of the depends statements as the maximal set of edges for the processor. But at runtime, you may wnat to follow only a single path! By default, our processor will spin up the VllmWorker and Router as separate services. But lets say you want to only spin up the Router itself! You can do this by linking the Router to the Processor.
+You can think of all the depends statements as the maximal set of edges for the processor. At runtime, you may want to follow only a single path. By default, our processor will spin up both the VllmWorker and Router as separate services (because `depends()` is defined for both). However, if you want to only spin up the Router, you can do this by linking the Router to the Processor which will remove the `worker` dependency from the Processor.
 
 ```python
 Processor.link(Router)
