@@ -91,12 +91,12 @@ Existing routing methods, including load-based routing, overlook the specific pr
 Dynamo's design enables KV cache offloading to system CPU memory, and will be extended to support SSDs and networked object storage in subsequent releases. In many accelerated servers, the CPU (system) memory is much larger than the GPU memory and fast enough to store and serve KV cache data. The following plot highlights the performance gains achieved through system memory offloading, even with prefix caching enabled via inference engine. In a scenario involving 10 multi-turn conversations with 80 users, system memory offloading resulted in a 40% improvement in TTFT, demonstrating additional benefits beyond basic prefix caching.
 
 <figure>
-    <img src='images/nixl.png' alt='missing' />
+    <img src='images/kv_manager.png' alt='missing' />
     <p>Tested with 100K requests to R1 using R1 Distilled Llama 70B FP8 on 2 nodes of H100s. Avg 4K ISL / 800 OSL</p>
 </figure>
 
 <!--
-![](images/nixl.png)[3]
+![](images/kv_manager.png)[3]
 
 [3]: Tested with 80 users and 10 multi-turns for each user using 1K ISL / 100 OSL. R1 Distilled Llama 8B model running on single node H100s
 -->
