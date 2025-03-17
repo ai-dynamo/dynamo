@@ -19,8 +19,7 @@ on:
   push:
     branches:
     - main
-
-  pull_request:
+    - "pull-request/[0-9]+"
 
 jobs:
   mirror_repo:
