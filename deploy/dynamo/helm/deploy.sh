@@ -20,7 +20,7 @@ set -euo pipefail
 # Set default values only if not already set
 export NAMESPACE="${NAMESPACE:=cai-system}"  # Default namespace
 export NGC_TOKEN="${NGC_TOKEN:=<your-ngc-token>}"  # Default NGC token
-export CI_COMMIT_SHA="${CI_COMMIT_SHA:=6083324a0a5f310dcec38c6863f043cd9070ffcc}"  # Default commit SHA
+export CI_COMMIT_SHA="${CI_COMMIT_SHA:=250e2e0f93f7af3d83a4a0ff992e56956f7651f2}"  # Default commit SHA
 export RELEASE_NAME="${RELEASE_NAME:=dynamo-platform}"  # Default commit SHA
 
 
