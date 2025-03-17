@@ -17,10 +17,25 @@ limitations under the License.
 
 # NVIDIA Dynamo
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
-
-[![Discord](https://discord.com/api/guilds/1351250028588437504/widget.png?style=banner2)](https://discord.gg/ZXRE8epz)
+<table width="100%">
+  <tr>
+    <td align="left">
+      <a href="https://opensource.org/licenses/Apache-2.0">
+        <img src="https://img.shields.io/badge/Your-Badge-blue" alt="License">
+      </a>
+    </td>
+    <td align="left">
+      <a href="https://opensource.org/licenses/Apache-2.0">
+        <img src="https://img.shields.io/github/v/release/ai-dynamo/dynamo" alt="GitHub Release">
+      </a>
+    </td>
+    <td align="right">
+      <a href="https://github.com/ai-dynamo/dynamo/releases/latest">
+        <img src="https://discord.com/api/guilds/1351250028588437504/widget.png?style=banner2" alt="Discord">
+      </a>
+    </td>
+  </tr>
+</table>
 
 
 NVIDIA Dynamo is a high-throughput low-latency inference framework designed for serving generative AI and reasoning models in multi-node distributed environments. Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLang or others) and captures LLM-specific capabilities such as:
