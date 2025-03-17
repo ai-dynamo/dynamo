@@ -150,9 +150,9 @@ def _parse_service_args(args: list[str]) -> t.Dict[str, t.Any]:
 def build_serve_command() -> click.Group:
     from bentoml._internal.log import configure_server_logging
     from bentoml_cli.env_manager import env_manager
-    from bentoml_cli.utils import AliasCommand, BentoMLCommandGroup
+    from bentoml_cli.utils import AliasCommand
 
-    @click.group(name="serve", cls=BentoMLCommandGroup)
+    @click.group(name="serve")
     def cli():
         pass
 
@@ -335,7 +335,7 @@ def build_serve_command() -> click.Group:
         timeout_graceful_shutdown: int | None,
         **attrs: t.Any,
     ) -> None:
-        """Start a HTTP BentoServer from a given 🍱
+        """Locally run connected Dynamo services
 
         \b
         You can also pass service-specific configuration options using --ServiceName.param=value format.
