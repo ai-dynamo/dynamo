@@ -215,7 +215,7 @@ def create_dynamo_watcher(
         args=args,
         numprocesses=num_workers,
         working_dir=working_dir,
-        env=worker_env,  
+        env=worker_env,
     )
 
     return watcher, socket, uri
