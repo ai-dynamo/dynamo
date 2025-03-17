@@ -72,7 +72,7 @@ including: `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
 dynamo run out=vllm deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 ```
 
-Once launched you'll be able to directly chat with the model from the
+Once launched you'll be able to chat directly with the model from the
 command line.
 
 #### Example Output
