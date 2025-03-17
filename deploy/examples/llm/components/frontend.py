@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 from dynamo.sdk import depends, service
 from dynamo.sdk.lib.config import ServiceConfig
-
+from dynamo.sdk.lib.image import DYNAMO_IMAGE
 
 class FrontendConfig(BaseModel):
     model: str
@@ -33,6 +33,7 @@ class FrontendConfig(BaseModel):
 @service(
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
+    image=DYNAMO_IMAGE,
 )
 # todo this should be called ApiServer
 class Frontend:
@@ -58,6 +59,7 @@ class Frontend:
             ]
         )
 
+        print("Starting HTTP server")
         subprocess.run(
             ["http", "-p", str(frontend_config.port)], stdout=None, stderr=None
         )
