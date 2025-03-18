@@ -230,7 +230,7 @@ get_options() {
     if [ ! -z "$TARGET" ]; then
         TARGET_STR="--target ${TARGET}"
     else
-        TARGET_STR="--target runtime"
+        TARGET_STR="--target dev"
     fi
 }
 
