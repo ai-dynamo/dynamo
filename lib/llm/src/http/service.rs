@@ -50,7 +50,9 @@ use crate::types::openai::{
     completions::OpenAICompletionsStreamingEngine,
 };
 use std::{
-    collections::HashMap, default, sync::{Arc, Mutex}
+    collections::HashMap,
+    default,
+    sync::{Arc, Mutex},
 };
 
 #[derive(Clone)]
