@@ -17,8 +17,6 @@ limitations under the License.
 
 # LLM Deployment Examples
 
-This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations.
-
 ## Components
 
 - workers: Prefill and decode worker handles actual LLM inference
