@@ -48,7 +48,7 @@ pub struct HttpServiceConfig {
 
 impl HttpService {
     pub fn builder() -> HttpServiceConfigBuilder {
-        HttpServiceConfigBuilder::default()
+        <_>::default()
     }
 
     pub fn model_manager(&self) -> &ModelManager {

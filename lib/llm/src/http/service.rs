@@ -50,8 +50,7 @@ use crate::types::openai::{
     completions::OpenAICompletionsStreamingEngine,
 };
 use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
+    collections::HashMap, default, sync::{Arc, Mutex}
 };
 
 #[derive(Clone)]
@@ -196,9 +195,9 @@ pub struct DeploymentState {
 impl DeploymentState {
     fn new() -> Self {
         Self {
-            completion_engines: Arc::new(Mutex::new(ModelEngines::default())),
-            chat_completion_engines: Arc::new(Mutex::new(ModelEngines::default())),
-            metrics: Arc::new(Metrics::default()),
+            completion_engines: <_>::default(),
+            chat_completion_engines: <_>::default(),
+            metrics: <_>::default(),
         }
     }
 

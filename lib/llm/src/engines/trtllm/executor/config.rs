@@ -68,7 +68,7 @@ impl From<&str> for LogLevel {
 
 impl ExecutorConfig {
     pub fn builder() -> ExecutorConfigBuilder {
-        ExecutorConfigBuilder::default()
+        <_>::default()
     }
 
     pub fn new(model_path: String) -> Self {

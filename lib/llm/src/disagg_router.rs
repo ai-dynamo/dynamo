@@ -45,7 +45,7 @@ impl DisaggRouterConf {
         let initial_config = match drt.etcd_client().kv_get_prefix(&etcd_key).await {
             Ok(kvs) => {
                 if let Some(kv) = kvs.first() {
-                    match serde_json::from_slice::<DisaggRouterConf>(kv.value()) {
+                    match serde_json::from_slice::<Self>(kv.value()) {
                         Ok(config) => {
                             tracing::debug!(
                                 "Found initial config for key {}: {:?}",
@@ -60,7 +60,7 @@ impl DisaggRouterConf {
                                 etcd_key,
                                 e
                             );
-                            DisaggRouterConf::default()
+                            Self::default()
                         }
                     }
                 } else {
@@ -68,12 +68,12 @@ impl DisaggRouterConf {
                         "No initial config found for key {}, using default",
                         etcd_key
                     );
-                    DisaggRouterConf::default()
+                    Self::default()
                 }
             }
             Err(e) => {
                 tracing::warn!("Error fetching initial config for key {}: {}", etcd_key, e);
-                DisaggRouterConf::default()
+                Self::default()
             }
         };
 
