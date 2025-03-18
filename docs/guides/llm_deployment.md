@@ -27,61 +27,6 @@ This directory contains examples and reference implementations for deploying Lar
 
 ## Deployment Architectures
 
-### Aggregated
-Single-instance deployment where both prefill and decode are done by the same worker.
-
-### Disaggregated
-Distributed deployment where prefill and decode are done by separate workers that can scale independently.
-
-```mermaid
-sequenceDiagram
-    participant D as VllmWorker
-    participant Q as PrefillQueue
-    participant P as PrefillWorker
-
-    Note over D: Request is routed to decode
-    D->>D: Decide if prefill should be done locally or remotely
-
-        D->>D: Allocate KV blocks
-        D->>Q: Put RemotePrefillRequest on the queue
-
-        P->>Q: Pull request from the queue
-        P-->>D: Read cached KVs from Decode
-
-        D->>D: Decode other requests
-        P->>P: Run prefill
-        P-->>D: Write prefilled KVs into allocated blocks
-        P->>D: Send completion notification
-        Note over D: Notification received when prefill is done
-        D->>D: Schedule decoding
-```
-
-## Getting Started
-
-1. Choose a deployment architecture based on your requirements
-2. Configure the components as needed
-3. Deploy using the provided scripts
-
-### Prerequisites
-
-Start required services (etcd and NATS) using [Docker Compose](/deploy/docker-compose.yml)
-```bash
-docker compose -f deploy/docker-compose.yml up -d
-```
-
-### Build docker
-
-```
-./container/build.sh
-```
-
-### Run container
-
-```
-./container/run.sh -it
-```
-## Run Deployment
-
 This figure shows an overview of the major components to deploy:
 
 ```
@@ -103,6 +48,41 @@ This figure shows an overview of the major components to deploy:
                                  +------------------+
 
 ```
+
+
+### Aggregated
+Single-instance deployment where both prefill and decode are done by the same worker.
+
+### Disaggregated
+Distributed deployment where prefill and decode are done by separate workers that can scale independently.
+
+## Getting Started
+
+1. Choose a deployment architecture based on your requirements
+2. Configure the components as needed
+3. Deploy using the provided scripts
+
+### Prerequisites
+
+Start required services (etcd and NATS) using [Docker Compose](/deploy/docker-compose.yml)
+```bash
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+### Build container
+
+```
+./container/build.sh
+```
+
+### Run container
+
+```
+./container/run.sh -it
+```
+## Run Deployment
+
+
 
 ### Example architectures
 
