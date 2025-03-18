@@ -1,6 +1,82 @@
 # Dynamo service runner
 
-`dynamo-run` is a tool for exploring the dynamo components, and an example of how to use them from Rust.
+`dynamo-run` is a CLI tool for exploring the Dynamo components, and an example of how to use them from Rust. It is also available as `dynamo run` if using the Python wheel.
+
+## Quickstart with pip and vllm
+
+If you used `pip` to install `dynamo` you should have the `dynamo-run` binary pre-installed with the `vllm` engine. You must be in a virtual env with vllm installed to use this. For more options see "Full documentation" below.
+
+### Automatically download a model from [Hugging Face](https://huggingface.co/models)
+
+This will automatically download Qwen2.5 3B from Hugging Face (6 GiB download) and start it in interactive text mode:
+```
+dynamo run out=vllm Qwen/Qwen2.5-3B-Instruct
+```
+
+General format for HF download:
+```
+dynamo run out=<engine> <HUGGING_FACE_ORGANIZATION/MODEL_NAME>
+```
+
+For gated models (e.g. meta-llama/Llama-3.2-3B-Instruct) you have to have an `HF_TOKEN` environment variable set.
+
+The parameter can be the ID of a HuggingFace repository (it will be downloaded), a GGUF file, or a folder containing safetensors, config.json, etc (a locally checked out HuggingFace repository).
+
+## Manually download a model from Hugging Face
+
+One of these models should be high quality and fast on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
+E.g. https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/blob/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf
+
+Download model file:
+```
+curl -L -o Llama-3.2-3B-Instruct-Q4_K_M.gguf "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf?download=true"
+```
+
+## Run a model from local file
+
+*Text interface*
+```
+dynamo run out=vllm Llama-3.2-3B-Instruct-Q4_K_M.gguf # or path to a Hugging Face repo checkout instead of the GGUF
+```
+
+*HTTP interface*
+```
+dynamo run in=http out=vllm Llama-3.2-3B-Instruct-Q4_K_M.gguf
+```
+
+*List the models*
+```
+curl localhost:8080/v1/models
+```
+
+*Send a request*
+```
+curl -d '{"model": "Llama-3.2-3B-Instruct-Q4_K_M", "max_completion_tokens": 2049, "messages":[{"role":"user", "content": "What is the capital of South Africa?" }]}' -H 'Content-Type: application/json' http://localhost:8080/v1/chat/completions
+```
+
+*Multi-node*
+
+You will need [etcd](https://etcd.io/) and [nats](https://nats.io) installed and accessible from both nodes.
+
+Node 1:
+```
+dynamo run in=http out=dyn://llama3B_pool
+```
+
+Node 2:
+```
+dynamo run in=dyn://llama3B_pool out=vllm ~/llm_models/Llama-3.2-3B-Instruct
+```
+
+This will use etcd to auto-discover the model and NATS to talk to it. You can run multiple workers on the same endpoint and it will pick one at random each time.
+
+The `llama3B_pool` name is purely symbolic, pick anything as long as it matches the other node.
+
+Run `dynamo run --help` for more options.
+
+# Full documentation
+
+`dynamo-run` is what `dynamo run` executes. It is an example of what you can build in Rust with the `dynamo-llm` and `dynamo-runtime`. Here is a list of how to build from source and all the features.
 
 ## Setup
 
@@ -57,68 +133,6 @@ The binary will be called `dynamo-run` in `target/release`
 ```
 cd target/release
 ```
-
-## Quickstart
-### Automatically download a model from [Hugging Face](https://huggingface.co/models)
-NOTE: for gated models (e.g. meta-llama/Llama-3.2-3B-Instruct) you have to have an `HF_TOKEN` environment variable set.
-
-```
-./dynamo-run <HUGGING_FACE_ORGANIZATION/MODEL_NAME>
-```
-This will automatically download Qwen2.5 3B from Hugging Face (6 GiB download) and start it in interactive text mode:
-`./dynamo-run Qwen/Qwen2.5-3B-Instruct`
-
-The parameter can be the ID of a HuggingFace repository (it will be downloaded), a GGUF file, or a folder containing safetensors, config.json, etc (a locally checked out HuggingFace repository).
-
-## Download a model from Hugging Face
-
-One of these models should be high quality and fast on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
-E.g. https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/blob/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf
-
-Download model file:
-```
-curl -L -o Llama-3.2-3B-Instruct-Q4_K_M.gguf "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf?download=true"
-```
-
-## Run a model from local file
-
-*Text interface*
-```
-dynamo-run Llama-3.2-3B-Instruct-Q4_K_M.gguf # or path to a Hugging Face repo checkout instead of the GGUF
-```
-
-*HTTP interface*
-```
-dynamo-run in=http Llama-3.2-3B-Instruct-Q4_K_M.gguf
-```
-
-*List the models*
-```
-curl localhost:8080/v1/models
-```
-
-*Send a request*
-```
-curl -d '{"model": "Llama-3.2-3B-Instruct-Q4_K_M", "max_tokens": 2049, "messages":[{"role":"user", "content": "What is the capital of South Africa?" }]}' -H 'Content-Type: application/json' http://localhost:8080/v1/chat/completions
-```
-
-*Multi-node*
-
-Node 1:
-```
-dynamo-run in=http out=dyn://llama3B_pool
-```
-
-Node 2:
-```
-dynamo-run in=dyn://llama3B_pool out=mistralrs ~/llm_models/Llama-3.2-3B-Instruct
-```
-
-This will use etcd to auto-discover the model and NATS to talk to it. You can run multiple workers on the same endpoint and it will pick one at random each time.
-
-The `llama3B_pool` name is purely symbolic, pick anything as long as it matches the other node.
-
-Run `dynamo-run --help` for more options.
 
 ## sglang
 
@@ -416,7 +430,5 @@ The output looks like this:
 
 ## Defaults
 
-The input defaults to `in=text`.
-
-The output will default to `mistralrs` engine. If not available whatever engine you have compiled in (so depending on `--features`).
+The input defaults to `in=text`. The output will default to `mistralrs` engine. If not available whatever engine you have compiled in (so depending on `--features`).
 
