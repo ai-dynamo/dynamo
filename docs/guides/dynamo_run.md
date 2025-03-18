@@ -1,4 +1,4 @@
-# Dynamo service runner
+# Dynamo Run
 
 `dynamo-run` is a CLI tool for exploring the Dynamo components, and an example of how to use them from Rust. It is also available as `dynamo run` if using the Python wheel.
 
