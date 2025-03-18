@@ -12,7 +12,7 @@ The Dynamo KV Cache Manager feature addresses this challenge by enabling the off
 The Dynamo KV Cache Manager uses advanced caching policies that prioritize placing frequently accessed data in GPU memory, while less accessed data is moved to shared CPU memory, SSDs, or networked object storage. It incorporates eviction policies that strike a balance between over-caching (which can introduce lookup latencies) and under-caching (which leads to missed lookups and KV cache re-computation).
 Additionally, this feature can manage KV cache across multiple GPU nodes, supporting both distributed and disaggregated inference serving, and offers hierarchical caching capabilities, creating offloading strategies at the GPU, node, and cluster levels.
 
-The Dynamo KV Cache Manager is designed to be framework-agnostic to support various backends, including TensorRT-TLLM, vLLM, and SGLang, and to facilitate the scaling of KV cache storage across large, distributed clusters using NVLink, NVIDIA Quantum switches, and NVIDIA Spectrum switches. It integrates with [NIXL](https://github.com/ai-dynamo/nixl/blob/omrik/documentation/docs/nixl.md) to enable data transfers across different worker instances and storage backends.
+The Dynamo KV Cache Manager is designed to be framework-agnostic to support various backends, including TensorRT-TLLM, vLLM, and SGLang, and to facilitate the scaling of KV cache storage across large, distributed clusters using NVLink, NVIDIA Quantum switches, and NVIDIA Spectrum switches. It integrates with [NIXL](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md) to enable data transfers across different worker instances and storage backends.
 
 ## Design
 
