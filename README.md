@@ -15,15 +15,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-<h1 style="display: inline;">NVIDIA Dynamo</h1>
-<span style="float: right;">
-  <a href="https://discord.gg/D92uqZRjCZ">
-    <img src="https://dcbadge.limes.pink/api/server/D92uqZRjCZ" alt="Discord">
-  </a>
-</span>
+# NVIDIA Dynamo
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
+[![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ) 
 
 | **[Guides](docs/guides)** | **[Architecture and Features](docs/architecture.md)** | **[APIs](lib/bindings/python/README.md)** | **[SDK](deploy/dynamo/sdk/README.md)** |
 
