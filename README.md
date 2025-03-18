@@ -39,9 +39,13 @@ The following examples require a few system level packages.
 
 ```
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev libucx0
+DEBIAN_FRONTEND=noninteractive apt-get install -yq curl python3-dev libucx0
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+uv venv 
+source .venv/bin/activate
 
-pip install ai-dynamo[all]
+uv pip install ai-dynamo[all]
 ```
 
 > [!NOTE]
