@@ -13,18 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pytest
+replicaCount: 1
+# Explicitly remove authentication
+auth:
+  rbac:
+    create: false
 
-try:
-    import vllm
-except ImportError:
-    vllm = None  # type: ignore
+readinessProbe:
+  enabled: false
 
-pytestmark = pytest.mark.pre_merge
-
-
-# TODO: Consider `pytest.mark.vllm` and running tests based on environment
-@pytest.mark.skipif(vllm is None, reason="Skipping vllm tests, vllm not installed")
-def test_version():
-    # Verify that the image has the patched version of vllm
-    assert vllm.__version__.endswith("0.7.2")  # type: ignore
+livenessProbe:
+  enabled: false

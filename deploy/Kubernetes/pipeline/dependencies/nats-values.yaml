@@ -13,18 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pytest
-
-try:
-    import vllm
-except ImportError:
-    vllm = None  # type: ignore
-
-pytestmark = pytest.mark.pre_merge
-
-
-# TODO: Consider `pytest.mark.vllm` and running tests based on environment
-@pytest.mark.skipif(vllm is None, reason="Skipping vllm tests, vllm not installed")
-def test_version():
-    # Verify that the image has the patched version of vllm
-    assert vllm.__version__.endswith("0.7.2")  # type: ignore
+config:
+  jetstream:
+    enabled: true
+    fileStore:
+      enabled: true
+      dir: /data
+      pvc:
+        enabled: true
+        size: 10Gi
+        storageClassName:
