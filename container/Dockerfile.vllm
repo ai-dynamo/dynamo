@@ -327,10 +327,11 @@ FROM build AS dev
 
 ARG GENAI_PERF_TAG
 
-COPY --from=perf_analyzer /workspace/bin/perf-analyzer-build /workspace/benchmarking
+COPY --from=perf_analyzer /workspace/bin/perf-analyzer-build/ /perf/bin
+COPY --from=perf_analyzer /workspace/perf_analyzer /perf_analyzer
+ENV PATH="/perf/bin:${PATH}"
 
 # Install genai-perf for benchmarking
-ENV PATH="/workspace/benchmarking:${PATH}"
 RUN uv pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
 RUN uv pip uninstall tritonclient
 

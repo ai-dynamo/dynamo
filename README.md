@@ -15,28 +15,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# NVIDIA Dynamo
+# NVIDIA Dynamo [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ)](https://discord.gg/D92uqZRjCZ)
 
-<table width="100%">
-  <tr>
-    <td align="left">
-      <a href="https://opensource.org/licenses/Apache-2.0">
-        <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License">
-      </a>
-    </td>
-    <td align="left">
-      <a href="https://github.com/ai-dynamo/dynamo/releases/latest">
-        <img src="https://img.shields.io/github/v/release/ai-dynamo/dynamo" alt="GitHub Release">
-      </a>
-    </td>
-    <td align="right">
-      <a href="https://discord.gg/nvidia-dynamo">
-        <img src="https://discord.com/api/guilds/1351250028588437504/widget.png?style=banner2" alt="Discord">
-      </a>
-    </td>
-  </tr>
-</table>
-
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
 
 | **[Guides](docs/guides)** | **[Architecture and Features](docs/architecture.md)** | **[APIs](lib/bindings/python/README.md)** | **[SDK](deploy/dynamo/sdk/README.md)** |
 
