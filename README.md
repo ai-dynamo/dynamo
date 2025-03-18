@@ -36,7 +36,7 @@ Built in Rust for performance and in Python for extensibility, Dynamo is fully o
 ### Installation
 
 The following examples require a few system level packages.
-Reccommended to use Ubuntu 24.04 with a x86_64 CPU. See [support_matrix.md](support_matrix.md)
+Recommended to use Ubuntu 24.04 with a x86_64 CPU. See [support_matrix.md](support_matrix.md)
 
 ```
 apt-get update
