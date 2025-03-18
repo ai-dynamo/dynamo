@@ -68,4 +68,17 @@ docker push <TAG>
 ```
 
 now one can deploy the pipeline onto k8s using helm 
-# TODO: mkhadkevich work in progress
+- get values.yaml for helm chart:
+- install chart
+```
+export HELM_RELEASE=helloworld
+bentoml get frontend > pipeline-values.yaml #TODO: mkhadkevich dynamo CLI should support get command
+
+helm upgrade -i "$HELM_RELEASE" ./chart -f pipeline-values.yaml --set image=<TAG> --set dynamoIdentifier="hello_world:Frontend" -n "$NAMESPACE"
+```
+
+once the deployments are running, one can port-forward to localhost and make API calls to the frontend component:
+```
+kubectl -n ${NAMESPACE} port-forward svc/helloworld-frontend 3000:80
+curl -X 'POST'   'http://localhost:3000/generate'   -H 'accept: text/event-stream'   -H 'Content-Type: application/json'   -d '{"text": "test"}'
+```
