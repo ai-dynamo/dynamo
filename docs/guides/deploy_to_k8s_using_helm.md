@@ -32,7 +32,7 @@ Kube config
 mkdir -p ~/.kube && microk8s config >> ~/.kube/config
 ```
 
-Now one can use `kubectl` command. 
+Now one can use `kubectl` command.
 
 2. create a namespace
 
@@ -53,26 +53,26 @@ helm install --namespace ${NAMESPACE} dynamo-platform-etcd oci://registry-1.dock
 ```
 
 Now let's containerize a hello world pipeline:
-1. Build container image for `container/Dockerfile.vllm` 
+1. Build container image for `container/Dockerfile.vllm`
 2. Containerize hello world pipeline
 ```
 cd examples/hello_world
-export DYNAMO_IMAGE=<dynamo_runtime_image_name>  
+export DYNAMO_IMAGE=<dynamo_runtime_image_name>
 dynamo build --containerize hello_world:Frontend
 ```
 
 Once the container is built, it has to be tagged and pushed to container registry:
 ```
-docker tag <BUILT_IMAGE_TAG> <TAG> 
+docker tag <BUILT_IMAGE_TAG> <TAG>
 docker push <TAG>
 ```
 
-Now one can deploy the pipeline onto k8s using helm 
+Now one can deploy the pipeline onto k8s using helm
 - get values.yaml for helm chart:
 - install chart
 ```
 export HELM_RELEASE=helloworld
-dynamo get frontend > pipeline-values.yaml 
+dynamo get frontend > pipeline-values.yaml
 
 helm upgrade -i "$HELM_RELEASE" ./chart -f pipeline-values.yaml --set image=<TAG> --set dynamoIdentifier="hello_world:Frontend" -n "$NAMESPACE"
 ```
