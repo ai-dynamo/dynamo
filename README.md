@@ -39,7 +39,7 @@ The following examples require a few system level packages.
 
 ```
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev libucx0
+DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip libucx0
 
 pip install ai-dynamo[all]
 ```
