@@ -292,8 +292,7 @@ impl StopTrigger {
     pub fn should_hide_text(&self) -> bool {
         match self {
             Self::MaxTokensLimit => false,
-            Self::HiddenStopTokenDetected(_) |
-            Self::HiddenStopSequenceDetected(_) => true,
+            Self::HiddenStopTokenDetected(_) | Self::HiddenStopSequenceDetected(_) => true,
         }
     }
 }
