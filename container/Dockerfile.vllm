@@ -188,7 +188,6 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 # rebuilds from unrelated source code changes
 ARG VLLM_REF="0.7.2"
 ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
-ARG VLLM_VERSION_PATCH_SUFFIX="dynamo"
 ARG VLLM_PATCHED_PACKAGE_NAME="ai_dynamo_vllm"
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     mkdir /tmp/vllm && \
@@ -198,17 +197,13 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     wheel unpack *.whl && \
     cd vllm-${VLLM_REF}/ && \
     patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
-    sed -i "s/__version__ = version = '\(.*\)'/__version__ = version = '\1+${VLLM_VERSION_PATCH_SUFFIX}'/g; s/__version_tuple__ = version_tuple = (\(.*\))/__version_tuple__ = version_tuple = (\1, '${VLLM_VERSION_PATCH_SUFFIX}')/g" vllm/_version.py && \
     # Rename the package from vllm to ai_dynamo_vllm
-    mv vllm-${VLLM_REF}.dist-info ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}.dist-info && \
-    sed -i "s/${VLLM_REF}/${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}.dist-info/METADATA && \
-    sed -i "s/vllm-${VLLM_REF}/vllm-${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}.dist-info/RECORD && \
-    # Rename the package from vllm to ai_dynamo_vllm
-    sed -i "s/^Name: vllm/Name: ${VLLM_PATCHED_PACKAGE_NAME}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}.dist-info/METADATA && \
+    mv vllm-${VLLM_REF}.dist-info ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info && \
+    sed -i "s/^Name: vllm/Name: ${VLLM_PATCHED_PACKAGE_NAME}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info/METADATA && \
     # Update wheel tag from linux_x86_64 to manylinux1_x86_64 in WHEEL file
-    sed -i 's/Tag: cp38-abi3-linux_x86_64/Tag: cp38-abi3-manylinux1_x86_64/g' ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}.dist-info/WHEEL && \
+    sed -i 's/Tag: cp38-abi3-linux_x86_64/Tag: cp38-abi3-manylinux1_x86_64/g' ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info/WHEEL && \
     # Also update the tag in RECORD file to match
-    sed -i "s/-cp38-abi3-linux_x86_64.whl/-cp38-abi3-manylinux1_x86_64.whl/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}+${VLLM_VERSION_PATCH_SUFFIX}.dist-info/RECORD && \
+    sed -i "s/-cp38-abi3-linux_x86_64.whl/-cp38-abi3-manylinux1_x86_64.whl/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info/RECORD && \
     mkdir -p /workspace/dist && \
     wheel pack . --dest-dir /workspace/dist && \
     uv pip install /workspace/dist/${VLLM_PATCHED_PACKAGE_NAME}-*.whl
