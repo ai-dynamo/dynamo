@@ -120,7 +120,7 @@ impl Metrics {
         )
         .unwrap();
 
-        Metrics {
+        Self {
             request_counter,
             inflight_gauge,
             request_duration,
@@ -233,7 +233,7 @@ impl InflightGuard {
         metrics.inc_inflight_gauge(&model);
 
         // Return the RAII Guard
-        InflightGuard {
+        Self {
             metrics,
             model,
             endpoint,

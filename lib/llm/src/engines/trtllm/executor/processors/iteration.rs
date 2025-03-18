@@ -50,7 +50,7 @@ impl IterationProcessor {
             process_events(state, shutdown_clone, channel_clone);
         });
 
-        IterationProcessor {
+        Self {
             handle,
             shutdown,
             channel: Arc::downgrade(&channel),

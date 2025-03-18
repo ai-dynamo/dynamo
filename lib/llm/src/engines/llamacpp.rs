@@ -106,7 +106,7 @@ impl LlamacppEngine {
         let ct = cancel_token.clone();
         tokio::task::spawn(worker(ct, req_rx, ctx_get, ctx_set));
 
-        Ok(LlamacppEngine {
+        Ok(Self {
             cancel_token,
             req_tx,
         })

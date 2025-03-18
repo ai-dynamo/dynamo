@@ -50,7 +50,7 @@ impl KvEventProcessor {
             process_events(state, shutdown_clone, channel_clone);
         });
 
-        KvEventProcessor {
+        Self {
             handle,
             shutdown,
             channel: Arc::downgrade(&channel),

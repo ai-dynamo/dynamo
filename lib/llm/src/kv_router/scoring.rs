@@ -46,7 +46,7 @@ impl ProcessedEndpoints {
         let worker_ids: HashSet<i64> = endpoints.iter().map(|x| x.worker_id()).collect();
         let worker_ids: Vec<i64> = worker_ids.into_iter().collect();
 
-        ProcessedEndpoints {
+        Self {
             endpoints,
             worker_ids,
             load_avg,

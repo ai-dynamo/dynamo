@@ -32,7 +32,7 @@ impl DiscoveryClient {
     /// If the lease expires, the [`Runtime`] will be shutdown.
     /// If the [`Runtime`] is shutdown, the lease will be revoked.
     pub(crate) fn new(namespace: String, etcd_client: etcd::Client) -> Self {
-        DiscoveryClient {
+        Self {
             namespace,
             etcd_client,
         }

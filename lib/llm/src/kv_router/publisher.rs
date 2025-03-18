@@ -81,7 +81,7 @@ pub struct KvMetricsPublisher {
 impl KvMetricsPublisher {
     pub fn new() -> Result<Self> {
         let (tx, rx) = tokio::sync::watch::channel(Arc::new(ForwardPassMetrics::default()));
-        Ok(KvMetricsPublisher { tx, rx })
+        Ok(Self { tx, rx })
     }
 
     pub fn publish(

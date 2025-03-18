@@ -86,7 +86,7 @@ impl HfTokenizerConfigJsonFormatter {
             }
         }
 
-        Ok(HfTokenizerConfigJsonFormatter {
+        Ok(Self {
             env,
             config,
             mixins: Arc::new(mixins),

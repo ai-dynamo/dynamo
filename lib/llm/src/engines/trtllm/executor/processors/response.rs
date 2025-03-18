@@ -28,7 +28,7 @@ impl ResponseProcessor {
         let handle = std::thread::spawn(move || {
             process_responses(state, response_queues);
         });
-        ResponseProcessor { handle }
+        Self { handle }
     }
 
     /// Block and wait for the response processor to finish

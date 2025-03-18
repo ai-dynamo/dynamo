@@ -242,7 +242,7 @@ impl std::fmt::Display for RouteDoc {
 
 impl RouteDoc {
     pub fn new<T: Into<String>>(method: axum::http::Method, path: T) -> Self {
-        RouteDoc {
+        Self {
             method,
             path: path.into(),
         }

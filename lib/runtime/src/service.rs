@@ -35,7 +35,7 @@ pub struct ServiceClient {
 
 impl ServiceClient {
     pub fn new(nats_client: nats::Client) -> Self {
-        ServiceClient { nats_client }
+        Self { nats_client }
     }
 }
 

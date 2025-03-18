@@ -55,7 +55,7 @@ impl DisaggregatedRouter {
             })
         })?;
 
-        Ok(DisaggregatedRouter {
+        Ok(Self {
             inner: Arc::new(router),
         })
     }

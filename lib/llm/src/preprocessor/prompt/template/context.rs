@@ -30,7 +30,7 @@ impl Object for ContextMixins {
 
 impl ContextMixins {
     pub fn new(allowed_mixins: &[PromptContextMixin]) -> Self {
-        ContextMixins {
+        Self {
             context_mixins: allowed_mixins.iter().cloned().collect(),
         }
     }

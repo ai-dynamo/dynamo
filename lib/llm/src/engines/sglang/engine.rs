@@ -49,12 +49,11 @@ impl SgLangEngine {
             base_gpu_id,
         )
         .await?;
-        let engine = SgLangEngine {
+
+        Ok(Self {
             cancel_token,
             worker: w,
-        };
-
-        Ok(engine)
+        })
     }
 
     pub fn take_sglang_worker_handle(&mut self) -> tokio::task::JoinHandle<()> {

@@ -51,7 +51,7 @@ where
         Fut: Future<Output = U> + Send + 'static,
     {
         // Wrap the closure in Arc and Box it for internal management
-        AsyncProcessor {
+        Self {
             func: Arc::new(move |input: T| Box::pin(f(input))),
         }
     }
@@ -70,7 +70,7 @@ pub struct ResponseSource<T: Send + Sync + 'static> {
 
 impl<T: Send + Sync + 'static> ResponseSource<T> {
     fn new(tx: mpsc::Sender<T>, ctx: StreamContext) -> Self {
-        ResponseSource { tx, ctx }
+        Self { tx, ctx }
     }
 
     /// Emit a response to the stream
@@ -144,7 +144,7 @@ pub struct LlmdbaEngine<Req: DataType, Resp: DataType> {
 
 impl<Req: DataType, Resp: DataType> LlmdbaEngine<Req, Resp> {
     fn new(lambda: AsyncGenerator<Req, Resp>) -> Self {
-        LlmdbaEngine {
+        Self {
             lambda: Arc::new(lambda),
         }
     }

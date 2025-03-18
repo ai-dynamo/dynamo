@@ -54,7 +54,7 @@ pub struct Registry {
 impl Registry {
     /// Create a new empty registry.
     pub fn new() -> Self {
-        Registry {
+        Self {
             shared_storage: HashMap::new(),
             unique_storage: HashMap::new(),
         }

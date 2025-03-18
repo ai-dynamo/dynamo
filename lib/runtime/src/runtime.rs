@@ -51,7 +51,7 @@ impl Runtime {
             }
         };
 
-        Ok(Runtime {
+        Ok(Self {
             id,
             primary: runtime,
             secondary,
@@ -59,31 +59,31 @@ impl Runtime {
         })
     }
 
-    pub fn from_current() -> Result<Runtime> {
+    pub fn from_current() -> Result<Self> {
         let handle = tokio::runtime::Handle::current();
         let primary = RuntimeType::External(handle.clone());
         let secondary = RuntimeType::External(handle);
-        Runtime::new(primary, Some(secondary))
+        Self::new(primary, Some(secondary))
     }
 
-    pub fn from_handle(handle: tokio::runtime::Handle) -> Result<Runtime> {
+    pub fn from_handle(handle: tokio::runtime::Handle) -> Result<Self> {
         let runtime = RuntimeType::External(handle);
-        Runtime::new(runtime, None)
+        Self::new(runtime, None)
     }
 
     /// Create a [`Runtime`] instance from the settings
     /// See [`config::RuntimeConfig::from_settings`]
-    pub fn from_settings() -> Result<Runtime> {
+    pub fn from_settings() -> Result<Self> {
         let config = config::RuntimeConfig::from_settings()?;
         let owned = RuntimeType::Shared(Arc::new(config.create_runtime()?));
-        Runtime::new(owned, None)
+        Self::new(owned, None)
     }
 
     /// Create a [`Runtime`] with a single-threaded primary async tokio runtime
-    pub fn single_threaded() -> Result<Runtime> {
+    pub fn single_threaded() -> Result<Self> {
         let config = config::RuntimeConfig::single_threaded();
         let owned = RuntimeType::Shared(Arc::new(config.create_runtime()?));
-        Runtime::new(owned, None)
+        Self::new(owned, None)
     }
 
     /// Returns the unique identifier for the [`Runtime`]

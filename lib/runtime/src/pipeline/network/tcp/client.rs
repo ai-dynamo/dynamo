@@ -48,7 +48,7 @@ impl Default for TcpClient {
 
 impl TcpClient {
     pub fn new(worker_id: String) -> Self {
-        TcpClient { worker_id }
+        Self { worker_id }
     }
 
     async fn connect(address: &str) -> std::io::Result<TcpStream> {

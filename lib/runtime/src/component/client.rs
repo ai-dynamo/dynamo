@@ -140,7 +140,7 @@ where
             let _ = watch_tx.send(vec![]);
         });
 
-        Ok(Client {
+        Ok(Self {
             endpoint,
             router,
             watch_rx,

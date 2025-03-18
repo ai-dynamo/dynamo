@@ -94,7 +94,7 @@ pub struct Edge<T: PipelineIO> {
 
 impl<T: PipelineIO> Edge<T> {
     fn new(downstream: Arc<dyn Sink<T>>) -> Self {
-        Edge { downstream }
+        Self { downstream }
     }
 
     async fn write(&self, data: T) -> Result<(), Error> {
@@ -190,7 +190,7 @@ where
 {
     /// Create a new [`PipelineOperator`] with the given [`Operator`] implementation.
     pub fn new(operator: Arc<dyn Operator<UpIn, UpOut, DownIn, DownOut>>) -> Arc<Self> {
-        Arc::new(PipelineOperator {
+        Arc::new(Self {
             operator,
             downstream: Arc::new(sources::Frontend::default()),
             upstream: sinks::SinkEdge::default(),
@@ -303,7 +303,7 @@ pub struct PipelineNode<In: PipelineIO, Out: PipelineIO> {
 
 impl<In: PipelineIO, Out: PipelineIO> PipelineNode<In, Out> {
     pub fn new(map_fn: NodeFn<In, Out>) -> Arc<Self> {
-        Arc::new(PipelineNode::<In, Out> {
+        Arc::new(Self {
             edge: OnceLock::new(),
             map_fn,
         })

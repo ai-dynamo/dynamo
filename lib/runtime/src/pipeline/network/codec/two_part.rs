@@ -26,7 +26,7 @@ pub struct TwoPartCodec {
 
 impl TwoPartCodec {
     pub fn new(max_message_size: Option<usize>) -> Self {
-        TwoPartCodec { max_message_size }
+        Self { max_message_size }
     }
 
     /// Encodes a `TwoPartMessage` into `Bytes`, enforcing `max_message_size`.
@@ -151,25 +151,25 @@ pub struct TwoPartMessage {
 
 impl TwoPartMessage {
     pub fn new(header: Bytes, data: Bytes) -> Self {
-        TwoPartMessage { header, data }
+        Self { header, data }
     }
 
     pub fn from_header(header: Bytes) -> Self {
-        TwoPartMessage {
+        Self {
             header,
             data: Bytes::new(),
         }
     }
 
     pub fn from_data(data: Bytes) -> Self {
-        TwoPartMessage {
+        Self {
             header: Bytes::new(),
             data,
         }
     }
 
     pub fn from_parts(header: Bytes, data: Bytes) -> Self {
-        TwoPartMessage { header, data }
+        Self { header, data }
     }
 
     pub fn parts(&self) -> (&Bytes, &Bytes) {

@@ -40,7 +40,7 @@ pub struct Context<T: Data> {
 impl<T: Send + Sync + 'static> Context<T> {
     // Create a new context with initial data
     pub fn new(current: T) -> Self {
-        Context {
+        Self {
             current,
             controller: Arc::new(Controller::default()),
             registry: Registry::new(),
@@ -49,7 +49,7 @@ impl<T: Send + Sync + 'static> Context<T> {
     }
 
     pub fn with_controller(current: T, controller: Controller) -> Self {
-        Context {
+        Self {
             current,
             controller: Arc::new(controller),
             registry: Registry::new(),
@@ -58,7 +58,7 @@ impl<T: Send + Sync + 'static> Context<T> {
     }
 
     pub fn with_id(current: T, id: String) -> Self {
-        Context {
+        Self {
             current,
             controller: Arc::new(Controller::new(id)),
             registry: Registry::new(),
@@ -222,7 +222,7 @@ pub struct StreamContext {
 
 impl StreamContext {
     fn new(controller: Arc<Controller>, registry: Registry) -> Self {
-        StreamContext {
+        Self {
             controller,
             registry: Arc::new(registry),
             stages: Vec::new(),

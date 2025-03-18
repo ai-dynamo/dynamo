@@ -25,15 +25,15 @@ const REPLACEMENT_CHAR: char = '_';
 pub struct Slug(String);
 
 impl Slug {
-    fn new(s: String) -> Slug {
+    fn new(s: String) -> Self {
         // remove any leading REPLACEMENT_CHAR
         let s = s.trim_start_matches(REPLACEMENT_CHAR).to_string();
-        Slug(s)
+        Self(s)
     }
 
     /// Create [`Slug`] from a string.
-    pub fn from_string(s: impl AsRef<str>) -> Slug {
-        Slug::slugify_unique(s.as_ref())
+    pub fn from_string(s: impl AsRef<str>) -> Self {
+        Self::slugify_unique(s.as_ref())
     }
 
     // /// Turn the string into a valid slug, replacing any not-web-or-nats-safe characters with '-'
@@ -55,7 +55,7 @@ impl Slug {
 
     /// Like slugify but also add a four byte hash on the end, in case two different strings slug
     /// to the same thing.
-    fn slugify_unique(s: &str) -> Slug {
+    fn slugify_unique(s: &str) -> Self {
         let out = s
             .to_lowercase()
             .chars()
@@ -70,7 +70,7 @@ impl Slug {
             .collect::<String>();
         let hash = blake3::hash(s.as_bytes()).to_string();
         let out = format!("{out}_{}", &hash[(hash.len() - 8)..]);
-        Slug::new(out)
+        Self::new(out)
     }
 }
 

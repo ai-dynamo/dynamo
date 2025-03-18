@@ -154,7 +154,7 @@ impl MistralRsEngine {
         };
         // Create the MistralRs, which is a runner
         let builder = MistralRsBuilder::new(pipeline.clone(), scheduler).with_prefix_cache_n(16);
-        Ok(MistralRsEngine {
+        Ok(Self {
             mistralrs: builder.build(),
         })
     }

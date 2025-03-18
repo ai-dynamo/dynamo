@@ -148,7 +148,7 @@ impl PythonServerStreamingEngine {
         generator: Arc<PyObject>,
         event_loop: Arc<PyObject>,
     ) -> Self {
-        PythonServerStreamingEngine {
+        Self {
             _cancel_token: cancel_token,
             generator,
             event_loop,
