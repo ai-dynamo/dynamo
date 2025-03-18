@@ -46,10 +46,10 @@ cd deploy/Kubernetes/pipeline/dependencies
 #install nats
 helm repo add nats https://nats-io.github.io/k8s/helm/charts/
 helm repo update
-helm install --namespace ${NAMESPACE} dynamo-platform-nats nats/nats --create-namespace --values nats.yaml
+helm install --namespace ${NAMESPACE} dynamo-platform-nats nats/nats --create-namespace --values nats-values.yaml
 
 #install etcd
-helm install --namespace ${NAMESPACE} dynamo-platform-etcd oci://registry-1.docker.io/bitnamicharts/etcd --values etcd.yaml
+helm install --namespace ${NAMESPACE} dynamo-platform-etcd oci://registry-1.docker.io/bitnamicharts/etcd --values etcd-values.yaml
 ```
 
 Now let's containerize a hello world pipeline:
@@ -72,7 +72,7 @@ now one can deploy the pipeline onto k8s using helm
 - install chart
 ```
 export HELM_RELEASE=helloworld
-bentoml get frontend > pipeline-values.yaml #TODO: mkhadkevich dynamo CLI should support get command
+dynamo get frontend > pipeline-values.yaml 
 
 helm upgrade -i "$HELM_RELEASE" ./chart -f pipeline-values.yaml --set image=<TAG> --set dynamoIdentifier="hello_world:Frontend" -n "$NAMESPACE"
 ```

@@ -157,6 +157,7 @@ def build_start_command() -> click.Group:
         help="Print the final service configuration and exit without starting the server",
         default=False,
     )
+    @click.pass_context
     @add_experimental_docstring
     def start(
         ctx: click.Context,
