@@ -72,18 +72,18 @@ impl DType {
     /// Get the size of the data type in bytes
     pub fn size_in_bytes(&self) -> usize {
         match self {
-            DType::F32 => 4,
-            DType::F16 => 2,
-            DType::BF16 => 2,
-            DType::FP8 => 1,
-            DType::U8 => 1,
-            DType::U16 => 2,
-            DType::U32 => 4,
-            DType::U64 => 8,
-            DType::I8 => 1,
-            DType::I16 => 2,
-            DType::I32 => 4,
-            DType::I64 => 8,
+            Self::F32 => 4,
+            Self::F16 => 2,
+            Self::BF16 => 2,
+            Self::FP8 => 1,
+            Self::U8 => 1,
+            Self::U16 => 2,
+            Self::U32 => 4,
+            Self::U64 => 8,
+            Self::I8 => 1,
+            Self::I16 => 2,
+            Self::I32 => 4,
+            Self::I64 => 8,
         }
     }
 }

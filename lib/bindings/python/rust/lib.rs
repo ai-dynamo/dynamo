@@ -161,7 +161,7 @@ impl DistributedRuntime {
             .block_on(rs::DistributedRuntime::from_settings(runtime))
             .map_err(to_pyerr)?;
 
-        Ok(DistributedRuntime { inner, event_loop })
+        Ok(Self { inner, event_loop })
     }
 
     fn namespace(&self, name: String) -> PyResult<Namespace> {
@@ -545,7 +545,7 @@ struct Annotated {
 impl Annotated {
     #[new]
     fn new(data: PyObject) -> Self {
-        Annotated {
+        Self {
             inner: RsAnnotated::from_data(data),
         }
     }

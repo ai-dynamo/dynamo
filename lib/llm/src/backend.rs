@@ -291,9 +291,9 @@ pub enum StopTrigger {
 impl StopTrigger {
     pub fn should_hide_text(&self) -> bool {
         match self {
-            StopTrigger::MaxTokensLimit => false,
-            StopTrigger::HiddenStopTokenDetected(_) => true,
-            StopTrigger::HiddenStopSequenceDetected(_) => true,
+            Self::MaxTokensLimit => false,
+            Self::HiddenStopTokenDetected(_) |
+            Self::HiddenStopSequenceDetected(_) => true,
         }
     }
 }

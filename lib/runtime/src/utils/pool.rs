@@ -38,27 +38,27 @@ pub enum PoolValue<T: Returnable> {
 impl<T: Returnable> PoolValue<T> {
     /// Create a new PoolValue from a boxed item
     pub fn from_boxed(value: Box<T>) -> Self {
-        PoolValue::Boxed(value)
+        Self::Boxed(value)
     }
 
     /// Create a new PoolValue from a direct item
     pub fn from_direct(value: T) -> Self {
-        PoolValue::Direct(value)
+        Self::Direct(value)
     }
 
     /// Get a reference to the underlying item
     pub fn get(&self) -> &T {
         match self {
-            PoolValue::Boxed(boxed) => boxed.as_ref(),
-            PoolValue::Direct(direct) => direct,
+            Self::Boxed(boxed) => boxed.as_ref(),
+            Self::Direct(direct) => direct,
         }
     }
 
     /// Get a mutable reference to the underlying item
     pub fn get_mut(&mut self) -> &mut T {
         match self {
-            PoolValue::Boxed(boxed) => boxed.as_mut(),
-            PoolValue::Direct(direct) => direct,
+            Self::Boxed(boxed) => boxed.as_mut(),
+            Self::Direct(direct) => direct,
         }
     }
 
@@ -90,7 +90,7 @@ mod private {
 
     impl PoolItemToken {
         pub(super) fn new() -> Self {
-            PoolItemToken(())
+            Self(())
         }
     }
 }

@@ -274,8 +274,8 @@ impl Drop for InflightGuard {
 impl std::fmt::Display for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Endpoint::Completions => write!(f, "completions"),
-            Endpoint::ChatCompletions => write!(f, "chat_completions"),
+            Self::Completions => write!(f, "completions"),
+            Self::ChatCompletions => write!(f, "chat_completions"),
         }
     }
 }
@@ -283,8 +283,8 @@ impl std::fmt::Display for Endpoint {
 impl Endpoint {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Endpoint::Completions => "completions",
-            Endpoint::ChatCompletions => "chat_completions",
+            Self::Completions => "completions",
+            Self::ChatCompletions => "chat_completions",
         }
     }
 }
@@ -292,8 +292,8 @@ impl Endpoint {
 impl RequestType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            RequestType::Unary => REQUEST_TYPE_UNARY,
-            RequestType::Stream => REQUEST_TYPE_STREAM,
+            Self::Unary => REQUEST_TYPE_UNARY,
+            Self::Stream => REQUEST_TYPE_STREAM,
         }
     }
 }
@@ -301,8 +301,8 @@ impl RequestType {
 impl Status {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Status::Success => REQUEST_STATUS_SUCCESS,
-            Status::Error => REQUEST_STATUS_ERROR,
+            Self::Success => REQUEST_STATUS_SUCCESS,
+            Self::Error => REQUEST_STATUS_ERROR,
         }
     }
 }

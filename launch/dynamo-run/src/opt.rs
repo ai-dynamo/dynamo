@@ -67,12 +67,12 @@ impl TryFrom<&str> for Input {
 impl fmt::Display for Input {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let s = match self {
-            Input::Http => "http",
-            Input::Text => "text",
-            Input::Stdin => "stdin",
-            Input::Endpoint(path) => path,
-            Input::Batch(path) => &path.display().to_string(),
-            Input::None => "none",
+            Self::Http => "http",
+            Self::Text => "text",
+            Self::Stdin => "stdin",
+            Self::Endpoint(path) => path,
+            Self::Batch(path) => &path.display().to_string(),
+            Self::None => "none",
         };
         write!(f, "{s}")
     }
@@ -81,9 +81,9 @@ impl fmt::Display for Input {
 impl Default for Input {
     fn default() -> Self {
         if std::io::stdin().is_terminal() {
-            Input::Text
+            Self::Text
         } else {
-            Input::Stdin
+            Self::Stdin
         }
     }
 }

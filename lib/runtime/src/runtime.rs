@@ -121,8 +121,8 @@ impl RuntimeType {
     /// Get [`tokio::runtime::Handle`] to runtime
     pub fn handle(&self) -> tokio::runtime::Handle {
         match self {
-            RuntimeType::External(rt) => rt.clone(),
-            RuntimeType::Shared(rt) => rt.handle().clone(),
+            Self::External(rt) => rt.clone(),
+            Self::Shared(rt) => rt.handle().clone(),
         }
     }
 }
@@ -130,8 +130,8 @@ impl RuntimeType {
 impl std::fmt::Debug for RuntimeType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RuntimeType::External(_) => write!(f, "RuntimeType::External"),
-            RuntimeType::Shared(_) => write!(f, "RuntimeType::Shared"),
+            Self::External(_) => write!(f, "RuntimeType::External"),
+            Self::Shared(_) => write!(f, "RuntimeType::Shared"),
         }
     }
 }

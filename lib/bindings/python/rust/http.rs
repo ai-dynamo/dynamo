@@ -105,7 +105,7 @@ pub struct HttpError {
 impl HttpError {
     #[new]
     pub fn new(code: u16, message: String) -> Self {
-        HttpError { code, message }
+        Self { code, message }
     }
 
     #[getter]
