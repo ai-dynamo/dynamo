@@ -15,6 +15,15 @@
 
 use super::*;
 
+// Python bindings for the Dynamo LLM system.
+//
+// This module exposes several sub-modules to interact with the Dynamo runtime:
+// - `backend`: Interfaces for LLM inference and backend resource management.
+// - `disagg_router`: Functionality for disaggregated routing of inference requests.
+// - `kv`: Key-value caching and indexing utilities for managing model state.
+// - `model_card`: Handling model deployment cards and related operations.
+// - `preprocessor`: Tools for preprocessing LLM requests prior to execution.
+
 pub mod backend;
 pub mod disagg_router;
 pub mod kv;
