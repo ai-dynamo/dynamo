@@ -44,7 +44,7 @@ cargo test
 
 The simplest way to deploy the pre-requisite services is using
 [docker-compose](https://docs.docker.com/compose/install/linux/),
-defined in the project's root [docker-compose.yml](docker-compose.yml).
+defined in [deploy/docker-compose.yml](../../deploy/docker-compose.yml).
 
 ```
 docker-compose up -d
@@ -109,7 +109,7 @@ Annotated { data: Some("d"), id: None, event: None, comment: None }
 
 #### Python
 
-See the [README.md](/lib/bindings/python/README.md) for details
+See the [README.md](../bindings/python/README.md) for details
 
 The Python and Rust `hello_world` client and server examples are interchangeable,
 so you can start the Python `server.py` and talk to it from the Rust `client`.

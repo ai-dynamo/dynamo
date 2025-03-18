@@ -65,7 +65,7 @@ metrics --component my_component --endpoint my_endpoint
 ### Real Worker
 
 To run a more realistic deployment to gathering metrics from,
-see the examples in [deploy/examples/llm](deploy/examples/llm).
+see the examples in [examples/llm](../../examples/llm).
 
 For example, for a VLLM + KV Routing based deployment that
 exposes statistics on an endpoint labeled
@@ -88,7 +88,7 @@ endpoint name used for python-based workers that register a `KvMetricsPublisher`
 
 To visualize the metrics being exposed on the Prometheus endpoint,
 see the Prometheus and Grafana configurations in
-[deploy/metrics](deploy/metrics):
+[deploy/metrics](../../deploy/metrics):
 ```bash
 docker compose -f deploy/docker-compose.yml --profile metrics up -d
 ```

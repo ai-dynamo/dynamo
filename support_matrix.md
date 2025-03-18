@@ -39,12 +39,12 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | **Dependency**   | **Version** |
 |------------------|-------------|
 |**Base Container**|    25.01    |
-| **vLLM**         |0.7.2+dynamo*|
+|**ai-dynamo-vllm**|    0.7.2*   |
 |**TensorRT-LLM**  |    0.19.0** |
 |**NIXL**          |    0.1.0    |
 
 > **Note**:
-> - *v0.7.2+dynamo is a customized patch of v0.7.2 from vLLM.
+> - *ai-dynamo-vllm v0.7.2 is a customized patch of v0.7.2 from vLLM.
 > - **The specific version of TensorRT-LLM (planned v0.19.0) that will be supported by Dynamo is subject to change.
 
 
@@ -54,4 +54,4 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 - **Wheels**: Pre-built Python wheels are only available for **x86_64 Linux**. No wheels are available for other platforms at this time.
 - **Container Images**: We distribute only the source code for container images, and only **x86_64 Linux** is supported for these. Users must build the container image from source if they require it.
 
-Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the instructions in the [Quick Start Guide](https://github.com/ai-dynamo/dynamo/?tab=readme-ov-file#quick-start).
+Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the instructions in the [Quick Start Guide](https://github.com/ai-dynamo/dynamo/blob/main/README.md#installation).
