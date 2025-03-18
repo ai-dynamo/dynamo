@@ -61,13 +61,13 @@ export DYNAMO_IMAGE=<dynamo_runtime_image_name>
 dynamo build --containerize hello_world:Frontend
 ```
 
-once the container is built, it has to be tagged and pushed to container registry:
+Once the container is built, it has to be tagged and pushed to container registry:
 ```
 docker tag <BUILT_IMAGE_TAG> <TAG> 
 docker push <TAG>
 ```
 
-now one can deploy the pipeline onto k8s using helm 
+Now one can deploy the pipeline onto k8s using helm 
 - get values.yaml for helm chart:
 - install chart
 ```
@@ -77,8 +77,10 @@ dynamo get frontend > pipeline-values.yaml
 helm upgrade -i "$HELM_RELEASE" ./chart -f pipeline-values.yaml --set image=<TAG> --set dynamoIdentifier="hello_world:Frontend" -n "$NAMESPACE"
 ```
 
-once the deployments are running, one can port-forward to localhost and make API calls to the frontend component:
+Once the deployments are running, one can port-forward to localhost and make API calls to the frontend component:
 ```
 kubectl -n ${NAMESPACE} port-forward svc/helloworld-frontend 3000:80
 curl -X 'POST'   'http://localhost:3000/generate'   -H 'accept: text/event-stream'   -H 'Content-Type: application/json'   -d '{"text": "test"}'
 ```
+
+Full script to build a container, push it to registry and deploya helm chart: `deploy/Kubernetes/pipeline/deploy.sh`
