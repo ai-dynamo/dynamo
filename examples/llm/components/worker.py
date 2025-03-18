@@ -31,14 +31,7 @@ from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
 from dynamo.llm import KvMetricsPublisher
-from dynamo.sdk import (
-    async_on_start,
-    depends,
-    dynamo_context,
-    dynamo_endpoint,
-    server_context,
-    service,
-)
+from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
 
 @service(
@@ -90,13 +83,6 @@ class VllmWorker:
             os.environ["VLLM_KV_NAMESPACE"] = "dynamo"
             os.environ["VLLM_KV_COMPONENT"] = class_name
             vllm_logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
-        # note: worker_index is 1-based, but CUDA_VISIBLE_DEVICES is 0-based
-        gpu_idx = (
-            self.engine_args.cuda_visible_device_offset
-            + server_context.worker_index
-            - 1
-        )
-        os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_idx}"
         self.metrics_publisher = KvMetricsPublisher()
 
     @async_on_start
@@ -175,12 +161,12 @@ class VllmWorker:
                 is_remote_prefill=True,
                 remote_prefill_request_callback=self.get_remote_prefill_request_callback(),
             )
-            vllm_logger.info(
+            print(
                 f"Prefilling remotely for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
             )
         else:
             remote_prefill_params = None
-            vllm_logger.info(
+            print(
                 f"Prefilling locally for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
             )
 

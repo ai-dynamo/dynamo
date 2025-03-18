@@ -17,137 +17,114 @@ limitations under the License.
 
 # NVIDIA Dynamo
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
+<table width="100%">
+  <tr>
+    <td align="left">
+      <a href="https://opensource.org/licenses/Apache-2.0">
+        <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License">
+      </a>
+    </td>
+    <td align="left">
+      <a href="https://github.com/ai-dynamo/dynamo/releases/latest">
+        <img src="https://img.shields.io/github/v/release/ai-dynamo/dynamo" alt="GitHub Release">
+      </a>
+    </td>
+    <td align="right">
+      <a href="https://discord.gg/nvidia-dynamo">
+        <img src="https://discord.com/api/guilds/1351250028588437504/widget.png?style=banner2" alt="Discord">
+      </a>
+    </td>
+  </tr>
+</table>
 
-NVIDIA Dynamo is a new modular inference framework designed for serving large language models (LLMs) in multi-node
-distributed environments. It enables seamless scaling of inference workloads across GPU nodes and the dynamic allocation
-of GPU workers to address traffic bottlenecks at various stages of the model pipeline.
 
-NVIDIA Dynamo also features LLM-specific capabilities, such as disaggregated serving, which separates the context
-(prefill) and generation (decode) steps of inference requests onto distinct GPUs and GPU nodes to optimize performance.
+| **[Guides](docs/guides)** | **[Architecture and Features](docs/architecture.md)** | **[APIs](lib/bindings/python/README.md)** | **[SDK](deploy/dynamo/sdk/README.md)** |
 
-NVIDIA Dynamo includes four key innovations:
+NVIDIA Dynamo is a high-throughput low-latency inference framework designed for serving generative AI and reasoning models in multi-node distributed environments. Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLang or others) and captures LLM-specific capabilities such as:
 
-* **Smart Router**: An LLM-aware router that directs requests across large GPU fleets to minimize costly key-value (KV)
-cache recomputations for repeat or overlapping requests, freeing up GPUs to respond to new incoming requests
-* **Low-Latency Communication Library**: An inference optimized library that supports state-of-the-art GPU-to-GPU
-communication and abstracts complexity of data exchange across heterogenous devices and networking protocols,
-accelerating data transfers
-* **Memory Manager**: An engine that intelligently offloads and reloads inference data (KV cache) to and from lower-cost memory and storage devices using NVIDIA NIXL without impacting user experiences
+- **Disaggregated prefill & decode inference** – Maximizes GPU throughput and facilitates trade off between throughput and latency.
+- **Dynamic GPU scheduling** – Optimizes performance based on fluctuating demand
+- **LLM-aware request routing** – Eliminates unnecessary KV cache re-computation
+- **Accelerated data transfer** – Reduces inference response time using NIXL.
+- **KV cache offloading** – Leverages multiple memory hierarchies for higher system throughput
+
+Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach.
+
+### Installation
+
+The following examples require a few system level packages.
+
+```
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev libucx0
+
+pip install ai-dynamo nixl vllm==0.7.2+dynamo
+```
 
 > [!NOTE]
-> This project is currently in the alpha / experimental /
-> rapid-prototyping stage and we are actively looking for feedback and
-> collaborators.
+> TensorRT-LLM Support is currently available on a [branch](https://github.com/ai-dynamo/dynamo/tree/dynamo/trtllm_llmapi_v1/examples/trtllm#building-the-environment)
 
-## Quick Start
+### Running and Interacting with an LLM Locally
 
-TODO add quick start guide here
+To run a model and interact with it locally you can call `dynamo
+run` with a hugging face model. `dynamo run` supports several backends
+including: `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
 
-## Building Dynamo
+#### Example Command
 
-### Requirements
-
-Dynamo development and examples are container based.
-
-* [Docker](https://docs.docker.com/get-started/get-docker/)
-* [buildx](https://github.com/docker/buildx)
-
-### Development
-
-You can build the Dynamo container using the build scripts
-in `container/` (or directly with `docker build`).
-
-We provide 2 types of builds:
-
-1. `VLLM` which includes our VLLM backend using new NIXL communication library.
-2. `TENSORRTLLM` which includes our TRT-LLM backend
-
-For example, if you want to build a container for the `VLLM` backend you can run
-
-<!--pytest.mark.skip-->
-```bash
-./container/build.sh
+```
+dynamo run out=vllm deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 ```
 
-Please see the instructions in the corresponding example for specific build instructions.
-
-## Running Dynamo for Local Testing and Development
-
-You can run the Dynamo container using the run scripts in
-`container/` (or directly with `docker run`).
-
-The run script offers a few common workflows:
-
-1. Running a command in a container and exiting.
-
-<!--pytest.mark.skip-->
-```bash
-./container/run.sh -- python3 -c "import dynamo.runtime; help(dynamo.runtime)"
 ```
-<!--
-
-# This tests the above the line but from within the container
-# using pytest-codeblocks
-
-```bash
-python3 -c "import dynamo.runtime; help(dynamo.runtime)"
-```
--- >
-
-2. Starting an interactive shell.
-
-<!--pytest.mark.skip-->
-```bash
-./container/run.sh -it
+? User › Hello, how are you?
+✔ User · Hello, how are you?
+Okay, so I'm trying to figure out how to respond to the user's greeting. They said, "Hello, how are you?" and then followed it with "Hello! I'm just a program, but thanks for asking." Hmm, I need to come up with a suitable reply. ...
 ```
 
-3. Mounting the local workspace and Starting an interactive shell.
+### LLM Serving
 
-<!--pytest.mark.skip-->
+Dynamo provides a simple way to spin up a local set of inference
+components including:
+
+- **OpenAI Compatible Frontend** – High performance OpenAI compatible http api server written in Rust.
+- **Basic and Kv Aware Router** – Route and load balance traffic to a set of workers.
+- **Workers** – Set of pre-configured LLM serving engines.
+
+To run a minimal configuration you can use a pre-configured
+example.
+
+#### Start Dynamo Distributed Runtime Services
+
+First start the Dynamo Distributed Runtime services:
+
 ```bash
-./container/run.sh -it --mount-workspace
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
-The last command also passes common environment variables ( `-e
-HF_TOKEN` ) and mounts common directories such as `/tmp:/tmp`,
-`/mnt:/mnt`.
+#### Start Dynamo LLM Serving Components
 
-Please see the instructions in the corresponding example for specific
-deployment instructions.
+Next serve a minimal configuration with an http server, basic
+round-robin router, and a single worker.
 
-## Rust Based Runtime
+```bash
+cd examples/llm
+dynamo serve graphs.agg:Frontend -f configs/agg.yaml
+```
 
-Dynamo has a new rust based distributed runtime with
-implementation under development. The rust based runtime enables
-serving arbitrary python code as well as native rust. Please note the
-APIs are subject to change.
+#### Send a Request
 
-### Hello World
+```bash
+curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "messages": [
+    {
+        "role": "user",
+        "content": "Hello, how are you?"
+    }
+    ],
+    "stream":false,
+    "max_tokens": 300
+  }' | jq
+```
 
-[Hello World](./lib/bindings/python/examples/hello_world)
-
-A basic example demonstrating the rust based runtime and python
-bindings.
-
-### LLM
-
-[VLLM](./examples/python_rs/llm/vllm)
-
-An intermediate example expanding further on the concepts introduced
-in the Hello World example. In this example, we demonstrate
-[Disaggregated Serving](https://arxiv.org/abs/2401.09670) as an
-application of the components defined in Dynamo.
-
-# Disclaimers
-
-> [!NOTE]
-> This project is currently in the alpha / experimental /
-> rapid-prototyping stage and we will be adding new features incrementally.
-
-1. The `TENSORRTLLM` and `VLLM` containers are WIP and not expected to
-   work out of the box.
-
-2. Testing has primarily been on single node systems with processes
-   launched within a single container.

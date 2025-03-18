@@ -12,7 +12,28 @@ However, not all requests’ prefill phases need to be computed in the remote pr
 
 ## Design
 
-![](images/disagg_design.png)
+```mermaid
+sequenceDiagram
+    participant D as Worker
+    participant Q as PrefillQueue
+    participant P as PrefillWorker
+
+    Note over D: Request is routed to decode
+    D->>D: Decide if prefill should be done locally or remotely
+
+        D->>D: Allocate KV blocks
+        D->>Q: Put RemotePrefillRequest on the queue
+
+        P->>Q: Pull request from the queue
+        P-->>D: Read cached KVs from Decode
+
+        D->>D: Decode other requests
+        P->>P: Run prefill
+        P-->>D: Write prefilled KVs into allocated blocks
+        P->>D: Send completion notification
+        Note over D: Notification received when prefill is done
+        D->>D: Schedule decoding
+```
 
 There are four main components in Dynamo disaggregation:
 - Worker: execute prefill and decode requests
@@ -36,7 +57,27 @@ Prefill requests are computation bound (except for very short prefills) and shou
 
 ## Efficient KV Transfer
 
-![](images/kv_transfer.png)
+```mermaid
+sequenceDiagram
+    participant D as Worker
+    participant SD as WorkerScheduler
+    participant SP as PrefillWorkerScheduler
+    participant P as PrefillWorker
+
+    Note over SD: KV blocks allocated
+    SD->>SP: Issue remote prefill request <br> with KV block descriptors via prefill queue
+    SP->>P: Add to in-flight batch
+
+    P-->>D: Remote NIXL read for prefix hit KV blocks (non-block)
+    P->>P: Execute prefill
+    P-->>D: Remote NIXL write for comptued KV blocks (non-block)
+
+    P->>SP: Notify finish
+    SP->>SD: Notify finish
+    SD->>D: Add to in-flight batch
+
+    D->>D: Execute decode
+```
 
 The key to high-performance disaggregation is efficient KV transfer. Dynamo leverage NIXL to transfer KV cache directly from the VRAM of prefill engine to the VRAM of decode engine. In addition, the KV transfer is non-blocking, allowing GPU forward pass to serve other requests in addition to the KV transfer.
 

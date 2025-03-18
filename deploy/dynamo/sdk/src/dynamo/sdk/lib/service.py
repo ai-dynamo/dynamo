@@ -177,11 +177,24 @@ class DynamoService(Service[T]):
         return next_service
 
     def _remove_service_args(self, service_name: str):
-        """Remove ServiceArgs from the environment config after using them"""
+        """Remove ServiceArgs from the environment config after using them, preserving envs"""
         config_str = os.environ.get("DYNAMO_SERVICE_CONFIG")
         if config_str:
             config = json.loads(config_str)
             if service_name in config and "ServiceArgs" in config[service_name]:
+                # Save envs to separate env var before removing ServiceArgs
+                service_args = config[service_name]["ServiceArgs"]
+                if "envs" in service_args:
+                    service_envs = os.environ.get("DYNAMO_SERVICE_ENVS", "{}")
+                    envs_config = json.loads(service_envs)
+                    if service_name not in envs_config:
+                        envs_config[service_name] = {}
+                    envs_config[service_name]["ServiceArgs"] = {
+                        "envs": service_args["envs"]
+                    }
+                    os.environ["DYNAMO_SERVICE_ENVS"] = json.dumps(envs_config)
+
+                # Remove ServiceArgs from main config
                 del config[service_name]["ServiceArgs"]
                 os.environ["DYNAMO_SERVICE_CONFIG"] = json.dumps(config)
 

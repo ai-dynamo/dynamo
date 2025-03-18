@@ -61,11 +61,6 @@ class Frontend:
         )
 
         print("Starting HTTP server")
-        process = subprocess.Popen(
+        subprocess.run(
             ["http", "-p", str(frontend_config.port)], stdout=None, stderr=None
         )
-        try:
-            process.wait()
-        except KeyboardInterrupt:
-            process.terminate()
-            process.wait()
