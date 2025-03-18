@@ -36,10 +36,13 @@ Built in Rust for performance and in Python for extensibility, Dynamo is fully o
 ### Installation
 
 The following examples require a few system level packages.
+Reccommended to use Ubuntu 24.04 with a x86_64 CPU. See [support_matrix.md](support_matrix.md)
 
 ```
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip libucx0
+DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0
+python3 -m venv venv
+source venv/bin/activate
 
 pip install ai-dynamo[all]
 ```
