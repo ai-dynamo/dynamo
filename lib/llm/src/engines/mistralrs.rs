@@ -39,7 +39,15 @@ use crate::protocols::openai::chat_completions::{
 };
 use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 
-const PAGED_ATTENTION_MAX_NUM_SEQS: usize = 5;
+/// How many requests mistral will run at once in the paged attention scheduler.
+/// It actually runs 1 fewer than this.
+/// I would call this the batch size but apparently that's something else.
+const PAGED_ATTENTION_MAX_NUM_SEQS: usize = 10;
+
+/// Experimental: Switch this to true to enable paged attention on CUDA devices.
+/// Under load (dynamo-run batch mode) paged attention sometimes returns an immediate
+/// finish_reason=stop and no tokens for one of the requests.
+const EXP_ENABLE_PAGED_ATTENTION: bool = false;
 
 pub async fn make_engine(
     gguf_path: &Path,
@@ -110,10 +118,10 @@ impl MistralRsEngine {
         let max_seq_len = AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN;
 
         // Paged attention requires cuda
-        let paged_attention_config = if cfg!(feature = "cuda") {
+        let paged_attention_config = if cfg!(feature = "cuda") && EXP_ENABLE_PAGED_ATTENTION {
             Some(PagedAttentionConfig::new(
                 None, // Block size, default 32
-                512,  // CPU memory in MiB
+                4096, // CPU memory in MiB
                 MemoryGpuConfig::ContextSize(max_seq_len),
             )?)
         } else {
@@ -133,7 +141,7 @@ impl MistralRsEngine {
             None,
             paged_attention_config,
         )?;
-        let scheduler = if cfg!(feature = "cuda") {
+        let scheduler = if cfg!(feature = "cuda") && EXP_ENABLE_PAGED_ATTENTION {
             tracing::debug!("Using mistralrs PagedAttentionMeta scheduler");
             let config = match pipeline.lock().await.get_metadata().cache_config.as_ref() {
                 Some(conf) => conf.clone(),
@@ -154,9 +162,12 @@ impl MistralRsEngine {
         };
         // Create the MistralRs, which is a runner
         let builder = MistralRsBuilder::new(pipeline.clone(), scheduler).with_prefix_cache_n(16);
-        Ok(MistralRsEngine {
+        let engine = MistralRsEngine {
             mistralrs: builder.build(),
-        })
+        };
+        // skip the id used for dummy run https://github.com/EricLBuehler/mistral.rs/issues/1218
+        let _ = engine.mistralrs.next_request_id();
+        Ok(engine)
     }
 }
 
@@ -231,13 +242,14 @@ impl
             n_choices: 1,
             dry_params: det.dry_params,
         };
+        let request_id = self.mistralrs.next_request_id();
         let mistralrs_request = Request::Normal(NormalRequest {
+            id: request_id,
             messages: RequestMessage::Chat(messages),
             sampling_params,
             response: tx,
             return_logprobs: request.inner.logprobs.unwrap_or_default(),
             is_streaming: true,
-            id: self.mistralrs.next_request_id(),
             constraint: Constraint::None,
             suffix: None,
             adapters: None,
@@ -254,14 +266,14 @@ impl
                 let response = match response.as_result() {
                     Ok(r) => r,
                     Err(err) => {
-                        tracing::error!(%err, "Failed converting mistralrs channel response to result.");
+                        tracing::error!(request_id, %err, "Failed converting mistralrs channel response to result.");
                         break;
                     }
                 };
                 match response {
                     ResponseOk::Chunk(c) => {
                         let Some(from_assistant) = c.choices[0].delta.content.clone() else {
-                            tracing::warn!("No content from mistralrs. Abandoning request.");
+                            tracing::warn!(request_id, "No content from mistralrs. Abandoning request.");
                             break;
                         };
                         let finish_reason = match &c.choices[0].finish_reason.as_deref() {
@@ -272,7 +284,7 @@ impl
                                 Some(FinishReason::Length)
                             }
                             Some(s) => {
-                                tracing::warn!(stop_reason = s, "Unknow stop reason");
+                                tracing::warn!(request_id, stop_reason = s, "Unknow stop reason");
                                 Some(FinishReason::Stop)
                             }
                             None => None,
@@ -312,11 +324,11 @@ impl
                         yield ann;
 
                         if finish_reason.is_some() {
-                            //tracing::trace!("Finish reason: {finish_reason:?}");
+                            //tracing::trace!(request_id, "Finish reason: {finish_reason:?}");
                             break;
                         }
                     },
-                    x => tracing::error!("Unhandled. {x:?}"),
+                    x => tracing::error!(request_id, "Unhandled. {x:?}"),
                 }
             }
         };

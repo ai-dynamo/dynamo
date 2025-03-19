@@ -66,3 +66,7 @@ prometheus = { version = "0.13" }
 
 [profile.dev.package]
 insta.opt-level = 3
+
+[profile.release]
+codegen-units = 1
+lto = true
