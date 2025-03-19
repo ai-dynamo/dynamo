@@ -59,7 +59,7 @@ use pyo3::prelude::*;
     target_os = "macos",
     any(feature = "sglang", feature = "vllm", feature = "python")
 ))]
-fn fix_venv(venv: String, py: pyo3::Python<'_>) -> anyhow::Result<()> {
+fn fix_venv(venv: String, py: Python<'_>) -> anyhow::Result<()> {
     let version_info = py.version_info();
     let sys: PyObject = py.import("sys")?.into();
     let sys_path = sys.getattr(py, "path")?;
@@ -76,4 +76,6 @@ fn fix_venv(venv: String, py: pyo3::Python<'_>) -> anyhow::Result<()> {
     target_os = "linux",
     any(feature = "sglang", feature = "vllm", feature = "python")
 ))]
-fn fix_venv(_venv: String, _py: Python<'_>) {}
+fn fix_venv(_venv: String, _py: Python<'_>) -> anyhow::Result<()> {
+    Ok(())
+}

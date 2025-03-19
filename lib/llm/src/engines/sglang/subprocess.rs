@@ -94,7 +94,7 @@ pub fn run_subprocess(
 ) -> anyhow::Result<()> {
     pyo3::prepare_freethreaded_python(); // or enable feature "auto-initialize"
     if let Ok(venv) = env::var("VIRTUAL_ENV") {
-        Python::with_gil(|py| crate::engines::fix_venv(venv, py));
+        let _ = Python::with_gil(|py| crate::engines::fix_venv(venv, py));
     }
     let dir = model_path.display().to_string();
     Python::with_gil(|py| {
