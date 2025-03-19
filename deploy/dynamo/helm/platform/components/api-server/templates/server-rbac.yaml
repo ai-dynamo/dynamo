@@ -30,7 +30,7 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dynamonimdeployments
+  - dynamodeployments
   verbs:
   - create
   - delete
@@ -56,6 +56,10 @@ subjects:
   name: {{ include "helm.serviceAccountName" . }}
   namespace: {{ .Release.Namespace }}
 roleRef:
+  {{- if .Values.namespaceRestriction.enabled }}
+  kind: Role
+  {{- else }}
   kind: ClusterRole
+  {{- end }}
   name: {{ include "helm.fullname" . }}-role
   apiGroup: rbac.authorization.k8s.io
