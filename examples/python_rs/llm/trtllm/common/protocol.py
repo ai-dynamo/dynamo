@@ -52,6 +52,14 @@ class Request(BaseModel):
     streaming: bool
 
 
+class TRTLLMWorkerRequest(BaseModel):
+    prompt: str
+    sampling_params: dict
+    streaming: bool = True
+    conversation: Optional[List[str]] = Field(default=None)
+    disaggregated_params: Optional[DisaggregatedParams] = Field(default=None)
+
+
 class DisaggregatedTypeConverter:
     @staticmethod
     def to_llm_disaggregated_params(

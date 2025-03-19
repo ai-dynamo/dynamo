@@ -14,91 +14,82 @@
 # limitations under the License.
 
 
-import json
-import signal
+from enum import Enum
 
-from common.base_engine import BaseTensorrtLLMEngine
-from common.processor import merge_promises, parse_chat_message_content
-from common.protocol import DisaggregatedTypeConverter
-from tensorrt_llm.executor import CppExecutorError
+from common.processor import (
+    ChatProcessor,
+    CompletionsProcessor,
+    merge_promises,
+    parse_chat_message_content,
+)
+from common.protocol import DisaggregatedTypeConverter, TRTLLMWorkerRequest
 from tensorrt_llm.logger import logger
 
 logger.set_level("info")
 
 
-async def chat_generator(
-    engine: BaseTensorrtLLMEngine, request, is_disaggregated: bool = False
+class ServerType(Enum):
+    # Generation server used for disaggregated and aggregated requests
+    GEN = "gen"
+    # Context server used for disaggregated requests
+    CTX = "ctx"
+
+
+async def chat_preprocessor(request, tokenizer):
+    conversation = []
+    for message in request.messages:
+        conversation.extend(parse_chat_message_content(message))
+    tool_dicts = (
+        None if request.tools is None else [tool.model_dump() for tool in request.tools]
+    )
+    prompt: str = tokenizer.apply_chat_template(
+        conversation=conversation,
+        tokenize=False,
+        add_generation_prompt=request.add_generation_prompt,
+        tools=tool_dicts,
+        documents=request.documents,
+        chat_template=request.chat_template,
+        **(request.chat_template_kwargs or {}),
+    )
+    sampling_params = request.to_sampling_params()
+    disaggregated_params = None
+    if request.disaggregated_params is not None:
+        disaggregated_params = DisaggregatedTypeConverter.to_llm_disaggregated_params(
+            request.disaggregated_params
+        )
+
+    return TRTLLMWorkerRequest(
+        prompt=prompt,
+        sampling_params=sampling_params,
+        conversation=conversation,
+        disaggregated_params=disaggregated_params,
+    )
+
+
+async def chat_postprocessor(
+    engine_generator,
+    request,
+    conversation,
+    server_type: ServerType,
+    chat_processor: ChatProcessor,
 ):
-    if engine._llm_engine is None:
-        raise RuntimeError("Engine not initialized")
-
-    logger.debug(f"Received chat request: {request}")
-    engine._ongoing_request_count += 1
-
-    try:
-        conversation = []
-        for message in request.messages:
-            conversation.extend(parse_chat_message_content(message))
-        tool_dicts = (
-            None
-            if request.tools is None
-            else [tool.model_dump() for tool in request.tools]
-        )
-        prompt: str = engine._tokenizer.apply_chat_template(
-            conversation=conversation,
-            tokenize=False,
-            add_generation_prompt=request.add_generation_prompt,
-            tools=tool_dicts,
-            documents=request.documents,
-            chat_template=request.chat_template,
-            **(request.chat_template_kwargs or {}),
-        )
-        sampling_params = request.to_sampling_params()
-        disaggregated_params = None
-        if is_disaggregated:
-            disaggregated_params = (
-                DisaggregatedTypeConverter.to_llm_disaggregated_params(
-                    request.disaggregated_params
-                )
+    async for response in engine_generator:
+        if request.disaggregated_params is not None and server_type == ServerType.CTX:
+            response_data = chat_processor.yield_first_chat(
+                request, request.id, response
             )
-
-        async for response in engine._llm_engine.generate_async(
-            prompt,
-            sampling_params,
-            streaming=request.stream,
-            disaggregated_params=disaggregated_params,
-        ):
-            if is_disaggregated and engine.server_config.type == "ctx":
-                response_data = engine.chat_processor.yield_first_chat(
-                    request, request.id, response
-                )
-            else:
-                response_data = engine.chat_processor.create_chat_stream_response(
-                    request,
-                    request.id,
-                    response,
-                    conversation,
-                    first_iteration=(not is_disaggregated),
-                )
-            yield json.loads(response_data)
-
-        engine._ongoing_request_count -= 1
-    except CppExecutorError:
-        # If internal executor error is raised, shutdown the server
-        signal.raise_signal(signal.SIGINT)
-    except Exception as e:
-        raise RuntimeError("Failed to generate: " + str(e))
+        else:
+            response_data = chat_processor.create_chat_stream_response(
+                request,
+                request.id,
+                response,
+                conversation,
+                first_iteration=(not request.disaggregated_params is not None),
+            )
+        yield response_data
 
 
-async def completion_generator(
-    engine: BaseTensorrtLLMEngine, request, is_disaggregated: bool = False
-):
-    if engine._llm_engine is None:
-        raise RuntimeError("Engine not initialized")
-
-    engine._ongoing_request_count += 1
-    logger.debug(f"Received completion request: {request}")
-
+def completion_preprocessor(request):
     if isinstance(request.prompt, str) or (
         isinstance(request.prompt, list)
         and all(isinstance(x, int) for x in request.prompt)
@@ -111,30 +102,26 @@ async def completion_generator(
 
     sampling_params = request.to_sampling_params()
     disaggregated_params = None
-    if is_disaggregated:
+    if request.disaggregated_params is not None:
         disaggregated_params = DisaggregatedTypeConverter.to_llm_disaggregated_params(
             request.disaggregated_params
         )
 
-    try:
-        promise = engine._llm_engine.generate_async(
-            prompt,
-            sampling_params,
-            streaming=request.stream,
-            disaggregated_params=disaggregated_params,
-        )
-        generator = merge_promises([promise])
-        num_choices = 1 if request.n is None else request.n
+    return TRTLLMWorkerRequest(
+        prompt=prompt,
+        sampling_params=sampling_params,
+        disaggregated_params=disaggregated_params,
+    )
 
-        response_generator = engine.completions_processor.create_completion_generator(
-            request, generator, num_choices
-        )
-        async for response in response_generator:
-            yield json.loads(response)
 
-        engine._ongoing_request_count -= 1
-    except CppExecutorError:
-        # If internal executor error is raised, shutdown the server
-        signal.raise_signal(signal.SIGINT)
-    except Exception as e:
-        raise RuntimeError("Failed to generate: " + str(e))
+async def completion_postprocessor(
+    engine_generator, request, completions_processor: CompletionsProcessor
+):
+    generator = merge_promises([engine_generator])
+    num_choices = 1 if request.n is None else request.n
+
+    response_generator = completions_processor.create_completion_generator(
+        request, generator, num_choices
+    )
+    async for response in response_generator:
+        yield response

@@ -174,6 +174,7 @@ class ChatProcessor(BaseChatProcessor):
         if first_iteration:
             return self.yield_first_chat(request, request_id, response)
 
+            # TODO: Fix this
             if request.echo:
                 last_msg_content = ""
                 if (

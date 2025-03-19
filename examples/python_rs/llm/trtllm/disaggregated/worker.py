@@ -16,17 +16,12 @@
 import asyncio
 import os
 import signal
+from typing import AsyncGenerator
 
 import uvloop
 from common.base_engine import BaseTensorrtLLMEngine, TensorrtLLMEngineConfig
-from common.generators import chat_generator, completion_generator
 from common.parser import LLMAPIConfig, parse_tensorrt_llm_args
-from common.protocol import (
-    AdaptedCompletionRequest,
-    DisaggChatCompletionRequest,
-    DisaggChatCompletionStreamResponse,
-    DisaggCompletionStreamResponse,
-)
+from common.protocol import TRTLLMWorkerRequest
 from mpi4py.futures import MPICommExecutor
 from mpi4py.MPI import COMM_WORLD
 from tensorrt_llm._utils import set_mpi_comm
@@ -85,8 +80,8 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
 
         super().__init__(trt_llm_engine_config)
 
-    @dynamo_endpoint(DisaggChatCompletionRequest, DisaggChatCompletionStreamResponse)
-    async def generate_chat(self, request):
+    @dynamo_endpoint(TRTLLMWorkerRequest, AsyncGenerator)
+    async def generate(self, request):
         if self._llm_engine is None:
             raise RuntimeError("Engine not initialized")
 
@@ -94,49 +89,72 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
             error = self._error_queue.get()
             raise error
 
-        logger.debug(f"Received request: {request}")
-
+        logger.debug(f"[worker] Received request: {request}")
         self._ongoing_request_count += 1
 
         try:
-            async for response in chat_generator(self, request, is_disaggregated=True):
-                yield response
+            yield self._llm_engine.generate_async()
 
         except CppExecutorError:
             signal.raise_signal(signal.SIGINT)
         except Exception as e:
             raise RuntimeError("Failed to generate: " + str(e))
 
-        # Start the publishing threads with first request submission
         self._start_threads()
         self._ongoing_request_count -= 1
 
-    @dynamo_endpoint(AdaptedCompletionRequest, DisaggCompletionStreamResponse)
-    async def generate_completions(self, request):
-        logger.debug(f"[worker] worker_id: {self._worker_id} received request")
-        if self._llm_engine is None:
-            raise RuntimeError("Engine not initialized")
+    # @dynamo_endpoint(DisaggChatCompletionRequest, DisaggChatCompletionStreamResponse)
+    # async def generate_chat(self, request):
+    #     if self._llm_engine is None:
+    #         raise RuntimeError("Engine not initialized")
 
-        if self._error_queue.qsize() > 0:
-            error = self._error_queue.get()
-            raise error
+    #     if self._error_queue.qsize() > 0:
+    #         error = self._error_queue.get()
+    #         raise error
 
-        self._ongoing_request_count += 1
-        logger.debug(f"[worker] Received completions request: {request}")
+    #     logger.debug(f"Received request: {request}")
 
-        try:
-            async for response in completion_generator(
-                self, request, is_disaggregated=True
-            ):
-                yield response
-        except CppExecutorError:
-            signal.raise_signal(signal.SIGINT)
-        except Exception as e:
-            raise RuntimeError("Failed to generate: " + str(e))
+    #     self._ongoing_request_count += 1
 
-        # Start the publishing threads with first request submission
-        self._start_threads()
-        self._ongoing_request_count -= 1
+    #     try:
+    #         async for response in chat_generator(self, request, is_disaggregated=True):
+    #             yield response
+
+    #     except CppExecutorError:
+    #         signal.raise_signal(signal.SIGINT)
+    #     except Exception as e:
+    #         raise RuntimeError("Failed to generate: " + str(e))
+
+    #     # Start the publishing threads with first request submission
+    #     self._start_threads()
+    #     self._ongoing_request_count -= 1
+
+    # @dynamo_endpoint(AdaptedCompletionRequest, DisaggCompletionStreamResponse)
+    # async def generate_completions(self, request):
+    #     logger.debug(f"[worker] worker_id: {self._worker_id} received request")
+    #     if self._llm_engine is None:
+    #         raise RuntimeError("Engine not initialized")
+
+    #     if self._error_queue.qsize() > 0:
+    #         error = self._error_queue.get()
+    #         raise error
+
+    #     self._ongoing_request_count += 1
+    #     logger.debug(f"[worker] Received completions request: {request}")
+
+    #     try:
+    #         async for response in completion_generator(
+    #             self, request, is_disaggregated=True
+    #         ):
+    #             yield response
+    #     except CppExecutorError:
+    #         signal.raise_signal(signal.SIGINT)
+    #     except Exception as e:
+    #         raise RuntimeError("Failed to generate: " + str(e))
+
+    #     # Start the publishing threads with first request submission
+    #     self._start_threads()
+    #     self._ongoing_request_count -= 1
 
 
 @dynamo_worker()
@@ -161,8 +179,7 @@ async def worker(
     component = runtime.namespace(namespace_str).component(component_str)
     await component.create_service()
 
-    completions_endpoint = component.endpoint("completions")
-    chat_endpoint = component.endpoint("chat/completions")
+    generate_endpoint = component.endpoint("generate")
 
     if server_type == "gen" and args.publish_kv_cache_events:
         logger.warning("KV routing is not supported for gen server")
@@ -176,8 +193,7 @@ async def worker(
         kv_block_size=args.kv_block_size,
     )
 
-    # TODO: fix
-    trt_llm_engine_config.worker_id = completions_endpoint.lease_id()
+    trt_llm_engine_config.worker_id = generate_endpoint.lease_id()
 
     if args.publish_stats:
         trt_llm_engine_config.kv_metrics_publisher = KvMetricsPublisher()
@@ -190,8 +206,7 @@ async def worker(
     )
 
     coros = [
-        completions_endpoint.serve_endpoint(engine.generate_completions),
-        chat_endpoint.serve_endpoint(engine.generate_chat),
+        generate_endpoint.serve_endpoint(engine.generate),
     ]
     if args.publish_stats:
         coros.append(
