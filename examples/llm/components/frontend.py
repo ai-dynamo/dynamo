@@ -37,7 +37,7 @@ def get_http_binary_path():
 
 
 class FrontendConfig(BaseModel):
-    model: str
+    served_model_name: str
     endpoint: str
     port: int = 8080
 
@@ -58,7 +58,7 @@ class Frontend:
         frontend_config = FrontendConfig(**config.get("Frontend", {}))
 
         subprocess.run(
-            ["llmctl", "http", "remove", "chat-models", frontend_config.model]
+            ["llmctl", "http", "remove", "chat-models", frontend_config.served_model_name]
         )
         subprocess.run(
             [
@@ -66,7 +66,7 @@ class Frontend:
                 "http",
                 "add",
                 "chat-models",
-                frontend_config.model,
+                frontend_config.served_model_name,
                 frontend_config.endpoint,
             ]
         )
