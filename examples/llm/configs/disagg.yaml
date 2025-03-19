@@ -24,19 +24,23 @@ Processor:
   router: round-robin
 
 VllmWorker:
-  # vllm enging args
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
   max-model-len: 16384
-
-  # dynamo args
   remote-prefill: true
   conditional-disagg: true
   max-local-prefill-length: 10
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: 1
 
 PrefillWorker:
-  # vllm enging args
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
   max-model-len: 16384
   max-num-batched-tokens: 16384
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: 1 

@@ -35,3 +35,5 @@ VllmWorker:
   tensor-parallel-size: 1
   ServiceArgs:
     workers: 1
+    resources:
+      gpu: 1
