@@ -58,7 +58,13 @@ class Frontend:
         frontend_config = FrontendConfig(**config.get("Frontend", {}))
 
         subprocess.run(
-            ["llmctl", "http", "remove", "chat-models", frontend_config.served_model_name]
+            [
+                "llmctl",
+                "http",
+                "remove",
+                "chat-models",
+                frontend_config.served_model_name,
+            ]
         )
         subprocess.run(
             [
