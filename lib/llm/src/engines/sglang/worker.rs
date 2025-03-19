@@ -291,7 +291,7 @@ pub async fn start(
 ) -> anyhow::Result<SgLangWorker> {
     pyo3::prepare_freethreaded_python();
     if let Ok(venv) = env::var("VIRTUAL_ENV") {
-        Python::with_gil(|py| crate::engines::fix_venv(venv, py));
+        let _ = Python::with_gil(|py| crate::engines::fix_venv(venv, py));
     }
 
     let Sockets {
