@@ -211,7 +211,7 @@ where
                     self.endpoint.etcd_path()
                 ));
             }
-            let counter = rand::thread_rng().gen::<u64>();
+            let counter = rand::rng().random::<u64>();
             let offset = counter % count as u64;
             endpoints[offset as usize]
         };

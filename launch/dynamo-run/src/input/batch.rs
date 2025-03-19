@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use anyhow::Context as _;
+use async_openai::types::FinishReason;
 use dynamo_llm::model_card::model::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::types::openai::chat_completions::{
@@ -37,7 +38,6 @@ use crate::EngineConfig;
 const MAX_TOKENS: u32 = 8192;
 
 const OUTPUT_FILENAME: &str = "output.jsonl";
-const DUMMY_MODEL_NAME: &str = "dynamo-run-batch";
 
 #[derive(Serialize, Deserialize, Default, Debug)]
 struct Entry {
@@ -54,6 +54,12 @@ struct Entry {
 
     #[serde(default)]
     elapsed_ms: usize,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    finish_reason: Option<FinishReason>,
+
+    #[serde(skip, default)]
+    request_id: usize,
 }
 
 pub async fn run(
@@ -71,29 +77,21 @@ pub async fn run(
         );
     }
 
-    let (_service_name, engine, _inspect_template) =
+    let (service_name, engine, _inspect_template) =
         common::prepare_engine(runtime.clone(), engine_config).await?;
+    let service_name_ref = Arc::new(service_name);
 
     let pre_processor = if let Some(card) = maybe_card {
         Some(OpenAIPreprocessor::new(card).await?)
     } else {
         None
     };
-    let (all_finish_tx, all_finish_rx) = tokio::sync::oneshot::channel();
-
     let (done_entries_tx, done_entries_rx) = tokio::sync::mpsc::channel(64);
     let dw_cancel_token = cancel_token.clone();
     let mut output_file = input_jsonl.clone();
     output_file.set_file_name(OUTPUT_FILENAME);
     tokio::spawn(async move {
-        if let Err(err) = output_writer(
-            dw_cancel_token,
-            done_entries_rx,
-            &output_file,
-            all_finish_tx,
-        )
-        .await
-        {
+        if let Err(err) = output_writer(dw_cancel_token, done_entries_rx, &output_file).await {
             tracing::error!(%err, "Failed writing output to {}", output_file.display());
         }
     });
@@ -125,21 +123,24 @@ pub async fn run(
                 anyhow::bail!("Error parsing entry: '{line}'. {err}");
             }
         };
+        entry.request_id = request_id;
 
         let engine = engine.clone();
         let pre_processor = pre_processor.clone();
         let tokens_in = tokens_in.clone();
         let tokens_out = tokens_out.clone();
         let done_entries_tx = done_entries_tx.clone();
+        let service_name_ref = service_name_ref.clone();
         let handle = tokio::spawn(async move {
             let local_start = Instant::now();
-            let response = match evaluate(request_id, engine, &entry.text).await {
-                Ok(r) => r,
-                Err(err) => {
-                    tracing::error!(%err, entry.text, "Failed evaluating prompt");
-                    return;
-                }
-            };
+            let response =
+                match evaluate(request_id, service_name_ref.as_str(), engine, &mut entry).await {
+                    Ok(r) => r,
+                    Err(err) => {
+                        tracing::error!(%err, entry.text, "Failed evaluating prompt");
+                        return;
+                    }
+                };
             let local_elapsed = Instant::now() - local_start;
             entry.elapsed_ms = local_elapsed.as_millis() as usize;
 
@@ -175,8 +176,6 @@ pub async fn run(
         }
         _ = futures::future::join_all(handles) => {
         }
-        _ = all_finish_rx => {
-        }
     }
     let elapsed = Instant::now() - start;
     let elapsed_clean = Duration::from_millis(elapsed.as_millis() as u64);
@@ -198,23 +197,24 @@ pub async fn run(
 
 // Run a single prompt through the engine
 async fn evaluate(
-    _request_id: usize,
+    request_id: usize,
+    service_name: &str,
     engine: OpenAIChatCompletionsStreamingEngine,
-    prompt: &str,
+    entry: &mut Entry,
 ) -> anyhow::Result<String> {
     let user_message = async_openai::types::ChatCompletionRequestMessage::User(
         async_openai::types::ChatCompletionRequestUserMessage {
             content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                prompt.to_string(),
+                entry.text.clone(),
             ),
             name: None,
         },
     );
     let inner = async_openai::types::CreateChatCompletionRequestArgs::default()
         .messages(vec![user_message])
-        .model(DUMMY_MODEL_NAME)
+        .model(service_name)
         .stream(true)
-        .max_tokens(MAX_TOKENS)
+        .max_completion_tokens(MAX_TOKENS)
         .build()?;
     let req = NvCreateChatCompletionRequest { inner, nvext: None };
     let mut stream = engine.generate(Context::new(req)).await?;
@@ -223,24 +223,30 @@ async fn evaluate(
         match (item.data.as_ref(), item.event.as_deref()) {
             (Some(data), _) => {
                 // Normal case
-                let entry = data.inner.choices.first();
-                let chat_comp = entry.as_ref().unwrap();
+                let choice = data.inner.choices.first();
+                let chat_comp = choice.as_ref().unwrap();
                 if let Some(c) = &chat_comp.delta.content {
                     output += c;
                 }
+                entry.finish_reason = chat_comp.finish_reason;
                 if chat_comp.finish_reason.is_some() {
-                    tracing::trace!("finish reason: {:?}", chat_comp.finish_reason.unwrap());
+                    tracing::trace!(
+                        request_id,
+                        "finish reason: {:?}",
+                        chat_comp.finish_reason.unwrap()
+                    );
                     break;
                 }
             }
             (None, Some("error")) => {
+                tracing::error!(request_id, "the error case");
                 // There's only one error but we loop in case that changes
                 for err in item.comment.unwrap_or_default() {
-                    tracing::error!("Engine error: {err}");
+                    tracing::error!(request_id, "Engine error: {err}");
                 }
             }
             (None, Some(annotation)) => {
-                tracing::debug!("Annotation. {annotation}: {:?}", item.comment);
+                tracing::debug!(request_id, "Annotation. {annotation}: {:?}", item.comment);
             }
             _ => {
                 unreachable!("Event from engine with no data, no error, no annotation.");
@@ -254,22 +260,20 @@ async fn output_writer(
     cancel_token: CancellationToken,
     mut entries_rx: tokio::sync::mpsc::Receiver<Entry>,
     output_file: &Path,
-    all_finish_tx: tokio::sync::oneshot::Sender<()>,
 ) -> anyhow::Result<()> {
     let mut num_completed = 0;
     let mut f = tokio::fs::File::create(output_file).await?;
     loop {
-        let maybe_entry = tokio::select! {
+        let entry = tokio::select! {
             _ = cancel_token.cancelled() => {
                 break;
             }
-            entry = entries_rx.recv() => {
-                entry
+            maybe_entry = entries_rx.recv() => {
+                match maybe_entry {
+                    Some(entry) => entry,
+                    None => {break;}
+                }
             }
-        };
-        let Some(entry) = maybe_entry else {
-            let _ = all_finish_tx.send(());
-            break;
         };
         let mut s = serde_json::to_string(&entry)?;
         s.push('\n');
@@ -278,7 +282,7 @@ async fn output_writer(
         num_completed += 1;
         // TODO: Progress bar. We'd have to count the lines in the input first,
         // and the input maybe be large
-        tracing::info!("Saved {num_completed}");
+        tracing::info!(entry.request_id, entry.tokens_out, "Saved {num_completed}");
     }
     Ok(())
 }
