@@ -27,21 +27,21 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 **Dynamo** is compatible with the following platforms:
 
-| **Operating System**   | **Architecture**   | **Status**              |
-|------------------------|--------------------|-------------------------|
-| **Linux**              | x86_64             | Supported               |
-| **Linux**              | ARM64              | Experimental            |
+| **Operating System** | **Version** | **Architecture** | **Status**   |
+|----------------------|-------------|------------------|--------------|
+| **Ubuntu**           | 24.04       | x86_64           | Supported    |
+| **Ubuntu**           | 24.04       | ARM64            | Experimental |
 
 > **Note**: For **Linux**, the **ARM64** support is experimental and may have limitations.
 
 ## Software Compatibility
 
-| **Dependency**   | **Version** |
-|------------------|-------------|
-|**Base Container**|    25.01    |
-|**ai-dynamo-vllm**|    0.7.2*   |
-|**TensorRT-LLM**  |    0.19.0** |
-|**NIXL**          |    0.1.0    |
+| **Build Dependency** | **Version** |
+|----------------------|-------------|
+| **Base Container**   |    [25.01](https://hub.docker.com/layers/nvidia/cuda/12.8.1-runtime-ubuntu24.04/images/sha256-828c4d878adcaa4265d80c95d8ec877149b49bb2419a4cf3bb6aa889bbb7ca2e)    |
+| **ai-dynamo-vllm**   |    0.7.2*   |
+| **TensorRT-LLM**     |    0.19.0** |
+| **NIXL**             |    0.1.0    |
 
 > **Note**:
 > - *ai-dynamo-vllm v0.7.2 is a customized patch of v0.7.2 from vLLM.
