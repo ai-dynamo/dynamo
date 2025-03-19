@@ -79,15 +79,15 @@ async fn mock_event_publisher(namespace: Namespace) {
     // be reflective of the KV Router's performance.
     // 3. The data in these events aren't in sync with the stats handler's
     // ForwardPassMetrics data, so they may not correlate well.
-    let worker_id = rand::thread_rng().gen_range(1..=1000);
+    let worker_id = rand::rng().random_range(1..=1000);
 
     let mut interval = interval(Duration::from_secs(1));
     loop {
         interval.tick().await;
 
         // Generate random KV hit rate event using a new thread_rng each time
-        let isl_blocks = rand::thread_rng().gen_range(0..=100);
-        let overlap_blocks = rand::thread_rng().gen_range(0..=isl_blocks);
+        let isl_blocks = rand::rng().random_range(0..=100);
+        let overlap_blocks = rand::rng().random_range(0..=isl_blocks);
 
         let event = KVHitRateEvent {
             worker_id,
@@ -109,12 +109,12 @@ async fn mock_event_publisher(namespace: Namespace) {
 /// Generates mock forward pass metrics for stats handler
 fn mock_stats_handler(_stats: Stats) -> serde_json::Value {
     let request_total_slots = 100;
-    let request_active_slots = rand::thread_rng().gen_range(0..=request_total_slots);
+    let request_active_slots = rand::rng().random_range(0..=request_total_slots);
     let kv_total_blocks = 100;
-    let kv_active_blocks = rand::thread_rng().gen_range(0..=kv_total_blocks);
-    let num_requests_waiting = rand::thread_rng().gen_range(0..=100);
-    let gpu_cache_usage_perc = rand::thread_rng().gen_range(0.0..=1.0);
-    let gpu_prefix_cache_hit_rate = rand::thread_rng().gen_range(0.0..=1.0);
+    let kv_active_blocks = rand::rng().random_range(0..=kv_total_blocks);
+    let num_requests_waiting = rand::rng().random_range(0..=100);
+    let gpu_cache_usage_perc = rand::rng().random_range(0.0..=1.0);
+    let gpu_prefix_cache_hit_rate = rand::rng().random_range(0.0..=1.0);
     let stats = ForwardPassMetrics {
         request_active_slots,
         request_total_slots,

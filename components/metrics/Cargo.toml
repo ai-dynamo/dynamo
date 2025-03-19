@@ -27,6 +27,7 @@ dynamo-llm = { workspace = true }
 dynamo-runtime = { workspace = true }
 
 futures = { workspace = true }
+rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
@@ -38,6 +39,5 @@ clap = { version = "4.5", features = ["derive", "env"] }
 opentelemetry = { version = "0.20" }
 opentelemetry-prometheus = { version = "0.13" }
 prometheus = { version = "0.13" }
-rand = { version = "0.8" }
-reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 thiserror = { version = "1.0" }
