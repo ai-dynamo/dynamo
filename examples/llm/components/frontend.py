@@ -17,7 +17,6 @@ import subprocess
 from pathlib import Path
 
 from components.processor import Processor
-from components.routerless.worker import VllmWorkerRouterLess
 from components.worker import VllmWorker
 from pydantic import BaseModel
 
@@ -50,7 +49,6 @@ class FrontendConfig(BaseModel):
 # todo this should be called ApiServer
 class Frontend:
     worker = depends(VllmWorker)
-    worker_routerless = depends(VllmWorkerRouterLess)
     processor = depends(Processor)
 
     def __init__(self):

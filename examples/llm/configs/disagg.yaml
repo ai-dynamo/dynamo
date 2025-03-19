@@ -43,4 +43,4 @@ PrefillWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 1 
+      gpu: 1
