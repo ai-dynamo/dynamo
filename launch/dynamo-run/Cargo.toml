@@ -61,3 +61,7 @@ futures-util = { version = "0.3" }
 [target.x86_64-unknown-linux-gnu.dependencies]
 netlink-packet-route = { version = "0.19", optional = true }
 rtnetlink = { version = "0.14", optional = true }
+
+[target.x86_64-unknown-linux-musl.dependencies]
+netlink-packet-route = { version = "0.19", optional = true }
+rtnetlink = { version = "0.14", optional = true }
