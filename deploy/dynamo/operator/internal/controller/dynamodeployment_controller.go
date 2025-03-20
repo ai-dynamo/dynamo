@@ -197,5 +197,6 @@ func (r *DynamoDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config)).
+		WithEventFilter(predicate.GenerationChangedPredicate{}).
 		Complete(r)
 }
