@@ -116,23 +116,25 @@ Optionally can run `cargo build` from any location with arguments:
 
 - Linux with GPU and CUDA (tested on Ubuntu):
 ```
-cargo build --release --features mistralrs,cuda
+cargo build --features cuda
 ```
 
 - macOS with Metal:
 ```
-cargo build --release --features mistralrs,metal
+cargo build --features metal
 ```
 
 - CPU only:
 ```
-cargo build --release --features mistralrs
+cargo build
 ```
 
-The binary will be called `dynamo-run` in `target/release`
+The binary will be called `dynamo-run` in `target/debug`
 ```
-cd target/release
+cd target/debug
 ```
+
+Build with `--release` for a smaller binary and better performance, but longer build times. The binary will be in `target/release`.
 
 ## sglang
 
@@ -149,7 +151,7 @@ uv pip install "sglang[all]==0.4.2" --find-links https://flashinfer.ai/whl/cu124
 2. Build
 
 ```
-cargo build --release --features sglang
+cargo build --features sglang
 ```
 
 3. Run
@@ -168,7 +170,7 @@ dynamo-run in=none out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llam
 
 ## llama_cpp
 
-- `cargo build --release --features llamacpp,cuda`
+- `cargo build --features llamacpp,cuda`
 
 - `dynamo-run out=llama_cpp --model-path ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf --model-config ~/llm_models/Llama-3.2-3B-Instruct/`
 
@@ -197,7 +199,7 @@ uv pip install vllm==0.7.3 setuptools
 
 Build:
 ```
-cargo build --release --features vllm
+cargo build --features vllm
 ```
 
 Run (still inside that virtualenv) - HF repo:
@@ -230,7 +232,7 @@ You can provide your own engine in a Python file. The file must provide a genera
 async def generate(request):
 ```
 
-Build: `cargo build --release --features python`
+Build: `cargo build --features python`
 
 ### Python does the pre-processing
 
@@ -343,7 +345,7 @@ TensorRT-LLM. Requires `clang` and `libclang-dev`.
 
 Build:
 ```
-cargo build --release --features trtllm
+cargo build --features trtllm
 ```
 
 Run:
