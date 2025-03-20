@@ -63,7 +63,7 @@ class ChatProcessorMixin:
             )
 
         self.chat_processor = ChatProcessor(self._model_name, self._tokenizer)
-        self.completions_processor = CompletionsProcessor(self._model_name)
+        self.completions_processor = CompletionsProcessor(self._model_name, self._tokenizer)
 
 
 @dataclass

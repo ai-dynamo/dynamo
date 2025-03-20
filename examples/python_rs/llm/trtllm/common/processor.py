@@ -14,15 +14,20 @@
 # limitations under the License.
 
 import asyncio
-from typing import Any, AsyncIterator, Dict, List, Tuple, Union
+from dataclasses import asdict
+from typing import Any, Dict, List, Union
 
-from common.utils import ConversationMessage
+from common.utils import ConversationMessage, ServerType
 from common.protocol import (
     DisaggChatCompletionResponseStreamChoice,
     DisaggChatCompletionStreamResponse,
     DisaggCompletionResponseStreamChoice,
     DisaggCompletionStreamResponse,
     DisaggregatedTypeConverter,
+    Tokens, 
+    TRTLLMWorkerRequest,
+    TRTLLMWorkerResponse,
+    TRTLLMWorkerResponseOutput,
 )
 from openai.types.chat import ChatCompletionMessageParam
 from tensorrt_llm.llmapi.llm import RequestOutput
@@ -253,36 +258,68 @@ class ChatProcessor(BaseChatProcessor):
             )
             return final_usage_chunk.model_dump_json()
         return "data: [DONE]\n\n"
+    
+    async def preprocess(self, request):
+        conversation = []
+        for message in request.messages:
+            conversation.extend(parse_chat_message_content(message))
+        tool_dicts = (
+            None if request.tools is None else [tool.model_dump() for tool in request.tools]
+        )
+        prompt: str = self.tokenizer.apply_chat_template(
+            conversation=conversation,
+            tokenize=False,
+            add_generation_prompt=request.add_generation_prompt,
+            tools=tool_dicts,
+            documents=request.documents,
+            chat_template=request.chat_template,
+            **(request.chat_template_kwargs or {}),
+        )
+        sampling_params = request.to_sampling_params()
 
+        return TRTLLMWorkerRequest(
+            id=request.id,
+            prompt=prompt,
+            sampling_params=asdict(sampling_params),
+            conversation=conversation,
+            disaggregated_params=request.disaggregated_params,
+            # NOTE: dont include the first token (e.g. <s>) when searching for a prefix match. We might want to exclude all special tokens at some point.
+            tokens=Tokens(tokens=self.tokenizer.encode(prompt)[1:]),
+        )
 
-def merge_promises(
-    promises: List[RequestOutput],
-) -> AsyncIterator[Tuple[int, RequestOutput]]:
-    outputs = asyncio.Queue()  # type: ignore
-    finished = [False] * len(promises)
+    async def postprocess(
+        self,
+        engine_generator,
+        request,
+        conversation,
+        server_type: ServerType,
+    ):
+        async for raw_response in engine_generator:
+            response = TRTLLMWorkerResponse.model_validate_json(raw_response.data())
+            response.outputs = [TRTLLMWorkerResponseOutput(**response.outputs[0])]
 
-    async def producer(i: int, promise: RequestOutput):
-        async for output in promise:
-            await outputs.put((i, output))
-        finished[i] = True
+            if request.disaggregated_params is not None and server_type == ServerType.CTX:
+                response_data = self.yield_first_chat(
+                    request, request.id, response
+                )
+            else:
+                response_data = self.create_chat_stream_response(
+                    request,
+                    request.id,
+                    response,
+                    conversation,
+                    first_iteration=(not request.disaggregated_params is not None),
+                )
+            logger.debug(f"[postprocessor] Response: {response_data}")
+            yield response_data
 
-    _tasks = [
-        asyncio.create_task(producer(i, promise)) for i, promise in enumerate(promises)
-    ]
-
-    async def consumer():
-        while not all(finished) or not outputs.empty():
-            item = await outputs.get()
-            yield item
-        await asyncio.gather(*_tasks)
-
-    return consumer()
 
 
 class CompletionsProcessor:
-    def __init__(self, model: str):
+    def __init__(self, model: str, tokenizer: AutoTokenizer):
         self.model = model
-
+        self.tokenizer = tokenizer
+        
     def create_completion_stream_response(self, request, response):
         num_choices = 1 if request.n is None else request.n
         echoed = [False] * num_choices
@@ -310,3 +347,41 @@ class CompletionsProcessor:
                 choices=[choice],
             )
             return chunk.model_dump_json()
+
+    async def preprocess(self, request):
+        if isinstance(request.prompt, str) or (
+            isinstance(request.prompt, list)
+            and all(isinstance(x, int) for x in request.prompt)
+        ):
+            prompt = request.prompt
+        else:
+            raise ValueError(
+                "Invalid prompt type. Only string or list of integers are supported."
+            )
+
+        sampling_params = request.to_sampling_params()
+
+        return TRTLLMWorkerRequest(
+            id=request.id,
+            prompt=prompt,
+            sampling_params=asdict(sampling_params),
+            disaggregated_params=request.disaggregated_params,
+            tokens=Tokens(tokens=self.tokenizer.encode(prompt)[1:]), 
+        )
+
+
+    async def postprocess(
+        self, 
+        engine_generator, 
+        request,
+    ):
+        async for raw_response in engine_generator:
+            response = TRTLLMWorkerResponse.model_validate_json(raw_response.data())
+            response.outputs = [TRTLLMWorkerResponseOutput(**response.outputs[0])]
+
+            response_data = self.create_completion_stream_response(
+                request,
+                response,
+            )
+            logger.debug(f"[postprocessor] Response: {response_data}")
+            yield response_data

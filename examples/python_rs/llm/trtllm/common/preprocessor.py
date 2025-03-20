@@ -18,13 +18,6 @@ import json
 
 import uvloop
 from common.base_engine import ChatProcessorMixin
-from common.generators import (
-    ServerType,
-    chat_postprocessor,
-    chat_preprocessor,
-    completion_postprocessor,
-    completion_preprocessor,
-)
 from common.kv_router import KVRouter, RoutingStrategy, get_worker_id
 from common.parser import LLMAPIConfig, parse_tensorrt_llm_args
 from common.protocol import (
@@ -34,7 +27,7 @@ from common.protocol import (
     DisaggChatCompletionRequest,
     DisaggChatCompletionStreamResponse
 )
-from common.utils import RequestType, wait_for_workers
+from common.utils import RequestType, wait_for_workers, ServerType
 from tensorrt_llm.logger import logger
 
 from dynamo.llm import KvIndexer, KvMetricsAggregator
@@ -65,11 +58,9 @@ class Processor(ChatProcessorMixin):
         logger.debug(f"[preprocessor] Received request: {raw_request}")
 
         if request_type == RequestType.CHAT:
-            preprocessed_request = await chat_preprocessor(raw_request, self._tokenizer)
+            preprocessed_request = await self.chat_processor.preprocess(raw_request)
         else:
-            preprocessed_request = await completion_preprocessor(
-                raw_request, self._tokenizer
-            )
+            preprocessed_request = await self.completions_processor.preprocess(raw_request)
 
         worker_id = ""
         if self.routing_strategy == RoutingStrategy.PREFIX:
@@ -91,18 +82,17 @@ class Processor(ChatProcessorMixin):
             )
 
         if request_type == RequestType.CHAT:
-            async for response in chat_postprocessor(
+            async for response in self.chat_processor.postprocess(
                 engine_generator,
                 raw_request,
                 preprocessed_request.conversation,
                 ServerType.GEN,
-                self.chat_processor,
             ):
                 logger.debug(f"[preprocessor] Response: {response}")
                 yield json.loads(response)
         else:
-            async for response in completion_postprocessor(
-                engine_generator, raw_request, self.completions_processor
+            async for response in self.completions_processor.postprocess(
+                engine_generator, raw_request
             ):
                 logger.debug(f"[preprocessor] Response: {response}")
                 yield json.loads(response)
