@@ -76,7 +76,6 @@ class Router:
     """
     Request handler for the generate endpoint
     """
-
     worker = depends(VllmWorker)
 
     def __init__(self):
@@ -113,6 +112,22 @@ class Router:
         metrics: AggregatedMetrics | None,
         token_length: int,
     ):
+        """The cost function for deciding the best worker to route a request to.
+        If there are multiple workers sharing the same optimal cost, then
+        one of them is randomly selected.
+
+        Args:
+            scores (OverlapScores | None): The number of matching blocks between
+                the request and the prefix cache of each worker.
+            metrics (AggregatedMetrics | None): Several worker metrics polled
+                by the `KvMetricsAggregator`, currently including the
+                GPU cache usage, number of waiting requests, and the
+                GPU prefix cache hit rate.
+            token_length (int): The number of tokens in the request.
+
+        Returns:
+            (str, float): The best worker id and the corresponding score.
+        """
         worker_scores = {}
         if scores:
             for worker_id, score in scores.scores.items():
