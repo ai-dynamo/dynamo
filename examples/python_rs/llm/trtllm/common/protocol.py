@@ -57,6 +57,7 @@ class TRTLLMWorkerRequest(BaseModel):
     sampling_params: dict
     streaming: bool = True
     conversation: Optional[List[str]] = Field(default=None)
+    tokens: Optional[Tokens] = Field(default=None)
     disaggregated_params: Optional[DisaggregatedParams] = Field(default=None)
 
 

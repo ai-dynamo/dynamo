@@ -20,7 +20,7 @@ from common.processor import (
     merge_promises,
     parse_chat_message_content,
 )
-from common.protocol import DisaggregatedTypeConverter, TRTLLMWorkerRequest
+from common.protocol import DisaggregatedTypeConverter, Tokens, TRTLLMWorkerRequest
 from common.utils import ServerType
 from tensorrt_llm.logger import logger
 
@@ -55,6 +55,7 @@ async def chat_preprocessor(request, tokenizer):
         sampling_params=sampling_params,
         conversation=conversation,
         disaggregated_params=disaggregated_params,
+        tokens=Tokens(tokenizer.encode(request.prompt)[1:]),
     )
 
 
@@ -81,7 +82,7 @@ async def chat_postprocessor(
         yield response_data
 
 
-def completion_preprocessor(request):
+def completion_preprocessor(request, tokenizer):
     if isinstance(request.prompt, str) or (
         isinstance(request.prompt, list)
         and all(isinstance(x, int) for x in request.prompt)
@@ -103,6 +104,7 @@ def completion_preprocessor(request):
         prompt=prompt,
         sampling_params=sampling_params,
         disaggregated_params=disaggregated_params,
+        tokens=Tokens(tokenizer.encode(request.prompt)[1:]),
     )
 
 

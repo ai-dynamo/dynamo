@@ -25,6 +25,7 @@ from common.generators import (
     completion_postprocessor,
     completion_preprocessor,
 )
+from common.kv_router import KVRouter, RoutingStrategy, get_worker_id
 from common.parser import LLMAPIConfig, parse_tensorrt_llm_args
 from common.protocol import (
     AdaptedChatCompletionRequest,
@@ -32,31 +33,58 @@ from common.protocol import (
     ChatCompletionStreamResponse,
     CompletionStreamResponse,
 )
-from common.utils import RequestType
+from common.utils import RequestType, wait_for_workers
 from tensorrt_llm.logger import logger
 
+from dynamo.llm import KvIndexer, KvMetricsAggregator
 from dynamo.runtime import Client, DistributedRuntime, dynamo_endpoint, dynamo_worker
 
 
 class Processor(ChatProcessorMixin):
-    def __init__(self, args, engine_config: LLMAPIConfig, workers_client: Client):
-        self.args = args
+    def __init__(
+        self,
+        engine_config: LLMAPIConfig,
+        workers_client: Client,
+        kv_router: KVRouter,
+        routing_strategy: RoutingStrategy,
+    ):
         self.engine_config = engine_config
         self.workers_client = workers_client
+        self.kv_router = kv_router
+        self.routing_strategy = routing_strategy
         super().__init__(self.engine_config)
 
     async def _generate(self, raw_request, request_type: RequestType):
+        raw_request.skip_special_tokens = False
+        raw_request.add_special_tokens = False
+        raw_request.spaces_between_special_tokens = False
         logger.debug(f"[preprocessor] Received request: {raw_request}")
 
-        # worker_id = ""
         if request_type == RequestType.CHAT:
             preprocessed_request = await chat_preprocessor(raw_request, self._tokenizer)
         else:
-            preprocessed_request = await completion_preprocessor(raw_request)
+            preprocessed_request = await completion_preprocessor(
+                raw_request, self._tokenizer
+            )
 
-        engine_generator = await self.workers_client.round_robin(
-            preprocessed_request.model_dump_json()
-        )
+        worker_id = ""
+        if self.routing_strategy == RoutingStrategy.PREFIX:
+            worker_id = await get_worker_id(self.kv_router, preprocessed_request.tokens)
+
+        if worker_id == "":
+            if self.routing_strategy == RoutingStrategy.ROUND_ROBIN:
+                engine_generator = await self.workers_client.round_robin(
+                    preprocessed_request.model_dump_json()
+                )
+            else:
+                # fallback to random
+                engine_generator = await self.workers_client.random(
+                    preprocessed_request.model_dump_json()
+                )
+        else:
+            engine_generator = await self.workers_client.direct(
+                preprocessed_request.model_dump_json(), int(worker_id)
+            )
 
         if request_type == RequestType.CHAT:
             async for response in chat_postprocessor(
@@ -99,17 +127,30 @@ async def worker(runtime: DistributedRuntime, args, engine_config: LLMAPIConfig)
         .endpoint("generate")
         .client()
     )
-    # router_client = (
-    #     await runtime.namespace("dynamo")
-    #     .component("router")
-    #     .endpoint("generate")
-    #     .client()
-    # )
+
+    await wait_for_workers(workers_client, args.min_workers)
+
+    if args.routing_strategy == RoutingStrategy.PREFIX:
+        kv_listener = runtime.namespace("dynamo").component("tensorrt-llm")
+        await kv_listener.create_service()
+
+        logger.info(
+            f"Intializing KV indexer with tokens per block: {args.kv_block_size}"
+        )
+        indexer = KvIndexer(kv_listener, args.kv_block_size)
+        metrics_aggregator = KvMetricsAggregator(kv_listener)
+    else:
+        indexer = None
+        metrics_aggregator = None
 
     chat_endpoint = preprocess_component.endpoint("chat/completions")
     completions_endpoint = preprocess_component.endpoint("completions")
 
-    processor = Processor(args, engine_config, workers_client)
+    kv_router = KVRouter(indexer, metrics_aggregator, workers_client)
+
+    processor = Processor(
+        engine_config, workers_client, kv_router, args.routing_strategy
+    )
 
     await asyncio.gather(
         chat_endpoint.serve_endpoint(processor.generate_chat),
