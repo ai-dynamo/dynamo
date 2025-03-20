@@ -179,14 +179,11 @@ class Router:
             return ""
 
         # Select the worker with the highest logit
-        if worker_logits:
-            max_logit = max(worker_logits.values())
-            best_workers = [
-                wid for wid, logit in worker_logits.items() if logit == max_logit
-            ]
-            best_worker_id = random.choice(best_workers)
-        else:
-            best_worker_id = ""
+        max_logit = max(worker_logits.values())
+        best_workers = [
+            wid for wid, logit in worker_logits.items() if logit == max_logit
+        ]
+        best_worker_id = random.choice(best_workers)
 
         # Log the metrics for the selected worker
         if best_worker_id:
