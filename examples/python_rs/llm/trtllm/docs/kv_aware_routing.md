@@ -48,7 +48,7 @@ To launch the router, run the following command:
 
 ```bash
 cd /workspace/examples/python_rs/llm/tensorrt_llm/
-python3 -m monolith.router --min-workers 2 --engine_args llm_api_config.yaml --routing-strategy prefix 1>router.log 2>&1 &
+python3 -m common.preprocessor --engine_args llm_api_config.yaml --routing-strategy prefix --min-workers 2 1>preprocess.log 2>&1 &
 ```
 
 Note the extra argument `--min-workers 2` to specify the minimum number of workers to wait for before starting the router.
@@ -56,7 +56,7 @@ The router will schedule requests to the workers based on the stats and kv cache
 
 Create HTTP endpoints for the router:
 ```bash
-llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.router.completions
+llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.preprocess.completions
 ```
 
 ### 3. Send Requests

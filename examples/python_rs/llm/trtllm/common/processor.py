@@ -283,18 +283,18 @@ class CompletionsProcessor:
     def __init__(self, model: str):
         self.model = model
 
-    def _post_process(self, request, prompt_idx, num_choices, requst_output):
-        res = []
+    def create_completion_stream_response(self, request, response):
+        num_choices = 1 if request.n is None else request.n
         echoed = [False] * num_choices
-        num_repsonse_per_request = 1 if request.n is None else request.n
-        for gen_idx, output in enumerate(requst_output.outputs):
-            response_idx = prompt_idx * num_repsonse_per_request + gen_idx
+
+        # len(response.outputs) is always 1
+        for gen_idx, output in enumerate(response.outputs):
             delta_text = output.text_diff
-            if request.echo and not echoed[response_idx]:
+            if request.echo and not echoed[gen_idx]:
                 delta_text = request.prompt + delta_text
-                echoed[response_idx] = True
+                echoed[gen_idx] = True
             choice = DisaggCompletionResponseStreamChoice(
-                index=response_idx,
+                index=gen_idx,
                 text=delta_text,
                 stop_reason=output.stop_reason,
                 finish_reason=output.finish_reason,
@@ -309,16 +309,4 @@ class CompletionsProcessor:
                 model=self.model,
                 choices=[choice],
             )
-            res.append(chunk.model_dump_json())
-        return res
-
-    async def create_completion_generator(
-        self,
-        request: CompletionRequest,
-        generator: AsyncIterator[Tuple[int, RequestOutput]],
-        num_choices: int,
-    ):
-        async for prompt_idx, requst_output in generator:
-            pp_res = self._post_process(request, prompt_idx, num_choices, requst_output)
-            for _p in pp_res:
-                yield _p
+            return chunk.model_dump_json()

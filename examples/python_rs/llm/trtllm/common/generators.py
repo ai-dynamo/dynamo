@@ -52,6 +52,7 @@ async def chat_preprocessor(request, tokenizer):
         sampling_params=asdict(sampling_params),
         conversation=conversation,
         disaggregated_params=request.disaggregated_params,
+        # NOTE: dont include the first token (e.g. <s>) when searching for a prefix match. We might want to exclude all special tokens at some point.
         tokens=Tokens(tokens=tokenizer.encode(prompt)[1:]),
     )
 
@@ -108,11 +109,13 @@ async def completion_preprocessor(request, tokenizer):
 async def completion_postprocessor(
     engine_generator, request, completions_processor: CompletionsProcessor
 ):
-    generator = merge_promises([engine_generator])
-    num_choices = 1 if request.n is None else request.n
+    async for raw_response in engine_generator:
+        response = TRTLLMWorkerResponse.model_validate_json(raw_response.data())
+        response.outputs = [TRTLLMWorkerResponseOutput(**response.outputs[0])]
 
-    response_generator = completions_processor.create_completion_generator(
-        request, generator, num_choices
-    )
-    async for response in response_generator:
-        yield response
+        response_data = completions_processor.create_completion_stream_response(
+            request,
+            response,
+        )
+        logger.debug(f"[postprocessor] Response: {response_data}")
+        yield response_data

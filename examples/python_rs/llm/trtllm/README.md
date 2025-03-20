@@ -108,8 +108,8 @@ By default the server will run on port 8080.
 
 Add model to the server:
 ```bash
-llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.tensorrt-llm.chat/completions
-llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.tensorrt-llm.completions
+llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.preprocess.chat/completions
+llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.preprocess.completions
 ```
 
 #### 2. Workers
@@ -119,6 +119,7 @@ llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.tensorrt-ll
 ```bash
 # Launch worker
 cd /workspace/examples/python_rs/llm/trtllm
+python3 -m common.preprocessor --engine_args llm_api_config.yaml 1>preprocess.log 2>&1 &
 mpirun --allow-run-as-root -n 1 --oversubscribe python3 -m monolith.worker --engine_args llm_api_config.yaml 1>agg_worker.log 2>&1 &
 ```
 
@@ -160,7 +161,9 @@ curl localhost:8080/v1/chat/completions \
     "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     "messages": [
       {"role": "user", "content": "What is the capital of France?"}
-    ]
+    ],
+    "max_completion_tokens": 10,
+    "stream": true
   }'
 ```
 
@@ -193,8 +196,9 @@ curl localhost:8080/v1/completions \
   -d '{
         "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         "prompt": "The capital of France is",
-        "max_tokens": 1,
-        "temperature": 0
+        "max_tokens": 10,
+        "temperature": 0,
+        "stream": true
     }'
 ```
 
@@ -238,8 +242,8 @@ By default the server will run on port 8080.
 
 Add model to the server:
 ```bash
-llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.disaggregated_server.chat/completions
-llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.disaggregated_server.completions
+llmctl http add chat meta-llama/Llama-3.1-8B-Instruct dynamo.disaggregated_server.chat/completions
+llmctl http add completion meta-llama/Llama-3.1-8B-Instruct dynamo.disaggregated_server.completions
 ```
 
 #### 2. Workers
@@ -258,7 +262,7 @@ For example, 2 TP2 generation servers are 2 workers but 4 mpi executors.
 
 ```bash
 cd /workspace/examples/python_rs/llm/trtllm/
-mpirun --allow-run-as-root --oversubscribe -n WORLD_SIZE python3 -m disaggregated.worker --engine_args llm_api_config.yaml -c disaggregated/llmapi_disaggregated_configs/single_node_config.yaml 1>disagg_workers.log 2>&1 &
+mpirun --allow-run-as-root --oversubscribe -n 2 python3 -m disaggregated.worker --engine_args llm_api_config.yaml -c disaggregated/llmapi_disaggregated_configs/single_node_config.yaml 1>disagg_workers.log 2>&1 &
 ```
 If using the provided [single_node_config.yaml](disaggregated/llmapi_disaggregated_configs/single_node_config.yaml), WORLD_SIZE should be 2 as it has 1 context servers(TP=1) and 1 generation server(TP=1).
 

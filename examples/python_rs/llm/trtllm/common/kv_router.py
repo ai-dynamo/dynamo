@@ -25,7 +25,7 @@ from tensorrt_llm.logger import logger
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
 from dynamo.runtime import dynamo_endpoint
 
-logger.set_level("info")
+logger.set_level("debug")
 
 
 class RoutingStrategy(enum.Enum):
@@ -174,17 +174,8 @@ class KVRouter:
         yield f"{worker_id}_{prefix_hit_rate}"
 
 
-async def get_worker_id(kv_router: KVRouter, request, tokenizer) -> str:
-    # NOTE: this will increase TTFT since we are encoding the prompt here
-    # prompt is also encoded in the worker.
-    # TODO: we need to implement our own request processing and protocols to send only token ids to llmapi worker.
-    # TODO: support chat endpoint
-    # NOTE: dont include the first token (e.g. <s>) when searching for a prefix match. We might want to exclude all special tokens at some point.
-    token_ids = tokenizer.encode(request.prompt)[1:]
-    print(f"token_ids: {token_ids}")
-    worker_id_generator: AsyncIterator = kv_router.generate(
-        Tokens(tokens=token_ids).model_dump_json()
-    )
+async def get_worker_id(kv_router: KVRouter, tokens: Tokens) -> str:
+    worker_id_generator: AsyncIterator = kv_router.generate(tokens)
 
     response = await worker_id_generator.__anext__()  # only one worker id is returned
     worker_id, prefix_hit_rate = response.split("_")
