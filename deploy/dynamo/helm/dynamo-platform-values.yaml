@@ -33,9 +33,6 @@ dynamo-operator:
       args:
         - --health-probe-bind-address=:8081
         - --metrics-bind-address=127.0.0.1:8080
-        - --leader-elect=false
-        - --natsAddr=nats://my-nats:4222
-        - --etcdAddr=etcd:2379
 
   dynamo:
     yatai:
