@@ -187,7 +187,9 @@ func (r *DynamoDeploymentReconciler) getSecret(ctx context.Context, namespace, n
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&nvidiacomv1alpha1.DynamoDeployment{}).
+		For(&nvidiacomv1alpha1.DynamoDeployment{}, builder.WithPredicates(
+			predicate.GenerationChangedPredicate{},
+		)).
 		Named("dynamodeployment").
 		Owns(&nvidiacomv1alpha1.DynamoNimDeployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment
@@ -197,6 +199,5 @@ func (r *DynamoDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config)).
-		WithEventFilter(predicate.GenerationChangedPredicate{}).
 		Complete(r)
 }
