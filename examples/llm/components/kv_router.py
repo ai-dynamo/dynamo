@@ -129,9 +129,15 @@ class Router:
             for endpoint in metrics.endpoints:
                 worker_id = endpoint.worker_id
                 worker_metrics[worker_id] = {
-                    "gpu_cache_usage_perc": getattr(endpoint, "gpu_cache_usage_perc", 0.0),
-                    "num_requests_waiting": getattr(endpoint, "num_requests_waiting", 0.0),
-                    "gpu_prefix_cache_hit_rate": getattr(endpoint, "gpu_prefix_cache_hit_rate", 0.0),
+                    "gpu_cache_usage_perc": getattr(
+                        endpoint, "gpu_cache_usage_perc", 0.0
+                    ),
+                    "num_requests_waiting": getattr(
+                        endpoint, "num_requests_waiting", 0.0
+                    ),
+                    "gpu_prefix_cache_hit_rate": getattr(
+                        endpoint, "gpu_prefix_cache_hit_rate", 0.0
+                    ),
                 }
                 max_waiting = max(
                     max_waiting, worker_metrics[worker_id]["num_requests_waiting"]
