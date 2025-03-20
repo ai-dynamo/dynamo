@@ -93,7 +93,11 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
         self._ongoing_request_count += 1
 
         try:
-            yield self._llm_engine.generate_async()
+            yield self._llm_engine.generate_async(
+                prompt=request.prompt,
+                sampling_params=request.sampling_params,
+                disaggregated_params=request.disaggregated_params,
+            )
 
         except CppExecutorError:
             signal.raise_signal(signal.SIGINT)
@@ -102,59 +106,6 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
 
         self._start_threads()
         self._ongoing_request_count -= 1
-
-    # @dynamo_endpoint(DisaggChatCompletionRequest, DisaggChatCompletionStreamResponse)
-    # async def generate_chat(self, request):
-    #     if self._llm_engine is None:
-    #         raise RuntimeError("Engine not initialized")
-
-    #     if self._error_queue.qsize() > 0:
-    #         error = self._error_queue.get()
-    #         raise error
-
-    #     logger.debug(f"Received request: {request}")
-
-    #     self._ongoing_request_count += 1
-
-    #     try:
-    #         async for response in chat_generator(self, request, is_disaggregated=True):
-    #             yield response
-
-    #     except CppExecutorError:
-    #         signal.raise_signal(signal.SIGINT)
-    #     except Exception as e:
-    #         raise RuntimeError("Failed to generate: " + str(e))
-
-    #     # Start the publishing threads with first request submission
-    #     self._start_threads()
-    #     self._ongoing_request_count -= 1
-
-    # @dynamo_endpoint(AdaptedCompletionRequest, DisaggCompletionStreamResponse)
-    # async def generate_completions(self, request):
-    #     logger.debug(f"[worker] worker_id: {self._worker_id} received request")
-    #     if self._llm_engine is None:
-    #         raise RuntimeError("Engine not initialized")
-
-    #     if self._error_queue.qsize() > 0:
-    #         error = self._error_queue.get()
-    #         raise error
-
-    #     self._ongoing_request_count += 1
-    #     logger.debug(f"[worker] Received completions request: {request}")
-
-    #     try:
-    #         async for response in completion_generator(
-    #             self, request, is_disaggregated=True
-    #         ):
-    #             yield response
-    #     except CppExecutorError:
-    #         signal.raise_signal(signal.SIGINT)
-    #     except Exception as e:
-    #         raise RuntimeError("Failed to generate: " + str(e))
-
-    #     # Start the publishing threads with first request submission
-    #     self._start_threads()
-    #     self._ongoing_request_count -= 1
 
 
 @dynamo_worker()

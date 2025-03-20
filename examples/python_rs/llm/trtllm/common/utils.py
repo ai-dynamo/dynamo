@@ -18,12 +18,25 @@ import asyncio
 import threading
 import traceback
 import weakref
+from enum import Enum
 from queue import Queue
 from typing import Callable, Optional, Union
 
 from tensorrt_llm.logger import logger
 
 logger.set_level("info")
+
+
+class RequestType(Enum):
+    CHAT = "chat"
+    COMPLETION = "completion"
+
+
+class ServerType(Enum):
+    # Generation server used for disaggregated and aggregated requests
+    GEN = "gen"
+    # Context server used for disaggregated requests
+    CTX = "ctx"
 
 
 class ManagedThread(threading.Thread):

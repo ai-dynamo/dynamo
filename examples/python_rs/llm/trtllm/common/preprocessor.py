@@ -15,7 +15,6 @@
 
 import asyncio
 import json
-from enum import Enum
 
 import uvloop
 from common.base_engine import ChatProcessorMixin
@@ -33,14 +32,10 @@ from common.protocol import (
     ChatCompletionStreamResponse,
     CompletionStreamResponse,
 )
+from common.utils import RequestType
 from tensorrt_llm.logger import logger
 
 from dynamo.runtime import Client, DistributedRuntime, dynamo_endpoint, dynamo_worker
-
-
-class RequestType(Enum):
-    CHAT = "chat"
-    COMPLETION = "completion"
 
 
 class Processor(ChatProcessorMixin):

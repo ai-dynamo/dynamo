@@ -19,6 +19,12 @@ import json
 
 import uvloop
 from common.base_engine import ChatProcessorMixin
+from common.generators import (
+    chat_postprocessor,
+    chat_preprocessor,
+    completion_postprocessor,
+    completion_preprocessor,
+)
 from common.kv_router import KVRouter, RoutingStrategy, get_worker_id
 from common.parser import LLMAPIConfig, parse_tensorrt_llm_args
 from common.protocol import (
@@ -27,6 +33,7 @@ from common.protocol import (
     DisaggChatCompletionStreamResponse,
     DisaggCompletionStreamResponse,
 )
+from common.utils import RequestType, ServerType
 from tensorrt_llm.logger import logger
 from tensorrt_llm.serve.openai_protocol import DisaggregatedParams
 
@@ -39,18 +46,14 @@ logger.set_level("debug")
 class DisaggServer(ChatProcessorMixin):
     def __init__(
         self,
-        ctx_chat_client,
-        gen_chat_client,
-        ctx_completion_client,
-        gen_completion_client,
+        ctx_client,
+        gen_client,
         engine_config: LLMAPIConfig,
         kv_router: KVRouter,
         routing_strategy: RoutingStrategy,
     ):
-        self.ctx_chat_client = ctx_chat_client
-        self.gen_chat_client = gen_chat_client
-        self.ctx_completion_client = ctx_completion_client
-        self.gen_completion_client = gen_completion_client
+        self.ctx_client = ctx_client
+        self.gen_client = gen_client
         self.kv_router = kv_router
 
         if self.kv_router is None:
@@ -69,7 +72,7 @@ class DisaggServer(ChatProcessorMixin):
             f"Initialized Disaggregated Server with routing strategy: {self.routing_strategy}"
         )
 
-    async def _generate(self, request, ctx_client, gen_client, response_cls):
+    async def _generate(self, request, request_type: RequestType):
         request.skip_special_tokens = False
         request.add_special_tokens = False
         request.spaces_between_special_tokens = False
@@ -77,31 +80,53 @@ class DisaggServer(ChatProcessorMixin):
 
         request.max_tokens = 1
         request.disaggregated_params = DisaggregatedParams(request_type="context_only")
-        logger.debug(f"[router] Sending request to context server: {request}")
+        logger.debug(f"[disagg-server] Sending request to context server: {request}")
 
+        if request_type == RequestType.CHAT:
+            preprocessed_request = await chat_preprocessor(request, self._tokenizer)
+            response_cls = DisaggChatCompletionStreamResponse
+        else:
+            preprocessed_request = await completion_preprocessor(request)
+            response_cls = DisaggCompletionStreamResponse
+
+        logger.debug(f"[disagg-server] Preprocessed request: {preprocessed_request}")
+
+        # TODO: move this somewhere. can be reused by monolith
         worker_id = ""
         if self.routing_strategy == RoutingStrategy.PREFIX:
             worker_id = await get_worker_id(self.kv_router, request, self._tokenizer)
 
         if worker_id == "":
             if self.routing_strategy == RoutingStrategy.ROUND_ROBIN:
-                ctx_resp = [
-                    resp
-                    async for resp in await ctx_client.round_robin(
-                        request.model_dump_json()
-                    )
-                ]
+                ctx_generator = await self.ctx_client.round_robin(
+                    preprocessed_request.model_dump_json()
+                )
             else:
                 # fallback to random
-                ctx_resp = [
-                    resp
-                    async for resp in await ctx_client.random(request.model_dump_json())
-                ]
+                ctx_generator = await self.ctx_client.random(
+                    preprocessed_request.model_dump_json()
+                )
+        else:
+            ctx_generator = await self.ctx_client.direct(
+                preprocessed_request.model_dump_json(), int(worker_id)
+            )
+
+        if request_type == RequestType.CHAT:
+            ctx_resp = [
+                resp
+                async for resp in chat_postprocessor(
+                    ctx_generator,
+                    request,
+                    preprocessed_request.conversation,
+                    ServerType.CTX,
+                    self.chat_processor,
+                )
+            ]
         else:
             ctx_resp = [
                 resp
-                async for resp in await ctx_client.direct(
-                    request.model_dump_json(), int(worker_id)
+                async for resp in completion_postprocessor(
+                    ctx_generator, request, self.completions_processor
                 )
             ]
 
@@ -110,7 +135,7 @@ class DisaggServer(ChatProcessorMixin):
                 "Context server returned more than one response. This is currently not supported in disaggregated server."
             )
         logger.debug(
-            f"[router] received response from context server: {ctx_resp[0].data()}"
+            f"[disagg-server] received response from context server: {ctx_resp[0].data()}"
         )
         ctx_resp_obj = response_cls.model_validate(ctx_resp[0].data())
 
@@ -125,30 +150,47 @@ class DisaggServer(ChatProcessorMixin):
             )
         )
 
-        logger.debug(f"[router] Sending request to generation server: {gen_req}")
-        async for response in await gen_client.round_robin(gen_req.model_dump_json()):
-            logger.debug(
-                f"[router] Received response from generation server: {response.data()}"
-            )
-            gen_resp_obj = response_cls.model_validate(response.data())
-            yield json.loads(gen_resp_obj.model_dump_json(exclude_unset=True))
+        if request_type == RequestType.CHAT:
+            preprocessed_gen_request = await chat_preprocessor(gen_req, self._tokenizer)
+        else:
+            preprocessed_gen_request = await completion_preprocessor(gen_req)
+
+        logger.debug(
+            f"[disagg-server] Sending request to generation server: {preprocessed_gen_request}"
+        )
+        gen_generator = await self.gen_client.round_robin(
+            preprocessed_gen_request.model_dump_json()
+        )
+
+        if request_type == RequestType.CHAT:
+            async for resp in chat_postprocessor(
+                gen_generator,
+                gen_req,
+                preprocessed_gen_request.conversation,
+                ServerType.GEN,
+                self.chat_processor,
+            ):
+                gen_resp_obj = response_cls.model_validate(resp.data())
+                yield json.loads(gen_resp_obj.model_dump_json(exclude_unset=True))
+        else:
+            async for resp in completion_postprocessor(
+                gen_generator, gen_req, self.completions_processor
+            ):
+                gen_resp_obj = response_cls.model_validate(resp.data())
+                yield json.loads(gen_resp_obj.model_dump_json(exclude_unset=True))
 
     @dynamo_endpoint(AdaptedCompletionRequest, DisaggCompletionStreamResponse)
     async def generate_completion(self, request):
         await self._generate(
             request,
-            self.ctx_completion_client,
-            self.gen_completion_client,
-            DisaggCompletionStreamResponse,
+            RequestType.COMPLETION,
         )
 
     @dynamo_endpoint(DisaggChatCompletionRequest, DisaggChatCompletionStreamResponse)
     async def generate_chat(self, request):
         await self._generate(
             request,
-            self.ctx_chat_client,
-            self.gen_chat_client,
-            DisaggChatCompletionStreamResponse,
+            RequestType.CHAT,
         )
 
 
@@ -161,28 +203,16 @@ async def worker(runtime: DistributedRuntime, args, engine_config: LLMAPIConfig)
     component = runtime.namespace("dynamo").component("disaggregated_server")
     await component.create_service()
 
-    ctx_completion_client = (
+    ctx_client = (
         await runtime.namespace("dynamo")
         .component("tensorrt-llm-ctx")
-        .endpoint("completions")
+        .endpoint("generate")
         .client()
     )
-    gen_completion_client = (
+    gen_client = (
         await runtime.namespace("dynamo")
         .component("tensorrt-llm-gen")
-        .endpoint("completions")
-        .client()
-    )
-    ctx_chat_client = (
-        await runtime.namespace("dynamo")
-        .component("tensorrt-llm-ctx")
-        .endpoint("chat/completions")
-        .client()
-    )
-    gen_chat_client = (
-        await runtime.namespace("dynamo")
-        .component("tensorrt-llm-gen")
-        .endpoint("chat/completions")
+        .endpoint("generate")
         .client()
     )
 
@@ -196,9 +226,7 @@ async def worker(runtime: DistributedRuntime, args, engine_config: LLMAPIConfig)
         )
         indexer = KvIndexer(kv_listener, args.kv_block_size)
         metrics_aggregator = KvMetricsAggregator(kv_listener)
-        # FIXME: only using completion_client for now
-        # need 1 method for both completion and chat
-        kv_router = KVRouter(indexer, metrics_aggregator, ctx_completion_client)
+        kv_router = KVRouter(indexer, metrics_aggregator, ctx_client)
     else:
         kv_router = None
 
@@ -206,10 +234,8 @@ async def worker(runtime: DistributedRuntime, args, engine_config: LLMAPIConfig)
     chat_endpoint = component.endpoint("chat/completions")
 
     disaggregated_server = DisaggServer(
-        ctx_chat_client,
-        gen_chat_client,
-        ctx_completion_client,
-        gen_completion_client,
+        ctx_client,
+        gen_client,
         engine_config,
         kv_router,
         args.routing_strategy,

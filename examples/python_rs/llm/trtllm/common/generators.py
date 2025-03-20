@@ -14,8 +14,6 @@
 # limitations under the License.
 
 
-from enum import Enum
-
 from common.processor import (
     ChatProcessor,
     CompletionsProcessor,
@@ -23,16 +21,10 @@ from common.processor import (
     parse_chat_message_content,
 )
 from common.protocol import DisaggregatedTypeConverter, TRTLLMWorkerRequest
+from common.utils import ServerType
 from tensorrt_llm.logger import logger
 
 logger.set_level("info")
-
-
-class ServerType(Enum):
-    # Generation server used for disaggregated and aggregated requests
-    GEN = "gen"
-    # Context server used for disaggregated requests
-    CTX = "ctx"
 
 
 async def chat_preprocessor(request, tokenizer):

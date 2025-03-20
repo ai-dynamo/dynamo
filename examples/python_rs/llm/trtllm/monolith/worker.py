@@ -51,8 +51,11 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
         self._ongoing_request_count += 1
 
         try:
-            yield self._llm_engine.generate_async()
-
+            yield self._llm_engine.generate_async(
+                prompt=request.prompt,
+                sampling_params=request.sampling_params,
+                disaggregated_params=request.disaggregated_params,
+            )
         except CppExecutorError:
             signal.raise_signal(signal.SIGINT)
         except Exception as e:
@@ -60,22 +63,6 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
 
         self._start_threads()
         self._ongoing_request_count -= 1
-
-    # @dynamo_endpoint(AdaptedChatCompletionRequest, ChatCompletionStreamResponse)
-    # async def generate_chat(self, request):
-    #     if request.max_completion_tokens is not None:
-    #         request.max_tokens = request.max_completion_tokens
-    #     async for response in chat_generator(self, request):
-    #         yield response
-    #     self._start_threads()
-
-    # @dynamo_endpoint(AdaptedCompletionRequest, CompletionStreamResponse)
-    # async def generate_completion(self, request):
-    #     if request.max_completion_tokens is not None:
-    #         request.max_tokens = request.max_completion_tokens
-    #     async for response in completion_generator(self, request):
-    #         yield response
-    #     self._start_threads()
 
 
 @dynamo_worker()
