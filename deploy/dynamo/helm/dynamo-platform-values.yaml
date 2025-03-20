@@ -64,7 +64,7 @@ dynamo-operator:
       username: '$oauthtoken'
       # Password will use global.NGC_API_KEY by default
       password: ""
-      passwordExistingSecretName: ''
+      passwordExistingSecretName: 'nvcrimagepullsecret'
       passwordExistingSecretKey: ''
       secure: true
       bentoRepositoryName: yatai-bentos
