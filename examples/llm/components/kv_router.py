@@ -76,6 +76,7 @@ class Router:
     """
     Request handler for the generate endpoint
     """
+    
     worker = depends(VllmWorker)
 
     def __init__(self):
@@ -128,6 +129,7 @@ class Router:
         Returns:
             (str, float): The best worker id and the corresponding score.
         """
+        
         worker_scores = {}
         if scores:
             for worker_id, score in scores.scores.items():
