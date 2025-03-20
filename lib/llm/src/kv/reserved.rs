@@ -17,15 +17,15 @@ use std::sync::Weak;
 
 use super::*;
 
-type ReservedBlockMap = Arc<RwLock<HashMap<SequenceHash, Weak<ReservedBlockInner>>>>;
+type ReservedBlockMap<T> = Arc<RwLock<HashMap<SequenceHash, Weak<ReservedBlockInner<T>>>>>;
 
 #[derive(Clone)]
-pub struct ReservedBlock {
-    inner: Arc<ReservedBlockInner>,
+pub struct ReservedBlock<T: BlockStorage + Send + Sync + 'static> {
+    inner: Arc<ReservedBlockInner<T>>,
 }
 
-impl ReservedBlock {
-    fn new(inner: Arc<ReservedBlockInner>) -> Self {
+impl<T: BlockStorage + Send + Sync + 'static> ReservedBlock<T> {
+    fn new(inner: Arc<ReservedBlockInner<T>>) -> Self {
         Self { inner }
     }
 
@@ -34,20 +34,20 @@ impl ReservedBlock {
     }
 }
 
-impl std::ops::Deref for ReservedBlock {
-    type Target = SharedBlock;
+impl<T: BlockStorage + Send + Sync + 'static> std::ops::Deref for ReservedBlock<T> {
+    type Target = SharedBlock<T>;
 
     fn deref(&self) -> &Self::Target {
         &self.inner.block
     }
 }
 
-struct ReservedBlockInner {
-    block: SharedBlock,
-    map: ReservedBlockMap,
+struct ReservedBlockInner<T: BlockStorage + Send + Sync + 'static> {
+    block: SharedBlock<T>,
+    map: ReservedBlockMap<T>,
 }
 
-impl Drop for ReservedBlockInner {
+impl<T: BlockStorage + Send + Sync> Drop for ReservedBlockInner<T> {
     fn drop(&mut self) {
         let sequence_hash = self.block.token_block.sequence_hash();
         let mut map = self.map.write().unwrap();
@@ -63,12 +63,12 @@ impl Drop for ReservedBlockInner {
 }
 
 /// [ReservedBlocks] is a collection of inflight blocks that are actively being used
-pub struct ReservedBlocks {
+pub struct ReservedBlocks<T: BlockStorage + Send + Sync + 'static> {
     block_size: usize,
-    blocks: ReservedBlockMap,
+    blocks: ReservedBlockMap<T>,
 }
 
-impl ReservedBlocks {
+impl<T: BlockStorage + Send + Sync> ReservedBlocks<T> {
     pub fn new(block_size: usize) -> Self {
         Self {
             block_size,
@@ -79,7 +79,7 @@ impl ReservedBlocks {
     pub fn match_sequence_hashes(
         &self,
         sequence_hashes: &[SequenceHash],
-    ) -> Result<Vec<ReservedBlock>> {
+    ) -> Result<Vec<ReservedBlock<T>>> {
         let mut inflight_blocks = Vec::new();
         let map = self.blocks.read().unwrap();
         for sequence_hash in sequence_hashes {
@@ -106,7 +106,7 @@ impl ReservedBlocks {
     ///
     /// If a block is not found, the function will return the list of matched blocks
     /// and the remaining blocks will not be included.
-    pub fn match_token_blocks(&self, token_blocks: &[TokenBlock]) -> Result<Vec<ReservedBlock>> {
+    pub fn match_token_blocks(&self, token_blocks: &[TokenBlock]) -> Result<Vec<ReservedBlock<T>>> {
         let mut inflight_blocks = Vec::new();
         let map = self.blocks.read().unwrap();
         for token_block in token_blocks {
@@ -124,7 +124,7 @@ impl ReservedBlocks {
         Ok(inflight_blocks)
     }
 
-    pub fn register(&mut self, block: UniqueBlock) -> Result<ReservedBlock> {
+    pub fn register(&mut self, block: UniqueBlock<T>) -> Result<ReservedBlock<T>> {
         let sequence_hash = block.token_block.sequence_hash();
         let shared = block.into_shared();
 
@@ -210,7 +210,7 @@ mod tests {
         assert_eq!(matched.len(), 1);
 
         // possible update the api to take a vec of unique blocks and return a vec of reserved blocks
-        let reserved: Vec<ReservedBlock> = matched
+        let reserved: Vec<ReservedBlock<NullStorage>> = matched
             .into_iter()
             .map(|unique_block| reserved_blocks.register(unique_block).unwrap())
             .collect();

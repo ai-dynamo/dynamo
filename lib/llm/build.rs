@@ -22,99 +22,70 @@ fn main() {
 
     println!("cargo:rerun-if-changed=src/kernels/block_copy.cu");
 
-    // first do a which nvcc, if it is in the path
-    // if so, we don't need to set the cuda_lib
-    let nvcc = Command::new("which").arg("nvcc").output().unwrap();
-    let cuda_lib = if nvcc.status.success() {
-        println!("cargo:info=nvcc found in path");
-        // Extract the path from nvcc location by removing "bin/nvcc"
-        let nvcc_path = String::from_utf8_lossy(&nvcc.stdout).trim().to_string();
-        let path = PathBuf::from(nvcc_path);
-        if let Some(parent) = path.parent() {
-            // Remove "nvcc"
-            if let Some(cuda_root) = parent.parent() {
-                // Remove "bin"
-                cuda_root.to_string_lossy().to_string()
+    let cuda_lib = match Command::new("which").arg("nvcc").output() {
+        Ok(output) if output.status.success() => {
+            let nvcc_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let path = PathBuf::from(nvcc_path);
+            if let Some(parent) = path.parent().and_then(|p| p.parent()) {
+                parent.to_string_lossy().to_string()
             } else {
-                // Fallback to CUDA_ROOT or default if path extraction fails
                 get_cuda_root_or_default()
             }
-        } else {
-            // Fallback to CUDA_ROOT or default if path extraction fails
+        }
+        _ => {
+            println!("cargo:warning=nvcc not found in path");
             get_cuda_root_or_default()
         }
-    } else {
-        println!("cargo:warning=nvcc not found in path");
-        get_cuda_root_or_default()
     };
 
-    println!("cargo:info=Using CUDA installation at: {}", cuda_lib);
-
     let cuda_lib_path = PathBuf::from(&cuda_lib).join("lib64");
-    println!("cargo:info=Using CUDA libs: {}", cuda_lib_path.display());
     println!("cargo:rustc-link-search=native={}", cuda_lib_path.display());
-
-    // Link against multiple CUDA libraries
     println!("cargo:rustc-link-lib=dylib=cudart");
     println!("cargo:rustc-link-lib=dylib=cuda");
     println!("cargo:rustc-link-lib=dylib=cudadevrt");
 
-    // Make sure the CUDA libraries are found before other system libraries
     println!(
         "cargo:rustc-link-arg=-Wl,-rpath,{}",
         cuda_lib_path.display()
     );
 
-    // Create kernels directory for output if it doesn't exist
-    std::fs::create_dir_all("src/kernels").unwrap_or_else(|_| {
-        println!("Kernels directory already exists");
-    });
+    let kernel_dir = "src/kernels";
+    std::fs::create_dir_all(kernel_dir).expect("Failed to create kernel directory");
 
-    // Compile CUDA code
-    let output = Command::new("nvcc")
-        .arg("src/kernels/block_copy.cu")
-        .arg("-O3")
-        .arg("--compiler-options")
-        .arg("-fPIC")
-        .arg("-o")
-        .arg("src/kernels/libblock_copy.o")
-        .arg("-c")
-        .output()
-        .expect("Failed to compile CUDA code");
+    let block_copy_o = format!("{}/libblock_copy.o", kernel_dir);
+    let block_copy_a = format!("{}/libblock_copy.a", kernel_dir);
 
-    if !output.status.success() {
-        panic!(
-            "Failed to compile CUDA kernel: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+    let compile_status = Command::new("nvcc")
+        .args([
+            "-O3",
+            "--compiler-options",
+            "-fPIC",
+            "-c",
+            "src/kernels/block_copy.cu",
+            "-o",
+            &block_copy_o,
+        ])
+        .status()
+        .expect("Failed to run nvcc");
+
+    if !compile_status.success() {
+        panic!("nvcc failed to compile block_copy.cu");
     }
 
-    // Create static library
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("lib")
-            .arg("/OUT:src/kernels/block_copy.lib")
-            .arg("src/kernels/libblock_copy.o")
-            .output()
-            .expect("Failed to create static library");
-        println!("cargo:rustc-link-search=native=src/kernels");
-        println!("cargo:rustc-link-lib=static=block_copy");
+    let ar_status = Command::new("ar")
+        .args(["rcs", &block_copy_a, &block_copy_o])
+        .status()
+        .expect("Failed to create static library");
+
+    if !ar_status.success() {
+        panic!("Failed to create libblock_copy.a");
     }
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new("ar")
-            .arg("rcs")
-            .arg("src/kernels/libblock_copy.a")
-            .arg("src/kernels/libblock_copy.o")
-            .output()
-            .expect("Failed to create static library");
-        println!("cargo:rustc-link-search=native=src/kernels");
-        println!("cargo:rustc-link-lib=static=block_copy");
-        println!("cargo:rustc-link-lib=dylib=cudart");
-        println!("cargo:rustc-link-lib=dylib=cuda");
-        println!("cargo:rustc-link-lib=dylib=cudadevrt");
-    }
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let lib_path = PathBuf::from(&manifest_dir).join("src/kernels");
+
+    println!("cargo:rustc-link-search=native={}", lib_path.display());
+    println!("cargo:rustc-link-lib=static=block_copy");
 }
 
 #[cfg(feature = "cuda_kv")]

@@ -19,13 +19,13 @@ use reuse::AvailableBlocks;
 
 /// Manages the reservation and priority reuse of kv blocks for a single storage type,
 /// e.g. a GPU, host memory.
-pub struct KvStorageManager {
-    available_blocks: AvailableBlocks,
-    inflight_blocks: ReservedBlocks,
+pub struct KvStorageManager<T: BlockStorage + Send + Sync + 'static> {
+    available_blocks: AvailableBlocks<T>,
+    inflight_blocks: ReservedBlocks<T>,
     block_size: usize,
 }
 
-impl KvStorageManager {
+impl<T: BlockStorage + Send + Sync + 'static> KvStorageManager<T> {
     pub async fn new(block_size: usize) -> Self {
         Self {
             available_blocks: AvailableBlocks::new().await,
@@ -34,7 +34,7 @@ impl KvStorageManager {
         }
     }
 
-    pub async fn prepare_prefill_sequence(&mut self, tokens: Tokens) -> Result<PrefillMatched> {
+    pub async fn prepare_prefill_sequence(&mut self, tokens: Tokens) -> Result<PrefillMatched<T>> {
         log::debug!("adding request with {} tokens", tokens.len());
 
         let seq = tokens.into_sequence(self.block_size);
@@ -78,8 +78,8 @@ impl KvStorageManager {
 
     pub async fn prepare_prefill_offload(
         &mut self,
-        matched: PrefillMatched,
-    ) -> Result<PrefillOffload> {
+        matched: PrefillMatched<T>,
+    ) -> Result<PrefillOffload<T>> {
         let (inflight_blocks, remaining_blocks, tail_block) = matched.dissolve();
 
         let mut blocks_to_reuse = self
@@ -96,7 +96,7 @@ impl KvStorageManager {
         }
 
         // update the blocks_to_reuse with the token block from remaining_blocks
-        let complete_prefill_blocks: Vec<UniqueBlock> = remaining_blocks
+        let complete_prefill_blocks: Vec<UniqueBlock<T>> = remaining_blocks
             .into_iter()
             .map(|b| {
                 let mut block = blocks_to_reuse.pop().unwrap();
@@ -122,23 +122,23 @@ impl KvStorageManager {
 }
 
 #[derive(Dissolve)]
-pub struct PartialKvBlock {
+pub struct PartialKvBlock<T: BlockStorage + Send + Sync + 'static> {
     token_block: PartialTokenBlock,
-    kv_block: UniqueBlock,
+    kv_block: UniqueBlock<T>,
 }
 
 #[derive(Dissolve)]
-pub struct PrefillMatched {
-    inflight_blocks: Vec<ReservedBlock>,
+pub struct PrefillMatched<T: BlockStorage + Send + Sync + 'static> {
+    inflight_blocks: Vec<ReservedBlock<T>>,
     remaining_blocks: Vec<TokenBlock>,
     tail_block: PartialTokenBlock,
 }
 
 #[derive(Dissolve)]
-pub struct PrefillOffload {
-    inflight_blocks: Vec<ReservedBlock>,
-    complete_prefill_blocks: Vec<UniqueBlock>,
-    tail_prefill_block: PartialKvBlock,
+pub struct PrefillOffload<T: BlockStorage + Send + Sync + 'static> {
+    inflight_blocks: Vec<ReservedBlock<T>>,
+    complete_prefill_blocks: Vec<UniqueBlock<T>>,
+    tail_prefill_block: PartialKvBlock<T>,
 }
 
 // #[cfg(test)]

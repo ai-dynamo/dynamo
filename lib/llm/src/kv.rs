@@ -42,14 +42,46 @@ use crate::tokens::{PartialTokenBlock, SequenceHash, TokenBlock, Tokens};
 
 use tracing as log;
 
-pub type UniqueBlock = PoolItem<KvBlock>;
-pub type SharedBlock = SharedPoolItem<KvBlock>;
+pub type UniqueBlock<T> = PoolItem<KvBlock<T>>;
+pub type SharedBlock<T> = SharedPoolItem<KvBlock<T>>;
 
-#[derive(Default)]
-pub struct KvBlock {
+#[derive(Debug, Clone, Default)]
+pub struct NullStorage {}
+
+pub trait BlockStorage {
+    fn k_layer_pointer(&self, layer_id: usize) -> Result<u64, anyhow::Error> {
+        Ok(0 as usize)
+    }
+
+    fn v_layer_pointer(&self, layer_id: usize) -> Result<u64, anyhow::Error> {
+        Ok(0 as usize)
+    }
+
+    fn layer_size_in_bytes(&self) -> usize {
+        0 as usize
+    }
+}
+
+impl BlockStorage for NullStorage {
+    fn k_layer_pointer(&self, layer_id: usize) -> Result<u64, anyhow::Error> {
+        Ok(0 as usize)
+    }
+
+    fn v_layer_pointer(&self, layer_id: usize) -> Result<u64, anyhow::Error> {
+        Ok(0 as usize)
+    }
+
+    fn layer_size_in_bytes(&self) -> usize {
+        0 as usize
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct KvBlock<T: BlockStorage + Send + Sync> {
     token_block: TokenBlock,
     priority: u32,
     return_tick: u64,
+    storage: T,
 }
 
 // pub struct KvStorage {
@@ -63,14 +95,15 @@ pub struct KvBlock {
 //     layout: layer::KvLayer,
 // }
 
-impl KvBlock {
+impl<T: BlockStorage + Send + Sync> KvBlock<T> {
     /// Creates a new KvBlock with the given token block
-    pub fn new(token_block: TokenBlock) -> Self {
-        Self {
+    pub fn new(token_block: TokenBlock) -> KvBlock<NullStorage> {
+        let storage = NullStorage {};
+        KvBlock {
             token_block,
             priority: 0,
             return_tick: 0,
-            // storage: None,
+            storage,
         }
     }
 
@@ -89,8 +122,50 @@ impl KvBlock {
     }
 }
 
-impl Returnable for KvBlock {
+impl<T: BlockStorage + Send + Sync + 'static> Returnable for KvBlock<T> {
     fn on_return(&mut self) {}
 }
 
 pub struct KvBlockConfig {}
+
+// Host memory but special class of host memory
+pub struct PinnedBlockStorage {
+    layers: Vec<usize>,
+    bytes: usize,
+}
+pub struct DeviceStorage;
+
+pub type PinnedKvBlock = KvBlock<PinnedBlockStorage>;
+
+// Creeated from objects in layers.
+// impl PinnedBlockStorage {
+//     pub fn
+// pub into_pinner_block_storage(&self) -> Result<Vec<PinnedBlockStorage>>
+
+// }
+// layer passed in outside the bounds, need to throw an error
+// currently created with a number of layers
+
+impl BlockStorage for PinnedBlockStorage {
+    // fn layer_pointer(&self, layer_id: usize) -> Result<u64> {
+    //     self.layers.get(layer_id).copied().ok_or_else(|| {
+    //         anyhow::anyhow!(
+    //             "Invalid layer_id: {}. Must be within 0..{}",
+    //             layer_id,
+    //             self.layers.len()
+    //         )
+    //     })
+    // }
+
+    fn k_layer_pointer(&self, layer_id: usize) -> Result<u64, anyhow::Error> {
+        Ok(0 as usize)
+    }
+
+    fn v_layer_pointer(&self, layer_id: usize) -> Result<u64, anyhow::Error> {
+        Ok(0 as usize)
+    }
+
+    fn layer_size_in_bytes(&self) -> usize {
+        self.bytes
+    }
+}
