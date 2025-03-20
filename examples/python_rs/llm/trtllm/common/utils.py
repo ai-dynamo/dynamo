@@ -20,7 +20,7 @@ import traceback
 import weakref
 from enum import Enum
 from queue import Queue
-from typing import Callable, Optional, Union
+from typing import Callable, Optional, Union, TypedDict
 
 from tensorrt_llm.logger import logger
 
@@ -37,6 +37,11 @@ class ServerType(Enum):
     GEN = "gen"
     # Context server used for disaggregated requests
     CTX = "ctx"
+
+
+class ConversationMessage(TypedDict):
+    role: str
+    content: str
 
 
 class ManagedThread(threading.Thread):

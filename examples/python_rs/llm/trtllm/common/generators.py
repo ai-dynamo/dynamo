@@ -13,18 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+from dataclasses import asdict
 from common.processor import (
     ChatProcessor,
     CompletionsProcessor,
     merge_promises,
     parse_chat_message_content,
 )
-from common.protocol import DisaggregatedTypeConverter, Tokens, TRTLLMWorkerRequest
+from common.protocol import DisaggregatedTypeConverter, Tokens, TRTLLMWorkerRequest, TRTLLMWorkerResponse, TRTLLMWorkerResponseOutput
 from common.utils import ServerType
 from tensorrt_llm.logger import logger
+from tensorrt_llm.executor.result import CompletionOutput
 
-logger.set_level("info")
+logger.set_level("debug")
 
 
 async def chat_preprocessor(request, tokenizer):
@@ -44,18 +45,14 @@ async def chat_preprocessor(request, tokenizer):
         **(request.chat_template_kwargs or {}),
     )
     sampling_params = request.to_sampling_params()
-    disaggregated_params = None
-    if request.disaggregated_params is not None:
-        disaggregated_params = DisaggregatedTypeConverter.to_llm_disaggregated_params(
-            request.disaggregated_params
-        )
 
     return TRTLLMWorkerRequest(
+        id=request.id,
         prompt=prompt,
-        sampling_params=sampling_params,
+        sampling_params=asdict(sampling_params),
         conversation=conversation,
-        disaggregated_params=disaggregated_params,
-        tokens=Tokens(tokenizer.encode(request.prompt)[1:]),
+        disaggregated_params=request.disaggregated_params,
+        tokens=Tokens(tokens=tokenizer.encode(prompt)[1:]),
     )
 
 
@@ -66,7 +63,10 @@ async def chat_postprocessor(
     server_type: ServerType,
     chat_processor: ChatProcessor,
 ):
-    async for response in engine_generator:
+    async for raw_response in engine_generator:
+        response = TRTLLMWorkerResponse.model_validate_json(raw_response.data())
+        response.outputs = [TRTLLMWorkerResponseOutput(**response.outputs[0])]
+
         if request.disaggregated_params is not None and server_type == ServerType.CTX:
             response_data = chat_processor.yield_first_chat(
                 request, request.id, response
@@ -79,10 +79,11 @@ async def chat_postprocessor(
                 conversation,
                 first_iteration=(not request.disaggregated_params is not None),
             )
+        logger.debug(f"[postprocessor] Response: {response_data}")
         yield response_data
 
 
-def completion_preprocessor(request, tokenizer):
+async def completion_preprocessor(request, tokenizer):
     if isinstance(request.prompt, str) or (
         isinstance(request.prompt, list)
         and all(isinstance(x, int) for x in request.prompt)
@@ -94,17 +95,13 @@ def completion_preprocessor(request, tokenizer):
         )
 
     sampling_params = request.to_sampling_params()
-    disaggregated_params = None
-    if request.disaggregated_params is not None:
-        disaggregated_params = DisaggregatedTypeConverter.to_llm_disaggregated_params(
-            request.disaggregated_params
-        )
 
     return TRTLLMWorkerRequest(
+        id=request.id,
         prompt=prompt,
-        sampling_params=sampling_params,
-        disaggregated_params=disaggregated_params,
-        tokens=Tokens(tokenizer.encode(request.prompt)[1:]),
+        sampling_params=asdict(sampling_params),
+        disaggregated_params=request.disaggregated_params,
+        tokens=Tokens(tokens=tokenizer.encode(prompt)[1:]), 
     )
 
 

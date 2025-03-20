@@ -14,13 +14,14 @@
 # limitations under the License.
 
 import asyncio
+import json
 import signal
 from typing import AsyncGenerator
-
+from dataclasses import asdict
 import uvloop
 from common.base_engine import BaseTensorrtLLMEngine, TensorrtLLMEngineConfig
 from common.parser import LLMAPIConfig, parse_tensorrt_llm_args
-from common.protocol import TRTLLMWorkerRequest
+from common.protocol import TRTLLMWorkerRequest, DisaggregatedTypeConverter, TRTLLMWorkerResponse
 from tensorrt_llm.executor import CppExecutorError
 from tensorrt_llm.logger import logger
 
@@ -51,11 +52,26 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
         self._ongoing_request_count += 1
 
         try:
-            yield self._llm_engine.generate_async(
-                prompt=request.prompt,
-                sampling_params=request.sampling_params,
-                disaggregated_params=request.disaggregated_params,
-            )
+            disaggregated_params = None
+            if request.disaggregated_params is not None:
+                disaggregated_params = DisaggregatedTypeConverter.to_llm_disaggregated_params(
+                    request.disaggregated_params
+                )
+
+            async for response in self._llm_engine.generate_async(
+                inputs=request.prompt,
+                sampling_params=request.to_sampling_params(),
+                disaggregated_params=disaggregated_params,
+                streaming=True,
+            ):
+                yield TRTLLMWorkerResponse(
+                    request_id=request.id,
+                    prompt=response.prompt,
+                    prompt_token_ids=response.prompt_token_ids,
+                    outputs=[asdict(response.outputs[0])],
+                    finished=response.finished,
+                ).model_dump_json(exclude_unset=True)
+
         except CppExecutorError:
             signal.raise_signal(signal.SIGINT)
         except Exception as e:

@@ -30,14 +30,18 @@ from common.parser import LLMAPIConfig, parse_tensorrt_llm_args
 from common.protocol import (
     AdaptedChatCompletionRequest,
     AdaptedCompletionRequest,
-    ChatCompletionStreamResponse,
-    CompletionStreamResponse,
+    DisaggCompletionStreamResponse,
+    DisaggChatCompletionRequest,
+    DisaggChatCompletionStreamResponse
 )
 from common.utils import RequestType, wait_for_workers
 from tensorrt_llm.logger import logger
 
 from dynamo.llm import KvIndexer, KvMetricsAggregator
 from dynamo.runtime import Client, DistributedRuntime, dynamo_endpoint, dynamo_worker
+
+
+logger.set_level("debug")
 
 
 class Processor(ChatProcessorMixin):
@@ -94,19 +98,21 @@ class Processor(ChatProcessorMixin):
                 ServerType.GEN,
                 self.chat_processor,
             ):
+                logger.debug(f"[preprocessor] Response: {response}")
                 yield json.loads(response)
         else:
             async for response in completion_postprocessor(
                 engine_generator, raw_request, self.completions_processor
             ):
+                logger.debug(f"[preprocessor] Response: {response}")
                 yield json.loads(response)
 
-    @dynamo_endpoint(AdaptedChatCompletionRequest, ChatCompletionStreamResponse)
+    @dynamo_endpoint(DisaggChatCompletionRequest, DisaggChatCompletionStreamResponse)
     async def generate_chat(self, raw_request):
         async for response in self._generate(raw_request, RequestType.CHAT):
             yield response
 
-    @dynamo_endpoint(AdaptedCompletionRequest, CompletionStreamResponse)
+    @dynamo_endpoint(AdaptedCompletionRequest, DisaggCompletionStreamResponse)
     async def generate_completions(self, raw_request):
         async for response in self._generate(raw_request, RequestType.COMPLETION):
             yield response

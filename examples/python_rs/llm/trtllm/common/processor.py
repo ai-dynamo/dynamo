@@ -14,8 +14,9 @@
 # limitations under the License.
 
 import asyncio
-from typing import Any, AsyncIterator, Dict, List, Tuple, TypedDict, Union
+from typing import Any, AsyncIterator, Dict, List, Tuple, Union
 
+from common.utils import ConversationMessage
 from common.protocol import (
     DisaggChatCompletionResponseStreamChoice,
     DisaggChatCompletionStreamResponse,
@@ -40,11 +41,6 @@ from tensorrt_llm.serve.openai_protocol import (
 from transformers import AutoTokenizer
 
 logger.set_level("debug")
-
-
-class ConversationMessage(TypedDict):
-    role: str
-    content: str
 
 
 def parse_chat_message_content(
@@ -236,6 +232,7 @@ class ChatProcessor(BaseChatProcessor):
                 choices=[choice],
                 model=self.model,
             )
+            logger.debug(f"[processor] Chunk: {chunk}")
             chunk.usage = self._stream_usage_info(request, prompt_tokens, output.length)
             return chunk.model_dump_json()
 

@@ -94,7 +94,7 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
 
         try:
             yield self._llm_engine.generate_async(
-                prompt=request.prompt,
+                inputs=request.prompt,
                 sampling_params=request.sampling_params,
                 disaggregated_params=request.disaggregated_params,
             )

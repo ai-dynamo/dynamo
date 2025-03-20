@@ -15,11 +15,14 @@
 
 import base64
 import time
+import torch
 import uuid
-from typing import List, Literal, Optional
-
+from typing import List, Literal, Optional, Union, Any
+from dataclasses import dataclass, field
+from common.utils import ConversationMessage
 from pydantic import BaseModel, ConfigDict, Field
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
+from tensorrt_llm.llmapi import SamplingParams
 from tensorrt_llm.serve.openai_protocol import (
     ChatCompletionRequest,
     ChatCompletionResponseStreamChoice,
@@ -53,12 +56,84 @@ class Request(BaseModel):
 
 
 class TRTLLMWorkerRequest(BaseModel):
+    id: str
     prompt: str
     sampling_params: dict
     streaming: bool = True
-    conversation: Optional[List[str]] = Field(default=None)
+    conversation: Optional[List[ConversationMessage]] = Field(default=None)
     tokens: Optional[Tokens] = Field(default=None)
     disaggregated_params: Optional[DisaggregatedParams] = Field(default=None)
+
+    def to_sampling_params(self) -> SamplingParams:
+
+        sampling_params = SamplingParams(
+            frequency_penalty=self.sampling_params.get("frequency_penalty", 0.0),
+            return_log_probs=self.sampling_params.get("logprobs", False),
+            max_tokens=self.sampling_params.get("max_tokens", 16),
+            n=self.sampling_params.get("n", 1),
+            presence_penalty=self.sampling_params.get("presence_penalty", 0.0),
+            seed=self.sampling_params.get("seed", None),
+            stop=self.sampling_params.get("stop", None),
+            temperature=self.sampling_params.get("temperature", 0.7),
+
+            # chat-completion-sampling-params
+            best_of=self.sampling_params.get("best_of", None),
+            use_beam_search=self.sampling_params.get("use_beam_search", False),
+            top_k=self.sampling_params.get("top_k", 0),
+            top_p=self.sampling_params.get("top_p", 1.0),
+            top_p_min=self.sampling_params.get("top_p_min", None),
+            min_p=self.sampling_params.get("min_p", 0.0),
+            repetition_penalty=self.sampling_params.get("repetition_penalty", 1.0),
+            length_penalty=self.sampling_params.get("length_penalty", 1.0),
+            early_stopping=self.sampling_params.get("early_stopping", False),
+            stop_token_ids=self.sampling_params.get("stop_token_ids", []),
+            include_stop_str_in_output=self.sampling_params.get("include_stop_str_in_output", False),
+            ignore_eos=self.sampling_params.get("ignore_eos", False),
+            min_tokens=self.sampling_params.get("min_tokens", 0),
+            skip_special_tokens=self.sampling_params.get("skip_special_tokens", False),
+            spaces_between_special_tokens=self.sampling_params.get("spaces_between_special_tokens", False),
+            truncate_prompt_tokens=self.sampling_params.get("truncate_prompt_tokens", None),
+
+            # chat-completion-extra-params
+            add_special_tokens=self.sampling_params.get("add_special_tokens", False),
+        )
+        return sampling_params
+
+@dataclass
+class TRTLLMWorkerResponseOutput:
+    index: int
+    text: str
+    token_ids: list[int]
+    logprobs: Optional[List[float]] = None
+    cumulative_logprob: Optional[float] = None
+    finish_reason: Optional[Literal['stop', 'length', 'timeout', 'cancelled']] = None
+    stop_reason: Optional[Union[int, str]] = None
+    generation_logits: Optional[torch.Tensor] = None
+    disaggregated_params: Optional[DisaggregatedParams] = None
+    
+    _last_text_len: int = field(default=0)
+    _last_token_ids_len: int = field(default=0)
+    _last_logprobs_len: int = field(default=0)
+    _incremental_states: Optional[dict] = field(default=None)
+    _postprocess_result: Optional[Any] = field(default=None)
+
+    text_diff: str = field(default="")
+    length: int = field(default=0)
+
+    def __post_init__(self):
+        self.text_diff = self.text[self._last_text_len:]
+        self.length = len(self.token_ids)
+
+
+class TRTLLMWorkerResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+    request_id: str
+    prompt: str
+    prompt_token_ids: list[int]
+    outputs: list[dict]
+    finished: bool
+    # TODO
+    # prompt_logprobs: list[float]
 
 
 class DisaggregatedTypeConverter:
