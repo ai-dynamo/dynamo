@@ -15,7 +15,7 @@
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Annotated, List, Optional
 
 from db.components import (
@@ -591,7 +591,9 @@ async def upload_dynamo_nim_version(
         s3_storage.upload_file(file, object_name)
 
         dynamo_nim_version.upload_status = DynamoNimUploadStatus.Success
-        dynamo_nim_version.upload_finished_at = utc_now_naive() # datetime.now(timezone.utc)
+        dynamo_nim_version.upload_finished_at = (
+            utc_now_naive()
+        )  # datetime.now(timezone.utc)
         session.add(dynamo_nim_version)
         await session.commit()
 
@@ -771,8 +773,8 @@ async def convert_dynamo_nim_version_model_to_schema(
 
         if dynamo_nim:
             # Add timezone info for API responses
-            created_at = utc_now_naive() # make_aware(entity.created_at)
-            updated_at = utc_now_naive() # make_aware(entity.updated_at)
+            created_at = make_aware(utc_now_naive())  # make_aware(entity.created_at)
+            updated_at = make_aware(utc_now_naive())  # make_aware(entity.updated_at)
             # upload_started_at = (
             #     make_aware(entity.upload_started_at)
             #     if entity.upload_started_at
@@ -783,11 +785,11 @@ async def convert_dynamo_nim_version_model_to_schema(
             #     if entity.upload_finished_at
             #     else None
             # )
-            build_at = utc_now_naive() # make_aware(entity.build_at)
+            build_at = make_aware(utc_now_naive())  # make_aware(entity.build_at)
             # description = entity.description or ""
 
             dynamo_nim_version_schema = DynamoNimVersionSchema(
-                description="", 
+                description="",
                 version=entity.version,
                 image_build_status=entity.image_build_status,
                 upload_status=str(entity.upload_status.value),
