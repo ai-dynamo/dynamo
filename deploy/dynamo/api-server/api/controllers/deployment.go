@@ -804,6 +804,7 @@ func (c *deploymentController) CreateV2(ctx *gin.Context) {
 	}
 
 	// Create the DynamoDeployment CR
+	log.Info().Msgf("Creating DynamoDeployment CR: %+v", dynamoDeployment)
 	err = services.K8sService.CreateDynamoDeployment(ctx, dynamoDeployment)
 	if err != nil {
 		log.Error().Msgf("Failed to create DynamoDeployment CR: %s", err.Error())
