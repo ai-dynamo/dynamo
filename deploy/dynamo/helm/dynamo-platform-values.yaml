@@ -63,9 +63,9 @@ dynamo-operator:
       inClusterServer: ''
       username: '$oauthtoken'
       # Password will use global.NGC_API_KEY by default
-      password: ""
+      # password: ""
       passwordExistingSecretName: 'nvcrimagepullsecret'
-      passwordExistingSecretKey: ''
+      # passwordExistingSecretKey: ''
       secure: true
       bentoRepositoryName: yatai-bentos
 

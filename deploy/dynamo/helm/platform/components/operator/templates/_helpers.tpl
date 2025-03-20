@@ -96,15 +96,83 @@ Generate docker config json for registry credentials
 {{- $username := .Values.dynamo.dockerRegistry.username -}}
 {{- $password := default .Values.global.NGC_API_KEY .Values.dynamo.dockerRegistry.password -}}
 {{- if .Values.dynamo.dockerRegistry.passwordExistingSecretName -}}
-{{- $password = .Values.dynamo.dockerRegistry.passwordExistingSecretKey -}}
-{{- end -}}
-{
-  "auths": {
-    "{{ $server }}": {
-      "username": "{{ $username }}",
-      "password": "{{ $password }}",
-      "auth": "{{ printf "%s:%s" $username $password | b64enc }}"
+  {{- $secretName := .Values.dynamo.dockerRegistry.passwordExistingSecretName -}}
+  {{- $secretKey := .Values.dynamo.dockerRegistry.passwordExistingSecretKey -}}
+  {{- $dockerconfigjson := lookup "v1" "Secret" .Release.Namespace $secretName }}
+  
+  {{- if $dockerconfigjson -}}
+    {{- if eq $dockerconfigjson.type "kubernetes.io/dockerconfigjson" -}}
+      {{/* If the secret is already of type kubernetes.io/dockerconfigjson, use its .dockerconfigjson value directly */}}
+      {{- index $dockerconfigjson.data ".dockerconfigjson" | b64dec }}
+    {{- else -}}
+      {{/* If the secret is not of the correct type, extract password from the secret and build a new one */}}
+      {{- $password = index $dockerconfigjson.data $secretKey | b64dec }}
+      {
+        "auths": {
+          "{{ $server }}": {
+            "username": "{{ $username }}",
+            "password": "{{ $password }}",
+            "auth": "{{ printf "%s:%s" $username $password | b64enc }}"
+          }
+        }
+      }
+    {{- end -}}
+  {{- else -}}
+    {{/* If no secret is found, use the default password */}}
+    {{- $password = .Values.dynamo.dockerRegistry.password | default .Values.global.NGC_API_KEY }}
+    {
+      "auths": {
+        "{{ $server }}": {
+          "username": "{{ $username }}",
+          "password": "{{ $password }}",
+          "auth": "{{ printf "%s:%s" $username $password | b64enc }}"
+        }
+      }
+    }
+  {{- end -}}
+{{- else -}}
+  {{/* Build a new dockerconfigjson if passwordExistingSecretName is not set */}}
+  {
+    "auths": {
+      "{{ $server }}": {
+        "username": "{{ $username }}",
+        "password": "{{ $password }}",
+        "auth": "{{ printf "%s:%s" $username $password | b64enc }}"
+      }
     }
   }
-}
 {{- end -}}
+{{- end -}}
+
+
+{{/*
+Extract username and password from docker registry configuration
+*/}}
+{{- define "dynamo-operator.extractDockerCredentials" -}}
+{{- $server := .Values.dynamo.dockerRegistry.server -}}
+{{- $username := .Values.dynamo.dockerRegistry.username -}}
+{{- $password := default .Values.global.NGC_API_KEY .Values.dynamo.dockerRegistry.password -}}
+{{- $result := dict "username" $username "password" $password }}
+
+{{- if .Values.dynamo.dockerRegistry.passwordExistingSecretName }}
+  {{- $secretName := .Values.dynamo.dockerRegistry.passwordExistingSecretName }}
+  {{- $secretKey := .Values.dynamo.dockerRegistry.passwordExistingSecretKey }}
+  {{- $dockerconfigjson := lookup "v1" "Secret" .Release.Namespace $secretName }}
+
+  {{- if $dockerconfigjson }}
+    {{- if eq $dockerconfigjson.type "kubernetes.io/dockerconfigjson" }}
+      {{- $decodedConfig := index $dockerconfigjson.data ".dockerconfigjson" | b64dec | fromJson }}
+      {{- range $registry, $authConfig := $decodedConfig.auths }}
+        {{- $_ := set $result "username" $authConfig.username }}
+        {{- $_ := set $result "password" $authConfig.password }}
+        {{- break }}
+      {{- end }}
+    {{- else if hasKey $dockerconfigjson.data $secretKey }}
+      {{- $_ := set $result "password" (index $dockerconfigjson.data $secretKey | b64dec) }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+
+{{- toYaml $result }}
+
+{{- end }}
