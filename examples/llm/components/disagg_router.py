@@ -34,6 +34,7 @@ class PyDisaggregatedRouter:
         self, prompt_length: int, prefix_hit_rate: float, queue_size: int
     ):
         absolute_prefill_length = int(prompt_length * (1 - prefix_hit_rate))
+        # TODO: consider size of each request in the queue when making the decision
         decision = (
             absolute_prefill_length > self.max_local_prefill_length
             and queue_size < self.max_prefill_queue_size
