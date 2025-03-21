@@ -225,4 +225,4 @@ fn print_cuda(output: &Output) {
 }
 
 #[cfg(not(any(feature = "mistralrs", feature = "llamacpp")))]
-fn print_cuda(_output: Output) {}
+fn print_cuda(_output: &Output) {}

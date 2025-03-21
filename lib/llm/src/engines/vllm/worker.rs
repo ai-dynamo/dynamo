@@ -167,7 +167,7 @@ pub async fn start(
 ) -> anyhow::Result<VllmWorker> {
     pyo3::prepare_freethreaded_python(); // or enable feature "auto-initialize"
     if let Ok(venv) = env::var("VIRTUAL_ENV") {
-        Python::with_gil(|py| crate::engines::fix_venv(venv, py));
+        let _ = Python::with_gil(|py| crate::engines::fix_venv(venv, py));
     }
 
     let py_imports = Arc::new(python_imports());

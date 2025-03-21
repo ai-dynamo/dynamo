@@ -376,13 +376,11 @@ spec:
         - name: DYNAMO_RP_NATS_URL
           value: {{ $request_plane_nats_url }}
         - name: DYNAMO_RP_TIMEOUT
-          value: {{ $request_plane_timeout }}
+          value: {{ $request_plane_timeout | quote }}
 {{- if gt $worker_count 1 }}
         - name: DYNAMO_WORKER_COUNT
           value: {{ $worker_count }}
 {{- end }}
-        image: {{ $container_image_name }}
-        imagePullPolicy: IfNotPresent
         image: {{ $container_image_name }}
         imagePullPolicy: IfNotPresent
 {{- if $kube_liveness_enabled }}

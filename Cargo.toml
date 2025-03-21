@@ -51,6 +51,9 @@ derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
 either = { version = "1.13", features = ["serde"] }
 futures = { version = "0.3" }
+hf-hub = { version = "0.4.2", default-features = false, features = ["tokio", "rustls-tls"] }
+humantime = { version = "2.2.0" }
+rand = { version = "0.9.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 thiserror = { version = "2.0.11" }
@@ -58,6 +61,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["codec", "net"] }
 tracing = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
@@ -66,3 +70,12 @@ prometheus = { version = "0.13" }
 
 [profile.dev.package]
 insta.opt-level = 3
+
+[profile.dev]
+# release level optimizations otherwise everything feels slow
+opt-level = 3
+
+[profile.release]
+# These make the build much slower but shrink the binary, and could help performance
+codegen-units = 1
+lto = true

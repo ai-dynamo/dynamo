@@ -12,33 +12,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  endpoint: dynamo.Processor.chat/completions
-  port: 8000
-
-Processor:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  block-size: 64
-  max-model-len: 16384
-  router: kv
-
-Router:
-  model-name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  min-workers: 1
-
-VllmWorker:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  enforce-eager: true
-  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-  block-size: 64
-  max-model-len: 16384
-  max-num-batched-tokens: 16384
-  enable-prefix-caching: true
-  router: kv
-  tensor-parallel-size: 1
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: 1

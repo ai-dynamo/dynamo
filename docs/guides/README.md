@@ -15,134 +15,25 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# LLM Deployment Examples
+# Guide to Dynamo CLI
 
-## Components
-
-- workers: Prefill and decode worker handles actual LLM inference
-- router: Handles API requests and routes them to appropriate workers based on specified strategy
-- frontend: OpenAI compatible http server handles incoming requests
-
-## Deployment Architectures
-
-This figure shows an overview of the major components to deploy:
-
+After installing Dynamo with the following command, Dynamo can be used primarily through its CLI.
 ```
-                                                 +----------------+
-                                          +------| prefill worker |-------+
-                                   notify |      |                |       |
-                                 finished |      +----------------+       | pull
-                                          v                               v
-+------+      +-----------+      +------------------+    push     +---------------+
-| HTTP |----->| processor |----->| decode/monolith  |------------>| prefill queue |
-|      |<-----|           |<-----|      worker      |             |               |
-+------+      +-----------+      +------------------+             +---------------+
-                  |    ^                  |
-       query best |    | return           | publish kv events
-           worker |    | worker_id        v
-                  |    |         +------------------+
-                  |    +---------|     kv-router    |
-                  +------------->|                  |
-                                 +------------------+
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0
+python3 -m venv venv
+source venv/bin/activate
 
+pip install ai-dynamo[all]
 ```
 
+## Dynamo workflow
+Dynamo CLI has the following 4 sub-commands.
 
-### Aggregated
-Single-instance deployment where both prefill and decode are done by the same worker.
+- :runner: dynamo run: quickly spin up a server to experiment with a specified model, input and output target.
+- :palm_up_hand: dynamo serve: compose a graph of workers locally and serve.
+- :hammer: (Experiemental) dynamo build: containerize either the entire graph or parts of graph to multiple containers
+- :rocket: (Experiemental) dynamo deploy: deploy to K8 with helm charts or custom operators
 
-### Disaggregated
-Distributed deployment where prefill and decode are done by separate workers that can scale independently.
+For more detailed examples on serving LLMs with disaggregated serving, KV aware routing, etc,  please refer to [LLM deployment examples](https://github.com/ai-dynamo/dynamo/blob/main/examples/llm/README.md)
 
-## Getting Started
-
-1. Choose a deployment architecture based on your requirements
-2. Configure the components as needed
-3. Deploy using the provided scripts
-
-### Prerequisites
-
-Start required services (etcd and NATS) using [Docker Compose](../../deploy/docker-compose.yml)
-```bash
-docker compose -f deploy/docker-compose.yml up -d
-```
-
-### Build container
-
-```
-./container/build.sh
-```
-
-### Run container
-
-```
-./container/run.sh -it
-```
-## Run Deployment
-
-
-
-### Example architectures
-
-#### Aggregated serving
-```bash
-cd /workspace/examples/llm
-dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
-```
-
-#### Aggregated serving with KV Routing
-```bash
-cd /workspace/examples/llm
-dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
-```
-
-#### Disaggregated serving
-```bash
-cd /workspace/examples/llm
-dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
-```
-
-#### Disaggregated serving with KV Routing
-```bash
-cd /workspace/examples/llm
-dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
-```
-
-### Client
-
-In another terminal:
-```bash
-# this test request has around 200 tokens isl
-
-curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    "messages": [
-    {
-        "role": "user",
-        "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
-    }
-    ],
-    "stream":false,
-    "max_tokens": 30
-  }'
-
-```
-
-### Close deployment
-
-Kill all dynamo processes managed by circusd.
-
-```
-function kill_tree() {
-    local parent=$1
-    local children=$(ps -o pid= --ppid $parent)
-    for child in $children; do
-        kill_tree $child
-    done
-    echo "Killing process $parent"
-    kill -9 $parent
-}
-
-# kill process-tree of circusd
-kill_tree $(pgrep circusd)
-```
