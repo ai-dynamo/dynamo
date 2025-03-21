@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1780,36 +1781,35 @@ monitoring.options.insecure=true`
 
 	args = append(args, "uv", "run", "dynamo", "start")
 
+	if len(opt.dynamoNimDeployment.Spec.ExternalServices) > 0 {
+		serviceSuffix := fmt.Sprintf("%s.svc.cluster.local:3000", opt.dynamoNimDeployment.Namespace)
+		keys := make([]string, 0, len(opt.dynamoNimDeployment.Spec.ExternalServices))
+
+		for key := range opt.dynamoNimDeployment.Spec.ExternalServices {
+			keys = append(keys, key)
+		}
+
+		sort.Strings(keys)
+		for _, key := range keys {
+			service := opt.dynamoNimDeployment.Spec.ExternalServices[key]
+
+			// Check if DeploymentSelectorKey is not "name"
+			if service.DeploymentSelectorKey == "name" {
+				dependsFlag := fmt.Sprintf("--depends \"%s=http://%s.%s\"", key, service.DeploymentSelectorValue, serviceSuffix)
+				args = append(args, dependsFlag)
+			} else if service.DeploymentSelectorKey == "dynamo" {
+				dependsFlag := fmt.Sprintf("--depends \"%s=dynamo://%s\"", key, service.DeploymentSelectorValue)
+				args = append(args, dependsFlag)
+			} else {
+				return nil, errors.Errorf("DeploymentSelectorKey '%s' not supported. Only 'name' and 'dynamo' are supported", service.DeploymentSelectorKey)
+			}
+		}
+	}
+
 	if opt.dynamoNimDeployment.Spec.ServiceName != "" {
 		args = append(args, []string{"--service-name", opt.dynamoNimDeployment.Spec.ServiceName}...)
 		args = append(args, "src."+opt.dynamoNimDeployment.Spec.DynamoTag)
 	}
-
-	// TODO: Is this needed anymore? confirm and delete if unused.
-	// if len(opt.dynamoNimDeployment.Spec.ExternalServices) > 0 {
-	// 	serviceSuffix := fmt.Sprintf("%s.svc.cluster.local:3000", opt.dynamoNimDeployment.Namespace)
-	// 	keys := make([]string, 0, len(opt.dynamoNimDeployment.Spec.ExternalServices))
-
-	// 	for key := range opt.dynamoNimDeployment.Spec.ExternalServices {
-	// 		keys = append(keys, key)
-	// 	}
-
-	// 	sort.Strings(keys)
-	// 	for _, key := range keys {
-	// 		service := opt.dynamoNimDeployment.Spec.ExternalServices[key]
-
-	// 		// Check if DeploymentSelectorKey is not "name"
-	// 		if service.DeploymentSelectorKey == "name" {
-	// 			dependsFlag := fmt.Sprintf("--depends \"%s=http://%s.%s\"", key, service.DeploymentSelectorValue, serviceSuffix)
-	// 			args = append(args, dependsFlag)
-	// 		} else if service.DeploymentSelectorKey == "nova" {
-	// 			dependsFlag := fmt.Sprintf("--depends \"%s=nova://%s\"", key, service.DeploymentSelectorValue)
-	// 			args = append(args, dependsFlag)
-	// 		} else {
-	// 			return nil, errors.Errorf("DeploymentSelectorKey '%s' not supported. Only 'name' and 'nova' are supported", service.DeploymentSelectorKey)
-	// 		}
-	// 	}
-	// }
 
 	yataiResources := opt.dynamoNimDeployment.Spec.Resources
 

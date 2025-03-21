@@ -35,6 +35,7 @@ dynamo-operator:
         - --metrics-bind-address=127.0.0.1:8080
 
   dynamo:
+    dynamoIngressSuffix: ${DYNAMO_INGRESS_SUFFIX}
     yatai:
     # todo: only use dns name
       endpoint: http://dynamo-server
