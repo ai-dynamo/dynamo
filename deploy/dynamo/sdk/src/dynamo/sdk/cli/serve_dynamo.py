@@ -67,7 +67,7 @@ def main(
     worker_id: int | None,
 ) -> None:
     """Start a worker for the given service - either Dynamo or regular service"""
-    from _bentoml_impl.loader import import_service
+    from _bentoml_impl.loader import load
     from bentoml._internal.container import BentoMLContainer
     from bentoml._internal.context import server_context
     from bentoml._internal.log import configure_server_logging
@@ -78,7 +78,7 @@ def main(
     dynamo_context["worker_id"] = worker_id
 
     # Import service first to check configuration
-    service = import_service(bento_identifier)
+    service = load(bento_identifier)
     if service_name and service_name != service.name:
         service = service.find_dependent_by_name(service_name)
 

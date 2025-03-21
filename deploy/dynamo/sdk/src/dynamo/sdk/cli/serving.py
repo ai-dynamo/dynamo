@@ -269,7 +269,7 @@ def serve_http(
     service_name: str = "",
     threaded: bool = False,
 ) -> Server:
-    from _bentoml_impl.loader import import_service, normalize_identifier
+    from _bentoml_impl.loader import load
     from bentoml._internal.log import SERVER_LOGGING_CONFIG
     from bentoml._internal.utils import reserve_free_port
     from bentoml._internal.utils.analytics.usage_stats import track_serve
@@ -285,20 +285,18 @@ def serve_http(
 
     from .allocator import ResourceAllocator
 
-    bento_id: str = ""
     env = {"PROMETHEUS_MULTIPROC_DIR": ensure_prometheus_dir()}
     if isinstance(bento_identifier, Service):
         svc = bento_identifier
-        bento_id = svc.import_string
+        bento_identifier = svc.import_string
         assert (
             working_dir is None
         ), "working_dir should not be set when passing a service in process"
         # use cwd
-        bento_path = pathlib.Path(".")
+        bento_path = pathlib.Path(svc.working_dir)
     else:
-        bento_id, bento_path = normalize_identifier(bento_identifier, working_dir)
-
-        svc = import_service(bento_id, bento_path)
+        svc = load(bento_identifier, working_dir)
+        bento_path = pathlib.Path(working_dir or ".")
 
     watchers: list[Watcher] = []
     sockets: list[CircusSocket] = []
@@ -333,7 +331,7 @@ def serve_http(
                         and dep_svc.is_dynamo_component()
                     ):
                         new_watcher, new_socket, uri = create_dynamo_watcher(
-                            bento_id,
+                            bento_identifier,
                             dep_svc,
                             uds_path,
                             port_stack,
@@ -345,7 +343,7 @@ def serve_http(
                     else:
                         # Regular BentoML service
                         new_watcher, new_socket, uri = create_dependency_watcher(
-                            bento_id,
+                            bento_identifier,
                             dep_svc,
                             uds_path,
                             port_stack,
