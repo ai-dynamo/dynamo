@@ -516,7 +516,6 @@ mod tests {
     #[test]
     fn test_encode_decode_llama() -> Result<()> {
         use rand::seq::SliceRandom;
-        use rand::thread_rng;
 
         let passage = get_test_passage();
         let hf_tokenizer = get_hf_tokenizer(TokenizerType::Llama)?;
@@ -540,7 +539,7 @@ mod tests {
 
         #[allow(clippy::cast_possible_truncation)]
         let mut tokens = (0..hf_tokenizer.get_vocab_size(false) as u32).collect::<Vec<_>>();
-        tokens.shuffle(&mut thread_rng());
+        tokens.shuffle(&mut rand::rng());
 
         // Without skipping special tokens
         let hf_decoded = decode(&hf_tokenizer, &tokens, false)?;
@@ -558,7 +557,6 @@ mod tests {
     #[test]
     fn test_encode_decode_gpt2() -> Result<()> {
         use rand::seq::SliceRandom;
-        use rand::thread_rng;
 
         let passage = get_test_passage();
         let hf_tokenizer = get_hf_tokenizer(TokenizerType::Gpt2)?;
@@ -582,7 +580,7 @@ mod tests {
 
         #[allow(clippy::cast_possible_truncation)]
         let mut tokens = (0..hf_tokenizer.get_vocab_size(false) as u32).collect::<Vec<_>>();
-        tokens.shuffle(&mut thread_rng());
+        tokens.shuffle(&mut rand::rng());
 
         // Without skipping special tokens
         let hf_decoded = decode(&hf_tokenizer, &tokens, false)?;
