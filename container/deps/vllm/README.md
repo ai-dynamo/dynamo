@@ -16,3 +16,4 @@ limitations under the License.
 -->
 
 Apply this patch to Python source code from vLLM release [v0.7.2](https://github.com/vllm-project/vllm/releases/tag/v0.7.2).
+Apply this patch to Python source code from vLLM release [v0.8.1](https://github.com/vllm-project/vllm/releases/tag/v0.8.2).
