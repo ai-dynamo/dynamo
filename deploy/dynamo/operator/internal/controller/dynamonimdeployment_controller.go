@@ -1163,7 +1163,7 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context
 					Route: []*istioNetworking.HTTPRouteDestination{
 						{
 							Destination: &istioNetworking.Destination{
-								Host: fmt.Sprintf("%s.yatai.svc.cluster.local", dynamoNimDeployment.Name),
+								Host: dynamoNimDeployment.Name,
 								Port: &istioNetworking.PortSelector{
 									Number: 3000,
 								},
