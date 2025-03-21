@@ -1186,7 +1186,7 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context
 
 	vsEnabled := dynamoNimDeployment.Spec.Ingress.Enabled && dynamoNimDeployment.Spec.Ingress.UseVirtualService != nil && *dynamoNimDeployment.Spec.Ingress.UseVirtualService
 
-	if err := ctrl.SetControllerReference(vs, dynamoNimDeployment, r.Scheme); err != nil {
+	if err := ctrl.SetControllerReference(dynamoNimDeployment, vs, r.Scheme); err != nil {
 		log.Error(err, "Failed to set controller reference for the VirtualService")
 		return false, err
 	}
