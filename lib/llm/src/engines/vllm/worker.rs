@@ -160,7 +160,6 @@ struct Logprob {
 pub async fn start(
     cancel_token: CancellationToken,
     sock_code: &str,
-    card_path: &Path,
     model_path: &Path,
     _node_conf: MultiNodeConfig,
     tensor_parallel_size: u32,
@@ -180,14 +179,7 @@ pub async fn start(
         metrics,
     } = zmq_sockets(sock_code)?;
 
-    let vllm_process = start_vllm(
-        card_path,
-        model_path,
-        &py_imports,
-        data,
-        tensor_parallel_size,
-    )
-    .await?;
+    let vllm_process = start_vllm(model_path, &py_imports, data, tensor_parallel_size).await?;
     let vllm_join_handle = watch_vllm(cancel_token.clone(), vllm_process);
 
     tokio::spawn(heartbeat_loop(cancel_token.clone(), heartbeat));
@@ -308,7 +300,6 @@ fn zmq_sockets(sock_code: &str) -> anyhow::Result<Sockets> {
 
 /// Start the vllm python sub-process and wait for it to start
 async fn start_vllm(
-    card_path: &Path,
     model_path: &Path,
     python_imports: &Imports,
     mut data_socket: async_zmq::Dealer<IntoIter<Vec<u8>>, Vec<u8>>,
@@ -316,7 +307,6 @@ async fn start_vllm(
 ) -> anyhow::Result<tokio::process::Child> {
     let vllm_args = [
         "--internal-vllm-process",
-        &format!("--model-config={}", card_path.display()),
         &format!("--model-path={}", model_path.display()),
         &format!("--tensor-parallel-size={tensor_parallel_size}"),
     ];

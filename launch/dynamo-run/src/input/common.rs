@@ -74,7 +74,9 @@ pub async fn prepare_engine(
             let preprocessor = OpenAIPreprocessor::new(*card.clone())
                 .await?
                 .into_operator();
-            let backend = Backend::from_mdc(*card.clone()).await?.into_operator();
+            let backend = Backend::from_tokenizer(card.tokenizer_hf()?)
+                .await?
+                .into_operator();
             let engine = ServiceBackend::from_engine(inner_engine);
 
             let pipeline = frontend
