@@ -272,7 +272,8 @@ pub async fn run(
             };
             let Some(card) = maybe_card.clone() else {
                 anyhow::bail!(
-                    "out=vllm requires --model-path to be an HF repo, or for GGUF add flag --model-config <hf-repo>"
+                    "Failed to load model card: either unsupported HuggingFace repo format \
+                    or for GGUF files --model-config is missing."
                 );
             };
             let Some(sock_prefix) = zmq_socket_prefix else {
