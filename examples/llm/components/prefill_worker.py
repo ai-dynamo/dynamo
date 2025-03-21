@@ -64,6 +64,12 @@ class PrefillWorker:
             print("Prefill must be done eagerly, setting to True")
             self.engine_args.enforce_eager = True
 
+        if self.engine_args.enable_prefix_caching is not False:
+            print(
+                "Prefix caching is not supported yet in prefill worker, setting to False"
+            )
+            self.engine_args.enable_prefix_caching = False
+
     @async_on_start
     async def async_init(self):
         self._engine_context = build_async_engine_client_from_engine_args(
@@ -115,6 +121,7 @@ class PrefillWorker:
             is_remote_decode=True,
             decode_block_ids=request.block_ids,
             decode_engine_id=request.engine_id,
+            decode_computed_block_ids=request.computed_block_ids,
         )
 
         # TODO check if metadata has changed
