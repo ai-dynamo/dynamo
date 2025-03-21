@@ -1186,6 +1186,11 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context
 
 	vsEnabled := dynamoNimDeployment.Spec.Ingress.Enabled && dynamoNimDeployment.Spec.Ingress.UseVirtualService != nil && *dynamoNimDeployment.Spec.Ingress.UseVirtualService
 
+	if err := ctrl.SetControllerReference(vs, dynamoNimDeployment, r.Scheme); err != nil {
+		log.Error(err, "Failed to set controller reference for the VirtualService")
+		return false, err
+	}
+
 	if err != nil {
 		if vsEnabled {
 			log.Info("VirtualService not found, creating new one")
@@ -1209,7 +1214,7 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context
 	}
 
 	log.Info("VirtualService found, updating", "OldVirtualService", oldVS)
-
+	vs.ObjectMeta.ResourceVersion = oldVS.ObjectMeta.ResourceVersion
 	if err := r.Update(ctx, vs); err != nil {
 		log.Error(err, "Failed to update VirtualService")
 		return false, err
