@@ -1764,34 +1764,12 @@ monitoring.options.insecure=true`
 		// do nothing
 	}
 
-	livenessProbe := &corev1.Probe{
-		InitialDelaySeconds: 10,
-		TimeoutSeconds:      20,
-		FailureThreshold:    6,
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/livez",
-				Port: intstr.FromString(commonconsts.BentoContainerPortName),
-			},
-		},
-	}
-
+	var livenessProbe *corev1.Probe
 	if opt.dynamoNimDeployment.Spec.LivenessProbe != nil {
 		livenessProbe = opt.dynamoNimDeployment.Spec.LivenessProbe
 	}
 
-	readinessProbe := &corev1.Probe{
-		InitialDelaySeconds: 5,
-		TimeoutSeconds:      5,
-		FailureThreshold:    12,
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/readyz",
-				Port: intstr.FromString(commonconsts.BentoContainerPortName),
-			},
-		},
-	}
-
+	var readinessProbe *corev1.Probe
 	if opt.dynamoNimDeployment.Spec.ReadinessProbe != nil {
 		readinessProbe = opt.dynamoNimDeployment.Spec.ReadinessProbe
 	}
@@ -1805,6 +1783,7 @@ monitoring.options.insecure=true`
 
 	if opt.dynamoNimDeployment.Spec.ServiceName != "" {
 		args = append(args, []string{"--service-name", opt.dynamoNimDeployment.Spec.ServiceName}...)
+		args = append(args, "src."+opt.dynamoNim.Spec.Tag)
 	}
 
 	if len(opt.dynamoNimDeployment.Spec.ExternalServices) > 0 {
