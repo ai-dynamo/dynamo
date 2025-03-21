@@ -1786,7 +1786,9 @@ monitoring.options.insecure=true`
 
 	args = append(args, "uv", "run", "dynamo", "start")
 
-	if len(opt.dynamoNimDeployment.Spec.ExternalServices) > 0 {
+	// todo : remove this line when https://github.com/ai-dynamo/dynamo/issues/345 is fixed
+	enableDependsOption := false
+	if len(opt.dynamoNimDeployment.Spec.ExternalServices) > 0 && enableDependsOption {
 		serviceSuffix := fmt.Sprintf("%s.svc.cluster.local:3000", opt.dynamoNimDeployment.Namespace)
 		keys := make([]string, 0, len(opt.dynamoNimDeployment.Spec.ExternalServices))
 
