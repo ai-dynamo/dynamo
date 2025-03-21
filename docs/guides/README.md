@@ -15,9 +15,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Guide to Dynamo CLI 
+# Guide to Dynamo CLI
 
-After installing Dynamo with the following command, Dynamo can be used primarily through its CLI. 
+After installing Dynamo with the following command, Dynamo can be used primarily through its CLI.
 ```
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0
