@@ -129,21 +129,34 @@ pub async fn run(
     let (maybe_card_path, maybe_card) = match (&model_path, &flags.model_config) {
         // --model-config takes precedence
         (_, Some(model_config)) => {
-            let card = match ModelDeploymentCard::from_local_path(model_config, model_name.as_deref()).await {
-                Ok(card) => Some(card),
-                Err(e) => {
-                    tracing::error!("Failed to load model card from config path {:?}: {}", model_config, e);
-                    None
-                }
-            };
+            let card =
+                match ModelDeploymentCard::from_local_path(model_config, model_name.as_deref())
+                    .await
+                {
+                    Ok(card) => Some(card),
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to load model card from config path {}: {}",
+                            model_config.display(),
+                            e
+                        );
+                        None
+                    }
+                };
             (Some(model_config.clone()), card)
         }
         // If --model-path is an HF repo use that
         (Some(model_path), _) if model_path.is_dir() => {
-            let card = match ModelDeploymentCard::from_local_path(model_path, model_name.as_deref()).await {
+            let card = match ModelDeploymentCard::from_local_path(model_path, model_name.as_deref())
+                .await
+            {
                 Ok(card) => Some(card),
                 Err(e) => {
-                    tracing::error!("Failed to load model card from model path {:?}: {}", model_path, e);
+                    tracing::error!(
+                        "Failed to load model card from model path {}: {}",
+                        model_path.display(),
+                        e
+                    );
                     None
                 }
             };
