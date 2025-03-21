@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"os"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1673,6 +1672,10 @@ func (r *DynamoNimDeploymentReconciler) generatePodTemplateSpec(ctx context.Cont
 			Name:  commonconsts.EnvYataiBentoDeploymentNamespace,
 			Value: opt.dynamoNimDeployment.Namespace,
 		},
+		{
+			Name:  commonconsts.EnvDynamoDeploymentTag,
+			Value: opt.dynamoNimDeployment.Spec.DynamoTag,
+		},
 	}
 
 	if r.NatsAddr != "" {
@@ -1779,37 +1782,38 @@ monitoring.options.insecure=true`
 
 	args := make([]string, 0)
 
-	args = append(args, "uv", "run", "dynamo", "start")
+	args = append(args, "sleep", "infinity")
+	// args = append(args, "uv", "run", "dynamo", "start")
 
-	if opt.dynamoNimDeployment.Spec.ServiceName != "" {
-		args = append(args, []string{"--service-name", opt.dynamoNimDeployment.Spec.ServiceName}...)
-		args = append(args, "src."+opt.dynamoNim.Spec.Tag)
-	}
+	// if opt.dynamoNimDeployment.Spec.ServiceName != "" {
+	// 	args = append(args, []string{"--service-name", opt.dynamoNimDeployment.Spec.ServiceName}...)
+	// 	args = append(args, "src."+opt.dynamoNim.Spec.Tag)
+	// }
 
-	if len(opt.dynamoNimDeployment.Spec.ExternalServices) > 0 {
-		serviceSuffix := fmt.Sprintf("%s.svc.cluster.local:3000", opt.dynamoNimDeployment.Namespace)
-		keys := make([]string, 0, len(opt.dynamoNimDeployment.Spec.ExternalServices))
+	// if len(opt.dynamoNimDeployment.Spec.ExternalServices) > 0 {
+	// 	serviceSuffix := fmt.Sprintf("%s.svc.cluster.local:3000", opt.dynamoNimDeployment.Namespace)
+	// 	keys := make([]string, 0, len(opt.dynamoNimDeployment.Spec.ExternalServices))
 
-		for key := range opt.dynamoNimDeployment.Spec.ExternalServices {
-			keys = append(keys, key)
-		}
+	// 	for key := range opt.dynamoNimDeployment.Spec.ExternalServices {
+	// 		keys = append(keys, key)
+	// 	}
 
-		sort.Strings(keys)
-		for _, key := range keys {
-			service := opt.dynamoNimDeployment.Spec.ExternalServices[key]
+	// 	sort.Strings(keys)
+	// 	for _, key := range keys {
+	// 		service := opt.dynamoNimDeployment.Spec.ExternalServices[key]
 
-			// Check if DeploymentSelectorKey is not "name"
-			if service.DeploymentSelectorKey == "name" {
-				dependsFlag := fmt.Sprintf("--depends \"%s=http://%s.%s\"", key, service.DeploymentSelectorValue, serviceSuffix)
-				args = append(args, dependsFlag)
-			} else if service.DeploymentSelectorKey == "nova" {
-				dependsFlag := fmt.Sprintf("--depends \"%s=nova://%s\"", key, service.DeploymentSelectorValue)
-				args = append(args, dependsFlag)
-			} else {
-				return nil, errors.Errorf("DeploymentSelectorKey '%s' not supported. Only 'name' and 'nova' are supported", service.DeploymentSelectorKey)
-			}
-		}
-	}
+	// 		// Check if DeploymentSelectorKey is not "name"
+	// 		if service.DeploymentSelectorKey == "name" {
+	// 			dependsFlag := fmt.Sprintf("--depends \"%s=http://%s.%s\"", key, service.DeploymentSelectorValue, serviceSuffix)
+	// 			args = append(args, dependsFlag)
+	// 		} else if service.DeploymentSelectorKey == "nova" {
+	// 			dependsFlag := fmt.Sprintf("--depends \"%s=nova://%s\"", key, service.DeploymentSelectorValue)
+	// 			args = append(args, dependsFlag)
+	// 		} else {
+	// 			return nil, errors.Errorf("DeploymentSelectorKey '%s' not supported. Only 'name' and 'nova' are supported", service.DeploymentSelectorKey)
+	// 		}
+	// 	}
+	// }
 
 	yataiResources := opt.dynamoNimDeployment.Spec.Resources
 

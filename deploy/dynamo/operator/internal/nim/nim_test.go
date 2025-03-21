@@ -50,6 +50,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 					},
 				},
 				config: &DynamoNIMConfig{
+					DynamoTag: "dynamonim:MyService1",
 					Services: []ServiceConfig{
 						{
 							Name:         "service1",
@@ -92,6 +93,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 					},
 					Spec: v1alpha1.DynamoNimDeploymentSpec{
 						DynamoNim:   "dynamonim",
+						DynamoTag:   "dynamonim:MyService1",
 						ServiceName: "service1",
 						Resources: &compounaiCommon.Resources{
 							Requests: &compounaiCommon.ResourceItem{
@@ -125,8 +127,9 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						ServiceName: "service2",
 						DynamoNim:   "dynamonim",
+						DynamoTag:   "dynamonim:MyService1",
+						ServiceName: "service2",
 					},
 				},
 			},
@@ -145,6 +148,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 					},
 				},
 				config: &DynamoNIMConfig{
+					DynamoTag: "dynamonim:MyService2",
 					Services: []ServiceConfig{
 						{
 							Name:         "service1",
@@ -189,6 +193,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 					},
 					Spec: v1alpha1.DynamoNimDeploymentSpec{
 						DynamoNim:   "dynamonim",
+						DynamoTag:   "dynamonim:MyService2",
 						ServiceName: "service1",
 						Resources: &compounaiCommon.Resources{
 							Requests: &compounaiCommon.ResourceItem{
@@ -223,6 +228,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 					},
 					Spec: v1alpha1.DynamoNimDeploymentSpec{
 						DynamoNim:   "dynamonim",
+						DynamoTag:   "dynamonim:MyService2",
 						ServiceName: "service2",
 					},
 				},
@@ -242,6 +248,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 					},
 				},
 				config: &DynamoNIMConfig{
+					DynamoTag: "dynamonim:MyService3",
 					Services: []ServiceConfig{
 						{
 							Name:         "service1",
