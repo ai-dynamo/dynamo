@@ -28,7 +28,7 @@ pip install ai-dynamo[all]
 ```
 
 ## Dynamo workflow
-Dynamo CLI has the following 4 sub-commands. 
+Dynamo CLI has the following 4 sub-commands.
 
 - :runner: dynamo run: quickly spin up a server to experiment with a specified model, input and output target.
 - :palm_up_hand: dynamo serve: compose a graph of workers locally and serve.
