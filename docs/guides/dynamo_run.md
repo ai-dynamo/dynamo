@@ -86,15 +86,20 @@ apt install -y build-essential libhwloc-dev libudev-dev pkg-config libssl-dev li
 ```
 
 Libraries macOS:
+- [Homebrew](https://brew.sh/)
+```
+# if brew is not installed on your system, install it
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+- [Xcode](https://developer.apple.com/xcode/)
+
 ```
 brew install cmake protobuf
 
-# install Xcode from App Store and check that Metal is accessible
+# Check that Metal is accessible
 xcrun -sdk macosx metal
-
-# may have to install Xcode Command Line Tools:
-xcode-select --install
 ```
+If Metal is accessible, you should see an error like `metal: error: no input files`, which confirms it is installed correctly.
 
 Install Rust:
 ```

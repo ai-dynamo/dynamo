@@ -129,20 +129,31 @@ pub async fn run(
     let (maybe_card_path, maybe_card) = match (&model_path, &flags.model_config) {
         // --model-config takes precedence
         (_, Some(model_config)) => {
-            let card = ModelDeploymentCard::from_local_path(model_config, model_name.as_deref())
-                .await
-                .ok();
+            let card = match ModelDeploymentCard::from_local_path(model_config, model_name.as_deref()).await {
+                Ok(card) => Some(card),
+                Err(e) => {
+                    tracing::error!("Failed to load model card from config path {:?}: {}", model_config, e);
+                    None
+                }
+            };
             (Some(model_config.clone()), card)
         }
         // If --model-path is an HF repo use that
         (Some(model_path), _) if model_path.is_dir() => {
-            let card = ModelDeploymentCard::from_local_path(model_path, model_name.as_deref())
-                .await
-                .ok();
+            let card = match ModelDeploymentCard::from_local_path(model_path, model_name.as_deref()).await {
+                Ok(card) => Some(card),
+                Err(e) => {
+                    tracing::error!("Failed to load model card from model path {:?}: {}", model_path, e);
+                    None
+                }
+            };
             (Some(model_path.clone()), card)
         }
         // Otherwise we don't have one, but we only need it if we're tokenizing
-        _ => (None, None),
+        _ => {
+            tracing::debug!("No model card path provided (neither --model-config nor a directory in --model-path)");
+            (None, None)
+        }
     };
 
     #[cfg(any(feature = "vllm", feature = "sglang"))]
