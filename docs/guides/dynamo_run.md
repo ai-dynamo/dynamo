@@ -177,12 +177,7 @@ dynamo-run in=none out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llam
 
 - `cargo build --features llamacpp,cuda`
 
-- `dynamo-run out=llama_cpp --model-path ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf --model-config ~/llm_models/Llama-3.2-3B-Instruct/`
-
-The extra `--model-config` flag is because:
-- llama_cpp only runs GGUF
-- We send it tokens, meaning we do the tokenization ourself, so we need a tokenizer
-- We don't yet read it out of the GGUF (TODO), so we need an HF repo with `tokenizer.json` et al
+- `dynamo-run out=llama_cp ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf`
 
 If the build step also builds llama_cpp libraries into the same folder as the binary ("libllama.so", "libggml.so", "libggml-base.so", "libggml-cpu.so", "libggml-cuda.so"), then `dynamo-run` will need to find those at runtime. Set `LD_LIBRARY_PATH`, and be sure to deploy them alongside the `dynamo-run` binary.
 
@@ -215,7 +210,7 @@ Run (still inside that virtualenv) - HF repo:
 
 Run (still inside that virtualenv) - GGUF:
 ```
-./dynamo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf --model-config ~/llm_models/Llama-3.2-3B-Instruct/
+./dynamo-run in=http out=vllm ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf
 ```
 
 + Multi-node:

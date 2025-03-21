@@ -35,7 +35,6 @@ impl VllmEngine {
     pub async fn new(
         cancel_token: CancellationToken,
         sock_code: &str,
-        card_path: &Path,
         model_path: &Path,
         node_conf: MultiNodeConfig,
         tensor_parallel_size: u32,
@@ -43,7 +42,6 @@ impl VllmEngine {
         let w = worker::start(
             cancel_token.clone(),
             sock_code,
-            card_path,
             model_path,
             node_conf,
             tensor_parallel_size,
