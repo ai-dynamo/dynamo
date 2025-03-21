@@ -1672,10 +1672,6 @@ func (r *DynamoNimDeploymentReconciler) generatePodTemplateSpec(ctx context.Cont
 			Name:  commonconsts.EnvYataiBentoDeploymentNamespace,
 			Value: opt.dynamoNimDeployment.Namespace,
 		},
-		{
-			Name:  commonconsts.EnvDynamoDeploymentTag,
-			Value: opt.dynamoNimDeployment.Spec.DynamoTag,
-		},
 	}
 
 	if r.NatsAddr != "" {
@@ -1782,14 +1778,14 @@ monitoring.options.insecure=true`
 
 	args := make([]string, 0)
 
-	args = append(args, "sleep", "infinity")
-	// args = append(args, "uv", "run", "dynamo", "start")
+	args = append(args, "uv", "run", "dynamo", "start")
 
-	// if opt.dynamoNimDeployment.Spec.ServiceName != "" {
-	// 	args = append(args, []string{"--service-name", opt.dynamoNimDeployment.Spec.ServiceName}...)
-	// 	args = append(args, "src."+opt.dynamoNim.Spec.Tag)
-	// }
+	if opt.dynamoNimDeployment.Spec.ServiceName != "" {
+		args = append(args, []string{"--service-name", opt.dynamoNimDeployment.Spec.ServiceName}...)
+		args = append(args, "src."+opt.dynamoNimDeployment.Spec.DynamoTag)
+	}
 
+	// TODO: Is this needed anymore? confirm and delete if unused.
 	// if len(opt.dynamoNimDeployment.Spec.ExternalServices) > 0 {
 	// 	serviceSuffix := fmt.Sprintf("%s.svc.cluster.local:3000", opt.dynamoNimDeployment.Namespace)
 	// 	keys := make([]string, 0, len(opt.dynamoNimDeployment.Spec.ExternalServices))
