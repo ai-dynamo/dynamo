@@ -22,7 +22,7 @@ from queue import Queue
 from typing import Any, Optional
 
 from common.parser import LLMAPIConfig
-from common.processor import ChatProcessor, CompletionsProcessor
+from common.chat_processor import ChatProcessor, CompletionsProcessor
 from common.utils import ManagedThread
 from tensorrt_llm._torch import LLM
 from tensorrt_llm.logger import logger
