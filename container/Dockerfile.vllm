@@ -156,7 +156,7 @@ RUN ls -l /usr/local/nixl/include/
 RUN ls /opt/nixl
 
 # Install utilities
-RUN apt update -y && apt install -y git wget curl nvtop tmux vim
+RUN apt update -y && apt install -y git wget curl nvtop tmux vim yq
 # nats
 RUN wget https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-amd64.deb && \
     dpkg -i nats-server-v2.10.24-amd64.deb && rm nats-server-v2.10.24-amd64.deb
