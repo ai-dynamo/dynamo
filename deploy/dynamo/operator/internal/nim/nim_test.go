@@ -56,7 +56,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 							Name:         "service1",
 							Dependencies: []map[string]string{{"service": "service2"}},
 							Config: Config{
-								Nova: &NovaConfig{
+								Dynamo: &DynamoConfig{
 									Enabled:   true,
 									Namespace: "default",
 									Name:      "service1",
@@ -77,7 +77,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 							Name:         "service2",
 							Dependencies: []map[string]string{},
 							Config: Config{
-								Nova: &NovaConfig{
+								Dynamo: &DynamoConfig{
 									Enabled: false,
 								},
 							},
@@ -148,17 +148,13 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 					},
 				},
 				config: &DynamoNIMConfig{
-					DynamoTag: "dynamonim:MyService2",
+					DynamoTag:    "dynamonim:MyService2",
+					EntryService: "service1",
 					Services: []ServiceConfig{
 						{
 							Name:         "service1",
 							Dependencies: []map[string]string{{"service": "service2"}},
 							Config: Config{
-								Nova: &NovaConfig{
-									Enabled:   true,
-									Namespace: "default",
-									Name:      "service1",
-								},
 								Resources: &Resources{
 									CPU:    "1",
 									Memory: "1Gi",
@@ -175,7 +171,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 							Name:         "service2",
 							Dependencies: []map[string]string{},
 							Config: Config{
-								Nova: &NovaConfig{
+								Dynamo: &DynamoConfig{
 									Enabled:   true,
 									Namespace: "default",
 									Name:      "service2",
@@ -215,9 +211,13 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						},
 						ExternalServices: map[string]v1alpha1.ExternalService{
 							"service2": {
-								DeploymentSelectorKey:   "nova",
+								DeploymentSelectorKey:   "dynamo",
 								DeploymentSelectorValue: "service2/default",
 							},
+						},
+						Ingress: v1alpha1.IngressSpec{
+							Enabled:           true,
+							UseVirtualService: &[]bool{true}[0],
 						},
 					},
 				},
@@ -254,7 +254,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 							Name:         "service1",
 							Dependencies: []map[string]string{{"service": "service2"}},
 							Config: Config{
-								Nova: &NovaConfig{
+								Dynamo: &DynamoConfig{
 									Enabled:   true,
 									Namespace: "default",
 									Name:      "service1",
@@ -275,7 +275,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 							Name:         "service3",
 							Dependencies: []map[string]string{},
 							Config: Config{
-								Nova: &NovaConfig{
+								Dynamo: &DynamoConfig{
 									Enabled:   true,
 									Namespace: "default",
 									Name:      "service3",
