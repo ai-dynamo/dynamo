@@ -43,15 +43,17 @@ jobs:
         with:
            run_id: ${{ github.event.workflow_run.id }}
            path: artifacts
-
-      - name: Report test status
+           
+      - name: Report test status - In Progress
         id: report_test_status
-        uses: LouisBrunner/checks-action@v2.0.0
+        uses: github-actions/status@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          name: "Summarize test report"
           status: "in_progress"
+          conclusion: "neutral"
+          name: "Summarize test report"
           sha: ${{ github.event.workflow_run.head_commit.id }}
+          context: "Test Report"
 
       - name: Set Test Run URL
         id: set_test_run_url
@@ -99,10 +101,11 @@ jobs:
 
       - name: Complete report test status
         if: always()
-        uses: LouisBrunner/checks-action@v2.0.0
+        uses: github-actions/status@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          name: "Summarize test report"
           status: "completed"
           conclusion: ${{ job.status }}
+          name: "Summarize test report"
           sha: ${{ github.event.workflow_run.head_commit.id }}
+          context: "Test Report"
