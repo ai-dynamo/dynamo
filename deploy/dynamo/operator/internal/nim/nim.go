@@ -131,7 +131,8 @@ func RetrieveDynamoNimDownloadURL(ctx context.Context, dynamoDeployment *v1alpha
 
 // ServicesConfig represents the top-level YAML structure of a dynamoNim yaml file stored in a dynamoNim tar file
 type DynamoNIMConfig struct {
-	Services []ServiceConfig `yaml:"services"`
+	DynamoTag string          `yaml:"service"`
+	Services  []ServiceConfig `yaml:"services"`
 }
 
 type EventRecorder interface {
@@ -255,6 +256,7 @@ func GenerateDynamoNIMDeployments(parentDynamoDeployment *v1alpha1.DynamoDeploym
 		deployment := &v1alpha1.DynamoNimDeployment{}
 		deployment.Name = fmt.Sprintf("%s-%s", parentDynamoDeployment.Name, strings.ToLower(service.Name))
 		deployment.Namespace = parentDynamoDeployment.Namespace
+		deployment.Spec.DynamoTag = config.DynamoTag
 		deployment.Spec.DynamoNim = strings.Split(parentDynamoDeployment.Spec.DynamoNim, ":")[0]
 		deployment.Spec.ServiceName = service.Name
 		if service.Config.Nova != nil && service.Config.Nova.Enabled {
