@@ -99,3 +99,9 @@ def async_on_start(func: t.Callable) -> t.Callable:
     # Mark the function as a startup hook
     setattr(func, "__bentoml_startup_hook__", True)
     return bentoml.on_startup(func)
+
+def async_on_shutdown(func: t.Callable) -> t.Callable:
+    """Decorator for async onshutdown functions."""
+    # Mark the function as a shutdown hook
+    setattr(func, "__bentoml_shutdown_hook__", True)
+    return bentoml.on_shutdown(func)

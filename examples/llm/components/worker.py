@@ -31,7 +31,7 @@ from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
 from dynamo.llm import KvMetricsPublisher
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service, async_on_shutdown
 
 
 @service(
@@ -129,6 +129,13 @@ class VllmWorker:
         else:
             self.disaggregated_router = None
         print("VllmWorker has been initialized")
+
+    @async_on_shutdown
+    async def async_shutdown(self):
+        print("VllmWorker is shutting down")
+        self.engine_client.shutdown_background_loop()
+        await self.engine_client.__aexit__()
+        print("VllmWorker has been shutdown")
 
     async def create_metrics_publisher_endpoint(self):
         component = dynamo_context["component"]

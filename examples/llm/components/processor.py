@@ -64,7 +64,6 @@ class Processor(ProcessMixIn):
             self.tokenizer, self.model_config
         )
         self.router_mode = self.engine_args.router
-        self.min_workers = 1
 
     def _create_tokenizer(self, engine_args: AsyncEngineArgs) -> AnyTokenizer:
         """Create a TokenizerGroup using engine arguments similar to VLLM's approach"""
@@ -90,12 +89,8 @@ class Processor(ProcessMixIn):
             .endpoint("generate")
             .client()
         )
-        while len(self.worker_client.endpoint_ids()) < self.min_workers:
-            print(
-                f"Waiting for workers to be ready.\n"
-                f" Current: {len(self.worker_client.endpoint_ids())},"
-                f" Required: {self.min_workers}"
-            )
+        while len(self.worker_client.endpoint_ids()) < 1:
+            print("Waiting for a worker to be ready...")
             await asyncio.sleep(2)
 
     async def _generate(
