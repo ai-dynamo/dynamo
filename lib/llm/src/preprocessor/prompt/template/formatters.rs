@@ -13,8 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::*;
+use std::sync::Arc;
+
+use super::tokcfg::{raise_exception, tojson, ChatTemplate};
+use super::{ContextMixins, HfTokenizerConfigJsonFormatter, JinjaEnvironment};
 use either::Either;
+use minijinja::Environment;
 use tracing;
 
 impl JinjaEnvironment {
@@ -35,7 +39,7 @@ impl Default for JinjaEnvironment {
 }
 
 impl HfTokenizerConfigJsonFormatter {
-    pub fn new(config: HfTokenizerConfig, mixins: ContextMixins) -> Result<Self> {
+    pub fn new(config: ChatTemplate, mixins: ContextMixins) -> anyhow::Result<Self> {
         let mut env = JinjaEnvironment::default().env();
 
         let chat_template = config.chat_template.as_ref().ok_or(anyhow::anyhow!(

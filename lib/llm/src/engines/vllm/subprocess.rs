@@ -30,9 +30,8 @@ from vllm.usage.usage_lib import UsageContext
 engine_args = AsyncEngineArgs(
     model=f"{model_path}",
     served_model_name=None,
-    tokenizer=f"{tokenizer_path}",
     task='generate',
-    tokenizer_mode='auto',
+    skip_tokenizer_init=True,
     seed=0,
     max_model_len=8192,
     max_seq_len_to_capture=8192,
@@ -43,7 +42,16 @@ engine_args = AsyncEngineArgs(
 ipc_path = f"ipc:///tmp/{socket_id}";
 
 engine_alive = multiprocessing.Value('b', True, lock=False)
+
+# 0.7.3
 run_mp_engine(engine_args, UsageContext.OPENAI_API_SERVER, ipc_path, engine_alive)
+
+# 0.8.1
+# TODO: In 0.8+ first argument is VllmConfig, not AsyncEngineArgs
+# disable_log_stats = False
+# disable_log_requests = True
+# run_mp_engine(engine_args, UsageContext.OPENAI_API_SERVER, ipc_path, disable_log_stats, disable_log_requests, engine_alive)
+
 "#;
 
 /// Start the Python vllm engine that listens on zmq socket
@@ -51,7 +59,6 @@ run_mp_engine(engine_args, UsageContext.OPENAI_API_SERVER, ipc_path, engine_aliv
 /// This does not return until vllm exits.
 pub fn run_subprocess(
     socket_id: &str,
-    model_card_path: &Path,
     model_path: &Path,
     node_config: MultiNodeConfig,
     tp_size: u32,
@@ -60,12 +67,10 @@ pub fn run_subprocess(
     if let Ok(venv) = env::var("VIRTUAL_ENV") {
         let _ = Python::with_gil(|py| crate::engines::fix_venv(venv, py));
     }
-    let card = model_card_path.display().to_string();
     let model_path_str = model_path.display().to_string();
     Python::with_gil(|py| {
         let locals = [
             ("socket_id", socket_id),
-            ("tokenizer_path", card.as_str()),
             ("model_path", model_path_str.as_str()),
             ("tp_size_str", &tp_size.to_string()),
             ("nnodes_str", &node_config.num_nodes.to_string()),
