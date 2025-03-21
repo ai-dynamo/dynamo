@@ -268,7 +268,6 @@ func GenerateDynamoNIMDeployments(parentDynamoDeployment *v1alpha1.DynamoDeploym
 				// enable virtual service for the entry service
 				deployment.Spec.Ingress.Enabled = true
 				deployment.Spec.Ingress.UseVirtualService = &deployment.Spec.Ingress.Enabled
-				deployment.Spec.Ingress.HostPrefix = &[]string{fmt.Sprintf("%s-", parentDynamoDeployment.Name)}[0]
 			}
 		}
 		if service.Config.Resources != nil {

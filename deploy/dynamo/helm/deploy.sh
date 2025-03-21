@@ -51,9 +51,9 @@ echo "NGC_TOKEN: [HIDDEN]"
 echo "RELEASE_NAME: $RELEASE_NAME"
 
 echo "generated file contents:"
-envsubst '${NAMESPACE} ${NGC_TOKEN} ${CI_COMMIT_SHA} ${RELEASE_NAME}' < dynamo-platform-values.yaml
+envsubst '${NAMESPACE} ${NGC_TOKEN} ${CI_COMMIT_SHA} ${RELEASE_NAME} ${DYNAMO_INGRESS_SUFFIX}' < dynamo-platform-values.yaml
 
-envsubst '${NAMESPACE} ${NGC_TOKEN} ${CI_COMMIT_SHA} ${RELEASE_NAME}' < dynamo-platform-values.yaml > generated-values.yaml
+envsubst '${NAMESPACE} ${NGC_TOKEN} ${CI_COMMIT_SHA} ${RELEASE_NAME} ${DYNAMO_INGRESS_SUFFIX}' < dynamo-platform-values.yaml > generated-values.yaml
 
 echo "Generated values file saved as generated-values.yaml"
 
