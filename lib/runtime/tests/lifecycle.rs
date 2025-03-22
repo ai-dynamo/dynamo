@@ -13,7 +13,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use dynamo_runtime::{worker::Worker, Result, Runtime};
+use dynamo_runtime::{worker::Worker, Result, Runtime, DistributedRuntime};
+use tokio::time::sleep;
+use std::time::Duration;
 
 async fn hello_world(_runtime: Runtime) -> Result<()> {
     Ok(())
@@ -23,6 +25,53 @@ async fn hello_world(_runtime: Runtime) -> Result<()> {
 fn test_lifecycle() {
     let worker = Worker::from_settings().unwrap();
     worker.execute(hello_world).unwrap();
+}
+
+#[cfg(feature = "integration")]
+#[tokio::test]
+async fn test_etcd_key_cleanup() -> Result<()> {
+    use dynamo_runtime::transports::etcd::Client as EtcdClient;
+    
+    // Create runtime and distributed runtime
+    let runtime = Runtime::from_settings()?;
+    let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
+    
+    // Create namespace and component
+    let namespace = drt.namespace("test_cleanup")?;
+    let component = namespace.component("test_component")?;
+    
+    // Create service and endpoint
+    let service = component.service_builder().create().await?;
+    let endpoint = component.endpoint("test_endpoint");
+    
+    // Set up a simple echo handler
+    let handler = endpoint
+        .endpoint_builder()
+        .handler(|_ctx, _input: Vec<u8>| async move { Ok(vec![]) })
+        .stats_handler(|_| serde_json::Value::Null);
+    
+    // Start the endpoint
+    handler.start().await?;
+    
+    // Verify component key exists in etcd
+    let component_path = component.etcd_path();
+    let component_keys = drt.etcd_client().kv_get_prefix(&component_path).await?;
+    assert!(!component_keys.is_empty(), "Component key should exist in etcd");
+    
+    // Now shutdown the runtime
+    drt.shutdown();
+    
+    // Wait a bit for leases to be revoked
+    sleep(Duration::from_secs(2)).await;
+    
+    // Create a new client to check if keys still exist
+    let etcd_client = EtcdClient::new(Default::default(), Runtime::from_settings()?).await?;
+    
+    // Check for component key - should be gone
+    let component_keys = etcd_client.kv_get_prefix(&component_path).await?;
+    assert!(component_keys.is_empty(), "Component key should be cleaned up after shutdown");
+    
+    Ok(())
 }
 
 // async fn discoverable(runtime: Runtime) -> Result<()> {

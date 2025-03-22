@@ -120,6 +120,27 @@ impl EndpointConfigBuilder {
 
         let info = serde_json::to_vec_pretty(&info)?;
 
+        // Create a key for the component path itself, tied to the same lease.
+        // This ensures the component path key is deleted when the lease is revoked.
+        // 
+        // Before this fix, the component path key was created implicitly by the etcd server
+        // when the endpoint key was created, but it wasn't tied to any lease, so it wasn't
+        // deleted when the lease was revoked, causing an orphaned key in etcd.
+        if let Err(e) = endpoint
+            .component
+            .drt
+            .etcd_client
+            .kv_create_or_validate(
+                endpoint.component.etcd_path(),
+                Vec::new(), // empty value
+                Some(lease.id()),
+            )
+            .await
+        {
+            tracing::warn!("Failed to register component path key: {:?}", e);
+            // Don't fail the endpoint registration if this fails
+        }
+
         if let Err(e) = endpoint
             .component
             .drt
