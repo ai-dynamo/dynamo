@@ -17,7 +17,7 @@ use std::{
     collections::HashMap,
     env, fmt,
     os::fd::{FromRawFd as _, RawFd},
-    path::Path,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
     time::Duration,
@@ -288,6 +288,7 @@ pub async fn start(
     node_conf: MultiNodeConfig,
     tp_size: u32,
     base_gpu_id: u32,
+    extra_engine_args: Option<PathBuf>,
 ) -> anyhow::Result<SgLangWorker> {
     pyo3::prepare_freethreaded_python();
     if let Ok(venv) = env::var("VIRTUAL_ENV") {
@@ -321,8 +322,13 @@ pub async fn start(
             tp_rank,
             gpu_id,
         };
-        let (sglang_process, ready_fd) =
-            start_sglang(model_path, node_conf.clone(), gpu_conf).await?;
+        let (sglang_process, ready_fd) = start_sglang(
+            model_path,
+            node_conf.clone(),
+            gpu_conf,
+            extra_engine_args.clone(),
+        )
+        .await?;
         process_group.push((tp_rank, ready_fd));
         let watcher_join_handle = watch_sglang(cancel_token.clone(), sglang_process);
         // TODO: Do we want to hold on to this?
@@ -442,6 +448,7 @@ async fn start_sglang(
     model_path: &Path,
     node_conf: MultiNodeConfig,
     gpu_conf: MultiGPUConfig,
+    extra_engine_args: Option<PathBuf>,
 ) -> anyhow::Result<(tokio::process::Child, RawFd)> {
     // This pipe is how sglang tells us it's ready
     let mut pipe_fds: [libc::c_int; 2] = [-1, -1];
@@ -462,6 +469,12 @@ async fn start_sglang(
         format!("--num-nodes={}", node_conf.num_nodes),
         format!("--node-rank={}", node_conf.node_rank),
     ];
+    if let Some(extra_engine_args) = extra_engine_args {
+        args.push(format!(
+            "--extra-engine-args={}",
+            extra_engine_args.display()
+        ));
+    };
     if node_conf.num_nodes > 1 {
         if node_conf.leader_addr.is_empty() {
             anyhow::bail!("Missing --leader-addr for multi-node");

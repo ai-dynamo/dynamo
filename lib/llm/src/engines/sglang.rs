@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::backend::ExecutionContext;
@@ -40,6 +40,8 @@ pub async fn make_engine(
     tensor_parallel_size: u32,
     // The base GPU ID to start allocating GPUs from
     base_gpu_id: u32,
+    // Extra arguments to pass directly as sglang ServerArgs
+    extra_engine_args: Option<PathBuf>,
 ) -> pipeline_error::Result<(ExecutionContext, tokio::task::JoinHandle<()>)> {
     let mut engine = SgLangEngine::new(
         cancel_token,
@@ -48,6 +50,7 @@ pub async fn make_engine(
         node_conf,
         tensor_parallel_size,
         base_gpu_id,
+        extra_engine_args,
     )
     .await?;
     let sglang_process = engine.take_sglang_worker_handle();
