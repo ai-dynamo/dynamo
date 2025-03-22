@@ -44,7 +44,7 @@ import (
 )
 
 // ServiceConfig represents the YAML configuration structure for a service
-type NovaConfig struct {
+type DynamoConfig struct {
 	Enabled   bool   `yaml:"enabled"`
 	Namespace string `yaml:"namespace"`
 	Name      string `yaml:"name"`
@@ -67,10 +67,10 @@ type Autoscaling struct {
 }
 
 type Config struct {
-	Nova        *NovaConfig  `yaml:"nova,omitempty"`
-	Resources   *Resources   `yaml:"resources,omitempty"`
-	Traffic     *Traffic     `yaml:"traffic,omitempty"`
-	Autoscaling *Autoscaling `yaml:"autoscaling,omitempty"`
+	Dynamo      *DynamoConfig `yaml:"dynamo,omitempty"`
+	Resources   *Resources    `yaml:"resources,omitempty"`
+	Traffic     *Traffic      `yaml:"traffic,omitempty"`
+	Autoscaling *Autoscaling  `yaml:"autoscaling,omitempty"`
 }
 
 type ServiceConfig struct {
@@ -131,7 +131,9 @@ func RetrieveDynamoNimDownloadURL(ctx context.Context, dynamoDeployment *v1alpha
 
 // ServicesConfig represents the top-level YAML structure of a dynamoNim yaml file stored in a dynamoNim tar file
 type DynamoNIMConfig struct {
-	Services []ServiceConfig `yaml:"services"`
+	DynamoTag    string          `yaml:"service"`
+	Services     []ServiceConfig `yaml:"services"`
+	EntryService string          `yaml:"entry_service"`
 }
 
 type EventRecorder interface {
@@ -249,16 +251,24 @@ func GetDynamoNIMConfig(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDe
 
 // generate DynamoNIMDeployment from config
 func GenerateDynamoNIMDeployments(parentDynamoDeployment *v1alpha1.DynamoDeployment, config *DynamoNIMConfig) (map[string]*v1alpha1.DynamoNimDeployment, error) {
-	novaServices := make(map[string]string)
+	dynamoServices := make(map[string]string)
 	deployments := make(map[string]*v1alpha1.DynamoNimDeployment)
 	for _, service := range config.Services {
 		deployment := &v1alpha1.DynamoNimDeployment{}
 		deployment.Name = fmt.Sprintf("%s-%s", parentDynamoDeployment.Name, strings.ToLower(service.Name))
 		deployment.Namespace = parentDynamoDeployment.Namespace
+		deployment.Spec.DynamoTag = config.DynamoTag
 		deployment.Spec.DynamoNim = strings.Split(parentDynamoDeployment.Spec.DynamoNim, ":")[0]
 		deployment.Spec.ServiceName = service.Name
-		if service.Config.Nova != nil && service.Config.Nova.Enabled {
-			novaServices[service.Name] = fmt.Sprintf("%s/%s", service.Config.Nova.Name, service.Config.Nova.Namespace)
+		if service.Config.Dynamo != nil && service.Config.Dynamo.Enabled {
+			dynamoServices[service.Name] = fmt.Sprintf("%s/%s", service.Config.Dynamo.Name, service.Config.Dynamo.Namespace)
+		} else {
+			// dynamo is not enabled
+			if config.EntryService == service.Name {
+				// enable virtual service for the entry service
+				deployment.Spec.Ingress.Enabled = true
+				deployment.Spec.Ingress.UseVirtualService = &deployment.Spec.Ingress.Enabled
+			}
 		}
 		if service.Config.Resources != nil {
 			deployment.Spec.Resources = &compounaiCommon.Resources{
@@ -296,10 +306,10 @@ func GenerateDynamoNIMDeployments(parentDynamoDeployment *v1alpha1.DynamoDeploym
 			if dependencyDeployment == nil {
 				return nil, fmt.Errorf("dependency %s not found", dependentServiceName)
 			}
-			if novaService, ok := novaServices[dependentServiceName]; ok {
+			if dynamoService, ok := dynamoServices[dependentServiceName]; ok {
 				deployment.Spec.ExternalServices[dependentServiceName] = v1alpha1.ExternalService{
-					DeploymentSelectorKey:   "nova",
-					DeploymentSelectorValue: novaService,
+					DeploymentSelectorKey:   "dynamo",
+					DeploymentSelectorValue: dynamoService,
 				}
 			} else {
 				deployment.Spec.ExternalServices[dependentServiceName] = v1alpha1.ExternalService{

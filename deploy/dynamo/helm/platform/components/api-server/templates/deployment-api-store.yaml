@@ -15,27 +15,16 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "helm.fullname" . }}
-  labels:
-    {{- include "helm.labels" . | nindent 4 }}
+  name: dynamo-api-store
 spec:
-  {{- if not .Values.autoscaling.enabled }}
-  replicas: {{ .Values.replicaCount }}
-  {{- end }}
+  replicas: 1
   selector:
     matchLabels:
-      {{- include "helm.selectorLabels" . | nindent 6 }}
+      app: dynamo-api-store
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
-      annotations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
       labels:
-        {{- include "helm.labels" . | nindent 8 }}
-        {{- with .Values.podLabels }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
+        app: dynamo-api-store
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -49,13 +38,13 @@ spec:
           image: busybox
           command: [ 'sh', '-c', 'until nc -z {{ .Release.Name }}-postgresql 5432; do echo "PostgreSQL is unavailable. Sleeping for 5 seconds"; sleep 5; done;' ]
       containers:
-        - name: "api-server"
+        - name: "api-store"
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          imagePullPolicy: {{ .Values.storeImage.pullPolicy }}
           ports:
             - name: http
-              containerPort: {{ .Values.dynamo.port }}
+              containerPort: {{ .Values.dynamo.apiStore.port }}
               protocol: TCP
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
@@ -81,32 +70,30 @@ spec:
                 secretKeyRef:
                   name: "{{ .Release.Name }}-postgresql"
                   key: password
-            - name: API_DATABASE_PORT
-              value: "8001"
-            - name: API_BACKEND_URL
-              value: "http://127.0.0.1:8001"
+            - name: SERVICE_PORT
+              value: "8000"
             - name: RESOURCE_SCOPE
               value: {{ .Values.dynamo.env.resource_scope | quote }}
             - name: DEFAULT_KUBE_NAMESPACE
               value: {{ .Release.Namespace }}
-            - name: DYNAMO_CONTAINER_NAME
+            - name: DYN_OBJECT_STORE_BUCKET
               value: "dynamo-storage"
-            - name: S3_ACCESS_KEY_ID
+            - name: DYN_OBJECT_STORE_ID
               valueFrom:
                 secretKeyRef:
                   name: "{{ .Release.Name }}-minio"
                   key: root-user
-            - name: S3_SECRET_ACCESS_KEY
+            - name: DYN_OBJECT_STORE_KEY
               valueFrom:
                 secretKeyRef:
                   name: "{{ .Release.Name }}-minio"
                   key: root-password
-            - name: S3_ENDPOINT_URL
+            - name: DYN_OBJECT_STORE_ENDPOINT
               value: "http://{{ .Release.Name }}-minio:9000"
           envFrom:
           - secretRef:
               name: dynamo-deployment-env
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ .Values.storeImage.repository }}:{{ .Values.storeImage.tag | default .Chart.AppVersion }}"
       {{- with .Values.volumes }}
       volumes:
         {{- toYaml . | nindent 8 }}
@@ -123,3 +110,4 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      imagePullSecrets: {{ .Values.imagePullSecrets | default list | toJson }}
