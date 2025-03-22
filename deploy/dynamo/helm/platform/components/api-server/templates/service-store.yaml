@@ -26,4 +26,4 @@ spec:
       protocol: TCP
       name: http
   selector:
-    app: dynamo-store
+    app: dynamo-api-store
