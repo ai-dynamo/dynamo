@@ -99,7 +99,7 @@ Generate docker config json for registry credentials
   {{- $secretName := .Values.dynamo.dockerRegistry.passwordExistingSecretName -}}
   {{- $secretKey := .Values.dynamo.dockerRegistry.passwordExistingSecretKey -}}
   {{- $dockerconfigjson := lookup "v1" "Secret" .Release.Namespace $secretName }}
-  
+
   {{- if $dockerconfigjson -}}
     {{- if eq $dockerconfigjson.type "kubernetes.io/dockerconfigjson" -}}
       {{/* If the secret is already of type kubernetes.io/dockerconfigjson, use its .dockerconfigjson value directly */}}
