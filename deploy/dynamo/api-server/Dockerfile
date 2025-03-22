@@ -42,7 +42,6 @@ FROM python:3.9-slim
 WORKDIR /
 COPY --from=builder /workspace/server .
 COPY --from=builder /workspace/.env .
-COPY db/ db/
 
 RUN pip install -r db/requirements.txt
 
