@@ -18,7 +18,13 @@ import logging
 from datetime import datetime
 from typing import Annotated, List, Optional
 
-from db.components import (
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, responses
+from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlmodel import col, desc, func, select
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from .components import (
     CreateDynamoNimRequest,
     CreateDynamoNimVersionRequest,
     DynamoNimSchema,
@@ -37,13 +43,8 @@ from db.components import (
     UpdateDynamoNimVersionRequest,
     UserSchema,
 )
-from db.storage import get_session, s3_storage
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, responses
-from model import DynamoNim, DynamoNimVersion, make_aware, utc_now_naive
-from pydantic import ValidationError
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlmodel import col, desc, func, select
-from sqlmodel.ext.asyncio.session import AsyncSession
+from .model import DynamoNim, DynamoNimVersion, make_aware, utc_now_naive
+from .storage import get_session, s3_storage
 
 API_TAG_MODELS = "dynamo"
 
@@ -53,18 +54,17 @@ SORTABLE_COLUMNS = {
     "update_at": col(DynamoNim.updated_at),
 }
 
-router = APIRouter()
+router = APIRouter(prefix="/api/v1")
 logger = logging.getLogger(__name__)
 
 
 @router.get(
-    "/api/v1/auth/current",
+    "/auth/current",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def login(
     request: Request,
@@ -78,13 +78,12 @@ async def login(
 
 
 @router.get(
-    "/api/v1/current_org",
+    "/current_org",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def current_org(
     request: Request,
@@ -120,22 +119,20 @@ GetDynamoNim = Depends(dynamo_nim_handler)
 
 
 @router.get(
-    "/api/v1/bento_repositories/{dynamo_nim_name}",
+    "/bento_repositories/{dynamo_nim_name}",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.get(
-    "/api/v1/dynamo_nims/{dynamo_nim_name}",
+    "/dynamo_nims/{dynamo_nim_name}",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def get_dynamo_nim(
     *,
@@ -176,22 +173,20 @@ async def get_dynamo_nim(
 
 
 @router.post(
-    "/api/v1/bento_repositories",
+    "/bento_repositories",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.post(
-    "/api/v1/dynamo_nims",
+    "/dynamo_nims",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def create_dynamo_nim(
     *,
@@ -247,22 +242,20 @@ async def create_dynamo_nim(
 
 
 @router.get(
-    "/api/v1/bento_repositories",
+    "/bento_repositories",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.get(
-    "/api/v1/dynamo_nims",
+    "/dynamo_nims",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def get_dynamo_nim_list(
     *,
@@ -352,22 +345,20 @@ GetDynamoNimVersion = Depends(dynamo_nim_version_handler)
 
 
 @router.get(
-    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos/{version}",
+    "/bento_repositories/{dynamo_nim_name}/bentos/{version}",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.get(
-    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}",
+    "/dynamo_nims/{dynamo_nim_name}/versions/{version}",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def get_dynamo_nim_version(
     *,
@@ -388,22 +379,20 @@ async def get_dynamo_nim_version(
 
 
 @router.post(
-    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos",
+    "/bento_repositories/{dynamo_nim_name}/bentos",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.post(
-    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions",
+    "/dynamo_nims/{dynamo_nim_name}/versions",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def create_dynamo_nim_version(
     request: CreateDynamoNimVersionRequest,
@@ -458,22 +447,20 @@ async def create_dynamo_nim_version(
 
 
 @router.get(
-    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos",
+    "/bento_repositories/{dynamo_nim_name}/bentos",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.get(
-    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions",
+    "/dynamo_nims/{dynamo_nim_name}/versions",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def get_dynamo_nim_versions(
     *,
@@ -517,22 +504,20 @@ async def get_dynamo_nim_versions(
 
 
 @router.patch(
-    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos/{version}",
+    "/bento_repositories/{dynamo_nim_name}/bentos/{version}",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.patch(
-    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}",
+    "/dynamo_nims/{dynamo_nim_name}/versions/{version}",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def update_dynamo_nim_version(
     *,
@@ -561,22 +546,20 @@ async def update_dynamo_nim_version(
 
 
 @router.put(
-    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos/{version}/upload",
+    "/bento_repositories/{dynamo_nim_name}/bentos/{version}/upload",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.put(
-    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}/upload",
+    "/dynamo_nims/{dynamo_nim_name}/versions/{version}/upload",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def upload_dynamo_nim_version(
     *,
@@ -608,22 +591,20 @@ def generate_file_path(version) -> str:
 
 
 @router.get(
-    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos/{version}/download",
+    "/bento_repositories/{dynamo_nim_name}/bentos/{version}/download",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.get(
-    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}/download",
+    "/dynamo_nims/{dynamo_nim_name}/versions/{version}/download",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def download_dynamo_nim_version(
     *,
@@ -643,22 +624,20 @@ async def download_dynamo_nim_version(
 
 
 @router.patch(
-    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos/{version}/start_upload",
+    "/bento_repositories/{dynamo_nim_name}/bentos/{version}/start_upload",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.patch(
-    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}/start_upload",
+    "/dynamo_nims/{dynamo_nim_name}/versions/{version}/start_upload",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def start_dynamo_nim_version_upload(
     *,

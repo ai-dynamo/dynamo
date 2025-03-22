@@ -84,25 +84,11 @@ spec:
             - name: API_DATABASE_PORT
               value: "8001"
             - name: API_BACKEND_URL
-              value: "http://127.0.0.1:8001"
+              value: "http://dynamo-store"
             - name: RESOURCE_SCOPE
               value: {{ .Values.dynamo.env.resource_scope | quote }}
             - name: DEFAULT_KUBE_NAMESPACE
               value: {{ .Release.Namespace }}
-            - name: DYNAMO_CONTAINER_NAME
-              value: "dynamo-storage"
-            - name: S3_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: "{{ .Release.Name }}-minio"
-                  key: root-user
-            - name: S3_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: "{{ .Release.Name }}-minio"
-                  key: root-password
-            - name: S3_ENDPOINT_URL
-              value: "http://{{ .Release.Name }}-minio:9000"
           envFrom:
           - secretRef:
               name: dynamo-deployment-env

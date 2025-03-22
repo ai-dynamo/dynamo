@@ -105,7 +105,7 @@ ingress:
 
 # Istio settings
 istio:
-  host: cai.dev.aire.nvidia.com
+  host: ""
 
 ## In-cluster minio deployment configuration
 ## ref: https://github.com/bitnami/charts/blob/minio/13.3.1/bitnami/minio/values.yaml

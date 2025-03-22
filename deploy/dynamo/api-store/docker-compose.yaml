@@ -30,8 +30,6 @@ services:
       POSTGRES_DB: postgres
     ports:
       - "5432:5432"
-    # volumes:
-    #   - ${DOCKER_VOLUME_DIRECTORY:-./local/data/postgres}:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready"]
       interval: 30s
@@ -45,10 +43,8 @@ services:
     image: quay.io/minio/minio:RELEASE.2024-06-29T01-20-47Z
     command: minio server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: dyanmo
-      MINIO_ROOT_PASSWORD: dyanmo
-    # volumes:
-    #   - ${DOCKER_VOLUME_DIRECTORY:-.}/local/data/minio:/data
+      MINIO_ROOT_USER: dyanmo-minio
+      MINIO_ROOT_PASSWORD: dyanmo-minio
     ports:
       - "9000:9000"
       - "9001:9001"
