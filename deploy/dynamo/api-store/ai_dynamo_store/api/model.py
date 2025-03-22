@@ -22,7 +22,7 @@ from sqlalchemy import Column, DateTime
 from sqlmodel import Field as SQLField
 from sqlmodel import UniqueConstraint
 
-from components import DynamoNimBase, DynamoNimVersionBase
+from .components import DynamoNimBase, DynamoNimVersionBase
 
 """
 This file stores all of the models/tables stored in the SQL database.
