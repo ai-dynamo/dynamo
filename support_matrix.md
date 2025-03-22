@@ -10,7 +10,7 @@ This document provides the support matrix for Dynamo, including hardware, softwa
 | **x86_64**            | Supported     |
 | **ARM64**             | Experimental  |
 
-> **Note**: While **x86_64** architecture is supported on systems with a minimum of 32 GB RAM and at least 4 CPU cores. The **ARM64** support is experimental and may have limitations.
+> **Note**: While **x86_64** architecture is supported on systems with a minimum of 32 GB RAM and at least 4 CPU cores, The **ARM64** support is experimental and may have limitations.
 
 ### GPU Compatibility
 
@@ -35,7 +35,15 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 > **Note**: For **Linux**, the **ARM64** support is experimental and may have limitations.
 
 ## Software Compatibility
+### Runtime Dependency
+| **Python Package** | **Version** | glibc version |
+|--------------------|-------------|---------------|
+| ai-dynamo          |    0.1.0    | 2.39          |
+| ai-dynamo-runtime  |    0.1.0    | 2.39          |
+| ai-dynamo-vllm     |    0.7.2*   | 2.39          |
+| NIXL               |    0.1.0    | 2.39          |
 
+### Build Dependency
 | **Build Dependency** | **Version** |
 |----------------------|-------------|
 | **Base Container**   |    [25.01](https://hub.docker.com/layers/nvidia/cuda/12.8.1-runtime-ubuntu24.04/images/sha256-828c4d878adcaa4265d80c95d8ec877149b49bb2419a4cf3bb6aa889bbb7ca2e)    |

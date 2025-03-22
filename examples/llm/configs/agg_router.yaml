@@ -14,7 +14,7 @@
 # limitations under the License.
 
 Frontend:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   endpoint: dynamo.Processor.chat/completions
   port: 8000
 
@@ -40,3 +40,5 @@ VllmWorker:
   tensor-parallel-size: 1
   ServiceArgs:
     workers: 1
+    resources:
+      gpu: 1

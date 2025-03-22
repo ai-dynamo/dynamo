@@ -17,7 +17,6 @@ import subprocess
 from pathlib import Path
 
 from components.processor import Processor
-from components.routerless.worker import VllmWorkerRouterLess
 from components.worker import VllmWorker
 from pydantic import BaseModel
 
@@ -37,7 +36,7 @@ def get_http_binary_path():
 
 
 class FrontendConfig(BaseModel):
-    model: str
+    served_model_name: str
     endpoint: str
     port: int = 8080
 
@@ -50,7 +49,6 @@ class FrontendConfig(BaseModel):
 # todo this should be called ApiServer
 class Frontend:
     worker = depends(VllmWorker)
-    worker_routerless = depends(VllmWorkerRouterLess)
     processor = depends(Processor)
 
     def __init__(self):
@@ -58,7 +56,13 @@ class Frontend:
         frontend_config = FrontendConfig(**config.get("Frontend", {}))
 
         subprocess.run(
-            ["llmctl", "http", "remove", "chat-models", frontend_config.model]
+            [
+                "llmctl",
+                "http",
+                "remove",
+                "chat-models",
+                frontend_config.served_model_name,
+            ]
         )
         subprocess.run(
             [
@@ -66,7 +70,7 @@ class Frontend:
                 "http",
                 "add",
                 "chat-models",
-                frontend_config.model,
+                frontend_config.served_model_name,
                 frontend_config.endpoint,
             ]
         )
