@@ -26,7 +26,7 @@ import shutil
 import socket
 import tempfile
 import typing as t
-from typing import Any, Dict, Optional, Protocol, TypeVar
+from typing import Any, Dict, Optional, Protocol
 
 from _bentoml_sdk import Service
 from bentoml._internal.container import BentoMLContainer
@@ -49,9 +49,6 @@ class ServiceProtocol(Protocol):
     def is_dynamo_component(self) -> bool:
         ...
 
-
-# Use Protocol as the base for type alias
-AnyService = TypeVar("AnyService", bound=ServiceProtocol)
 
 POSIX = os.name == "posix"
 WINDOWS = os.name == "nt"
@@ -247,7 +244,7 @@ def server_on_deployment(
 
 @inject(squeeze_none=True)
 def serve_http(
-    bento_identifier: str | AnyService,
+    bento_identifier: str | Service,
     working_dir: str | None = None,
     host: str = Provide[BentoMLContainer.http.host],
     port: int = Provide[BentoMLContainer.http.port],
