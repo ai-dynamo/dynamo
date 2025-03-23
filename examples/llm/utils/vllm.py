@@ -52,4 +52,6 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     engine_args.remote_prefill = args.remote_prefill
     engine_args.conditional_disagg = args.conditional_disagg
     engine_args.max_local_prefill_length = args.max_local_prefill_length
+    if args.served_model_name and isinstance(args.served_model_name, list):
+        engine_args.served_model_name = args.served_model_name[0]
     return engine_args
