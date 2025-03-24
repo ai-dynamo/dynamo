@@ -46,6 +46,7 @@ uv-source:
 
 dynamo-base-docker:
     ARG IMAGE=dynamo-base-docker
+    ARG CARGO_BUILD_JOBS=16
     FROM ubuntu:24.04
     ARG CI_REGISTRY_IMAGE=my-registry
     ARG CI_COMMIT_SHA=latest
@@ -88,8 +89,6 @@ dynamo-base-docker:
     WORKDIR /workspace
 
     COPY . /workspace/
-
-    ARG CARGO_BUILD_JOBS
 
     ENV CARGO_TARGET_DIR=/workspace/target
 
