@@ -43,12 +43,8 @@ uv-source:
     FROM ghcr.io/astral-sh/uv:latest
     SAVE ARTIFACT /uv
 
-
-dynamo-base-docker:
-    ARG IMAGE=dynamo-base-docker
+dynamo-base:
     FROM ubuntu:24.04
-    ARG CI_REGISTRY_IMAGE=my-registry
-    ARG CI_COMMIT_SHA=latest
     RUN apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0
     COPY +uv-source/uv /bin/uv
@@ -63,6 +59,8 @@ dynamo-base-docker:
     ENV VIRTUAL_ENV=/opt/dynamo/venv
     ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
+rust-base:
+    FROM +dynamo-base
     # Rust build/dev dependencies
     RUN apt update -y && \
         apt install --no-install-recommends -y \
@@ -79,13 +77,19 @@ dynamo-base-docker:
     ENV RUST_VERSION=1.85.0
     ENV RUSTARCH=x86_64-unknown-linux-gnu
 
-    RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/x86_64-unknown-linux-gnu/rustup-init" && \
-        echo "a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f *rustup-init" | sha256sum -c - && \
-        chmod +x rustup-init && \
-        ./rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.85.0 --default-host x86_64-unknown-linux-gnu && \
-        rm rustup-init && \
-        chmod -R a+w $RUSTUP_HOME $CARGO_HOME
+    RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/x86_64-unknown-linux-gnu/rustup-init"
+    RUN echo "a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f *rustup-init" | sha256sum -c -
+    RUN chmod +x rustup-init
+    RUN ./rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.85.0 --default-host x86_64-unknown-linux-gnu
+    RUN rm rustup-init
+    RUN chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
+
+dynamo-base-docker:
+    FROM +rust-base
+    ARG IMAGE=dynamo-base-docker
+    ARG CI_REGISTRY_IMAGE=my-registry
+    ARG CI_COMMIT_SHA=latest
     WORKDIR /workspace
 
     COPY . /workspace/
@@ -99,7 +103,6 @@ dynamo-base-docker:
         cp target/release/llmctl /usr/local/bin && \
         cp target/release/metrics /usr/local/bin && \
         cp target/release/mock_worker /usr/local/bin
-
 
     RUN uv build --wheel --out-dir /workspace/dist && \
         uv pip install /workspace/dist/ai_dynamo*any.whl
