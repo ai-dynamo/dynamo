@@ -123,7 +123,6 @@ async def worker(runtime: DistributedRuntime, args, engine_config: LLMAPIConfig)
         .endpoint("generate")
         .client()
     )
-
     await wait_for_workers(workers_client, args.min_workers)
 
     if args.routing_strategy == RoutingStrategy.PREFIX:

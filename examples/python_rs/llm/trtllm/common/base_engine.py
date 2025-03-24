@@ -29,6 +29,7 @@ from tensorrt_llm.logger import logger
 from transformers import AutoTokenizer
 
 from dynamo.llm import KvMetricsPublisher
+from dynamo.runtime import Client
 
 from .kv_cache_event_publisher import KVCacheEventPublisher
 

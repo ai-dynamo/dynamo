@@ -57,7 +57,7 @@ class Request(BaseModel):
 
 class TRTLLMWorkerRequest(BaseModel):
     id: str
-    prompt: str
+    prompt: str | None = None
     sampling_params: dict
     streaming: bool = True
     conversation: Optional[List[ConversationMessage]] = Field(default=None)
@@ -128,7 +128,7 @@ class TRTLLMWorkerResponseOutput:
 class TRTLLMWorkerResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
     request_id: str
-    prompt: str
+    prompt: str | None = None
     prompt_token_ids: list[int]
     outputs: list[dict]
     finished: bool
