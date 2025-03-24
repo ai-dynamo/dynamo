@@ -358,7 +358,11 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv
 
 # Copy NIXL
 COPY --from=build /usr/local/nixl /usr/local/nixl
-ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
+
+# Copy OpenUCX
+COPY --from=build /usr/lib/ucx /usr/lib/ucx
+
+ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:/usr/lib/ucx:$LD_LIBRARY_PATH
 ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/:$PYTHONPATH
 
 # Setup the python environment
