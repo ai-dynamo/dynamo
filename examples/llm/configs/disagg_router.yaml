@@ -39,7 +39,6 @@ VllmWorker:
   max-local-prefill-length: 10
   max-prefill-queue-size: 2
   tensor-parallel-size: 1
-  router: kv
   enable-prefix-caching: true
 
 # TODO - set all of these but model as default
