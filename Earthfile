@@ -46,7 +46,6 @@ uv-source:
 
 dynamo-base-docker:
     ARG IMAGE=dynamo-base-docker
-    ARG CARGO_BUILD_JOBS=16
     FROM ubuntu:24.04
     ARG CI_REGISTRY_IMAGE=my-registry
     ARG CI_COMMIT_SHA=latest
@@ -54,6 +53,7 @@ dynamo-base-docker:
         DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0
     COPY +uv-source/uv /bin/uv
     # COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+    ENV CARGO_BUILD_JOBS=16
 
     RUN mkdir /opt/dynamo && \
         uv venv /opt/dynamo/venv --python 3.12 && \
