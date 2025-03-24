@@ -77,12 +77,12 @@ rust-base:
     ENV RUST_VERSION=1.85.0
     ENV RUSTARCH=x86_64-unknown-linux-gnu
 
-    RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/x86_64-unknown-linux-gnu/rustup-init"
-    RUN echo "a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f *rustup-init" | sha256sum -c -
-    RUN chmod +x rustup-init
-    RUN ./rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.85.0 --default-host x86_64-unknown-linux-gnu
-    RUN rm rustup-init
-    RUN chmod -R a+w $RUSTUP_HOME $CARGO_HOME
+    RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/x86_64-unknown-linux-gnu/rustup-init" && \
+        echo "a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f *rustup-init" | sha256sum -c - && \
+        chmod +x rustup-init && \
+        ./rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.85.0 --default-host x86_64-unknown-linux-gnu && \
+        rm rustup-init && \
+        chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
 
 dynamo-base-docker:
@@ -96,16 +96,16 @@ dynamo-base-docker:
 
     ENV CARGO_TARGET_DIR=/workspace/target
 
-    # RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
-    #     cargo doc --no-deps && \
-    #     cp target/release/dynamo-run /usr/local/bin && \
-    #     cp target/release/http /usr/local/bin && \
-    #     cp target/release/llmctl /usr/local/bin && \
-    #     cp target/release/metrics /usr/local/bin && \
-    #     cp target/release/mock_worker /usr/local/bin
+    RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
+        cargo doc --no-deps && \
+        cp target/release/dynamo-run /usr/local/bin && \
+        cp target/release/http /usr/local/bin && \
+        cp target/release/llmctl /usr/local/bin && \
+        cp target/release/metrics /usr/local/bin && \
+        cp target/release/mock_worker /usr/local/bin
 
-    # RUN uv build --wheel --out-dir /workspace/dist && \
-    #     uv pip install /workspace/dist/ai_dynamo*any.whl
+    RUN uv build --wheel --out-dir /workspace/dist && \
+        uv pip install /workspace/dist/ai_dynamo*any.whl
     SAVE IMAGE --push $CI_REGISTRY_IMAGE/$IMAGE:$CI_COMMIT_SHA
 
 
