@@ -96,16 +96,16 @@ dynamo-base-docker:
 
     ENV CARGO_TARGET_DIR=/workspace/target
 
-    RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
-        cargo doc --no-deps && \
-        cp target/release/dynamo-run /usr/local/bin && \
-        cp target/release/http /usr/local/bin && \
-        cp target/release/llmctl /usr/local/bin && \
-        cp target/release/metrics /usr/local/bin && \
-        cp target/release/mock_worker /usr/local/bin
+    # RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
+    #     cargo doc --no-deps && \
+    #     cp target/release/dynamo-run /usr/local/bin && \
+    #     cp target/release/http /usr/local/bin && \
+    #     cp target/release/llmctl /usr/local/bin && \
+    #     cp target/release/metrics /usr/local/bin && \
+    #     cp target/release/mock_worker /usr/local/bin
 
-    RUN uv build --wheel --out-dir /workspace/dist && \
-        uv pip install /workspace/dist/ai_dynamo*any.whl
+    # RUN uv build --wheel --out-dir /workspace/dist && \
+    #     uv pip install /workspace/dist/ai_dynamo*any.whl
     SAVE IMAGE --push $CI_REGISTRY_IMAGE/$IMAGE:$CI_COMMIT_SHA
 
 
