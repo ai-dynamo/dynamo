@@ -129,6 +129,7 @@ addopts = [
     "--strict-config",
     "--mypy",
     "--ignore-glob=*model.py",
+    "--ignore-glob=*_inc.py",
     # FIXME: Get relative/generic blob paths to work here
 ]
 xfail_strict = true
