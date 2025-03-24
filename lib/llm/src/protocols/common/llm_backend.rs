@@ -44,9 +44,8 @@ pub struct BackendOutput {
     // TODO: Enrich this with more information as can apply our first-level postprocessing
     // logic and return more detailed information
     pub finish_reason: Option<FinishReason>,
-
-    /// Model Deployment Card checksum
-    pub mdcsum: String,
+    // Model Deployment Card checksum
+    //pub mdcsum: String,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a

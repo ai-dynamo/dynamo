@@ -80,12 +80,6 @@ fn main() -> anyhow::Result<()> {
             let Some(model_path) = flags.model_path_flag else {
                 anyhow::bail!("vllm subprocess requires --model-path flag");
             };
-            let Some(model_config) = flags.model_config else {
-                anyhow::bail!("vllm subprocess requires --model-config");
-            };
-            if !model_config.is_dir() {
-                anyhow::bail!("vllm subprocess requires model config path to be a directory containing tokenizer.json, config.json, etc");
-            }
             if cfg!(feature = "vllm") {
                 #[cfg(feature = "vllm")]
                 {
@@ -97,7 +91,6 @@ fn main() -> anyhow::Result<()> {
                     };
                     return vllm::run_subprocess(
                         ZMQ_SOCKET_PREFIX,
-                        &model_config,
                         &model_path,
                         node_config,
                         flags.tensor_parallel_size,

@@ -26,7 +26,7 @@ mod oai;
 mod tokcfg;
 
 use super::{OAIChatLikeRequest, OAIPromptFormatter, PromptFormatter};
-use tokcfg::{raise_exception, tojson, ChatTemplate as HfTokenizerConfig};
+use tokcfg::ChatTemplate;
 
 impl PromptFormatter {
     pub async fn from_mdc(mdc: ModelDeploymentCard) -> Result<PromptFormatter> {
@@ -36,15 +36,23 @@ impl PromptFormatter {
         {
             PromptFormatterArtifact::HfTokenizerConfigJson(file) => {
                 let content = std::fs::read_to_string(file)?;
-                let config: HfTokenizerConfig = serde_json::from_str(&content)?;
-                let formatter = HfTokenizerConfigJsonFormatter::new(
+                let config: ChatTemplate = serde_json::from_str(&content)?;
+                Self::from_parts(
                     config,
                     mdc.prompt_context
                         .map_or(ContextMixins::default(), |x| ContextMixins::new(&x)),
-                )?;
-                Ok(Self::OAI(Arc::new(formatter)))
+                )
+            }
+            PromptFormatterArtifact::GGUF(gguf_path) => {
+                let config = ChatTemplate::from_gguf(&gguf_path)?;
+                Self::from_parts(config, ContextMixins::default())
             }
         }
+    }
+
+    pub fn from_parts(config: ChatTemplate, context: ContextMixins) -> Result<PromptFormatter> {
+        let formatter = HfTokenizerConfigJsonFormatter::new(config, context)?;
+        Ok(Self::OAI(Arc::new(formatter)))
     }
 }
 
@@ -74,7 +82,7 @@ struct JinjaEnvironment {
 #[derive(Debug)]
 struct HfTokenizerConfigJsonFormatter {
     env: Environment<'static>,
-    config: HfTokenizerConfig,
+    config: ChatTemplate,
     mixins: Arc<ContextMixins>,
     supports_add_generation_prompt: bool,
 }

@@ -38,8 +38,6 @@ mod worker;
 
 pub async fn make_leader_engine(
     cancel_token: CancellationToken,
-    // Where to find the tokenzier, and config.json
-    card_path: &Path,
     // Full path to the model, either a GGUF file or an HF repo dir
     model_path: &Path,
     // Unique string to name zmq sockets
@@ -63,7 +61,6 @@ pub async fn make_leader_engine(
     let mut engine = VllmEngine::new(
         cancel_token,
         sock_code,
-        card_path,
         model_path,
         node_conf,
         tensor_parallel_size,
