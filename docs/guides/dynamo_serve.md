@@ -140,7 +140,7 @@ Frontend.link(Processor).link(VllmWorker)
 
 ### 3. Define your configuration
 
-We've provided a set of basic configurations for this example [here](../../examples/llm/configs/agg.yaml). All of these can be changed and also be overriden by passing in CLI flags to serve!
+We've provided a set of basic configurations for this example [here](../../examples/llm/configs/agg.yaml). All of these can be changed and also be overridden by passing in CLI flags to serve!
 
 ### 4. Serve your graph
 
