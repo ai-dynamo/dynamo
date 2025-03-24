@@ -43,7 +43,6 @@ jobs:
         with:
            run_id: ${{ github.event.workflow_run.id }}
            path: artifacts
-           
       - name: Report test status - In Progress
         id: report_test_status
         uses: github-actions/status@v2
