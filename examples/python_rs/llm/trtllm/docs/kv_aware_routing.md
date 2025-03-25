@@ -32,8 +32,8 @@ For KV aware routing to work, we need to launch multiple workers. To do this, yo
 ```bash
 cd /workspace/examples/python_rs/llm/tensorrt_llm/
 # For 2 workers
-CUDA_VISIBLE_DEVICES=0 mpirun --allow-run-as-root -n 1 --oversubscribe python3 -m monolith.worker --publish-stats --publish-kv-cache-events --engine_args llm_api_config.yaml 1>worker1.log 2>&1 &
-CUDA_VISIBLE_DEVICES=1 mpirun --allow-run-as-root -n 1 --oversubscribe python3 -m monolith.worker --publish-stats --publish-kv-cache-events --engine_args llm_api_config.yaml 1>worker2.log 2>&1 &
+CUDA_VISIBLE_DEVICES=0 mpirun --allow-run-as-root -n 1 --oversubscribe python3 -m agg_worker --publish-stats --publish-kv-cache-events --engine_args llm_api_config.yaml 1>worker1.log 2>&1 &
+CUDA_VISIBLE_DEVICES=1 mpirun --allow-run-as-root -n 1 --oversubscribe python3 -m agg_worker --publish-stats --publish-kv-cache-events --engine_args llm_api_config.yaml 1>worker2.log 2>&1 &
 ```
 
 Note the extra arguments `--publish-stats` and `--publish-kv-cache-events` to publish the stats and kv cache events from the workers for effective routing.
@@ -42,13 +42,13 @@ The config file [llm_api_config.yaml](../llm_api_config.yaml) specifies extra co
 2. `event_buffer_max_size` in `kv_cache_config` to specify the maximum number of events that can be stored in the buffer.
 3. `enable_block_reuse` in `kv_cache_config` to enable the block reuse feature for improved performance.
 
-### 2. Router
+### 2. Preprocessor
 
-To launch the router, run the following command:
+To launch the preprocessor, run the following command:
 
 ```bash
 cd /workspace/examples/python_rs/llm/tensorrt_llm/
-python3 -m common.preprocessor --engine_args llm_api_config.yaml --routing-strategy prefix --min-workers 2 1>preprocess.log 2>&1 &
+python3 -m preprocessor --engine_args llm_api_config.yaml --routing-strategy prefix --min-workers 2 1>preprocess.log 2>&1 &
 ```
 
 Note the extra argument `--min-workers 2` to specify the minimum number of workers to wait for before starting the router.
@@ -75,20 +75,20 @@ To launch the workers and the router, run the following command:
 
 ```bash
 cd /workspace/examples/python_rs/llm/tensorrt_llm/
-mpirun --allow-run-as-root --oversubscribe -n 5 python3 -m disaggregated.worker --publish-stats --publish-kv-cache-events --engine_args llm_api_config.yaml -c disaggregated/llmapi_disaggregated_configs/single_node_kv_aware_config.yaml 1>disagg_workers.log 2>&1 &
+mpirun --allow-run-as-root --oversubscribe -n 5 python3 -m disagg_worker --publish-stats --publish-kv-cache-events --engine_args llm_api_config.yaml -c llmapi_disaggregated_configs/single_node_kv_aware_config.yaml 1>disagg_workers.log 2>&1 &
 ```
 
 The config file [single_node_kv_aware_config.yaml](disaggregated/llmapi_disaggregated_configs/single_node_kv_aware_config.yaml) specifies extra configuration for the LLM execution engine to support stats and kv cache events collection. These configurations are:
 
 Note: The configuration also specifies 4 context servers and 1 generation server.
 
-### 2. Disaggregated Server
+### 2. Preprocessor
 
-To launch the disaggregated server, run the following command:
+To launch the preprocessor, run the following command:
 
 ```bash
 cd /workspace/examples/python_rs/llm/tensorrt_llm/
-python3 -m disaggregated.server --engine_args llm_api_config.yaml --routing-strategy prefix 1>disagg_server.log 2>&1 &
+python3 -m preprocessor --engine_args llm_api_config.yaml --routing-strategy prefix 1>preprocess.log 2>&1 &
 ```
 
 ### 3. Send Requests

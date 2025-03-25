@@ -121,7 +121,7 @@ llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.preprocess.
 cd /workspace/examples/python_rs/llm/trtllm
 python3 -m common.preprocessor --engine_args llm_api_config.yaml 1>preprocess.log 2>&1 &
 
-mpirun --allow-run-as-root -n 1 --oversubscribe python3 -m monolith.worker --engine_args llm_api_config.yaml 1>agg_worker.log 2>&1 &
+mpirun --allow-run-as-root -n 1 --oversubscribe python3 -m agg_worker --engine_args llm_api_config.yaml 1>agg_worker.log 2>&1 &
 ```
 
 Upon successful launch, the output should look similar to:
@@ -145,12 +145,8 @@ Update `tensor_parallel_size` in the `llm_api_config.yaml` to load the model wit
 When launching the workers, prepend `trtllm-llmapi-launch` to the command.
 ```bash
 # Note: -n should still be 1
-trtllm-llmapi-launch mpirun --allow-run-as-root -n 1 --oversubscribe python3 -m monolith.worker ...
+trtllm-llmapi-launch mpirun --allow-run-as-root -n 1 --oversubscribe python3 -m agg_worker ...
 ```
-
-##### Option 2.3 Multi-Node Multi-GPU
-
-TODO: Add multi-node multi-GPU example
 
 #### 3. Client
 
@@ -243,8 +239,8 @@ By default the server will run on port 8080.
 
 Add model to the server:
 ```bash
-llmctl http add chat meta-llama/Llama-3.1-8B-Instruct dynamo.disaggregated_server.chat/completions
-llmctl http add completion meta-llama/Llama-3.1-8B-Instruct dynamo.disaggregated_server.completions
+llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.preprocess.chat/completions
+llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.preprocess.completions
 ```
 
 #### 2. Workers
@@ -263,15 +259,15 @@ For example, 2 TP2 generation servers are 2 workers but 4 mpi executors.
 
 ```bash
 cd /workspace/examples/python_rs/llm/trtllm/
-mpirun --allow-run-as-root --oversubscribe -n 2 python3 -m disaggregated.worker --engine_args llm_api_config.yaml -c disaggregated/llmapi_disaggregated_configs/single_node_config.yaml 1>disagg_workers.log 2>&1 &
+mpirun --allow-run-as-root --oversubscribe -n 2 python3 -m disagg_worker --engine_args llm_api_config.yaml -c llmapi_disaggregated_configs/single_node_config.yaml 1>disagg_workers.log 2>&1 &
 ```
 If using the provided [single_node_config.yaml](disaggregated/llmapi_disaggregated_configs/single_node_config.yaml), WORLD_SIZE should be 2 as it has 1 context servers(TP=1) and 1 generation server(TP=1).
 
-2. **Launch the disaggregated server**
+2. **Launch the preprocessor**
 
 ```bash
 cd /workspace/examples/python_rs/llm/trtllm/
-python3 -m disaggregated.server --engine_args llm_api_config.yaml 1>disagg_server.log 2>&1 &
+python3 -m preprocessor --engine_args llm_api_config.yaml 1>preprocess.log 2>&1 &
 ```
 
 Note: For KV cache aware routing, please refer to the [KV Aware Routing](./docs/kv_aware_routing.md) section.
@@ -315,7 +311,7 @@ export ETCD_ENDPOINTS="http://node1:2379,http://node2:2379"
 
 4. Launch the workers from node1 or login node. WORLD_SIZE is similar to single node deployment.
 ```bash
-srun --mpi pmix -N NUM_NODES --ntasks WORLD_SIZE --ntasks-per-node=GPUS_PER_NODE --no-container-mount-home --overlap --container-image IMAGE --output batch_%x_%j.log --err batch_%x_%j.err --container-mounts PATH_TO_DYNAMO:/workspace --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/trtllm && python3 -m disaggregated.worker --engine_args llm_api_config.yaml -c disaggregated/llmapi_disaggregated_configs/multi_node_config.yaml' &
+srun --mpi pmix -N NUM_NODES --ntasks WORLD_SIZE --ntasks-per-node=GPUS_PER_NODE --no-container-mount-home --overlap --container-image IMAGE --output batch_%x_%j.log --err batch_%x_%j.err --container-mounts PATH_TO_DYNAMO:/workspace --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/trtllm && python3 -m disagg_worker --engine_args llm_api_config.yaml -c llmapi_disaggregated_configs/multi_node_config.yaml' &
 ```
 
 Once the workers are launched, you should see the output similar to the following in the worker logs.
@@ -330,9 +326,9 @@ Once the workers are launched, you should see the output similar to the followin
 [02/20/2025-07:10:33] [TRT-LLM] [I] Engine loaded and ready to serve...
 ```
 
-4. Launch the disaggregated server from node1 or login node.
+4. Launch the preprocessor from node1 or login node.
 ```bash
-srun --mpi pmix -N 1 --ntasks 1 --ntasks-per-node=1 --overlap --container-image IMAGE --output batch_disagg_server_%x_%j.log --err batch_disagg_server_%x_%j.err --container-mounts PATH_TO_DYNAMO:/workspace  --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/trtllm && python3 -m disaggregated.server --engine_args llm_api_config.yaml --routing-strategy round_robin' &
+srun --mpi pmix -N 1 --ntasks 1 --ntasks-per-node=1 --overlap --container-image IMAGE --output batch_preprocessor_%x_%j.log --err batch_preprocessor_%x_%j.err --container-mounts PATH_TO_DYNAMO:/workspace  --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/trtllm && python3 -m preprocessor --engine_args llm_api_config.yaml' &
 ```
 
 5. Send requests to the disaggregated server.
