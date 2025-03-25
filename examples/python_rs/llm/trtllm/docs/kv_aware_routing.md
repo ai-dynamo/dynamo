@@ -21,11 +21,19 @@ This document describes how to use the KV aware routing feature in Dynamo with T
 
 The KV Router is a component that aggregates KV Events from all the workers and maintains a prefix tree of the cached tokens. It makes decisions on which worker to route requests to based on the length of the prefix match and the load on the workers.
 
-## KV Aware Routing with Monolithic Serving
+## Prerequisites
 
-Follow the instructions in the [README](../README.md) to setup the environment for [monolithic serving](../README.md#monolithic-deployment).
+Follow the instructions in the [README](../README.md#Deployment_Prerequisites) to setup the environment. Note that the preprocessor must be launched with `--min-workers` argument to wait for workers start. It also must be launched with the `--routing-strategy prefix` argument to enable the kv routing.
 
-### 1. Workers
+In addition, launch a KV router endpoint:
+```bash
+cd /workspace/examples/python_rs/llm/tensorrt_llm/
+python3 -m kv_router --engine_args llm_api_config.yaml --routing-strategy prefix --kv-block-size 32 --min-workers 2 1>kv_router.log 2>&1 &
+```
+
+## KV Aware Routing with Aggregated Serving
+
+### Workers
 
 For KV aware routing to work, we need to launch multiple workers. To do this, you can use the following command for each worker:
 
@@ -42,36 +50,15 @@ The config file [llm_api_config.yaml](../llm_api_config.yaml) specifies extra co
 2. `event_buffer_max_size` in `kv_cache_config` to specify the maximum number of events that can be stored in the buffer.
 3. `enable_block_reuse` in `kv_cache_config` to enable the block reuse feature for improved performance.
 
-### 2. Preprocessor
-
-To launch the preprocessor, run the following command:
-
-```bash
-cd /workspace/examples/python_rs/llm/tensorrt_llm/
-python3 -m preprocessor --engine_args llm_api_config.yaml --routing-strategy prefix --min-workers 2 1>preprocess.log 2>&1 &
-```
-
-Note the extra argument `--min-workers 2` to specify the minimum number of workers to wait for before starting the router.
-The router will schedule requests to the workers based on the stats and kv cache events. If KV aware routing is not enabled, the router will schedule requests to the workers in a random manner.
-
-Create HTTP endpoints for the router:
-```bash
-llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.preprocess.completions
-```
-
-### 3. Send Requests
-
-Follow the instructions in the [README](../README.md#send-requests) to send requests to the [HTTP server](../README.md#http-server).
-
 
 ## KV Aware Routing with Disaggregated Serving
 
 Follow the instructions in the [README](../README.md) to setup the environment for [disaggregated serving](../README.md#disaggregated-deployment).
 All of the steps remain the same except launching the [workers and the router](../README.md#workers).
 
-### 1. Workers
+### Workers
 
-To launch the workers and the router, run the following command:
+To launch the workers, run the following command:
 
 ```bash
 cd /workspace/examples/python_rs/llm/tensorrt_llm/
@@ -82,20 +69,19 @@ The config file [single_node_kv_aware_config.yaml](disaggregated/llmapi_disaggre
 
 Note: The configuration also specifies 4 context servers and 1 generation server.
 
-### 2. Preprocessor
 
-To launch the preprocessor, run the following command:
+### Send Requests
+
+The requests must be long (greater than kv_block_size number of tokens) for KV routing to work.
 
 ```bash
-cd /workspace/examples/python_rs/llm/tensorrt_llm/
-python3 -m preprocessor --engine_args llm_api_config.yaml --routing-strategy prefix 1>preprocess.log 2>&1 &
+curl localhost:8080/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+        "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        "prompt": "Quantum computing is a revolutionary approach to computation that leverages the principles of quantum mechanics to process information. Unlike classical computers, which use bits as the smallest unit of data (represented as 0s and 1s), quantum computers use quantum bits, or qubits. Qubits can exist in multiple states simultaneously due to a property called superposition, allowing quantum computers to perform many calculations at once. Another key feature ",
+        "max_tokens": 50,
+        "temperature": 0,
+        "stream": false
+    }'
 ```
-
-### 3. Send Requests
-
-Follow the instructions in the [README](../README.md#send-requests) to send requests to the [HTTP server](../README.md#http-server).
-
-
-## Known Issues
-- KV aware routing is not supported for chat endpoint.
-- For disaggregated deployment, kv aware routing is only supported for context servers. TRT LLM currently does not transfer the KV cache of the new tokens generated in the generation server to the context server which means that KV will not be reused (such as in multi-turn conversations).

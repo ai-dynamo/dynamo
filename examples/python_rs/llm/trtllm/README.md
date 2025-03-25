@@ -91,14 +91,13 @@ Adding support for disaggregated deployment is under development. This does *not
 any other pre-requisites mentioned in the [Prerequisites](#prerequisites) section.
 
 
-
 ## Deployment Options
 
 Note: NATS and ETCD servers should be running and accessible from the container as described in the [Prerequisites](#prerequisites) section.
 
-### Monolithic Deployment
+### Deployment Prerequisites
 
-#### 1. HTTP Server
+#### HTTP Server
 
 Run the server logging (with debug level logging):
 ```bash
@@ -106,21 +105,25 @@ DYN_LOG=DEBUG http &
 ```
 By default the server will run on port 8080.
 
-Add model to the server:
+Add model to the server using preprocess endpoint:
 ```bash
 llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.preprocess.chat/completions
 llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.preprocess.completions
 ```
 
-#### 2. Workers
+#### Preprocessor
 
-##### Option 2.1 Single-Node Single-GPU
+Start the preprocessor:
+```bash
+cd /workspace/examples/python_rs/llm/trtllm
+python3 -m preprocessor --engine_args llm_api_config.yaml --routing-strategy prefix 1>preprocess.log 2>&1 &
+```
+
+### Aggregated Deployment
 
 ```bash
 # Launch worker
 cd /workspace/examples/python_rs/llm/trtllm
-python3 -m common.preprocessor --engine_args llm_api_config.yaml 1>preprocess.log 2>&1 &
-
 mpirun --allow-run-as-root -n 1 --oversubscribe python3 -m agg_worker --engine_args llm_api_config.yaml 1>agg_worker.log 2>&1 &
 ```
 
@@ -137,9 +140,7 @@ Upon successful launch, the output should look similar to:
 
 `nvidia-smi` can be used to check the GPU usage and the model is loaded on single GPU.
 
-##### Option 2.2 Single-Node Multi-GPU
-
-Update `tensor_parallel_size` in the `llm_api_config.yaml` to load the model with the desired number of GPUs.
+To launch the worker on multiple GPUs, update the mapping configuration in the `llm_api_config.yaml` to load the model with the desired number of GPUs. For example, to load the model on 4 GPUs, update the `tensor_parallel_size` to 4.
 `nvidia-smi` can be used to check the GPU usage and the model is loaded on 4 GPUs.
 
 When launching the workers, prepend `trtllm-llmapi-launch` to the command.
@@ -148,7 +149,7 @@ When launching the workers, prepend `trtllm-llmapi-launch` to the command.
 trtllm-llmapi-launch mpirun --allow-run-as-root -n 1 --oversubscribe python3 -m agg_worker ...
 ```
 
-#### 3. Client
+### Client
 
 ```bash
 # Chat Completion
@@ -221,39 +222,10 @@ Note: For KV cache aware routing, please refer to the [KV Aware Routing](./docs/
 
 ### Disaggregated Deployment
 
-**Environment**
-This is the latest image with tensorrt_llm supporting distributed serving with pytorch workflow in LLM API.
-
-Run the container interactively with the following command:
-```bash
-./container/run.sh --image IMAGE -it
-```
-
-#### 1. HTTP Server
-
-Run the server logging (with debug level logging):
-```bash
-DYN_LOG=DEBUG http &
-```
-By default the server will run on port 8080.
-
-Add model to the server:
-```bash
-llmctl http add chat TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.preprocess.chat/completions
-llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.preprocess.completions
-```
-
-#### 2. Workers
-
-##### Option 2.1 Single-Node Disaggregated Deployment
-
 **TRTLLM LLMAPI Disaggregated config file**
 Define disaggregated config file similar to the example [single_node_config.yaml](disaggregated/llmapi_disaggregated_configs/single_node_config.yaml). The important sections are the model, context_servers and generation_servers.
 
-
-1. **Launch the workers**
-
-Launch context and generation workers.\
+**Launch context and generation workers**
 WORLD_SIZE is the total number of workers covering all the servers described in disaggregated configuration.\
 For example, 2 TP2 generation servers are 2 workers but 4 mpi executors.
 
@@ -263,18 +235,10 @@ mpirun --allow-run-as-root --oversubscribe -n 2 python3 -m disagg_worker --engin
 ```
 If using the provided [single_node_config.yaml](disaggregated/llmapi_disaggregated_configs/single_node_config.yaml), WORLD_SIZE should be 2 as it has 1 context servers(TP=1) and 1 generation server(TP=1).
 
-2. **Launch the preprocessor**
-
-```bash
-cd /workspace/examples/python_rs/llm/trtllm/
-python3 -m preprocessor --engine_args llm_api_config.yaml 1>preprocess.log 2>&1 &
-```
-
 Note: For KV cache aware routing, please refer to the [KV Aware Routing](./docs/kv_aware_routing.md) section.
 
-3. **Send Requests**
-Follow the instructions in the [Monolithic Deployment](#3-client) section to send requests to the router.
-
+#### Send Requests
+Follow the instructions in the [Client](#client) section to send requests to the router.
 
 For more details on the disaggregated deployment, please refer to the [TRT-LLM example](#TODO).
 

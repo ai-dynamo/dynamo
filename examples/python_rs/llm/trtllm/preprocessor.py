@@ -24,15 +24,33 @@ from common.protocol import (
     DynamoTRTLLMChatCompletionStreamResponse,
     DynamoTRTLLMCompletionRequest,
     DynamoTRTLLMCompletionStreamResponse,
+    Tokens,
 )
-from common.utils import RequestType, ServerType, wait_for_workers
-from kv_router import KVRouter, RoutingStrategy, get_worker_id
+from common.utils import (
+    RequestType,
+    ServerType,
+    wait_for_workers,
+    RoutingStrategy,
+)
 from tensorrt_llm.logger import logger
 
-from dynamo.llm import KvIndexer, KvMetricsAggregator
 from dynamo.runtime import Client, DistributedRuntime, dynamo_endpoint, dynamo_worker
 
 logger.set_level("debug")
+
+
+async def get_worker_id(kv_router_client: Client, tokens: Tokens) -> str:
+    worker_id_generator: AsyncIterator = await kv_router_client.generate(tokens.model_dump_json())
+
+    response = await worker_id_generator.__anext__()  # only one worker id is returned
+    print(response.data())
+    worker_id, prefix_hit_rate = response.data().split("_")
+    prefix_hit_rate = float(prefix_hit_rate)
+
+    logger.debug(
+        f"Scheduling to worker_id: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
+    )
+    return worker_id
 
 
 class Processor(ChatProcessorMixin):
@@ -40,12 +58,12 @@ class Processor(ChatProcessorMixin):
         self,
         engine_config: LLMAPIConfig,
         workers_client: Client,
-        kv_router: KVRouter,
+        kv_router_client: Client,
         routing_strategy: RoutingStrategy,
     ):
         self.engine_config = engine_config
         self.workers_client = workers_client
-        self.kv_router = kv_router
+        self.kv_router_client = kv_router_client
         self.routing_strategy = routing_strategy
         super().__init__(self.engine_config)
 
@@ -64,7 +82,9 @@ class Processor(ChatProcessorMixin):
 
         worker_id = ""
         if self.routing_strategy == RoutingStrategy.PREFIX:
-            worker_id = await get_worker_id(self.kv_router, preprocessed_request.tokens)
+            worker_id = await get_worker_id(
+                self.kv_router_client, preprocessed_request.tokens
+            )
 
         if worker_id == "":
             if self.routing_strategy == RoutingStrategy.ROUND_ROBIN:
@@ -130,25 +150,21 @@ async def worker(runtime: DistributedRuntime, args, engine_config: LLMAPIConfig)
     await wait_for_workers(workers_client, args.min_workers)
 
     if args.routing_strategy == RoutingStrategy.PREFIX:
-        kv_listener = runtime.namespace("dynamo").component("tensorrt-llm")
-        await kv_listener.create_service()
-
-        logger.info(
-            f"Intializing KV indexer with tokens per block: {args.kv_block_size}"
+        kv_router_client = (
+            await runtime.namespace("dynamo")
+            .component("router")
+            .endpoint("generate")
+            .client()
         )
-        indexer = KvIndexer(kv_listener, args.kv_block_size)
-        metrics_aggregator = KvMetricsAggregator(kv_listener)
+        logger.info(f"Initialized KV router client for prefix routing.")
     else:
-        indexer = None
-        metrics_aggregator = None
+        kv_router_client = None
 
     chat_endpoint = preprocess_component.endpoint("chat/completions")
     completions_endpoint = preprocess_component.endpoint("completions")
 
-    kv_router = KVRouter(indexer, metrics_aggregator, workers_client)
-
     processor = Processor(
-        engine_config, workers_client, kv_router, args.routing_strategy
+        engine_config, workers_client, kv_router_client, args.routing_strategy
     )
 
     await asyncio.gather(

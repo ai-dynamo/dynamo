@@ -14,15 +14,19 @@
 # limitations under the License.
 
 
+import asyncio
+import uvloop
 import random
 import traceback
 from typing import AsyncIterator
 
 from common.protocol import Tokens
+from common.parser import parse_tensorrt_llm_args
+from common.utils import wait_for_workers
 from tensorrt_llm.logger import logger
 
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
-from dynamo.runtime import dynamo_endpoint
+from dynamo.runtime import Client, DistributedRuntime, dynamo_endpoint, dynamo_worker
 
 logger.set_level("debug")
 
@@ -34,6 +38,7 @@ class KVRouter:
         self.indexer = indexer
         self.metrics_aggregator = metrics_aggregator
         self.workers_client = client
+        logger.info(f"Initialized KV router.")
 
     def _cost_function(
         self,
@@ -167,14 +172,42 @@ class KVRouter:
         yield f"{worker_id}_{prefix_hit_rate}"
 
 
-async def get_worker_id(kv_router: KVRouter, tokens: Tokens) -> str:
-    worker_id_generator: AsyncIterator = kv_router.generate(tokens)
-
-    response = await worker_id_generator.__anext__()  # only one worker id is returned
-    worker_id, prefix_hit_rate = response.split("_")
-    prefix_hit_rate = float(prefix_hit_rate)
-
-    logger.debug(
-        f"Scheduling to worker_id: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
+@dynamo_worker()
+async def worker(runtime: DistributedRuntime, args):
+    """
+    Set up the worker clients.
+    Serve the dynamo-init.router.generate endpoint.
+    """
+    workers_client = (
+        await runtime.namespace("dynamo")
+        .component("tensorrt-llm")
+        .endpoint("generate")
+        .client()
     )
-    return worker_id
+
+    await wait_for_workers(workers_client, args.min_workers)
+
+    logger.info(
+            f"Intializing KV indexer with tokens per block: {args.kv_block_size}"
+        )
+
+    kv_listener = runtime.namespace("dynamo").component("tensorrt-llm")
+    await kv_listener.create_service()
+
+    router_component = runtime.namespace("dynamo").component("router")
+    await router_component.create_service()
+
+    endpoint = router_component.endpoint("generate")
+
+    indexer = KvIndexer(kv_listener, args.kv_block_size)
+    metrics_aggregator = KvMetricsAggregator(kv_listener)
+    await endpoint.serve_endpoint(
+        KVRouter(indexer, metrics_aggregator, workers_client).generate
+    )
+
+
+if __name__ == "__main__":
+    uvloop.install()
+    args, _ = parse_tensorrt_llm_args()
+
+    asyncio.run(worker(args))
