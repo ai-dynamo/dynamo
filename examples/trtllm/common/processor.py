@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+import os
 import time
 from typing import (
     Any,
@@ -51,7 +52,7 @@ from tensorrt_llm.serve.openai_protocol import (
 )
 from transformers import AutoTokenizer
 
-logger.set_level("info")
+logger.set_level(os.getenv("DYNAMO_TRTLLM_LOG_LEVEL", "info"))
 
 
 class ConversationMessage(TypedDict):

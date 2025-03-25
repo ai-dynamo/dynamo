@@ -15,6 +15,7 @@
 
 
 import asyncio
+import os
 import threading
 import traceback
 import weakref
@@ -23,7 +24,7 @@ from typing import Callable, Optional, Union
 
 from tensorrt_llm.logger import logger
 
-logger.set_level("info")
+logger.set_level(os.getenv("DYNAMO_TRTLLM_LOG_LEVEL", "info"))
 
 
 class ManagedThread(threading.Thread):

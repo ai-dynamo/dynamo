@@ -15,6 +15,7 @@
 
 
 import enum
+import os
 import random
 import traceback
 from typing import AsyncIterator
@@ -25,7 +26,7 @@ from tensorrt_llm.logger import logger
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
 from dynamo.runtime import dynamo_endpoint
 
-logger.set_level("info")
+logger.set_level(os.getenv("DYNAMO_TRTLLM_LOG_LEVEL", "info"))
 
 
 class RoutingStrategy(enum.Enum):
