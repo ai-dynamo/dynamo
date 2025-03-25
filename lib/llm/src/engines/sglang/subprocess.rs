@@ -14,68 +14,16 @@
 // limitations under the License.
 
 use pyo3::{types::IntoPyDict, Python};
-use std::{env, os::fd::RawFd, path::Path};
+use std::{
+    env,
+    ffi::CString,
+    os::fd::RawFd,
+    path::{Path, PathBuf},
+};
 
 use crate::engines::MultiNodeConfig;
 
-const PY_START_ENGINE: &std::ffi::CStr = cr#"
-from multiprocessing.connection import Connection
-import signal
-import tempfile
-import logging
-
-from sglang.srt.server_args import ServerArgs, PortArgs
-import sglang as sgl
-from sglang.srt.managers.scheduler import run_scheduler_process
-from sglang.srt.entrypoints.engine import _set_envs_and_config
-
-
-server_args = ServerArgs(
-    model_path=f"{model_path}",
-    enable_metrics = False,
-    log_level = "debug",
-    log_requests = True,
-    tp_size = int(tp_size_str),
-    # Multi-node
-    dist_init_addr = dist_init_addr if dist_init_addr != "" else None,
-    nnodes = int(nnodes_str),
-    node_rank = int(node_rank_str),
-)
-logging.basicConfig(
-    level="DEBUG",
-    force=True,
-    datefmt="%Y-%m-%d %H:%M:%S",
-    format=f"[%(asctime)s] %(message)s",
-)
-_set_envs_and_config(server_args)
-
-logging.debug(server_args)
-
-ipc_path = f"ipc:///tmp/{socket_id}";
-# These must match worker.rs zmq_sockets, which is the other side
-port_args = PortArgs(
-    # we don't use this one so use anything
-    tokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
-    # Us -> sglang
-    scheduler_input_ipc_name=f"{ipc_path}_input_socket",
-    # sglang -> us
-    detokenizer_ipc_name=f"{ipc_path}_output_socket",
-    # The port for nccl initialization (torch.dist), which we don't use
-    nccl_port=9876,
-)
-
-# Rank must be globally unique across nodes
-tp_rank = int(tp_rank_str)
-
-# See nvidia-smi for GPU IDs, they run 0,1,2,etc.
-# In a single-node setup this is the same as rank
-gpu_id = int(gpu_id_str)
-
-pipe_fd_int = int(pipe_fd)
-writer = Connection(handle=pipe_fd_int, readable=False, writable=True)
-
-run_scheduler_process(server_args, port_args, gpu_id, tp_rank, None, writer)
-"#;
+const PY_START_ENGINE: &str = include_str!("sglang_inc.py");
 
 /// Start the Python sglang engine that listens on zmq socket
 /// This is called by running `nio --internal-sglang-process
@@ -91,12 +39,17 @@ pub fn run_subprocess(
     node_config: MultiNodeConfig,
     // Multi GPU. Usually Default::default
     gpu_config: super::MultiGPUConfig,
+    // Allow passing any arguments to sglang
+    extra_engine_args: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     pyo3::prepare_freethreaded_python(); // or enable feature "auto-initialize"
     if let Ok(venv) = env::var("VIRTUAL_ENV") {
         let _ = Python::with_gil(|py| crate::engines::fix_venv(venv, py));
     }
     let dir = model_path.display().to_string();
+    let extra_engine_args_str = &extra_engine_args
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     Python::with_gil(|py| {
         let locals = [
             ("socket_id", socket_id),
@@ -109,10 +62,11 @@ pub fn run_subprocess(
             ("nnodes_str", &node_config.num_nodes.to_string()),
             ("node_rank_str", &node_config.node_rank.to_string()),
             ("dist_init_addr", &node_config.leader_addr),
+            ("extra_engine_args", extra_engine_args_str),
         ]
         .into_py_dict(py)
         .unwrap();
-        if let Err(err) = py.run(PY_START_ENGINE, None, Some(&locals)) {
+        if let Err(err) = py.run(CString::new(PY_START_ENGINE)?.as_ref(), None, Some(&locals)) {
             anyhow::bail!("sglang engine run error: {err}");
         }
         tracing::info!("sglang subprocess exit");

@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::ops::Deref;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -163,6 +163,7 @@ pub async fn start(
     model_path: &Path,
     _node_conf: MultiNodeConfig,
     tensor_parallel_size: u32,
+    extra_engine_args: Option<PathBuf>,
 ) -> anyhow::Result<VllmWorker> {
     pyo3::prepare_freethreaded_python(); // or enable feature "auto-initialize"
     if let Ok(venv) = env::var("VIRTUAL_ENV") {
@@ -179,7 +180,14 @@ pub async fn start(
         metrics,
     } = zmq_sockets(sock_code)?;
 
-    let vllm_process = start_vllm(model_path, &py_imports, data, tensor_parallel_size).await?;
+    let vllm_process = start_vllm(
+        model_path,
+        &py_imports,
+        data,
+        tensor_parallel_size,
+        extra_engine_args,
+    )
+    .await?;
     let vllm_join_handle = watch_vllm(cancel_token.clone(), vllm_process);
 
     tokio::spawn(heartbeat_loop(cancel_token.clone(), heartbeat));
@@ -304,17 +312,21 @@ async fn start_vllm(
     python_imports: &Imports,
     mut data_socket: async_zmq::Dealer<IntoIter<Vec<u8>>, Vec<u8>>,
     tensor_parallel_size: u32,
+    extra_engine_args: Option<PathBuf>,
 ) -> anyhow::Result<tokio::process::Child> {
-    let vllm_args = [
-        "--internal-vllm-process",
-        &format!("--model-path={}", model_path.display()),
-        &format!("--tensor-parallel-size={tensor_parallel_size}"),
+    let mut vllm_args = vec![
+        "--internal-vllm-process".to_string(),
+        format!("--model-path={}", model_path.display()),
+        format!("--tensor-parallel-size={tensor_parallel_size}"),
     ];
+    if let Some(args_path) = extra_engine_args {
+        vllm_args.push(format!("--extra-engine-args={}", args_path.display()));
+    }
 
     let self_path = std::env::current_exe()?;
     let mut proc = tokio::process::Command::new(self_path)
         .env("VLLM_LOGGING_LEVEL", "DEBUG")
-        .args(vllm_args)
+        .args(&vllm_args)
         .kill_on_drop(false)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -257,6 +257,7 @@ pub async fn run(
                 node_conf,
                 flags.tensor_parallel_size,
                 flags.base_gpu_id,
+                flags.extra_engine_args,
             )
             .await?;
             extra = Some(Box::pin(async move {
@@ -310,6 +311,7 @@ pub async fn run(
                     &sock_prefix,
                     node_conf,
                     flags.tensor_parallel_size,
+                    flags.extra_engine_args,
                 )
                 .await?;
                 extra = Some(Box::pin(async move {
