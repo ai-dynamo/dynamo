@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# http://www.apache.org/licenses/LICENSE-2.0
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+                          @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                          @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                          @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                     @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                @@@@@@@@@@@@@@@     @@@@@@@@@@@@@@@@@@@@@@@@@
+             @@@@@@@@@@   @@@@@@@@@@    @@@@@@@@@@@@@@@@@@@@@
+          @@@@@@@@     @@@@@@@@@@@@@@@@   @@@@@@@@@@@@@@@@@@@
+        @@@@@@@    @@@@@@@@      @@@@@@@    @@@@@@@@@@@@@@@@@
+      @@@@@@@@   @@@@@@@  @@@@      @@@@@@    @@@@@@@@@@@@@@@
+      @@@@@@@   @@@@@@    @@@@@@   @@@@@@@   @@@@@@@@@@@@@@@@
+       @@@@@@@  @@@@@@    @@@@@@@@@@@@@@    @@@@@@@@@@@@@@@@@
+        @@@@@@   @@@@@@   @@@@@@@@@@@@    @@@@@@@@@@@@@@@@@@@
+         @@@@@@@  @@@@@@@ @@@@@@@@@@   @@@@@@@@@      @@@@@@@
+           @@@@@@   @@@@@@@@@@@@@    @@@@@@@@         @@@@@@@
+             @@@@@@    @@@@     @@@@@@@@@@          @@@@@@@@@
+               @@@@@@@    @@@@@@@@@@@@@        @@@@@@@@@@@@@@
+                 @@@@@@@@@@@@@@@@@        @@@@@@@@@@@@@@@@@@@
+                     @@@@@@       @@@@@@@@@@@@@@@@@@@@@@@@@@@
+                          @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                          @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                          @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+  @@@@@@@@@     @@@@      @@@@ @@@@  @@@@@@@@       @@@@       @@@@@
+ @@@@@@@@@@@@@  @@@@@    @@@@@ @@@@@ @@@@@@@@@@@@@  @@@@@     @@@@@@@
+ @@@@@@@@@@@@@@ @@@@@@  @@@@@  @@@@@ @@@@@@@@@@@@@@ @@@@@    @@@@@@@@@
+ @@@@@    @@@@@@@@@@@@  @@@@@  @@@@@ @@@@@    @@@@@ @@@@@   @@@@@ @@@@@
+ @@@@@     @@@@@ @@@@@@@@@@@   @@@@@ @@@@@    @@@@@ @@@@@  @@@@@  @@@@@@
+ @@@@@     @@@@@  @@@@@@@@@@   @@@@@ @@@@@   @@@@@@ @@@@@  @@@@@@@@@@@@@
+ @@@@@     @@@@@  @@@@@@@@@    @@@@@ @@@@@@@@@@@@@@ @@@@@ @@@@@@@@@@@@@@@
+ @@@@@     @@@@@   @@@@@@@     @@@@@ @@@@@@@@@@@@@  @@@@@@@@@@@     @@@@@@
+  @@@       @@@      @@@@       @@@   @@@@@@@        @@   @@@         @@@  ®
+
+Dynamo: A Datacenter Scale Distributed Inference Serving Framework
+
+This is a minimum runtime container for interacting with Dynamo via our CLI
+tools.
+
+Try the following to begin interacting with a model:
+> dynamo --help
+> dynamo run Qwen/Qwen2.5-3B-Instruct
+
+For more complete deployment configurations, check out the examples folder.
+To run the examples instances of etcd and nats are needed from the host system.
+> cd examples/hello_world
+> dynamo serve hello_world:Frontend
+

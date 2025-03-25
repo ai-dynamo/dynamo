@@ -20,9 +20,11 @@ package controllers
 import (
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/env"
 	"github.com/gin-gonic/gin"
+	"github.com/rs/zerolog/log"
 )
 
 type proxyController struct{}
@@ -30,12 +32,33 @@ type proxyController struct{}
 var ProxyController = proxyController{}
 
 func (*proxyController) ReverseProxy(ctx *gin.Context) {
+	backendUrl := env.GetBackendUrl()
+	target, err := url.Parse(backendUrl)
+	if err != nil {
+		ctx.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	log.Info().Msgf("Proxying request to: %s%s", backendUrl, ctx.Request.URL.Path)
+
 	director := func(req *http.Request) {
 		r := ctx.Request
-		req.URL.Scheme = "http"
-		req.URL.Host = env.GetBackendUrl()
+		req.URL.Scheme = target.Scheme
+		req.URL.Host = target.Host
+		req.URL.Path = r.URL.Path
+		req.URL.RawQuery = r.URL.RawQuery
 		req.Header = r.Header.Clone()
+
+		req.Host = target.Host
 	}
-	proxy := &httputil.ReverseProxy{Director: director}
+
+	proxy := &httputil.ReverseProxy{
+		Director: director,
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			log.Error().Msgf("Proxy error: %v", err)
+			ctx.AbortWithStatus(http.StatusBadGateway)
+		},
+	}
+
 	proxy.ServeHTTP(ctx.Writer, ctx.Request)
 }

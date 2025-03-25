@@ -138,15 +138,11 @@ impl OpenAISamplingOptionsProvider for NvCreateChatCompletionRequest {
 
 /// Implements `OpenAIStopConditionsProvider` for `NvCreateChatCompletionRequest`,
 /// providing access to stop conditions that control chat completion behavior.
-#[allow(deprecated)]
 impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     /// Retrieves the maximum number of tokens allowed in the response.
-    ///
-    /// # Note
-    /// This field is deprecated in favor of `max_completion_tokens`.
+    #[allow(deprecated)]
     fn get_max_tokens(&self) -> Option<u32> {
-        // ALLOW: max_tokens is deprecated in favor of max_completion_tokens
-        self.inner.max_tokens
+        self.inner.max_completion_tokens.or(self.inner.max_tokens)
     }
 
     /// Retrieves the minimum number of tokens required in the response.

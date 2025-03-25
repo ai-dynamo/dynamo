@@ -77,6 +77,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::EndpointKvMetrics>()?;
     m.add_class::<llm::kv::AggregatedMetrics>()?;
     m.add_class::<llm::kv::KvMetricsAggregator>()?;
+    m.add_class::<llm::kv::KvEventPublisher>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpError>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
@@ -226,10 +227,6 @@ impl Component {
             let _ = builder.create().await.map_err(to_pyerr)?;
             Ok(())
         })
-    }
-
-    fn event_subject(&self, name: String) -> String {
-        self.inner.event_subject(name)
     }
 }
 

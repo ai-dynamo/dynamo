@@ -21,16 +21,22 @@ authors.workspace = true
 homepage.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
+description = "Dynamo Run CLI"
 
 [features]
+# Build with `--no-default-features` to disable these defaults
+default = ["mistralrs", "vllm", "sglang"]
 mistralrs = ["dynamo-llm/mistralrs"]
 sglang = ["dynamo-llm/sglang", "dep:netlink-packet-route", "dep:rtnetlink"]
 vllm = ["dynamo-llm/vllm", "dep:netlink-packet-route", "dep:rtnetlink"]
+# We don't include llamacpp by default until we figure out when it needs external libraries
 llamacpp = ["dynamo-llm/llamacpp"]
 trtllm = ["dynamo-llm/trtllm"]
 python = ["dynamo-llm/python"]
 cuda = ["dynamo-llm/cuda"]
 metal = ["dynamo-llm/metal"]
+vulkan = ["dynamo-llm/vulkan"]
 
 [dependencies]
 dynamo-llm = { workspace = true }
@@ -40,19 +46,24 @@ anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
+hf-hub = { workspace = true }
+humantime = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 async-openai = { version = "0.27.2" }
-candle-hf-hub = { version = "0.3.3", default-features = false, features = ["tokio", "rustls-tls"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 dialoguer = { version = "0.11", default-features = false, features = ["editor", "history"] }
 futures-util = { version = "0.3" }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
+netlink-packet-route = { version = "0.19", optional = true }
+rtnetlink = { version = "0.14", optional = true }
+
+[target.x86_64-unknown-linux-musl.dependencies]
 netlink-packet-route = { version = "0.19", optional = true }
 rtnetlink = { version = "0.14", optional = true }

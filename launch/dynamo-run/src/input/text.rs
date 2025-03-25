@@ -13,31 +13,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use dynamo_llm::{
-    backend::Backend,
-    preprocessor::OpenAIPreprocessor,
-    types::{
-        openai::chat_completions::{
-            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-            OpenAIChatCompletionsStreamingEngine,
-        },
-        Annotated,
-    },
+use dynamo_llm::types::openai::chat_completions::{
+    NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
 };
-use dynamo_runtime::{
-    pipeline::{Context, ManyOut, Operator, ServiceBackend, ServiceFrontend, SingleIn, Source},
-    runtime::CancellationToken,
-    DistributedRuntime, Runtime,
-};
+use dynamo_runtime::{pipeline::Context, runtime::CancellationToken, Runtime};
 use futures::StreamExt;
-use std::{
-    io::{ErrorKind, Write},
-    sync::Arc,
-};
+use std::io::{ErrorKind, Write};
 
+use crate::input::common;
 use crate::EngineConfig;
 
 /// Max response tokens for each single query. Must be less than model context size.
+/// TODO: Cmd line flag to overwrite this
 const MAX_TOKENS: u32 = 8192;
 
 pub async fn run(
@@ -50,60 +37,7 @@ pub async fn run(
         String,
         OpenAIChatCompletionsStreamingEngine,
         bool,
-    ) = match engine_config {
-        EngineConfig::Dynamic(endpoint_id) => {
-            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
-
-            let endpoint = distributed_runtime
-                .namespace(endpoint_id.namespace)?
-                .component(endpoint_id.component)?
-                .endpoint(endpoint_id.name);
-
-            let client = endpoint.client::<NvCreateChatCompletionRequest, Annotated<NvCreateChatCompletionStreamResponse>>().await?;
-            tracing::info!("Waiting for remote model..");
-            client.wait_for_endpoints().await?;
-            tracing::info!("Model discovered");
-
-            // The service_name isn't used for text chat outside of logs,
-            // so use the path. That avoids having to listen on etcd for model registration.
-            let service_name = endpoint.subject();
-            (service_name, Arc::new(client), false)
-        }
-        EngineConfig::StaticFull {
-            service_name,
-            engine,
-        } => {
-            tracing::debug!("Model: {service_name}");
-            (service_name, engine, false)
-        }
-        EngineConfig::StaticCore {
-            service_name,
-            engine: inner_engine,
-            card,
-        } => {
-            let frontend = ServiceFrontend::<
-                SingleIn<NvCreateChatCompletionRequest>,
-                ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-            >::new();
-            let preprocessor = OpenAIPreprocessor::new(*card.clone())
-                .await?
-                .into_operator();
-            let backend = Backend::from_mdc(*card.clone()).await?.into_operator();
-            let engine = ServiceBackend::from_engine(inner_engine);
-
-            let pipeline = frontend
-                .link(preprocessor.forward_edge())?
-                .link(backend.forward_edge())?
-                .link(engine)?
-                .link(backend.backward_edge())?
-                .link(preprocessor.backward_edge())?
-                .link(frontend)?;
-
-            tracing::debug!("Model: {service_name} with pre-processing");
-            (service_name, pipeline, true)
-        }
-        EngineConfig::None => unreachable!(),
-    };
+    ) = common::prepare_engine(runtime.clone(), engine_config).await?;
     main_loop(
         cancel_token,
         &service_name,

@@ -47,9 +47,6 @@ use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::FinishReason;
 use crate::protocols::TokenIdType;
 
-/// If user does not provide a max_tokens limit to this many
-const DEFAULT_MAX_TOKENS: u32 = 8192;
-
 /// Wait this long for the sglang sub-process to stop after we send it a KILL
 const SGLANG_STOP_TIMEOUT: Duration = Duration::from_millis(1500);
 
@@ -99,7 +96,6 @@ pub struct WorkRequest {
 struct ActiveRequest {
     tx: Sender<Annotated<LLMEngineOutput>>,
     num_output_tokens_so_far: Option<i32>,
-    max_tokens: i32,
 }
 
 /// Python imports
@@ -295,7 +291,7 @@ pub async fn start(
 ) -> anyhow::Result<SgLangWorker> {
     pyo3::prepare_freethreaded_python();
     if let Ok(venv) = env::var("VIRTUAL_ENV") {
-        Python::with_gil(|py| crate::engines::fix_venv(venv, py));
+        let _ = Python::with_gil(|py| crate::engines::fix_venv(venv, py));
     }
 
     let Sockets {
@@ -487,7 +483,7 @@ async fn start_sglang(
     tokio::spawn(async move {
         let mut lines = stdout.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            tracing::info!("{LOG_PREFIX}{tp_rank} {line}");
+            tracing::debug!("{LOG_PREFIX}{tp_rank} {line}");
         }
     });
 
@@ -505,7 +501,7 @@ async fn start_sglang(
                     }
                     3 => {
                         // Normal log line. Skip Python's date/time
-                        tracing::info!("{LOG_PREFIX}{tp_rank} {}", &cap[2]);
+                        tracing::debug!("{LOG_PREFIX}{tp_rank} {}", &cap[2]);
                     }
                     x => {
                         unreachable!("sglang log re only has two capture groups, so {x} entries is impossible");
@@ -608,21 +604,18 @@ async fn input_loop(
             .temperature
             .unwrap_or(0.0)
             .into();
-        let max_tokens = work_request
-            .request
-            .stop_conditions
-            .max_tokens
-            .unwrap_or(DEFAULT_MAX_TOKENS);
-
         tracing::trace!("Received work request: {request_id}");
 
         // Parts that don't change
         let (py_request_id, sampling_params) = Python::with_gil(|py| {
             let py_temp: PyObject = temperature.into_pyobject(py).unwrap().into();
-            let py_max_tokens: PyObject = max_tokens.into_pyobject(py).unwrap().into();
-            let sp_kwargs = [("temperature", py_temp), ("max_new_tokens", py_max_tokens)]
-                .into_py_dict(py)
-                .unwrap();
+            let mut sp_kwargs = vec![("temperature", py_temp)];
+            if let Some(max_tokens) = work_request.request.stop_conditions.max_tokens {
+                let py_max_tokens: PyObject = max_tokens.into_pyobject(py).unwrap().into();
+                // sglang defaults this to 128
+                sp_kwargs.push(("max_new_tokens", py_max_tokens));
+            }
+            let sp_kwargs = sp_kwargs.into_py_dict(py).unwrap();
             let sampling_params = py_imports
                 .sampling_params_type
                 .call(py, (), Some(&sp_kwargs))
@@ -666,7 +659,6 @@ async fn input_loop(
         });
         let new_active_request = ActiveRequest {
             tx: work_request.response_channel,
-            max_tokens: max_tokens as i32,
             num_output_tokens_so_far: None,
         };
         active_requests
@@ -674,7 +666,6 @@ async fn input_loop(
             .await
             .insert(request_id, new_active_request);
 
-        //if let Err(err) = input_socket.send(vec![pickled_req].into()).await {
         if let Err(err) = input_socket.send(pickled_req.into()).await {
             tracing::error!("Error sending new request to sglang over zmq: {err}");
         }
@@ -732,6 +723,11 @@ async fn output_loop(
                     let token_ids: Vec<TokenIdType> = if sglang_finish_reason.is_none() {
                         req_out.decode_ids[idx][previous_total_toks..].into()
                     } else {
+                        tracing::trace!(
+                            req_id,
+                            ?sglang_finish_reason,
+                            "finished with finish reason"
+                        );
                         // Request is over, sglang says so.
                         // The last token is the eos_token, don't forward it
                         remove_after.push(req_id.clone());
@@ -746,14 +742,7 @@ async fn output_loop(
                         finish_reason: sglang_finish_reason.map(|x| x.into()),
                     };
                     active.num_output_tokens_so_far = Some(next_total_toks);
-                    let out = if next_total_toks <= active.max_tokens {
-                        Annotated::from_data(out)
-                    } else {
-                        // we exceeded max tokens, this request is over
-                        remove_after.push(req_id.clone());
-                        Annotated::from_data(LLMEngineOutput::length())
-                    };
-                    let _ = active.tx.send(out).await;
+                    let _ = active.tx.send(Annotated::from_data(out)).await;
                 }
                 None => {
                     // sglang sends the finish response twice, I don't know why

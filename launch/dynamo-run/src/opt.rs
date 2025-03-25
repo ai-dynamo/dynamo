@@ -13,9 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{fmt, io::IsTerminal as _};
+use std::{fmt, io::IsTerminal as _, path::PathBuf};
 
 use crate::ENDPOINT_SCHEME;
+
+const BATCH_PREFIX: &str = "batch:";
 
 #[derive(PartialEq)]
 pub enum Input {
@@ -30,6 +32,9 @@ pub enum Input {
 
     /// Pull requests from a namespace/component/endpoint path.
     Endpoint(String),
+
+    /// Batch mode. Run all the prompts, write the outputs, exit.
+    Batch(PathBuf),
 
     /// Start the engine but don't provide any way to talk to it.
     /// For multi-node sglang, where the engine connects directly
@@ -50,6 +55,10 @@ impl TryFrom<&str> for Input {
                 let path = endpoint_path.strip_prefix(ENDPOINT_SCHEME).unwrap();
                 Ok(Input::Endpoint(path.to_string()))
             }
+            batch_patch if batch_patch.starts_with(BATCH_PREFIX) => {
+                let path = batch_patch.strip_prefix(BATCH_PREFIX).unwrap();
+                Ok(Input::Batch(PathBuf::from(path)))
+            }
             e => Err(anyhow::anyhow!("Invalid in= option '{e}'")),
         }
     }
@@ -62,6 +71,7 @@ impl fmt::Display for Input {
             Input::Text => "text",
             Input::Stdin => "stdin",
             Input::Endpoint(path) => path,
+            Input::Batch(path) => &path.display().to_string(),
             Input::None => "none",
         };
         write!(f, "{s}")
@@ -204,19 +214,14 @@ impl fmt::Display for Output {
     }
 }
 
-/// Returns the engine to use if user did not say on cmd line
-/// Uses whatever was compiled in, with a priority ordering.
+/// Returns the engine to use if user did not say on cmd line.
+/// Nearly always defaults to mistralrs which has no dependencies and we include by default.
+/// If built with --no-default-features and a specific engine, default to that.
 #[allow(unused_assignments, unused_mut)]
 impl Default for Output {
     fn default() -> Self {
         // Default if no engines
         let mut out = Output::EchoFull;
-
-        // Runs everywhere but needs local CUDA to build
-        #[cfg(feature = "mistralrs")]
-        {
-            out = Output::MistralRs;
-        }
 
         #[cfg(feature = "llamacpp")]
         {
@@ -231,6 +236,11 @@ impl Default for Output {
         #[cfg(feature = "vllm")]
         {
             out = Output::Vllm;
+        }
+
+        #[cfg(feature = "mistralrs")]
+        {
+            out = Output::MistralRs;
         }
 
         out

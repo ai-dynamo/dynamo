@@ -20,10 +20,13 @@ package fixtures
 import (
 	"context"
 	"fmt"
+	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/common/consts"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/models"
+	"github.com/stretchr/testify/assert"
 
+	dynamov1alpha1 "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 	"github.com/rs/zerolog/log"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -32,7 +35,9 @@ import (
 	v1 "k8s.io/client-go/listers/core/v1"
 )
 
-type MockedK8sService struct{}
+type MockedK8sService struct {
+	T *testing.T
+}
 
 func (s *MockedK8sService) GetK8sClient(kubeConfig string) (kubernetes.Interface, error) {
 	log.Info().Msgf("Using fake client.")
@@ -57,4 +62,10 @@ func (s *MockedK8sService) ListPodsBySelector(ctx context.Context, podLister v1.
 	}
 
 	return pods, nil
+}
+
+func (s *MockedK8sService) CreateDynamoDeployment(ctx context.Context, dynamoDeployment *dynamov1alpha1.DynamoDeployment) error {
+	log.Info().Msgf("Faking create deployment")
+	assert.Equal(s.T, DefaultCreateDeploymentSchemaV2().Name, dynamoDeployment.Name)
+	return nil
 }

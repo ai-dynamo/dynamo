@@ -1906,8 +1906,9 @@ func (r *DynamoNimRequestReconciler) generateImageBuilderJob(ctx context.Context
 			Annotations: kubeAnnotations,
 		},
 		Spec: batchv1.JobSpec{
-			Completions: ptr.To(int32(1)),
-			Parallelism: ptr.To(int32(1)),
+			TTLSecondsAfterFinished: ptr.To(int32(60 * 60 * 24)),
+			Completions:             ptr.To(int32(1)),
+			Parallelism:             ptr.To(int32(1)),
 			PodFailurePolicy: &batchv1.PodFailurePolicy{
 				Rules: []batchv1.PodFailurePolicyRule{
 					{

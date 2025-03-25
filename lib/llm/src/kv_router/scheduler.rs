@@ -43,13 +43,8 @@ pub enum KvSchedulerError {
     SubscriberShutdown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FlexibleEndpoint {
-    pub name: String,
-    pub subject: String,
-    pub data: Option<ForwardPassMetrics>,
-}
-
+/// [gluo FIXME] exactly the same as EndpointInfo except that 'data'
+/// is cleaned (not optional)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Endpoint {
     pub name: String,
@@ -70,24 +65,6 @@ impl Endpoint {
         )
         .expect("invalid worker id")
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FlexibleService {
-    pub name: String,
-    pub id: String,
-    pub version: String,
-    pub started: String,
-    pub endpoints: Vec<FlexibleEndpoint>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Service {
-    pub name: String,
-    pub id: String,
-    pub version: String,
-    pub started: String,
-    pub endpoints: Vec<FlexibleEndpoint>,
 }
 
 pub struct SchedulingRequest {

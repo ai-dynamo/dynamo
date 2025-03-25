@@ -19,24 +19,32 @@ import json
 import logging
 import os
 import sys
+import typing as t
 from typing import Optional
 from urllib.parse import urlparse
 
 import click
 import rich
+import yaml
+
+from dynamo.sdk.cli.serve import _parse_service_args
 
 logger = logging.getLogger(__name__)
 
 
 def build_start_command() -> click.Group:
     from bentoml._internal.utils import add_experimental_docstring
-    from bentoml_cli.utils import BentoMLCommandGroup
 
-    @click.group(name="start", cls=BentoMLCommandGroup)
+    @click.group(name="start")
     def cli():
         pass
 
-    @cli.command()
+    @cli.command(
+        context_settings=dict(
+            ignore_unknown_options=True,
+            allow_extra_args=True,
+        ),
+    )
     @click.argument("bento", type=click.STRING, default=".")
     @click.option(
         "--service-name",
@@ -45,6 +53,12 @@ def build_start_command() -> click.Group:
         default="",
         envvar="BENTOML_SERVE_SERVICE_NAME",
         help="specify the runner name to serve",
+    )
+    @click.option(
+        "-f",
+        "--file",
+        type=click.Path(exists=True),
+        help="Path to YAML config file for service configuration",
     )
     @click.option(
         "--depends",
@@ -137,15 +151,25 @@ def build_start_command() -> click.Group:
         help="Reload Service when code changes detected",
         default=False,
     )
+    @click.option(
+        "--dry-run",
+        is_flag=True,
+        help="Print the final service configuration and exit without starting the server",
+        default=False,
+    )
+    @click.pass_context
     @add_experimental_docstring
     def start(
+        ctx: click.Context,
         bento: str,
         service_name: str,
+        dry_run: bool,
         depends: Optional[list[str]],
         runner_map: Optional[str],
         bind: Optional[str],
         port: Optional[int],
         host: Optional[str],
+        file: str | None,
         backlog: Optional[int],
         working_dir: Optional[str],
         api_workers: Optional[int],
@@ -162,10 +186,43 @@ def build_start_command() -> click.Group:
         reload: bool = False,
     ) -> None:
         """
-        Start a HTTP API server standalone. This will be used inside Yatai.
+        Start a single Dynamo service. This will be used inside Yatai.
         """
         from bentoml import Service
         from bentoml._internal.service.loader import load
+
+        service_configs: dict[str, dict[str, t.Any]] = {}
+
+        # Load file if provided
+        if file:
+            with open(file) as f:
+                yaml_configs = yaml.safe_load(f)
+                # Initialize service_configs as empty dict if it's None
+                # Convert nested YAML structure to flat dict with dot notation
+                for service, configs in yaml_configs.items():
+                    for key, value in configs.items():
+                        if service not in service_configs:
+                            service_configs[service] = {}
+                        service_configs[service][key] = value
+
+        # Process service-specific options
+        cmdline_overrides: t.Dict[str, t.Any] = _parse_service_args(ctx.args)
+        for service, configs in cmdline_overrides.items():
+            for key, value in configs.items():
+                if service not in service_configs:
+                    service_configs[service] = {}
+                service_configs[service][key] = value
+
+        if dry_run:
+            rich.print("[bold]Service Configuration:[/bold]")
+            rich.print(json.dumps(service_configs, indent=2))
+            rich.print("\n[bold]Environment Variable that would be set:[/bold]")
+            rich.print(f"DYNAMO_SERVICE_CONFIG={json.dumps(service_configs)}")
+            sys.exit(0)
+
+        # Set environment variable with service configuration
+        if service_configs:
+            os.environ["DYNAMO_SERVICE_CONFIG"] = json.dumps(service_configs)
 
         if working_dir is None:
             if os.path.isdir(os.path.expanduser(bento)):

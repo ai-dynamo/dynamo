@@ -108,35 +108,6 @@ impl Client {
         Ok(subscription)
     }
 
-    // todo - deprecate - move to service subscriber
-    pub async fn get_endpoints(
-        &self,
-        service_name: &str,
-        timeout: time::Duration,
-    ) -> Result<Vec<Bytes>, anyhow::Error> {
-        let subject = format!("$SRV.STATS.{}", service_name);
-        let reply_subject = format!("_INBOX.{}", nuid::next());
-        let mut subscription = self.client.subscribe(reply_subject.clone()).await?;
-
-        let deadline = tokio::time::Instant::now() + timeout;
-
-        // Publish the request with the reply-to subject
-        self.client
-            .publish_with_reply(subject, reply_subject, "".into())
-            .await?;
-
-        // Set a timeout to gather responses
-        let mut responses = Vec::new();
-        // let mut response_stream = subscription.take_while(|_| futures::future::ready(true));
-
-        while let Ok(Some(message)) = time::timeout_at(deadline, subscription.next()).await {
-            // log::debug!("get endpoint received message before timeout: {:?}", message);
-            responses.push(message.payload);
-        }
-
-        Ok(responses)
-    }
-
     // /// create a new stream
     // async fn get_or_create_work_queue_stream(
     //     &self,
@@ -270,35 +241,6 @@ impl Client {
 
     //     self.client.publish(subject, payload.into()).await?;
     //     Ok(())
-    // }
-
-    // pub async fn get_endpoints(
-    //     &self,
-    //     service_name: &str,
-    //     timeout: Duration,
-    // ) -> Result<Vec<Bytes>, anyhow::Error> {
-    //     let subject = format!("$SRV.STATS.{}", service_name);
-    //     let reply_subject = format!("_INBOX.{}", nuid::next());
-    //     let mut subscription = self.client.subscribe(reply_subject.clone()).await?;
-
-    //     // Publish the request with the reply-to subject
-    //     self.client
-    //         .publish_with_reply(subject, reply_subject, "".into())
-    //         .await?;
-
-    //     // Set a timeout to gather responses
-    //     let mut responses = Vec::new();
-    //     // let mut response_stream = subscription.take_while(|_| futures::future::ready(true));
-
-    //     let start = time::Instant::now();
-    //     while let Ok(Some(message)) = time::timeout(timeout, subscription.next()).await {
-    //         responses.push(message.payload);
-    //         if start.elapsed() > timeout {
-    //             break;
-    //         }
-    //     }
-
-    //     Ok(responses)
     // }
 
     // pub fn frontend_client(&self, request_id: String) -> SpecializedClient {
@@ -691,35 +633,6 @@ mod tests {
 //     assert_eq!(initial_work_queue_count, work_queue_count);
 // }
 
-// pub async fn get_endpoints(
-//     &self,
-//     service_name: &str,
-//     timeout: Duration,
-// ) -> Result<Vec<Bytes>, anyhow::Error> {
-//     let subject = format!("$SRV.STATS.{}", service_name);
-//     let reply_subject = format!("_INBOX.{}", nuid::next());
-//     let mut subscription = self.client.subscribe(reply_subject.clone()).await?;
-
-//     // Publish the request with the reply-to subject
-//     self.client
-//         .publish_with_reply(subject, reply_subject, "".into())
-//         .await?;
-
-//     // Set a timeout to gather responses
-//     let mut responses = Vec::new();
-//     // let mut response_stream = subscription.take_while(|_| futures::future::ready(true));
-
-//     let start = time::Instant::now();
-//     while let Ok(Some(message)) = time::timeout(timeout, subscription.next()).await {
-//         responses.push(message.payload);
-//         if start.elapsed() > timeout {
-//             break;
-//         }
-//     }
-
-//     Ok(responses)
-// }
-
 // async fn connect(config: Arc<Config>) -> Result<NatsClient> {
 //     let client = ClientOptions::builder()
 //         .server(config.nats_address.clone())
@@ -851,35 +764,6 @@ mod tests {
 
 //     pub fn service_builder(&self) -> NatsServiceBuilder {
 //         self.client.service_builder()
-//     }
-
-//     pub async fn get_endpoints(
-//         &self,
-//         service_name: &str,
-//         timeout: Duration,
-//     ) -> Result<Vec<Bytes>, anyhow::Error> {
-//         let subject = format!("$SRV.STATS.{}", service_name);
-//         let reply_subject = format!("_INBOX.{}", nuid::next());
-//         let mut subscription = self.client.subscribe(reply_subject.clone()).await?;
-
-//         // Publish the request with the reply-to subject
-//         self.client
-//             .publish_with_reply(subject, reply_subject, "".into())
-//             .await?;
-
-//         // Set a timeout to gather responses
-//         let mut responses = Vec::new();
-//         // let mut response_stream = subscription.take_while(|_| futures::future::ready(true));
-
-//         let start = tokio::time::Instant::now();
-//         while let Ok(Some(message)) = tokio::time::timeout(timeout, subscription.next()).await {
-//             responses.push(message.payload);
-//             if start.elapsed() > timeout {
-//                 break;
-//             }
-//         }
-
-//         Ok(responses)
 //     }
 // }
 

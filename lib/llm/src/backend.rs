@@ -142,16 +142,7 @@ impl
         request: SingleIn<BackendInput>,
         next: ServerStreamingEngine<BackendInput, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<BackendOutput>>> {
-        // possible use the request
-        let mut stop_conditions = request.stop_conditions.clone();
-
-        // preprocessor should have set max_tokens
-        // assert!(stop_conditions.max_tokens.is_some());
-        if stop_conditions.max_tokens.is_none() {
-            log::warn!("max_tokens is not set in stop_conditions; fixme");
-            stop_conditions.max_tokens = Some(256);
-        }
-
+        let stop_conditions = request.stop_conditions.clone();
         let next_stream = next.generate(request).await?;
 
         let context = next_stream.context();
@@ -265,9 +256,6 @@ pub struct Decoder {
     // do not trigger stop conditions until at least this many tokens have been generated
     min_tokens: u32,
 
-    // maximum number of tokens to generate - the llm engine should enforce this
-    max_tokens: u32,
-
     // single tokens that if found in the response will trigger a stop condition after the
     // minimum number of tokens have been generated
     hidden_stop_ids: HashSet<TokenIdType>,
@@ -372,7 +360,6 @@ impl Decoder {
             //visible_stop_ids: HashSet::new(),
             //visible_stop_sequences: Vec::new(),
             min_tokens: stop_condition.min_tokens.unwrap_or(0),
-            max_tokens: stop_condition.max_tokens.expect("max_tokens is required"),
             generated_tokens: 0,
             jail: String::new(),
             jail_max_bytes,
@@ -404,14 +391,6 @@ impl Decoder {
             return Ok(StepResult::with_stop_trigger(
                 token,
                 StopTrigger::HiddenStopTokenDetected(token_id),
-            ));
-        }
-
-        // next check max_tokens limit
-        if self.generated_tokens >= self.max_tokens {
-            return Ok(StepResult::with_stop_trigger(
-                token,
-                StopTrigger::MaxTokensLimit,
             ));
         }
 

@@ -61,6 +61,8 @@ use std::{collections::HashMap, sync::Arc};
 use validator::{Validate, ValidationError};
 
 mod client;
+#[allow(clippy::module_inception)]
+mod component;
 mod endpoint;
 mod namespace;
 mod registry;
@@ -115,12 +117,12 @@ pub struct Component {
     // todo - restrict the namespace to a-z0-9-_A-Z
     /// Namespace
     #[builder(setter(into))]
-    namespace: String,
+    namespace: Namespace,
 }
 
 impl std::fmt::Display for Component {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}.{}", self.namespace, self.name)
+        write!(f, "{}.{}", self.namespace.name(), self.name)
     }
 }
 
@@ -138,28 +140,19 @@ impl RuntimeProvider for Component {
 
 impl Component {
     pub fn etcd_path(&self) -> String {
-        format!("{}/components/{}", self.namespace, self.name)
+        format!("{}/components/{}", self.namespace.name(), self.name)
     }
 
     pub fn service_name(&self) -> String {
-        Slug::from_string(format!("{}|{}", self.namespace, self.name)).to_string()
-    }
-
-    // todo - move to EventPlane
-    pub fn event_subject(&self, name: impl AsRef<str>) -> String {
-        format!("{}.events.{}", self.service_name(), name.as_ref())
+        Slug::from_string(format!("{}|{}", self.namespace.name(), self.name)).to_string()
     }
 
     pub fn path(&self) -> String {
-        format!("{}/{}", self.namespace, self.name)
+        format!("{}/{}", self.namespace.name(), self.name)
     }
 
-    pub fn namespace(&self) -> &str {
+    pub fn namespace(&self) -> &Namespace {
         &self.namespace
-    }
-
-    pub fn drt(&self) -> &DistributedRuntime {
-        &self.drt
     }
 
     pub fn endpoint(&self, endpoint: impl Into<String>) -> Endpoint {
@@ -300,6 +293,12 @@ impl RuntimeProvider for Namespace {
     }
 }
 
+impl std::fmt::Display for Namespace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
 impl Namespace {
     pub(crate) fn new(runtime: DistributedRuntime, name: String) -> Result<Self> {
         Ok(NamespaceBuilder::default()
@@ -312,7 +311,7 @@ impl Namespace {
     pub fn component(&self, name: impl Into<String>) -> Result<Component> {
         Ok(ComponentBuilder::from_runtime(self.runtime.clone())
             .name(name)
-            .namespace(self.name.clone())
+            .namespace(self.clone())
             .build()?)
     }
 

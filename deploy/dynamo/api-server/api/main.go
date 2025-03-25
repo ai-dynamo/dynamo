@@ -18,7 +18,9 @@
 package main
 
 import (
+	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -32,25 +34,49 @@ const (
 	port = 8181
 )
 
-func startDatabaseServer() {
-	/*
-		Starts the Python FastAPI server for the database.
-	*/
+func waitForDatabase(port string) error {
+	hostname, _ := os.Hostname()
+	url := fmt.Sprintf("http://%s:%s/api/v1/healthz", hostname, port)
+	client := http.Client{Timeout: 1 * time.Second}
 
-	// Check if the database is already running
-	cmd := exec.Command("python3", "../db/start_db.py")
+	log.Printf("Waiting for database to be ready at %s", url)
+	for i := 0; i < 30; i++ { // try for 30 seconds
+		resp, err := client.Get(url)
+		if err != nil {
+			log.Printf("Error connecting to database: %v", err)
+		} else {
+			log.Printf("Got response with status: %d", resp.StatusCode)
+			return nil
+		}
+		time.Sleep(1 * time.Second)
+	}
+	return fmt.Errorf("database server failed to start on port %s", port)
+}
+
+func startDatabaseServer() error {
+	dbPort := os.Getenv("API_DATABASE_PORT")
+	if dbPort == "" {
+		dbPort = "8001"
+	}
+
+	// Set the backend URL based on the database port
+	hostname, _ := os.Hostname()
+	backendUrl := fmt.Sprintf("http://%s:%s", hostname, dbPort)
+	os.Setenv("API_BACKEND_URL", backendUrl)
+
+	cmd := exec.Command("python3", "db/start_db.py")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
-		log.Printf("Failed to start database: %v", err)
-		return
+		return fmt.Errorf("failed to start database: %v", err)
 	}
 
-	// Give the database time to initialize
-	time.Sleep(2 * time.Second)
-
-	log.Println("Database started successfully")
+	// Wait for database to be ready
+	if err := waitForDatabase(dbPort); err != nil {
+		cmd.Process.Kill()
+		return err
+	}
 
 	// Set up graceful shutdown
 	c := make(chan os.Signal, 1)
@@ -63,11 +89,15 @@ func startDatabaseServer() {
 		}
 		os.Exit(0)
 	}()
+
+	return nil
 }
 
 func main() {
 	// Start the database server first
-	startDatabaseServer()
+	if err := startDatabaseServer(); err != nil {
+		log.Fatalf("Failed to start database server: %v", err)
+	}
 
 	// Start the API server
 	runtime.Runtime.StartServer(port)

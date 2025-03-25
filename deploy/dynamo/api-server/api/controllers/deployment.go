@@ -19,7 +19,6 @@ package controllers
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -33,10 +32,12 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemas"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/schemasv2"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/services"
+	dynamov1alpha1 "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/invopop/jsonschema"
 	"github.com/rs/zerolog/log"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type deploymentController struct{}
@@ -750,7 +751,7 @@ func getDeployment(ctx *gin.Context, s *schemas.GetDeploymentSchema) (*models.De
 
 // The start of the V2 deployment APIs
 func (c *deploymentController) CreateV2(ctx *gin.Context) {
-	cluster, kubeNamespace, err := getClusterAndInfo(ctx)
+	_, kubeNamespace, err := getClusterAndInfo(ctx)
 	if err != nil {
 		return // ctx set in helper function
 	}
@@ -767,53 +768,54 @@ func (c *deploymentController) CreateV2(ctx *gin.Context) {
 		return
 	}
 
-	createDeploymentTarget, err := c.buildDeploymentTargetConfiguration(&schema.UpdateDeploymentSchema, dynamoNim, dynamoNimVersion)
-	if err != nil {
-		log.Error().Msgf("Failed to build createDeploymentTarget schema %s", err.Error())
-		ctx.JSON(400, gin.H{"error": err.Error()})
-		return
-	}
-
 	// Determine the deployment name
 	deploymentName := schema.Name
 	if deploymentName == "" {
 		deploymentName = fmt.Sprintf("dep-%s-%s--%s", dynamoNim, dynamoNimVersion, uuid.New().String())
 		deploymentName = deploymentName[:63] // Max label length for k8s
 	}
-	fmt.Println("Deployment Name:", deploymentName)
+	log.Info().Msgf("Creating deployment with name: %s", deploymentName)
 
-	body, _ := json.Marshal(createDeploymentTarget)
-	log.Info().Msgf("Got the following target: %s", body)
+	// Get ownership info for labels
+	ownership, err := GetOwnershipInfo(ctx)
+	if err != nil {
+		ctx.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
 
-	// Create the CreateDeploymentSchema instance
-	createDeploymentSchema := CreateDeploymentSchema{
-		CreateDeploymentSchema: schemas.CreateDeploymentSchema{
-			Name:          deploymentName,
-			KubeNamespace: kubeNamespace,
-			UpdateDeploymentSchema: schemas.UpdateDeploymentSchema{
-				Targets: []*schemas.CreateDeploymentTargetSchema{
-					createDeploymentTarget,
-				},
+	// Create DynamoDeployment CR
+	dynamoDeployment := &dynamov1alpha1.DynamoDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      deploymentName,
+			Namespace: kubeNamespace,
+			Labels: map[string]string{
+				"ngc-organization": ownership.OrganizationId,
+				"ngc-user":         ownership.UserId,
 			},
+		},
+		Spec: dynamov1alpha1.DynamoDeploymentSpec{
+			DynamoNim: schema.DynamoNim,
+			Services:  make(map[string]*dynamov1alpha1.DynamoNimDeployment),
 		},
 	}
 
-	deployment, err := c.createDeploymentHelper(ctx, cluster, createDeploymentSchema)
-
+	// Create the DynamoDeployment CR
+	err = services.K8sService.CreateDynamoDeployment(ctx, dynamoDeployment)
 	if err != nil {
-		ctx.JSON(500, gin.H{"error": err.Error()})
+		log.Error().Msgf("Failed to create DynamoDeployment CR: %s", err.Error())
+		ctx.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create DynamoDeployment CR: %v", err)})
 		return
 	}
 
-	// Getting mocked creator
-	creator := mocks.DefaultUser()
-
-	deploymentSchema, err := converters.ToDeploymentSchemaV2(ctx, cluster, deployment, creator)
-	if err != nil {
-		ctx.JSON(500, gin.H{"error": err.Error()})
-		return
-	}
-	ctx.JSON(200, deploymentSchema)
+	// Return success response
+	ctx.JSON(200, gin.H{
+		"status":    "success",
+		"message":   "Deployment created successfully",
+		"name":      deploymentName,
+		"namespace": kubeNamespace,
+		"dynamoNim": schema.DynamoNim,
+		"ingress":   fmt.Sprintf("https://%s.%s.%s", deploymentName, kubeNamespace, "compoundai.cloud"),
+	})
 }
 
 func (c *deploymentController) GetV2(ctx *gin.Context) {

@@ -132,8 +132,8 @@ impl Worker {
 
             tokio::select! {
                 _ = cancel_token.cancelled() => {
-                    eprintln!("{}", SHUTDOWN_MESSAGE);
-                    eprintln!("{} {} seconds", SHUTDOWN_TIMEOUT_MESSAGE, timeout);
+                    tracing::debug!("{}", SHUTDOWN_MESSAGE);
+                    tracing::debug!("{} {} seconds", SHUTDOWN_TIMEOUT_MESSAGE, timeout);
                 }
 
                 _ = app_tx.closed() => {
@@ -146,7 +146,7 @@ impl Worker {
                 }
 
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(timeout)) => {
-                    eprintln!("Application did not shutdown in time; terminating");
+                    tracing::debug!("Application did not shutdown in time; terminating");
                     std::process::exit(911);
                 }
             }?;

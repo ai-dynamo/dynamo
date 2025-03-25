@@ -37,12 +37,15 @@ COPY .env .env
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o server api/main.go
 
-# Use distroless as minimal base image to package the manager binary
-# Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+# Change the final image to include Python
+FROM python:3.9-slim
 WORKDIR /
 COPY --from=builder /workspace/server .
 COPY --from=builder /workspace/.env .
+COPY db/ db/
+
+RUN pip install -r db/requirements.txt
+
 USER 65532:65532
 
 ENTRYPOINT ["/server"]

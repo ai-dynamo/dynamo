@@ -21,4 +21,5 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: dynamodeployment-sample
 spec:
-  dynamoNim: frontend:2c4romhs6s33e4w7
+  # TODO(user): Add fields here
+  # EXAMPLE: dynamoNim: basic:dev

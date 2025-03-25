@@ -4,22 +4,30 @@
 # https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
 # Rust
-*.rs @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @alec-flowers
-Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4
+*.rs @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @alec-flowers @kkranen
+Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @kkranen
 
 # Python Libraries
-*.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers
+*.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen
 
 # Container/Environments
-/container/ @rmccorm4 @tanmayv25 @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @nv-anants
+/container/ @rmccorm4 @tanmayv25 @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @ai-dynamo/Devops
 
 # Kubernetes
 /deploy/Kubernetes/ @whoisj @hutm @biswapanda
+
+# Dynamo deploy
+/deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @nnshah1
+
+# Dynamo deploy
+/examples/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen
+
+
 
 # CI/CD
 /.github/ @ai-dynamo/Devops @nnshah1
 CODEOWNERS @ai-dynamo/Devops @nnshah1
 
 # Legal
-/LICENSE @nv-anants @nvda-mesharma @dmitry-tokarev-nv
-/ATTRIBUTIONS.md @nv-anants @nvda-mesharma @dmitry-tokarev-nv
+/LICENSE @ai-dynamo/Devops
+/ATTRIBUTIONS.md @ai-dynamo/Devops

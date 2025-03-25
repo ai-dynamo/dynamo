@@ -28,12 +28,30 @@ allow = [
     "OpenSSL",
     "Unicode-3.0",
     "BSL-1.0",
-    "MPL-2.0"
+    "MPL-2.0",
+    "MIT-0"
 ]
 
+# TODO exceptions
+# MIT: https://github.com/guidance-ai/llguidance
+#  "llguidance",
+# MIT: https://github.com/guidance-ai/llguidance/toktrie
+#  "toktrie",
+# MIT: https://github.com/guidance-ai/llguidance/toktrie_hf_tokenizers
+#  "toktrie_hf_tokenizers",
+
 [[licenses.clarify]]
+
 name = "ring"
 expression = "MIT AND ISC AND OpenSSL"
 license-files = [
     { path = "LICENSE", hash = 0xbd0eed23 }
 ]
+
+[bans]
+deny = [
+	# Ensure we don't depend on openssl
+    { name = "native-tls" },
+    { name = "openssl-sys" },
+]
+

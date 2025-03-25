@@ -101,7 +101,7 @@ mod tests {
         let ns = dtr.namespace("test".to_string()).unwrap();
 
         // Create a subscriber
-        let subscriber = ns.subscribe("test").await.unwrap();
+        let mut subscriber = ns.subscribe("test").await.unwrap();
 
         // Publish a message
         ns.publish("test", &"test_message".to_string())

@@ -58,11 +58,25 @@ RUN ln -sf /bin/bash /bin/sh
 
 # Rust build/dev dependencies
 RUN apt-get update && \
-    apt-get install --no-install-recommends --yes  gdb protobuf-compiler cmake libssl-dev pkg-config
+    apt-get install --no-install-recommends -y \
+    gdb \
+    protobuf-compiler \
+    cmake \
+    libssl-dev \
+    pkg-config
 
-RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
-RUN rustup toolchain install 1.85.0-x86_64-unknown-linux-gnu
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH \
+    RUST_VERSION=1.85.0 \
+    RUSTARCH=x86_64-unknown-linux-gnu
+
+RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
+    echo "a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f *rustup-init" | sha256sum -c - && \
+    chmod +x rustup-init && \
+    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
+    rm rustup-init && \
+    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
 # Working directory
 WORKDIR /workspace
@@ -90,7 +104,8 @@ RUN cargo build --release --locked --features mistralrs,sglang,python && \
     cp target/release/dynamo-run /usr/local/bin && \
     cp target/release/http /usr/local/bin && \
     cp target/release/llmctl /usr/local/bin && \
-    cp target/release/metrics /usr/local/bin
+    cp target/release/metrics /usr/local/bin && \
+    cp target/release/mock_worker /usr/local/bin
 
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 

@@ -113,7 +113,7 @@ impl EndpointConfigBuilder {
         let info = ComponentEndpointInfo {
             component: endpoint.component.name.clone(),
             endpoint: endpoint.name.clone(),
-            namespace: endpoint.component.namespace.clone(),
+            namespace: endpoint.component.namespace.name.clone(),
             lease_id: lease.id(),
             transport: TransportType::NatsTcp(endpoint.subject_to(lease.id())),
         };

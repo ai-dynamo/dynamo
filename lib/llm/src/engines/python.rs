@@ -77,7 +77,11 @@ pub async fn make_string_engine(
 ) -> pipeline_error::Result<OpenAIChatCompletionsStreamingEngine> {
     pyo3::prepare_freethreaded_python();
     if let Ok(venv) = env::var("VIRTUAL_ENV") {
-        Python::with_gil(|py| super::fix_venv(venv, py));
+        Python::with_gil(|py| {
+            if let Err(e) = super::fix_venv(venv, py) {
+                tracing::warn!("failed to fix venv: {}", e);
+            }
+        });
     }
 
     let engine = new_engine(cancel_token, py_file, py_args).await?;
@@ -93,7 +97,11 @@ pub async fn make_token_engine(
 ) -> pipeline_error::Result<ExecutionContext> {
     pyo3::prepare_freethreaded_python();
     if let Ok(venv) = env::var("VIRTUAL_ENV") {
-        Python::with_gil(|py| super::fix_venv(venv, py));
+        Python::with_gil(|py| {
+            if let Err(e) = super::fix_venv(venv, py) {
+                tracing::warn!("failed to fix venv: {}", e);
+            }
+        });
     }
 
     let engine = new_engine(cancel_token, py_file, py_args).await?;

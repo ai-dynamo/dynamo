@@ -22,6 +22,7 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
+description = "Dynamo Runtime Library"
 
 [features]
 default = []
@@ -41,12 +42,15 @@ derive_builder = { workspace = true }
 derive-getters = { workspace = true }
 either = { workspace = true }
 futures = { workspace = true }
+humantime = { workspace = true }
+rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 validator = { workspace = true }
 uuid = { workspace = true }
 xxhash-rust = { workspace = true }
@@ -55,12 +59,10 @@ thiserror = { workspace = true }
 
 # Dependencies not yet in workspace
 figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
-humantime = { version = "2.1.0" }
 log = { version = "0.4" }
 once_cell = { version = "1" }
 regex = { version = "1" }
 socket2 = { version = "0.5.8" }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
 
 async-once-cell = { version = "0.5.4" }
 educe = { version = "0.6.0" }
@@ -69,7 +71,6 @@ local-ip-address = { version = "0.6.3" }
 nid = { version = "3.0.0", features = ["serde"] }
 nix = { version = "0.29", features = ["signal"] }
 nuid = { version = "0.5" }
-rand = { version = "0.8"}
 
 [dev-dependencies]
 assert_matches = { version = "1.5.0" }

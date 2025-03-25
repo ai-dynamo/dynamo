@@ -39,9 +39,6 @@ use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::FinishReason;
 
-/// If user does not provide a max_tokens limit to this many
-const DEFAULT_MAX_TOKENS: u32 = 8192;
-
 /// Wait this long for the vllm sub-process to stop after we send it a KILL
 const VLLM_STOP_TIMEOUT: Duration = Duration::from_millis(1500);
 
@@ -82,7 +79,6 @@ pub struct WorkRequest {
 struct ActiveRequest {
     tx: Sender<Annotated<LLMEngineOutput>>,
     num_output_tokens_so_far: usize,
-    max_tokens: usize,
 }
 
 /// Python imports
@@ -171,7 +167,7 @@ pub async fn start(
 ) -> anyhow::Result<VllmWorker> {
     pyo3::prepare_freethreaded_python(); // or enable feature "auto-initialize"
     if let Ok(venv) = env::var("VIRTUAL_ENV") {
-        Python::with_gil(|py| crate::engines::fix_venv(venv, py));
+        let _ = Python::with_gil(|py| crate::engines::fix_venv(venv, py));
     }
 
     let py_imports = Arc::new(python_imports());
@@ -623,19 +619,17 @@ async fn input_loop(
             .temperature
             .unwrap_or(0.0)
             .into();
-        let max_tokens = work_request
-            .request
-            .stop_conditions
-            .max_tokens
-            .unwrap_or(DEFAULT_MAX_TOKENS);
 
         // Parts that don't change
         let (py_request_id, sampling_params) = Python::with_gil(|py| {
             let py_temp: PyObject = temperature.into_pyobject(py).unwrap().into();
-            let py_max_tokens: PyObject = max_tokens.into_pyobject(py).unwrap().into();
-            let sp_kwargs = [("temperature", py_temp), ("max_tokens", py_max_tokens)]
-                .into_py_dict(py)
-                .unwrap();
+            let mut sp_kwargs = vec![("temperature", py_temp)];
+            if let Some(max_tokens) = work_request.request.stop_conditions.max_tokens {
+                let py_max_tokens: PyObject = max_tokens.into_pyobject(py).unwrap().into();
+                // vllm defaults this to 16
+                sp_kwargs.push(("max_tokens", py_max_tokens));
+            }
+            let sp_kwargs = sp_kwargs.into_py_dict(py).unwrap();
             let sampling_params = py_imports
                 .sample_params_type
                 .call(py, (), Some(&sp_kwargs))
@@ -668,7 +662,6 @@ async fn input_loop(
 
         let new_active_request = ActiveRequest {
             tx: work_request.response_channel,
-            max_tokens: max_tokens as usize,
             num_output_tokens_so_far: 0,
         };
         active_requests
@@ -728,6 +721,7 @@ async fn output_loop(
 
         if req_out.finished {
             // The last token is the eos_token, don't forward it
+            // TODO: Look at req_out.finish_reason (Option<String>) and set out correctly.
             let out = Annotated::from_data(LLMEngineOutput::stop());
             let maybe_active = active_requests.lock().await.remove(&req_out.request_id);
             match maybe_active {
@@ -744,7 +738,6 @@ async fn output_loop(
             continue;
         }
 
-        let mut remove_after = false;
         for vllm_output in req_out.outputs.into_iter() {
             let next_total_toks = vllm_output.token_ids.len();
 
@@ -752,22 +745,12 @@ async fn output_loop(
                 Some(active) => {
                     let out = from_vllm(vllm_output, active.num_output_tokens_so_far);
                     active.num_output_tokens_so_far = next_total_toks;
-                    let out = if active.num_output_tokens_so_far <= active.max_tokens {
-                        Annotated::from_data(out)
-                    } else {
-                        // we exceeded max tokens, this request is over
-                        remove_after = true;
-                        Annotated::from_data(LLMEngineOutput::length())
-                    };
-                    let _ = active.tx.send(out).await;
+                    let _ = active.tx.send(Annotated::from_data(out)).await;
                 }
                 None => {
                     tracing::warn!(req_out.request_id, "Missing active request");
                 }
             }
-        }
-        if remove_after {
-            let _ = active_requests.lock().await.remove(&req_out.request_id);
         }
     }
 }

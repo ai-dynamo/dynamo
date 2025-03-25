@@ -13,22 +13,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
 
-# linking syntax example
+from dynamo.sdk.lib.service import LinkedServices
+
+pytestmark = pytest.mark.pre_merge
 
 
-from dynamo.sdk.tests.pipeline import Backend, Frontend, Middle
+def test_remove_backend2():
+    from dynamo.sdk.tests.pipeline import Backend, Backend2, Frontend, Middle
 
-# print("INITIAL DEPENDENCIES")
-# print("Frontend dependencies", Frontend.dependencies)
-# print("Middle dependencies", Middle.dependencies)
-# print("Backend dependencies", Backend.dependencies)
+    # Initial state assertions
+    assert set(Frontend.dependencies.keys()) == {"backend", "middle"}
+    assert Frontend.dependencies["backend"].on == Backend
+    assert Frontend.dependencies["middle"].on == Middle
 
-# print("\n\n\n")
+    assert set(Middle.dependencies.keys()) == {"backend", "backend2"}
+    assert Middle.dependencies["backend"].on == Backend
+    assert Middle.dependencies["backend2"].on == Backend2
 
-print()
-Frontend.link(Middle).build()
+    assert Backend.dependencies == {}
 
-print("Frontend dependencies", Frontend.dependencies)
-print("Middle dependencies", Middle.dependencies)
-print("Backend dependencies", Backend.dependencies)
+    Frontend.link(Middle).link(Backend)
+    LinkedServices.remove_unused_edges()
+
+    # Final state assertions after linking and cleanup
+    assert set(Frontend.dependencies.keys()) == {"middle"}
+    assert Frontend.dependencies["middle"].on == Middle
+
+    assert set(Middle.dependencies.keys()) == {"backend"}
+    assert Middle.dependencies["backend"].on == Backend
+
+    assert Backend.dependencies == {}

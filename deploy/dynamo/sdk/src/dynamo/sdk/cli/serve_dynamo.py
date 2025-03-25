@@ -169,7 +169,7 @@ def main(
                         logger.info(f"[{run_id}] Running startup hook: {name}")
                         result = getattr(class_instance, name)()
                         if inspect.isawaitable(result):
-                            # await on startup hook async_onstart
+                            # await on startup hook async_on_start
                             await result
                             logger.info(
                                 f"[{run_id}] Completed async startup hook: {name}"

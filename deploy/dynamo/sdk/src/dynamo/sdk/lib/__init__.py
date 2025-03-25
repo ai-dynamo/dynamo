@@ -15,4 +15,4 @@
 
 
 def main() -> None:
-    print("Hello from dyenmo sdk!")
+    print("Hello from dynamo sdk!")

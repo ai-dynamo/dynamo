@@ -26,6 +26,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/api-server/api/models"
 	"github.com/ghodss/yaml"
 
+	dynamov1alpha1 "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -110,8 +111,18 @@ func (s *k8sService) ListPodsBySelector(ctx context.Context, podLister v1.PodNam
 	return pods, nil
 }
 
+func (s *k8sService) CreateDynamoDeployment(ctx context.Context, dynamoDeployment *dynamov1alpha1.DynamoDeployment) error {
+	k8sClient, err := s.GetK8sClient("")
+	if err != nil {
+		return err
+	}
+
+	return k8sClient.CoreV1().RESTClient().Post().Namespace(dynamoDeployment.Namespace).Resource("dynamodeployments").Body(dynamoDeployment).Do(ctx).Error()
+}
+
 type IK8sService interface {
 	GetK8sClient(string) (kubernetes.Interface, error)
+	CreateDynamoDeployment(context.Context, *dynamov1alpha1.DynamoDeployment) error
 	ListPodsByDeployment(context.Context, v1.PodNamespaceLister, *models.Deployment) ([]*apiv1.Pod, error)
 	ListPodsBySelector(context.Context, v1.PodNamespaceLister, labels.Selector) ([]*apiv1.Pod, error)
 }

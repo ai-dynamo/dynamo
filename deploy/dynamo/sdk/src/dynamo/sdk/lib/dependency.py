@@ -139,7 +139,7 @@ class DynamoDependency(Dependency[T]):
         ...
         await dep.get_endpoint("generate") # equivalent to the following
         router_client = (
-            await runtime.namespace("dynamo-init")
+            await runtime.namespace("dynamo")
             .component("router")
             .endpoint("generate")
             .client()
