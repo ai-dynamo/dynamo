@@ -263,6 +263,8 @@ async def worker(
         args.publish_stats = False
 
     # TODO: check if disagg router is enabled.
+    # TODO: check the args for gen server. They should be equal to the prefill server.
+    # This is the case when using disaggregated router as well
     if args.remote_prefill and server_type == "gen":
         prefill_client = (
             await runtime.namespace("dynamo")
