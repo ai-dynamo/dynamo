@@ -371,7 +371,7 @@ RUN apt-get update && \
 
 # Install the wheels
 RUN --mount=type=bind,source=/workspace/dist,from=build,target=wheelhouse \
-    uv pip install ai-dynamo[vllm] --find-links wheelhouse
+    uv pip install --no-cache ai-dynamo[vllm] --find-links wheelhouse
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
