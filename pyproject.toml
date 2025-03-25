@@ -25,7 +25,7 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "bentoml==1.4.5",
+    "bentoml==1.4.6",
     "kubernetes==32.0.1",
     "ai-dynamo-runtime==0.1.0",
 ]
