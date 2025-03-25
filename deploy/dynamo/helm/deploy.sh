@@ -57,8 +57,6 @@ envsubst '${NAMESPACE} ${NGC_TOKEN} ${CI_COMMIT_SHA} ${RELEASE_NAME} ${DYNAMO_IN
 
 echo "Generated values file saved as generated-values.yaml"
 
-## Debug
-helm install $RELEASE_NAME --dry-run --debug platform/  -f generated-values.yaml
 
 # Install/upgrade the helm chart
 echo "Installing/upgrading helm chart..."

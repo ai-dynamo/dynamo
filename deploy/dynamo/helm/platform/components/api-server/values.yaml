@@ -19,7 +19,7 @@ replicaCount: 1
 image:
   repository: gitlab-master.nvidia.com:5005/aire/microservices/dynamo/api-server
   # This sets the pull policy for images.
-  pullPolicy: Always
+  pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
   tag: ""
 
