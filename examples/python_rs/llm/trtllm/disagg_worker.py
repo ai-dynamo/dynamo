@@ -94,6 +94,13 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
         ctx_responses = [
             ctx_response async for ctx_response in await self.prefill_client.round_robin(prefill_request.model_dump_json())
         ]
+        if len(ctx_responses) > 1:
+            raise ValueError(
+                "Context server returned more than one response. This is currently not supported in disaggregated server."
+            )
+        logger.debug(
+            f"[worker - {self.server_config.type}] received response from context server: {ctx_responses[0].data()}"
+        )
         ctx_response_obj = TRTLLMWorkerResponse.model_validate_json(ctx_responses[0].data())
         ctx_response_obj.outputs = [TRTLLMWorkerResponseOutput(**ctx_response_obj.outputs[0])]
         assert ctx_response_obj.outputs[0].disaggregated_params is not None

@@ -120,6 +120,7 @@ llmctl http add completion TinyLlama/TinyLlama-1.1B-Chat-v1.0 dynamo.preprocess.
 # Launch worker
 cd /workspace/examples/python_rs/llm/trtllm
 python3 -m common.preprocessor --engine_args llm_api_config.yaml 1>preprocess.log 2>&1 &
+
 mpirun --allow-run-as-root -n 1 --oversubscribe python3 -m monolith.worker --engine_args llm_api_config.yaml 1>agg_worker.log 2>&1 &
 ```
 
