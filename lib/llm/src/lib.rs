@@ -22,6 +22,7 @@ pub mod backend;
 pub mod common;
 pub mod disagg_router;
 pub mod engines;
+pub mod gguf;
 pub mod http;
 pub mod kv_router;
 pub mod model_card;

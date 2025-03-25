@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -38,8 +38,6 @@ mod worker;
 
 pub async fn make_leader_engine(
     cancel_token: CancellationToken,
-    // Where to find the tokenzier, and config.json
-    card_path: &Path,
     // Full path to the model, either a GGUF file or an HF repo dir
     model_path: &Path,
     // Unique string to name zmq sockets
@@ -48,6 +46,8 @@ pub async fn make_leader_engine(
     node_conf: MultiNodeConfig,
     // How many GPUs to use
     tensor_parallel_size: u32,
+    // Path to extra engine args file
+    extra_engine_args: Option<PathBuf>,
 ) -> pipeline_error::Result<(ExecutionContext, impl Future<Output = ()>)> {
     let ray_obj = if node_conf.num_nodes > 1 {
         let r = ray::start_leader(node_conf.leader_addr.parse()?)?;
@@ -63,10 +63,10 @@ pub async fn make_leader_engine(
     let mut engine = VllmEngine::new(
         cancel_token,
         sock_code,
-        card_path,
         model_path,
         node_conf,
         tensor_parallel_size,
+        extra_engine_args,
     )
     .await?;
     let vllm_process = engine.take_vllm_worker_handle();

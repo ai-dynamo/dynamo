@@ -126,46 +126,49 @@ pub async fn run(
     // Load the model deployment card, if any
     // Only used by some engines, so without those feature flags it's unused.
     #[allow(unused_variables)]
-    let (maybe_card_path, maybe_card) = match (&model_path, &flags.model_config) {
+    let maybe_card = match (&model_path, &flags.model_config) {
         // --model-config takes precedence
         (_, Some(model_config)) => {
-            let card =
-                match ModelDeploymentCard::from_local_path(model_config, model_name.as_deref())
-                    .await
-                {
-                    Ok(card) => Some(card),
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to load model card from config path {}: {}",
-                            model_config.display(),
-                            e
-                        );
-                        None
-                    }
-                };
-            (Some(model_config.clone()), card)
-        }
-        // If --model-path is an HF repo use that
-        (Some(model_path), _) if model_path.is_dir() => {
-            let card = match ModelDeploymentCard::from_local_path(model_path, model_name.as_deref())
-                .await
-            {
+            match ModelDeploymentCard::from_local_path(model_config, model_name.as_deref()).await {
                 Ok(card) => Some(card),
                 Err(e) => {
                     tracing::error!(
-                        "Failed to load model card from model path {}: {}",
-                        model_path.display(),
-                        e
+                        "Failed to load model card from --model-config path {}: {e}",
+                        model_config.display(),
                     );
                     None
                 }
-            };
-            (Some(model_path.clone()), card)
+            }
+        }
+        // If --model-path is an HF repo use that
+        (Some(model_path), _) if model_path.is_dir() => {
+            match ModelDeploymentCard::from_local_path(model_path, model_name.as_deref()).await {
+                Ok(card) => Some(card),
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to load model card from --model-path {}: {e}",
+                        model_path.display(),
+                    );
+                    None
+                }
+            }
+        }
+        (Some(model_path), _) if model_path.is_file() => {
+            match ModelDeploymentCard::from_gguf(model_path, model_name.as_deref()).await {
+                Ok(card) => Some(card),
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to load model card from GGUF {}: {e}",
+                        model_path.display(),
+                    );
+                    None
+                }
+            }
         }
         // Otherwise we don't have one, but we only need it if we're tokenizing
         _ => {
             tracing::debug!("No model card path provided (neither --model-config nor a directory in --model-path)");
-            (None, None)
+            None
         }
     };
 
@@ -254,6 +257,7 @@ pub async fn run(
                 node_conf,
                 flags.tensor_parallel_size,
                 flags.base_gpu_id,
+                flags.extra_engine_args,
             )
             .await?;
             extra = Some(Box::pin(async move {
@@ -276,17 +280,9 @@ pub async fn run(
                     "out=vllm requires flag --model-path=<full-path-to-hf-repo-or-model-gguf>"
                 );
             };
-            let Some(card_path) = maybe_card_path else {
-                // If we have a gguf we also need a model card because we don't currently parse
-                // tokenizer et al out of gguf.
-                anyhow::bail!(
-                    "Running GGUF files also requires a `--model-config` for the tokenizer et al."
-                );
-            };
             let Some(card) = maybe_card.clone() else {
                 anyhow::bail!(
-                    "Failed to load model card: either unsupported HuggingFace repo format \
-                    or for GGUF files --model-config is missing."
+                    "Unable to build tokenizer. out=vllm requires --model-path to be an HF repo with fast tokenizer (tokenizer.json) or a GGUF file"
                 );
             };
             let Some(sock_prefix) = zmq_socket_prefix else {
@@ -311,11 +307,11 @@ pub async fn run(
                 // vllm multi-node only the leader runs vllm
                 let (engine, vllm_future) = vllm::make_leader_engine(
                     cancel_token.clone(),
-                    &card_path,
                     &model_path,
                     &sock_prefix,
                     node_conf,
                     flags.tensor_parallel_size,
+                    flags.extra_engine_args,
                 )
                 .await?;
                 extra = Some(Box::pin(async move {
