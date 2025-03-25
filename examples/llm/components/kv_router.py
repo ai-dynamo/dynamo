@@ -85,7 +85,7 @@ class Router:
 
         self.default_metrics = {
             "gpu_cache_usage_perc": 0.0,
-            "num_requests_waiting": 0,
+            "num_requests_waiting": 0.0,
             "gpu_prefix_cache_hit_rate": 0.0,
         }
 
@@ -146,7 +146,7 @@ class Router:
                 )
 
         worker_metrics = {}
-        max_waiting = 0
+        max_waiting = 0.0
         if metrics:
             for endpoint in metrics.endpoints:
                 worker_id = endpoint.worker_id
