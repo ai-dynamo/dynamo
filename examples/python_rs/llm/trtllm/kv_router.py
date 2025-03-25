@@ -15,18 +15,18 @@
 
 
 import asyncio
-import uvloop
 import random
 import traceback
 from typing import AsyncIterator
 
-from common.protocol import Tokens
+import uvloop
 from common.parser import parse_tensorrt_llm_args
+from common.protocol import Tokens
 from common.utils import wait_for_workers
 from tensorrt_llm.logger import logger
 
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
-from dynamo.runtime import Client, DistributedRuntime, dynamo_endpoint, dynamo_worker
+from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
 logger.set_level("debug")
 
@@ -38,7 +38,7 @@ class KVRouter:
         self.indexer = indexer
         self.metrics_aggregator = metrics_aggregator
         self.workers_client = client
-        logger.info(f"Initialized KV router.")
+        logger.info("Initialized KV router.")
 
     def _cost_function(
         self,
@@ -187,9 +187,7 @@ async def worker(runtime: DistributedRuntime, args):
 
     await wait_for_workers(workers_client, args.min_workers)
 
-    logger.info(
-            f"Intializing KV indexer with tokens per block: {args.kv_block_size}"
-        )
+    logger.info(f"Intializing KV indexer with tokens per block: {args.kv_block_size}")
 
     kv_listener = runtime.namespace("dynamo").component("tensorrt-llm")
     await kv_listener.create_service()

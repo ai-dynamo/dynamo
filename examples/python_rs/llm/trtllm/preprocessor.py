@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+from typing import AsyncIterator
 
 import uvloop
 from common.base_engine import ChatProcessorMixin
@@ -26,12 +27,7 @@ from common.protocol import (
     DynamoTRTLLMCompletionStreamResponse,
     Tokens,
 )
-from common.utils import (
-    RequestType,
-    ServerType,
-    wait_for_workers,
-    RoutingStrategy,
-)
+from common.utils import RequestType, RoutingStrategy, ServerType, wait_for_workers
 from tensorrt_llm.logger import logger
 
 from dynamo.runtime import Client, DistributedRuntime, dynamo_endpoint, dynamo_worker
@@ -40,7 +36,9 @@ logger.set_level("debug")
 
 
 async def get_worker_id(kv_router_client: Client, tokens: Tokens) -> str:
-    worker_id_generator: AsyncIterator = await kv_router_client.generate(tokens.model_dump_json())
+    worker_id_generator: AsyncIterator = await kv_router_client.generate(
+        tokens.model_dump_json()
+    )
 
     response = await worker_id_generator.__anext__()  # only one worker id is returned
     print(response.data())
@@ -156,7 +154,7 @@ async def worker(runtime: DistributedRuntime, args, engine_config: LLMAPIConfig)
             .endpoint("generate")
             .client()
         )
-        logger.info(f"Initialized KV router client for prefix routing.")
+        logger.info("Initialized KV router client for prefix routing.")
     else:
         kv_router_client = None
 
