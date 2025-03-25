@@ -46,6 +46,7 @@ async fn test_tokenizer_from_hf_like_local_repo() {
     // Verify tokenizer file was found
     match mdc.tokenizer {
         TokenizerKind::HfTokenizerJson(_) => (),
+        TokenizerKind::GGUF(_) => (),
     }
 }
 
