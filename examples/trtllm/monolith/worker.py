@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import os
 
 import uvloop
 from common.base_engine import BaseTensorrtLLMEngine, TensorrtLLMEngineConfig
@@ -29,7 +30,7 @@ from tensorrt_llm.serve.openai_protocol import (
 from dynamo.llm import KvMetricsPublisher
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
-logger.set_level("debug")
+logger.set_level(os.getenv("DYN_TRTLLM_LOG_LEVEL", "info"))
 
 
 class TensorrtLLMEngine(BaseTensorrtLLMEngine):

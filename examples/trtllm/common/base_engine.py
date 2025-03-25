@@ -15,6 +15,7 @@
 
 
 import asyncio
+import os
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -32,7 +33,7 @@ from dynamo.llm import KvMetricsPublisher
 
 from .kv_cache_event_publisher import KVCacheEventPublisher
 
-logger.set_level("info")
+logger.set_level(os.getenv("DYN_TRTLLM_LOG_LEVEL", "info"))
 
 
 class ChatProcessorMixin:

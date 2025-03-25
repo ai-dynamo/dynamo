@@ -49,7 +49,7 @@ from tensorrt_llm.serve.openai_protocol import CompletionRequest
 from dynamo.llm import KvMetricsPublisher
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
-logger.set_level("info")
+logger.set_level(os.getenv("DYN_TRTLLM_LOG_LEVEL", "info"))
 
 
 def update_args_from_disagg_config(
