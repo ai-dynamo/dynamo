@@ -13,22 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
 from dataclasses import asdict
 from typing import Any, Dict, List, Union
 
-from common.utils import ConversationMessage, ServerType
 from common.protocol import (
-    DisaggChatCompletionResponseStreamChoice,
-    DisaggChatCompletionStreamResponse,
-    DisaggCompletionResponseStreamChoice,
-    DisaggCompletionStreamResponse,
     DisaggregatedTypeConverter,
-    Tokens, 
+    DynamoTRTLLMChatCompletionResponseStreamChoice,
+    DynamoTRTLLMChatCompletionStreamResponse,
+    DynamoTRTLLMCompletionResponseStreamChoice,
+    DynamoTRTLLMCompletionStreamResponse,
+    Tokens,
     TRTLLMWorkerRequest,
     TRTLLMWorkerResponse,
     TRTLLMWorkerResponseOutput,
 )
+from common.utils import ConversationMessage, ServerType
 from openai.types.chat import ChatCompletionMessageParam
 from tensorrt_llm.llmapi.llm import RequestOutput
 from tensorrt_llm.logger import logger
@@ -37,7 +36,6 @@ from tensorrt_llm.serve.openai_protocol import (
     ChatCompletionLogProbsContent,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
-    CompletionRequest,
     DeltaMessage,
     FunctionCall,
     ToolCall,
@@ -139,7 +137,7 @@ class ChatProcessor(BaseChatProcessor):
         content = response.outputs[0].text_diff
 
         for i in range(num_choices):
-            choice = DisaggChatCompletionResponseStreamChoice(
+            choice = DynamoTRTLLMChatCompletionResponseStreamChoice(
                 index=i,
                 delta=DeltaMessage(role=role, content=content),
                 finish_reason=None,
@@ -150,7 +148,7 @@ class ChatProcessor(BaseChatProcessor):
                         response.outputs[0].disaggregated_params
                     )
                 )
-            chunk = DisaggChatCompletionStreamResponse(
+            chunk = DynamoTRTLLMChatCompletionStreamResponse(
                 id=request_id,
                 choices=[choice],
                 model=self.model,
@@ -215,7 +213,7 @@ class ChatProcessor(BaseChatProcessor):
             else:
                 delta_message = DeltaMessage(content=delta_text, role=role)
 
-            choice = DisaggChatCompletionResponseStreamChoice(
+            choice = DynamoTRTLLMChatCompletionResponseStreamChoice(
                 index=i, delta=delta_message, finish_reason=None
             )
             if request.logprobs:
@@ -232,7 +230,7 @@ class ChatProcessor(BaseChatProcessor):
                         output.disaggregated_params
                     )
                 )
-            chunk = DisaggChatCompletionStreamResponse(
+            chunk = DynamoTRTLLMChatCompletionStreamResponse(
                 id=request_id,
                 choices=[choice],
                 model=self.model,
@@ -250,7 +248,7 @@ class ChatProcessor(BaseChatProcessor):
                 total_tokens=prompt_tokens + completion_tokens,
             )
 
-            final_usage_chunk = DisaggChatCompletionStreamResponse(
+            final_usage_chunk = DynamoTRTLLMChatCompletionStreamResponse(
                 id=request_id,
                 choices=[],
                 model=self.model,
@@ -258,13 +256,15 @@ class ChatProcessor(BaseChatProcessor):
             )
             return final_usage_chunk.model_dump_json()
         return "data: [DONE]\n\n"
-    
+
     async def preprocess(self, request):
         conversation = []
         for message in request.messages:
             conversation.extend(parse_chat_message_content(message))
         tool_dicts = (
-            None if request.tools is None else [tool.model_dump() for tool in request.tools]
+            None
+            if request.tools is None
+            else [tool.model_dump() for tool in request.tools]
         )
         prompt: str = self.tokenizer.apply_chat_template(
             conversation=conversation,
@@ -298,10 +298,11 @@ class ChatProcessor(BaseChatProcessor):
             response = TRTLLMWorkerResponse.model_validate_json(raw_response.data())
             response.outputs = [TRTLLMWorkerResponseOutput(**response.outputs[0])]
 
-            if request.disaggregated_params is not None and server_type == ServerType.CTX:
-                response_data = self.yield_first_chat(
-                    request, request.id, response
-                )
+            if (
+                request.disaggregated_params is not None
+                and server_type == ServerType.CTX
+            ):
+                response_data = self.yield_first_chat(request, request.id, response)
             else:
                 response_data = self.create_chat_stream_response(
                     request,
@@ -314,12 +315,11 @@ class ChatProcessor(BaseChatProcessor):
             yield response_data
 
 
-
 class CompletionsProcessor:
     def __init__(self, model: str, tokenizer: AutoTokenizer):
         self.model = model
         self.tokenizer = tokenizer
-        
+
     def create_completion_stream_response(self, request, response):
         num_choices = 1 if request.n is None else request.n
         echoed = [False] * num_choices
@@ -330,7 +330,7 @@ class CompletionsProcessor:
             if request.echo and not echoed[gen_idx]:
                 delta_text = request.prompt + delta_text
                 echoed[gen_idx] = True
-            choice = DisaggCompletionResponseStreamChoice(
+            choice = DynamoTRTLLMCompletionResponseStreamChoice(
                 index=gen_idx,
                 text=delta_text,
                 stop_reason=output.stop_reason,
@@ -342,7 +342,7 @@ class CompletionsProcessor:
                         output.disaggregated_params
                     )
                 )
-            chunk = DisaggCompletionStreamResponse(
+            chunk = DynamoTRTLLMCompletionStreamResponse(
                 model=self.model,
                 choices=[choice],
             )
@@ -366,13 +366,12 @@ class CompletionsProcessor:
             prompt=prompt,
             sampling_params=asdict(sampling_params),
             disaggregated_params=request.disaggregated_params,
-            tokens=Tokens(tokens=self.tokenizer.encode(prompt)[1:]), 
+            tokens=Tokens(tokens=self.tokenizer.encode(prompt)[1:]),
         )
 
-
     async def postprocess(
-        self, 
-        engine_generator, 
+        self,
+        engine_generator,
         request,
     ):
         async for raw_response in engine_generator:

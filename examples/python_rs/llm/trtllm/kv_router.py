@@ -14,7 +14,6 @@
 # limitations under the License.
 
 
-import enum
 import random
 import traceback
 from typing import AsyncIterator
@@ -26,12 +25,6 @@ from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, Overla
 from dynamo.runtime import dynamo_endpoint
 
 logger.set_level("debug")
-
-
-class RoutingStrategy(enum.Enum):
-    ROUND_ROBIN = "round_robin"
-    RANDOM = "random"
-    PREFIX = "prefix"
 
 
 class KVRouter:

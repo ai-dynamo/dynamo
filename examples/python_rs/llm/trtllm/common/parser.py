@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import yaml
-from common.kv_router import RoutingStrategy
+from common.utils import RoutingStrategy
 from tensorrt_llm._torch.pyexecutor.config import PyTorchConfig
 from tensorrt_llm.llmapi import KvCacheConfig
 

@@ -18,21 +18,19 @@ import json
 
 import uvloop
 from common.base_engine import ChatProcessorMixin
-from common.kv_router import KVRouter, RoutingStrategy, get_worker_id
 from common.parser import LLMAPIConfig, parse_tensorrt_llm_args
 from common.protocol import (
-    AdaptedChatCompletionRequest,
-    AdaptedCompletionRequest,
-    DisaggCompletionStreamResponse,
-    DisaggChatCompletionRequest,
-    DisaggChatCompletionStreamResponse
+    DynamoTRTLLMChatCompletionRequest,
+    DynamoTRTLLMChatCompletionStreamResponse,
+    DynamoTRTLLMCompletionRequest,
+    DynamoTRTLLMCompletionStreamResponse,
 )
-from common.utils import RequestType, wait_for_workers, ServerType
+from common.utils import RequestType, ServerType, wait_for_workers
+from kv_router import KVRouter, RoutingStrategy, get_worker_id
 from tensorrt_llm.logger import logger
 
 from dynamo.llm import KvIndexer, KvMetricsAggregator
 from dynamo.runtime import Client, DistributedRuntime, dynamo_endpoint, dynamo_worker
-
 
 logger.set_level("debug")
 
@@ -60,7 +58,9 @@ class Processor(ChatProcessorMixin):
         if request_type == RequestType.CHAT:
             preprocessed_request = await self.chat_processor.preprocess(raw_request)
         else:
-            preprocessed_request = await self.completions_processor.preprocess(raw_request)
+            preprocessed_request = await self.completions_processor.preprocess(
+                raw_request
+            )
 
         worker_id = ""
         if self.routing_strategy == RoutingStrategy.PREFIX:
@@ -97,12 +97,16 @@ class Processor(ChatProcessorMixin):
                 logger.debug(f"[preprocessor] Response: {response}")
                 yield json.loads(response)
 
-    @dynamo_endpoint(DisaggChatCompletionRequest, DisaggChatCompletionStreamResponse)
+    @dynamo_endpoint(
+        DynamoTRTLLMChatCompletionRequest, DynamoTRTLLMChatCompletionStreamResponse
+    )
     async def generate_chat(self, raw_request):
         async for response in self._generate(raw_request, RequestType.CHAT):
             yield response
 
-    @dynamo_endpoint(AdaptedCompletionRequest, DisaggCompletionStreamResponse)
+    @dynamo_endpoint(
+        DynamoTRTLLMCompletionRequest, DynamoTRTLLMCompletionStreamResponse
+    )
     async def generate_completions(self, raw_request):
         async for response in self._generate(raw_request, RequestType.COMPLETION):
             yield response

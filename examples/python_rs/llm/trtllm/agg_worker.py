@@ -14,14 +14,18 @@
 # limitations under the License.
 
 import asyncio
-import json
 import signal
-from typing import AsyncGenerator
 from dataclasses import asdict
+from typing import AsyncGenerator
+
 import uvloop
 from common.base_engine import BaseTensorrtLLMEngine, TensorrtLLMEngineConfig
 from common.parser import LLMAPIConfig, parse_tensorrt_llm_args
-from common.protocol import TRTLLMWorkerRequest, DisaggregatedTypeConverter, TRTLLMWorkerResponse
+from common.protocol import (
+    DisaggregatedTypeConverter,
+    TRTLLMWorkerRequest,
+    TRTLLMWorkerResponse,
+)
 from tensorrt_llm.executor import CppExecutorError
 from tensorrt_llm.logger import logger
 
@@ -54,8 +58,10 @@ class TensorrtLLMEngine(BaseTensorrtLLMEngine):
         try:
             disaggregated_params = None
             if request.disaggregated_params is not None:
-                disaggregated_params = DisaggregatedTypeConverter.to_llm_disaggregated_params(
-                    request.disaggregated_params
+                disaggregated_params = (
+                    DisaggregatedTypeConverter.to_llm_disaggregated_params(
+                        request.disaggregated_params
+                    )
                 )
 
             async for response in self._llm_engine.generate_async(

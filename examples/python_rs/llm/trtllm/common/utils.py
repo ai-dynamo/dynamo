@@ -20,11 +20,17 @@ import traceback
 import weakref
 from enum import Enum
 from queue import Queue
-from typing import Callable, Optional, Union, TypedDict
+from typing import Callable, Optional, TypedDict, Union
 
 from tensorrt_llm.logger import logger
 
 logger.set_level("info")
+
+
+class RoutingStrategy(Enum):
+    ROUND_ROBIN = "round_robin"
+    RANDOM = "random"
+    PREFIX = "prefix"
 
 
 class RequestType(Enum):
