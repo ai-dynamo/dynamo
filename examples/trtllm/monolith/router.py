@@ -32,7 +32,7 @@ from tensorrt_llm.serve.openai_protocol import (
 from dynamo.llm import KvIndexer, KvMetricsAggregator
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 
-logger.set_level(os.getenv("DYNAMO_TRTLLM_LOG_LEVEL", "info"))
+logger.set_level(os.getenv("DYN_TRTLLM_LOG_LEVEL", "info"))
 
 
 class Router(ChatProcessorMixin):

@@ -19,7 +19,7 @@ from ctypes import c_char_p, c_int64, c_uint32
 
 from tensorrt_llm.logger import logger
 
-logger.set_level(os.getenv("DYNAMO_TRTLLM_LOG_LEVEL", "info"))
+logger.set_level(os.getenv("DYN_TRTLLM_LOG_LEVEL", "info"))
 
 
 class DynamoResult:

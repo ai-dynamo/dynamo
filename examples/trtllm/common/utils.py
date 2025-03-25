@@ -24,7 +24,7 @@ from typing import Callable, Optional, Union
 
 from tensorrt_llm.logger import logger
 
-logger.set_level(os.getenv("DYNAMO_TRTLLM_LOG_LEVEL", "info"))
+logger.set_level(os.getenv("DYN_TRTLLM_LOG_LEVEL", "info"))
 
 
 class ManagedThread(threading.Thread):

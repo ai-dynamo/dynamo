@@ -26,7 +26,7 @@ from tensorrt_llm.logger import logger
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
 from dynamo.runtime import dynamo_endpoint
 
-logger.set_level(os.getenv("DYNAMO_TRTLLM_LOG_LEVEL", "info"))
+logger.set_level(os.getenv("DYN_TRTLLM_LOG_LEVEL", "info"))
 
 
 class RoutingStrategy(enum.Enum):

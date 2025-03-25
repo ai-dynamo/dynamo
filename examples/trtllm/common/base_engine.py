@@ -33,7 +33,7 @@ from dynamo.llm import KvMetricsPublisher
 
 from .kv_cache_event_publisher import KVCacheEventPublisher
 
-logger.set_level(os.getenv("DYNAMO_TRTLLM_LOG_LEVEL", "info"))
+logger.set_level(os.getenv("DYN_TRTLLM_LOG_LEVEL", "info"))
 
 
 class ChatProcessorMixin:

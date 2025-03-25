@@ -41,7 +41,7 @@ from common.generators import chat_generator  # noqa: E402
 from common.parser import parse_dynamo_run_args  # noqa: E402
 from common.protocol import AdaptedChatCompletionRequest  # noqa: E402
 
-logger.set_level(os.getenv("DYNAMO_TRTLLM_LOG_LEVEL", "info"))
+logger.set_level(os.getenv("DYN_TRTLLM_LOG_LEVEL", "info"))
 
 
 class DynamoTRTLLMEngine(BaseTensorrtLLMEngine):

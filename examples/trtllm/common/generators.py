@@ -24,7 +24,7 @@ from common.processor import merge_promises, parse_chat_message_content
 from tensorrt_llm.executor import CppExecutorError
 from tensorrt_llm.logger import logger
 
-logger.set_level(os.getenv("DYNAMO_TRTLLM_LOG_LEVEL", "info"))
+logger.set_level(os.getenv("DYN_TRTLLM_LOG_LEVEL", "info"))
 
 
 # TODO: support disaggregated as well
