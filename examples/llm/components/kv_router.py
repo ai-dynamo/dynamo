@@ -146,14 +146,12 @@ class Router:
                 )
 
         worker_metrics = {}
-        get_metric = lambda ep, key: getattr(ep, key, self.default_metrics[key])
-
         max_waiting = 0
         if metrics:
             for endpoint in metrics.endpoints:
                 worker_id = endpoint.worker_id
                 worker_metrics[worker_id] = {
-                    key: get_metric(endpoint, key)
+                    key: getattr(endpoint, key, self.default_metrics[key])
                     for key in self.default_metrics.keys()
                 }
                 max_waiting = max(
