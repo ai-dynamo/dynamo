@@ -148,6 +148,11 @@ def parse_tensorrt_llm_args() -> Tuple[Any, Tuple[Dict[str, Any], Dict[str, Any]
         help="Routing strategy for the router",
         choices=list(RoutingStrategy),
     )
+    parser.add_argument(
+        "--remote-prefill",
+        action="store_true",
+        help="Use remote prefill workers for generation server in Disaggregated mode.",
+    )
 
     args = parser.parse_args()
     return (args, _init_engine_args(args.engine_args))

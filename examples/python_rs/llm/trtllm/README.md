@@ -259,7 +259,7 @@ For example, 2 TP2 generation servers are 2 workers but 4 mpi executors.
 
 ```bash
 cd /workspace/examples/python_rs/llm/trtllm/
-mpirun --allow-run-as-root --oversubscribe -n 2 python3 -m disagg_worker --engine_args llm_api_config.yaml -c llmapi_disaggregated_configs/single_node_config.yaml 1>disagg_workers.log 2>&1 &
+mpirun --allow-run-as-root --oversubscribe -n 2 python3 -m disagg_worker --engine_args llm_api_config.yaml -c llmapi_disaggregated_configs/single_node_config.yaml --remote-prefill 1>disagg_workers.log 2>&1 &
 ```
 If using the provided [single_node_config.yaml](disaggregated/llmapi_disaggregated_configs/single_node_config.yaml), WORLD_SIZE should be 2 as it has 1 context servers(TP=1) and 1 generation server(TP=1).
 
@@ -311,7 +311,7 @@ export ETCD_ENDPOINTS="http://node1:2379,http://node2:2379"
 
 4. Launch the workers from node1 or login node. WORLD_SIZE is similar to single node deployment.
 ```bash
-srun --mpi pmix -N NUM_NODES --ntasks WORLD_SIZE --ntasks-per-node=GPUS_PER_NODE --no-container-mount-home --overlap --container-image IMAGE --output batch_%x_%j.log --err batch_%x_%j.err --container-mounts PATH_TO_DYNAMO:/workspace --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/trtllm && python3 -m disagg_worker --engine_args llm_api_config.yaml -c llmapi_disaggregated_configs/multi_node_config.yaml' &
+srun --mpi pmix -N NUM_NODES --ntasks WORLD_SIZE --ntasks-per-node=GPUS_PER_NODE --no-container-mount-home --overlap --container-image IMAGE --output batch_%x_%j.log --err batch_%x_%j.err --container-mounts PATH_TO_DYNAMO:/workspace --container-env=NATS_SERVER,ETCD_ENDPOINTS bash -c 'cd /workspace/examples/python_rs/llm/trtllm && python3 -m disagg_worker --engine_args llm_api_config.yaml -c llmapi_disaggregated_configs/multi_node_config.yaml --remote-prefill' &
 ```
 
 Once the workers are launched, you should see the output similar to the following in the worker logs.

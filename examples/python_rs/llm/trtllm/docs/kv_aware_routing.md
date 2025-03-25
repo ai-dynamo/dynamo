@@ -75,7 +75,7 @@ To launch the workers and the router, run the following command:
 
 ```bash
 cd /workspace/examples/python_rs/llm/tensorrt_llm/
-mpirun --allow-run-as-root --oversubscribe -n 5 python3 -m disagg_worker --publish-stats --publish-kv-cache-events --engine_args llm_api_config.yaml -c llmapi_disaggregated_configs/single_node_kv_aware_config.yaml 1>disagg_workers.log 2>&1 &
+mpirun --allow-run-as-root --oversubscribe -n 5 python3 -m disagg_worker --publish-stats --publish-kv-cache-events --engine_args llm_api_config.yaml -c llmapi_disaggregated_configs/single_node_kv_aware_config.yaml --remote-prefill 1>disagg_workers.log 2>&1 &
 ```
 
 The config file [single_node_kv_aware_config.yaml](disaggregated/llmapi_disaggregated_configs/single_node_kv_aware_config.yaml) specifies extra configuration for the LLM execution engine to support stats and kv cache events collection. These configurations are:
