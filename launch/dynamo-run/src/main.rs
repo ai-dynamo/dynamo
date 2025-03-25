@@ -32,7 +32,7 @@ Example:
 
 const ZMQ_SOCKET_PREFIX: &str = "dyn";
 
-const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>|none] out=[mistralrs|sglang|llamacpp|vllm|trtllm|echo_full|echo_core|pystr:<engine.py>|pytok:<engine.py>] [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0]";
+const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>|none] out=[mistralrs|sglang|llamacpp|vllm|trtllm|echo_full|echo_core|pystr:<engine.py>|pytok:<engine.py>] [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json]";
 
 fn main() -> anyhow::Result<()> {
     logging::init();
@@ -68,6 +68,7 @@ fn main() -> anyhow::Result<()> {
                         sglang_flags.pipe_fd as std::os::fd::RawFd,
                         node_config,
                         gpu_config,
+                        flags.extra_engine_args,
                     );
                 }
             } else {
@@ -80,12 +81,6 @@ fn main() -> anyhow::Result<()> {
             let Some(model_path) = flags.model_path_flag else {
                 anyhow::bail!("vllm subprocess requires --model-path flag");
             };
-            let Some(model_config) = flags.model_config else {
-                anyhow::bail!("vllm subprocess requires --model-config");
-            };
-            if !model_config.is_dir() {
-                anyhow::bail!("vllm subprocess requires model config path to be a directory containing tokenizer.json, config.json, etc");
-            }
             if cfg!(feature = "vllm") {
                 #[cfg(feature = "vllm")]
                 {
@@ -97,10 +92,10 @@ fn main() -> anyhow::Result<()> {
                     };
                     return vllm::run_subprocess(
                         ZMQ_SOCKET_PREFIX,
-                        &model_config,
                         &model_path,
                         node_config,
                         flags.tensor_parallel_size,
+                        flags.extra_engine_args,
                     );
                 }
             } else {

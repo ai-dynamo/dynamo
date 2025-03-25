@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_stream::stream;
 use async_trait::async_trait;
@@ -35,18 +35,18 @@ impl VllmEngine {
     pub async fn new(
         cancel_token: CancellationToken,
         sock_code: &str,
-        card_path: &Path,
         model_path: &Path,
         node_conf: MultiNodeConfig,
         tensor_parallel_size: u32,
+        extra_engine_args: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
         let w = worker::start(
             cancel_token.clone(),
             sock_code,
-            card_path,
             model_path,
             node_conf,
             tensor_parallel_size,
+            extra_engine_args,
         )
         .await?;
         let engine = VllmEngine {

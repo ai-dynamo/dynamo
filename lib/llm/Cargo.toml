@@ -36,7 +36,7 @@ sentencepiece = ["dep:sentencepiece"]
 trtllm = []
 vllm = []
 
-cuda = ["mistralrs/cuda", "llama-cpp-2/cuda"]
+cuda = ["mistralrs/cuda", "llama-cpp-2/cuda", "candle-core/cuda"]
 metal = ["mistralrs/metal", "llama-cpp-2/metal"]
 vulkan = ["llama-cpp-2/vulkan"]
 
@@ -68,9 +68,11 @@ uuid = { workspace = true }
 xxhash-rust = { workspace = true }
 strum = { workspace = true }
 
+akin = "0.4.0"
 async-openai = "0.27.2"
 blake3 = "1"
 bytemuck = "1.22"
+candle-core = { version = "0.8.0" }
 derive-getters = "0.5"
 regex = "1"
 rayon = "1"
@@ -78,7 +80,6 @@ rayon = "1"
 # kv_cuda
 cudarc = { git = "https://github.com/coreylowman/cudarc.git", rev = "8c52e735b55bf8e979e1a16bd85e3dfe4f87c9fe", features = ["cuda-12040"], optional = true }
 ndarray = { version = "0.16", optional = true }
-# candle-core = { version = "0.8.3", features = ["cuda"], optional = true }
 # half = "2.4.1"
 
 pyo3 = { version = "0.23.3", default-features = false, features = [
@@ -138,6 +139,9 @@ pyo3-async-runtimes = { version = "0.23.0", optional = true, default-features = 
 ] }
 pythonize = { version = "0.23", optional = true }
 
+# GGUF
+ggus = "0.4.0"
+memmap2 = "0.9.5"
 
 [dev-dependencies]
 hf-hub = { workspace = true }

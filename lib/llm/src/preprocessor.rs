@@ -74,6 +74,9 @@ impl OpenAIPreprocessor {
 
         let tokenizer = match &mdc.tokenizer {
             TokenizerKind::HfTokenizerJson(file) => HuggingFaceTokenizer::from_file(file)?,
+            TokenizerKind::GGUF(tokenizer) => {
+                HuggingFaceTokenizer::from_tokenizer(*tokenizer.clone())
+            }
         };
         let tokenizer = Arc::new(tokenizer);
 

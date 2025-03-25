@@ -36,6 +36,8 @@ VllmWorker:
   max-num-batched-tokens: 16384
   remote-prefill: true
   conditional-disagg: true
+  max-local-prefill-length: 10
+  max-prefill-queue-size: 2
   tensor-parallel-size: 1
   router: kv
   enable-prefix-caching: true
