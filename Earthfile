@@ -46,7 +46,7 @@ uv-source:
 dynamo-base:
     FROM ubuntu:24.04
     RUN apt-get update && \
-        DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0
+        DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0 curl
     COPY +uv-source/uv /bin/uv
     # COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
     ENV CARGO_BUILD_JOBS=16
