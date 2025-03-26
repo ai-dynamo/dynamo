@@ -23,4 +23,4 @@ ai-dynamo-store
 uv pip install -e ".[dev]"
 
 #### Run docker container locally
-earthly +docker && dk run -it my-registry/ai-dynamo-store:latest
+earthly +docker && docker run -it my-registry/ai-dynamo-store:latest
