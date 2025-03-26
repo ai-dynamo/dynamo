@@ -13,24 +13,42 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-pub use crate::kv_router::protocols::ForwardPassMetrics;
-use crate::kv_router::KV_METRICS_ENDPOINT;
-
-use crate::kv_router::scheduler::Endpoint;
-use crate::kv_router::ProcessedEndpoints;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::{service::EndpointInfo, utils::Duration, Result};
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
+
+use crate::kv_router::indexer::{KvIndexer, KvIndexerInterface, WorkerId};
+use crate::kv_router::protocols::ForwardPassMetrics;
+use crate::kv_router::scheduler::Endpoint;
+use crate::kv_router::ProcessedEndpoints;
+use crate::kv_router::KV_METRICS_ENDPOINT;
 
 pub struct KvMetricsAggregator {
     pub service_name: String,
     pub endpoints: Arc<Mutex<ProcessedEndpoints>>,
+    pub kv_block_size: usize,
+    indexer: KvIndexer,
 }
 
 impl KvMetricsAggregator {
-    pub async fn new(component: Component, cancellation_token: CancellationToken) -> Self {
+    /// Creates a new KvMetricsAggregator with KvIndexer
+    ///
+    /// # Arguments
+    /// * `component` - Component information
+    /// * `cancellation_token` - Token for cancelling background tasks
+    /// * `kv_block_size` - Size of the KV blocks
+    ///
+    /// # Returns
+    /// * `Result<Self, anyhow::Error>` - New KvMetricsAggregator instance or an error
+    pub async fn new(
+        component: Component,
+        cancellation_token: CancellationToken,
+        kv_block_size: usize,
+    ) -> Self {
         let (ep_tx, mut ep_rx) = tokio::sync::mpsc::channel(128);
 
         tokio::spawn(collect_endpoints_task(
@@ -39,7 +57,6 @@ impl KvMetricsAggregator {
             cancellation_token.clone(),
         ));
 
-        tracing::trace!("awaiting the start of the background endpoint subscriber");
         let endpoints = Arc::new(Mutex::new(ProcessedEndpoints::default()));
         let endpoints_clone = endpoints.clone();
         tokio::spawn(async move {
@@ -63,9 +80,16 @@ impl KvMetricsAggregator {
 
             tracing::trace!("background endpoint subscriber shutting down");
         });
+        let indexer = KvIndexer::new(
+            cancellation_token.clone(),
+            kv_block_size,
+        );
+
         Self {
             service_name: component.service_name(),
             endpoints,
+            indexer,
+            kv_block_size,
         }
     }
 
@@ -78,6 +102,93 @@ impl KvMetricsAggregator {
             }
         }
     }
+
+    /// Finds the best worker based on overlap scores, GPU cache usage, and request queue metrics
+    ///
+    /// # Arguments
+    /// * `tokens` - The tokens to match
+    /// * `block_size` - The size of the block
+    ///
+    /// # Returns
+    /// * `Result<String, anyhow::Error>` - The ID of the best worker or an error
+    pub async fn find_best_worker(
+        &self,
+        tokens: &[u32],
+    ) -> Result<WorkerId, anyhow::Error> {
+        // Get overlap scores from the indexer
+        let overlap_scores = self.indexer.find_matches_for_request(tokens).await?;
+
+        // Get endpoint metrics
+        let endpoints = self.get_endpoints();
+        let mut endpoint_metrics: HashMap<WorkerId, &ForwardPassMetrics> = HashMap::new();
+        for endpoint in &endpoints.endpoints {
+            endpoint_metrics.insert(endpoint.worker_id(), &endpoint.data);
+        }
+        
+        let mut max_requests_waiting = 0;
+        for endpoint in &endpoints.endpoints {
+            max_requests_waiting = max_requests_waiting.max(endpoint.data.num_requests_waiting);
+        }
+        let max_requests_waiting = max_requests_waiting.max(1);
+
+        // Compute cost for each worker
+        let mut worker_costs: HashMap<WorkerId, f64> = HashMap::new();
+        for (worker_id, metrics) in &endpoint_metrics {
+            let overlap_score = overlap_scores.scores.get(worker_id).copied().unwrap_or(0);
+            let cost = calculate_worker_cost(
+                overlap_score,
+                self.kv_block_size,
+                tokens.len(),
+                metrics.gpu_cache_usage_perc,
+                metrics.num_requests_waiting,
+                max_requests_waiting,
+            );
+            worker_costs.insert(*worker_id, cost);
+        }
+
+        if worker_costs.is_empty() {
+            return Err(anyhow::anyhow!("No valid workers found"));
+        }
+
+        // Find workers with maximum cost
+        let max_cost = worker_costs.iter().map(|(_, cost)| *cost).fold(f64::NEG_INFINITY, f64::max);
+        let best_workers: Vec<WorkerId> = worker_costs
+            .into_iter()
+            .filter(|(_, cost)| (cost - max_cost).abs() < f64::EPSILON)
+            .map(|(id, _)| id)
+            .collect();
+
+        // Randomly select one of the best workers
+        let index = rand::random::<u32>() % (best_workers.len() as u32);
+        let index = index as usize;
+        match best_workers.get(index) {
+            Some(worker_id) => {
+                debug!(
+                    "Selected worker {} with cost {}",
+                    worker_id, max_cost
+                );
+                Ok(worker_id.clone())
+            }
+            None => Err(anyhow::anyhow!("Failed to select a worker")),
+        }
+    }
+}
+
+/// Calculate the cost function for a worker based on the formula:
+/// 2 * overlap * block_size / len_of_tokens - gpu_cache_usage_perc - num_requests_waiting / max(num_requests_waiting)
+fn calculate_worker_cost(
+    overlap: u32,
+    block_size: usize,
+    tokens_len: usize,
+    gpu_cache_usage_perc: f32,
+    num_requests_waiting: u64,
+    max_requests_waiting: u64,
+) -> f64 {
+    let overlap_term = (overlap as f64) * (block_size as f64) / (tokens_len as f64);
+    let gpu_term = gpu_cache_usage_perc as f64;
+    let queue_term = (num_requests_waiting as f64) / (max_requests_waiting as f64);
+    
+    2.0 * overlap_term - gpu_term - queue_term
 }
 
 /// [gluo TODO] 'collect_endpoints' is from component/metrics,
