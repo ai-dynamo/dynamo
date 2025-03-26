@@ -30,22 +30,25 @@ Router:
 
 VllmWorker:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  enforce-eager: true
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
   block-size: 64
   max-model-len: 16384
   max-num-batched-tokens: 16384
+  remote-prefill: true
   conditional-disagg: true
   max-local-prefill-length: 10
   max-prefill-queue-size: 2
   tensor-parallel-size: 1
   router: kv
   enable-prefix-caching: true
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: 1
 
 # TODO - set all of these but model as default
 PrefillWorker:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  enforce-eager: true
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
   block-size: 64
   max-model-len: 16384

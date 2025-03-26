@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_stream::stream;
 use async_trait::async_trait;
@@ -39,6 +39,7 @@ impl SgLangEngine {
         node_conf: MultiNodeConfig,
         tensor_parallel_size: u32,
         base_gpu_id: u32,
+        extra_engine_args: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
         let w = super::worker::start(
             cancel_token.clone(),
@@ -47,6 +48,7 @@ impl SgLangEngine {
             node_conf,
             tensor_parallel_size,
             base_gpu_id,
+            extra_engine_args,
         )
         .await?;
         let engine = SgLangEngine {
