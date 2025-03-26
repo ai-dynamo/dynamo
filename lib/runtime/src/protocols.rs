@@ -177,6 +177,7 @@ impl Default for RouterType {
     }
 }
 
+// TODO Is this used anywhere?
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ModelMetaData {
     pub name: String,

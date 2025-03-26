@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 use crate::input::common;
-use crate::EngineConfig;
+use crate::{EngineConfig, Flags};
 
 /// Max tokens in each response.
 /// TODO: For batch mode this should be the full context size of the model
@@ -64,11 +64,12 @@ struct Entry {
 
 pub async fn run(
     runtime: Runtime,
-    cancel_token: CancellationToken,
+    flags: Flags,
     maybe_card: Option<ModelDeploymentCard>,
     input_jsonl: PathBuf,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
+    let cancel_token = runtime.primary_token();
     // Check if the path exists and is a directory
     if !input_jsonl.exists() || !input_jsonl.is_file() {
         anyhow::bail!(
@@ -78,7 +79,7 @@ pub async fn run(
     }
 
     let (service_name, engine, _inspect_template) =
-        common::prepare_engine(runtime.clone(), engine_config).await?;
+        common::prepare_engine(runtime, flags, engine_config).await?;
     let service_name_ref = Arc::new(service_name);
 
     let pre_processor = if let Some(card) = maybe_card {

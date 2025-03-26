@@ -78,23 +78,29 @@ pub struct KvMetricsPublisher {
     rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>,
 }
 
-impl KvMetricsPublisher {
-    pub fn new() -> Result<Self> {
+impl Default for KvMetricsPublisher {
+    fn default() -> Self {
         let (tx, rx) = tokio::sync::watch::channel(Arc::new(ForwardPassMetrics::default()));
-        Ok(KvMetricsPublisher { tx, rx })
+        KvMetricsPublisher { tx, rx }
+    }
+}
+
+impl KvMetricsPublisher {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn publish(
         &self,
         metrics: Arc<ForwardPassMetrics>,
     ) -> Result<(), tokio::sync::watch::error::SendError<Arc<ForwardPassMetrics>>> {
-        log::debug!("Publish metrics: {:?}", metrics);
+        log::trace!("Publish metrics: {:?}", metrics);
         self.tx.send(metrics)
     }
 
-    pub async fn create_endpoint(&self, component: Component) -> Result<()> {
+    pub async fn run(&self, component: Component) -> Result<()> {
         let mut metrics_rx = self.rx.clone();
-        let handler = Arc::new(KvLoadEndpoingHander::new(metrics_rx.clone()));
+        let handler = Arc::new(KvLoadEndpointHander::new(metrics_rx.clone()));
         let handler = Ingress::for_engine(handler)?;
 
         component
@@ -108,13 +114,19 @@ impl KvMetricsPublisher {
             .start()
             .await
     }
+
+    /// Use `run`. This does not return until shutdown.
+    #[deprecated]
+    pub async fn create_endpoint(&self, component: Component) -> Result<()> {
+        self.run(component).await
+    }
 }
 
-struct KvLoadEndpoingHander {
+struct KvLoadEndpointHander {
     metrics_rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>,
 }
 
-impl KvLoadEndpoingHander {
+impl KvLoadEndpointHander {
     pub fn new(metrics_rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>) -> Self {
         Self { metrics_rx }
     }
@@ -122,7 +134,7 @@ impl KvLoadEndpoingHander {
 
 #[async_trait]
 impl AsyncEngine<SingleIn<()>, ManyOut<Annotated<ForwardPassMetrics>>, Error>
-    for KvLoadEndpoingHander
+    for KvLoadEndpointHander
 {
     async fn generate(
         &self,

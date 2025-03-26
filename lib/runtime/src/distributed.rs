@@ -26,6 +26,7 @@ use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, OK};
 
 use derive_getters::Dissolve;
 use figment::error;
+use tokio_util::sync::CancellationToken;
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
@@ -72,6 +73,10 @@ impl DistributedRuntime {
 
     pub fn runtime(&self) -> &Runtime {
         &self.runtime
+    }
+
+    pub fn primary_token(&self) -> CancellationToken {
+        self.runtime.primary_token()
     }
 
     pub fn primary_lease(&self) -> etcd::Lease {

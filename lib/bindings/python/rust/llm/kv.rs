@@ -71,7 +71,7 @@ pub(crate) struct KvMetricsPublisher {
 impl KvMetricsPublisher {
     #[new]
     fn new() -> PyResult<Self> {
-        let inner = llm_rs::kv_router::publisher::KvMetricsPublisher::new().map_err(to_pyerr)?;
+        let inner = llm_rs::kv_router::publisher::KvMetricsPublisher::new();
         Ok(Self {
             inner: inner.into(),
         })
@@ -85,10 +85,7 @@ impl KvMetricsPublisher {
         let rs_publisher = self.inner.clone();
         let rs_component = component.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            rs_publisher
-                .create_endpoint(rs_component)
-                .await
-                .map_err(to_pyerr)?;
+            rs_publisher.run(rs_component).await.map_err(to_pyerr)?;
             Ok(())
         })
     }
