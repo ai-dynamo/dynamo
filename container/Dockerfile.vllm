@@ -262,6 +262,10 @@ COPY components /workspace/components
 COPY launch /workspace/launch
 
 ARG CARGO_BUILD_JOBS
+# Set CARGO_BUILD_JOBS to 16 if not provided
+# This is to prevent cargo from building $(nproc) jobs in parallel,
+# which might exceed the number of opened files limit.
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 
 ENV CARGO_TARGET_DIR=/workspace/target
 
