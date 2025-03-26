@@ -87,24 +87,14 @@ pub struct KvScheduler {
 
 impl KvScheduler {
     pub async fn start(
-        endpoints_rx: tokio::sync::mpsc::Receiver<ProcessedEndpoints>,
+        endpoints_rx: tokio::sync::watch::Receiver<ProcessedEndpoints>,
         ns: Namespace,
         kv_block_size: usize,
     ) -> Result<Self, KvSchedulerError> {
         let mut endpoints_rx = endpoints_rx;
+        let mut endpoints: ProcessedEndpoints = endpoints_rx.borrow_and_update().clone();
 
-        tracing::trace!("awaiting the start of the background endpoint subscriber");
-        let mut endpoints = match endpoints_rx.recv().await {
-            Some(endpoints) => endpoints,
-            None => {
-                return Err(KvSchedulerError::SubscriberShutdown);
-            }
-        };
-
-        // Channel to asynchronously publish metric events on
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<KVHitRateEvent>();
-
-        // Publisher task
         tokio::spawn(async move {
             let mut event_rx = event_rx;
             while let Some(event) = event_rx.recv().await {
@@ -115,7 +105,7 @@ impl KvScheduler {
         });
 
         // Channel to accept new scheduling requests
-        let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(16);
+        let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
         tracing::debug!("scheduler starting");
         // Background task to handle scheduling requests
         tokio::spawn(async move {
@@ -140,18 +130,9 @@ impl KvScheduler {
                         }
                     }
 
-                    new_endpoints = endpoints_rx.recv() => {
-                        match new_endpoints {
-                            Some(new_endpoints) => {
-                                tracing::trace!("updated endpoints");
-                                endpoints = new_endpoints;
-                                continue 'outer;
-                            }
-                            None => {
-                                tracing::trace!("endpoint subscriber shutdown");
-                                break 'outer;
-                            }
-                        }
+                    new_endpoints = endpoints_rx.changed() => {
+                        endpoints = endpoints_rx.borrow_and_update().clone();
+                        continue 'outer;
                     }
                 };
                 tracing::debug!("selected");
@@ -164,13 +145,14 @@ impl KvScheduler {
                         }
                         Err(KvSchedulerError::AllWorkersBusy) => {
                             tracing::trace!("all workers busy; waiting for more capacity");
-                            endpoints = match endpoints_rx.recv().await {
-                                Some(endpoints) => endpoints,
-                                None => {
-                                    tracing::trace!("endpoint subscriber shutdown");
+                            match endpoints_rx.changed().await {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    tracing::error!("error waiting for endpoints change: {:?}", e);
                                     break 'outer;
                                 }
                             };
+                            endpoints = endpoints_rx.borrow_and_update().clone();
                         }
                         Err(e) => {
                             tracing::error!("error scheduling request: {:?}", e);

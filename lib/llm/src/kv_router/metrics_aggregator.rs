@@ -22,61 +22,36 @@ use crate::kv_router::scheduler::Endpoint;
 use crate::kv_router::ProcessedEndpoints;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::{service::EndpointInfo, utils::Duration, Result};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 pub struct KvMetricsAggregator {
     pub service_name: String,
-    pub endpoints: Arc<Mutex<ProcessedEndpoints>>,
+    pub endpoints_rx: watch::Receiver<ProcessedEndpoints>,
 }
 
 impl KvMetricsAggregator {
     pub async fn new(component: Component, cancellation_token: CancellationToken) -> Self {
-        let (ep_tx, mut ep_rx) = tokio::sync::mpsc::channel(128);
+        let (watch_tx, watch_rx) = watch::channel(ProcessedEndpoints::default());
 
         tokio::spawn(collect_endpoints_task(
             component.clone(),
-            ep_tx,
+            watch_tx,
             cancellation_token.clone(),
         ));
 
-        tracing::trace!("awaiting the start of the background endpoint subscriber");
-        let endpoints = Arc::new(Mutex::new(ProcessedEndpoints::default()));
-        let endpoints_clone = endpoints.clone();
-        tokio::spawn(async move {
-            tracing::debug!("scheduler background task started");
-            loop {
-                match ep_rx.recv().await {
-                    Some(endpoints) => match endpoints_clone.lock() {
-                        Ok(mut shared_endpoint) => {
-                            *shared_endpoint = endpoints;
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to acquire lock on endpoints: {:?}", e);
-                        }
-                    },
-                    None => {
-                        tracing::warn!("endpoint subscriber shutdown");
-                        break;
-                    }
-                };
-            }
-
-            tracing::trace!("background endpoint subscriber shutting down");
-        });
         Self {
             service_name: component.service_name(),
-            endpoints,
+            endpoints_rx: watch_rx,
         }
     }
 
     pub fn get_endpoints(&self) -> ProcessedEndpoints {
-        match self.endpoints.lock() {
-            Ok(endpoints) => endpoints.clone(),
-            Err(e) => {
-                tracing::error!("Failed to acquire lock on endpoints: {:?}", e);
-                ProcessedEndpoints::default()
-            }
-        }
+        self.endpoints_rx.borrow().clone()
+    }
+
+    pub fn endpoints_watcher(&self) -> watch::Receiver<ProcessedEndpoints> {
+        self.endpoints_rx.clone()
     }
 }
 
@@ -108,7 +83,7 @@ pub async fn collect_endpoints(
 
 pub async fn collect_endpoints_task(
     component: Component,
-    ep_tx: tokio::sync::mpsc::Sender<ProcessedEndpoints>,
+    watch_tx: watch::Sender<ProcessedEndpoints>,
     cancel: CancellationToken,
 ) {
     let backoff_delay = Duration::from_millis(100);
@@ -161,7 +136,8 @@ pub async fn collect_endpoints_task(
                 );
 
                 let processed = ProcessedEndpoints::new(endpoints);
-                if ep_tx.send(processed).await.is_err() {
+
+                if watch_tx.send(processed).is_err() {
                     tracing::trace!("failed to send processed endpoints; shutting down");
                     break;
                 }
