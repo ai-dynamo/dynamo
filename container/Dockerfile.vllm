@@ -196,7 +196,8 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     cd /tmp/vllm && \
     wheel unpack *.whl && \
     cd vllm-${VLLM_REF}/ && \
-    patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
+    patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} > list_of_files.txt && \
+    sed -i "1i# Modified by NVIDIA Inc. Authors email: sw-dl-dynamo@nvidia.com" $(cat list_of_files.txt | awk '{print $3}') && \
     # Rename the package from vllm to ai_dynamo_vllm
     mv vllm-${VLLM_REF}.dist-info ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info && \
     sed -i "s/^Name: vllm/Name: ${VLLM_PATCHED_PACKAGE_NAME}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info/METADATA && \
