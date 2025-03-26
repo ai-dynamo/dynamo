@@ -5230,9 +5230,11 @@ dependencies = [
  "clap",
  "dynamo-llm",
  "dynamo-runtime",
+ "rand 0.9.0",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

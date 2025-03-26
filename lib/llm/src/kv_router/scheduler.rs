@@ -17,12 +17,14 @@ use dynamo_runtime::component::Namespace;
 use dynamo_runtime::traits::events::EventPublisher;
 use serde::{Deserialize, Serialize};
 use std::borrow::BorrowMut;
-use std::cmp::min;
 
 use crate::kv_router::indexer::OverlapScores;
 pub use crate::kv_router::protocols::ForwardPassMetrics;
 use crate::kv_router::scoring::ProcessedEndpoints;
 use crate::kv_router::KV_HIT_RATE_SUBJECT;
+
+use super::protocols::WorkerSelectionResult;
+use super::WorkerSelector;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KVHitRateEvent {
@@ -68,8 +70,8 @@ impl Endpoint {
 }
 
 pub struct SchedulingRequest {
-    isl_tokens: usize,
-    overlap: OverlapScores,
+    pub isl_tokens: usize,
+    pub overlap: OverlapScores,
     resp_tx: tokio::sync::oneshot::Sender<i64>,
 }
 
@@ -87,6 +89,7 @@ pub struct KvScheduler {
 
 impl KvScheduler {
     pub async fn start(
+        selector: Box<dyn WorkerSelector + Send + Sync>,
         endpoints_rx: tokio::sync::watch::Receiver<ProcessedEndpoints>,
         ns: Namespace,
         kv_block_size: usize,
@@ -137,9 +140,13 @@ impl KvScheduler {
                 };
                 tracing::debug!("selected");
                 loop {
-                    match select_worker(endpoints.borrow_mut(), &request, &event_tx, kv_block_size)
-                    {
-                        Ok(worker_id) => {
+                    match selector.select_worker(&endpoints, &request, kv_block_size) {
+                        Ok(selection) => {
+                            let worker_id = process_worker_selection(
+                                endpoints.borrow_mut(),
+                                selection,
+                                &event_tx,
+                            );
                             request.respond(worker_id);
                             continue 'outer;
                         }
@@ -194,105 +201,28 @@ impl KvScheduler {
     }
 }
 
-pub fn select_worker(
+// This becomes the driver function that handles the selection result
+pub fn process_worker_selection(
     workers: &mut ProcessedEndpoints,
-    request: &SchedulingRequest,
+    selection: WorkerSelectionResult,
     event_tx: &tokio::sync::mpsc::UnboundedSender<KVHitRateEvent>,
-    kv_block_size: usize,
-) -> Result<i64, KvSchedulerError> {
-    // balance mode prioritizes balancing load across workers
-    let balance_threshold: f64 = 0.1;
-    let balance_mode = workers.load_std > balance_threshold * workers.load_avg;
+) -> i64 {
+    // Update worker state
+    workers.endpoints[selection.worker_index]
+        .data
+        .request_active_slots += 1;
+    workers.endpoints[selection.worker_index]
+        .data
+        .kv_active_blocks += selection.total_blocks;
 
-    // Determine alpha based on mode
-    let alpha = if balance_mode { 0.7 } else { 0.3 };
-    let gamma = 0.1; // example tuning param
-
-    // Compute each worker's score
-    let mut best_index = None;
-    let mut best_cost = f64::INFINITY;
-    // [FIXME] REMOVE ONLY FOR TESTING
-    if workers.endpoints.is_empty() {
-        return Err(KvSchedulerError::NoEndpoints);
+    // Emit event
+    if let Err(e) = event_tx.send(KVHitRateEvent {
+        worker_id: selection.worker_id,
+        isl_blocks: selection.isl_blocks,
+        overlap_blocks: selection.overlap_blocks,
+    }) {
+        tracing::warn!("Failed to send KV hit rate event: {:?}", e);
     }
 
-    for (i, w) in workers.endpoints.iter().enumerate() {
-        // Exclude workers that are at capacity
-        if w.data.request_active_slots >= w.data.request_total_slots
-            || w.data.kv_active_blocks >= w.data.kv_total_blocks
-        {
-            continue;
-        }
-
-        let kv_load_ratio = w.data.kv_active_blocks as f64 / w.data.kv_total_blocks as f64;
-        let load_deviation = kv_load_ratio - workers.load_avg;
-
-        // [FIXME] multiple endpoints of the same worker cause out of bound error
-        let worker_id = workers.worker_ids[i];
-        let overlap_score = request.overlap.scores.get(&worker_id).map_or(0, |x| *x);
-        let overlap_score = overlap_score as usize * kv_block_size;
-
-        let new_tokens = request.isl_tokens.saturating_sub(overlap_score);
-        let normalized_new_tokens = new_tokens as f64 / request.isl_tokens as f64;
-
-        let request_load_ratio =
-            w.data.request_active_slots as f64 / w.data.request_total_slots as f64;
-
-        // cost = alpha * load_deviation + (1 - alpha)*normalized_new_tokens + gamma * request_load_ratio
-        let cost = alpha * load_deviation
-            + (1.0 - alpha) * normalized_new_tokens
-            + gamma * request_load_ratio;
-
-        tracing::debug!("worker: {}; load_deviation: {}; normalized new blocks: {}; request_load_ratio: {} cost: {}",
-                worker_id,
-                load_deviation,
-                normalized_new_tokens,
-                request_load_ratio,
-                cost
-            );
-
-        if cost < best_cost {
-            best_cost = cost;
-            best_index = Some(i);
-        }
-    }
-
-    if let Some(best_index) = best_index {
-        let total_blocks = min(request.isl_tokens / kv_block_size, 1);
-
-        workers.endpoints[best_index].data.request_active_slots += 1;
-        workers.endpoints[best_index].data.kv_active_blocks += total_blocks as u64;
-
-        // Optimization - pass this to a channel for emitting events, async task, etc. to avoid blocking the scheduler
-        let best_worker_id = workers.endpoints[best_index].worker_id();
-        let isl_blocks = request.isl_tokens / kv_block_size;
-        let overlap_blocks = request
-            .overlap
-            .scores
-            .get(&best_worker_id)
-            .copied()
-            .unwrap_or(0);
-        if let Err(e) = event_tx.send(KVHitRateEvent {
-            worker_id: best_worker_id,
-            isl_blocks,
-            overlap_blocks: overlap_blocks as usize,
-        }) {
-            tracing::warn!("Failed to send KV hit rate event: {:?}", e);
-        }
-    }
-
-    match best_index {
-        Some(i) => {
-            tracing::info!(
-                "selected worker: {}; cost: {}",
-                workers.endpoints[i].worker_id(),
-                best_cost
-            );
-            Ok(workers.endpoints[i].worker_id())
-        }
-        None => {
-            tracing::debug!("all workers busy");
-            Err(KvSchedulerError::AllWorkersBusy)
-        }
-    }
+    selection.worker_id
 }

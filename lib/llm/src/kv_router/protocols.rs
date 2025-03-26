@@ -26,6 +26,15 @@ pub struct RouterResponse {
     pub worker_id: i64,
 }
 
+#[derive(Debug)]
+pub struct WorkerSelectionResult {
+    pub worker_id: i64,
+    pub worker_index: usize,
+    pub total_blocks: u64,
+    pub overlap_blocks: usize,
+    pub isl_blocks: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ForwardPassMetrics {
     pub request_active_slots: u64,

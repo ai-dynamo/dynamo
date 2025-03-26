@@ -37,8 +37,8 @@ use crate::{
     kv_router::{
         indexer::{KvIndexer, KvIndexerInterface, RouterEvent},
         metrics_aggregator::KvMetricsAggregator,
-        protocols::{LocalBlockHash, RouterRequest, RouterResponse},
-        scheduler::KvScheduler,
+        protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
+        scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
         scoring::ProcessedEndpoints,
     },
     tokens::Tokens,
@@ -52,6 +52,16 @@ pub const KV_EVENT_SUBJECT: &str = "kv_events";
 pub const KV_HIT_RATE_SUBJECT: &str = "kv-hit-rate";
 pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 
+/// A trait that users can implement to define custom selection logic
+pub trait WorkerSelector {
+    fn select_worker(
+        &self,
+        workers: &ProcessedEndpoints,
+        request: &SchedulingRequest,
+        kv_block_size: usize,
+    ) -> Result<WorkerSelectionResult, KvSchedulerError>;
+}
+
 pub struct KvRouter {
     indexer: KvIndexer,
     scheduler: KvScheduler,
@@ -59,7 +69,11 @@ pub struct KvRouter {
 }
 
 impl KvRouter {
-    pub async fn new(component: Component, block_size: usize) -> Result<Arc<Self>> {
+    pub async fn new(
+        selector: Box<dyn WorkerSelector + Send + Sync>,
+        component: Component,
+        block_size: usize,
+    ) -> Result<Arc<Self>> {
         let cancellation_token = component.drt().primary_lease().primary_token();
 
         let metrics_aggregator =
@@ -67,6 +81,7 @@ impl KvRouter {
 
         let indexer = KvIndexer::new(cancellation_token.clone(), block_size);
         let scheduler = KvScheduler::start(
+            selector,
             metrics_aggregator.endpoints_watcher(),
             component.namespace().clone(),
             block_size,

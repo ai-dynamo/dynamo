@@ -20,12 +20,20 @@
 // 2. Update the backend component to produce a config in a standard location.
 // 3. Update the KvRouter to read the config from the backend component.
 
+use std::collections::HashMap;
+
 use clap::Parser;
 
-use dynamo_llm::kv_router::KvRouter;
+use dynamo_llm::kv_router::{
+    protocols::WorkerSelectionResult,
+    scheduler::{KvSchedulerError, SchedulingRequest},
+    scoring::ProcessedEndpoints,
+    KvRouter, WorkerSelector,
+};
 use dynamo_runtime::{
     logging, pipeline::network::Ingress, DistributedRuntime, Result, Runtime, Worker,
 };
+use rand::Rng;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -57,7 +65,9 @@ async fn app(runtime: Runtime) -> Result<()> {
         .namespace(&args.namespace)?
         .component(&args.component)?;
 
-    let router = KvRouter::new(component.clone(), args.block_size).await?;
+    let selector = Box::new(CustomeWorkerSelector);
+
+    let router = KvRouter::new(selector, component.clone(), args.block_size).await?;
     let router = Ingress::for_engine(router)?;
 
     component
@@ -69,4 +79,105 @@ async fn app(runtime: Runtime) -> Result<()> {
         .handler(router)
         .start()
         .await
+}
+
+// Default implementation matching the Python _cost_function
+pub struct CustomeWorkerSelector;
+
+impl WorkerSelector for CustomeWorkerSelector {
+    fn select_worker(
+        &self,
+        workers: &ProcessedEndpoints,
+        request: &SchedulingRequest,
+        kv_block_size: usize,
+    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+        let mut worker_scores = HashMap::new();
+        let mut max_waiting = 0.0;
+
+        // Calculate worker scores and find max waiting requests
+        for (i, w) in workers.endpoints.iter().enumerate() {
+            let worker_id = workers.worker_ids[i];
+
+            // Calculate score similar to Python version
+            if let Some(score) = request.overlap.scores.get(&worker_id) {
+                let score = *score as f64 * kv_block_size as f64 / request.isl_tokens as f64;
+                worker_scores.insert(worker_id, score);
+            }
+
+            // Track max waiting requests
+            max_waiting = f64::max(max_waiting, w.data.request_active_slots as f64);
+        }
+
+        // Calculate logits for each worker
+        let mut best_logit = f64::NEG_INFINITY;
+        let mut best_workers = Vec::new();
+
+        for (i, w) in workers.endpoints.iter().enumerate() {
+            let worker_id = workers.worker_ids[i];
+
+            // Get score or default to 0.0
+            let score = worker_scores.get(&worker_id).copied().unwrap_or(0.0);
+
+            // Calculate normalized metrics
+            let gpu_cache_usage = w.data.kv_active_blocks as f64 / w.data.kv_total_blocks as f64;
+            let normalized_waiting = if max_waiting > 0.0 {
+                w.data.request_active_slots as f64 / max_waiting
+            } else {
+                0.0
+            };
+
+            // Calculate logit using same formula as Python
+            let logit = 2.0 * score - gpu_cache_usage - normalized_waiting;
+
+            tracing::info!(
+                "Formula for {}: {:.3} = 2.0 * {:.3} - {:.3} - {:.3}",
+                worker_id,
+                logit,
+                score,
+                gpu_cache_usage,
+                normalized_waiting
+            );
+
+            // Track best workers
+            match logit.partial_cmp(&best_logit) {
+                Some(std::cmp::Ordering::Greater) => {
+                    best_logit = logit;
+                    best_workers.clear();
+                    best_workers.push(i);
+                }
+                Some(std::cmp::Ordering::Equal) => {
+                    best_workers.push(i);
+                }
+                _ => {}
+            }
+        }
+
+        // Return early if no valid workers found
+        if best_workers.is_empty() || best_logit == 0.0 {
+            return Err(KvSchedulerError::NoEndpoints);
+        }
+
+        // Randomly select from best workers
+        let selected_index = {
+            let mut rng = rand::rng();
+            best_workers[rng.random_range(0..best_workers.len())]
+        };
+
+        let selected_worker = &workers.endpoints[selected_index];
+        let worker_id = selected_worker.worker_id();
+
+        // Log selection metrics
+        tracing::info!("Selected worker: {}, logit: {:.3}", worker_id, best_logit);
+
+        let total_blocks = std::cmp::min(request.isl_tokens / kv_block_size, 1) as u64;
+        let overlap_blocks = request.overlap.scores.get(&worker_id).copied().unwrap_or(0) as usize;
+
+        Ok(WorkerSelectionResult {
+            worker_id,
+            worker_index: selected_index,
+            total_blocks,
+            overlap_blocks,
+            isl_blocks: request.isl_tokens / kv_block_size,
+        })
+    }
 }

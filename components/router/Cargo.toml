@@ -28,8 +28,10 @@ keywords.workspace = true
 dynamo-runtime = { workspace = true}
 dynamo-llm = { workspace = true}
 
+rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 
 clap = { version = "4.5", features = ["derive"] }
