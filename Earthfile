@@ -48,7 +48,6 @@ dynamo-base:
     RUN apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0 curl
     COPY +uv-source/uv /bin/uv
-    # COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
     ENV CARGO_BUILD_JOBS=16
 
     RUN mkdir /opt/dynamo && \
@@ -86,10 +85,10 @@ rust-base:
 
 
 dynamo-base-docker:
-    FROM +rust-base
     ARG IMAGE=dynamo-base-docker
     ARG CI_REGISTRY_IMAGE=my-registry
     ARG CI_COMMIT_SHA=latest
+    FROM +rust-base
     WORKDIR /workspace
 
     COPY . /workspace/
@@ -118,7 +117,6 @@ all-test:
 all-docker:
     ARG CI_REGISTRY_IMAGE=my-registry
     ARG CI_COMMIT_SHA=latest
-    BUILD +dynamo-base-docker
     BUILD ./deploy/dynamo/operator+docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
     BUILD ./deploy/dynamo/api-server+docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
     BUILD ./deploy/dynamo/api-store+docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
