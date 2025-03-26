@@ -65,7 +65,7 @@ async fn app(runtime: Runtime) -> Result<()> {
         .namespace(&args.namespace)?
         .component(&args.component)?;
 
-    let selector = Box::new(CustomeWorkerSelector);
+    let selector = Box::new(CustomWorkerSelector);
 
     let router = KvRouter::new(component.clone(), args.block_size, Some(selector)).await?;
     let router = Ingress::for_engine(router)?;
@@ -81,9 +81,9 @@ async fn app(runtime: Runtime) -> Result<()> {
         .await
 }
 
-pub struct CustomeWorkerSelector;
+pub struct CustomWorkerSelector;
 
-impl WorkerSelector for CustomeWorkerSelector {
+impl WorkerSelector for CustomWorkerSelector {
     fn select_worker(
         &self,
         workers: &ProcessedEndpoints,
