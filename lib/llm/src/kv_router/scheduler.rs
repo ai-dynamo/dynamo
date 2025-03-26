@@ -130,7 +130,7 @@ impl KvScheduler {
                         }
                     }
 
-                    new_endpoints = endpoints_rx.changed() => {
+                    _ = endpoints_rx.changed() => {
                         endpoints = endpoints_rx.borrow_and_update().clone();
                         continue 'outer;
                     }

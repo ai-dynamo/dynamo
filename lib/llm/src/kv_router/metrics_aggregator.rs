@@ -13,8 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::{Arc, Mutex};
-
 pub use crate::kv_router::protocols::ForwardPassMetrics;
 use crate::kv_router::KV_METRICS_ENDPOINT;
 

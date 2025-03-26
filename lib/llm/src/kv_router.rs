@@ -44,7 +44,7 @@ use crate::{
     tokens::Tokens,
 };
 
-use dynamo_runtime::traits::events::{EventPublisher, EventSubscriber};
+use dynamo_runtime::traits::events::EventSubscriber;
 
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
