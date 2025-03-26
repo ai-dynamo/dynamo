@@ -70,21 +70,20 @@ pub struct KvRouter {
 
 impl KvRouter {
     pub async fn new(
-        selector: Box<dyn WorkerSelector + Send + Sync>,
         component: Component,
         block_size: usize,
+        selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
     ) -> Result<Arc<Self>> {
         let cancellation_token = component.drt().primary_lease().primary_token();
 
         let metrics_aggregator =
             KvMetricsAggregator::new(component.clone(), cancellation_token.clone()).await;
-
         let indexer = KvIndexer::new(cancellation_token.clone(), block_size);
         let scheduler = KvScheduler::start(
-            selector,
-            metrics_aggregator.endpoints_watcher(),
             component.namespace().clone(),
             block_size,
+            metrics_aggregator.endpoints_watcher(),
+            selector,
         )
         .await?;
 

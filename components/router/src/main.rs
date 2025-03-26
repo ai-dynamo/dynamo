@@ -67,7 +67,7 @@ async fn app(runtime: Runtime) -> Result<()> {
 
     let selector = Box::new(CustomeWorkerSelector);
 
-    let router = KvRouter::new(selector, component.clone(), args.block_size).await?;
+    let router = KvRouter::new(component.clone(), args.block_size, Some(selector)).await?;
     let router = Ingress::for_engine(router)?;
 
     component
@@ -81,7 +81,6 @@ async fn app(runtime: Runtime) -> Result<()> {
         .await
 }
 
-// Default implementation matching the Python _cost_function
 pub struct CustomeWorkerSelector;
 
 impl WorkerSelector for CustomeWorkerSelector {
