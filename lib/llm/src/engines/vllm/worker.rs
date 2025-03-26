@@ -33,11 +33,11 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc::{error::SendError, Sender};
 use tokio::task::JoinHandle;
 
-use crate::engines::MultiNodeConfig;
 use crate::kv_router::protocols::ForwardPassMetrics;
 use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::FinishReason;
+use crate::{engines::MultiNodeConfig, kv_router::publisher::KvMetricsPublisher};
 
 /// Wait this long for the vllm sub-process to stop after we send it a KILL
 const VLLM_STOP_TIMEOUT: Duration = Duration::from_millis(1500);
@@ -164,6 +164,8 @@ pub async fn start(
     _node_conf: MultiNodeConfig,
     tensor_parallel_size: u32,
     extra_engine_args: Option<PathBuf>,
+    // When using our vllm fork, this is how we publish it's KV metrics for the KV router
+    kv_metrics_publisher: Option<Arc<KvMetricsPublisher>>,
 ) -> anyhow::Result<VllmWorker> {
     pyo3::prepare_freethreaded_python(); // or enable feature "auto-initialize"
     if let Ok(venv) = env::var("VIRTUAL_ENV") {
@@ -191,7 +193,11 @@ pub async fn start(
     let vllm_join_handle = watch_vllm(cancel_token.clone(), vllm_process);
 
     tokio::spawn(heartbeat_loop(cancel_token.clone(), heartbeat));
-    tokio::spawn(metrics_loop(cancel_token.clone(), metrics));
+    tokio::spawn(metrics_loop(
+        cancel_token.clone(),
+        metrics,
+        kv_metrics_publisher.clone(),
+    ));
 
     let active_requests = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let (tx, rx) = tokio::sync::mpsc::channel(8);
@@ -475,7 +481,11 @@ async fn heartbeat_loop(cancel_token: CancellationToken, mut socket: async_zmq::
 }
 
 // NOTE: Custom to our patch of vllm.
-async fn metrics_loop(cancel_token: CancellationToken, mut socket: async_zmq::Pull) {
+async fn metrics_loop(
+    cancel_token: CancellationToken,
+    mut socket: async_zmq::Pull,
+    publisher: Option<Arc<KvMetricsPublisher>>,
+) {
     loop {
         let maybe_metrics = tokio::select! {
             _ = cancel_token.cancelled() => {
@@ -551,15 +561,14 @@ async fn metrics_loop(cancel_token: CancellationToken, mut socket: async_zmq::Pu
 
         match metrics_result {
             Ok(metrics) => {
-                // TODO: These metrics could be attached to StatsHandler or Events
-                // for aggregation and visualization.
-                tracing::debug!("Received vllm metrics: {:?}", metrics);
+                if let Some(metrics_publisher) = publisher.as_ref() {
+                    if let Err(err) = metrics_publisher.publish(metrics.into()) {
+                        tracing::error!(%err, "Failed publishing KV metrics");
+                    }
+                }
             }
             Err(err) => {
-                tracing::error!(
-                    "Error deserializing vllm metrics with Python pickle: {}",
-                    err
-                );
+                tracing::error!("Error deserializing vllm metrics with Python pickle: {err}");
             }
         }
     }
