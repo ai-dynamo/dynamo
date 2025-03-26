@@ -43,8 +43,8 @@ services:
     image: quay.io/minio/minio:RELEASE.2024-06-29T01-20-47Z
     command: minio server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: dyanmo-minio
-      MINIO_ROOT_PASSWORD: dyanmo-minio
+      MINIO_ROOT_USER: dynamo-minio
+      MINIO_ROOT_PASSWORD: dynamo-minio
     ports:
       - "9000:9000"
       - "9001:9001"
