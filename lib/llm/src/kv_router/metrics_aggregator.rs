@@ -80,10 +80,7 @@ impl KvMetricsAggregator {
 
             tracing::trace!("background endpoint subscriber shutting down");
         });
-        let indexer = KvIndexer::new(
-            cancellation_token.clone(),
-            kv_block_size,
-        );
+        let indexer = KvIndexer::new(cancellation_token.clone(), kv_block_size);
 
         Self {
             service_name: component.service_name(),
@@ -111,10 +108,7 @@ impl KvMetricsAggregator {
     ///
     /// # Returns
     /// * `Result<String, anyhow::Error>` - The ID of the best worker or an error
-    pub async fn find_best_worker(
-        &self,
-        tokens: &[u32],
-    ) -> Result<WorkerId, anyhow::Error> {
+    pub async fn find_best_worker(&self, tokens: &[u32]) -> Result<WorkerId, anyhow::Error> {
         // Get overlap scores from the indexer
         let overlap_scores = self.indexer.find_matches_for_request(tokens).await?;
 
@@ -124,7 +118,7 @@ impl KvMetricsAggregator {
         for endpoint in &endpoints.endpoints {
             endpoint_metrics.insert(endpoint.worker_id(), &endpoint.data);
         }
-        
+
         let mut max_requests_waiting = 0;
         for endpoint in &endpoints.endpoints {
             max_requests_waiting = max_requests_waiting.max(endpoint.data.num_requests_waiting);
@@ -151,7 +145,10 @@ impl KvMetricsAggregator {
         }
 
         // Find workers with maximum cost
-        let max_cost = worker_costs.iter().map(|(_, cost)| *cost).fold(f64::NEG_INFINITY, f64::max);
+        let max_cost = worker_costs
+            .values()
+            .map(|cost| *cost)
+            .fold(f64::NEG_INFINITY, f64::max);
         let best_workers: Vec<WorkerId> = worker_costs
             .into_iter()
             .filter(|(_, cost)| (cost - max_cost).abs() < f64::EPSILON)
@@ -163,11 +160,8 @@ impl KvMetricsAggregator {
         let index = index as usize;
         match best_workers.get(index) {
             Some(worker_id) => {
-                debug!(
-                    "Selected worker {} with cost {}",
-                    worker_id, max_cost
-                );
-                Ok(worker_id.clone())
+                debug!("Selected worker {} with cost {}", worker_id, max_cost);
+                Ok(*worker_id)
             }
             None => Err(anyhow::anyhow!("Failed to select a worker")),
         }
@@ -187,7 +181,7 @@ fn calculate_worker_cost(
     let overlap_term = (overlap as f64) * (block_size as f64) / (tokens_len as f64);
     let gpu_term = gpu_cache_usage_perc as f64;
     let queue_term = (num_requests_waiting as f64) / (max_requests_waiting as f64);
-    
+
     2.0 * overlap_term - gpu_term - queue_term
 }
 

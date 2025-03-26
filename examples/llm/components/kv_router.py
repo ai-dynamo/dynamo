@@ -215,7 +215,7 @@ class Router:
     async def generate(self, request: Tokens) -> AsyncIterator[WorkerId]:
         worker_id = await self.metrics_aggregator.find_best_worker(request.tokens)
         yield f"{worker_id}_{0.5}"  # TODO: 0.5 is dummy
-    
+
     # @dynamo_endpoint()
     # async def generate(self, request: Tokens) -> AsyncIterator[WorkerId]:
     #     lora_id = 0
@@ -226,13 +226,13 @@ class Router:
     #     except Exception as e:
     #         scores = {}
     #         vllm_logger.exception(f"Error finding matches: {e}")
-        
-        # metrics = await self.metrics_aggregator.get_metrics()
-        # worker_id, prefix_hit_rate = self._cost_function(
-        #     scores, metrics, len(request.tokens)
-        # )
 
-        # vllm_logger.info(
-        #     f"Scheduling to worker_id: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
-        # )
-        # yield f"{worker_id}_{prefix_hit_rate}"
+    # metrics = await self.metrics_aggregator.get_metrics()
+    # worker_id, prefix_hit_rate = self._cost_function(
+    #     scores, metrics, len(request.tokens)
+    # )
+
+    # vllm_logger.info(
+    #     f"Scheduling to worker_id: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
+    # )
+    # yield f"{worker_id}_{prefix_hit_rate}"
