@@ -13,6 +13,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// TODO(#400):
+// Instead of passing in a block_size, we should get this data from the backend component's config.
+// What changes need to be made:
+// 1. Take as an argument the name of the backend component.
+// 2. Update the backend component to produce a config in a standard location.
+// 3. Update the KvRouter to read the config from the backend component.
+
 use clap::Parser;
 
 use dynamo_llm::kv_router::KvRouter;
