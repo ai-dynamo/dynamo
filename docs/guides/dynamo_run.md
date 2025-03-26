@@ -165,13 +165,15 @@ Any example above using `out=sglang` will work, but our sglang backend is also m
 
 Node 1:
 ```
-dynamo-run in=http out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 0 --dist-init-addr 10.217.98.122:9876
+dynamo-run in=http out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 0 --leader-addr 10.217.98.122:9876
 ```
 
 Node 2:
 ```
-dynamo-run in=none out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 1 --dist-init-addr 10.217.98.122:9876
+dynamo-run in=none out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 1 --leader-addr 10.217.98.122:9876
 ```
+
+To pass extra arguments to the sglang engine see *Extra engine arguments* below.
 
 ## llama_cpp
 
@@ -224,6 +226,8 @@ Node 2:
 ```
 dynamo-run in=none out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 1
 ```
+
+To pass extra arguments to the vllm engine see *Extra engine arguments* below.
 
 ## Python bring-your-own-engine
 
@@ -433,4 +437,21 @@ The output looks like this:
 ## Defaults
 
 The input defaults to `in=text`. The output will default to `mistralrs` engine. If not available whatever engine you have compiled in (so depending on `--features`).
+
+## Extra engine arguments
+
+The vllm and sglang backends support passing any argument the engine accepts.
+
+Put the arguments in a JSON file:
+```
+{
+    "dtype": "half",
+    "trust_remote_code": true
+}
+```
+
+Pass it like this:
+```
+dynamo-run out=sglang ~/llm_models/Llama-3.2-3B-Instruct --extra-engine-args sglang_extra.json
+```
 
