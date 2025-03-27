@@ -14,8 +14,10 @@
 #  limitations under the License.
 from __future__ import annotations
 
+import inspect
 import json
 import os
+from abc import ABC
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple, TypeVar, Union
@@ -75,7 +77,12 @@ class DynamoService(Service[T]):
         envs: Optional[list[dict[str, Any]]] = None,
         dynamo_config: Optional[DynamoConfig] = None,
     ):
-        service_name = inner.__name__
+        if type(inner) is tuple:
+            inner = inner[0]
+        if hasattr(inner, 'inner'):
+            inner = inner.inner
+        service_name = inner.__name__ if hasattr(inner, '__name__') else inner.name
+        # service_name = inner.__name__
         service_args = self._get_service_args(service_name)
 
         if service_args:
@@ -97,13 +104,15 @@ class DynamoService(Service[T]):
 
         # Add dynamo configuration to the service config
         # this allows for the config to be part of the service in bento.yaml
-        self.config["dynamo"] = asdict(self._dynamo_config)
-
+        if type(self.config) is not str:
+            self.config["dynamo"] = asdict(self._dynamo_config)
+        else:
+            pass
         # Register Dynamo endpoints
         self._dynamo_endpoints: Dict[str, DynamoEndpoint] = {}
         for field in dir(inner):
             value = getattr(inner, field)
-            if isinstance(value, DynamoEndpoint):
+            if isinstance(value, DynamoEndpoint) and not inspect.isabstract(self.inner):
                 self._dynamo_endpoints[value.name] = value
 
         self._linked_services: List[DynamoService] = []  # Track linked services
@@ -228,7 +237,7 @@ def service(
             dynamo_config = dynamo
 
     def decorator(inner: type[T]) -> DynamoService[T]:
-        if isinstance(inner, Service):
+        if isinstance(inner, Service) and not inspect.isabstract(inner.inner):
             raise TypeError("service() decorator can only be applied once")
         return DynamoService(
             config=config,
