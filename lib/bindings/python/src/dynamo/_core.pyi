@@ -347,6 +347,11 @@ class KvMetricsAggregator:
         """
         Return the aggregated metrics of the endpoints.
         """
+
+    def find_best_worker(self, token_ids: List[int]) -> int:
+        """
+        Find the best worker to route to based on the input tokens
+        """
         ...
 
 class KvEventPublisher:

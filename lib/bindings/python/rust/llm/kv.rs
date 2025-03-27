@@ -363,6 +363,7 @@ impl KvMetricsAggregator {
             let inner = llm_rs::kv_router::metrics_aggregator::KvMetricsAggregator::new(
                 component.inner.clone(),
                 component.inner.drt().runtime().child_token(),
+                64,  // [TODO] Block size is hardcoded, should be configurable
             )
             .await;
             Ok(Self {
@@ -393,6 +394,21 @@ impl KvMetricsAggregator {
                 load_avg: endpoints.load_avg,
                 load_std: endpoints.load_std,
             })
+        })
+    }
+
+    fn find_best_worker<'p>(
+        &self,
+        py: Python<'p>,
+        token_ids: Vec<u32>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let aggregator = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let worker_id = aggregator
+                .find_best_worker(&token_ids)
+                .await
+                .map_err(to_pyerr)?;
+            Ok(worker_id)
         })
     }
 }
