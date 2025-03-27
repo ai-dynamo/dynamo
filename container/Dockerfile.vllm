@@ -278,11 +278,14 @@ RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
     cp target/release/mock_worker /usr/local/bin
 
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
-# Build dynamo wheel
+# Build dynamo wheels (runtime, sdk, top level)
 RUN source /opt/dynamo/venv/bin/activate && \
     cd /workspace/lib/bindings/python && \
     uv build --wheel --out-dir /workspace/dist && \
     uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
+    cd /workspace/deploy/dynamo/sdk && \
+    uv build --wheel --out-dir /workspace/dist && \
+    uv pip install /workspace/dist/ai_dynamo_graph*any.whl && \
     cd /workspace && \
     uv build --wheel --out-dir /workspace/dist && \
     uv pip install /workspace/dist/ai_dynamo*any.whl
