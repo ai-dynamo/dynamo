@@ -29,7 +29,10 @@ use dynamo_runtime::{error, raise, utils::pool::Returnable, ErrorContext, Result
 use std::{ptr::NonNull, sync::Arc};
 use validator::{Validate, ValidationError};
 
-use super::storage::{DType, OwnedStorage, Storage, StorageType, TensorView};
+use super::{
+    storage::{DType, OwnedStorage, Storage, StorageType, TensorView},
+    PinnedBlockStorage,
+};
 extern "C" {
     fn copy_blocks_3d(
         src_data: *const std::ffi::c_void,
@@ -593,6 +596,89 @@ impl KvBlockStorage {
     //         KvLayout::BlockFirst => 2 *
     //     };
     // }
+
+    pub fn into_pinned_blocks(self) -> Result<Vec<PinnedBlockStorage>> {
+        // Keep around privately to have access to details as we consume self
+        let arc_of_self = Arc::new(self);
+        // match on storage type
+        // if not in storage
+        let _change_this_later = match arc_of_self.storage_type {
+            storage::StorageType::Pinned => 0,
+            _ => anyhow::anyhow!("Not correct!"),
+        };
+
+        // nin each arm liuterate over hte layer
+        // check the offise fuction of the layer and
+        // grab referecnet to layer TensorView
+        // TensorView object know the elemetn size, don't know the element type
+        // know the number of bytes
+        // u16, fp16, don't have to cast to get the offset
+        // TensorView doesn't ahve the data type, just know the size
+        // self.dtype.size_in_points()
+
+        let vec_of_pbs = match arc_of_self.block_details.layout {
+            KvLayout::BlockFirst => {
+                // rank of tenosr is 5 for both
+                // everytings 0,
+                // for each layer, and for each block
+                // loop over block, and then internally loop over each layer
+                // view object that is throwaway, just startup and this is fine
+                // get the offs and throw that into a vec
+                // for each block
+                // construct pinnedblockstorage object
+                // for each loop of block
+                // push into our vec
+                // evaluate the offset
+                let vec_of_pbs: Vec<PinnedBlockStorage> = Vec::new();
+
+                for block_idx in 0..self.number_of_blocks {
+                    let k_vec: Vec<usize> = Vec::new();
+                    let v_vec: Vec<usize> = Vec::new();
+                    let mut bytes: usize = 0 as usize;
+                    for &layer in self.layers {
+                        let element_size = self.dtype.size_in_bytes();
+                        let view = layer.view().unwrap();
+                        let k_byte_offset = view.byte_offset(&[block_idx, 0, 0, 0, 0]).unwrap();
+                        let v_byte_offset = view.byte_offset(&[block_idx, 1, 0, 0, 0]).unwrap();
+                        // k is offset, block id is 0 and three 0s - block offset for k
+                        // v offset, block id is 1, 0, 0, 0 - block offset for v
+                        k_vec.push(k_byte_offset);
+                        v_vec.push(v_byte_offset);
+                        // 2, 3,4 multiply those together and element size and that's the bytes pe rblock
+                        let shape = view.shape();
+                        bytes = shape[2] * shape[3] * shape[4] * element_size;
+                    }
+                    let pbs = PinnedBlockStorage { layers, bytes };
+                    vec_of_pbs.push(pbs);
+                }
+
+                vec_of_pbs
+            }
+            KvLayout::KvFirst => {
+                // TODO!
+                let vec_of_pbs: Vec<PinnedBlockStorage> = Vec::new();
+                vec_of_pbs
+            }
+        };
+
+        result
+
+        // extract ouyr layer pointer and block size
+        // for each layer extract out offset as u64 and know hwat
+        // the contiguous block size
+        // and map that in to create vec of objeccts with
+
+        // tricky - kv layer has two memory layours
+        // cant directly addrwss tensor dimension 1 or 2
+        // either tensor dimensoin 1 or 2
+        // great that we have slice object,
+        // ultiamtely crate a slice on tensor dimension and
+        // first thing to do
+        // check the storage type
+        // if storage type is not int, we throw an error
+
+        // todo!()
+    }
 }
 
 /// This struct holds the details of the layers to be copied
