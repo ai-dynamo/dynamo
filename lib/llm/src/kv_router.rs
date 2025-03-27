@@ -39,6 +39,7 @@ use dynamo_runtime::traits::events::{EventPublisher, EventSubscriber};
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
 pub const KV_EVENT_SUBJECT: &str = "kv_events";
+// this is a test change to see how sccache reacts
 pub const KV_HIT_RATE_SUBJECT: &str = "kv-hit-rate";
 pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 
