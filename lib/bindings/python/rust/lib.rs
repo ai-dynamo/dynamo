@@ -377,6 +377,10 @@ impl Client {
         annotated: Option<bool>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let ignore_response = request
+            .get("ignore_response") // returns an Option<&Value> if request is an object
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -384,7 +388,7 @@ impl Client {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = client.round_robin(request.into()).await.map_err(to_pyerr)?;
-            tokio::spawn(process_stream(stream, tx));
+            tokio::spawn(process_stream(stream, tx, ignore_response));
             Ok(AsyncResponseStream {
                 rx: Arc::new(Mutex::new(rx)),
                 annotated,
@@ -401,6 +405,10 @@ impl Client {
         annotated: Option<bool>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let ignore_response = request
+            .get("ignore_response") // returns an Option<&Value> if request is an object
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -408,7 +416,7 @@ impl Client {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = client.random(request.into()).await.map_err(to_pyerr)?;
-            tokio::spawn(process_stream(stream, tx));
+            tokio::spawn(process_stream(stream, tx, ignore_response));
             Ok(AsyncResponseStream {
                 rx: Arc::new(Mutex::new(rx)),
                 annotated,
@@ -426,6 +434,10 @@ impl Client {
         annotated: Option<bool>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let ignore_response = request
+            .get("ignore_response") // returns an Option<&Value> if request is an object
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -437,7 +449,7 @@ impl Client {
                 .await
                 .map_err(to_pyerr)?;
 
-            tokio::spawn(process_stream(stream, tx));
+            tokio::spawn(process_stream(stream, tx, ignore_response));
 
             Ok(AsyncResponseStream {
                 rx: Arc::new(Mutex::new(rx)),
@@ -450,6 +462,7 @@ impl Client {
 async fn process_stream(
     stream: EngineStream<serde_json::Value>,
     tx: tokio::sync::mpsc::Sender<RsAnnotated<PyObject>>,
+    ignore_response: bool,
 ) {
     let mut stream = stream;
     while let Some(response) = stream.next().await {
@@ -477,7 +490,12 @@ async fn process_stream(
 
         // Send the PyObject through the channel or log an error
         if let Err(e) = tx.send(annotated).await {
-            tracing::error!("Failed to send response: {:?}", e);
+            let msg = format!("Failed to send response to channel: {:?}", e);
+            if ignore_response {
+                tracing::debug!(%msg);
+            } else {
+                tracing::warn!(%msg);
+            }
         }
 
         if is_error {
