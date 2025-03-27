@@ -17,6 +17,7 @@
 **/[Oo][Uu][Tt]/
 **/[Rr]elease/
 **/[Tt][Mm][Pp]/
+**/*.etcd
 
 .markdownlint.json
 CMakeCache.txt
@@ -83,3 +84,5 @@ __pycache__/
 *.tgz
 Chart.lock
 generated-values.yaml
+
+TensorRT-LLM
