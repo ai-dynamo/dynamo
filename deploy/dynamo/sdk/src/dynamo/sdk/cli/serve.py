@@ -21,6 +21,7 @@ import logging
 import os
 import sys
 import typing as t
+from typing import Optional
 
 import click
 import rich
@@ -172,6 +173,27 @@ def build_serve_command() -> click.Group:
     )
     @click.argument("bento", type=click.STRING, default=".")
     @click.option(
+        "--service-name",
+        type=click.STRING,
+        required=False,
+        default="",
+        envvar="BENTOML_SERVE_SERVICE_NAME", 
+        help="specify the service name to serve",
+    )
+    @click.option(
+        "--depends",
+        type=click.STRING,
+        multiple=True,
+        envvar="BENTOML_SERVE_DEPENDS",
+        help="list of runners map",
+    )
+    @click.option(
+        "--runner-map",
+        type=click.STRING,
+        envvar="BENTOML_SERVE_RUNNER_MAP",
+        help="[Deprecated] use --depends instead. JSON string of runners map.",
+    )
+    @click.option(
         "-f",
         "--file",
         type=click.Path(exists=True),
@@ -320,6 +342,9 @@ def build_serve_command() -> click.Group:
     def serve(
         ctx: click.Context,
         bento: str,
+        service_name: str,
+        depends: Optional[list[str]],
+        runner_map: Optional[str],
         dry_run: bool,
         development: bool,
         port: int,
@@ -403,6 +428,14 @@ def build_serve_command() -> click.Group:
                 if service not in service_configs:
                     service_configs[service] = {}
                 service_configs[service][key] = value
+
+        # Process depends/runner_map
+        if depends:
+            runner_map_dict = dict([s.split("=", maxsplit=2) for s in depends or []])
+        elif runner_map:
+            runner_map_dict = json.loads(runner_map)
+        else:
+            runner_map_dict = {}
 
         if dry_run:
             rich.print("[bold]Service Configuration:[/bold]")
@@ -495,6 +528,8 @@ def build_serve_command() -> click.Group:
                 reload=reload,
                 timeout_keep_alive=timeout_keep_alive,
                 timeout_graceful_shutdown=timeout_graceful_shutdown,
+                dependency_map=runner_map_dict,
+                service_name=service_name,
             )
 
     return cli
