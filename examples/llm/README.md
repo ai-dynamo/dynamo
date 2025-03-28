@@ -140,7 +140,7 @@ export ETCD_ENDPOINTS = '<your-etcd-endpoints-address>'
 cd /workspace/examples/llm
 sed -i '/worker = depends(VllmWorker)/d' ./components/frontend.py
 sed -i '/worker = depends(VllmWorker)/d' ./components/processor.py
-dynamo serve graphs.frontend_router:Fronend -f ./configs/disagg_router.yaml
+dynamo serve graphs.frontend_router:Frontend -f ./configs/disagg_router.yaml
 ```
 
 ##### worker node
