@@ -130,6 +130,36 @@ cd /workspace/examples/llm
 dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
 ```
 
+#### Disaggregated serving in multi nodes with KV Routing
+
+##### frontend node
+```bash
+export NATS_SERVER = '<your-nats-server-address>'
+export ETCD_ENDPOINTS = '<your-etcd-endpoints-address>'
+
+cd /workspace/examples/llm
+dynamo serve graphs.frontend_router:Fronend -f /configs/disagg_router.yaml
+```
+
+##### worker node
+```bash
+export NATS_SERVER = '<your-nats-server-address>'
+export ETCD_ENDPOINTS = '<your-etcd-endpoints-address>'
+
+cd /workspace/examples/llm
+sed -i '/prefill_worker = depends(PrefillWorker)/d' ./components/worker.py
+dynamo serve components.worker:VllmWorker -f ./configs/disagg_router.yaml
+```
+
+##### prefill worker node
+```bash
+export NATS_SERVER = '<your-nats-server-address>'
+export ETCD_ENDPOINTS = '<your-etcd-endpoints-address>'
+
+cd /workspace/examples/llm
+dynamo serve components.prefill_worker:PrefillWorker -f ./configs/disagg_router.yaml
+```
+
 ### Client
 
 In another terminal:
