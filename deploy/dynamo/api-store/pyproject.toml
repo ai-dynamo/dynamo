@@ -27,7 +27,7 @@ dependencies = [
     "fastapi>=0.115.11",
     "uvicorn>=0.34.0",
     "sqlalchemy>=2.0.39",
-    "pydantic>=2.10.6",
+    "pydantic>=2.10.6,<2.11.0",
     "aiosqlite==0.21.0",
     "asyncpg==0.30.0",
     "base58==2.1.1",
