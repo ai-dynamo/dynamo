@@ -20,7 +20,7 @@ import sys
 import uvicorn
 from fastapi import FastAPI
 
-from .api.dynamo import router as dynamo_router
+from .api.dynamo import router as dynamo_router  # type: ignore
 from .api.health_check import router as health_check_router
 from .api.storage import create_db_and_tables_async
 

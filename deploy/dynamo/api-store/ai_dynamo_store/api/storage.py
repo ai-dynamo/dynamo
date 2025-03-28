@@ -140,4 +140,12 @@ class S3Storage:
             raise
 
 
-s3_storage = S3Storage()
+S3_STORAGE_INSTANCE: S3Storage | None = None
+
+
+def get_s3_storage() -> S3Storage:
+    global S3_STORAGE_INSTANCE
+    if S3_STORAGE_INSTANCE is None:
+        S3_STORAGE_INSTANCE = S3Storage()
+    assert isinstance(S3_STORAGE_INSTANCE, S3Storage)
+    return S3_STORAGE_INSTANCE

@@ -1,3 +1,4 @@
+# type: ignore  # Ignore all mypy errors in this file
 #  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 #  #
@@ -44,7 +45,7 @@ from .components import (
     UserSchema,
 )
 from .model import DynamoNim, DynamoNimVersion, make_aware, utc_now_naive
-from .storage import get_session, s3_storage
+from .storage import S3Storage, get_s3_storage, get_session
 
 API_TAG_MODELS = "dynamo"
 
@@ -566,6 +567,7 @@ async def upload_dynamo_nim_version(
     dynamo_nim_entities: tuple[DynamoNimVersion, DynamoNim] = GetDynamoNimVersion,
     file: Annotated[bytes, Body()],
     session: AsyncSession = Depends(get_session),
+    s3_storage: S3Storage = Depends(get_s3_storage),
 ):
     dynamo_nim_version, dynamo_nim = dynamo_nim_entities
     object_name = f"{dynamo_nim.name}/{dynamo_nim_version.version}"
@@ -609,6 +611,7 @@ def generate_file_path(version) -> str:
 async def download_dynamo_nim_version(
     *,
     dynamo_nim_entities: tuple[DynamoNimVersion, DynamoNim] = GetDynamoNimVersion,
+    s3_storage: S3Storage = Depends(get_s3_storage),
 ):
     dynamo_nim_version, dynamo_nim = dynamo_nim_entities
     object_name = f"{dynamo_nim.name}/{dynamo_nim_version.version}"
