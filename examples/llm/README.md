@@ -138,6 +138,8 @@ export NATS_SERVER = '<your-nats-server-address>'
 export ETCD_ENDPOINTS = '<your-etcd-endpoints-address>'
 
 cd /workspace/examples/llm
+sed -i '/worker = depends(VllmWorker)/d' ./components/frontend.py
+sed -i '/worker = depends(VllmWorker)/d' ./components/Processor.py
 dynamo serve graphs.frontend_router:Fronend -f /configs/disagg_router.yaml
 ```
 
