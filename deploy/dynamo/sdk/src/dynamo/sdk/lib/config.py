@@ -51,9 +51,10 @@ class ServiceConfig(dict):
         self, service_name, prefix="", common_config_keys: Optional[set[str]] = None
     ):
         """Extract configs as CLI args for a service, with optional prefix filtering.
-        Every service will additionally have the args in the `Common` service name
+
+        Every component will additionally have the args in the `Common` configs
         applied if it has subscribed to that config key, i.e. the given key is provided in
-        `common_config_keys`
+        `common_config_keys`, and that key has not been overriden by the component's config.
         """
         if service_name not in self:
             return []
