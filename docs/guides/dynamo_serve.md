@@ -162,22 +162,21 @@ This will print out something like
 ```bash
 Service Configuration:
 {
+  "Common": {
+    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "block-size": 64,
+    "max-model-len": 16384,
+  },
   "Frontend": {
     "served_model_name": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "endpoint": "dynamo.Processor.chat/completions",
     "port": 8000
   },
   "Processor": {
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    "block-size": 64,
-    "max-model-len": 16384,
     "router": "round-robin"
   },
   "VllmWorker": {
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "enforce-eager": true,
-    "block-size": 64,
-    "max-model-len": 16384,
     "max-num-batched-tokens": 16384,
     "enable-prefix-caching": true,
     "router": "random",
