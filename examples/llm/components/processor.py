@@ -65,7 +65,7 @@ class Processor(ProcessMixIn):
     def __init__(self):
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(
-            class_name, "", common_configs=COMMON_CONFIGS
+            class_name, "", common_config_keys=COMMON_CONFIGS
         )
         self.model_config = self.engine_args.create_model_config()
         self.tokenizer = self._create_tokenizer(self.engine_args)

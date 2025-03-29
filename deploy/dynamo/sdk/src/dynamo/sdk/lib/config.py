@@ -48,11 +48,12 @@ class ServiceConfig(dict):
         return self[service_name][key]
 
     def as_args(
-        self, service_name, prefix="", common_configs: Optional[set[str]] = None
+        self, service_name, prefix="", common_config_keys: Optional[set[str]] = None
     ):
         """Extract configs as CLI args for a service, with optional prefix filtering.
         Every service will additionally have the args in the `Common` service name
-        uniformly applied.
+        applied if it has subscribed to that config key, i.e. the given key is provided in
+        `common_config_keys`
         """
         if service_name not in self:
             return []
@@ -75,8 +76,11 @@ class ServiceConfig(dict):
             else:
                 args.extend([f"--{arg_key}", str(value)])
 
-        if common_configs is not None and (common := self.get("Common")) is not None:
-            for key in common_configs:
+        if (
+            common_config_keys is not None
+            and (common := self.get("Common")) is not None
+        ):
+            for key in common_config_keys:
                 if key in common and key not in self[service_name]:
                     add_to_args(args, common[key])
 

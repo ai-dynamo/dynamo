@@ -20,10 +20,10 @@ from vllm.utils import FlexibleArgumentParser
 from dynamo.sdk.lib.config import ServiceConfig
 
 
-def parse_vllm_args(service_name, prefix, common_configs) -> AsyncEngineArgs:
+def parse_vllm_args(service_name, prefix, common_config_keys) -> AsyncEngineArgs:
     config = ServiceConfig.get_instance()
     vllm_args = config.as_args(
-        service_name, prefix=prefix, common_configs=common_configs
+        service_name, prefix=prefix, common_config_keys=common_config_keys
     )
     parser = FlexibleArgumentParser()
     parser.add_argument(

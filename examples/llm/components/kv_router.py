@@ -62,7 +62,7 @@ def parse_args(service_name, prefix) -> Namespace:
     )
     config = ServiceConfig.get_instance()
     config_args = config.as_args(
-        service_name, prefix=prefix, common_configs=COMMON_CONFIGS
+        service_name, prefix=prefix, common_config_keys=COMMON_CONFIGS
     )
     args = parser.parse_args(config_args)
     return args
