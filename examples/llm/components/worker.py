@@ -33,7 +33,7 @@ from vllm.sampling_params import RequestOutputKind
 from dynamo.llm import KvMetricsPublisher
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
-COMMON_CONFIGS: set[str] = {
+COMMON_CONFIG_KEYS: set[str] = {
     "model",
     "block-size",
     "max-model-len",
@@ -58,7 +58,7 @@ class VllmWorker:
         self.disaggregated_router: PyDisaggregatedRouter = None  # type: ignore
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(
-            class_name, "", common_config_keys=COMMON_CONFIGS
+            class_name, "", common_config_keys=COMMON_CONFIG_KEYS
         )
         self.do_remote_prefill = self.engine_args.remote_prefill
         self.model_name = (

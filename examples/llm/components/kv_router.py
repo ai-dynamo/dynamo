@@ -30,7 +30,7 @@ from dynamo.sdk.lib.config import ServiceConfig
 
 WorkerId = str
 
-COMMON_CONFIGS: set[str] = {"model", "block-size"}
+COMMON_CONFIG_KEYS: set[str] = {"model", "block-size"}
 
 
 def parse_args(service_name, prefix) -> Namespace:
@@ -62,7 +62,7 @@ def parse_args(service_name, prefix) -> Namespace:
     )
     config = ServiceConfig.get_instance()
     config_args = config.as_args(
-        service_name, prefix=prefix, common_config_keys=COMMON_CONFIGS
+        service_name, prefix=prefix, common_config_keys=COMMON_CONFIG_KEYS
     )
     args = parser.parse_args(config_args)
     return args

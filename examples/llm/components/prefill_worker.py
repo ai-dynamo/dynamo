@@ -29,7 +29,7 @@ from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
 
-COMMON_CONFIGS: set[str] = {
+COMMON_CONFIG_KEYS: set[str] = {
     "model",
     "block-size",
     "max-model-len",
@@ -54,7 +54,7 @@ class PrefillWorker:
     def __init__(self):
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(
-            class_name, "", common_config_keys=COMMON_CONFIGS
+            class_name, "", common_config_keys=COMMON_CONFIG_KEYS
         )
         self._loaded_metadata = set()
         self.initialized = False

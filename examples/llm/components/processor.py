@@ -32,7 +32,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
-COMMON_CONFIGS: set[str] = {
+COMMON_CONFIG_KEYS: set[str] = {
     "model",
     "block-size",
     "max-model-len",
@@ -65,7 +65,7 @@ class Processor(ProcessMixIn):
     def __init__(self):
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(
-            class_name, "", common_config_keys=COMMON_CONFIGS
+            class_name, "", common_config_keys=COMMON_CONFIG_KEYS
         )
         self.model_config = self.engine_args.create_model_config()
         self.tokenizer = self._create_tokenizer(self.engine_args)
