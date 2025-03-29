@@ -200,17 +200,17 @@ def build_start_command() -> click.Group:
                 # Initialize service_configs as empty dict if it's None
                 # Convert nested YAML structure to flat dict with dot notation
                 for service, configs in yaml_configs.items():
+                    if service not in service_configs:
+                        service_configs[service] = {}
                     for key, value in configs.items():
-                        if service not in service_configs:
-                            service_configs[service] = {}
                         service_configs[service][key] = value
 
         # Process service-specific options
         cmdline_overrides: t.Dict[str, t.Any] = _parse_service_args(ctx.args)
         for service, configs in cmdline_overrides.items():
+            if service not in service_configs:
+                service_configs[service] = {}
             for key, value in configs.items():
-                if service not in service_configs:
-                    service_configs[service] = {}
                 service_configs[service][key] = value
 
         if dry_run:
