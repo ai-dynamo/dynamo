@@ -94,24 +94,20 @@ class VllmWorker:
             self.engine_client = await self._engine_context.__aenter__()
         else:
             raise RuntimeError("Failed to initialize engine client")
-        if self.engine_args.router == "kv":
-            assert self.engine_client is not None, "engine_client was not initialized"
-            self.engine_client.set_metrics_publisher(self.metrics_publisher)
-            # Initially send dummy metrics to kick start,
-            # vLLM will not update stat until forward pass is triggered
-            self.metrics_publisher.publish(
-                0,  # request_active_slots
-                1024,  # request_total_slots
-                0,  # kv_active_blocks
-                1024,  # kv_total_blocks
-                0,  # num_requests_waiting
-                0.0,  # gpu_cache_usage_perc
-                0.0,  # gpu_prefix_cache_hit_rate
-            )
-            task = asyncio.create_task(self.create_metrics_publisher_endpoint())
-            task.add_done_callback(
-                lambda _: print("metrics publisher endpoint created")
-            )
+        self.engine_client.set_metrics_publisher(self.metrics_publisher)
+        # Initially send dummy metrics to kick start,
+        # vLLM will not update stat until forward pass is triggered
+        self.metrics_publisher.publish(
+            0,  # request_active_slots
+            1024,  # request_total_slots
+            0,  # kv_active_blocks
+            1024,  # kv_total_blocks
+            0,  # num_requests_waiting
+            0.0,  # gpu_cache_usage_perc
+            0.0,  # gpu_prefix_cache_hit_rate
+        )
+        task = asyncio.create_task(self.create_metrics_publisher_endpoint())
+        task.add_done_callback(lambda _: print("metrics publisher endpoint created"))
 
         runtime = dynamo_context["runtime"]
 
