@@ -88,4 +88,6 @@ class ServiceConfig(dict):
         for key, value in self[service_name].items():
             add_to_args(args, value)
 
+        print(f"Running {service_name} with {args=}")
+
         return args
