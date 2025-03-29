@@ -59,7 +59,7 @@ class ServiceConfig(dict):
         if service_name not in self:
             return []
 
-        args = []
+        args: list[str] = []
 
         def add_to_args(args: list[str], value):
             if prefix and not key.startswith(prefix):
