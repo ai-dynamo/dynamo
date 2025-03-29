@@ -138,20 +138,6 @@ ENV PKG_CONFIG_PATH=/usr/local/ompi/lib/pkgconfig:$PKG_CONFIG_PATH
 # Copy nixl source, and use commit hash as cache hint
 COPY --from=nixl_base /opt/nixl /opt/nixl
 COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
-RUN cd /opt/nixl && \
-    mkdir build && \
-    meson setup build/ --prefix=/usr/local/nixl && \
-    cd build/ && \
-    ninja && \
-    ninja install
-
-ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
-ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/:$PYTHONPATH
-ENV UCX_TLS=^cuda_ipc
-ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/x86_64-linux-gnu/plugins
-
-RUN ls -l /usr/local/nixl/
-RUN ls -l /usr/local/nixl/include/
 
 RUN ls /opt/nixl
 
@@ -183,6 +169,10 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # Common dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     uv pip install --requirement /tmp/requirements.txt
+
+# Install nixl
+RUN cd /opt/nixl && \
+    uv pip install .
 
 # Install patched vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
