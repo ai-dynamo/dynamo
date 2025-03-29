@@ -140,6 +140,7 @@ RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
 
 # Tell TRTLLM worker to use the Dynamo LLM C API for KV Cache Routing
 ENV DYNAMO_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
+ENV DYNAMO_HOME=/workspace
 
 # FIXME: Copy more specific folders in for dev/debug after directory restructure
 COPY . /workspace
