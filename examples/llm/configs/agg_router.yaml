@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-CommonDefault:
+Common:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   router: kv
   block-size: 64
