@@ -42,7 +42,6 @@ VllmWorker:
     resources:
       gpu: 1
 
-# TODO - set all of these but model as Common
 PrefillWorker:
   max-num-batched-tokens: 16384
   ServiceArgs:
