@@ -30,17 +30,13 @@ pub(crate) struct KvRouter {
 #[pymethods]
 impl KvRouter {
     #[new]
-    // [FXIME] 'drt' can be obtained from 'component'
-    fn new(drt: DistributedRuntime, component: Component, kv_block_size: usize) -> PyResult<Self> {
+    fn new(component: Component, kv_block_size: usize) -> PyResult<Self> {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async {
-            let inner = llm_rs::kv_router::KvRouter::from_runtime(
-                drt.inner.clone(),
-                component.inner.clone(),
-                kv_block_size,
-            )
-            .await
-            .map_err(to_pyerr)?;
+            let inner =
+                llm_rs::kv_router::KvRouter::new(component.inner.clone(), kv_block_size, None)
+                    .await
+                    .map_err(to_pyerr)?;
             Ok(Self { inner })
         })
     }

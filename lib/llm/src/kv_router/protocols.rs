@@ -13,7 +13,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::tokens::Token;
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RouterRequest {
+    pub tokens: Vec<Token>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RouterResponse {
+    pub worker_id: i64,
+}
+
+#[derive(Debug)]
+pub struct WorkerSelectionResult {
+    pub worker_id: i64,
+    pub worker_index: usize,
+    pub total_blocks: u64,
+    pub overlap_blocks: usize,
+    pub isl_blocks: usize,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ForwardPassMetrics {
