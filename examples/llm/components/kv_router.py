@@ -30,7 +30,7 @@ from dynamo.sdk.lib.config import ServiceConfig
 
 WorkerId = str
 
-COMMON_KEYS: set[str] = {"model", "block-size"}
+COMMON_CONFIGS: set[str] = {"model", "block-size"}
 
 
 def parse_args(service_name, prefix) -> Namespace:
@@ -61,7 +61,9 @@ def parse_args(service_name, prefix) -> Namespace:
         help="Whether to use custom router or not",
     )
     config = ServiceConfig.get_instance()
-    config_args = config.as_args(service_name, prefix=prefix, common_keys=COMMON_KEYS)
+    config_args = config.as_args(
+        service_name, prefix=prefix, common_configs=COMMON_CONFIGS
+    )
     args = parser.parse_args(config_args)
     return args
 
