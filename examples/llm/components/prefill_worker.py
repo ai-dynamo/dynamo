@@ -29,6 +29,14 @@ from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
 
+COMMON_KEYS: set[str] = {
+    "model",
+    "block-size",
+    "max-model-len",
+    "kv-transfer-config",
+    "router",
+}
+
 
 class RequestType(BaseModel):
     text: str
@@ -45,7 +53,7 @@ class RequestType(BaseModel):
 class PrefillWorker:
     def __init__(self):
         class_name = self.__class__.__name__
-        self.engine_args = parse_vllm_args(class_name, "")
+        self.engine_args = parse_vllm_args(class_name, "", common_keys=COMMON_KEYS)
         self._loaded_metadata = set()
         self.initialized = False
         if self.engine_args.enable_chunked_prefill is not False:

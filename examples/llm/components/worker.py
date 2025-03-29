@@ -33,6 +33,14 @@ from vllm.sampling_params import RequestOutputKind
 from dynamo.llm import KvMetricsPublisher
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
+COMMON_KEYS: set[str] = {
+    "model",
+    "block-size",
+    "max-model-len",
+    "kv-transfer-config",
+    "router",
+}
+
 
 @service(
     dynamo={
@@ -49,7 +57,7 @@ class VllmWorker:
         self.client = None
         self.disaggregated_router: PyDisaggregatedRouter = None  # type: ignore
         class_name = self.__class__.__name__
-        self.engine_args = parse_vllm_args(class_name, "")
+        self.engine_args = parse_vllm_args(class_name, "", common_keys=COMMON_KEYS)
         self.do_remote_prefill = self.engine_args.remote_prefill
         self.model_name = (
             self.engine_args.served_model_name

@@ -12,46 +12,38 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+Common:
+  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  block-size: 64
+  max-model-len: 16384
+  router: kv
+  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
 
 Frontend:
   served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   endpoint: dynamo.Processor.chat/completions
   port: 8000
 
-Processor:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  block-size: 64
-  max-model-len: 16384
-  router: kv
+Processor: {}
 
 Router:
-  model-name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   min-workers: 1
 
 VllmWorker:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-  block-size: 64
-  max-model-len: 16384
   max-num-batched-tokens: 16384
   remote-prefill: true
   conditional-disagg: true
   max-local-prefill-length: 10
   max-prefill-queue-size: 2
   tensor-parallel-size: 1
-  router: kv
   enable-prefix-caching: true
   ServiceArgs:
     workers: 1
     resources:
       gpu: 1
 
-# TODO - set all of these but model as default
+# TODO - set all of these but model as Common
 PrefillWorker:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-  block-size: 64
-  max-model-len: 16384
   max-num-batched-tokens: 16384
   ServiceArgs:
     workers: 1

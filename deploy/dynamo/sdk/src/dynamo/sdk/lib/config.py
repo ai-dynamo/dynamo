@@ -15,6 +15,7 @@
 
 import json
 import os
+from typing import Optional
 
 
 class ServiceConfig(dict):
@@ -46,15 +47,19 @@ class ServiceConfig(dict):
             raise ValueError(f"{service_name}.{key} must be specified in configuration")
         return self[service_name][key]
 
-    def as_args(self, service_name, prefix=""):
-        """Extract configs as CLI args for a service, with optional prefix filtering"""
+    def as_args(self, service_name, prefix="", common_keys: Optional[set[str]] = None):
+        """Extract configs as CLI args for a service, with optional prefix filtering.
+        Every service will additionally have the args in the `Common` service name
+        uniformly applied.
+        """
         if service_name not in self:
             return []
 
         args = []
-        for key, value in self[service_name].items():
+
+        def add_to_args(args: list[str], value):
             if prefix and not key.startswith(prefix):
-                continue
+                return
 
             # Strip prefix if needed
             arg_key = key[len(prefix) :] if prefix and key.startswith(prefix) else key
@@ -67,5 +72,13 @@ class ServiceConfig(dict):
                 args.extend([f"--{arg_key}", json.dumps(value)])
             else:
                 args.extend([f"--{arg_key}", str(value)])
+
+        if common_keys is not None and (common := self.get("Common")) is not None:
+            for key in common_keys:
+                if key in common and key not in self[service_name]:
+                    add_to_args(args, common[key])
+
+        for key, value in self[service_name].items():
+            add_to_args(args, value)
 
         return args

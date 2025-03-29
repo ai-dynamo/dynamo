@@ -30,6 +30,8 @@ from dynamo.sdk.lib.config import ServiceConfig
 
 WorkerId = str
 
+COMMON_KEYS: set[str] = {"model", "block-size"}
+
 
 def parse_args(service_name, prefix) -> Namespace:
     parser = argparse.ArgumentParser()
@@ -40,7 +42,7 @@ def parse_args(service_name, prefix) -> Namespace:
         help="Minimum number of workers required before proceeding",
     )
     parser.add_argument(
-        "--model-name",
+        "--model",
         type=str,
         default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         help="Model that is being served",
@@ -59,7 +61,7 @@ def parse_args(service_name, prefix) -> Namespace:
         help="Whether to use custom router or not",
     )
     config = ServiceConfig.get_instance()
-    config_args = config.as_args(service_name, prefix=prefix)
+    config_args = config.as_args(service_name, prefix=prefix, common_keys=COMMON_KEYS)
     args = parser.parse_args(config_args)
     return args
 

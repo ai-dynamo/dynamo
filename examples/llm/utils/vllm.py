@@ -20,9 +20,9 @@ from vllm.utils import FlexibleArgumentParser
 from dynamo.sdk.lib.config import ServiceConfig
 
 
-def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
+def parse_vllm_args(service_name, prefix, common_keys) -> AsyncEngineArgs:
     config = ServiceConfig.get_instance()
-    vllm_args = config.as_args(service_name, prefix=prefix)
+    vllm_args = config.as_args(service_name, prefix=prefix, common_keys=common_keys)
     parser = FlexibleArgumentParser()
     parser.add_argument(
         "--router",
