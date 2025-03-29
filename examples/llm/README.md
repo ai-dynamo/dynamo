@@ -131,9 +131,6 @@ cd $DYNAMO_HOME/examples/llm
 dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
 ```
 
-
-
-
 ### Client
 
 In another terminal:
