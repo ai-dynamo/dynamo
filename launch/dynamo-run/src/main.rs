@@ -208,23 +208,21 @@ fn print_help() {
 // Only mistralrs and llamacpp need to be built with CUDA.
 // The Python engines only need it at runtime.
 #[cfg(any(feature = "mistralrs", feature = "llamacpp"))]
-fn get_acceleration_status() -> &'static str {
+fn get_acceleration_status() -> String {
     #[cfg(feature = "cuda")]
-    return "CUDA";
+    return "CUDA".to_string();
     #[cfg(feature = "metal")]
-    return "Metal";
+    return "Metal".to_string();
     #[cfg(feature = "vulkan")]
-    return "Vulkan";
+    return "Vulkan".to_string();
     #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
     {
         tracing::debug!(
             "CPU mode. Rebuild with `--features cuda|metal|vulkan` for better performance"
         );
-        "CPU"
+        "CPU".to_string()
     }
 }
 
 #[cfg(not(any(feature = "mistralrs", feature = "llamacpp")))]
-fn get_acceleration_status() -> &'static str {
-    ""
-}
+fn get_acceleration_status() {}
