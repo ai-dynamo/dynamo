@@ -16,6 +16,7 @@
 
 import asyncio
 import os
+import sys
 
 from pydantic import BaseModel
 from utils.nixl import NixlMetadataStore
@@ -86,8 +87,12 @@ class PrefillWorker:
         task = asyncio.create_task(self.prefill_queue_handler())
 
         def prefill_queue_handler_cb(fut):
-            fut.result()
-            print("prefill queue handler created successfully")
+            try:
+                fut.result()
+                print("prefill queue handler created successfully")
+            except Exception as e:
+                print(f"prefill queue handler failed: {e!r}")
+                sys.exit(1)
 
         task.add_done_callback(prefill_queue_handler_cb)
         print("PrefillWorker initialized")
