@@ -39,7 +39,7 @@ fn main() -> anyhow::Result<()> {
 
     // Call sub-processes before starting the Runtime machinery
     // For anything except sub-process starting try_parse_from will error.
-    if let Ok(flags) = dynamo_run::flags::try_parse_from(env::args()) {
+    if let Ok(flags) = dynamo_run::Flags::try_parse_from(env::args()) {
         #[allow(unused_variables)]
         if let Some(sglang_flags) = flags.internal_sglang_process {
             let Some(model_path) = flags.model_path_flag.as_ref() else {
@@ -108,7 +108,7 @@ fn main() -> anyhow::Result<()> {
     let rt_config = dynamo_runtime::RuntimeConfig::from_settings()?;
 
     // One per process. Wraps a Runtime with holds two tokio runtimes.
-    let worker = dynamo_runtime::worker::from_config(rt_config)?;
+    let worker = dynamo_runtime::Worker::from_config(rt_config)?;
 
     worker.execute(wrapper)
 }
