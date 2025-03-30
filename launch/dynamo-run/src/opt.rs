@@ -88,6 +88,19 @@ impl Default for Input {
     }
 }
 
+impl Input {
+    pub fn available_inputs() -> Vec<String> {
+        vec![
+            "http".to_string(),
+            "text".to_string(), 
+            "stdin".to_string(),
+            format!("{ENDPOINT_SCHEME}<path>"),
+            format!("{BATCH_PREFIX}<path_to_batch_file>"),
+            "none".to_string(),
+        ]
+    }
+}
+
 pub enum Output {
     /// Accept un-preprocessed requests, echo the prompt back as the response
     EchoFull,

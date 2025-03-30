@@ -149,7 +149,7 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
         }
         None => {
             tracing::debug!("Using default input. Use in=<input> to specify one of {}",
-            Input::available_inputs().join(", "));
+                Input::available_inputs().join(", "));
 
             Input::default()
         }
