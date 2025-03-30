@@ -39,7 +39,7 @@ fn main() -> anyhow::Result<()> {
 
     // Call sub-processes before starting the Runtime machinery
     // For anything except sub-process starting try_parse_from will error.
-    if let Ok(flags) = dynamo_run::Flags::try_parse_from(env::args()) {
+    if let Ok(flags) = dynamo_run::flags::try_parse_from(env::args()) {
         #[allow(unused_variables)]
         if let Some(sglang_flags) = flags.internal_sglang_process {
             let Some(model_path) = flags.model_path_flag.as_ref() else {
@@ -108,7 +108,7 @@ fn main() -> anyhow::Result<()> {
     let rt_config = dynamo_runtime::RuntimeConfig::from_settings()?;
 
     // One per process. Wraps a Runtime with holds two tokio runtimes.
-    let worker = dynamo_runtime::Worker::from_config(rt_config)?;
+    let worker = dynamo_runtime::worker::from_config(rt_config)?;
 
     worker.execute(wrapper)
 }
@@ -117,16 +117,12 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
     let mut in_opt = None;
     let mut out_opt = None;
     let args: Vec<String> = env::args().skip(1).collect();
-    if args.is_empty() || args[0] == "-h" || args[0] == "--help" {
-        println!("{USAGE}");
-        println!("{HELP}");
-        println!(
-            "Available engines: {}",
-            Output::available_engines().join(", ")
-        );
 
+    if args.is_empty() || args[0] == "-h" || args[0] == "--help" {
+        print_help();
         return Ok(());
     }
+
     for arg in env::args().skip(1).take(2) {
         let Some((in_out, val)) = arg.split_once('=') else {
             // Probably we're defaulting in and/or out, and this is a flag
@@ -144,33 +140,40 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
             }
         }
     }
+
     let mut non_flag_params = 1; // binary name
     let in_opt = match in_opt {
         Some(x) => {
             non_flag_params += 1;
             x
         }
-        None => Input::default(),
+        None => {
+            Input::default()
+        }
     };
+
+    let mut use_default_engine_output = false;
     let out_opt = match out_opt {
         Some(x) => {
             non_flag_params += 1;
             x
         }
         None => {
-            let default_engine = Output::default(); // smart default based on feature flags
-            tracing::info!(
-                "Using default engine: {default_engine}. Use out=<engine> to specify one of {}",
-                Output::available_engines().join(", ")
-            );
-            default_engine
+            use_default_engine_output = true;
+            Output::default() // smart default based on feature flags            
         }
     };
-    print_cuda(&out_opt);
 
+    tracing::info!("Engine={},Input={},Accelerator={}",
+    out_opt, in_opt, get_acceleration_status());
+
+    if use_default_engine_output {
+        tracing::debug!("Using default engine. Use out=<engine> to specify one of {}",
+            Output::available_engines().join(", "));
+    }
     // Clap skips the first argument expecting it to be the binary name, so add it back
     // Note `--model-path` has index=1 (in lib.rs) so that doesn't need a flag.
-    let flags = dynamo_run::Flags::try_parse_from(
+    let flags = dynamo_run::flags::try_parse_from(
         ["dynamo-run".to_string()]
             .into_iter()
             .chain(env::args().skip(non_flag_params)),
@@ -186,38 +189,39 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
     .await
 }
 
+
+fn print_help() {
+    println!("{USAGE}");
+    println!("{HELP}");
+    println!(
+        "Available engines: {}",
+        Output::available_engines().join(", ")
+    );
+}
+
+/// Returns a string describing the acceleration status (CUDA/Metal/Vulkan or CPU)
 /// If the user will benefit from CUDA/Metal/Vulkan, remind them to build with it.
 /// If they have it, celebrate!
 // Only mistralrs and llamacpp need to be built with CUDA.
 // The Python engines only need it at runtime.
 #[cfg(any(feature = "mistralrs", feature = "llamacpp"))]
-fn print_cuda(output: &Output) {
-    // These engines maybe be compiled in, but are they the chosen one?
-    match output {
-        #[cfg(feature = "mistralrs")]
-        Output::MistralRs => {}
-        #[cfg(feature = "llamacpp")]
-        Output::LlamaCpp => {}
-        _ => {
-            return;
-        }
-    }
-
+fn get_acceleration_status() -> &'static str {
     #[cfg(feature = "cuda")]
-    {
-        tracing::info!("CUDA on");
-    }
+    return "CUDA";
     #[cfg(feature = "metal")]
-    {
-        tracing::info!("Metal on");
-    }
+    return "Metal";
     #[cfg(feature = "vulkan")]
-    {
-        tracing::info!("Vulkan on");
-    }
+    return "Vulkan";
     #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
-    tracing::info!("CPU mode. Rebuild with `--features cuda|metal|vulkan` for better performance");
+    {
+        tracing::debug!(
+            "CPU mode. Rebuild with `--features cuda|metal|vulkan` for better performance"
+        );
+        "CPU"
+    }
 }
 
 #[cfg(not(any(feature = "mistralrs", feature = "llamacpp")))]
-fn print_cuda(_output: &Output) {}
+fn get_acceleration_status() -> &'static str {
+    ""
+}
