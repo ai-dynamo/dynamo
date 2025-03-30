@@ -149,7 +149,8 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
         }
         None => {
             let default_input = Input::default();
-            tracing::debug!("Using default input: {default_input}. Use in=<input> to specify one of {}",
+            tracing::debug!(
+                "Using default input: {default_input}. Use in=<input> to specify one of {}",
                 Input::available_inputs().join(", ")
             );
             default_input
@@ -171,8 +172,12 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
         }
     };
 
-    tracing::info!("Engine={},Input={},Accelerator={}",
-    out_opt, in_opt, get_acceleration_status());
+    tracing::info!(
+        "engine={},input={},accelerator={}",
+        out_opt,
+        in_opt,
+        get_acceleration_status()
+    );
 
     // Clap skips the first argument expecting it to be the binary name, so add it back
     // Note `--model-path` has index=1 (in lib.rs) so that doesn't need a flag.
@@ -191,7 +196,6 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
     )
     .await
 }
-
 
 fn print_help() {
     println!("{USAGE}");
