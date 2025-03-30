@@ -89,9 +89,9 @@ class PrefillWorker:
         def prefill_queue_handler_cb(fut):
             try:
                 fut.result()
-                print("prefill queue handler created successfully")
+                print("prefill queue handler exited successfully")
             except Exception as e:
-                print(f"prefill queue handler failed: {e!r}")
+                print(f"[ERROR] prefill queue handler failed: {e!r}")
                 sys.exit(1)
 
         task.add_done_callback(prefill_queue_handler_cb)
