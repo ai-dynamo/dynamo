@@ -84,7 +84,12 @@ class PrefillWorker:
         self._metadata_store = NixlMetadataStore("dynamo", runtime)
         await self._metadata_store.put(metadata.engine_id, metadata)
         task = asyncio.create_task(self.prefill_queue_handler())
-        task.add_done_callback(lambda _: print("prefill queue handler created"))
+
+        def prefill_queue_handler_cb(fut):
+            fut.result()
+            print("prefill queue handler created successfully")
+
+        task.add_done_callback(prefill_queue_handler_cb)
         print("PrefillWorker initialized")
 
     async def prefill_queue_handler(self):
