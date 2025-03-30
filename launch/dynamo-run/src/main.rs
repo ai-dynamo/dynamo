@@ -159,21 +159,19 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
             x
         }
         None => {
-            use_default_engine_output = true;
-            Output::default() // smart default based on feature flags            
+            tracing::debug!("Using default engine. Use out=<engine> to specify one of {}",
+            Output::available_engines().join(", "));
+
+            Output::default() // smart default based on feature flags
         }
     };
 
     tracing::info!("Engine={},Input={},Accelerator={}",
     out_opt, in_opt, get_acceleration_status());
 
-    if use_default_engine_output {
-        tracing::debug!("Using default engine. Use out=<engine> to specify one of {}",
-            Output::available_engines().join(", "));
-    }
     // Clap skips the first argument expecting it to be the binary name, so add it back
     // Note `--model-path` has index=1 (in lib.rs) so that doesn't need a flag.
-    let flags = dynamo_run::flags::try_parse_from(
+    let flags = dynamo_run::Flags::try_parse_from(
         ["dynamo-run".to_string()]
             .into_iter()
             .chain(env::args().skip(non_flag_params)),
