@@ -148,11 +148,13 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
             x
         }
         None => {
+            tracing::debug!("Using default input. Use in=<input> to specify one of {}",
+            Input::available_inputs().join(", "));
+
             Input::default()
         }
     };
 
-    let mut use_default_engine_output = false;
     let out_opt = match out_opt {
         Some(x) => {
             non_flag_params += 1;
