@@ -2547,8 +2547,6 @@ echo "Done"
 			fmt.Sprintf("dockerfile=%s", filepath.Dir(dockerFilePath)),
 			"--output",
 			output,
-			"--secret",
-			"id=dockerconfig,src=/tmp/secrets/config.json",
 		}
 		cacheRepo := os.Getenv("BUILDKIT_CACHE_REPO")
 		if cacheRepo == "" {
