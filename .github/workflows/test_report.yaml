@@ -44,14 +44,20 @@ jobs:
            run_id: ${{ github.event.workflow_run.id }}
            path: artifacts
 
+      - name: Set Test Run URL
+        id: set_test_run_url
+        run: echo "test_run_url=${{ github.event.workflow_run.html_url }}" >> $GITHUB_OUTPUT
+
       - name: Summarize Test Results as Markdown Table
+        id: summarize_test_results
         run: |
           sudo apt-get update -y
           sudo apt-get install -y libxml2-utils
-          echo "## Unit Test Results Summary" >> $GITHUB_STEP_SUMMARY
-          echo "# This test report is a summary of the test run in workflow run: [${{ steps.set_test_run_url.outputs.test_run_url }}](${{ steps.set_test_run_url.outputs.test_run_url }})" >> $GITHUB_STEP_SUMMARY
-          echo "| Test Suite | Tests | Passed | Failed | Skipped | Duration |" >> $GITHUB_STEP_SUMMARY
-          echo "|------------|-------|--------|--------|---------|----------|" >> $GITHUB_STEP_SUMMARY
+          SUMMARY_FILE="${GITHUB_WORKSPACE}/summary.md"
+          echo "## Unit Test Results Summary" > $SUMMARY_FILE
+          echo "# This test report is a summary of the test run in workflow run: [${{ steps.set_test_run_url.outputs.test_run_url }}](${{ steps.set_test_run_url.outputs.test_run_url }})" >> $SUMMARY_FILE
+          echo "| Test Suite | Tests | Passed | Failed | Skipped | Duration |" >> $SUMMARY_FILE
+          echo "|------------|-------|--------|--------|---------|----------|" >> $SUMMARY_FILE
           total_tests=0
           total_passed=0
           total_failed=0
@@ -68,7 +74,7 @@ jobs:
               # Debugging: Output values for each file
               echo "Processing file: $file"
               echo "Suite: $suite_name, Tests: $tests, Passed: $passed, Failed: $failed, Skipped: $skipped, Duration: $duration"
-              echo "| $suite_name | $tests | $passed | $failed | $skipped | ${duration}s |" >> $GITHUB_STEP_SUMMARY
+              echo "| $suite_name | $tests | $passed | $failed | $skipped | ${duration}s |" >> $SUMMARY_FILE
               total_tests=$((total_tests + tests))
               total_passed=$((total_passed + passed))
               total_failed=$((total_failed + failed))
@@ -81,5 +87,32 @@ jobs:
           echo "Total failed: $total_failed"
           echo "Total skipped: $total_skipped"
           echo "Total duration: $total_duration"
-          echo "|------------|-------|--------|--------|---------|----------|" >> $GITHUB_STEP_SUMMARY
-          echo "| **Total** | $total_tests | $total_passed | $total_failed | $total_skipped | ${total_duration}s |" >> $GITHUB_STEP_SUMMARY
+          echo "|------------|-------|--------|--------|---------|----------|" >> $SUMMARY_FILE
+          echo "| **Total** | $total_tests | $total_passed | $total_failed | $total_skipped | ${total_duration}s |" >> $SUMMARY_FILE
+      
+      - name: Complete report test status
+        if: always()
+        id: report_test_status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = process.env.SUMMARY_FILE_PATH;
+            const summaryContent = fs.readFileSync(path, 'utf-8');
+            console.log("Contents of the summary file:");
+            console.log(summaryContent);
+            const check_run = await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: "Summarize test report",
+              head_sha: "${{ github.event.workflow_run.head_commit.id }}",
+              status: "completed",
+              conclusion: "${{ job.status }}",
+              output: {
+                title: "Test Summary",
+                summary: summaryContent
+              }
+            });
+            return check_run.data.id;
+        env:
+          SUMMARY_FILE_PATH: ${{ steps.summarize_test_results.outputs.summary_file }}
