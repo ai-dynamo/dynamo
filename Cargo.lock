@@ -3486,7 +3486,6 @@ dependencies = [
  "dynamo-llm",
  "dynamo-runtime",
  "futures",
- "opentelemetry",
  "prometheus",
  "rand 0.9.0",
  "reqwest",
@@ -4188,20 +4187,6 @@ name = "openssl-probe"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d05e27ee213611ffe7d6348b942e8f942b37114c00cc03cec254295a4a17852e"
-
-[[package]]
-name = "opentelemetry"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "768ee97dc5cd695a4dd4a69a0678fb42789666b5a89e8c0af48bb06c6e427120"
-dependencies = [
- "futures-core",
- "futures-sink",
- "js-sys",
- "pin-project-lite",
- "thiserror 2.0.12",
- "tracing",
-]
 
 [[package]]
 name = "option-ext"
