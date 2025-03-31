@@ -17,15 +17,15 @@
 # In the case of disaggregated deployment, this config will apply to each server
 # and will be overwritten by the disaggregated config file
 
-model_name: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+model_name: "TinyLlama/TinyLlama-1.1B-Chat-v1.0" # If built model engine (eg., rank0.engine) is used, pass directory with this argument or pass model path
+tokenizer: "TinyLlama/TinyLlama-1.1B-Chat-v1.0" # If built model engine (e.g., rank0.engine) is used, need to specify tokenizer
 model_path: null
-tensor_parallel_size: 1
-moe_expert_parallel_size: 1
-enable_attention_dp: false
-max_num_tokens: 10240
-max_batch_size: 16
+tensor_parallel_size: 1  # If built model engine (eg., rank0.engine) is used, this argument is ignored
+moe_expert_parallel_size: 1 # If built model engine (eg., rank0.engine) is used, this argument is ignored
+enable_attention_dp: false # If built model engine (eg., rank0.engine) is used, this argument is ignored
+max_num_tokens: 10240 # If built model engine (eg., rank0.engine) is used, this argument is ignored
+max_batch_size: 16 # If built model engine (eg., rank0.engine) is used, this argument is ignored
 trust_remote_code: true
-backend: pytorch
 
 kv_cache_config:
   free_gpu_memory_fraction: 0.95
