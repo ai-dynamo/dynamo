@@ -2530,8 +2530,14 @@ echo "Done"
 				Value: strings.Join(buildkitdFlags, " "),
 			})
 		}
-		command = []string{"buildctl-daemonless.sh"}
+		command = []string{
+			"/bin/sh",
+		}
 		args = []string{
+			"-c",
+			"buildctl",
+			"--addr",
+			"tcp://buildkit:1234",
 			"build",
 			"--frontend",
 			"dockerfile.v0",
@@ -2541,13 +2547,17 @@ echo "Done"
 			fmt.Sprintf("dockerfile=%s", filepath.Dir(dockerFilePath)),
 			"--output",
 			output,
+			"--secret",
+			"id=dockerconfig,src=/tmp/secrets/config.json",
 		}
 		cacheRepo := os.Getenv("BUILDKIT_CACHE_REPO")
 		if cacheRepo == "" {
-			cacheRepo = opt.ImageInfo.DockerRegistry.BentosRepositoryURIInCluster
+			args = append(args, "--export-cache", "type=local,dest=/cache")
+			args = append(args, "--import-cache", "type=local,src=/cache")
+		} else {
+			args = append(args, "--export-cache", fmt.Sprintf("type=registry,ref=%s:buildcache,mode=max,compression=zstd,ignore-error=true", cacheRepo))
+			args = append(args, "--import-cache", fmt.Sprintf("type=registry,ref=%s:buildcache", cacheRepo))
 		}
-		args = append(args, "--export-cache", fmt.Sprintf("type=registry,ref=%s:buildcache,mode=max,compression=zstd,ignore-error=true", cacheRepo))
-		args = append(args, "--import-cache", fmt.Sprintf("type=registry,ref=%s:buildcache", cacheRepo))
 	}
 
 	var builderContainerSecurityContext *corev1.SecurityContext
