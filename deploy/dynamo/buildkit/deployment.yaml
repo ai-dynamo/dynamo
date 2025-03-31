@@ -1,0 +1,58 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: buildkit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: buildkit
+  template:
+    metadata:
+      labels:
+        app: buildkit
+    spec:
+      containers:
+        - name: buildkitd
+          image: moby/buildkit:latest
+          args:
+            - "--addr=unix:///run/buildkit/buildkitd.sock"
+            - "--addr=tcp://0.0.0.0:1234"
+            - "--oci-worker=true"
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - mountPath: /cache
+              name: buildkit-cache
+      volumes:
+        - name: buildkit-cache
+          persistentVolumeClaim:
+            claimName: buildkit-cache-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: buildkit
+  labels:
+    app: buildkit
+spec:
+  ports:
+    - port: 1234
+      targetPort: 1234
+      protocol: TCP
+  selector:
+    app: buildkit
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: buildkit-cache-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: local-nfs
+  resources:
+    requests:
+      storage: 100Gi
+
