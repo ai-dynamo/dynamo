@@ -150,6 +150,9 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ```
 
+### Multinode Deployment (non k8s)
+You can deploy our modular components on multiple nodes due to the power of NATS and ETCD based discovery and communication. We suggest starting off by running NATS/ETCD on your head node.
+
 ### Close deployment
 
 Kill all dynamo processes managed by circusd.
