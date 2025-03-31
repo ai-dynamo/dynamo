@@ -1,0 +1,26 @@
+[package]
+name = "dynamo-engine-llamacpp"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+
+[features]
+default = []
+cuda = ["llama-cpp-2/cuda"]
+metal = ["llama-cpp-2/metal"]
+vulkan = ["llama-cpp-2/vulkan"]
+
+[dependencies]
+dynamo-runtime = { workspace = true }
+dynamo-llm = { workspace = true }
+
+async-stream = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+llama-cpp-2 = { version = "0.1.102" }

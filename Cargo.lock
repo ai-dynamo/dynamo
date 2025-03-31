@@ -1501,6 +1501,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-engine-llamacpp"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "llama-cpp-2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "dynamo-engine-mistral"
+version = "0.1.0"
+
+[[package]]
+name = "dynamo-engine-sglang"
+version = "0.1.0"
+
+[[package]]
+name = "dynamo-engine-trtllm"
+version = "0.1.0"
+
+[[package]]
+name = "dynamo-engine-vllm"
+version = "0.1.0"
+
+[[package]]
 name = "dynamo-llm"
 version = "0.1.0"
 dependencies = [
@@ -1533,7 +1561,6 @@ dependencies = [
  "insta",
  "itertools 0.14.0",
  "libc",
- "llama-cpp-2",
  "memmap2",
  "minijinja",
  "minijinja-contrib",
@@ -1582,6 +1609,7 @@ dependencies = [
  "async-trait",
  "clap",
  "dialoguer",
+ "dynamo-engine-llamacpp",
  "dynamo-llm",
  "dynamo-runtime",
  "futures",

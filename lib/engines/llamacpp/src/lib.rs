@@ -19,14 +19,12 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use anyhow::Context;
 use async_stream::stream;
-use async_trait::async_trait;
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::error as pipeline_error;
-use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
+use dynamo_runtime::pipeline::{async_trait, Error, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
-use dynamo_runtime::CancellationToken;
+use dynamo_runtime::{CancellationToken, ErrorContext, Result};
 use llama_cpp_2::{
     context::{params::LlamaContextParams, LlamaContext},
     llama_backend::LlamaBackend,
@@ -36,9 +34,9 @@ use llama_cpp_2::{
     token::LlamaToken,
 };
 
-use crate::backend::ExecutionContext;
-use crate::protocols::common::llm_backend::{BackendInput, LLMEngineOutput};
-use crate::protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_llm::backend::ExecutionContext;
+use dynamo_llm::protocols::common::llm_backend::{BackendInput, LLMEngineOutput};
+use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 
 /// If user does not provide a max_tokens limit prompt+output to this many
 const DEFAULT_MAX_TOKENS: u32 = 8192;
@@ -113,7 +111,7 @@ impl LlamacppEngine {
     }
 }
 
-fn load_model(backend: &LlamaBackend, model_path: &Path) -> anyhow::Result<LlamaModel> {
+fn load_model(backend: &LlamaBackend, model_path: &Path) -> Result<LlamaModel> {
     let model_params = {
         if cfg!(any(feature = "cuda", feature = "vulkan")) {
             LlamaModelParams::default().with_n_gpu_layers(1000)
@@ -212,7 +210,7 @@ fn run_request(
     cancel_token: CancellationToken,
     work_request: WorkRequest,
     llama_context: &mut ContextWrapper,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     let tokens_list: Vec<LlamaToken> = work_request
         .request
         .token_ids

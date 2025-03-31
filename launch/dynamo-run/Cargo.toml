@@ -31,16 +31,19 @@ mistralrs = ["dynamo-llm/mistralrs"]
 sglang = ["dynamo-llm/sglang", "dep:netlink-packet-route", "dep:rtnetlink"]
 vllm = ["dynamo-llm/vllm", "dep:netlink-packet-route", "dep:rtnetlink"]
 # We don't include llamacpp by default until we figure out when it needs external libraries
-llamacpp = ["dynamo-llm/llamacpp"]
+# llamacpp = ["dynamo-llm/llamacpp"]
+llamacpp = ["dynamo-engine-llamacpp"]
 trtllm = ["dynamo-llm/trtllm"]
 python = ["dynamo-llm/python"]
 cuda = ["dynamo-llm/cuda"]
 metal = ["dynamo-llm/metal"]
-vulkan = ["dynamo-llm/vulkan"]
+#vulkan = ["dynamo-llm/vulkan"]
 
 [dependencies]
 dynamo-llm = { workspace = true }
 dynamo-runtime = { workspace = true }
+
+dynamo-engine-llamacpp = { path = "../../lib/engines/llamacpp", optional = true }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }

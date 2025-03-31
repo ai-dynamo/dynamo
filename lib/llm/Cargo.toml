@@ -28,7 +28,6 @@ description = "Dynamo LLM Library"
 default = []
 
 cuda_kv = ["dep:cudarc", "dep:ndarray"]
-llamacpp = ["dep:llama-cpp-2"]
 mistralrs = ["dep:mistralrs"]
 python = ["dep:pyo3-async-runtimes", "dep:pythonize"]
 sglang = []
@@ -36,9 +35,8 @@ sentencepiece = ["dep:sentencepiece"]
 trtllm = []
 vllm = []
 
-cuda = ["mistralrs/cuda", "llama-cpp-2/cuda", "candle-core/cuda"]
-metal = ["mistralrs/metal", "llama-cpp-2/metal"]
-vulkan = ["llama-cpp-2/vulkan"]
+cuda = ["mistralrs/cuda",  "candle-core/cuda"]
+metal = ["mistralrs/metal", ]
 
 [dependencies]
 # repo
@@ -102,9 +100,6 @@ mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs.git", rev = "aaa
 # sglang
 libc = "0.2"
 serde-pickle = "1.2.0"
-
-# llamacpp
-llama-cpp-2 = { version = "0.1.102", optional = true }
 
 # tokenizers
 tokenizers = { version = "0.21.1", default-features = false, features = [
