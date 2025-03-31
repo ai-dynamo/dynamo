@@ -2548,9 +2548,6 @@ echo "Done"
 		}
 		cacheRepo := os.Getenv("BUILDKIT_CACHE_REPO")
 		if cacheRepo == "" {
-			args = append(args, "--export-cache", "type=local,dest=/cache")
-			args = append(args, "--import-cache", "type=local,src=/cache")
-		} else {
 			volumes = append(volumes, corev1.Volume{
 				Name: "cache",
 				VolumeSource: corev1.VolumeSource{
@@ -2563,6 +2560,9 @@ echo "Done"
 				Name:      "cache",
 				MountPath: "/cache",
 			})
+			args = append(args, "--export-cache", "type=local,dest=/cache")
+			args = append(args, "--import-cache", "type=local,src=/cache")
+		} else {
 			args = append(args, "--export-cache", fmt.Sprintf("type=registry,ref=%s:buildcache,mode=max,compression=zstd,ignore-error=true", cacheRepo))
 			args = append(args, "--import-cache", fmt.Sprintf("type=registry,ref=%s:buildcache", cacheRepo))
 		}
