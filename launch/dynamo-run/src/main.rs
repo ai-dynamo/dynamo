@@ -173,7 +173,9 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
 
     tracing::info!(
         "engine={}, input={}, accelerator={}",
-        out_opt, in_opt, get_acceleration_status()
+        out_opt,
+        in_opt,
+        get_acceleration_status()
     );
 
     // Clap skips the first argument expecting it to be the binary name, so add it back
