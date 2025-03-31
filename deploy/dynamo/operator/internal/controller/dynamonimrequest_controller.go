@@ -2531,11 +2531,9 @@ echo "Done"
 			})
 		}
 		command = []string{
-			"/bin/sh",
+			"buildctl",
 		}
 		args = []string{
-			"-c",
-			"buildctl",
 			"--addr",
 			"tcp://buildkit:1234",
 			"build",
