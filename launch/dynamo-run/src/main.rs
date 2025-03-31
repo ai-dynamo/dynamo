@@ -150,8 +150,7 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
         None => {
             let default_input = Input::default();
             tracing::debug!(
-                "Using default input: {default_input}. Use in=<input> to specify one of {}",
-                Input::available_inputs().join(", ")
+                "Using default input: {default_input}. Please use --help to learn about supported input types."
             );
             default_input
         }
@@ -173,10 +172,8 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
     };
 
     tracing::info!(
-        "engine={},input={},accelerator={}",
-        out_opt,
-        in_opt,
-        get_acceleration_status()
+        "engine={}, input={}, accelerator={}",
+        out_opt, in_opt, get_acceleration_status()
     );
 
     // Clap skips the first argument expecting it to be the binary name, so add it back
