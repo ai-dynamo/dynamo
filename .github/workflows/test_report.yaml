@@ -89,7 +89,7 @@ jobs:
           echo "Total duration: $total_duration"
           echo "|------------|-------|--------|--------|---------|----------|" >> $SUMMARY_FILE
           echo "| **Total** | $total_tests | $total_passed | $total_failed | $total_skipped | ${total_duration}s |" >> $SUMMARY_FILE
-      
+
       - name: Complete report test status
         if: always()
         id: report_test_status
