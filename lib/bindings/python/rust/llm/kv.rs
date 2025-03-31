@@ -372,8 +372,8 @@ impl KvMetricsAggregator {
         let endpoint_kv_metrics = endpoints
             .endpoints
             .iter()
-            .map(|x| EndpointKvMetrics {
-                worker_id: x.worker_id(),
+            .map(|(worker_id, x)| EndpointKvMetrics {
+                worker_id: *worker_id,
                 request_active_slots: x.data.request_active_slots,
                 request_total_slots: x.data.request_total_slots,
                 kv_active_blocks: x.data.kv_active_blocks,
