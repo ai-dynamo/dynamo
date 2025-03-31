@@ -25,7 +25,7 @@ from typing import Any, Optional
 from common.parser import LLMAPIConfig
 from common.processor import ChatProcessor, CompletionsProcessor
 from common.utils import ManagedThread
-from tensorrt_llm._torch import LLM
+from tensorrt_llm import LLM
 from tensorrt_llm.logger import logger
 from transformers import AutoTokenizer
 
@@ -47,20 +47,17 @@ class ChatProcessorMixin:
         # model for LLMAPI input
         self._model = self._model_name
 
-        if self._engine_config.model_path:
-            self._model = self._engine_config.model_path
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                self._engine_config.model_path
-            )
-            logger.info(f"Using model from path: {self._engine_config.model_path}")
-        else:
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                self._engine_config.model_name
-            )
+        logger.info(f"Using model from: {self._engine_config.model_name}")
 
+        # In case that the pre-built model engine (e.g., rank0.engine) is used.
+        # Need to specify tokenizer directory
         if self._engine_config.extra_args.get("tokenizer", None):
             self._tokenizer = AutoTokenizer.from_pretrained(
                 self._engine_config.extra_args.get("tokenizer", None)
+            )
+        else:
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self._engine_config.model_name
             )
 
         self.chat_processor = ChatProcessor(self._model_name, self._tokenizer)

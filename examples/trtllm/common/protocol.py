@@ -34,10 +34,12 @@ from tensorrt_llm.serve.openai_protocol import (
 # However, TRTLLM protocol might still refer it as max_tokens.
 class AdaptedCompletionRequest(CompletionRequest):
     max_completion_tokens: Optional[int] = None
+    max_tokens: Optional[int] = None
 
 
 class AdaptedChatCompletionRequest(ChatCompletionRequest):
     max_completion_tokens: Optional[int] = None
+    max_tokens: Optional[int] = None
 
 
 class Tokens(BaseModel):
