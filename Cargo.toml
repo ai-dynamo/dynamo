@@ -40,7 +40,7 @@ dynamo-llm = { path = "lib/llm" }
 
 # External dependencies
 anyhow = { version = "1" }
-async-nats = { version = "0.38", features = ["service"] }
+async-nats = { version = "0.40", features = ["service"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
 async_zmq = { version = "0.4.0" }
