@@ -22,7 +22,7 @@ RUN cargo fetch
 RUN cargo build --release --package metrics
 
 # ---- Runtime Stage ----
-FROM debian:bullseye-slim
+FROM ubuntu:22.04
 WORKDIR /app
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
