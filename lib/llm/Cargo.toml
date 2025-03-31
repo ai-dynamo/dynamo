@@ -104,7 +104,7 @@ libc = "0.2"
 serde-pickle = "1.2.0"
 
 # llamacpp
-llama-cpp-2 = { version = "0.1.86", optional = true }
+llama-cpp-2 = { version = "0.1.102", optional = true }
 
 # tokenizers
 tokenizers = { version = "0.21.1", default-features = false, features = [
