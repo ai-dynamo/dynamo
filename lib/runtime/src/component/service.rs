@@ -19,13 +19,11 @@ use std::sync::Mutex;
 
 use super::*;
 
-use async_nats::service::{endpoint, Service};
-
+pub use super::endpoint::EndpointStats;
 pub type StatsHandler =
-    Box<dyn FnMut(String, endpoint::Stats) -> serde_json::Value + Send + Sync + 'static>;
-
+    Box<dyn FnMut(String, EndpointStats) -> serde_json::Value + Send + Sync + 'static>;
 pub type EndpointStatsHandler =
-    Box<dyn FnMut(endpoint::Stats) -> serde_json::Value + Send + Sync + 'static>;
+    Box<dyn FnMut(EndpointStats) -> serde_json::Value + Send + Sync + 'static>;
 
 pub const PROJECT_NAME: &str = "Dynamo";
 
