@@ -182,9 +182,13 @@ async fn completions(
         let stream = stream.map(|response| Event::try_from(EventConverter::from(response)));
         let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight).await;
 
-        Ok(Sse::new(stream)
-            .keep_alive(KeepAlive::default())
-            .into_response())
+        let mut sse_stream = Sse::new(stream);
+
+        if let Some(keep_alive) = state.sse_keep_alive {
+            sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
+        }
+
+        Ok(sse_stream.into_response())
     } else {
         let response = CompletionResponse::from_annotated_stream(stream.into())
             .await
@@ -270,9 +274,13 @@ async fn chat_completions(
         let stream = stream.map(|response| Event::try_from(EventConverter::from(response)));
         let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight).await;
 
-        Ok(Sse::new(stream)
-            .keep_alive(KeepAlive::default())
-            .into_response())
+        let mut sse_stream = Sse::new(stream);
+
+        if let Some(keep_alive) = state.sse_keep_alive {
+            sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
+        }
+
+        Ok(sse_stream.into_response())
     } else {
         let response = NvCreateChatCompletionResponse::from_annotated_stream(stream.into())
             .await

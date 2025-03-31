@@ -61,6 +61,10 @@ spec:
         {{- end }}
         {{- if .Values.namespaceRestriction.enabled }}
           - --restrictedNamespace={{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace }}
+          - --leader-elect=false
+        {{- else }}
+          - --leader-elect
+          - --leader-election-id=dynamo.nvidia.com
         {{- end }}
         {{- if .Values.natsAddr }}
           - --natsAddr={{ .Values.natsAddr }}

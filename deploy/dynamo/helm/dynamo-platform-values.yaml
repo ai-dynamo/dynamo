@@ -33,11 +33,9 @@ dynamo-operator:
       args:
         - --health-probe-bind-address=:8081
         - --metrics-bind-address=127.0.0.1:8080
-        - --leader-elect=false
-        - --natsAddr=nats://my-nats:4222
-        - --etcdAddr=etcd:2379
 
   dynamo:
+    dynamoIngressSuffix: ${DYNAMO_INGRESS_SUFFIX}
     yatai:
     # todo: only use dns name
       endpoint: http://dynamo-server
@@ -66,9 +64,9 @@ dynamo-operator:
       inClusterServer: ''
       username: '$oauthtoken'
       # Password will use global.NGC_API_KEY by default
-      password: ""
-      passwordExistingSecretName: ''
-      passwordExistingSecretKey: ''
+      # password: ""
+      passwordExistingSecretName: 'nvcrimagepullsecret'
+      # passwordExistingSecretKey: ''
       secure: true
       bentoRepositoryName: yatai-bentos
 
@@ -97,7 +95,11 @@ dynamo-api-server:
   image:
     repository: gitlab-master.nvidia.com:5005/aire/microservices/compoundai/dynamo-api-server
     tag: ${CI_COMMIT_SHA}
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
+  storeImage:
+    repository: gitlab-master.nvidia.com:5005/aire/microservices/compoundai/dynamo-api-store
+    tag: ${CI_COMMIT_SHA}
+    pullPolicy: IfNotPresent
   imagePullSecrets:
     - name: nvcrimagepullsecret
     - name: gitlab-imagepull
@@ -108,8 +110,8 @@ dynamo-api-server:
   minio:
     persistence:
       enabled: true
-      size: 10Gi
-      storageClass: ""
+      size: 5Gi
+      storageClass: "local-path"
     apiIngress:
       enabled: false
       ingressClassName: nginx
@@ -118,6 +120,17 @@ dynamo-api-server:
 
 etcd:
   enabled: true
+  persistence:
+    enabled: true
+    storageClass: "local-path"
+    size: 1Gi
 
 nats:
   enabled: true
+  config:
+    jetstream:
+      enabled: true
+      fileStore:
+        pvc:
+          size: 1Gi
+          storageClassName: "local-path"

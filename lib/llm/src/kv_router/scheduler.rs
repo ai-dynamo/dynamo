@@ -210,18 +210,20 @@ pub fn process_worker_selection(
     selection: WorkerSelectionResult,
     event_tx: &tokio::sync::mpsc::UnboundedSender<KVHitRateEvent>,
 ) -> i64 {
+    let worker = workers
+        .endpoints
+        .get_mut(&selection.worker_id)
+        .expect("worker not found");
+
     // Update worker state
-    workers.endpoints[selection.worker_index]
-        .data
-        .request_active_slots += 1;
-    workers.endpoints[selection.worker_index]
-        .data
-        .kv_active_blocks += selection.total_blocks;
+    worker.data.request_active_slots += 1;
+    worker.data.kv_active_blocks +=
+        selection.required_blocks as u64 - selection.overlap_blocks as u64;
 
     // Emit event
     if let Err(e) = event_tx.send(KVHitRateEvent {
         worker_id: selection.worker_id,
-        isl_blocks: selection.isl_blocks,
+        isl_blocks: selection.required_blocks as usize,
         overlap_blocks: selection.overlap_blocks,
     }) {
         tracing::warn!("Failed to send KV hit rate event: {:?}", e);
@@ -241,12 +243,10 @@ impl WorkerSelector for DefaultWorkerSelector {
         block_size: usize,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         let mut worker_scores = HashMap::new();
-        let mut max_waiting = 0.0;
+        let mut max_active = 0.0;
 
         // Calculate worker scores and find max waiting requests
-        for (i, w) in workers.endpoints.iter().enumerate() {
-            let worker_id = workers.worker_ids[i];
-
+        for (worker_id, ep) in workers.endpoints.iter() {
             // Calculate score similar to Python version
             if let Some(score) = request.overlap.scores.get(&worker_id) {
                 let score = *score as f64 * block_size as f64 / request.isl_tokens as f64;
@@ -254,29 +254,29 @@ impl WorkerSelector for DefaultWorkerSelector {
             }
 
             // Track max waiting requests
-            max_waiting = f64::max(max_waiting, w.data.request_active_slots as f64);
+            max_active = f64::max(max_active, ep.data.request_active_slots as f64);
         }
 
         // Calculate logits for each worker
         let mut best_logit = f64::NEG_INFINITY;
         let mut best_workers = Vec::new();
 
-        for (i, w) in workers.endpoints.iter().enumerate() {
-            let worker_id = workers.worker_ids[i];
+        for (worker_id, ep) in workers.endpoints.iter() {
+            let worker_id = *worker_id;
 
             // Get score or default to 0.0
             let score = worker_scores.get(&worker_id).copied().unwrap_or(0.0);
 
             // Calculate normalized metrics
-            let gpu_cache_usage = w.data.kv_active_blocks as f64 / w.data.kv_total_blocks as f64;
-            let normalized_waiting = if max_waiting > 0.0 {
-                w.data.request_active_slots as f64 / max_waiting
+            let gpu_cache_usage = ep.data.kv_active_blocks as f64 / ep.data.kv_total_blocks as f64;
+            let normalized_active = if max_active > 0.0 {
+                ep.data.request_active_slots as f64 / max_active
             } else {
                 0.0
             };
 
             // Calculate logit using same formula as Python
-            let logit = 2.0 * score - gpu_cache_usage - normalized_waiting;
+            let logit = 2.0 * score - gpu_cache_usage - normalized_active;
 
             tracing::info!(
                 "Formula for {}: {:.3} = 2.0 * {:.3} - {:.3} - {:.3}",
@@ -284,7 +284,7 @@ impl WorkerSelector for DefaultWorkerSelector {
                 logit,
                 score,
                 gpu_cache_usage,
-                normalized_waiting
+                normalized_active
             );
 
             // Track best workers
@@ -292,10 +292,10 @@ impl WorkerSelector for DefaultWorkerSelector {
                 Some(std::cmp::Ordering::Greater) => {
                     best_logit = logit;
                     best_workers.clear();
-                    best_workers.push(i);
+                    best_workers.push(worker_id);
                 }
                 Some(std::cmp::Ordering::Equal) => {
-                    best_workers.push(i);
+                    best_workers.push(worker_id);
                 }
                 _ => {}
             }
@@ -306,14 +306,13 @@ impl WorkerSelector for DefaultWorkerSelector {
             return Err(KvSchedulerError::NoEndpoints);
         }
 
-        // Randomly select from best workers
-        let selected_index = {
+        let worker_id = if best_workers.len() == 1 {
+            best_workers[0]
+        } else {
+            // Randomly select from best workers
             let mut rng = rand::rng();
             best_workers[rng.random_range(0..best_workers.len())]
         };
-
-        let selected_worker = &workers.endpoints[selected_index];
-        let worker_id = selected_worker.worker_id();
 
         // Log selection metrics
         tracing::info!("Selected worker: {}, logit: {:.3}", worker_id, best_logit);
@@ -323,10 +322,8 @@ impl WorkerSelector for DefaultWorkerSelector {
 
         Ok(WorkerSelectionResult {
             worker_id,
-            worker_index: selected_index,
-            total_blocks,
+            required_blocks: total_blocks,
             overlap_blocks,
-            isl_blocks: request.isl_tokens / block_size,
         })
     }
 }

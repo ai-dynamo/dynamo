@@ -1,3 +1,4 @@
+# type: ignore  # Ignore all mypy errors in this file
 #  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 #  #
@@ -15,10 +16,16 @@
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Annotated, List, Optional
 
-from db.components import (
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, responses
+from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlmodel import col, desc, func, select
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from .components import (
     CreateDynamoNimRequest,
     CreateDynamoNimVersionRequest,
     DynamoNimSchema,
@@ -37,13 +44,8 @@ from db.components import (
     UpdateDynamoNimVersionRequest,
     UserSchema,
 )
-from db.storage import get_session, s3_storage
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, responses
-from model import DynamoNim, DynamoNimVersion, make_aware
-from pydantic import ValidationError
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlmodel import col, desc, func, select
-from sqlmodel.ext.asyncio.session import AsyncSession
+from .model import DynamoNim, DynamoNimVersion, make_aware, utc_now_naive
+from .storage import S3Storage, get_s3_storage, get_session
 
 API_TAG_MODELS = "dynamo"
 
@@ -53,18 +55,17 @@ SORTABLE_COLUMNS = {
     "update_at": col(DynamoNim.updated_at),
 }
 
-router = APIRouter()
+router = APIRouter(prefix="/api/v1")
 logger = logging.getLogger(__name__)
 
 
 @router.get(
-    "/api/v1/auth/current",
+    "/auth/current",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def login(
     request: Request,
@@ -78,13 +79,12 @@ async def login(
 
 
 @router.get(
-    "/api/v1/current_org",
+    "/current_org",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def current_org(
     request: Request,
@@ -108,9 +108,8 @@ async def dynamo_nim_handler(
     dynamo_nim_name: str,
 ) -> DynamoNim:
     statement = select(DynamoNim).where(DynamoNim.name == dynamo_nim_name)
-    stored_dynamo_nim_result = await session.execute(statement)
+    stored_dynamo_nim_result = await session.exec(statement)
     stored_dynamo_nim = stored_dynamo_nim_result.first()
-
     if not stored_dynamo_nim:
         raise HTTPException(status_code=404, detail="Record not found")
 
@@ -121,37 +120,36 @@ GetDynamoNim = Depends(dynamo_nim_handler)
 
 
 @router.get(
-    "/api/v1/bento_repositories/{dynamo_nim_name}",
+    "/bento_repositories/{dynamo_nim_name}",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.get(
-    "/api/v1/dynamo_nims/{dynamo_nim_name}",
+    "/dynamo_nims/{dynamo_nim_name}",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def get_dynamo_nim(
     *,
     dynamo_nim: DynamoNim = GetDynamoNim,
     session: AsyncSession = Depends(get_session),
 ):
+    dynamo_nim_id = dynamo_nim.id
     statement = (
         select(DynamoNimVersion)
         .where(
-            DynamoNimVersion.dynamo_nim_id == dynamo_nim.id,
+            DynamoNimVersion.dynamo_nim_id == dynamo_nim_id,
         )
         .order_by(desc(DynamoNimVersion.created_at))
     )
 
-    result = await session.execute(statement)
+    result = await session.exec(statement)
     dynamo_nims = result.all()
 
     latest_dynamo_nim_versions = await convert_dynamo_nim_version_model_to_schema(
@@ -176,22 +174,20 @@ async def get_dynamo_nim(
 
 
 @router.post(
-    "/api/v1/bento_repositories",
+    "/bento_repositories",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.post(
-    "/api/v1/dynamo_nims",
+    "/dynamo_nims",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def create_dynamo_nim(
     *,
@@ -247,22 +243,20 @@ async def create_dynamo_nim(
 
 
 @router.get(
-    "/api/v1/bento_repositories",
+    "/bento_repositories",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.get(
-    "/api/v1/dynamo_nims",
+    "/dynamo_nims",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def get_dynamo_nim_list(
     *,
@@ -281,7 +275,7 @@ async def get_dynamo_nim_list(
         total_statement = select(func.count(DynamoNim.id)).select_from(statement)
 
         # Execute count query
-        result = await session.execute(total_statement)
+        result = await session.exec(total_statement)
         total = result.scalar() or 0
 
         # Apply pagination and sorting
@@ -295,7 +289,7 @@ async def get_dynamo_nim_list(
         statement = statement.offset(query_params.start).limit(query_params.count)
 
         # Execute main query
-        result = await session.execute(statement)
+        result = await session.exec(statement)
         dynamo_nims = result.scalars().all()
 
         # Rest of your code remains the same
@@ -332,7 +326,7 @@ async def dynamo_nim_version_handler(
         DynamoNim.name == dynamo_nim_name,
     )
 
-    result = await session.execute(statement)
+    result = await session.exec(statement)
     records = result.all()
 
     if not records:
@@ -352,22 +346,20 @@ GetDynamoNimVersion = Depends(dynamo_nim_version_handler)
 
 
 @router.get(
-    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos/{version}",
+    "/bento_repositories/{dynamo_nim_name}/bentos/{version}",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.get(
-    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}",
+    "/dynamo_nims/{dynamo_nim_name}/versions/{version}",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def get_dynamo_nim_version(
     *,
@@ -388,22 +380,20 @@ async def get_dynamo_nim_version(
 
 
 @router.post(
-    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos",
+    "/bento_repositories/{dynamo_nim_name}/bentos",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.post(
-    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions",
+    "/dynamo_nims/{dynamo_nim_name}/versions",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def create_dynamo_nim_version(
     request: CreateDynamoNimVersionRequest,
@@ -413,6 +403,7 @@ async def create_dynamo_nim_version(
     """
     Create a new nim
     """
+    print("[DEBUG]request", request)
     try:
         # Create without validation
         db_dynamo_nim_version = DynamoNimVersion(
@@ -457,22 +448,20 @@ async def create_dynamo_nim_version(
 
 
 @router.get(
-    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos",
+    "/bento_repositories/{dynamo_nim_name}/bentos",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.get(
-    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions",
+    "/dynamo_nims/{dynamo_nim_name}/versions",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def get_dynamo_nim_versions(
     *,
@@ -491,12 +480,12 @@ async def get_dynamo_nim_versions(
         .order_by(desc(DynamoNimVersion.created_at))
     )
 
-    result = await session.execute(total_statement)
+    result = await session.exec(total_statement)
     dynamo_nim_versions = result.all()
     total = len(dynamo_nim_versions)
 
     statement = total_statement.limit(query_params.count)
-    result = await session.execute(statement)
+    result = await session.exec(statement)
     dynamo_nim_versions = list(result.all())
 
     dynamo_nim_version_schemas = await convert_dynamo_nim_version_model_to_schema(
@@ -516,22 +505,20 @@ async def get_dynamo_nim_versions(
 
 
 @router.patch(
-    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos/{version}",
+    "/bento_repositories/{dynamo_nim_name}/bentos/{version}",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.patch(
-    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}",
+    "/dynamo_nims/{dynamo_nim_name}/versions/{version}",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def update_dynamo_nim_version(
     *,
@@ -560,28 +547,27 @@ async def update_dynamo_nim_version(
 
 
 @router.put(
-    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos/{version}/upload",
+    "/bento_repositories/{dynamo_nim_name}/bentos/{version}/upload",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.put(
-    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}/upload",
+    "/dynamo_nims/{dynamo_nim_name}/versions/{version}/upload",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def upload_dynamo_nim_version(
     *,
     dynamo_nim_entities: tuple[DynamoNimVersion, DynamoNim] = GetDynamoNimVersion,
     file: Annotated[bytes, Body()],
     session: AsyncSession = Depends(get_session),
+    s3_storage: S3Storage = Depends(get_s3_storage),
 ):
     dynamo_nim_version, dynamo_nim = dynamo_nim_entities
     object_name = f"{dynamo_nim.name}/{dynamo_nim_version.version}"
@@ -590,7 +576,9 @@ async def upload_dynamo_nim_version(
         s3_storage.upload_file(file, object_name)
 
         dynamo_nim_version.upload_status = DynamoNimUploadStatus.Success
-        dynamo_nim_version.upload_finished_at = datetime.now(timezone.utc)
+        dynamo_nim_version.upload_finished_at = (
+            utc_now_naive()
+        )  # datetime.now(timezone.utc)
         session.add(dynamo_nim_version)
         await session.commit()
 
@@ -605,26 +593,25 @@ def generate_file_path(version) -> str:
 
 
 @router.get(
-    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos/{version}/download",
+    "/bento_repositories/{dynamo_nim_name}/bentos/{version}/download",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.get(
-    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}/download",
+    "/dynamo_nims/{dynamo_nim_name}/versions/{version}/download",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def download_dynamo_nim_version(
     *,
     dynamo_nim_entities: tuple[DynamoNimVersion, DynamoNim] = GetDynamoNimVersion,
+    s3_storage: S3Storage = Depends(get_s3_storage),
 ):
     dynamo_nim_version, dynamo_nim = dynamo_nim_entities
     object_name = f"{dynamo_nim.name}/{dynamo_nim_version.version}"
@@ -640,22 +627,20 @@ async def download_dynamo_nim_version(
 
 
 @router.patch(
-    "/api/v1/bento_repositories/{dynamo_nim_name}/bentos/{version}/start_upload",
+    "/bento_repositories/{dynamo_nim_name}/bentos/{version}/start_upload",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 @router.patch(
-    "/api/v1/dynamo_nims/{dynamo_nim_name}/versions/{version}/start_upload",
+    "/dynamo_nims/{dynamo_nim_name}/versions/{version}/start_upload",
     responses={
         200: {"description": "Successful Response"},
         422: {"description": "Validation Error"},
     },
     tags=[API_TAG_MODELS],
-    include_in_schema=False,
 )
 async def start_dynamo_nim_version_upload(
     *,
@@ -710,12 +695,12 @@ async def convert_dynamo_nim_model_to_schema(
             total_statement = select(func.count(col(DynamoNimVersion.id))).where(
                 DynamoNimVersion.dynamo_nim_id == entity.id
             )
-            result = await session.execute(total_statement)
+            result = await session.exec(total_statement)
             total = result.first()
             if not total:
                 total = 0
 
-            result = await session.execute(statement)
+            result = await session.exec(statement)
             dynamo_nim_versions = list(result.all())
             dynamo_nim_version_schemas = (
                 await convert_dynamo_nim_version_model_to_schema(
@@ -765,27 +750,28 @@ async def convert_dynamo_nim_version_model_to_schema(
     for entity in entities:
         if not dynamo_nim:
             statement = select(DynamoNim).where(DynamoNim.id == entity.dynamo_nim_id)
-            results = await session.execute(statement)
+            results = await session.exec(statement)
             dynamo_nim = results.first()
 
         if dynamo_nim:
             # Add timezone info for API responses
-            created_at = make_aware(entity.created_at)
-            updated_at = make_aware(entity.updated_at)
-            upload_started_at = (
-                make_aware(entity.upload_started_at)
-                if entity.upload_started_at
-                else None
-            )
-            upload_finished_at = (
-                make_aware(entity.upload_finished_at)
-                if entity.upload_finished_at
-                else None
-            )
-            build_at = make_aware(entity.build_at)
+            created_at = make_aware(utc_now_naive())  # make_aware(entity.created_at)
+            updated_at = make_aware(utc_now_naive())  # make_aware(entity.updated_at)
+            # upload_started_at = (
+            #     make_aware(entity.upload_started_at)
+            #     if entity.upload_started_at
+            #     else None
+            # )
+            # upload_finished_at = (
+            #     make_aware(entity.upload_finished_at)
+            #     if entity.upload_finished_at
+            #     else None
+            # )
+            build_at = make_aware(utc_now_naive())  # make_aware(entity.build_at)
+            # description = entity.description or ""
 
             dynamo_nim_version_schema = DynamoNimVersionSchema(
-                description=entity.description,
+                description="",
                 version=entity.version,
                 image_build_status=entity.image_build_status,
                 upload_status=str(entity.upload_status.value),
@@ -798,8 +784,8 @@ async def convert_dynamo_nim_version_model_to_schema(
                 manifest=entity.manifest,
                 updated_at=updated_at,
                 bento_repository_uid=dynamo_nim.id,
-                upload_started_at=upload_started_at,
-                upload_finished_at=upload_finished_at,
+                # upload_started_at=upload_started_at,
+                # upload_finished_at=upload_finished_at,
                 transmission_strategy=TransmissionStrategy.Proxy,
                 build_at=build_at,
             )

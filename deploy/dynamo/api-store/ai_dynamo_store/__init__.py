@@ -13,12 +13,10 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-aiosqlite==0.21.0
-asyncpg==0.30.0
-base58==2.1.1
-boto3==1.37.1
-botocore==1.37.1
-fastapi==0.115.4
-pydantic==2.9.0
-sqlmodel==0.0.22
-uvicorn==0.34.0
+"""AI Dynamo Store package."""
+
+__version__ = "0.1.0"
+
+from .app import run_app
+
+__all__ = ["run_app"]

@@ -88,45 +88,43 @@ impl WorkerSelector for CustomWorkerSelector {
         &self,
         workers: &ProcessedEndpoints,
         request: &SchedulingRequest,
-        kv_block_size: usize,
+        block_size: usize,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         let mut worker_scores = HashMap::new();
-        let mut max_waiting = 0.0;
+        let mut max_active = 0.0;
 
         // Calculate worker scores and find max waiting requests
-        for (i, w) in workers.endpoints.iter().enumerate() {
-            let worker_id = workers.worker_ids[i];
-
+        for (worker_id, ep) in workers.endpoints.iter() {
             // Calculate score similar to Python version
             if let Some(score) = request.overlap.scores.get(&worker_id) {
-                let score = *score as f64 * kv_block_size as f64 / request.isl_tokens as f64;
+                let score = *score as f64 * block_size as f64 / request.isl_tokens as f64;
                 worker_scores.insert(worker_id, score);
             }
 
             // Track max waiting requests
-            max_waiting = f64::max(max_waiting, w.data.request_active_slots as f64);
+            max_active = f64::max(max_active, ep.data.request_active_slots as f64);
         }
 
         // Calculate logits for each worker
         let mut best_logit = f64::NEG_INFINITY;
         let mut best_workers = Vec::new();
 
-        for (i, w) in workers.endpoints.iter().enumerate() {
-            let worker_id = workers.worker_ids[i];
+        for (worker_id, ep) in workers.endpoints.iter() {
+            let worker_id = *worker_id;
 
             // Get score or default to 0.0
             let score = worker_scores.get(&worker_id).copied().unwrap_or(0.0);
 
             // Calculate normalized metrics
-            let gpu_cache_usage = w.data.kv_active_blocks as f64 / w.data.kv_total_blocks as f64;
-            let normalized_waiting = if max_waiting > 0.0 {
-                w.data.request_active_slots as f64 / max_waiting
+            let gpu_cache_usage = ep.data.kv_active_blocks as f64 / ep.data.kv_total_blocks as f64;
+            let normalized_active = if max_active > 0.0 {
+                ep.data.request_active_slots as f64 / max_active
             } else {
                 0.0
             };
 
             // Calculate logit using same formula as Python
-            let logit = 2.0 * score - gpu_cache_usage - normalized_waiting;
+            let logit = 2.0 * score - gpu_cache_usage - normalized_active;
 
             tracing::info!(
                 "Formula for {}: {:.3} = 2.0 * {:.3} - {:.3} - {:.3}",
@@ -134,7 +132,7 @@ impl WorkerSelector for CustomWorkerSelector {
                 logit,
                 score,
                 gpu_cache_usage,
-                normalized_waiting
+                normalized_active
             );
 
             // Track best workers
@@ -142,10 +140,10 @@ impl WorkerSelector for CustomWorkerSelector {
                 Some(std::cmp::Ordering::Greater) => {
                     best_logit = logit;
                     best_workers.clear();
-                    best_workers.push(i);
+                    best_workers.push(worker_id);
                 }
                 Some(std::cmp::Ordering::Equal) => {
-                    best_workers.push(i);
+                    best_workers.push(worker_id);
                 }
                 _ => {}
             }
@@ -156,27 +154,24 @@ impl WorkerSelector for CustomWorkerSelector {
             return Err(KvSchedulerError::NoEndpoints);
         }
 
-        // Randomly select from best workers
-        let selected_index = {
+        let worker_id = if best_workers.len() == 1 {
+            best_workers[0]
+        } else {
+            // Randomly select from best workers
             let mut rng = rand::rng();
             best_workers[rng.random_range(0..best_workers.len())]
         };
 
-        let selected_worker = &workers.endpoints[selected_index];
-        let worker_id = selected_worker.worker_id();
-
         // Log selection metrics
         tracing::info!("Selected worker: {}, logit: {:.3}", worker_id, best_logit);
 
-        let total_blocks = std::cmp::min(request.isl_tokens / kv_block_size, 1) as u64;
+        let total_blocks = std::cmp::min(request.isl_tokens / block_size, 1) as u64;
         let overlap_blocks = request.overlap.scores.get(&worker_id).copied().unwrap_or(0) as usize;
 
         Ok(WorkerSelectionResult {
             worker_id,
-            worker_index: selected_index,
-            total_blocks,
+            required_blocks: total_blocks,
             overlap_blocks,
-            isl_blocks: request.isl_tokens / kv_block_size,
         })
     }
 }

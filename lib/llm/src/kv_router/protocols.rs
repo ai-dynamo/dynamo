@@ -28,11 +28,15 @@ pub struct RouterResponse {
 
 #[derive(Debug)]
 pub struct WorkerSelectionResult {
+    /// The worker id of the selected worker
     pub worker_id: i64,
-    pub worker_index: usize,
-    pub total_blocks: u64,
+
+    /// The total number of blocks required to prefill the request
+    pub required_blocks: u64,
+
+    /// The number of blocks that the selected worker may already have cached.
+    /// This is not a guarantee, but an estimate.
     pub overlap_blocks: usize,
-    pub isl_blocks: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
