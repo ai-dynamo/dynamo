@@ -51,7 +51,8 @@ use crate::protocols::TokenIdType;
 const SGLANG_STOP_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Match sglang python log entries, e.g "[2025-01-30 11:23:16] Some text we want"
-const SGLANG_LOG_RE: &str = r"(?<timestamp>\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] )?(?<message>.*)";
+const SGLANG_LOG_RE: &str =
+    r"(?<timestamp>\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] )?(?<message>.*)";
 
 /// Identify sglang log entries with this prefix
 const LOG_PREFIX: &str = "SGLANG";
