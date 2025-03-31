@@ -37,7 +37,7 @@ trtllm = ["dynamo-llm/trtllm"]
 python = ["dynamo-llm/python"]
 cuda = ["dynamo-llm/cuda"]
 metal = ["dynamo-llm/metal"]
-#vulkan = ["dynamo-llm/vulkan"]
+vulkan = []
 
 [dependencies]
 dynamo-llm = { workspace = true }

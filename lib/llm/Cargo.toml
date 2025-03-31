@@ -35,8 +35,9 @@ sentencepiece = ["dep:sentencepiece"]
 trtllm = []
 vllm = []
 
-cuda = ["mistralrs/cuda",  "candle-core/cuda"]
-metal = ["mistralrs/metal", ]
+cuda = ["mistralrs/cuda", "candle-core/cuda"]
+metal = ["mistralrs/metal"]
+vulkan = []
 
 [dependencies]
 # repo
