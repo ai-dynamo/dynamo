@@ -47,13 +47,13 @@ VllmWorker:
       gpu: 1
 
 # TODO - set all of these but model as default
-PrefillWorker:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-  block-size: 64
-  max-model-len: 16384
-  max-num-batched-tokens: 16384
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: 1
+#PrefillWorker:
+#  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+#  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
+#  block-size: 64
+#  max-model-len: 16384
+#  max-num-batched-tokens: 16384
+#  ServiceArgs:
+#    workers: 1
+#    resources:
+#      gpu: 1
