@@ -24,6 +24,9 @@ import random
 import string
 import typing as t
 from typing import Any
+import signal
+# import uvloop
+import functools
 
 import click
 
@@ -186,7 +189,33 @@ def main(
                 logger.error(f"[{run_id}] Error in Dynamo component setup: {str(e)}")
                 raise
 
-        asyncio.run(worker())
+        # Define the setup_signal_handlers function within main's scope 
+        async def setup_signal_handlers():
+            loop = asyncio.get_running_loop()
+            
+            # Add signal handlers for graceful shutdown
+            for signame in {'SIGINT', 'SIGTERM'}:
+                loop.add_signal_handler(
+                    getattr(signal, signame),
+                    functools.partial(handle_signal, signame, loop)
+                )
+            
+            logger.info(f"Process {os.getpid()}: Signal handlers registered for SIGINT and SIGTERM")
+            
+            # Run the worker
+            return await worker()
+
+        # Use the setup function instead of calling worker directly
+        # uv loop install 
+        # uvloop.install()
+        asyncio.run(setup_signal_handlers())
+
+
+def handle_signal(signame, loop, class_instance):
+    """Handle termination signals gracefully"""
+    # wire up bentoml shutdown hook here
+    logger.info(f"Received signal {signame}: shutting down")
+    loop.stop()
 
 
 if __name__ == "__main__":
