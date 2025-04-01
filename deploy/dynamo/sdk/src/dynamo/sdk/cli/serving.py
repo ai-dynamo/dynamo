@@ -445,8 +445,10 @@ def serve_http(
 
             # Pass through the main service config
             if "DYNAMO_SERVICE_CONFIG" in os.environ:
-                worker_env["DYNAMO_SERVICE_CONFIG"] = os.environ["DYNAMO_SERVICE_CONFIG"]
-            
+                worker_env["DYNAMO_SERVICE_CONFIG"] = os.environ[
+                    "DYNAMO_SERVICE_CONFIG"
+                ]
+
             # Get service-specific environment variables from DYNAMO_SERVICE_ENVS
             if "DYNAMO_SERVICE_ENVS" in os.environ:
                 try:
