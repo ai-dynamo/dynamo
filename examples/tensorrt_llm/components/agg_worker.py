@@ -89,7 +89,6 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
             error = self._error_queue.get()
             raise error
 
-        print(f"[worker] Received request: {request}")
         self._ongoing_request_count += 1
 
         try:

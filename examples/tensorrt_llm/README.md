@@ -36,8 +36,31 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ### Build docker
 
+#### Step 1: Build TensorRT-LLM base container image
+
+Because of the known issue of C++11 ABI compatibility, we rebuild the TensorRT-LLM from source within NGC pytorch container.
+See [here](https://nvidia.github.io/TensorRT-LLM/installation/linux.html) for more informantion.
+
+Use the helper script to build a TensorRT-LLM container base image. The script uses a specific commit id from TensorRT-LLM main branch.
+
+```bash
+./container/build_trtllm_base_image.sh
+```
+
+For more information see [here](https://nvidia.github.io/TensorRT-LLM/installation/build-from-source-linux.html#option-1-build-tensorrt-llm-in-one-step) for more details on building from source.
+If you already have a TensorRT-LLM container image, you can skip this step.
+
+#### Step 2: Build the Dynamo container
+
 ```
 ./container/build.sh --framework tensorrtllm
+```
+
+This build script internally points to the base container image built with step 1. If you skipped previous step because you already have the container image available, you can run the build script with that image as a base.
+
+```bash
+# Build dynamo image with other TRTLLM base image.
+./container/build.sh --framework TENSORRTLLM --base-image <trtllm-base-image> --base-image-tag <trtllm-base-image-tag>
 ```
 
 ### Run container
@@ -46,7 +69,6 @@ docker compose -f deploy/docker-compose.yml up -d
 ./container/run.sh --framework tensorrtllm -it
 ```
 ## Run Deployment
-
 
 ### Example architectures
 
