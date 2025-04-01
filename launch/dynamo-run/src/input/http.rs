@@ -32,16 +32,16 @@ use dynamo_runtime::{
     DistributedRuntime, Runtime,
 };
 
-use crate::EngineConfig;
+use crate::{EngineConfig, Flags};
 
 /// Build and run an HTTP service
 pub async fn run(
     runtime: Runtime,
-    http_port: u16,
+    flags: Flags,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
     let http_service = service_v2::HttpService::builder()
-        .port(http_port)
+        .port(flags.http_port)
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
         .build()?;

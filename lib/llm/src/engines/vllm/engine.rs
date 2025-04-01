@@ -14,12 +14,14 @@
 // limitations under the License.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_stream::stream;
 use async_trait::async_trait;
 
 use crate::engines::vllm::worker;
 use crate::engines::MultiNodeConfig;
+use crate::kv_router::publisher::KvMetricsPublisher;
 use crate::protocols::common::llm_backend::{BackendInput, LLMEngineOutput};
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
@@ -39,6 +41,7 @@ impl VllmEngine {
         node_conf: MultiNodeConfig,
         tensor_parallel_size: u32,
         extra_engine_args: Option<PathBuf>,
+        kv_metrics_publisher: Option<Arc<KvMetricsPublisher>>,
     ) -> anyhow::Result<Self> {
         let w = worker::start(
             cancel_token.clone(),
@@ -47,6 +50,7 @@ impl VllmEngine {
             node_conf,
             tensor_parallel_size,
             extra_engine_args,
+            kv_metrics_publisher,
         )
         .await?;
         let engine = VllmEngine {

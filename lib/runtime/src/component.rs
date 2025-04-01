@@ -68,7 +68,7 @@ mod namespace;
 mod registry;
 pub mod service;
 
-pub use client::Client;
+pub use client::{Client, RouterMode};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]

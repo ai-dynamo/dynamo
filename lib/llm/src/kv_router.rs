@@ -66,24 +66,24 @@ impl KvRouter {
         tracing::info!("Component Namespace {}", component.namespace());
         tracing::info!("Component Service Name {}", component.service_name());
         tracing::info!("KV Subject {}.{}", component.subject(), KV_EVENT_SUBJECT);
-        Self::new(component, namespace, kv_block_size).await
+        Self::new(runtime.primary_token(), component, namespace, kv_block_size).await
     }
 
-    pub async fn new(
+    async fn new(
+        cancel_token: CancellationToken,
         component: Component,
         namespace: Namespace,
         kv_block_size: usize,
     ) -> Result<Arc<Self>> {
-        let cancellation_token = CancellationToken::new();
         let (ep_tx, ep_rx) = tokio::sync::mpsc::channel(128);
 
         tokio::spawn(collect_endpoints_task(
             component.clone(),
             ep_tx,
-            cancellation_token.clone(),
+            cancel_token.clone(),
         ));
 
-        let indexer = KvIndexer::new(cancellation_token.clone(), kv_block_size);
+        let indexer = KvIndexer::new(cancel_token.clone(), kv_block_size);
         let scheduler = KvScheduler::start(ep_rx, namespace, kv_block_size).await?;
 
         // [gluo TODO] try subscribe_with_type::<RouterEvent>,
@@ -113,7 +113,7 @@ impl KvRouter {
 
         Ok(Arc::new(Self {
             service_name: component.service_name(),
-            cancellation_token,
+            cancellation_token: cancel_token,
             scheduler,
             indexer,
         }))

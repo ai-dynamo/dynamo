@@ -21,7 +21,7 @@ use futures::StreamExt;
 use std::io::{ErrorKind, Write};
 
 use crate::input::common;
-use crate::EngineConfig;
+use crate::{EngineConfig, Flags};
 
 /// Max response tokens for each single query. Must be less than model context size.
 /// TODO: Cmd line flag to overwrite this
@@ -29,15 +29,16 @@ const MAX_TOKENS: u32 = 8192;
 
 pub async fn run(
     runtime: Runtime,
-    cancel_token: CancellationToken,
+    flags: Flags,
     single_prompt: Option<String>,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
+    let cancel_token = runtime.primary_token();
     let (service_name, engine, inspect_template): (
         String,
         OpenAIChatCompletionsStreamingEngine,
         bool,
-    ) = common::prepare_engine(runtime.clone(), engine_config).await?;
+    ) = common::prepare_engine(runtime, flags, engine_config).await?;
     main_loop(
         cancel_token,
         &service_name,

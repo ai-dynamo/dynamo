@@ -13,9 +13,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::EngineConfig;
+use crate::{flags::RouterMode, EngineConfig, Flags};
 use dynamo_llm::{
     backend::Backend,
+    kv_router::KvRouter,
     preprocessor::OpenAIPreprocessor,
     types::{
         openai::chat_completions::{
@@ -31,9 +32,12 @@ use dynamo_runtime::{
 };
 use std::sync::Arc;
 
+const KV_BLOCK_SIZE: usize = 32;
+
 /// Turns an EngineConfig into an OpenAIChatCompletionsStreamingEngine.
 pub async fn prepare_engine(
     runtime: Runtime,
+    flags: Flags,
     engine_config: EngineConfig,
 ) -> anyhow::Result<(String, OpenAIChatCompletionsStreamingEngine, bool)> {
     match engine_config {
@@ -41,14 +45,35 @@ pub async fn prepare_engine(
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
 
             let endpoint = distributed_runtime
-                .namespace(endpoint_id.namespace)?
-                .component(endpoint_id.component)?
-                .endpoint(endpoint_id.name);
+                .namespace(endpoint_id.namespace.clone())?
+                .component(endpoint_id.component.clone())?
+                .endpoint(endpoint_id.name.clone());
 
-            let client = endpoint.client::<NvCreateChatCompletionRequest, Annotated<NvCreateChatCompletionStreamResponse>>().await?;
-            tracing::info!("Waiting for remote model..");
-            client.wait_for_endpoints().await?;
-            tracing::info!("Model discovered");
+            let mut client = endpoint.client::<NvCreateChatCompletionRequest, Annotated<NvCreateChatCompletionStreamResponse>>().await?;
+
+            match &flags.router_mode {
+                RouterMode::KV => {
+                    let component = distributed_runtime
+                        .namespace(endpoint_id.namespace.clone())?
+                        .component(endpoint_id.component.clone())?;
+                    // This should handle KvIndexer and KvMetricsAggregator
+                    let kv_router = KvRouter::from_runtime(
+                        distributed_runtime.clone(),
+                        component,
+                        KV_BLOCK_SIZE,
+                    )?;
+
+                    // 2. Give that to the `client`
+                    // 3. Inside client's generate, call kv router `schedule` function which gives us an endpoint ID
+                    // 4. route with client.direct(endpoint_id)
+                }
+                RouterMode::Random | RouterMode::RoundRobin => {
+                    client.set_router_mode(flags.router_mode.into());
+                    tracing::info!("Waiting for remote model..");
+                    client.wait_for_endpoints().await?;
+                    tracing::info!("Model discovered");
+                }
+            }
 
             // The service_name isn't used for text chat outside of logs,
             // so use the path. That avoids having to listen on etcd for model registration.
