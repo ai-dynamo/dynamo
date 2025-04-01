@@ -24,7 +24,7 @@ body:
     id: alternatives
     attributes:
       label: Describe alternatives you've tried
-      description: | 
+      description: |
         Please describe any alternative solutions you've tried in as much detail as possible.
     validations:
       required: false

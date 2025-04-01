@@ -135,4 +135,4 @@ body:
       label: Screenshots
       description: If applicable, add screenshots to help explain your problem.
     validations:
-      required: false 
+      required: false
