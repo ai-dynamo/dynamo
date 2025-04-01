@@ -185,7 +185,7 @@ Since we only want to start the `PrefillWorker` on node 2, you can simply run ju
 
 ```bash
 # node 2
-export NATS_SERVER = '<your-nats-server-address>'
+export NATS_SERVER = '<your-nats-server-address>' # note this should start with nats://...
 export ETCD_ENDPOINTS = '<your-etcd-endpoints-address>'
 
 cd /workspace/examples/llm
