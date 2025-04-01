@@ -89,7 +89,7 @@ jobs:
           echo "Total duration: $total_duration"
           echo "|------------|-------|--------|--------|---------|----------|" >> $SUMMARY_FILE
           echo "| **Total** | $total_tests | $total_passed | $total_failed | $total_skipped | ${total_duration}s |" >> $SUMMARY_FILE
-          
+
           echo "SUMMARY_FILE_PATH=$SUMMARY_FILE" >> $GITHUB_ENV
           echo "summary_file=$SUMMARY_FILE" >> $GITHUB_OUTPUT
           echo "Current directory: $(pwd)"
