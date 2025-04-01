@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,30 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-**/*.onnx
-**/*.plan
-**/*.onnx
-**/*.plan
-**/*.etcd
-**/.cache/*
-**/*onnx*
-# Engine must be allowed because code contains dynamo_engine.py
-**/*tensorrtllm_engines*
-**/*tensorrtllm_models*
-**/*tensorrtllm_checkpoints*
-**/*hf_downloads*
-**/*pytorch_model*
-**/*.pth*
-**/*.pt
-**/*.models/*
-**/*.model-store/*
-**/*.model.*/*
-**/*.cache/*
-**/*.libtorch_model_store/*
-**/.git
-**/.github
-**/*backup*/
-.dockerignore
-**/target/*
-**/*safetensors
-TensorRT-LLM
+from components.agg_worker import TensorRTLLMWorker
+from components.frontend import Frontend
+from components.kv_router import Router
+from components.processor import Processor
+
+Frontend.link(Processor).link(Router).link(TensorRTLLMWorker)

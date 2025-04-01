@@ -1,0 +1,102 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+
+# LLM Deployment Examples using TensorRT-LLM
+
+WIP: Merge the code base with llm example to reduce the code duplication.
+
+This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations using TensorRT-LLM.
+
+
+## Deployment Architectures
+
+See [deployment architectures](../llm/README.md#deployment-architectures) to learn about the general idea of the architecture.
+Note that this TensorRT-LLM version might not support all the options yet.
+
+### Prerequisites
+
+Start required services (etcd and NATS) using [Docker Compose](../../deploy/docker-compose.yml)
+```bash
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+### Build docker
+
+```
+./container/build.sh --framework tensorrtllm
+```
+
+### Run container
+
+```
+./container/run.sh --framework tensorrtllm -it
+```
+## Run Deployment
+
+
+### Example architectures
+
+#### Aggregated serving
+```bash
+cd /workspace/examples/tensorrt_llm
+dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
+```
+
+#### Aggregated serving with KV Routing
+```bash
+cd /workspace/examples/tensorrt_llm
+dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
+```
+
+#### Aggregated serving using Dynamo Run
+
+```bash
+cd /workspace/examples/tensorrt_llm
+dynamo run out=pystr:./engines/agg_engine.py -- --engine_args ./configs/llm_api_config.yaml
+```
+The above command should load the model specified in `llm_api_config.yaml` and start accepting
+text input from the client. For more details on the `dynamo run` command, please refer to the
+[dynamo run](/launch/README.md#python-bring-your-own-engine) documentation.
+
+Currently only aggregated deployment option is supported by `dynamo run` for TensorRT-LLM.
+Adding support for disaggregated deployment is under development. This does *not* require
+any other pre-requisites mentioned in the [Prerequisites](#prerequisites) section.
+
+
+<!--
+This is work in progress and will be enabled soon.
+
+#### Disaggregated serving
+```bash
+cd /workspace/examples/llm
+dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
+```
+
+#### Disaggregated serving with KV Routing
+```bash
+cd /workspace/examples/llm
+dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
+```
+-->
+
+### Client
+
+See [client](../llm/README.md#client) section to learn how to send request to the deployment.
+
+### Close deployment
+
+See [close deployment](../llm/README.md#close-deployment) section to learn about how to close the deployment.
