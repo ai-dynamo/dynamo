@@ -108,7 +108,7 @@ body:
     attributes:
       label: CPU Architecture
       description: What CPU Architecture are you using? You can find this by running `uname -m` in your terminal.
-      placeholder: e.g. x86_64, arm64.
+      placeholder: e.g. x86_64
     validations:
       required: false
 
