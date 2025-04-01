@@ -2530,12 +2530,17 @@ echo "Done"
 				Value: strings.Join(buildkitdFlags, " "),
 			})
 		}
+		buildkitURL := os.Getenv("BUILDKIT_URL")
+		if buildkitURL == "" {
+			err = errors.New("BUILDKIT_URL is not set")
+			return
+		}
 		command = []string{
 			"buildctl",
 		}
 		args = []string{
 			"--addr",
-			"tcp://buildkit:1234",
+			buildkitURL,
 			"build",
 			"--frontend",
 			"dockerfile.v0",
@@ -2551,25 +2556,6 @@ echo "Done"
 			args = append(args, "--export-cache", fmt.Sprintf("type=registry,ref=%s:buildcache,mode=max,compression=zstd,ignore-error=true", cacheRepo))
 			args = append(args, "--import-cache", fmt.Sprintf("type=registry,ref=%s:buildcache", cacheRepo))
 		}
-		// if cacheRepo == "" {
-		// 	volumes = append(volumes, corev1.Volume{
-		// 		Name: "cache",
-		// 		VolumeSource: corev1.VolumeSource{
-		// 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-		// 				ClaimName: "buildkit-cache-pvc",
-		// 			},
-		// 		},
-		// 	})
-		// 	volumeMounts = append(volumeMounts, corev1.VolumeMount{
-		// 		Name:      "cache",
-		// 		MountPath: "/cache",
-		// 	})
-		// 	args = append(args, "--export-cache", "type=local,dest=/cache")
-		// 	args = append(args, "--import-cache", "type=local,src=/cache")
-		// } else {
-		// 	args = append(args, "--export-cache", fmt.Sprintf("type=registry,ref=%s:buildcache,mode=max,compression=zstd,ignore-error=true", cacheRepo))
-		// 	args = append(args, "--import-cache", fmt.Sprintf("type=registry,ref=%s:buildcache", cacheRepo))
-		// }
 	}
 
 	var builderContainerSecurityContext *corev1.SecurityContext
