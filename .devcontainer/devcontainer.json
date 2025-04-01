@@ -1,0 +1,32 @@
+{
+    "name": "NVIDIA Dynamo Development",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": ".."
+    },
+    "runArgs": [
+        "--gpus=all"
+    ],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "rust-lang.rust-analyzer",
+                "tamasfe.even-better-toml",
+                "github.copilot",
+                "ms-azuretools.vscode-docker"
+            ],
+            "settings": {
+                "python.defaultInterpreterPath": "/workspaces/ai-dynamo/venv/bin/python",
+                "python.linting.enabled": true,
+                "python.linting.pylintEnabled": true,
+                "editor.formatOnSave": true,
+                "rust-analyzer.checkOnSave.command": "clippy"
+            }
+        }
+    },
+    "updateRemoteUserUID": true,
+    "postCreateCommand": "/bin/bash .devcontainer/post-create.sh",
+    "postStartCommand": "echo 'source /workspaces/ai-dynamo/venv/bin/activate' >> ~/.bashrc",
+    "remoteUser": "vscode"
+}
