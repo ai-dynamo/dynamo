@@ -50,7 +50,6 @@ class VllmWorker:
         self.disaggregated_router: PyDisaggregatedRouter = None  # type: ignore
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
-        print("CUDA_VISIBLE_DEVICES", os.environ["CUDA_VISIBLE_DEVICES"])
         self.do_remote_prefill = self.engine_args.remote_prefill
         self.model_name = (
             self.engine_args.served_model_name
