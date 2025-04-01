@@ -242,51 +242,60 @@ impl WorkerSelector for DefaultWorkerSelector {
         request: &SchedulingRequest,
         block_size: usize,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-        assert!(request.isl_tokens > 0);
-
-        let mut worker_scores = HashMap::new();
-        let mut max_active = 0.0;
-
-        // Calculate worker scores and find max waiting requests
-        for (worker_id, ep) in workers.endpoints.iter() {
-            // Calculate score similar to Python version
-            if let Some(score) = request.overlap.scores.get(worker_id) {
-                let score = *score as f64 * block_size as f64 / request.isl_tokens as f64;
-                worker_scores.insert(worker_id, score);
-            }
-
-            // Track max waiting requests
-            max_active = f64::max(max_active, ep.data.request_active_slots as f64);
-        }
-
-        if max_active == 0.0 {
+        // 1. Handle edge cases
+        if workers.endpoints.is_empty() {
+            // No endpoints at all
             return Err(KvSchedulerError::NoEndpoints);
         }
 
-        // make immutable
-        let worker_scores = worker_scores;
-        let max_active = max_active;
+        // If block_size == 0 or isl_tokens == 0, we consider that
+        // no blocks are required. We'll still pick a worker if possible,
+        // but the overlap-based score effectively becomes 0.
+        let zero_tokens_or_blocks = (request.isl_tokens == 0) || (block_size == 0);
+        let block_size_f = block_size as f64;
+        let isl_tokens_f = request.isl_tokens as f64;
 
-        // Calculate logits for each worker
+        // 2. Find the maximum request_active_slots to normalize usage
+        let max_active = workers
+            .endpoints
+            .values()
+            .map(|ep| ep.data.request_active_slots)
+            .max()
+            .unwrap_or(0);
+
+        // If all endpoints have 0 active slots, we can either:
+        // - Return an error (like the original code), or
+        // - Still proceed with the logic (since we do have endpoints).
+        if max_active == 0 {
+            // Decide how you want to handle this scenario.
+            // We'll return an error as the original code does:
+            return Err(KvSchedulerError::NoEndpoints);
+        }
+
+        // 3. In a single pass, determine the best worker(s) based on the logit formula
         let mut best_logit = f64::NEG_INFINITY;
         let mut best_workers = Vec::new();
 
-        for (worker_id, ep) in workers.endpoints.iter() {
-            let worker_id = *worker_id;
+        for (worker_id, ep) in &workers.endpoints {
+            // Overlap score (defaults to 0 if missing)
+            let overlap_score = request.overlap.scores.get(worker_id).copied().unwrap_or(0) as f64;
 
-            // Get score or default to 0.0
-            let score = worker_scores.get(&worker_id).copied().unwrap_or(0.0);
-
-            // Calculate normalized metrics
-            assert!(ep.data.kv_total_blocks > 0);
-            let gpu_cache_usage = ep.data.kv_active_blocks as f64 / ep.data.kv_total_blocks as f64;
-            let normalized_active = if max_active > 0.0 {
-                ep.data.request_active_slots as f64 / max_active
-            } else {
+            // If we have zero tokens or block size, we treat the effective 'score' as 0
+            // because we can't allocate blocks or meaningfully normalize the overlap.
+            let score = if zero_tokens_or_blocks {
                 0.0
+            } else {
+                overlap_score * block_size_f / isl_tokens_f
             };
 
-            // Calculate logit using same formula as Python
+            // Avoid division by zero; skip or handle endpoints that have zero kv_total_blocks
+            if ep.data.kv_total_blocks == 0 {
+                continue;
+            }
+
+            let gpu_cache_usage = ep.data.kv_active_blocks as f64 / ep.data.kv_total_blocks as f64;
+            let normalized_active = ep.data.request_active_slots as f64 / max_active as f64;
+
             let logit = 2.0 * score - gpu_cache_usage - normalized_active;
 
             tracing::info!(
@@ -298,42 +307,55 @@ impl WorkerSelector for DefaultWorkerSelector {
                 normalized_active
             );
 
-            // Track best workers
+            // Track best logit
             match logit.partial_cmp(&best_logit) {
                 Some(std::cmp::Ordering::Greater) => {
                     best_logit = logit;
                     best_workers.clear();
-                    best_workers.push(worker_id);
+                    best_workers.push(*worker_id);
                 }
                 Some(std::cmp::Ordering::Equal) => {
-                    best_workers.push(worker_id);
+                    best_workers.push(*worker_id);
                 }
                 _ => {}
             }
         }
 
-        // Return early if no valid workers found
-        if best_workers.is_empty() || best_logit == 0.0 {
+        // 4. Check if we found at least one valid endpoint
+        if best_workers.is_empty() {
             return Err(KvSchedulerError::NoEndpoints);
         }
 
+        // 5. If more than one, pick randomly among the best
         let worker_id = if best_workers.len() == 1 {
             best_workers[0]
         } else {
-            // Randomly select from best workers
             let mut rng = rand::rng();
             best_workers[rng.random_range(0..best_workers.len())]
         };
 
-        // Log selection metrics
-        tracing::info!("Selected worker: {}, logit: {:.3}", worker_id, best_logit);
+        // 6. Calculate required blocks for the chosen endpoint
+        //    If tokens == 0 or block_size == 0, the result is 0 blocks.
+        let required_blocks = if zero_tokens_or_blocks {
+            0
+        } else {
+            // As in the original code: `min(request.isl_tokens / block_size, 1) as u64`
+            std::cmp::min(request.isl_tokens / block_size, 1) as u64
+        };
 
-        let total_blocks = std::cmp::min(request.isl_tokens / block_size, 1) as u64;
-        let overlap_blocks = request.overlap.scores.get(&worker_id).copied().unwrap_or(0) as usize;
+        // Overlap blocks, if any
+        let overlap_blocks = request
+            .overlap
+            .scores
+            .get(&worker_id)
+            .copied()
+            .unwrap_or(0) as usize;
+
+        tracing::info!("Selected worker: {}, logit: {:.3}", worker_id, best_logit);
 
         Ok(WorkerSelectionResult {
             worker_id,
-            required_blocks: total_blocks,
+            required_blocks,
             overlap_blocks,
         })
     }
