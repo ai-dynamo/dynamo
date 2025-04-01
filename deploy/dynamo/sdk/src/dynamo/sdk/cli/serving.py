@@ -527,7 +527,7 @@ def serve_http(
                     else "Starting %s (Press CTRL+C to quit)"
                 ),
                 *(
-                    (svc.name, *svc.dynamo_address(), scheme, log_host, port)
+                    (svc.name,)
                     if (
                         hasattr(svc, "is_dynamo_component")
                         and svc.is_dynamo_component()
