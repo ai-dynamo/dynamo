@@ -19,6 +19,7 @@ import asyncio
 import random
 from argparse import Namespace
 from typing import AsyncIterator
+import warnings
 
 from components.worker import VllmWorker
 from utils.protocol import Tokens
@@ -98,14 +99,21 @@ class Router:
             .endpoint("generate")
             .client()
         )
-        while len(self.workers_client.endpoint_ids()) < self.args.min_workers:
-            # TODO: replace print w/ vllm_logger.info
-            print(
-                f"Waiting for more workers to be ready.\n"
-                f" Current: {len(self.workers_client.endpoint_ids())},"
-                f" Required: {self.args.min_workers}"
-            )
+        self.worker_ids = self.workers_client.endpoint_ids()
+
+        num_workers = len(self.worker_ids)
+        while num_workers < self.args.min_workers:
             await asyncio.sleep(2)
+            self.worker_ids = self.workers_client.endpoint_ids()
+            new_count = len(self.worker_ids)
+
+            if new_count != num_workers:
+                print(
+                    f"Waiting for more workers to be ready.\n"
+                    f" Current: {new_count},"
+                    f" Required: {self.args.min_workers}"
+                )
+                num_workers = new_count
 
         kv_listener = self.runtime.namespace("dynamo").component("VllmWorker")
         await kv_listener.create_service()
@@ -136,6 +144,9 @@ class Router:
             (str, float): The best worker id and the corresponding score.
         """
 
+        if not self.worker_ids:
+            warnings.warn("Cannot find any workers.")
+
         worker_scores = {}
         if scores:
             for worker_id, score in scores.scores.items():
@@ -158,12 +169,8 @@ class Router:
                     max_waiting, worker_metrics[worker_id]["num_requests_waiting"]
                 )
 
-        # Get all worker IDs from the client. This is needed because scores / metrics may not have values for all workers
-        # and we want all workers to be considered in the logit calculation
-        worker_ids = self.workers_client.endpoint_ids()
-
         worker_logits = {}
-        for worker_id in worker_ids:
+        for worker_id in self.worker_ids:
             # Use default values if worker not in scores or metrics
             score = worker_scores.get(worker_id, 0.0)
             metrics_dict = worker_metrics.get(worker_id, self.default_metrics)
@@ -182,8 +189,9 @@ class Router:
                 f"Formula for {worker_id}: {worker_logits[worker_id]:.3f} = 2.0 * {score:.3f} - {gpu_cache_usage:.3f} - {normalized_waiting:.3f}"
             )
 
-        if not worker_logits or all(logit == 0 for logit in worker_logits.values()):
-            return "", 0.0
+        if all(logit == 0 for logit in worker_logits.values()):
+            worker_id = random.choice(self.worker_ids)
+            return worker_id, 0.0
 
         # Select the worker with the highest logit
         max_logit = max(worker_logits.values())
@@ -223,6 +231,9 @@ class Router:
             vllm_logger.exception(f"Error finding matches: {e}")
 
         metrics = await self.metrics_aggregator.get_metrics()
+        if not metrics:
+            warnings.warn("Failed to poll any worker metrics.")
+
         worker_id, prefix_hit_rate = self._cost_function(
             scores, metrics, len(request.tokens)
         )

@@ -17,6 +17,7 @@ import asyncio
 import uuid
 from enum import Enum
 from typing import AsyncIterator, Tuple, Union
+import warnings
 
 from components.kv_router import Router
 from components.worker import VllmWorker
@@ -113,35 +114,26 @@ class Processor(ProcessMixIn):
             sampling_params,
         ) = await self._parse_raw_request(raw_request)
         if self.router_mode == "kv":
-            async for route_response in self.router.generate(
-                Tokens(tokens=engine_prompt["prompt_token_ids"]).model_dump_json()
-            ):
-                worker_id, prefix_hit_rate = route_response.split("_")
-                prefix_hit_rate = float(prefix_hit_rate)
-                vllm_logger.info(
-                    f"Worker ID: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
+            route_response = await anext(
+                self.router.generate(
+                    Tokens(tokens=engine_prompt["prompt_token_ids"]).model_dump_json()
                 )
-                break
+            )
+            worker_id, prefix_hit_rate = route_response.split("_")
+            prefix_hit_rate = float(prefix_hit_rate)
+            vllm_logger.info(
+                f"Worker ID: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
+            )
 
-            if worker_id == "":
-                engine_generator = await self.worker_client.generate(
-                    vLLMGenerateRequest(
-                        engine_prompt=engine_prompt,
-                        sampling_params=sampling_params,
-                        request_id=request_id,
-                        prefix_hit_rate=prefix_hit_rate,
-                    ).model_dump_json()
-                )
-            else:
-                engine_generator = await self.worker_client.direct(
-                    vLLMGenerateRequest(
-                        engine_prompt=engine_prompt,
-                        sampling_params=sampling_params,
-                        request_id=request_id,
-                        prefix_hit_rate=prefix_hit_rate,
-                    ).model_dump_json(),
-                    int(worker_id),
-                )
+            engine_generator = await self.worker_client.direct(
+                vLLMGenerateRequest(
+                    engine_prompt=engine_prompt,
+                    sampling_params=sampling_params,
+                    request_id=request_id,
+                    prefix_hit_rate=prefix_hit_rate,
+                ).model_dump_json(),
+                int(worker_id),
+            )
         elif self.router_mode == "random":
             engine_generator = await self.worker_client.generate(
                 vLLMGenerateRequest(
@@ -199,8 +191,28 @@ class Processor(ProcessMixIn):
 
     @dynamo_endpoint(name="chat/completions")
     async def chat_completions(self, raw_request: ChatCompletionRequest):
-        async for response in self._generate(raw_request, RequestType.CHAT):
-            yield response
+        attempt = 1
+        max_attempts = 5
+        base_delay = 0.01
+
+        while True:
+            try:
+                async for response in self._generate(raw_request, RequestType.CHAT):
+                    yield response
+                break  # Successfully completed without exception, exit the loop
+            except Exception as e:
+                if attempt < max_attempts:
+                    delay = base_delay * (2 ** (attempt - 1))
+                    warnings.warn(
+                        f"Attempt {attempt}/{max_attempts} failed for chat_completions. Error: {str(e)}. Retrying after {delay:.4f}s..."
+                    )
+                    await asyncio.sleep(delay)
+                    attempt += 1
+                else:
+                    warnings.warn(
+                        f"All {max_attempts} attempts failed for chat_completions. Last error: {str(e)}"
+                    )
+                    raise  # Re-raise the last exception after all attempts fail
 
     # @dynamo_endpoint()
     # async def completions(self, raw_request: CompletionRequest):
