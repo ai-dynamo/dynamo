@@ -22,11 +22,11 @@ import logging
 import os
 import random
 import string
-import uvloop
 import typing as t
 from typing import Any
 
 import click
+import uvloop
 
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 from dynamo.sdk import dynamo_context
