@@ -111,7 +111,7 @@ body:
       placeholder: e.g. x86_64, arm64.
     validations:
       required: false
-  
+
   - type: input
     id: cuda-version
     attributes:
