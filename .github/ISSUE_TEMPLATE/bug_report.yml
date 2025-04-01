@@ -66,7 +66,7 @@ body:
       placeholder: e.g. 0.1.0
     validations:
       required: true
-  
+
   - type: input
     id: dynamo-rt-version
     attributes:
@@ -75,7 +75,7 @@ body:
       placeholder: e.g. 0.1.0
     validations:
       required: false
-  
+
   - type: input
     id: dynamo-vllm-version
     attributes:
@@ -84,7 +84,7 @@ body:
       placeholder: e.g. 0.7.2
     validations:
       required: false
-  
+
   - type: input
     id: nixl-version
     attributes:
@@ -102,7 +102,7 @@ body:
       placeholder: e.g. 3.12.3
     validations:
       required: false
-  
+
   - type: input
     id: cuda-version
     attributes:
