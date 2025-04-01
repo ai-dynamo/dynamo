@@ -162,8 +162,7 @@ Node 2: 8 Prefill
 **Step 1**: Start NATS/ETCD on your head node. Ensure you have the correct firewall rules to allow communication between the nodes as you will need the NATS/ETCD endpoints to be accessible by node 2.
 ```bash
 # node 1
-cd deploy
-docker compose -d
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 **Step 2**: Create the inference graph for this deployment. The easiest way to do this is to remove the `.link(PrefillWorker)` from the `disagg_router.py` file.

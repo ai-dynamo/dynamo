@@ -439,9 +439,10 @@ def serve_http(
                 "$(CIRCUS.WID)",
             ]
             # resource_envs is the resource allocation (ie CUDA_VISIBLE_DEVICES) for each worker created by the allocator
+            # these resource_envs are passed to each individual worker's environment which is then set by the create_watcher
             if resource_envs:
                 args.extend(["--worker-env", json.dumps(resource_envs)])
-            # env is the base bentoml environment variables. We make a copy and update it for each worker in worker_env
+            # env is the base bentoml environment variables. We make a copy and update it to add any service configurations and additional env vars
             worker_env = env.copy() if env else {}
 
             # Pass through the main service config
@@ -518,7 +519,7 @@ def serve_http(
         arbiter.start(
             cb=lambda _: logger.info(  # type: ignore
                 (
-                    "Starting Dynamo Service %s (%s/%s) listening on %s://%s:%d (Press CTRL+C to quit)"
+                    "Starting Dynamo Service %s (Press CTRL+C to quit)"
                     if (
                         hasattr(svc, "is_dynamo_component")
                         and svc.is_dynamo_component()
