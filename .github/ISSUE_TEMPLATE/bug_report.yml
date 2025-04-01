@@ -104,19 +104,28 @@ body:
       required: false
 
   - type: input
+    id: cpu-type
+    attributes:
+      label: CPU Architecture
+      description: What CPU Architecture are you using? You can find this by running `uname -m` in your terminal.
+      placeholder: e.g. x86_64, arm64.
+    validations:
+      required: false
+    
+  - type: input
     id: cuda-version
     attributes:
       label: CUDA Version
-      description: If applicable, what CUDA version are you using?
+      description: If applicable, what CUDA version are you using? You can find this by running `nvidia-smi` in your terminal and looking at the CUDA Version column.
       placeholder: e.g. 12.8
     validations:
       required: false
-
+  
   - type: input
     id: gpu-type
     attributes:
       label: GPU Architecture
-      description: If applicable, what GPU Architecture are you using?
+      description: If applicable, what GPU Architecture are you using? You can find this by running `nvidia-smi -L` in your terminal.
       placeholder: e.g. A100
     validations:
       required: false
