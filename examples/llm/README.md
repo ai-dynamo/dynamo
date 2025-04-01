@@ -153,11 +153,11 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 ### Multinode Examples
 
 #### Single node sized models
-You can deploy our modular components on multiple nodes due to the power of NATS and ETCD based discovery and communication. We suggest starting off by running NATS/ETCD on your head node. Here's an example where we deploy the disaggregated serving example on 2 nodes (Decode on node1 and Prefill on node2). This example was run on 2 nodes of 8xH100 in the same infiniband domain:
+You can deploy our example architectures on multiple nodes via NATS/ETCD based discovery and communication. Here's an example of deploying disaggregated serving on 2 nodes
 
 ##### Disaggregated Deployment with KV Routing
-Node 1: Frontend, Processor, Router, 8 VllmWorker
-Node 2: 8 PrefillWorkers
+Node 1: Frontend, Processor, Router, 8 Decode
+Node 2: 8 Prefill
 
 **Step 1**: Start NATS/ETCD on your head node. Ensure you have the correct firewall rules to allow communication between the nodes as you will need the NATS/ETCD endpoints to be accessible by node 2.
 ```bash
@@ -192,6 +192,8 @@ export ETCD_ENDPOINTS = '<your-etcd-endpoints-address>'
 cd /workspace/examples/llm
 dynamo serve components.prefill_worker:PrefillWorker -f ./configs/disagg_router.yaml --PrefillWorker.ServiceArgs.workers=8
 ```
+
+You can now use the same curl request from above to interact with your deployment!
 
 ### Close deployment
 
