@@ -129,6 +129,8 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ### Local Development
 
+#### Container
+
 To develop locally, we recommend working inside of the container
 
 ```bash
@@ -141,4 +143,28 @@ cp /workspace/target/release/http /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cl
 cp /workspace/target/release/llmctl /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
 
 uv pip install -e .
+```
+
+#### Conda Environment
+
+Alternately, you can use a conda environment
+
+```bash
+conda activate <ENV_NAME>
+
+# Install https://github.com/ai-dynamo/nixl from source or via pip
+
+cargo build --release
+
+# To install ai-dynamo-runtime from source
+cd lib/bindings/python
+pip install .
+
+cd ../../../
+pip install .[all]
+
+# To test
+docker compose -f deploy/docker-compose.yml up -d
+cd examples/llm
+dynamo serve graphs.agg:Frontend -f configs/agg.yaml
 ```
