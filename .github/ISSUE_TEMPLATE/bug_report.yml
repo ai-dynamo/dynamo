@@ -62,7 +62,7 @@ body:
     id: dynamo-version
     attributes:
       label: ai-dynamo Version
-      description: What version of ai-dynamo are you using?
+      description: What version of ai-dynamo are you using? If you cloned the github repo, provide the commit SHA for the version you are using.
       placeholder: e.g. 0.1.0
     validations:
       required: true
@@ -89,7 +89,7 @@ body:
     id: nixl-version
     attributes:
       label: nixl Version
-      description: What version of nixl are you using?
+      description: What version of nixl are you using? If you cloned the github repo, provide the commit SHA for the version you are using.
       placeholder: e.g. 0.1.0
     validations:
       required: false
@@ -129,6 +129,24 @@ body:
       placeholder: e.g. A100
     validations:
       required: false
+
+  - type: input
+    id: glibc-version
+    attributes:
+      label: glibc Version
+      description: What version of glibc are you using? You can find this by running `ldd --version` in your terminal.
+      placeholder: e.g. 2.39
+      validations:
+        required: false
+
+  - type: input
+    id: docker-version
+    attributes:
+      label: Docker Version
+      description: What version of Docker are you using? You can find this by running `docker --version` in your terminal.
+      placeholder: e.g. 28.0.2
+      validations:
+        required: false
 
   - type: textarea
     id: additional-context
