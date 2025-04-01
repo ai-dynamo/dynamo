@@ -22,6 +22,7 @@ import logging
 import os
 import random
 import string
+import uvloop
 import typing as t
 from typing import Any
 
@@ -186,6 +187,7 @@ def main(
                 logger.error(f"[{run_id}] Error in Dynamo component setup: {str(e)}")
                 raise
 
+        uvloop.install()
         asyncio.run(worker())
 
 
