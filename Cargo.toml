@@ -40,7 +40,7 @@ dynamo-llm = { path = "lib/llm" }
 
 # External dependencies
 anyhow = { version = "1" }
-async-nats = { version = "0.38", features = ["service"] }
+async-nats = { version = "0.40", features = ["service"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
 async_zmq = { version = "0.4.0" }
@@ -53,6 +53,7 @@ either = { version = "1.13", features = ["serde"] }
 futures = { version = "0.3" }
 hf-hub = { version = "0.4.2", default-features = false, features = ["tokio", "rustls-tls"] }
 humantime = { version = "2.2.0" }
+prometheus = { version = "0.14" }
 rand = { version = "0.9.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
@@ -66,7 +67,6 @@ validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
 strum = { version = "0.27", features = ["derive"] }
-prometheus = { version = "0.13" }
 
 [profile.dev.package]
 insta.opt-level = 3
