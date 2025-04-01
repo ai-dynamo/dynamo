@@ -1784,7 +1784,7 @@ monitoring.options.insecure=true`
 
 	args := make([]string, 0)
 
-	args = append(args, "uv", "run", "dynamo", "start")
+	args = append(args, "cd", "src", "&&", "uv", "run", "dynamo", "start")
 
 	// todo : remove this line when https://github.com/ai-dynamo/dynamo/issues/345 is fixed
 	enableDependsOption := false
@@ -1815,7 +1815,7 @@ monitoring.options.insecure=true`
 
 	if opt.dynamoNimDeployment.Spec.ServiceName != "" {
 		args = append(args, []string{"--service-name", opt.dynamoNimDeployment.Spec.ServiceName}...)
-		args = append(args, "src."+opt.dynamoNimDeployment.Spec.DynamoTag)
+		args = append(args, opt.dynamoNimDeployment.Spec.DynamoTag)
 	}
 
 	yataiResources := opt.dynamoNimDeployment.Spec.Resources
