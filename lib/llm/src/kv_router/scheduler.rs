@@ -232,6 +232,7 @@ pub fn process_worker_selection(
 }
 
 // Default implementation matching the Python _cost_function
+#[derive(Default)]
 pub struct DefaultWorkerSelector;
 
 impl WorkerSelector for DefaultWorkerSelector {
