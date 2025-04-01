@@ -217,8 +217,7 @@ pub fn process_worker_selection(
 
     // Update worker state
     worker.data.request_active_slots += 1;
-    worker.data.kv_active_blocks +=
-        selection.required_blocks as u64 - selection.overlap_blocks as u64;
+    worker.data.kv_active_blocks += selection.required_blocks - selection.overlap_blocks as u64;
 
     // Emit event
     if let Err(e) = event_tx.send(KVHitRateEvent {
@@ -248,7 +247,7 @@ impl WorkerSelector for DefaultWorkerSelector {
         // Calculate worker scores and find max waiting requests
         for (worker_id, ep) in workers.endpoints.iter() {
             // Calculate score similar to Python version
-            if let Some(score) = request.overlap.scores.get(&worker_id) {
+            if let Some(score) = request.overlap.scores.get(worker_id) {
                 let score = *score as f64 * block_size as f64 / request.isl_tokens as f64;
                 worker_scores.insert(worker_id, score);
             }
@@ -278,7 +277,7 @@ impl WorkerSelector for DefaultWorkerSelector {
             // Calculate logit using same formula as Python
             let logit = 2.0 * score - gpu_cache_usage - normalized_active;
 
-            tracing::info!(
+            tracing::debug!(
                 "Formula for {}: {:.3} = 2.0 * {:.3} - {:.3} - {:.3}",
                 worker_id,
                 logit,
@@ -315,7 +314,7 @@ impl WorkerSelector for DefaultWorkerSelector {
         };
 
         // Log selection metrics
-        tracing::info!("Selected worker: {}, logit: {:.3}", worker_id, best_logit);
+        tracing::debug!("Selected worker: {}, logit: {:.3}", worker_id, best_logit);
 
         let total_blocks = std::cmp::min(request.isl_tokens / block_size, 1) as u64;
         let overlap_blocks = request.overlap.scores.get(&worker_id).copied().unwrap_or(0) as usize;
