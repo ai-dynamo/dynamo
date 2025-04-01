@@ -1,4 +1,4 @@
-#!/bin/bash -e
+#!bash -e
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -14,10 +14,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Ensure the script is executed with Bash.
+if [ -z "$BASH_VERSION" ]; then
+  echo "Error: This script must be run with Bash version 4 or higher." >&2
+  echo "If you are using macOS you can install a newer Bash version with: brew install bash" >&2
+  exit 1
+fi
+
+# Now that we're sure it's Bash, enforce a minimum version.
+if (( BASH_VERSINFO[0] < 4 )); then
+  echo "Error: Bash version 4 or higher is required. You are running version $BASH_VERSION." >&2
+  echo "If you are using macOS you can install a newer Bash version with: brew install bash" >&2
+  exit 1
+fi
 
 TAG=
 RUN_PREFIX=
-PLATFORM=linux/amd64
+PLATFORM=linux/arm64
 
 # Get short commit hash
 commit_id=$(git rev-parse --short HEAD)
@@ -53,7 +66,7 @@ BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 # Base Images
 TENSORRTLLM_BASE_VERSION=25.01
 # FIXME: Need a public image for public consumption
-TENSORRTLLM_BASE_IMAGE="gitlab-master.nvidia.com:5005/dl/dgx/tritonserver/tensorrt-llm/amd64"
+TENSORRTLLM_BASE_IMAGE="gitlab-master.nvidia.com:5005/dl/dgx/tritonserver/tensorrt-llm/arm64"
 TENSORRTLLM_BASE_IMAGE_TAG=krish-fix-trtllm-build.23766174
 TENSORRTLLM_PIP_WHEEL_PATH=""
 

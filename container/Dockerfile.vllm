@@ -31,63 +31,70 @@ USER root
 ARG MOFED_VERSION=24.10-1.1.4.0
 ARG PYTHON_VERSION=3.12
 ARG NSYS_URL=https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_1/
-ARG NSYS_PKG=NsightSystems-linux-cli-public-2025.1.1.131-3554042.deb
+# ARG NSYS_PKG=NsightSystems-linux-cli-public-2025.1.1.131-3554042.deb
+ARG NSYS_PKG=nsight-systems-2025.1.1_2025.1.1.131-1_arm64.deb
 
-RUN apt-get update -y && apt-get -y install curl \
-    git \
-    libnuma-dev \
-    numactl \
-    wget \
-    autotools-dev \
-    automake \
-    libtool \
-    libz-dev \
-    libiberty-dev \
-    flex \
-    build-essential \
-    cmake \
-    libibverbs-dev \
-    libgoogle-glog-dev \
-    libgtest-dev \
-    libjsoncpp-dev \
-    libpython3-dev \
-    libboost-all-dev \
-    libssl-dev \
-    libgrpc-dev \
-    libgrpc++-dev \
-    libprotobuf-dev \
-    protobuf-compiler-grpc \
-    pybind11-dev \
-    python3-full \
-    python3-pip \
-    python3-numpy \
-    etcd-server \
-    net-tools \
-    pciutils \
-    libpci-dev \
-    vim \
-    tmux \
-    screen \
-    ibverbs-utils \
-    libibmad-dev
+# ARG CPU_ARCH_x86=aarch64
+# ARG CPU_ARCH_AMD=aarch64
+
+ARG CPU_ARCH_ARM=arm64
+ARG CPU_ARCH=aarch64
+
+RUN apt-get update -y &&\
+    apt-get -y install curl \
+        git \
+        libnuma-dev \
+        numactl \
+        wget \
+        autotools-dev \
+        automake \
+        libtool \
+        libz-dev \
+        libiberty-dev \
+        flex \
+        build-essential \
+        cmake \
+        libibverbs-dev \
+        libgoogle-glog-dev \
+        libgtest-dev \
+        libjsoncpp-dev \
+        libpython3-dev \
+        libboost-all-dev \
+        libssl-dev \
+        libgrpc-dev \
+        libgrpc++-dev \
+        libprotobuf-dev \
+        protobuf-compiler-grpc \
+        pybind11-dev \
+        python3-full \
+        python3-pip \
+        python3-numpy \
+        etcd-server \
+        net-tools \
+        pciutils \
+        libpci-dev \
+        vim \
+        tmux \
+        screen \
+        ibverbs-utils \
+        libibmad-dev
 
 RUN apt-get install -y linux-tools-common linux-tools-generic ethtool iproute2
 RUN apt-get install -y dkms linux-headers-generic
 RUN apt-get install -y meson ninja-build uuid-dev gdb
 
 RUN apt install -y libglib2.0-0
-RUN wget ${NSYS_URL}${NSYS_PKG} &&\
+RUN wget --tries=3 --waitretry=5 ${NSYS_URL}${NSYS_PKG} &&\
     apt install -y ./${NSYS_PKG} &&\
     rm ${NSYS_PKG}
 
 RUN cd /usr/local/src && \
-    curl -fSsL "https://content.mellanox.com/ofed/MLNX_OFED-${MOFED_VERSION}/MLNX_OFED_LINUX-${MOFED_VERSION}-ubuntu24.04-x86_64.tgz" -o mofed.tgz && \
+    curl -fSsL "https://content.mellanox.com/ofed/MLNX_OFED-${MOFED_VERSION}/MLNX_OFED_LINUX-${MOFED_VERSION}-ubuntu24.04-aarch64.tgz" -o mofed.tgz && \
     tar -xf /usr/local/src/mofed.tgz && \
     cd MLNX_OFED_LINUX-* && \
     apt-get update && apt-get install -y --no-install-recommends \
     ./DEBS/libibverbs* ./DEBS/ibverbs-providers* ./DEBS/librdmacm* ./DEBS/libibumad* && \
     rm -rf /var/lib/apt/lists/* /usr/local/src/* mofed.tgz
-
 ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/cuda/lib64 \
     LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
 
@@ -97,7 +104,7 @@ ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/lib \
 WORKDIR /workspace
 RUN git clone https://github.com/NVIDIA/gdrcopy.git
 RUN PREFIX=/usr/local DESTLIB=/usr/local/lib make -C /workspace/gdrcopy lib_install
-RUN cp gdrcopy/src/libgdrapi.so.2.* /usr/lib/x86_64-linux-gnu/
+RUN cp gdrcopy/src/libgdrapi.so.2.* /usr/lib/aarch64-linux-gnu/
 RUN ldconfig
 
 ARG UCX_VERSION=v1.18.0
@@ -138,17 +145,21 @@ ENV PKG_CONFIG_PATH=/usr/local/ompi/lib/pkgconfig:$PKG_CONFIG_PATH
 # Copy nixl source, and use commit hash as cache hint
 COPY --from=nixl_base /opt/nixl /opt/nixl
 COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
+# TODO: fix NIXL portability for aarch64:
+# https://github.com/ai-dynamo/nixl/blob/main/meson_options.txt#L19
 RUN cd /opt/nixl && \
     mkdir build && \
+    find / -name meson_options.txt &&\
+    sed -i 's/x86_64/sbsa/g' $(find / -name meson_options.txt) &&\
     meson setup build/ --prefix=/usr/local/nixl && \
     cd build/ && \
     ninja && \
     ninja install
 
-ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/aarch64-linux-gnu/:$LD_LIBRARY_PATH
 ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/:$PYTHONPATH
 ENV UCX_TLS=^cuda_ipc
-ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/x86_64-linux-gnu/plugins
+ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/aarch64-linux-gnu/plugins
 
 RUN ls -l /usr/local/nixl/
 RUN ls -l /usr/local/nixl/include/
@@ -158,11 +169,11 @@ RUN ls /opt/nixl
 # Install utilities
 RUN apt update -y && apt install -y git wget curl nvtop tmux vim
 # nats
-RUN wget https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-amd64.deb && \
-    dpkg -i nats-server-v2.10.24-amd64.deb && rm nats-server-v2.10.24-amd64.deb
+RUN wget https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-arm64.deb && \
+    dpkg -i nats-server-v2.10.24-arm64.deb && rm nats-server-v2.10.24-arm64.deb
 # etcd
 ENV ETCD_VERSION="v3.5.18"
-RUN wget https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-amd64.tar.gz -O /tmp/etcd.tar.gz && \
+RUN wget https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-arm64.tar.gz -O /tmp/etcd.tar.gz && \
     mkdir -p /usr/local/bin/etcd && \
     tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
     rm /tmp/etcd.tar.gz
@@ -200,10 +211,10 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     # Rename the package from vllm to ai_dynamo_vllm
     mv vllm-${VLLM_REF}.dist-info ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info && \
     sed -i "s/^Name: vllm/Name: ${VLLM_PATCHED_PACKAGE_NAME}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info/METADATA && \
-    # Update wheel tag from linux_x86_64 to manylinux1_x86_64 in WHEEL file
-    sed -i 's/Tag: cp38-abi3-linux_x86_64/Tag: cp38-abi3-manylinux1_x86_64/g' ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info/WHEEL && \
+    # Update wheel tag from linux_aarch64 to manylinux1_aarch64 in WHEEL file
+    sed -i 's/Tag: cp38-abi3-linux_arm64/Tag: cp38-abi3-manylinux1_arm64/g' ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info/WHEEL && \
     # Also update the tag in RECORD file to match
-    sed -i "s/-cp38-abi3-linux_x86_64.whl/-cp38-abi3-manylinux1_x86_64.whl/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info/RECORD && \
+    sed -i "s/-cp38-abi3-linux_arm64.whl/-cp38-abi3-manylinux1_arm64.whl/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info/RECORD && \
     mkdir -p /workspace/dist && \
     wheel pack . --dest-dir /workspace/dist && \
     uv pip install /workspace/dist/${VLLM_PATCHED_PACKAGE_NAME}-*.whl
@@ -237,10 +248,11 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
     RUST_VERSION=1.85.0 \
-    RUSTARCH=x86_64-unknown-linux-gnu
+    RUSTARCH=aarch64-unknown-linux-gnu
 
+# from https://github.com/rust-lang/docker-rust/blob/master/stable/bookworm/Dockerfile
 RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
-    echo "a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f *rustup-init" | sha256sum -c - && \
+    echo "62cfed758140f94a75074fb350e287dd26d1b6c9a4d6a18616757fb344720bcb *rustup-init" | sha256sum -c - && \
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
     rm rustup-init && \
@@ -366,7 +378,7 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv
 
 # Copy NIXL
 COPY --from=build /usr/local/nixl /usr/local/nixl
-ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/aarch64-linux-gnu/:$LD_LIBRARY_PATH
 ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/:$PYTHONPATH
 
 # Setup the python environment
