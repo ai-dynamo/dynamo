@@ -241,13 +241,15 @@ impl WorkerSelector for DefaultWorkerSelector {
         request: &SchedulingRequest,
         block_size: usize,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+        assert!(request.isl_tokens > 0);
+
         let mut worker_scores = HashMap::new();
         let mut max_active = 0.0;
 
         // Calculate worker scores and find max waiting requests
         for (worker_id, ep) in workers.endpoints.iter() {
             // Calculate score similar to Python version
-            if let Some(score) = request.overlap.scores.get(worker_id) {
+            if let Some(score) = request.overlap.scores.get(&worker_id) {
                 let score = *score as f64 * block_size as f64 / request.isl_tokens as f64;
                 worker_scores.insert(worker_id, score);
             }
@@ -255,6 +257,14 @@ impl WorkerSelector for DefaultWorkerSelector {
             // Track max waiting requests
             max_active = f64::max(max_active, ep.data.request_active_slots as f64);
         }
+
+        if max_active == 0.0 {
+            return Err(KvSchedulerError::NoEndpoints);
+        }
+
+        // make immutable
+        let worker_scores = worker_scores;
+        let max_active = max_active;
 
         // Calculate logits for each worker
         let mut best_logit = f64::NEG_INFINITY;
@@ -267,6 +277,7 @@ impl WorkerSelector for DefaultWorkerSelector {
             let score = worker_scores.get(&worker_id).copied().unwrap_or(0.0);
 
             // Calculate normalized metrics
+            assert!(ep.data.kv_total_blocks > 0);
             let gpu_cache_usage = ep.data.kv_active_blocks as f64 / ep.data.kv_total_blocks as f64;
             let normalized_active = if max_active > 0.0 {
                 ep.data.request_active_slots as f64 / max_active
@@ -277,7 +288,7 @@ impl WorkerSelector for DefaultWorkerSelector {
             // Calculate logit using same formula as Python
             let logit = 2.0 * score - gpu_cache_usage - normalized_active;
 
-            tracing::debug!(
+            tracing::info!(
                 "Formula for {}: {:.3} = 2.0 * {:.3} - {:.3} - {:.3}",
                 worker_id,
                 logit,
@@ -314,7 +325,7 @@ impl WorkerSelector for DefaultWorkerSelector {
         };
 
         // Log selection metrics
-        tracing::debug!("Selected worker: {}, logit: {:.3}", worker_id, best_logit);
+        tracing::info!("Selected worker: {}, logit: {:.3}", worker_id, best_logit);
 
         let total_blocks = std::cmp::min(request.isl_tokens / block_size, 1) as u64;
         let overlap_blocks = request.overlap.scores.get(&worker_id).copied().unwrap_or(0) as usize;

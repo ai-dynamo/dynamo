@@ -58,7 +58,7 @@ pub trait WorkerSelector {
         &self,
         workers: &ProcessedEndpoints,
         request: &SchedulingRequest,
-        kv_block_size: usize,
+        block_size: usize,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
 }
 
