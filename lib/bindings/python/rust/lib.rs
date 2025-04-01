@@ -23,7 +23,6 @@ use pyo3::{exceptions::PyException, prelude::*};
 use rs::pipeline::network::Ingress;
 use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
-use tracing_subscriber::FmtSubscriber;
 
 use dynamo_runtime::{
     self as rs, logging,
