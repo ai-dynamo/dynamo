@@ -151,21 +151,22 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 ```
 
 ### Multinode Examples
+
 #### Single node sized models
-You can deploy our modular components on multiple nodes due to the power of NATS and ETCD based discovery and communication. We suggest starting off by running NATS/ETCD on your head node. Here's an example where we deploy the disaggregated serving example on 2 nodes (Decode on node1 and Prefill on node2). This example was run on 2 nodes of 4xA100 40GB:
+You can deploy our modular components on multiple nodes due to the power of NATS and ETCD based discovery and communication. We suggest starting off by running NATS/ETCD on your head node. Here's an example where we deploy the disaggregated serving example on 2 nodes (Decode on node1 and Prefill on node2). This example was run on 2 nodes of 8xH100 in the same infiniband domain:
 
-#### Disaggregated Deployment with KV Routing
-Node 1: Frontend, Processor, Router, 1 VllmWorker
-Node 2: 2 VllmWorker's, and 1 PrefillWorker
+##### Disaggregated Deployment with KV Routing
+Node 1: Frontend, Processor, Router, 8 VllmWorker
+Node 2: 8 PrefillWorkers
 
-Step 1: Start NATS/ETCD on your head node. Ensure you have the correct firewall rules to allow communication between the nodes.
+**Step 1**: Start NATS/ETCD on your head node. Ensure you have the correct firewall rules to allow communication between the nodes as you will need the NATS/ETCD endpoints to be accessible by node 2.
 ```bash
 # node 1
 cd deploy
 docker compose -d
 ```
 
-Step 2: Create the inference graph for this deployment. The easiest way to do this is to remove the `.link(PrefillWorker)` from the `disagg_router.py` file and to remove the `PrefillWorker` section from the `disagg_router.yaml` file. Afterward - your graph should look like this:
+**Step 2**: Create the inference graph for this deployment. The easiest way to do this is to remove the `.link(PrefillWorker)` from the `disagg_router.py` file.
 
 ```python
 # graphs/disag_router.py
@@ -173,27 +174,25 @@ Step 2: Create the inference graph for this deployment. The easiest way to do th
 Frontend.link(Processor).link(Router).link(VllmWorker)
 ```
 
-Step 2: Start the frontend, processor, router, and 4 VllmWorkers on node 1.
+**Step 3**: Start the frontend, processor, router, and 8 VllmWorkers on node 1.
 ```bash
 # node 1
 cd /workspace/examples/llm
-dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml --VllmWorker.ServiceArgs.workers=4
+dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml --VllmWorker.ServiceArgs.workers=8
 ```
 
-Step 3: Start 4 PrefillWorkers on node 2.
+**Step 4**: Start 8 PrefillWorkers on node 2.
 Since we only want to start the `PrefillWorker` on node 2, you can simply run just the PrefillWorker component directly.
+
 ```bash
 # node 2
 export NATS_SERVER = '<your-nats-server-address>'
 export ETCD_ENDPOINTS = '<your-etcd-endpoints-address>'
 
 cd /workspace/examples/llm
-dynamo serve components.prefill_worker:PrefillWorker --PrefillWorker.ServiceArgs.workers=4
+dynamo serve components.prefill_worker:PrefillWorker -f ./configs/disagg_router.yaml --PrefillWorker.ServiceArgs.workers=8
 ```
 
-#### Models that fit on a single node
-
-```
 ### Close deployment
 
 Kill all dynamo processes managed by circusd.
