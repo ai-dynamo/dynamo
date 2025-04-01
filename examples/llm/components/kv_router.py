@@ -19,7 +19,7 @@ import asyncio
 import random
 import warnings
 from argparse import Namespace
-from typing import AsyncIterator
+from typing import AsyncIterator, Tuple
 
 from components.worker import VllmWorker
 from utils.protocol import Tokens
@@ -220,7 +220,7 @@ class Router:
         return best_worker_id, worker_scores.get(best_worker_id, 0.0)
 
     @dynamo_endpoint()
-    async def generate(self, request: Tokens) -> AsyncIterator[WorkerId]:
+    async def generate(self, request: Tokens) -> AsyncIterator[Tuple]:
         lora_id = 0
         try:
             scores = await self.indexer.find_matches_for_request(
@@ -241,4 +241,4 @@ class Router:
         vllm_logger.info(
             f"Scheduling to worker_id: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
         )
-        yield f"{worker_id}_{prefix_hit_rate}"
+        yield (worker_id, prefix_hit_rate)
