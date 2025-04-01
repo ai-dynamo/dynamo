@@ -439,7 +439,7 @@ def serve_http(
                 "$(CIRCUS.WID)",
             ]
             # resource_envs is the resource allocation (ie CUDA_VISIBLE_DEVICES) for each worker created by the allocator
-            # these resource_envs are passed to each individual worker's environment which is then set by the create_watcher
+            # these resource_envs are passed to each individual worker's environment which is set in serve_dynamo
             if resource_envs:
                 args.extend(["--worker-env", json.dumps(resource_envs)])
             # env is the base bentoml environment variables. We make a copy and update it to add any service configurations and additional env vars
