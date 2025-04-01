@@ -250,7 +250,7 @@ impl WorkerSelector for DefaultWorkerSelector {
         // Calculate worker scores and find max waiting requests
         for (worker_id, ep) in workers.endpoints.iter() {
             // Calculate score similar to Python version
-            if let Some(score) = request.overlap.scores.get(&worker_id) {
+            if let Some(score) = request.overlap.scores.get(worker_id) {
                 let score = *score as f64 * block_size as f64 / request.isl_tokens as f64;
                 worker_scores.insert(worker_id, score);
             }
