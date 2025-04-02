@@ -17,6 +17,9 @@
 
 set -euo pipefail
 
+# Use system helm
+HELM_CMD=$(which helm)
+
 # Set default values only if not already set
 export NAMESPACE="${NAMESPACE:=cai-system}"  # Default namespace
 export NGC_TOKEN="${NGC_TOKEN:=<your-ngc-token>}"  # Default NGC token
@@ -34,13 +37,13 @@ fi
 # Update the helm repo and build the dependencies
 cd platform
 cd components/operator
-helm dependency update
+$HELM_CMD dependency update
 cd ../..
 cd components/api-server
-helm dependency update
+$HELM_CMD dependency update
 cd ../..
-helm dep update
-helm repo update
+$HELM_CMD dep update
+$HELM_CMD repo update
 cd ..
 
 # Generate the values file
@@ -60,7 +63,7 @@ echo "Generated values file saved as generated-values.yaml"
 
 # Install/upgrade the helm chart
 echo "Installing/upgrading helm chart..."
-helm upgrade --install $RELEASE_NAME platform/ \
+$HELM_CMD upgrade --install $RELEASE_NAME platform/ \
   -f generated-values.yaml \
   --create-namespace \
   --namespace ${NAMESPACE}
