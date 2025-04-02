@@ -38,7 +38,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 #### Step 1: Build TensorRT-LLM base container image
 
-Because of the known issue of C++11 ABI compatibility, we rebuild the TensorRT-LLM from source within NGC pytorch container.
+Because of the known issue of C++11 ABI compatibility within the NGC pytorch container, we rebuild TensorRT-LLM from source.
 See [here](https://nvidia.github.io/TensorRT-LLM/installation/linux.html) for more informantion.
 
 Use the helper script to build a TensorRT-LLM container base image. The script uses a specific commit id from TensorRT-LLM main branch.
