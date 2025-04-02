@@ -52,13 +52,7 @@ class Processor(ChatProcessorMixin):
         self.router_mode = self.args.router
         super().__init__(self.engine_config)
         self.min_workers = 1
-        """
-        self.engine_config = engine_config
-        self.worker_client = worker_client
-        self.kv_router_client = kv_router_client
-        self.routing_strategy = routing_strategy
-        super().__init__(self.engine_config)
-        """
+
 
     @async_on_start
     async def async_init(self):
