@@ -34,7 +34,6 @@ if t.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_DEV_SERVER_HOST = "127.0.0.1"
-print("checking if this is editable")
 
 
 def deprecated_option(*param_decls: str, **attrs: t.Any):
@@ -102,7 +101,6 @@ def _parse_service_arg(arg_name: str, arg_value: str) -> tuple[str, str, t.Any]:
 
 
 def _parse_service_args(args: list[str]) -> t.Dict[str, t.Any]:
-    print("args", args)
     service_configs: t.DefaultDict[str, t.Dict[str, t.Any]] = collections.defaultdict(
         dict
     )
