@@ -25,7 +25,7 @@ This directory contains examples and reference implementations for deploying Lar
 ## Deployment Architectures
 
 See [deployment architectures](../llm/README.md#deployment-architectures) to learn about the general idea of the architecture.
-Note that this TensorRT-LLM version might not support all the options yet.
+Note that this TensorRT-LLM version does not support all the options yet.
 
 ### Prerequisites
 
