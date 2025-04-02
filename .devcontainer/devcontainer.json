@@ -14,6 +14,8 @@
       "limitations under the License."
     ],
     "name": "NVIDIA Dynamo Development",
+    "remoteUser": "ubuntu",
+    "updateRemoteUserUID": true,
     "build": {
         "dockerfile": "Dockerfile",
         "context": ".."
@@ -32,7 +34,7 @@
                 "ms-azuretools.vscode-docker"
             ],
             "settings": {
-                "python.defaultInterpreterPath": "/workspaces/ai-dynamo/venv/bin/python",
+                "python.defaultInterpreterPath": "/home/ubuntu/dynamo/venv/bin/python",
                 "python.linting.enabled": true,
                 "python.linting.pylintEnabled": true,
                 "editor.formatOnSave": true,
@@ -41,10 +43,10 @@
         }
     },
     "mounts": [
-        "source=dynamo-bashhistory,target=/commandhistory,type=volume"
+        "source=dynamo-bashhistory,target=/home/ubuntu/.commandhistory,type=volume"
     ],
-    "remoteUser": "vscode",
-    "updateRemoteUserUID": true,
+    "workspaceFolder": "/home/ubuntu/dynamo",
+    "workspaceMount": "source=${localWorkspaceFolder},target=/home/ubuntu/dynamo,type=bind,consistency=cached",
     "postCreateCommand": "/bin/bash .devcontainer/post-create.sh",
-    "postStartCommand": "echo 'source /workspaces/ai-dynamo/venv/bin/activate' >> ~/.bashrc",
+    "postStartCommand": "grep -q 'source /home/ubuntu/dynamo/.dev-venv/bin/activate' ~/.bashrc || echo 'source /home/ubuntu/dynamo/.dev-venv/bin/activate' >> ~/.bashrc"
 }
