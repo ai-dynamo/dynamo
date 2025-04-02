@@ -24,6 +24,9 @@
     "mounts": [
         "source=${localEnv:HOME}${localEnv:USERPROFILE}/.kube,target=/home/vscode/.kube,type=bind,consistency=cached"
     ],
+    "remoteEnv": {
+        "NGC_API_TOKEN": "${localEnv:NGC_API_TOKEN}"
+    },
     "customizations": {
         "vscode": {
             "extensions": [
