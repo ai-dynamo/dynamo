@@ -56,7 +56,7 @@ def setup_and_teardown():
 @pytest.fixture(scope="module")
 async def distributed_runtime():
     loop = asyncio.get_running_loop()
-    return DistributedRuntime(loop)
+    return DistributedRuntime(loop, False)
 
 
 # TODO Figure out how to test with different kv_block_size

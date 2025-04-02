@@ -118,6 +118,10 @@ pub struct Component {
     /// Namespace
     #[builder(setter(into))]
     namespace: Namespace,
+
+    // A static component's endpoints cannot be discovered via etcd, they are
+    // fixed at startup time.
+    is_static: bool,
 }
 
 impl std::fmt::Display for Component {
@@ -144,7 +148,12 @@ impl Component {
     }
 
     pub fn service_name(&self) -> String {
-        Slug::from_string(format!("{}|{}", self.namespace.name(), self.name)).to_string()
+        let service_name = format!("{}_{}", self.namespace.name(), self.name);
+        if self.is_static {
+            Slug::slugify(&service_name).to_string()
+        } else {
+            Slug::slugify_unique(&service_name).to_string()
+        }
     }
 
     pub fn path(&self) -> String {
@@ -159,6 +168,7 @@ impl Component {
         Endpoint {
             component: self.clone(),
             name: endpoint.into(),
+            is_static: self.is_static,
         }
     }
 
@@ -204,6 +214,8 @@ pub struct Endpoint {
     // todo - restrict alphabet
     /// Endpoint name
     name: String,
+
+    is_static: bool,
 }
 
 impl DistributedRuntimeProvider for Endpoint {
@@ -236,11 +248,19 @@ impl Endpoint {
     }
 
     pub fn etcd_path_with_id(&self, lease_id: i64) -> String {
-        format!("{}:{:x}", self.etcd_path(), lease_id)
+        if self.is_static {
+            self.etcd_path()
+        } else {
+            format!("{}:{:x}", self.etcd_path(), lease_id)
+        }
     }
 
     pub fn name_with_id(&self, lease_id: i64) -> String {
-        format!("{}-{:x}", self.name, lease_id)
+        if self.is_static {
+            self.name.clone()
+        } else {
+            format!("{}-{:x}", self.name, lease_id)
+        }
     }
 
     pub fn subject(&self) -> String {
@@ -261,7 +281,11 @@ impl Endpoint {
         Req: Serialize + Send + Sync + 'static,
         Resp: for<'de> Deserialize<'de> + Send + Sync + 'static,
     {
-        client::Client::new(self.clone()).await
+        if self.is_static {
+            client::Client::new_static(self.clone()).await
+        } else {
+            client::Client::new_dynamic(self.clone()).await
+        }
     }
 
     pub fn endpoint_builder(&self) -> endpoint::EndpointConfigBuilder {
@@ -279,6 +303,8 @@ pub struct Namespace {
 
     #[validate()]
     name: String,
+
+    is_static: bool,
 }
 
 impl DistributedRuntimeProvider for Namespace {
@@ -300,18 +326,20 @@ impl std::fmt::Display for Namespace {
 }
 
 impl Namespace {
-    pub(crate) fn new(runtime: DistributedRuntime, name: String) -> Result<Self> {
+    pub(crate) fn new(runtime: DistributedRuntime, name: String, is_static: bool) -> Result<Self> {
         Ok(NamespaceBuilder::default()
             .runtime(runtime)
             .name(name)
+            .is_static(is_static)
             .build()?)
     }
 
-    /// Create a [`Component`] in the namespace
+    /// Create a [`Component`] in the namespace who's endpoints can be discovered with etcd
     pub fn component(&self, name: impl Into<String>) -> Result<Component> {
         Ok(ComponentBuilder::from_runtime(self.runtime.clone())
             .name(name)
             .namespace(self.clone())
+            .is_static(self.is_static)
             .build()?)
     }
 
