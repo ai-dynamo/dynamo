@@ -362,6 +362,7 @@ CMD []
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
 WORKDIR /workspace
+ENV DYNAMO_HOME=/workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 
 # Copy NIXL
