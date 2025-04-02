@@ -177,7 +177,7 @@ def build_serve_command() -> click.Group:
         type=click.STRING,
         required=False,
         default="",
-        envvar="BENTOML_SERVE_SERVICE_NAME", 
+        envvar="BENTOML_SERVE_SERVICE_NAME",
         help="Only serve the specified service. Don't serve any dependencies of this service.",
     )
     @click.option(
