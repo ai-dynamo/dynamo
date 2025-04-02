@@ -197,27 +197,34 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 
 # Install patched vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
-ARG VLLM_REF="0.7.2"
+# 0.7.2 fails to due to a bug that was fixed in 0.7.3
+ARG VLLM_REF="0.7.3"
 ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
 ARG VLLM_PATCHED_PACKAGE_NAME="ai_dynamo_vllm"
-RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
-    mkdir /tmp/vllm && \
-    uv pip install pip wheel && \
-    python -m pip download --only-binary=:all: --no-deps --dest /tmp/vllm vllm==v${VLLM_REF} && \
-    cd /tmp/vllm && \
-    wheel unpack *.whl && \
-    cd vllm-${VLLM_REF}/ && \
-    patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
-    # Rename the package from vllm to ai_dynamo_vllm
-    mv vllm-${VLLM_REF}.dist-info ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info && \
-    sed -i "s/^Name: vllm/Name: ${VLLM_PATCHED_PACKAGE_NAME}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info/METADATA && \
-    # Update wheel tag from linux_aarch64 to manylinux1_aarch64 in WHEEL file
-    sed -i 's/Tag: cp38-abi3-linux_arm64/Tag: cp38-abi3-manylinux1_arm64/g' ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info/WHEEL && \
-    # Also update the tag in RECORD file to match
-    sed -i "s/-cp38-abi3-linux_arm64.whl/-cp38-abi3-manylinux1_arm64.whl/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info/RECORD && \
-    mkdir -p /workspace/dist && \
-    wheel pack . --dest-dir /workspace/dist && \
-    uv pip install /workspace/dist/${VLLM_PATCHED_PACKAGE_NAME}-*.whl
+
+# python -m pip download --only-binary=:all: --no-deps --dest /tmp/vllm vllm==v${VLLM_REF} && \
+
+# install fix commit 407b5537db02da122abf863673fc6cb76795e8bd
+
+# wget https://github.com/vllm-project/vllm/archive/refs/tags/v0.7.2.zip
+# RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
+#     mkdir /tmp/vllm && \
+#     uv pip install pip wheel setuptools_scm && \
+#     python -m pip download --no-binary=:all: --no-build-isolation --no-deps --dest /tmp/vllm vllm==${VLLM_REF} && \
+#     cd /tmp/vllm && \
+#     tar xzf vllm-${VLLM_REF}.tar.gz    # wheel unpack *.whl && \
+#     cd vllm-${VLLM_REF}/ && \
+#     patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
+#     # Rename the package from vllm to ai_dynamo_vllm
+#     mv vllm-${VLLM_REF}.dist-info ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info && \
+#     sed -i "s/^Name: vllm/Name: ${VLLM_PATCHED_PACKAGE_NAME}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info/METADATA && \
+#     # Update wheel tag from linux_aarch64 to manylinux1_aarch64 in WHEEL file
+#     sed -i 's/Tag: cp38-abi3-linux_arm64/Tag: cp38-abi3-manylinux1_arm64/g' ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info/WHEEL && \
+#     # Also update the tag in RECORD file to match
+#     sed -i "s/-cp38-abi3-linux_arm64.whl/-cp38-abi3-manylinux1_arm64.whl/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info/RECORD && \
+#     mkdir -p /workspace/dist && \
+#     wheel pack . --dest-dir /workspace/dist && \
+#     uv pip install /workspace/dist/${VLLM_PATCHED_PACKAGE_NAME}-*.whl
 
 # Install test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
@@ -248,11 +255,14 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
     RUST_VERSION=1.85.0 \
-    RUSTARCH=aarch64-unknown-linux-gnu
+    RUSTARCH=aarch64-unknown-linux-gnu \
+    RUSTUP_SHA_AARCH64=c64b33db2c6b9385817ec0e49a84bcfe018ed6e328fe755c3c809580cc70ce7a \
+    RUSTUP_SHA_X86_64=62cfed758140f94a75074fb350e287dd26d1b6c9a4d6a18616757fb344720bcb
+
 
 # from https://github.com/rust-lang/docker-rust/blob/master/stable/bookworm/Dockerfile
 RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
-    echo "62cfed758140f94a75074fb350e287dd26d1b6c9a4d6a18616757fb344720bcb *rustup-init" | sha256sum -c - && \
+    echo "${RUSTUP_SHA_AARCH64} *rustup-init" | sha256sum -c - && \
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
     rm rustup-init && \
@@ -391,8 +401,8 @@ RUN apt-get update && \
 
 # Install the wheels
 COPY --from=build /workspace/dist/*.whl wheelhouse/
-RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
-    rm -r wheelhouse
+# RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
+#     rm -r wheelhouse
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
