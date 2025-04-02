@@ -188,12 +188,6 @@ def build_serve_command() -> click.Group:
         help="list of runners map",
     )
     @click.option(
-        "--runner-map",
-        type=click.STRING,
-        envvar="BENTOML_SERVE_RUNNER_MAP",
-        help="[Deprecated] use --depends instead. JSON string of runners map.",
-    )
-    @click.option(
         "-f",
         "--file",
         type=click.Path(exists=True),
@@ -344,7 +338,6 @@ def build_serve_command() -> click.Group:
         bento: str,
         service_name: str,
         depends: Optional[list[str]],
-        runner_map: Optional[str],
         dry_run: bool,
         development: bool,
         port: int,
@@ -429,11 +422,9 @@ def build_serve_command() -> click.Group:
                     service_configs[service] = {}
                 service_configs[service][key] = value
 
-        # Process depends/runner_map
+        # Process depends
         if depends:
             runner_map_dict = dict([s.split("=", maxsplit=2) for s in depends or []])
-        elif runner_map:
-            runner_map_dict = json.loads(runner_map)
         else:
             runner_map_dict = {}
 
