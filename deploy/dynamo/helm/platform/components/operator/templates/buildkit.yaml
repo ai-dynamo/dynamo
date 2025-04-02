@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+{{- if .Values.dynamo.bentoImageBuildEngine | eq "buildkit" }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  labels:
+    app.kubernetes.io/name: {{ include "dynamo-operator.fullname" . }}-buildkitd
+  name: {{ include "dynamo-operator.fullname" . }}-buildkitd
+spec:
+  serviceName: {{ include "dynamo-operator.fullname" . }}-buildkitd
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "dynamo-operator.fullname" . }}-buildkitd
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "dynamo-operator.fullname" . }}-buildkitd
+      annotations:
+        container.apparmor.security.beta.kubernetes.io/buildkitd: unconfined
+    # see buildkit/docs/rootless.md for caveats of rootless mode
+    spec:
+      containers:
+        - name: buildkitd
+          image: moby/buildkit:v0.20.0-rootless
+          args:
+            - --oci-worker-no-process-sandbox
+            - --addr
+            - unix:///run/user/1000/buildkit/buildkitd.sock
+            - --addr
+            - tcp://0.0.0.0:1234
+          resources:
+            requests:
+              cpu: 3
+              memory: 8Gi
+            limits:
+              cpu: 8
+              memory: 30Gi
+          readinessProbe:
+            exec:
+              command:
+                - buildctl
+                - debug
+                - workers
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          livenessProbe:
+            exec:
+              command:
+                - buildctl
+                - debug
+                - workers
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          securityContext:
+            seccompProfile:
+              type: Unconfined
+            # To change UID/GID, you need to rebuild the image
+            runAsUser: 1000
+            runAsGroup: 1000
+          volumeMounts:
+            - mountPath: /home/user/.local/share/buildkit
+              name: cache
+            - mountPath: /home/user/.config/buildkit
+              name: config
+              readOnly: true
+            - mountPath: /dev/shm
+              name: dshm
+      securityContext:
+        fsGroup: 1000
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "dynamo-operator.fullname" . }}-buildkitd
+            items:
+              - key: buildkitd.toml
+                path: buildkitd.toml
+        - name: dshm
+          emptyDir:
+            medium: Memory
+  volumeClaimTemplates:
+    - metadata:
+        name: cache
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 1000Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-buildkitd
+  labels:
+    app.kubernetes.io/name: {{ include "dynamo-operator.fullname" . }}-buildkitd
+spec:
+  ports:
+    - name: http
+      port: 1234
+      targetPort: 1234
+      protocol: TCP
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: {{ include "dynamo-operator.fullname" . }}-buildkitd
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-buildkitd
+data:
+  buildkitd.toml: |
+    {{- .Files.Get "buildkitd.toml" | nindent 4 }}
+{{- end }}

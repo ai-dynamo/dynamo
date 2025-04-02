@@ -18,8 +18,6 @@
 package controller
 
 import (
-	"strings"
-
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -77,8 +75,4 @@ func getPvcName(crd metav1.Object, defaultName *string) string {
 		return *defaultName
 	}
 	return crd.GetName()
-}
-
-func generateDynamoNimRequestName(tag string) string {
-	return strings.Split(tag, ":")[0]
 }
