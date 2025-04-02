@@ -105,28 +105,29 @@ This figure shows an overview of the major components to deploy:
 ```
 
 ### Example architectures
+_Note_: For a non-dockerized deployment, first export `DYNAMO_HOME` to point to the dynamo repository root, e.g. `export DYNAMO_HOME=$(pwd)`
 
 #### Aggregated serving
 ```bash
-cd /workspace/examples/llm
+cd $DYNAMO_HOME/examples/llm
 dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
 ```
 
 #### Aggregated serving with KV Routing
 ```bash
-cd /workspace/examples/llm
+cd $DYNAMO_HOME/examples/llm
 dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
 ```
 
 #### Disaggregated serving
 ```bash
-cd /workspace/examples/llm
+cd $DYNAMO_HOME/examples/llm
 dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
 ```
 
 #### Disaggregated serving with KV Routing
 ```bash
-cd /workspace/examples/llm
+cd $DYNAMO_HOME/examples/llm
 dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
 ```
 
