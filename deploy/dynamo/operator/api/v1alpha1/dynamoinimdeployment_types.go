@@ -138,3 +138,11 @@ func (s *DynamoNimDeploymentStatus) IsReady() bool {
 	}
 	return false
 }
+
+func (s *DynamoNimDeployment) GetSpec() any {
+	return s.Spec
+}
+
+func (s *DynamoNimDeployment) SetSpec(spec any) {
+	s.Spec = spec.(DynamoNimDeploymentSpec)
+}

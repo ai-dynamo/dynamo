@@ -145,7 +145,7 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		reason = "failed_to_set_the_controller_reference_for_the_DynamoNimRequest"
 		return ctrl.Result{}, err
 	}
-	_, err = commonController.SyncResource(ctx, r.Client, dynamoNimRequest, types.NamespacedName{Name: dynamoNimRequest.Name, Namespace: dynamoNimRequest.Namespace}, true)
+	_, err = commonController.SyncResource(ctx, r.Client, dynamoNimRequest, types.NamespacedName{Name: dynamoNimRequest.Name, Namespace: dynamoNimRequest.Namespace}, false)
 	if err != nil {
 		reason = "failed_to_sync_the_DynamoNimRequest"
 		return ctrl.Result{}, err
@@ -159,7 +159,7 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			reason = "failed_to_set_the_controller_reference_for_the_DynamoNimDeployment"
 			return ctrl.Result{}, err
 		}
-		dynamoNimDeployment, err = commonController.SyncResource(ctx, r.Client, dynamoNimDeployment, types.NamespacedName{Name: dynamoNimDeployment.Name, Namespace: dynamoNimDeployment.Namespace}, true)
+		dynamoNimDeployment, err = commonController.SyncResource(ctx, r.Client, dynamoNimDeployment, types.NamespacedName{Name: dynamoNimDeployment.Name, Namespace: dynamoNimDeployment.Namespace}, false)
 		if err != nil {
 			reason = "failed_to_sync_the_DynamoNimDeployment"
 			return ctrl.Result{}, err
