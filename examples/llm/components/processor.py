@@ -114,11 +114,35 @@ class Processor(ProcessMixIn):
             sampling_params,
         ) = await self._parse_raw_request(raw_request)
         if self.router_mode == "kv":
-            worker_id, prefix_hit_rate = await anext(
-                self.router.generate(
-                    Tokens(tokens=engine_prompt["prompt_token_ids"]).model_dump_json()
-                )
-            )
+            attempt = 1
+            max_attempts = 5
+            base_delay = 0.01
+
+            # Retry loop for the router.generate call
+            while True:
+                try:
+                    worker_id, prefix_hit_rate = await anext(
+                        self.router.generate(
+                            Tokens(
+                                tokens=engine_prompt["prompt_token_ids"]
+                            ).model_dump_json()
+                        )
+                    )
+                    break  # Successfully completed without exception, exit the loop
+                except Exception as e:
+                    if attempt < max_attempts:
+                        delay = base_delay * (2 ** (attempt - 1))
+                        warnings.warn(
+                            f"Attempt {attempt}/{max_attempts} failed for router.generate. Error: {str(e)}. Retrying after {delay:.4f}s..."
+                        )
+                        await asyncio.sleep(delay)
+                        attempt += 1
+                    else:
+                        warnings.warn(
+                            f"All {max_attempts} attempts failed for router.generate. Last error: {str(e)}"
+                        )
+                        raise  # Re-raise the last exception after all attempts fail
+
             vllm_logger.info(
                 f"Worker ID: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
             )
@@ -189,29 +213,8 @@ class Processor(ProcessMixIn):
 
     @dynamo_endpoint(name="chat/completions")
     async def chat_completions(self, raw_request: ChatCompletionRequest):
-        attempt = 1
-        max_attempts = 5
-        base_delay = 0.01
-
-        # TODO: This retry loop will be removed after the root issue is diagnosed
-        while True:
-            try:
-                async for response in self._generate(raw_request, RequestType.CHAT):
-                    yield response
-                break  # Successfully completed without exception, exit the loop
-            except Exception as e:
-                if attempt < max_attempts:
-                    delay = base_delay * (2 ** (attempt - 1))
-                    warnings.warn(
-                        f"Attempt {attempt}/{max_attempts} failed for chat_completions. Error: {str(e)}. Retrying after {delay:.4f}s..."
-                    )
-                    await asyncio.sleep(delay)
-                    attempt += 1
-                else:
-                    warnings.warn(
-                        f"All {max_attempts} attempts failed for chat_completions. Last error: {str(e)}"
-                    )
-                    raise  # Re-raise the last exception after all attempts fail
+        async for response in self._generate(raw_request, RequestType.CHAT):
+            yield response
 
     # @dynamo_endpoint()
     # async def completions(self, raw_request: CompletionRequest):
