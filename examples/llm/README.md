@@ -169,7 +169,7 @@ docker compose -f deploy/docker-compose.yml up -d
 **Step 2**: Create the inference graph for this deployment. The easiest way to do this is to remove the `.link(PrefillWorker)` from the `disagg_router.py` file.
 
 ```python
-# graphs/disag_router.py
+# graphs/disagg_router.py
 # imports...
 Frontend.link(Processor).link(Router).link(VllmWorker)
 ```
@@ -194,6 +194,74 @@ dynamo serve components.prefill_worker:PrefillWorker -f ./configs/disagg_router.
 ```
 
 You can now use the same curl request from above to interact with your deployment!
+
+#### Multi-node sized models 
+We support deploying models that require multiple nodes to serve. As our components are based on VLLM, we can use the same ray cluster flow to serve each model. Below is an example that lets you deploy Llama 3.1 405B with our disaggregated serving example. Please ensure that these nodes are correctly configured with Infiniband and/or RoCE.
+
+##### Disaggregated Deployment with KV Routing
+Node 1: Frontend, Processor, Router, Decode Worker
+Node 2: Decode Worker
+Node 3: Prefill Worker
+Node 4: Prefill Worker
+
+**Step 1**: Start NATS/ETCD on your head node. Ensure you have the correct firewall rules to allow communication between the nodes as you will need the NATS/ETCD endpoints to be accessible by node 3
+```bash
+# node 1
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+**Step 2**: Set the neccesary environment variables on your head nodes (node 1 and node 3)
+```bash
+# node 1
+export GLOO_SOCKET_IFNAME=...
+export UCX_NET_DEVICES=...
+export NCCL_DEBUG=WARN
+export NCCL_IB_HCA=...
+export NCCL_SOCKET_IFNAME=...
+
+
+# node 3
+export NATS_SERVER = '<your-nats-server-address>' # note this should start with nats://...
+export ETCD_ENDPOINTS = '<your-etcd-endpoints-address>'
+
+export GLOO_SOCKET_IFNAME=...
+export UCX_NET_DEVICES=...
+export NCCL_DEBUG=WARN
+export NCCL_IB_HCA=...
+export NCCL_SOCKET_IFNAME=...
+```
+
+**Step 3**: Start a ray cluster on your head nodes (node 1 and node 3)
+```bash
+# node 1
+export 
+ray start --head
+
+# node 3
+ray start --head
+```
+
+**Step 4**: Add ray worker nodes (node 2 for node 1 and node 4 for node 3)
+```bash
+# node 2
+ray start --address='<node-1-ray-address>:6379'
+
+# node 4
+ray start --address='<node-3-ray-address>:6379'
+```
+
+You can run ray status on any of the nodes to ensure that each cluster has 2 nodes
+
+**Step 5**: Create the inference graph for this deployment. The easiest way to do this is to remove the `.link(PrefillWorker)` from the `disagg_router.py` file.
+
+```python
+# graphs/disagg_router.py
+# imports...
+Frontend.link(Processor).link(Router).link(VllmWorker)
+```
+
+
+
 
 ### Close deployment
 
