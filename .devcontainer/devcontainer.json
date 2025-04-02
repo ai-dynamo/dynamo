@@ -19,7 +19,9 @@
         "context": ".."
     },
     "runArgs": [
-        "--gpus=all"
+        "--gpus=all",
+        "--network=host",
+        "--ipc=host"
     ],
     "customizations": {
         "vscode": {
@@ -27,7 +29,6 @@
                 "ms-python.python",
                 "rust-lang.rust-analyzer",
                 "tamasfe.even-better-toml",
-                "github.copilot",
                 "ms-azuretools.vscode-docker"
             ],
             "settings": {
@@ -39,8 +40,11 @@
             }
         }
     },
+    "mounts": [
+        "source=dynamo-bashhistory,target=/commandhistory,type=volume"
+    ],
+    "remoteUser": "vscode",
     "updateRemoteUserUID": true,
     "postCreateCommand": "/bin/bash .devcontainer/post-create.sh",
     "postStartCommand": "echo 'source /workspaces/ai-dynamo/venv/bin/activate' >> ~/.bashrc",
-    "remoteUser": "vscode"
 }
