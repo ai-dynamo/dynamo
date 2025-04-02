@@ -33,7 +33,7 @@ vllm = ["dynamo-llm/vllm", "dep:netlink-packet-route", "dep:rtnetlink"]
 # We don't include llamacpp by default until we figure out when it needs external libraries
 llamacpp = ["dynamo-llm/llamacpp"]
 trtllm = ["dynamo-llm/trtllm"]
-python = ["dynamo-llm/python"]
+python = ["dynamo-llm/python", "dep:netlink-packet-route", "dep:rtnetlink"]
 cuda = ["dynamo-llm/cuda"]
 metal = ["dynamo-llm/metal"]
 vulkan = ["dynamo-llm/vulkan"]
@@ -65,5 +65,13 @@ netlink-packet-route = { version = "0.19", optional = true }
 rtnetlink = { version = "0.14", optional = true }
 
 [target.x86_64-unknown-linux-musl.dependencies]
+netlink-packet-route = { version = "0.19", optional = true }
+rtnetlink = { version = "0.14", optional = true }
+
+[target.aarch64-unknown-linux-gnu.dependencies]
+netlink-packet-route = { version = "0.19", optional = true }
+rtnetlink = { version = "0.14", optional = true }
+
+[target.aarch64-unknown-linux-musl.dependencies]
 netlink-packet-route = { version = "0.19", optional = true }
 rtnetlink = { version = "0.14", optional = true }

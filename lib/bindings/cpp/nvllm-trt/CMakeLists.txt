@@ -47,7 +47,7 @@ SET(TRTLLM_LIB_DIR "/usr/local/lib" CACHE STRING "TRTLLM_LIB_DIR: /usr/local/lib
 
 #include(${TRTLLM_SRC_DIR}/cpp/cmake/modules/find_library_create_target.cmake)
 
-set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib;/opt/hpcx/ompi/lib:/usr/local/cuda/lib64:/usr/local/tensorrt/targets/x86_64-linux-gnu/lib:/src/tensorrt_llm/cpp/build/tensorrt_llm/plugins")
+set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib;/opt/hpcx/ompi/lib:/usr/local/cuda/lib64:/usr/local/tensorrt/targets/aarch64-linux-gnu/lib:/src/tensorrt_llm/cpp/build/tensorrt_llm/plugins")
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 include(FetchContent)
@@ -89,7 +89,7 @@ add_library(xxhash STATIC IMPORTED)
 set_target_properties(
   xxhash
   PROPERTIES
-    IMPORTED_LOCATION "/usr/lib/x86_64-linux-gnu/libxxhash.a"
+    IMPORTED_LOCATION "/usr/lib/aarch64-linux-gnu/libxxhash.a"
 )
 
 set(SOURCE_FILES
@@ -115,7 +115,7 @@ target_include_directories(
     $<INSTALL_INTERFACE:include/>
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
           ${CMAKE_BINARY_DIR}
-          /usr/local/cuda-12.6/targets/x86_64-linux/include
+          /usr/local/cuda-12/targets/sbsa-linux/include
           /usr/local/tensorrt/include/
 )
 
