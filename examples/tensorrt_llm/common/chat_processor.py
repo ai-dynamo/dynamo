@@ -261,7 +261,7 @@ class ChatProcessor(BaseChatProcessor):
         return "data: [DONE]\n\n"
 
     async def preprocess(self, request):
-        conversation = []
+        conversation: List[Any] = []
         for message in request.messages:
             conversation.extend(parse_chat_message_content(message))
         tool_dicts = (
