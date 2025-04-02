@@ -1,6 +1,6 @@
 name: Bug Report
 description: Submit a bug report to help improve ai-dynamo
-title: "[BUG]: <Enter bug title>"
+title: "[BUG]: Enter bug title"
 body:
   - type: markdown
     attributes:
