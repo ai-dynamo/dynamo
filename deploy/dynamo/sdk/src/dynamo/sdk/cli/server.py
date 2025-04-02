@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 
 import click
@@ -30,12 +32,160 @@ from bentoml._internal.utils import add_experimental_docstring
 from bentoml._internal.utils.cattr import bentoml_cattr
 from bentoml.exceptions import CLIException, CloudRESTApiClientError
 
+from dynamo.sdk.lib.binary_manager import ensure_helm, ensure_kubectl
+
 
 def build_cloud_command() -> click.Group:
     @click.group(name="server")
     @add_experimental_docstring
     def cloud_command():
         """Interact with your Dynamo Server"""
+
+    @cloud_command.command()
+    @click.argument("namespace", type=click.STRING)
+    @click.option(
+        "--sha",
+        type=click.STRING,
+        help="SHA of the commit to deploy",
+        required=True,
+    )
+    @click.option(
+        "--ngc-token",
+        type=click.STRING,
+        help="User's NGC API token",
+        required=True,
+    )
+    @click.option(
+        "--api-token",
+        type=click.STRING,
+        help="Dynamo Server user API token",
+        required=True,
+    )
+    @click.option(
+        "--endpoint-suffix",
+        type=click.STRING,
+        help="Dynamo Server endpoint suffix",
+        default="dev.aire.nvidia.com",
+        show_default=True,
+        required=False,
+    )
+    def create(namespace: str, sha: str, ngc_token: str, api_token: str, endpoint_suffix: str) -> None:  # type: ignore
+        """Create a deployment for a given namespace and SHA"""
+        try:
+            # Set up environment variables
+            rich.print(":gear: Setting up environment variables...")
+            os.environ["NAMESPACE"] = namespace
+            os.environ["NGC_TOKEN"] = ngc_token
+            os.environ["CI_COMMIT_SHA"] = sha
+            os.environ["RELEASE_NAME"] = namespace
+            os.environ["DYNAMO_INGRESS_SUFFIX"] = endpoint_suffix
+
+            # Ensure helm and kubectl are available
+            helm_path = ensure_helm()
+            kubectl_path = ensure_kubectl()
+
+            # Add helm repositories
+            rich.print(":gear: Adding helm repositories...")
+            subprocess.run(
+                [
+                    helm_path,
+                    "repo",
+                    "add",
+                    "bitnami",
+                    "https://charts.bitnami.com/bitnami",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    helm_path,
+                    "repo",
+                    "add",
+                    "nats",
+                    "https://nats-io.github.io/k8s/helm/charts/",
+                ],
+                check=True,
+            )
+            subprocess.run([helm_path, "repo", "update"], check=True)
+
+            # Create namespace if it doesn't exist
+            rich.print(f":gear: Creating namespace {namespace} if it doesn't exist...")
+            try:
+                subprocess.run(
+                    [kubectl_path, "create", "namespace", namespace], check=True
+                )
+                rich.print(f":white_check_mark: Created namespace {namespace}")
+            except subprocess.CalledProcessError as e:
+                if "already exists" not in str(e):
+                    raise
+                rich.print(f":white_check_mark: Namespace {namespace} already exists")
+
+            # Set current context to the namespace
+            rich.print(f":gear: Setting current context to namespace {namespace}...")
+            subprocess.run(
+                [
+                    kubectl_path,
+                    "config",
+                    "set-context",
+                    "--current",
+                    "--namespace",
+                    namespace,
+                ],
+                check=True,
+            )
+
+            # Install etcd and nats
+            rich.print(":gear: Installing etcd and nats...")
+            subprocess.run(
+                [
+                    helm_path,
+                    "install",
+                    "etcd",
+                    "bitnami/etcd",
+                    "-n",
+                    namespace,
+                    "-f",
+                    "etcd.yaml",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    helm_path,
+                    "install",
+                    "my-nats",
+                    "nats/nats",
+                    "--version",
+                    "1.2.9",
+                    "-f",
+                    "nats.yaml",
+                    "-n",
+                    namespace,
+                ],
+                check=True,
+            )
+
+            # Deploy the helm charts
+            rich.print(":gear: Deploying helm charts...")
+            subprocess.run(["./deploy.sh"], check=True)
+
+            # Verify user access at the end
+            rich.print(":gear: Verifying user access...")
+            endpoint = f"https://{namespace}.{endpoint_suffix}"
+            login(endpoint, api_token)
+
+            rich.print(":white_check_mark: Deployment completed successfully!")
+
+        except subprocess.CalledProcessError as e:
+            rich.print(
+                f":police_car_light: Error during deployment: {str(e)}", file=sys.stderr
+            )
+            sys.exit(1)
+        except (CLIException, CloudRESTApiClientError) as e:
+            rich.print(
+                f":police_car_light: Error during deployment: {str(e)}", file=sys.stderr
+            )
+            sys.exit(1)
 
     @cloud_command.command()
     @click.option(

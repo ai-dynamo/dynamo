@@ -18,9 +18,7 @@ name = "ai-dynamo"
 version = "0.1.0"
 description = "Distributed Inference Framework"
 readme = "README.md"
-authors = [
-    { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
-]
+authors = [{ name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" }]
 license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
@@ -52,14 +50,9 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 Repository = "https://github.com/ai-dynamo/dynamo.git"
 
 [project.optional-dependencies]
-all = [
-    "ai-dynamo-vllm==0.7.2",
-    "nixl",
-]
+all = ["ai-dynamo-vllm==0.7.2", "nixl"]
 
-vllm = [
-    "ai-dynamo-vllm==0.7.2"
-]
+vllm = ["ai-dynamo-vllm==0.7.2"]
 
 [project.scripts]
 dynamo = "dynamo.sdk.cli.cli:cli"
@@ -84,6 +77,8 @@ packages = ["deploy/dynamo/sdk/src/dynamo"]
 "target/release/http" = "dynamo/sdk/cli/bin/http"
 "target/release/metrics" = "dynamo/sdk/cli/bin/metrics"
 "target/release/mock_worker" = "dynamo/sdk/cli/bin/mock_worker"
+"dynamo/sdk/cli/bin/helm" = "dynamo/sdk/cli/bin/helm"
+"dynamo/sdk/cli/bin/kubectl" = "dynamo/sdk/cli/bin/kubectl"
 
 [tool.codespell]
 # note: pre-commit passes explicit lists of files here, which this skip file list doesn't override -
@@ -136,9 +131,9 @@ xfail_strict = true
 log_cli_level = "INFO"
 filterwarnings = [
     "error",
-    "ignore:.*cuda*:DeprecationWarning", # Need this to avoid deprecation warnings from CUDA in tensorrt_llm.
+    "ignore:.*cuda*:DeprecationWarning",              # Need this to avoid deprecation warnings from CUDA in tensorrt_llm.
     "ignore:.*pkg_resources.*:DeprecationWarning",
-    "ignore:.*multipart.*:PendingDeprecationWarning"
+    "ignore:.*multipart.*:PendingDeprecationWarning",
 ]
 
 
@@ -148,7 +143,7 @@ markers = [
     "pre_merge: marks tests to run before merging",
     "nightly: marks tests to run nightly",
     "weekly: marks tests to run weekly",
-    "gpu: marks tests to run on GPU"
+    "gpu: marks tests to run on GPU",
 ]
 
 # Linting/formatting
