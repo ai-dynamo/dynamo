@@ -53,7 +53,6 @@ class Processor(ChatProcessorMixin):
         super().__init__(self.engine_config)
         self.min_workers = 1
 
-
     @async_on_start
     async def async_init(self):
         runtime = dynamo_context["runtime"]
