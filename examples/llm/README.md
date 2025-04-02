@@ -150,6 +150,50 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ```
 
+### Multinode Examples
+
+#### Single node sized models
+You can deploy our example architectures on multiple nodes via NATS/ETCD based discovery and communication. Here's an example of deploying disaggregated serving on 2 nodes
+
+##### Disaggregated Deployment with KV Routing
+Node 1: Frontend, Processor, Router, 8 Decode
+Node 2: 8 Prefill
+
+**Step 1**: Start NATS/ETCD on your head node. Ensure you have the correct firewall rules to allow communication between the nodes as you will need the NATS/ETCD endpoints to be accessible by node 2.
+```bash
+# node 1
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+**Step 2**: Create the inference graph for this deployment. The easiest way to do this is to remove the `.link(PrefillWorker)` from the `disagg_router.py` file.
+
+```python
+# graphs/disag_router.py
+# imports...
+Frontend.link(Processor).link(Router).link(VllmWorker)
+```
+
+**Step 3**: Start the frontend, processor, router, and 8 VllmWorkers on node 1.
+```bash
+# node 1
+cd /workspace/examples/llm
+dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml --VllmWorker.ServiceArgs.workers=8
+```
+
+**Step 4**: Start 8 PrefillWorkers on node 2.
+Since we only want to start the `PrefillWorker` on node 2, you can simply run just the PrefillWorker component directly.
+
+```bash
+# node 2
+export NATS_SERVER = '<your-nats-server-address>' # note this should start with nats://...
+export ETCD_ENDPOINTS = '<your-etcd-endpoints-address>'
+
+cd /workspace/examples/llm
+dynamo serve components.prefill_worker:PrefillWorker -f ./configs/disagg_router.yaml --PrefillWorker.ServiceArgs.workers=8
+```
+
+You can now use the same curl request from above to interact with your deployment!
+
 ### Close deployment
 
 Kill all dynamo processes managed by circusd.

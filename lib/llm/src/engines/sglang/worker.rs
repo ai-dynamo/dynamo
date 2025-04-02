@@ -51,7 +51,8 @@ use crate::protocols::TokenIdType;
 const SGLANG_STOP_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Match sglang python log entries, e.g "[2025-01-30 11:23:16] Some text we want"
-const SGLANG_LOG_RE: &str = r"(\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] )?(.*)";
+const SGLANG_LOG_RE: &str =
+    r"(?<timestamp>\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] )?(?<message>.*)";
 
 /// Identify sglang log entries with this prefix
 const LOG_PREFIX: &str = "SGLANG";
@@ -506,18 +507,15 @@ async fn start_sglang(
         let line_re = Regex::new(SGLANG_LOG_RE).unwrap();
         let mut lines = stderr.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(cap) = line_re.captures(&line) {
-                match cap.len() {
-                    2 => {
-                        // No date/time, these are usually errors
+            if let Some(caps) = line_re.captures(&line) {
+                match caps.name("timestamp") {
+                    Some(_) => {
+                        // Skip Python's date/time. Should be normal log
+                        tracing::debug!("{LOG_PREFIX}{tp_rank} {}", &caps["message"]);
+                    }
+                    None => {
+                        // No date/time. Usually errors
                         tracing::warn!("{LOG_PREFIX}{tp_rank} {line}");
-                    }
-                    3 => {
-                        // Normal log line. Skip Python's date/time
-                        tracing::debug!("{LOG_PREFIX}{tp_rank} {}", &cap[2]);
-                    }
-                    x => {
-                        unreachable!("sglang log re only has two capture groups, so {x} entries is impossible");
                     }
                 }
             }

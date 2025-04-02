@@ -50,6 +50,19 @@ pip install ai-dynamo[all]
 > [!NOTE]
 > TensorRT-LLM Support is currently available on a [branch](https://github.com/ai-dynamo/dynamo/tree/dynamo/trtllm_llmapi_v1/examples/trtllm#building-the-environment)
 
+### Development Environment
+
+For a consistent development environment, you can use the provided devcontainer configuration. This requires:
+- [Docker](https://www.docker.com/products/docker-desktop)
+- [VS Code](https://code.visualstudio.com/) with the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
+
+To use the devcontainer:
+1. Open the project in VS Code
+2. Click on the button in the bottom-left corner
+3. Select "Reopen in Container"
+
+This will build and start a container with all the necessary dependencies for Dynamo development.
+
 ### Running and Interacting with an LLM Locally
 
 To run a model and interact with it locally you can call `dynamo
@@ -112,4 +125,20 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
     "stream":false,
     "max_tokens": 300
   }' | jq
+```
+
+### Local Development
+
+To develop locally, we recommend working inside of the container
+
+```bash
+./container/build.sh
+./container/run.sh -it --mount-workspace
+
+cargo build --release
+mkdir -p /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
+cp /workspace/target/release/http /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
+cp /workspace/target/release/llmctl /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
+
+uv pip install -e .
 ```

@@ -170,6 +170,12 @@ pub fn disable_ansi_logging() -> bool {
     env_is_truthy("DYN_SDK_DISABLE_ANSI_LOGGING")
 }
 
+/// Check whether to use local timezone for logging timestamps (default is UTC)
+/// Set the `DYN_LOG_USE_LOCAL_TZ` environment variable to a [`is_truthy`] value
+pub fn use_local_timezone() -> bool {
+    env_is_truthy("DYN_LOG_USE_LOCAL_TZ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

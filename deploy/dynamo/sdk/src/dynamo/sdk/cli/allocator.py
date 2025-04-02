@@ -96,7 +96,7 @@ class ResourceAllocator:
             return unassigned[:count]
 
     @inject
-    def get_worker_env(
+    def get_resource_envs(
         self,
         service: Service[Any],
         services: dict[str, Any] = Provide[BentoMLContainer.config.services],
@@ -105,14 +105,14 @@ class ResourceAllocator:
 
         num_gpus = 0
         num_workers = 1
-        worker_env: list[dict[str, str]] = []
+        resource_envs: list[dict[str, str]] = []
         if "gpu" in (config.get("resources") or {}):
             num_gpus = config["resources"]["gpu"]  # type: ignore
         if config.get("workers"):
             if (workers := config["workers"]) == "cpu_count":
                 num_workers = int(self.system_resources["cpu"])
                 # don't assign gpus to workers
-                return num_workers, worker_env
+                return num_workers, resource_envs
             else:  # workers is a number
                 num_workers = workers
         if num_gpus and DISABLE_GPU_ALLOCATION_ENV not in os.environ:
@@ -120,7 +120,7 @@ class ResourceAllocator:
                 # K8s replicas: Assumes DYNAMO_DEPLOYMENT_ENV is set
                 # each pod in replicaset will have separate GPU with same CUDA_VISIBLE_DEVICES
                 assigned = self.assign_gpus(num_gpus)
-                worker_env = [
+                resource_envs = [
                     {"CUDA_VISIBLE_DEVICES": ",".join(map(str, assigned))}
                     for _ in range(num_workers)
                 ]
@@ -128,7 +128,7 @@ class ResourceAllocator:
                 # local deployment where we split all available GPUs across workers
                 for _ in range(num_workers):
                     assigned = self.assign_gpus(num_gpus)
-                    worker_env.append(
+                    resource_envs.append(
                         {"CUDA_VISIBLE_DEVICES": ",".join(map(str, assigned))}
                     )
-        return num_workers, worker_env
+        return num_workers, resource_envs
