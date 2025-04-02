@@ -58,3 +58,34 @@ curl -X 'POST' \
   "text": "test"
 }'
 ```
+
+## Deploying to Kubernetes using Dynamo cloud and Dynamo deploy CLI
+
+**Pre-Requisites**
+
+The dynamo CLI must be installed first and the image must be Ubuntu 24.04-based.
+
+You must have first followed the instructions in [deploy/dynamo/helm/README.md](../../deploy/dynamo/helm/README.md) to create your Dynamo cloud deployment.
+
+**Step 1**: Login to dynamo server
+
+```bash
+  export KUBE_NS=hello-world # this must match the name of your Kubernetes namespace
+  export DYNAMO_SERVER=https://${KUBE_NS}.dev.aire.nvidia.com
+  dynamo server login --api-token TEST-TOKEN --endpoint $DYNAMO_SERVER
+```
+
+**Step 2**:  use a framework-less base image and build a dynamo nim
+
+```bash
+  export DYNAMO_IMAGE=nvcr.io/nvidian/nim-llm-dev/dynamo-base:097fb745a43e85b8c9e5ad0cf217e03290c865e8
+  cd /workspaces/ai-dynamo/examples/hello_world
+  DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk -F"\"" '{ print $2 }')
+```
+
+**Step 3**: Deploy!
+
+```bash
+  echo $DYNAMO_TAG
+  dynamo deploy $DYNAMO_TAG --no-wait -n ci-hw
+```
