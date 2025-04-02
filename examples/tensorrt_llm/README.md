@@ -17,8 +17,6 @@ limitations under the License.
 
 # LLM Deployment Examples using TensorRT-LLM
 
-WIP: Merge the code base with llm example to reduce the code duplication.
-
 This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations using TensorRT-LLM.
 
 
@@ -122,3 +120,13 @@ See [client](../llm/README.md#client) section to learn how to send request to th
 ### Close deployment
 
 See [close deployment](../llm/README.md#close-deployment) section to learn about how to close the deployment.
+
+Remaining tasks: 
+
+- [ ] Add support for the disaggregated serving.
+- [ ] Add integration test coverage.
+- [ ] Add instructions for benchmarking.
+- [ ] Add multi-node support.
+- [ ] Merge the code base with llm example to reduce the code duplication.
+- [ ] Use processor from dynamo-llm framework.
+- [ ] Explore NIXL integration with TensorRT-LLM.
