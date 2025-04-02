@@ -278,6 +278,7 @@ RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
     cp target/release/mock_worker /usr/local/bin
 
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
+COPY deploy/dynamo/api-store /workspace/deploy/dynamo/api-store
 # Build dynamo wheel
 RUN source /opt/dynamo/venv/bin/activate && \
     cd /workspace/lib/bindings/python && \
@@ -285,7 +286,10 @@ RUN source /opt/dynamo/venv/bin/activate && \
     uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     cd /workspace && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/ai_dynamo*any.whl
+    uv pip install /workspace/dist/ai_dynamo*any.whl && \
+    cd /workspace/deploy/dynamo/api-store && \
+    uv build --wheel --out-dir /workspace/dist && \
+    uv pip install /workspace/dist/ai_dynamo_store*any.whl
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \

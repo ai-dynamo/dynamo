@@ -17,6 +17,8 @@ use derive_getters::Dissolve;
 
 use super::*;
 
+pub use async_nats::service::endpoint::Stats as EndpointStats;
+
 #[derive(Educe, Builder, Dissolve)]
 #[educe(Debug)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
@@ -47,7 +49,7 @@ impl EndpointConfigBuilder {
 
     pub fn stats_handler<F>(self, handler: F) -> Self
     where
-        F: FnMut(async_nats::service::endpoint::Stats) -> serde_json::Value + Send + Sync + 'static,
+        F: FnMut(EndpointStats) -> serde_json::Value + Send + Sync + 'static,
     {
         self._stats_handler(Some(Box::new(handler)))
     }

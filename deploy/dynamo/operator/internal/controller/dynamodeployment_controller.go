@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 
 	"dario.cat/mergo"
 	"emperror.dev/errors"
@@ -133,7 +134,7 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// reconcile the dynamoNimRequest
 	dynamoNimRequest := &nvidiacomv1alpha1.DynamoNimRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      generateDynamoNimRequestName(dynamoDeployment.Spec.DynamoNim),
+			Name:      strings.ReplaceAll(dynamoDeployment.Spec.DynamoNim, ":", "--"),
 			Namespace: dynamoDeployment.Namespace,
 		},
 		Spec: nvidiacomv1alpha1.DynamoNimRequestSpec{
@@ -187,7 +188,9 @@ func (r *DynamoDeploymentReconciler) getSecret(ctx context.Context, namespace, n
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&nvidiacomv1alpha1.DynamoDeployment{}).
+		For(&nvidiacomv1alpha1.DynamoDeployment{}, builder.WithPredicates(
+			predicate.GenerationChangedPredicate{},
+		)).
 		Named("dynamodeployment").
 		Owns(&nvidiacomv1alpha1.DynamoNimDeployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment

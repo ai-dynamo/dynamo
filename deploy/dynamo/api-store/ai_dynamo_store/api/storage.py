@@ -76,17 +76,19 @@ async def create_db_and_tables_async():
 
 ### S3 storage
 
-DYNAMO_CONTAINER_NAME = os.getenv("DYNAMO_CONTAINER_NAME", "dynamo-storage").lower()
+DYN_OBJECT_STORE_BUCKET = os.getenv("DYN_OBJECT_STORE_BUCKET", "dynamo-storage").lower()
 
 
 def get_s3_client():
-    s3_key = os.getenv("S3_ACCESS_KEY_ID")
-    s3_secret = os.getenv("S3_SECRET_ACCESS_KEY")
-    s3_url = os.getenv("S3_ENDPOINT_URL")
-    if not s3_key or not s3_secret or not s3_url:
-        raise ValueError(
-            "S3_ENDPOINT_URL, S3_ACCESS_KEY_ID, and S3_SECRET_ACCESS_KEY are required to download from S3"
-        )
+    s3_key = os.getenv("DYN_OBJECT_STORE_ID")
+    s3_secret = os.getenv("DYN_OBJECT_STORE_KEY")
+    s3_url = os.getenv("DYN_OBJECT_STORE_ENDPOINT")
+    if not s3_url:
+        raise ValueError("DYN_OBJECT_STORE_ENDPOINT is required for S3 connection")
+    if not s3_key:
+        raise ValueError("DYN_OBJECT_STORE_ID is required for S3 authentication")
+    if not s3_secret:
+        raise ValueError("DYN_OBJECT_STORE_KEY is required for S3 authentication")
     return boto3.client(
         "s3",
         aws_access_key_id=s3_key,
@@ -98,7 +100,7 @@ def get_s3_client():
 class S3Storage:
     def __init__(self):
         self.s3_client = get_s3_client()
-        self.bucket_name = DYNAMO_CONTAINER_NAME.replace("_", "-").lower()
+        self.bucket_name = DYN_OBJECT_STORE_BUCKET.replace("_", "-").lower()
         self.ensure_bucket_exists()
 
     def ensure_bucket_exists(self):
@@ -138,4 +140,12 @@ class S3Storage:
             raise
 
 
-s3_storage = S3Storage()
+S3_STORAGE_INSTANCE: S3Storage | None = None
+
+
+def get_s3_storage() -> S3Storage:
+    global S3_STORAGE_INSTANCE
+    if S3_STORAGE_INSTANCE is None:
+        S3_STORAGE_INSTANCE = S3Storage()
+    assert isinstance(S3_STORAGE_INSTANCE, S3Storage)
+    return S3_STORAGE_INSTANCE

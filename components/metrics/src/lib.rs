@@ -429,7 +429,7 @@ impl PrometheusMetrics {
         &self,
         gauge: &prometheus::GaugeVec,
         config: &LLMWorkerLoadCapacityConfig,
-        worker_id: &str,
+        worker_id: &String,
         value: f64,
     ) {
         gauge
@@ -442,7 +442,7 @@ impl PrometheusMetrics {
         &self,
         counter: &prometheus::CounterVec,
         config: &LLMWorkerLoadCapacityConfig,
-        worker_id: &str,
+        worker_id: &String,
         value: f64,
     ) {
         counter

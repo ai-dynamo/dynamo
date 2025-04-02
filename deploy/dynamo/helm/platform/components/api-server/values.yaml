@@ -19,7 +19,7 @@ replicaCount: 1
 image:
   repository: gitlab-master.nvidia.com:5005/aire/microservices/dynamo/api-server
   # This sets the pull policy for images.
-  pullPolicy: Always
+  pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
   tag: ""
 
@@ -105,7 +105,7 @@ ingress:
 
 # Istio settings
 istio:
-  host: cai.dev.aire.nvidia.com
+  host: ""
 
 ## In-cluster minio deployment configuration
 ## ref: https://github.com/bitnami/charts/blob/minio/13.3.1/bitnami/minio/values.yaml
@@ -145,7 +145,10 @@ resources: {}
   #   memory: 128Mi
 
 dynamo:
-  port: 8181
+  apiServer:
+    port: 8181
+  apiStore:
+    port: 8000
 
 postgresql:
   auth:

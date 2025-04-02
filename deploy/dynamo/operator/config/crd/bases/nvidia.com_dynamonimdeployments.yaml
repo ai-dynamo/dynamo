@@ -391,6 +391,8 @@ spec:
                 type: object
               dynamoNim:
                 type: string
+              dynamoTag:
+                type: string
               envFromSecret:
                 type: string
               envs:
@@ -2784,6 +2786,7 @@ spec:
                 type: string
             required:
             - dynamoNim
+            - dynamoTag
             type: object
           status:
             properties:

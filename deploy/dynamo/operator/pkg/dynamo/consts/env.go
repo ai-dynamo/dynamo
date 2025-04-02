@@ -33,6 +33,7 @@ const (
 
 	EnvYataiBentoDeploymentName      = "YATAI_BENTO_DEPLOYMENT_NAME"
 	EnvYataiBentoDeploymentNamespace = "YATAI_BENTO_DEPLOYMENT_NAMESPACE"
+	EnvDynamoDeploymentTag           = "DYNAMO_DEPLOYMENT_TAG"
 
 	EnvS3Endpoint   = "S3_ENDPOINT"
 	EnvS3Region     = "S3_REGION"

@@ -28,8 +28,12 @@ import (
 
 	dynamov1alpha1 "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 	apiv1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	v1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/rest"
@@ -43,7 +47,7 @@ type k8sService struct{}
 
 var K8sService IK8sService = &k8sService{}
 
-func (s *k8sService) GetK8sClient(kubeConfig string) (kubernetes.Interface, error) {
+func (s *k8sService) GetK8sRestConfig(kubeConfig string) (*rest.Config, error) {
 	var restConfig *rest.Config
 	var err error
 
@@ -85,7 +89,30 @@ func (s *k8sService) GetK8sClient(kubeConfig string) (kubernetes.Interface, erro
 		}
 	}
 
+	return restConfig, nil
+}
+
+func (s *k8sService) GetK8sClient(kubeConfig string) (kubernetes.Interface, error) {
+	restConfig, err := s.GetK8sRestConfig(kubeConfig)
+	if err != nil {
+		return nil, err
+	}
+
 	clientSet, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	return clientSet, nil
+}
+
+func (s *k8sService) GetDynamicClient(kubeConfig string) (dynamic.Interface, error) {
+	restConfig, err := s.GetK8sRestConfig(kubeConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	clientSet, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -112,12 +139,25 @@ func (s *k8sService) ListPodsBySelector(ctx context.Context, podLister v1.PodNam
 }
 
 func (s *k8sService) CreateDynamoDeployment(ctx context.Context, dynamoDeployment *dynamov1alpha1.DynamoDeployment) error {
-	k8sClient, err := s.GetK8sClient("")
+	k8sClient, err := s.GetDynamicClient("")
 	if err != nil {
 		return err
 	}
-
-	return k8sClient.CoreV1().RESTClient().Post().Namespace(dynamoDeployment.Namespace).Resource("dynamodeployments").Body(dynamoDeployment).Do(ctx).Error()
+	unstructuredData, err := runtime.DefaultUnstructuredConverter.ToUnstructured(dynamoDeployment)
+	if err != nil {
+		return err
+	}
+	unstructured := &unstructured.Unstructured{Object: unstructuredData}
+	gvr := schema.GroupVersionResource{
+		Group:    dynamov1alpha1.GroupVersion.Group,
+		Version:  dynamov1alpha1.GroupVersion.Version,
+		Resource: "dynamodeployments",
+	}
+	_, err = k8sClient.Resource(gvr).Namespace(dynamoDeployment.Namespace).Create(ctx, unstructured, metav1.CreateOptions{})
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 type IK8sService interface {

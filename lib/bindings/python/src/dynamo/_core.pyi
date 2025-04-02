@@ -15,6 +15,12 @@
 
 from typing import AsyncGenerator, AsyncIterator, Callable, Dict, List, Optional
 
+def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
+    """
+    Log a message from Python with file and line info
+    """
+    ...
+
 class JsonLike:
     """
     Any PyObject which can be serialized to JSON

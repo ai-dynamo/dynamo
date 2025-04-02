@@ -41,6 +41,8 @@ type DynamoNimDeploymentSpec struct {
 	Labels      map[string]string `json:"labels,omitempty"`
 
 	DynamoNim string `json:"dynamoNim"`
+	// contains the tag of the DynamoNim: for example, "my_package:MyService"
+	DynamoTag string `json:"dynamoTag"`
 
 	// contains the name of the service
 	ServiceName string `json:"serviceName,omitempty"`

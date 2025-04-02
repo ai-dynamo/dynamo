@@ -27,6 +27,18 @@ rules:
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["get", "list", "watch"]
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamodeployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 {{- if .Values.namespaceRestriction.enabled }}
@@ -44,6 +56,10 @@ subjects:
   name: {{ include "helm.serviceAccountName" . }}
   namespace: {{ .Release.Namespace }}
 roleRef:
+  {{- if .Values.namespaceRestriction.enabled }}
+  kind: Role
+  {{- else }}
   kind: ClusterRole
+  {{- end }}
   name: {{ include "helm.fullname" . }}-role
   apiGroup: rbac.authorization.k8s.io
