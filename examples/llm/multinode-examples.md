@@ -8,8 +8,8 @@ Table of Contents
 You can deploy our example architectures on multiple nodes via NATS/ETCD based discovery and communication. Here's an example of deploying disaggregated serving on 2 nodes
 
 ##### Disaggregated Deployment with KV Routing
-Node 1: Frontend, Processor, Router, 8 Decode
-Node 2: 8 Prefill
+- Node 1: Frontend, Processor, Router, 8 Decode Workers
+- Node 2: 8 Prefill Workers
 
 **Step 1**: Start NATS/ETCD on your head node. Ensure you have the correct firewall rules to allow communication between the nodes as you will need the NATS/ETCD endpoints to be accessible by node 2.
 ```bash
@@ -52,10 +52,10 @@ We support deploying models that require multiple nodes to serve. As our compone
 In this example, we will deploy 2 Llama 3.1 405B models on 4 nodes each at tp16. This can be extended and configured as needed via the configuration yaml file
 
 ##### Disaggregated Deployment with KV Routing
-Node 1: Frontend, Processor, Router, Decode Worker
-Node 2: Decode Worker
-Node 3: Prefill Worker
-Node 4: Prefill Worker
+- Node 1: Frontend, Processor, Router, Decode Worker
+- Node 2: Decode Worker
+- Node 3: Prefill Worker
+- Node 4: Prefill Worker
 
 **Step 1**: Start NATS/ETCD on your head node (node 1). Ensure you have the correct firewall rules to allow communication between the nodes as you will need the NATS/ETCD endpoints to be accessible by node 3
 ```bash
