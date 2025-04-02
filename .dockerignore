@@ -39,4 +39,3 @@
 .dockerignore
 **/target/*
 **/*safetensors
-TensorRT-LLM

@@ -26,6 +26,7 @@ while getopts "c:" opt; do
   esac
 done
 
+(cd /tmp && \
 # Clone the TensorRT-LLM repository.
 if [ ! -d "TensorRT-LLM" ]; then
   git clone https://github.com/NVIDIA/TensorRT-LLM.git
@@ -41,4 +42,4 @@ git submodule update --init --recursive
 git lfs pull
 
 # Build the TRT-LLM base image.
-make -C docker release_build
+make -C docker release_build)
