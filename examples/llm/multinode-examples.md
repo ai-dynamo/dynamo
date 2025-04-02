@@ -49,7 +49,7 @@ You can now use the same curl request from above to interact with your deploymen
 #### Multi-node sized models 
 We support deploying models that require multiple nodes to serve. As our components are based on VLLM, we can use the same ray cluster flow to serve each model. Below is an example that lets you deploy Llama 3.1 405B FP8 with our disaggregated serving example. Please ensure that these nodes are correctly configured with Infiniband and/or RoCE.
 
-In this example, we will deploy 2 Llama 3.1 405B models on 4 nodes each at tp16. However - this can be extended and configured as needed.
+In this example, we will deploy 2 Llama 3.1 405B models on 4 nodes each at tp16. This can be extended and configured as needed via the configuration yaml file
 
 ##### Disaggregated Deployment with KV Routing
 Node 1: Frontend, Processor, Router, Decode Worker
