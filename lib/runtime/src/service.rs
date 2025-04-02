@@ -94,7 +94,8 @@ pub struct Metrics {
 
 impl Metrics {
     pub fn decode<T: for<'de> Deserialize<'de>>(self) -> Result<T> {
-        serde_json::from_value(self.data).map_err(Into::into)
+        let v = serde_json::to_value(&self)?;
+        serde_json::from_value(v).map_err(Into::into)
     }
 }
 
