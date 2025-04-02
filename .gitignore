@@ -78,8 +78,6 @@ __pycache__/
 *$py.class
 *.so
 
-**/.devcontainer
-
 ### Helm ###
 *.tgz
 Chart.lock

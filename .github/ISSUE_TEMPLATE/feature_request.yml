@@ -1,0 +1,31 @@
+name: Feature Request
+description: Suggest an improvement for ai-dynamo
+title: '[FEATURE]: Enter feature title'
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: feature-description
+    attributes:
+      label: Feature request
+      description: |
+        A clear and concise description of the feature proposal.
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Describe the problem you're encountering
+      description: |
+        Please describe the problem you're encountering. Include any relevant environment information (eg. os, dynamo version, etc).
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Describe alternatives you've tried
+      description: |
+        Please describe any alternative solutions you've tried in as much detail as possible.
+    validations:
+      required: false

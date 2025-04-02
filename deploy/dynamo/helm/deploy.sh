@@ -39,7 +39,7 @@ cd ../..
 cd components/api-server
 helm dependency update
 cd ../..
-helm dep build
+helm dep update
 helm repo update
 cd ..
 

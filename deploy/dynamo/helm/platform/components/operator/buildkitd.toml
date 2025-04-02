@@ -12,9 +12,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-apiVersion: v2
-name: dynamo-crds
-description: A Helm chart for CRDs of dynamo operator
-type: application
-version: 0.1.1
-dependencies: []
+debug = true
+[history]
+  maxAge = 345600
+  maxEntries = 1000
+[worker.oci]
+  enabled = true
+  gc = true
+  gckeepstorage = "1000GB"
+
+  [[worker.oci.gcpolicy]]
+    keepBytes = "200GB"
+    keepDuration = "168h" # 7 days
+    filters = [ "type==source.local", "type==exec.cachemount", "type==source.git.checkout"]
+  [[worker.oci.gcpolicy]]
+    all = false
+    keepDuration = "336h" # 14 days
+    keepBytes = "300GB"
+  [[worker.oci.gcpolicy]]
+    all = true
+    keepBytes = "500GB"
+[registry."docker.io"]
+  mirrors = []

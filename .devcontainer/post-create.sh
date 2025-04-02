@@ -1,3 +1,5 @@
+#!/bin/bash
+
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -12,9 +14,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-apiVersion: v2
-name: dynamo-crds
-description: A Helm chart for CRDs of dynamo operator
-type: application
-version: 0.1.1
-dependencies: []
+
+set -e
+
+# Create and activate Python virtual environment
+python3 -m venv venv
+. ./venv/bin/activate
+
+# Build Rust components first
+cargo build --release
+
+# Install Dynamo with all dependencies
+pip install -e .[all]
+
+# Install development tools
+pip install pytest isort mypy pylint pre-commit
+
+echo "Development environment setup complete!"

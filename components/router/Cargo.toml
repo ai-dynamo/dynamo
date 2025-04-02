@@ -12,9 +12,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-apiVersion: v2
-name: dynamo-crds
-description: A Helm chart for CRDs of dynamo operator
-type: application
-version: 0.1.1
-dependencies: []
+
+[package]
+name = "router"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+
+[dependencies]
+dynamo-runtime = { workspace = true}
+dynamo-llm = { workspace = true}
+
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+clap = { version = "4.5", features = ["derive"] }
