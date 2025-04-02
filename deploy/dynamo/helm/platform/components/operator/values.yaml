@@ -88,7 +88,7 @@ dynamo:
   internalImages:
     bentoDownloader: quay.io/bentoml/bento-downloader:0.0.5
     kaniko: quay.io/bentoml/kaniko:debug
-    buildkit: quay.io/bentoml/buildkit:master
+    buildkit: moby/buildkit:latest
     buildkitRootless: quay.io/bentoml/buildkit:master-rootless
     metricsTransformer: quay.io/bentoml/yatai-bento-metrics-transformer:0.0.4
     debugger: quay.io/bentoml/bento-debugger:0.0.8
@@ -110,7 +110,7 @@ dynamo:
     secure: true
     bentoRepositoryName: yatai-bentos
 
-  bentoImageBuildEngine: kaniko # options: kaniko, buildkit, buildkit-rootless
+  bentoImageBuildEngine: buildkit # options: kaniko, buildkit, buildkit-rootless
   addNamespacePrefixToImageName: false
 
   estargz:

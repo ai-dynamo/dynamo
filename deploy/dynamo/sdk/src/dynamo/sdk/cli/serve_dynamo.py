@@ -26,6 +26,7 @@ import typing as t
 from typing import Any
 
 import click
+import uvloop
 
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 from dynamo.sdk import dynamo_context
@@ -186,6 +187,7 @@ def main(
                 logger.error(f"[{run_id}] Error in Dynamo component setup: {str(e)}")
                 raise
 
+        uvloop.install()
         asyncio.run(worker())
 
 

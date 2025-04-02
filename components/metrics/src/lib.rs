@@ -465,8 +465,8 @@ impl PrometheusMetrics {
     /// Update metrics with current values
     fn update(&self, config: &LLMWorkerLoadCapacityConfig, processed: &ProcessedEndpoints) {
         // Update per-worker metrics
-        for endpoint in processed.endpoints.iter() {
-            let worker_id = endpoint.worker_id().to_string();
+        for (worker_id, endpoint) in processed.endpoints.iter() {
+            let worker_id = worker_id.to_string();
             let metrics = endpoint.data.clone();
 
             self.set_worker_gauge(

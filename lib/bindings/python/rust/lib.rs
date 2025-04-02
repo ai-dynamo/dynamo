@@ -23,10 +23,9 @@ use pyo3::{exceptions::PyException, prelude::*};
 use rs::pipeline::network::Ingress;
 use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
-use tracing_subscriber::FmtSubscriber;
 
 use dynamo_runtime::{
-    self as rs,
+    self as rs, logging,
     pipeline::{EngineStream, ManyOut, SingleIn},
     protocols::annotated::Annotated as RsAnnotated,
     traits::DistributedRuntimeProvider,
@@ -50,13 +49,8 @@ const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 /// import the module.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Sets up RUST_LOG environment variable for logging through the python-wheel
-    // Example: RUST_LOG=debug python3 -m ...
-    let subscriber = FmtSubscriber::builder()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    logging::init();
+    m.add_function(wrap_pyfunction!(log_message, m)?)?;
 
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<CancellationToken>()?;
@@ -92,6 +86,13 @@ where
     E: Display,
 {
     PyException::new_err(format!("{}", err))
+}
+
+/// Log a message from Python with file and line info
+#[pyfunction]
+#[pyo3(text_signature = "(level, message, module, file, line)")]
+fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) {
+    logging::log_message(level, message, module, file, line);
 }
 
 #[pyclass]

@@ -105,6 +105,13 @@ impl Tokens {
     pub fn into_sequence(self, block_size: usize) -> TokenSequence {
         TokenSequence::new(self, block_size)
     }
+
+    pub fn compute_block_hash(tokens: &[Token], block_size: usize) -> Vec<BlockHash> {
+        tokens
+            .par_chunks_exact(block_size)
+            .map(|chunk| compute_hash(cast_slice(chunk)))
+            .collect()
+    }
 }
 
 pub struct PartialTokenBlock {
