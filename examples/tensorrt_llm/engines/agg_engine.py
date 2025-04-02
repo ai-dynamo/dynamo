@@ -19,15 +19,14 @@ IMPORTANT:
 - This is only supposed to be used by dynamo-run launcher.
 - It is part of bring-your-own-engine python feature in dynamo-run.
 """
+import json
 import os
 import sys
 from pathlib import Path
-import json
 
 from tensorrt_llm.logger import logger
 
 from dynamo.runtime import dynamo_endpoint
-
 
 # Add the project root to the Python path
 project_root = str(Path(__file__).parents[1])  # Go up to trtllm directory
