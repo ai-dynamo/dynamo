@@ -121,7 +121,7 @@ See [client](../llm/README.md#client) section to learn how to send request to th
 
 See [close deployment](../llm/README.md#close-deployment) section to learn about how to close the deployment.
 
-Remaining tasks: 
+Remaining tasks:
 
 - [ ] Add support for the disaggregated serving.
 - [ ] Add integration test coverage.
