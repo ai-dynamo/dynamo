@@ -17,8 +17,6 @@ FROM ubuntu:24.04
 
 # Avoid prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
-
-# Install dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
@@ -36,32 +34,36 @@ RUN apt-get update && apt-get install -y \
     bash \
     && rm -rf /var/lib/apt/lists/*
 
-# https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user#_creating-a-nonroot-user
-ARG USERNAME=vscode
+# https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
+# Will use the default ubuntu user, but give sudo access
+ARG USERNAME=ubuntu
 ARG USER_UID=1000
-ARG USER_GID=$USER_UID
+ARG USER_GID=1000
 
-RUN groupadd --gid $USER_GID $USERNAME \
-    && useradd --uid $USER_UID --gid $USER_GID -m $USERNAME \
-    && apt-get update \
-    && apt-get install -y sudo \
-    && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
-    && chmod 0440 /etc/sudoers.d/$USERNAME
+RUN apt-get update && apt-get install -y sudo \
+    && echo "$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
+    && chmod 0440 /etc/sudoers.d/$USERNAME \
+    && mkdir -p /home/$USERNAME \
+    && chown -R $USERNAME:$USERNAME /home/$USERNAME \
+    && rm -rf /var/lib/apt/lists/*
+
 USER $USERNAME
+WORKDIR $HOME
 
-RUN chsh -s /bin/bash $USERNAME
-    
 # https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
-RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history" \
-    && mkdir /commandhistory \
-    && touch /commandhistory/.bash_history \
-    && chown -R $USERNAME /commandhistory \
-    && echo "$SNIPPET" >> "/home/$USERNAME/.bashrc"
+RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.commandhistory/.bash_history" \
+    && mkdir -p $HOME/.commandhistory \
+    && touch $HOME/.commandhistory/.bash_history \
+    && echo "$SNIPPET" >> "$HOME/.bashrc"
 
-# Install Rust for the vscode user
+# Install Rust for the user
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain stable --profile default -y \
     && . $HOME/.cargo/env
+ENV PATH="$HOME/.cargo/bin:${PATH}"
 
-ENV PATH="/home/$USERNAME/.cargo/bin:${PATH}"
+# Create project directory in home
+RUN mkdir -p $HOME/dynamo
+WORKDIR $HOME/dynamo
 
-WORKDIR /workspaces/dynamo
+# Add project to PYTHONPATH
+RUN echo "export PYTHONPATH=$HOME/dynamo:$PYTHONPATH" >> $HOME/.bashrc

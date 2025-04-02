@@ -18,8 +18,8 @@
 set -e
 
 # Create and activate Python virtual environment
-python3 -m venv venv
-. ./venv/bin/activate
+python3 -m venv .dev-venv
+. .dev-venv/bin/activate
 
 # Build Rust components first
 cargo build --release
