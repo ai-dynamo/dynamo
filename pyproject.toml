@@ -81,7 +81,7 @@ packages = ["dynamo/src/_dynamo"]
 "target/release/llmctl" = "_dynamo/cli/bin/llmctl"
 "target/release/http" = "_dynamo/cli/bin/http"
 "target/release/metrics" = "_dynamo/cli/bin/metrics"
-"target/release/mock_worker" = "dynamo/cli/bin/mock_worker"
+"target/release/mock_worker" = "_dynamo/cli/bin/mock_worker"
 
 [tool.codespell]
 # note: pre-commit passes explicit lists of files here, which this skip file list doesn't override -
