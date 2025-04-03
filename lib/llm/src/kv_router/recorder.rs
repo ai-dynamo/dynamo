@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dump_reload_and_verify_jsonl() {
+    async fn test_jsonl_roundtrip_preserves_events() {
         let token = CancellationToken::new();
         let recorder = KvRecorder::new(token.clone());
         let event_tx = recorder.event_sender();
@@ -383,5 +383,45 @@ mod tests {
         // Clean up
         recorder.shutdown();
         new_recorder.shutdown();
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn test_write_to_actual_file() {
+        // Use the manifest directory (project root) as a reference point
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        // Create the output path in the same directory as the source file
+        let output_path = manifest_dir
+            .join("src/kv_router/test_recorder_events.jsonl");
+
+        println!("Will write to: {}", output_path.display());
+        
+        // Create a recorder and send events
+        let token = CancellationToken::new();
+        let recorder = KvRecorder::new(token.clone());
+        let event_tx = recorder.event_sender();
+        
+        // Create and send two events
+        let store_event = create_store_event(1, 42, vec![1, 2, 3], None);
+        let remove_event = create_remove_event(2, 43, vec![3]);
+        
+        event_tx.send(store_event).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        event_tx.send(remove_event).await.unwrap();
+        
+        // Allow some time for processing
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        
+        // Write events to the actual file
+        recorder.to_jsonl(&output_path, None).unwrap();
+        
+        // Verify the file exists
+        assert!(output_path.exists(), "JSONL file should exist at {:?}", output_path);
+        println!("Successfully wrote events to {:?}", output_path);
+        
+        // Clean up
+        recorder.shutdown();
+        
+        // Note: We intentionally don't delete the file so it can be manually inspected
     }
 }
