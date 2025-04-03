@@ -33,11 +33,11 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc::{error::SendError, Sender};
 use tokio::task::JoinHandle;
 
-use crate::engines::MultiNodeConfig;
-use crate::kv_router::protocols::ForwardPassMetrics;
-use crate::protocols::common::llm_backend::LLMEngineOutput;
-use crate::protocols::common::preprocessor::PreprocessedRequest;
-use crate::protocols::common::FinishReason;
+use dynamo_llm::engines::MultiNodeConfig;
+use dynamo_llm::kv_router::protocols::ForwardPassMetrics;
+use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
+use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_llm::protocols::common::FinishReason;
 
 /// Wait this long for the vllm sub-process to stop after we send it a KILL
 const VLLM_STOP_TIMEOUT: Duration = Duration::from_millis(1500);
@@ -167,7 +167,7 @@ pub async fn start(
 ) -> anyhow::Result<VllmWorker> {
     pyo3::prepare_freethreaded_python(); // or enable feature "auto-initialize"
     if let Ok(venv) = env::var("VIRTUAL_ENV") {
-        let _ = Python::with_gil(|py| crate::engines::fix_venv(venv, py));
+        let _ = Python::with_gil(|py| crate::fix_venv(venv, py));
     }
 
     let py_imports = Arc::new(python_imports());

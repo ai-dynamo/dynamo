@@ -19,11 +19,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use pyo3::prelude::*;
+
 use dynamo_runtime::pipeline::error as pipeline_error;
 use dynamo_runtime::CancellationToken;
 
-use crate::backend::ExecutionContext;
-use crate::engines::MultiNodeConfig;
+use dynamo_llm::backend::ExecutionContext;
+use dynamo_llm::engines::MultiNodeConfig;
 
 mod engine;
 use engine::VllmEngine;
@@ -143,4 +145,23 @@ impl Future for StopFuture {
             }
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn fix_venv(venv: String, py: Python<'_>) -> anyhow::Result<()> {
+    let version_info = py.version_info();
+    let sys: PyObject = py.import("sys")?.into();
+    let sys_path = sys.getattr(py, "path")?;
+    let venv_path = format!(
+        "{venv}/lib/python{}.{}/site-packages",
+        version_info.major, version_info.minor
+    );
+    // TODO: This should go _before_ the site-packages
+    sys_path.call_method1(py, "append", (venv_path,))?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn fix_venv(_venv: String, _py: Python<'_>) -> anyhow::Result<()> {
+    Ok(())
 }

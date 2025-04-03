@@ -83,13 +83,12 @@ fn main() -> anyhow::Result<()> {
             if cfg!(feature = "vllm") {
                 #[cfg(feature = "vllm")]
                 {
-                    use dynamo_llm::engines::vllm;
                     let node_config = dynamo_llm::engines::MultiNodeConfig {
                         num_nodes: flags.num_nodes,
                         node_rank: flags.node_rank,
                         leader_addr: flags.leader_addr.unwrap_or_default(),
                     };
-                    return vllm::run_subprocess(
+                    return dynamo_engine_vllm::run_subprocess(
                         ZMQ_SOCKET_PREFIX,
                         &model_path,
                         node_config,

@@ -271,7 +271,6 @@ pub async fn run(
         }
         #[cfg(feature = "vllm")]
         Output::Vllm => {
-            use dynamo_llm::engines::vllm;
             if flags.base_gpu_id != 0 {
                 anyhow::bail!("vllm does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
             }
@@ -305,7 +304,7 @@ pub async fn run(
             }
             if node_conf.node_rank == 0 {
                 // vllm multi-node only the leader runs vllm
-                let (engine, vllm_future) = vllm::make_leader_engine(
+                let (engine, vllm_future) = dynamo_engine_vllm::make_leader_engine(
                     cancel_token.clone(),
                     &model_path,
                     &sock_prefix,
@@ -324,7 +323,8 @@ pub async fn run(
                 }
             } else {
                 // Nodes rank > 0 only run 'ray'
-                let stop_future = vllm::start_follower(cancel_token.clone(), node_conf).await?;
+                let stop_future =
+                    dynamo_engine_vllm::start_follower(cancel_token.clone(), node_conf).await?;
                 extra = Some(Box::pin(stop_future));
                 EngineConfig::None
             }

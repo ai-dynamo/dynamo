@@ -22,7 +22,6 @@ use thiserror::Error;
 use tokio::io::AsyncBufReadExt;
 use tokio::select;
 use tokio::time;
-use tracing;
 
 use dynamo_runtime::CancellationToken;
 

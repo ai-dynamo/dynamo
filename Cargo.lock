@@ -1552,6 +1552,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-engine-vllm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-openai",
+ "async-stream",
+ "async-trait",
+ "async_zmq",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "pyo3",
+ "regex",
+ "serde-pickle",
+ "serde_json",
+ "thiserror 2.0.12",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-llm"
 version = "0.1.0"
 dependencies = [
@@ -1600,7 +1620,6 @@ dependencies = [
  "semver",
  "sentencepiece",
  "serde",
- "serde-pickle",
  "serde_json",
  "serde_repr",
  "strum 0.27.1",
@@ -1632,6 +1651,7 @@ dependencies = [
  "dynamo-engine-llamacpp",
  "dynamo-engine-mistralrs",
  "dynamo-engine-sglang",
+ "dynamo-engine-vllm",
  "dynamo-llm",
  "dynamo-runtime",
  "futures",

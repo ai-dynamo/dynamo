@@ -18,13 +18,14 @@ use std::path::{Path, PathBuf};
 use async_stream::stream;
 use async_trait::async_trait;
 
-use crate::engines::vllm::worker;
-use crate::engines::MultiNodeConfig;
-use crate::protocols::common::llm_backend::{BackendInput, LLMEngineOutput};
+use dynamo_llm::engines::MultiNodeConfig;
+use dynamo_llm::protocols::common::llm_backend::{BackendInput, LLMEngineOutput};
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::runtime::CancellationToken;
+
+use crate::worker;
 
 pub struct VllmEngine {
     cancel_token: CancellationToken,
