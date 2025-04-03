@@ -22,7 +22,6 @@ Processor:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   block-size: 64
   max-model-len: 16384
-  router: kv
 
 Router:
   model-name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
