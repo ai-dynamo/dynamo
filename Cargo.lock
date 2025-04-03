@@ -1532,6 +1532,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-engine-python"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-openai",
+ "async-stream",
+ "async-trait",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "pyo3",
+ "pyo3-async-runtimes",
+ "pythonize",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.12",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-engine-sglang"
 version = "0.1.0"
 dependencies = [
@@ -1632,8 +1653,6 @@ dependencies = [
  "prometheus",
  "proptest",
  "pyo3",
- "pyo3-async-runtimes",
- "pythonize",
  "rand 0.9.0",
  "rayon",
  "regex",
@@ -1672,6 +1691,7 @@ dependencies = [
  "dialoguer",
  "dynamo-engine-llamacpp",
  "dynamo-engine-mistralrs",
+ "dynamo-engine-python",
  "dynamo-engine-sglang",
  "dynamo-engine-trtllm",
  "dynamo-engine-vllm",

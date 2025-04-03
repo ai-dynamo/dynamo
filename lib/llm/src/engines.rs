@@ -17,9 +17,6 @@
 // The engines are each in their own crate under `lib/engines`
 //
 
-#[cfg(feature = "python")]
-pub mod python;
-
 #[derive(Debug, Clone)]
 pub struct MultiNodeConfig {
     /// How many nodes / hosts we are using
@@ -38,27 +35,4 @@ impl Default for MultiNodeConfig {
             leader_addr: "".to_string(),
         }
     }
-}
-
-#[cfg(feature = "python")]
-use pyo3::prelude::*;
-
-/// On Mac embedded Python interpreters do not pick up the virtual env.
-#[cfg(all(target_os = "macos", feature = "python"))]
-fn fix_venv(venv: String, py: Python<'_>) -> anyhow::Result<()> {
-    let version_info = py.version_info();
-    let sys: PyObject = py.import("sys")?.into();
-    let sys_path = sys.getattr(py, "path")?;
-    let venv_path = format!(
-        "{venv}/lib/python{}.{}/site-packages",
-        version_info.major, version_info.minor
-    );
-    // TODO: This should go _before_ the site-packages
-    sys_path.call_method1(py, "append", (venv_path,))?;
-    Ok(())
-}
-
-#[cfg(all(target_os = "linux", feature = "python"))]
-fn fix_venv(_venv: String, _py: Python<'_>) -> anyhow::Result<()> {
-    Ok(())
 }

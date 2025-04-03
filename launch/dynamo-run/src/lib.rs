@@ -375,13 +375,13 @@ pub async fn run(
         }
         #[cfg(feature = "python")]
         Output::PythonStr(path_str) => {
-            use dynamo_llm::engines::python;
             let Some(model_name) = model_name else {
                 anyhow::bail!("Provide model service name as `--model-name <this>`");
             };
             let py_args = flags.as_vec(&path_str, &model_name);
             let p = std::path::PathBuf::from(path_str);
-            let engine = python::make_string_engine(cancel_token.clone(), &p, py_args).await?;
+            let engine =
+                dynamo_engine_python::make_string_engine(cancel_token.clone(), &p, py_args).await?;
             EngineConfig::StaticFull {
                 service_name: model_name,
                 engine,
@@ -389,7 +389,6 @@ pub async fn run(
         }
         #[cfg(feature = "python")]
         Output::PythonTok(path_str) => {
-            use dynamo_llm::engines::python;
             let Some(card) = maybe_card.clone() else {
                 anyhow::bail!("Could not find tokenizer. Pass flag --model-path <path>");
             };
@@ -398,7 +397,8 @@ pub async fn run(
             };
             let py_args = flags.as_vec(&path_str, &model_name);
             let p = std::path::PathBuf::from(path_str);
-            let engine = python::make_token_engine(cancel_token.clone(), &p, py_args).await?;
+            let engine =
+                dynamo_engine_python::make_token_engine(cancel_token.clone(), &p, py_args).await?;
             EngineConfig::StaticCore {
                 service_name: model_name.clone(),
                 engine,

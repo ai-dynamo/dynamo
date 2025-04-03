@@ -36,8 +36,8 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot::Sender;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 
-use crate::backend::ExecutionContext;
-use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+use dynamo_llm::backend::ExecutionContext;
+use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 
 /// Python snippet to import a file as a module
 const PY_IMPORT: &CStr = cr#"
@@ -78,7 +78,7 @@ pub async fn make_string_engine(
     pyo3::prepare_freethreaded_python();
     if let Ok(venv) = env::var("VIRTUAL_ENV") {
         Python::with_gil(|py| {
-            if let Err(e) = super::fix_venv(venv, py) {
+            if let Err(e) = fix_venv(venv, py) {
                 tracing::warn!("failed to fix venv: {}", e);
             }
         });
@@ -98,7 +98,7 @@ pub async fn make_token_engine(
     pyo3::prepare_freethreaded_python();
     if let Ok(venv) = env::var("VIRTUAL_ENV") {
         Python::with_gil(|py| {
-            if let Err(e) = super::fix_venv(venv, py) {
+            if let Err(e) = fix_venv(venv, py) {
                 tracing::warn!("failed to fix venv: {}", e);
             }
         });
@@ -359,4 +359,24 @@ where
     let response = Annotated::from_data(response);
 
     Ok(response)
+}
+
+/// On Mac embedded Python interpreters do not pick up the virtual env.
+#[cfg(target_os = "macos")]
+fn fix_venv(venv: String, py: Python<'_>) -> anyhow::Result<()> {
+    let version_info = py.version_info();
+    let sys: PyObject = py.import("sys")?.into();
+    let sys_path = sys.getattr(py, "path")?;
+    let venv_path = format!(
+        "{venv}/lib/python{}.{}/site-packages",
+        version_info.major, version_info.minor
+    );
+    // TODO: This should go _before_ the site-packages
+    sys_path.call_method1(py, "append", (venv_path,))?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn fix_venv(_venv: String, _py: Python<'_>) -> anyhow::Result<()> {
+    Ok(())
 }
