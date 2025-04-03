@@ -2,132 +2,83 @@
 
 Table of Contents
 - [Single node sized models](#single-node-sized-models)
-- [Multi-node sized models](#multi-node-sized-models)
 
 ## Single node sized models
-You can deploy our example architectures on multiple nodes via NATS/ETCD based discovery and communication. Here's an example of deploying disaggregated serving on 2 nodes
+You can deploy our example architectures on multiple nodes via NATS/ETCD based discovery and communication. Here's an example of deploying disaggregated serving on 3 nodes using `nvidia/Llama-3.1-405B-Instruct-FP8`. Each node will need to be properly configured with Infiniband and/or RoCE for communication between decode and prefill workers.
 
 ##### Disaggregated Deployment with KV Routing
-- Node 1: Frontend, Processor, Router, 8 Decode Workers
-- Node 2: 8 Prefill Workers
+- Node 1: Frontend, Processor, Router, Decode Worker 
+- Node 2: Prefill Worker
+- Node 3: Prefill Worker
 
-**Step 1**: Start NATS/ETCD on your head node. Ensure you have the correct firewall rules to allow communication between the nodes as you will need the NATS/ETCD endpoints to be accessible by node 2.
+Note that this can be easily extended to more nodes. You can also run the Frontend, Processor, and Router on a separate CPU only node if you'd like as long as all nodes have access to the NATS/ETCD endpoints!
+
+**Step 1**: Start NATS/ETCD on your head node. Ensure you have the correct firewall rules to allow communication between the nodes as you will need the NATS/ETCD endpoints to be accessible by all other nodes.
 ```bash
 # node 1
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-**Step 2**: Create the inference graph for this deployment. The easiest way to do this is to remove the `.link(PrefillWorker)` from the `disagg_router.py` file.
+**Step 2**: Create the inference graph for this node. Here we will use the `agg_router.py` (even though we are doing disaggregated serving) graph because we want the `Frontend`, `Processor`, `Router`, and `VllmWorker` to spin up (we will spin up the other decode worker and prefill worker separately on different nodes later). 
 
 ```python
-# graphs/disagg_router.py
-# imports...
+# graphs/agg_router.py
 Frontend.link(Processor).link(Router).link(VllmWorker)
 ```
 
-**Step 3**: Start the frontend, processor, router, and 8 VllmWorkers on node 1.
+**Step 3**: Create a configuration file for this node. We've provided a sample one for you in `configs/multinode-405b.yaml` for the 405B model. Note that we still include the `PrefillWorker` component in the configuration file even though we are not using it on node 1. This is because we can reuse the same configuration file on all nodes and just spin up individual workers on the other ones.
+
+**Step 3**: Start the frontend, processor, router, and VllmWorker on node 1.
 ```bash
 # node 1
 cd $DYNAMO_HOME/examples/llm
-dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml --VllmWorker.ServiceArgs.workers=8
+dynamo serve graphs.agg_router:Frontend -f ./configs/multinode-405b.yaml
 ```
 
-**Step 4**: Start 8 PrefillWorkers on node 2.
-Since we only want to start the `PrefillWorker` on node 2, you can simply run just the PrefillWorker component directly.
+**Step 4**: Start the first prefill worker on node 2. 
+Since we only want to start the `PrefillWorker` on node 2, you can simply run just the PrefillWorker component directly with the configuration file from before. 
 
 ```bash
 # node 2
 export NATS_SERVER = '<your-nats-server-address>' # note this should start with nats://...
 export ETCD_ENDPOINTS = '<your-etcd-endpoints-address>'
 
-cd /workspace/examples/llm
-dynamo serve components.prefill_worker:PrefillWorker -f ./configs/disagg_router.yaml --PrefillWorker.ServiceArgs.workers=8
+cd $DYNAMO_HOME/examples/llm
+dynamo serve components.prefill_worker:PrefillWorker -f ./configs/multinode-405b.yaml
 ```
 
-You can now use the same curl request from above to interact with your deployment!
+**Step 5**: Start the second prefill worker on node 3.
+```bash
+# node 3
+export NATS_SERVER = '<your-nats-server-address>' # note this should start with nats://...
+export ETCD_ENDPOINTS = '<your-etcd-endpoints-address>'
+
+cd $DYNAMO_HOME/examples/llm
+dynamo serve components.prefill_worker:PrefillWorker -f ./configs/multinode-405b.yaml
+```
+
+### Client 
+
+In another terminal:
+```bash
+# this test request has around 200 tokens isl
+
+curl <node1-ip>:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+    "model": "nvidia/Llama-3.1-405B-Instruct-FP8",
+    "messages": [
+      {
+        "role": "user",
+        "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
+      }
+    ],
+    "stream": true,
+    "max_tokens": 300
+  }'
+```
 
 #### Multi-node sized models 
-We support deploying models that require multiple nodes to serve. As our components are based on VLLM, we can use the same ray cluster flow to serve each model. Below is an example that lets you deploy Llama 3.1 405B FP8 with our disaggregated serving example. Please ensure that these nodes are correctly configured with Infiniband and/or RoCE.
 
-In this example, we will deploy 2 Llama 3.1 405B models on 4 nodes each at tp16. This can be extended and configured as needed via the configuration yaml file
-
-##### Disaggregated Deployment with KV Routing
-- Node 1: Frontend, Processor, Router, Decode Worker
-- Node 2: Decode Worker
-- Node 3: Prefill Worker
-- Node 4: Prefill Worker
-
-**Step 1**: Start NATS/ETCD on your head node (node 1). Ensure you have the correct firewall rules to allow communication between the nodes as you will need the NATS/ETCD endpoints to be accessible by node 3
-```bash
-# node 1
-docker compose -f deploy/docker-compose.yml up -d
-```
-
-**Step 2**: Set the neccesary environment variables on your head nodes (node 1 and node 3)
-```bash
-# node 1
-export GLOO_SOCKET_IFNAME=...
-export UCX_NET_DEVICES=...
-export NCCL_DEBUG=WARN
-export NCCL_IB_HCA=...
-export NCCL_SOCKET_IFNAME=...
-
-
-# node 3
-export NATS_SERVER = '<your-nats-server-address>' # note this should start with nats://...
-export ETCD_ENDPOINTS = '<your-etcd-endpoints-address>'
-
-export GLOO_SOCKET_IFNAME=...
-export UCX_NET_DEVICES=...
-export NCCL_DEBUG=WARN
-export NCCL_IB_HCA=...
-export NCCL_SOCKET_IFNAME=...
-```
-
-**Step 3**: Start a ray cluster on your head nodes (node 1 and node 3)
-```bash
-# node 1
-export 
-ray start --head
-
-# node 3
-ray start --head
-```
-
-**Step 4**: Add ray worker nodes (node 2 for node 1 and node 4 for node 3). `6379` is the default ray port
-```bash
-# node 2
-ray start --address='<node-1-ray-address>:6379'
-
-# node 4
-ray start --address='<node-3-ray-address>:6379'
-```
-
-You can run ray status on any of the nodes to ensure that each cluster has 2 nodes
-
-**Step 5**: Create the inference graph for this deployment. The easiest way to do this is to remove the `.link(PrefillWorker)` from the `disagg_router.py` file.
-
-```python
-# graphs/disagg_router.py
-# imports...
-Frontend.link(Processor).link(Router).link(VllmWorker)
-```
-
-**Step 6**: Edit the `disagg_router.yaml` file to configure Llama 3.1 405B. You will have to change the model name on the components to `nvidia/Llama-3.1-405B-Instruct-FP8`, `VllmWorker.ServiceArgs.resources.gpu` to `16`, `VllmWorker.tensor-parallel-size` to `16`, `PrefillWorker.ServiceArgs.resources.gpu` to `16`, and `PrefillWorker.tensor-parallel-size` to `16`.
-
-**Step 7**: Start the frontend, processor, router, and VllmWorker on node 1.
-```bash
-# node 1
-cd $DYNAMO_HOME/examples/llm
-dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml --VllmWorker.enforce-eager=true
-```
-
-Because we setup the ray cluster on nodes 1 and 2, we can specify the `gpu` and `tensor-parallel-size` to be `16` for the VllmWorkers.
-
-**Step 8**: Start the PrefillWorker on node 3.
-```bash
-# node 3
-dynamo serve components.prefill_worker:PrefillWorker -f ./configs/disagg_router.yaml --PrefillWorker.enforce-eager=true
-```
-
-Because we setup the ray cluster on nodes 3 and 4, we can specify the `gpu` and `tensor-parallel-size` to be `16` for the PrefillWorkers.
+Multinode model support is coming soon. You can track progress [here](https://github.com/ai-dynamo/dynamo/issues/513)!

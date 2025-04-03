@@ -137,8 +137,8 @@ In another terminal:
 ```bash
 # this test request has around 200 tokens isl
 
-curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+curl 10.52.48.3:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+    "model": "nvidia/Llama-3.1-405B-Instruct-FP8",
     "messages": [
     {
         "role": "user",
