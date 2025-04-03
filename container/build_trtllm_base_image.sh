@@ -1,3 +1,4 @@
+#!/bin/bash -e
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -13,29 +14,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-**/*.onnx
-**/*.plan
-**/*.onnx
-**/*.plan
-**/*.etcd
-**/.cache/*
-**/*onnx*
-# Engine must be allowed because code contains dynamo_engine.py
-**/*tensorrtllm_engines*
-**/*tensorrtllm_models*
-**/*tensorrtllm_checkpoints*
-**/*hf_downloads*
-**/*pytorch_model*
-**/*.pth*
-**/*.pt
-**/*.models/*
-**/*.model-store/*
-**/*.model.*/*
-**/*.cache/*
-**/*.libtorch_model_store/*
-**/.git
-**/.github
-**/*backup*/
-.dockerignore
-**/target/*
-**/*safetensors
+# Build the TRT-LLM base image.
+
+# This script builds the TRT-LLM base image for Dynamo with TensorRT-LLM.
+TRTLLM_COMMIT=9b931c0f6
+
+while getopts "c:" opt; do
+  case ${opt} in
+    c) TRTLLM_COMMIT=$OPTARG ;;
+    *) echo "Invalid option" ;;
+  esac
+done
+
+(cd /tmp && \
+# Clone the TensorRT-LLM repository.
+if [ ! -d "TensorRT-LLM" ]; then
+  git clone https://github.com/NVIDIA/TensorRT-LLM.git
+fi
+
+cd TensorRT-LLM
+
+# Checkout the specified commit.
+git checkout $TRTLLM_COMMIT
+
+# Update the submodules.
+git submodule update --init --recursive
+git lfs pull
+
+# Build the TRT-LLM base image.
+make -C docker release_build)
