@@ -20,11 +20,23 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from queue import Queue
 from typing import Any, Optional
+import copy
+import signal
+from dataclasses import asdict
 
 from common.chat_processor import ChatProcessor, CompletionsProcessor
 from common.parser import LLMAPIConfig
 from common.utils import ManagedThread
-from tensorrt_llm._torch import LLM
+from common.protocol import (
+    DisaggregatedTypeConverter,
+    TRTLLMWorkerRequest,
+    TRTLLMWorkerResponse,
+    TRTLLMWorkerResponseOutput,
+)
+
+from tensorrt_llm.serve.openai_protocol import DisaggregatedParams
+from tensorrt_llm.executor import CppExecutorError
+from tensorrt_llm.llmapi import LLM
 from tensorrt_llm.logger import logger
 from transformers import AutoTokenizer
 
@@ -368,3 +380,86 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
 
         self._llm_engine = None
         logger.info("Shutdown complete")
+
+    async def _get_remote_prefill_response(self, request):
+        prefill_request = copy.deepcopy(request)
+        prefill_request.sampling_params["max_tokens"] = 1
+        prefill_request.disaggregated_params = DisaggregatedParams(
+            request_type="context_only"
+        )
+
+        # TODO: Use smart KV router to determine which prefill worker to use.
+        ctx_responses = [
+            ctx_response
+            async for ctx_response in await self.prefill_client.round_robin(
+                prefill_request.model_dump_json()
+            )
+        ]
+        if len(ctx_responses) > 1:
+            raise ValueError(
+                "Context server returned more than one response. This is currently not supported in disaggregated server."
+            )
+        logger.debug(
+            f"[worker] received response from context server: {ctx_responses[0].data()}"
+        )
+        ctx_response_obj = TRTLLMWorkerResponse.model_validate_json(
+            ctx_responses[0].data()
+        )
+        ctx_response_obj.outputs = [
+            TRTLLMWorkerResponseOutput(**ctx_response_obj.outputs[0])
+        ]
+        assert ctx_response_obj.outputs[0].disaggregated_params is not None
+
+        return ctx_response_obj
+
+    async def generate(self, request: TRTLLMWorkerRequest):
+        if self._llm_engine is None:
+            raise RuntimeError("Engine not initialized")
+
+        if self._error_queue.qsize() > 0:
+            error = self._error_queue.get()
+            raise error
+
+        self._ongoing_request_count += 1
+
+        try:
+            worker_inputs = request.prompt
+            disaggregated_params = None
+
+            if self.do_remote_prefill:
+                ctx_response_obj = await self._get_remote_prefill_response(request)
+                worker_inputs = (ctx_response_obj.prompt_token_ids + ctx_response_obj.outputs[0].token_ids)
+                disaggregated_params = (
+                    DisaggregatedTypeConverter.to_llm_disaggregated_params(
+                        DisaggregatedParams(
+                            **ctx_response_obj.outputs[0].disaggregated_params
+                        )
+                    )
+                )
+                disaggregated_params.request_type = "generation_only"
+
+            logger.debug(
+                f"[worker context] Worker inputs: {worker_inputs}, disaggregated params: {disaggregated_params}"
+            )
+
+            async for response in self._llm_engine.generate_async(
+                inputs=worker_inputs,
+                sampling_params=request.to_sampling_params(),
+                disaggregated_params=disaggregated_params,
+                streaming=True,
+            ):
+                yield TRTLLMWorkerResponse(
+                    request_id=request.id,
+                    prompt=response.prompt,
+                    prompt_token_ids=response.prompt_token_ids,
+                    outputs=[asdict(response.outputs[0])],
+                    finished=response.finished,
+                ).model_dump_json(exclude_unset=True)
+
+        except CppExecutorError:
+            signal.raise_signal(signal.SIGINT)
+        except Exception as e:
+            raise RuntimeError("Failed to generate: " + str(e))
+
+        self._start_threads()
+        self._ongoing_request_count -= 1

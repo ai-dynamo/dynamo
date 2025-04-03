@@ -156,14 +156,6 @@ def parse_dynamo_run_args() -> Tuple[Any, Tuple[Dict[str, Any], Dict[str, Any]]]
     parser.add_argument(
         "--engine_args", type=str, required=True, help="Path to the engine args file"
     )
-    # Disaggregated mode is not supported in dynamo-run launcher yet.
-    # parser.add_argument(
-    #    "--llmapi-disaggregated-config",
-    #    "-c",
-    #    type=str,
-    #    help="Path to the llmapi disaggregated config file",
-    #    default=None,
-    # )
     parser.add_argument(
         "--publish-kv-cache-events",
         action="store_true",

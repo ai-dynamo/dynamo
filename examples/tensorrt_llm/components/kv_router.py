@@ -21,7 +21,7 @@ from argparse import Namespace
 from typing import AsyncIterator
 
 from common.protocol import Tokens
-from components.agg_worker import TensorRTLLMWorker
+from components.worker import TensorRTLLMWorker
 from tensorrt_llm.logger import logger
 
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores

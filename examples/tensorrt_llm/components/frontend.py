@@ -16,7 +16,7 @@
 import subprocess
 from pathlib import Path
 
-from components.agg_worker import TensorRTLLMWorker
+from components.worker import TensorRTLLMWorker
 from components.processor import Processor
 from pydantic import BaseModel
 

@@ -20,7 +20,7 @@ from common.base_engine import ChatProcessorMixin
 from common.parser import parse_tensorrt_llm_args
 from common.protocol import DynamoTRTLLMChatCompletionRequest
 from common.utils import RequestType, ServerType
-from components.agg_worker import TensorRTLLMWorker
+from components.worker import TensorRTLLMWorker
 from components.kv_router import Router
 from tensorrt_llm.logger import logger
 
