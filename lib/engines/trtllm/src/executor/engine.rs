@@ -22,8 +22,9 @@ use futures::stream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use dynamo_llm::protocols::common::llm_backend::{BackendInput, LLMEngineOutput};
+
 use super::Executor;
-use crate::protocols::common::llm_backend::{BackendInput, LLMEngineOutput};
 
 struct State {
     request_id: String,

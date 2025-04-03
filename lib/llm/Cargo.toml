@@ -30,8 +30,6 @@ default = []
 cuda_kv = ["dep:cudarc", "dep:ndarray"]
 python = ["dep:pyo3-async-runtimes", "dep:pythonize"]
 sentencepiece = ["dep:sentencepiece"]
-trtllm = []
-vllm = []
 
 [dependencies]
 # repo
@@ -108,9 +106,6 @@ itertools = { version = "0.14.0" }
 minijinja = { version = "2.3.1", features = ["loader"] }
 minijinja-contrib = { version = "2.3.1", features = ["pycompat"] }
 semver = { version = "1", features = ["serde"] }
-
-# trtllm
-serde_repr = "0.1"
 
 # python
 pyo3-async-runtimes = { version = "0.23.0", optional = true, default-features = false, features = [

@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use crate::backend::ExecutionContext;
+use dynamo_llm::backend::ExecutionContext;
 use dynamo_runtime::pipeline::error as pipeline_error;
 
 pub mod executor;

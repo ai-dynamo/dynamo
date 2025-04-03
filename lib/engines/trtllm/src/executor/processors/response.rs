@@ -17,7 +17,7 @@ use std::thread;
 use tokio::sync::mpsc;
 
 use super::*;
-use crate::engines::trtllm::executor::ResponseQueues;
+use crate::executor::ResponseQueues;
 
 pub struct ResponseProcessor {
     handle: thread::JoinHandle<()>,

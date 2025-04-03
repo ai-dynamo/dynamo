@@ -353,7 +353,6 @@ pub async fn run(
         }
         #[cfg(feature = "trtllm")]
         Output::TrtLLM => {
-            use dynamo_llm::engines::trtllm;
             let Some(model_path) = model_path else {
                 anyhow::bail!("out=trtllm requires flag --model-path=<full-path-to-model-dir>");
             };
@@ -364,7 +363,10 @@ pub async fn run(
             }
             // Safety: Earlier we build maybe_card from model_path, which we checked right above
             let card = maybe_card.clone().unwrap();
-            let engine = trtllm::make_engine(model_path.display(), flags.tensor_parallel_size)?;
+            let engine = dynamo_engine_trtllm::make_engine(
+                model_path.display(),
+                flags.tensor_parallel_size,
+            )?;
             EngineConfig::StaticCore {
                 service_name: card.service_name.clone(),
                 engine,

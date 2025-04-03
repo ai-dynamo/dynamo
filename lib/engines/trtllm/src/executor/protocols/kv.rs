@@ -13,4 +13,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use crate::kv_router::protocols::ForwardPassMetrics;
+pub use dynamo_llm::kv_router::protocols::ForwardPassMetrics;

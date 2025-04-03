@@ -158,8 +158,8 @@ impl Request {
 }
 
 // todo convert to a TryFrom
-impl From<crate::protocols::common::llm_backend::BackendInput> for Request {
-    fn from(input: crate::protocols::common::llm_backend::BackendInput) -> Self {
+impl From<dynamo_llm::protocols::common::llm_backend::BackendInput> for Request {
+    fn from(input: dynamo_llm::protocols::common::llm_backend::BackendInput) -> Self {
         let request = RequestBuilder::default()
             .input_token_ids(input.token_ids)
             .max_tokens(input.stop_conditions.max_tokens.unwrap_or(16))

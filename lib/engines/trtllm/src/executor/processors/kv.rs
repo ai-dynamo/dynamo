@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::kv_router::protocols::ForwardPassMetrics;
+use dynamo_llm::kv_router::protocols::KvCacheEvents;
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -25,17 +25,17 @@ use tokio::sync::broadcast;
 
 use super::*;
 
-const CHANNEL_CAPACITY: usize = 256;
-type ChannelType = broadcast::Sender<Arc<ForwardPassMetrics>>;
-pub type SubscriptionChannel = broadcast::Receiver<Arc<ForwardPassMetrics>>;
+const KV_EVENT_CHANNEL_CAPACITY: usize = 65536;
+type EventChannelType = broadcast::Sender<KvCacheEvents>;
+pub type KvEventSubscriptionChannel = broadcast::Receiver<KvCacheEvents>;
 
-pub struct IterationProcessor {
+pub struct KvEventProcessor {
     handle: thread::JoinHandle<()>,
     shutdown: Arc<AtomicBool>,
-    channel: Weak<ChannelType>,
+    channel: Weak<EventChannelType>,
 }
 
-impl IterationProcessor {
+impl KvEventProcessor {
     /// Creates a new KV Event Processor
     pub fn new(state: ProcessorState) -> Self {
         // Shutdown Token
@@ -43,14 +43,14 @@ impl IterationProcessor {
         let shutdown_clone = shutdown.clone();
 
         // Event Channel
-        let channel = Arc::new(broadcast::channel(CHANNEL_CAPACITY).0);
+        let channel = Arc::new(broadcast::channel(KV_EVENT_CHANNEL_CAPACITY).0);
         let channel_clone = channel.clone();
 
         let handle = std::thread::spawn(move || {
             process_events(state, shutdown_clone, channel_clone);
         });
 
-        IterationProcessor {
+        KvEventProcessor {
             handle,
             shutdown,
             channel: Arc::downgrade(&channel),
@@ -59,7 +59,7 @@ impl IterationProcessor {
 
     /// Subscribes to the KV Events broadcast channel
     /// Multiple subscribers can be created to monitor the KV Events
-    pub fn subscribe(&self) -> Option<SubscriptionChannel> {
+    pub fn subscribe(&self) -> Option<broadcast::Receiver<KvCacheEvents>> {
         self.channel.upgrade().map(|channel| channel.subscribe())
     }
 
@@ -70,24 +70,24 @@ impl IterationProcessor {
     }
 }
 
-fn process_events(state: ProcessorState, shutdown: Arc<AtomicBool>, channel: Arc<ChannelType>) {
+fn process_events(
+    state: ProcessorState,
+    shutdown: Arc<AtomicBool>,
+    channel: Arc<EventChannelType>,
+) {
     loop {
         // this blocks the thread until the response is ready or the server is shutdown
-        let iters = state
+        let mut message = state
             .executor
-            .await_iter_stats()
+            .await_kv_events()
             .expect("Failed to await responses");
 
-        let should_shutdown = shutdown.load(Ordering::Relaxed);
+        let should_shutdown = message.shutdown || shutdown.load(Ordering::Relaxed);
 
-        for iter in iters.stats {
-            tracing::debug!("Received iteration stats: {:?}", iter);
-            let iter = Arc::new(iter);
+        message.shutdown = should_shutdown;
 
-            if let Err(e) = channel.send(iter) {
-                tracing::debug!("Failed to send message to channel: {:?}", e);
-                break;
-            }
+        if let Err(e) = channel.send(message) {
+            tracing::debug!("Failed to send message to channel: {:?}", e);
         }
 
         if should_shutdown {

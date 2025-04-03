@@ -13,8 +13,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(feature = "trtllm")]
-pub mod trtllm;
+//
+// The engines are each in their own crate under `lib/engines`
+//
 
 #[cfg(feature = "python")]
 pub mod python;

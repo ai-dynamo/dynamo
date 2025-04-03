@@ -1552,6 +1552,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-engine-trtllm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-openai",
+ "async-stream",
+ "async-trait",
+ "bindgen 0.70.1",
+ "cmake",
+ "derive_builder",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "futures",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "thiserror 2.0.12",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-engine-vllm"
 version = "0.1.0"
 dependencies = [
@@ -1621,7 +1644,6 @@ dependencies = [
  "sentencepiece",
  "serde",
  "serde_json",
- "serde_repr",
  "strum 0.27.1",
  "tempfile",
  "thiserror 2.0.12",
@@ -1651,6 +1673,7 @@ dependencies = [
  "dynamo-engine-llamacpp",
  "dynamo-engine-mistralrs",
  "dynamo-engine-sglang",
+ "dynamo-engine-trtllm",
  "dynamo-engine-vllm",
  "dynamo-llm",
  "dynamo-runtime",

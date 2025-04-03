@@ -20,7 +20,7 @@ use std::ffi::CString;
 use std::ptr::NonNull;
 
 use super::protocols;
-use crate::kv_router::protocols::{ForwardPassMetrics, KvCacheEvents};
+use dynamo_llm::kv_router::protocols::{ForwardPassMetrics, KvCacheEvents};
 
 mod bindings {
     #![allow(warnings, missing_docs)]

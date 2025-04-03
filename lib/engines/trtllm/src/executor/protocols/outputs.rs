@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use super::*;
-use crate::protocols::{
+use dynamo_llm::protocols::{
     common::{self},
     TokenIdType,
 };
