@@ -45,4 +45,3 @@ pyo3 = { version = "0.23.3", default-features = false, features = [
   "py-clone",
 ] }
 regex = "1"
-serde-pickle = "1.2.0"

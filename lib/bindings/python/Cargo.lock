@@ -1055,6 +1055,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-engine-python"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-openai",
+ "async-stream",
+ "async-trait",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "pyo3",
+ "pyo3-async-runtimes",
+ "pythonize",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.12",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-llm"
 version = "0.1.0"
 dependencies = [
@@ -1087,15 +1108,12 @@ dependencies = [
  "minijinja-contrib",
  "prometheus",
  "pyo3",
- "pyo3-async-runtimes",
- "pythonize",
  "rand 0.9.0",
  "rayon",
  "regex",
  "semver",
  "serde",
  "serde_json",
- "serde_repr",
  "strum",
  "thiserror 2.0.12",
  "tokenizers",
@@ -1115,6 +1133,7 @@ dependencies = [
 name = "dynamo-py3"
 version = "0.1.0"
 dependencies = [
+ "dynamo-engine-python",
  "dynamo-llm",
  "dynamo-runtime",
  "futures",

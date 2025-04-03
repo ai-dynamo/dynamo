@@ -70,14 +70,6 @@ rayon = "1"
 # kv_cuda
 cudarc = { git = "https://github.com/coreylowman/cudarc.git", rev = "8c52e735b55bf8e979e1a16bd85e3dfe4f87c9fe", features = ["cuda-12040"], optional = true }
 ndarray = { version = "0.16", optional = true }
-# half = "2.4.1"
-
-pyo3 = { version = "0.23.3", default-features = false, features = [
-  "macros",
-  "experimental-async",
-  "experimental-inspect",
-  "py-clone",
-] }
 
 # protocols
 unicode-segmentation = "1.12"
@@ -104,7 +96,6 @@ erased-serde = { version = "0.4" }
 itertools = { version = "0.14.0" }
 minijinja = { version = "2.3.1", features = ["loader"] }
 minijinja-contrib = { version = "2.3.1", features = ["pycompat"] }
-semver = { version = "1", features = ["serde"] }
 
 # GGUF
 ggus = "0.4.0"
@@ -123,7 +114,3 @@ insta = { version = "1.41", features = [
   "redactions",
   "filters",
 ] }
-
-[build-dependencies]
-bindgen = "0.70"
-cmake = "0.1"

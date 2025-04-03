@@ -1566,7 +1566,6 @@ dependencies = [
  "libc",
  "pyo3",
  "regex",
- "serde-pickle",
  "serde_json",
  "tokio",
  "tracing",
@@ -1626,14 +1625,12 @@ dependencies = [
  "async-trait",
  "async_zmq",
  "axum 0.8.1",
- "bindgen 0.70.1",
  "blake3",
  "bs62",
  "bytemuck",
  "bytes",
  "candle-core 0.8.4",
  "chrono",
- "cmake",
  "cudarc 0.13.9 (git+https://github.com/coreylowman/cudarc.git?rev=8c52e735b55bf8e979e1a16bd85e3dfe4f87c9fe)",
  "derive-getters",
  "derive_builder",
@@ -1652,14 +1649,12 @@ dependencies = [
  "ndarray",
  "prometheus",
  "proptest",
- "pyo3",
  "rand 0.9.0",
  "rayon",
  "regex",
  "reqwest",
  "rstest 0.18.2",
  "rstest_reuse",
- "semver",
  "sentencepiece",
  "serde",
  "serde_json",
@@ -5652,9 +5647,6 @@ name = "semver"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56e6fa9c48d24d85fb3de5ad847117517440f6beceb7798af16b4a87d616b8d0"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "sentencepiece"
