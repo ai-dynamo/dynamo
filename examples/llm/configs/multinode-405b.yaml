@@ -35,7 +35,7 @@ VllmWorker:
   model: nvidia/Llama-3.1-405B-Instruct-FP8
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
   block-size: 64
-  max-model-len: 8192 
+  max-model-len: 8192
   max-num-seqs: 16
   remote-prefill: true
   conditional-disagg: true

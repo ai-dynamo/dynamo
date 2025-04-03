@@ -7,7 +7,7 @@ Table of Contents
 You can deploy our example architectures on multiple nodes via NATS/ETCD based discovery and communication. Here's an example of deploying disaggregated serving on 3 nodes using `nvidia/Llama-3.1-405B-Instruct-FP8`. Each node will need to be properly configured with Infiniband and/or RoCE for communication between decode and prefill workers.
 
 ##### Disaggregated Deployment with KV Routing
-- Node 1: Frontend, Processor, Router, Decode Worker 
+- Node 1: Frontend, Processor, Router, Decode Worker
 - Node 2: Prefill Worker
 - Node 3: Prefill Worker
 
@@ -19,7 +19,7 @@ Note that this can be easily extended to more nodes. You can also run the Fronte
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-**Step 2**: Create the inference graph for this node. Here we will use the `agg_router.py` (even though we are doing disaggregated serving) graph because we want the `Frontend`, `Processor`, `Router`, and `VllmWorker` to spin up (we will spin up the other decode worker and prefill worker separately on different nodes later). 
+**Step 2**: Create the inference graph for this node. Here we will use the `agg_router.py` (even though we are doing disaggregated serving) graph because we want the `Frontend`, `Processor`, `Router`, and `VllmWorker` to spin up (we will spin up the other decode worker and prefill worker separately on different nodes later).
 
 ```python
 # graphs/agg_router.py
@@ -35,8 +35,8 @@ cd $DYNAMO_HOME/examples/llm
 dynamo serve graphs.agg_router:Frontend -f ./configs/multinode-405b.yaml
 ```
 
-**Step 4**: Start the first prefill worker on node 2. 
-Since we only want to start the `PrefillWorker` on node 2, you can simply run just the PrefillWorker component directly with the configuration file from before. 
+**Step 4**: Start the first prefill worker on node 2.
+Since we only want to start the `PrefillWorker` on node 2, you can simply run just the PrefillWorker component directly with the configuration file from before.
 
 ```bash
 # node 2
@@ -57,7 +57,7 @@ cd $DYNAMO_HOME/examples/llm
 dynamo serve components.prefill_worker:PrefillWorker -f ./configs/multinode-405b.yaml
 ```
 
-### Client 
+### Client
 
 In another terminal:
 ```bash
@@ -79,6 +79,6 @@ curl <node1-ip>:8000/v1/chat/completions \
   }'
 ```
 
-#### Multi-node sized models 
+#### Multi-node sized models
 
 Multinode model support is coming soon. You can track progress [here](https://github.com/ai-dynamo/dynamo/issues/513)!
