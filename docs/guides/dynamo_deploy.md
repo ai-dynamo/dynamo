@@ -137,16 +137,19 @@ docker tag <BUILT_IMAGE_TAG> <TAG>
 docker push <TAG>
 ```
 
-3. Deploy using Helm, using the `chart` subdirectory within `deploy/Kubernetes/common`:
+3. Deploy using Helm:
 ```bash
+# Navigate to the deployment directory
+cd $PROJECT_ROOT/deploy/Kubernetes/pipeline
+
 # Set release name for Helm
-export HELM_RELEASE=helloworld
+export HELM_RELEASE=hello-world
 
 # Generate Helm values file from Frontend service
 dynamo get frontend > pipeline-values.yaml
 
 # Install/upgrade Helm release
-helm upgrade -i "$HELM_RELEASE" $PROJECT_ROOT/deploy/Kubernetes/common/chart \
+helm upgrade -i "$HELM_RELEASE" ./chart \
     -f pipeline-values.yaml \
     --set image=<TAG> \
     --set dynamoIdentifier="hello_world:Frontend" \
@@ -156,7 +159,7 @@ helm upgrade -i "$HELM_RELEASE" $PROJECT_ROOT/deploy/Kubernetes/common/chart \
 4. Test the deployment:
 ```bash
 # Forward the service port to localhost
-kubectl -n ${NAMESPACE} port-forward svc/helloworld-frontend 3000:80
+kubectl -n ${NAMESPACE} port-forward svc/${HELM_RELEASE}-frontend 3000:80
 
 # Test the API endpoint
 curl -X 'POST' 'http://localhost:3000/generate' \
