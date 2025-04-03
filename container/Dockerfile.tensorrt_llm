@@ -121,6 +121,9 @@ RUN mkdir /opt/dynamo && \
     cd /workspace/lib/bindings/python && \
     uv build --wheel --out-dir /workspace/dist && \
     uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
+    cd /workspace/deploy/dynamo/sdk && \
+    uv build --wheel --out-dir /workspace/dist && \
+    uv pip install /workspace/dist/ai_dynamo_sdk*any.whl && \
     cd /workspace && \
     uv build --wheel --out-dir /workspace/dist && \
     uv pip install /workspace/dist/ai_dynamo*any.whl

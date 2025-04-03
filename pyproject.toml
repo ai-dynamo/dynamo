@@ -76,20 +76,12 @@ packages = ["dynamo/src/dynamo"]
 
 # This section is for including the binaries in the wheel package
 # but doesn't make them executable scripts in the venv bin directory
-# [tool.hatch.build.targets.wheel.force-include]
-# "target/release/dynamo-run" = "dynamo/cli/bin/dynamo-run"
-# "target/release/llmctl" = "dynamo/cli/bin/llmctl"
-# "target/release/http" = "dynamo/cli/bin/http"
-# "target/release/metrics" = "dynamo/cli/bin/metrics"
-# "target/release/mock_worker" = "dynamo/cli/bin/mock_worker"
-
-# Test block for binaries from deploy/bin
-[tool.hatch.build.targets.wheel.force-include.test]
-"deploy/bin/dynamo-run" = "dynamo/cli/bin/dynamo-run"
-"deploy/bin/llmctl" = "dynamo/cli/bin/llmctl"
-"deploy/bin/http" = "dynamo/cli/bin/http"
-"deploy/bin/metrics" = "dynamo/cli/bin/metrics"
-"deploy/bin/mock_worker" = "dynamo/cli/bin/mock_worker"
+[tool.hatch.build.targets.wheel.force-include]
+"target/release/dynamo-run" = "dynamo/cli/bin/dynamo-run"
+"target/release/llmctl" = "dynamo/cli/bin/llmctl"
+"target/release/http" = "dynamo/cli/bin/http"
+"target/release/metrics" = "dynamo/cli/bin/metrics"
+"target/release/mock_worker" = "dynamo/cli/bin/mock_worker"
 
 [tool.codespell]
 # note: pre-commit passes explicit lists of files here, which this skip file list doesn't override -
