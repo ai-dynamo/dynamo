@@ -30,7 +30,6 @@ mod input;
 #[cfg(any(feature = "vllm", feature = "sglang"))]
 mod net;
 mod opt;
-mod output;
 pub use opt::{Input, Output};
 
 /// How we identify a namespace/component/endpoint URL.
@@ -185,7 +184,7 @@ pub async fn run(
             };
             EngineConfig::StaticFull {
                 service_name: model_name,
-                engine: output::echo_full::make_engine_full(),
+                engine: dynamo_llm::engines::make_engine_full(),
             }
         }
         Output::EchoCore => {
@@ -197,7 +196,7 @@ pub async fn run(
             card.requires_preprocessing = true;
             EngineConfig::StaticCore {
                 service_name: card.service_name.clone(),
-                engine: output::echo_core::make_engine_core(),
+                engine: dynamo_llm::engines::make_engine_core(),
                 card: Box::new(card),
             }
         }
