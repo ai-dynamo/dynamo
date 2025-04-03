@@ -357,27 +357,9 @@ Run:
 dynamo-run in=text out=trtllm --model-path /app/trtllm_engine/ --model-config ~/llm_models/Llama-3.2-3B-Instruct/
 ```
 
-Note that TRT-LLM uses it's own `.engine` format for weights. Repo models must be converted like so:
-
-+ Get the build container
-```
-docker run --gpus all -it nvcr.io/nvidian/nemo-llm/trtllm-engine-builder:0.2.0 bash
-```
-
-+ Fetch the model and convert
-```
-mkdir /tmp/model
-huggingface-cli download meta-llama/Llama-3.2-3B-Instruct --local-dir /tmp/model
-python convert_checkpoint.py --model_dir /tmp/model/ --output_dir ./converted --dtype [float16|bfloat16|whatever you want] --tp_size X --pp_size Y
-trtllm-build --checkpoint_dir ./converted --output_dir ./final/trtllm_engine --use_paged_context_fmha enable --gemm_plugin auto
-```
+Note that TRT-LLM uses it's own `.engine` format for weights.
 
 The `--model-path` you give to `dynamo-run` must contain the `config.json` (TRT-LLM's , not the model's) and `rank0.engine` (plus other ranks if relevant).
-
-+ Execute
-TRT-LLM is a C++ library that must have been previously built and installed. It needs a lot of memory to compile.
-
-Copy the trt-llm engine, the model's `.json` files (for the model deployment card) and the `nio` binary built for the correct glibc (container is Ubuntu 22.04 currently) into that container.
 
 ## Echo Engines
 
