@@ -22,7 +22,8 @@
         "--gpus=all"
     ],
     "mounts": [
-        "source=${localEnv:HOME}${localEnv:USERPROFILE}/.kube,target=/home/vscode/.kube,type=bind,consistency=cached"
+        "source=${localEnv:HOME}${localEnv:USERPROFILE}/.kube,target=/home/vscode/.kube,type=bind,consistency=cached",
+        "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
     ],
     "remoteEnv": {
         "NGC_API_TOKEN": "${localEnv:NGC_API_TOKEN}"
@@ -47,6 +48,6 @@
     },
     "updateRemoteUserUID": true,
     "postCreateCommand": "/bin/bash .devcontainer/post-create.sh",
-    "postStartCommand": "echo 'source /workspaces/ai-dynamo/venv/bin/activate' >> ~/.bashrc",
+    "postStartCommand": "echo 'source /workspaces/ai-dynamo/venv/bin/activate' >> ~/.bashrc && sudo chmod 666 /var/run/docker.sock",
     "remoteUser": "vscode"
 }

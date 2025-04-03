@@ -15,5 +15,7 @@ This is a proof of concept for a Helm chart to deploy services defined in a bent
 ```bash
 export DYNAMO_IMAGE=<dynamo_docker_image_name>
 ./deploy.sh <docker_registry> <k8s_namespace> <path_to_dynamo_directory> <dynamo_identifier>
-# example :  ./deploy.sh nvcr.io/nvidian/nim-llm-dev my-namespace ../deploy/dynamo/sdk/examples/hello_world/ hello_world:Frontend
+
+# example: export DYNAMO_IMAGE=nvcr.io/nvidian/nim-llm-dev/dynamo-base:cd05fbb91cdeae15efaf56b099b9951db065fd8d-26362190-vllm
+# example: ./deploy.sh nvcr.io/nvidian/nim-llm-dev my-namespace ../../../examples/hello_world/ hello_world:Frontend
 ```

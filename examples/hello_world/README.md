@@ -101,7 +101,8 @@ You must have first followed the instructions in [deploy/dynamo/helm/README.md](
 1. **Login to Dynamo Server**
 
 ```bash
-export KUBE_NS=hannahz-hello-world  # Must match your Kubernetes namespace
+export PROJECT_ROOT=$(pwd)
+export KUBE_NS=hello-world  # Must match your Kubernetes namespace
 export DYNAMO_SERVER=https://${KUBE_NS}.dev.aire.nvidia.com
 dynamo server login --api-token TEST-TOKEN --endpoint $DYNAMO_SERVER
 ```
@@ -109,8 +110,9 @@ dynamo server login --api-token TEST-TOKEN --endpoint $DYNAMO_SERVER
 2. **Build the Dynamo Image**
 
 ```bash
-export DYNAMO_IMAGE=nvcr.io/nvidian/nim-llm-dev/dynamo-base:097fb745a43e85b8c9e5ad0cf217e03290c865e8
-cd /workspaces/ai-dynamo/examples/hello_world
+export DYNAMO_IMAGE=<dynamo_docker_image_name>
+# example dynamo image if you have access to nvcr.io: nvcr.io/nvidian/nim-llm-dev/dynamo-base:cd05fbb91cdeae15efaf56b099b9951db065fd8d-26362190-vllm
+cd $PROJECT_ROOT/examples/hello_world
 DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk -F"\"" '{ print $2 }')
 ```
 
@@ -127,8 +129,4 @@ To delete an existing Dynamo deployment:
 kubectl delete dynamodeployment ci-hw
 ```
 
-## Additional Resources
-
-- For more complex examples, see the [LLM deployment examples](../../examples/llm/README.md)
-- Learn about Dynamo's architecture and key features in the [architecture documentation](../../docs/architecture.md)
-- Explore the [Dynamo SDK documentation](../../deploy/dynamo/sdk/docs/sdk/README.md) for detailed API references
+For more complex examples, see the [LLM deployment examples](../../examples/llm/README.md)
