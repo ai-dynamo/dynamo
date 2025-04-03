@@ -498,10 +498,7 @@ impl KvRecorder {
         let recorder = self.inner.clone();
         let event_tx = indexer.inner.event_sender();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let count = recorder
-                .send_events(&event_tx)
-                .await
-                .map_err(to_pyerr)?;
+            let count = recorder.send_events(&event_tx).await.map_err(to_pyerr)?;
             Ok(count)
         })
     }
