@@ -289,7 +289,10 @@ RUN source /opt/dynamo/venv/bin/activate && \
     uv pip install /workspace/dist/ai_dynamo*any.whl && \
     cd /workspace/deploy/dynamo/api-store && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/ai_dynamo_store*any.whl
+    uv pip install /workspace/dist/ai_dynamo_store*any.whl && \
+    cd /workspace/deploy/dynamo/sdk && \
+    uv build --wheel --out-dir /workspace/dist && \
+    uv pip install /workspace/dist/ai_dynamo_sdk*any.whl
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
