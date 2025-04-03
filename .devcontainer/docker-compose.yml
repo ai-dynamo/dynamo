@@ -1,11 +1,12 @@
 version: '3'
 services:
   dynamo:
-    image: dynamo:latest-vllm-dev
+    image: dynamo:latest-vllm
     volumes:
       - /tmp:/tmp
       - /mnt:/mnt
-      - ${HF_CACHE:-$HOME/.cache/huggingface}:/root/.cache/huggingface
+      - ../:/workspace
+      - ${HF_HOME:-$HOME/.cache/huggingface}:/root/.cache/huggingface
     working_dir: /workspace
     network_mode: host
     ipc: host

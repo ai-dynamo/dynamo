@@ -14,8 +14,8 @@
       "limitations under the License."
     ],
     "name": "NVIDIA Dynamo Development",
-    "remoteUser": "ubuntu",
-    "updateRemoteUserUID": true,
+    // "remoteUser": "ubuntu",
+    "updateRemoteUserUID": false,
     "initializeCommand": ["/bin/bash", "${localWorkspaceFolder}/container/build.sh"],
     "dockerComposeFile": ["docker-compose.yml"],
     "service": "dynamo",
@@ -23,6 +23,7 @@
         "vscode": {
             "extensions": [
                 "ms-python.python",
+                "ms-python.vscode-pylance",
                 "rust-lang.rust-analyzer",
                 "ms-azuretools.vscode-docker"
             ],
