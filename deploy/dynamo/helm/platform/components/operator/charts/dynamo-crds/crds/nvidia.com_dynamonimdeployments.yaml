@@ -2748,6 +2748,9 @@ spec:
                     format: int32
                     type: integer
                 type: object
+              replicas:
+                format: int32
+                type: integer
               resources:
                 properties:
                   limits:

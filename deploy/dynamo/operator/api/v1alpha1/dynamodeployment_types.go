@@ -70,3 +70,11 @@ type DynamoDeploymentList struct {
 func init() {
 	SchemeBuilder.Register(&DynamoDeployment{}, &DynamoDeploymentList{})
 }
+
+func (s *DynamoDeployment) GetSpec() any {
+	return s.Spec
+}
+
+func (s *DynamoDeployment) SetSpec(spec any) {
+	s.Spec = spec.(DynamoDeploymentSpec)
+}

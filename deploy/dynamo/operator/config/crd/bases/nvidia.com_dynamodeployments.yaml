@@ -2749,6 +2749,9 @@ spec:
                               format: int32
                               type: integer
                           type: object
+                        replicas:
+                          format: int32
+                          type: integer
                         resources:
                           properties:
                             limits:
@@ -2785,9 +2788,6 @@ spec:
                           type: object
                         serviceName:
                           type: string
-                      required:
-                      - dynamoNim
-                      - dynamoTag
                       type: object
                     status:
                       properties:
