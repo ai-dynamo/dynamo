@@ -33,13 +33,18 @@ dynamo serve [SERVICE]
 **Flags**
 - `--file`/`-f` - Path to optional YAML configuration file. An example of the YAML file can be found in the configuration section of the [SDK docs](../sdk/README.md)
 - `--dry-run` - Print out the dependency graph and values without starting any services.
+- `--service-name` - Only serve the specified service name. The rest of the discoverable components in the graph are not started.
 - `--working-dir` - Specify the directory to find the Service instance
 - Any additional flags that follow Class.key=value will be passed to the service constructor for the target service and parsed. Please see the configuration section of the [SDK docs](../sdk/README.md) for more details.
 
 **Example**
 ```bash
 cd examples
+# Spin up Frontend, Middle, and Backend components
 dynamo serve hello_world:Frontend
+
+# Spin up only the Middle component in the graph that is discoverable from the Frontend service
+dynamo serve  --service-name Middle hello_world:Frontend
 ```
 
 ## `build`

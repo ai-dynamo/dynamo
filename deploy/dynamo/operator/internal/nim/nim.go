@@ -258,7 +258,7 @@ func GenerateDynamoNIMDeployments(parentDynamoDeployment *v1alpha1.DynamoDeploym
 		deployment.Name = fmt.Sprintf("%s-%s", parentDynamoDeployment.Name, strings.ToLower(service.Name))
 		deployment.Namespace = parentDynamoDeployment.Namespace
 		deployment.Spec.DynamoTag = config.DynamoTag
-		deployment.Spec.DynamoNim = strings.Split(parentDynamoDeployment.Spec.DynamoNim, ":")[0]
+		deployment.Spec.DynamoNim = strings.ReplaceAll(parentDynamoDeployment.Spec.DynamoNim, ":", "--")
 		deployment.Spec.ServiceName = service.Name
 		if service.Config.Dynamo != nil && service.Config.Dynamo.Enabled {
 			dynamoServices[service.Name] = fmt.Sprintf("%s/%s", service.Config.Dynamo.Name, service.Config.Dynamo.Namespace)

@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+debug = true
+[history]
+  maxAge = 345600
+  maxEntries = 1000
+[worker.oci]
+  enabled = true
+  gc = true
+  gckeepstorage = "1000GB"
+
+  [[worker.oci.gcpolicy]]
+    keepBytes = "200GB"
+    keepDuration = "168h" # 7 days
+    filters = [ "type==source.local", "type==exec.cachemount", "type==source.git.checkout"]
+  [[worker.oci.gcpolicy]]
+    all = false
+    keepDuration = "336h" # 14 days
+    keepBytes = "300GB"
+  [[worker.oci.gcpolicy]]
+    all = true
+    keepBytes = "500GB"
+[registry."docker.io"]
+  mirrors = []

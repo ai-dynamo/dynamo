@@ -23,6 +23,8 @@
 //! Logging can take two forms: `READABLE` or `JSONL`. The default is `READABLE`. `JSONL`
 //! can be enabled by setting the `DYN_LOGGING_JSONL` environment variable to `1`.
 //!
+//! To use local timezone for logging timestamps, set the `DYN_LOG_USE_LOCAL_TZ` environment variable to `1`.
+//!
 //! Filters can be configured using the `DYN_LOG` environment variable or by setting the `filters`
 //! key in the TOML configuration file. Filters are comma-separated key-value pairs where the key
 //! is the crate or module name and the value is the log level. The default log level is `info`.
@@ -45,6 +47,10 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use tracing::{Event, Subscriber};
+use tracing_subscriber::fmt::time::FormatTime;
+use tracing_subscriber::fmt::time::LocalTime;
+use tracing_subscriber::fmt::time::SystemTime;
+use tracing_subscriber::fmt::time::UtcTime;
 use tracing_subscriber::fmt::{format::Writer, FormattedFields};
 use tracing_subscriber::fmt::{FmtContext, FormatFields};
 use tracing_subscriber::prelude::*;
@@ -112,15 +118,14 @@ pub fn init() {
         if crate::config::jsonl_logging_enabled() {
             let l = fmt::layer()
                 .with_ansi(false) // ansi terminal escapes and colors always disabled
-                .event_format(CustomJsonFormatter)
+                .event_format(CustomJsonFormatter::new())
                 .with_writer(std::io::stderr)
                 .with_filter(filter_layer);
-            //let l = fmt::layer().json().with_filter(filter_layer);
             tracing_subscriber::registry().with(l).init();
         } else {
             let l = fmt::layer()
                 .with_ansi(!crate::config::disable_ansi_logging())
-                .event_format(fmt::format().compact())
+                .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
                 .with_writer(std::io::stderr)
                 .with_filter(filter_layer);
             tracing_subscriber::registry().with(l).init();
@@ -174,8 +179,47 @@ struct JsonLog<'a> {
     fields: BTreeMap<String, serde_json::Value>,
 }
 
-/// Some teams (NVCF) require specific JSON style
-struct CustomJsonFormatter;
+struct TimeFormatter {
+    use_local_tz: bool,
+}
+
+impl TimeFormatter {
+    fn new() -> Self {
+        Self {
+            use_local_tz: crate::config::use_local_timezone(),
+        }
+    }
+
+    fn format_now(&self) -> String {
+        if self.use_local_tz {
+            chrono::Local::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3f%:z")
+                .to_string()
+        } else {
+            chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string()
+        }
+    }
+}
+
+impl FormatTime for TimeFormatter {
+    fn format_time(&self, w: &mut fmt::format::Writer<'_>) -> std::fmt::Result {
+        write!(w, "{}", self.format_now())
+    }
+}
+
+struct CustomJsonFormatter {
+    time_formatter: TimeFormatter,
+}
+
+impl CustomJsonFormatter {
+    fn new() -> Self {
+        Self {
+            time_formatter: TimeFormatter::new(),
+        }
+    }
+}
 
 impl<S, N> tracing_subscriber::fmt::FormatEvent<S, N> for CustomJsonFormatter
 where
@@ -201,10 +245,6 @@ where
             .or_else(|| ctx.lookup_current());
         if let Some(span) = current_span {
             let ext = span.extensions();
-            // This won't work is there's a space in the string, and loses the types making every
-            // span attribute a string.
-            // I think the correct way is to make a Layer.
-            // tracing_subscriber makes everything far more complicated than necessary.
             let data = ext.get::<FormattedFields<N>>().unwrap();
             let span_fields: Vec<(&str, &str)> = data
                 .fields
@@ -226,7 +266,7 @@ where
         let metadata = event.metadata();
         let log = JsonLog {
             level: metadata.level().to_string(),
-            time: format!("{}", chrono::Local::now().format("%m-%d %H:%M:%S.%3f")),
+            time: self.time_formatter.format_now(),
             file_path: if cfg!(debug_assertions) {
                 metadata.file()
             } else {

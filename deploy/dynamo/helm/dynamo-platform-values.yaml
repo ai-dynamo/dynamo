@@ -70,7 +70,7 @@ dynamo-operator:
       secure: true
       bentoRepositoryName: yatai-bentos
 
-    bentoImageBuildEngine: kaniko
+    bentoImageBuildEngine: buildkit
     addNamespacePrefixToImageName: false
 
     estargz:

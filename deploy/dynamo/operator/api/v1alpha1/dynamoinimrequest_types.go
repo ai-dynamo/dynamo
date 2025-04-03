@@ -113,3 +113,11 @@ type DynamoNimRequestList struct {
 func init() {
 	SchemeBuilder.Register(&DynamoNimRequest{}, &DynamoNimRequestList{})
 }
+
+func (s *DynamoNimRequest) GetSpec() any {
+	return s.Spec
+}
+
+func (s *DynamoNimRequest) SetSpec(spec any) {
+	s.Spec = spec.(DynamoNimRequestSpec)
+}
