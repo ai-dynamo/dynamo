@@ -375,10 +375,7 @@ trtllm-build --checkpoint_dir ./converted --output_dir ./final/trtllm_engine --u
 The `--model-path` you give to `dynamo-run` must contain the `config.json` (TRT-LLM's , not the model's) and `rank0.engine` (plus other ranks if relevant).
 
 + Execute
-TRT-LLM is a C++ library that must have been previously built and installed. It needs a lot of memory to compile. Gitlab builds a container you can try:
-```
-sudo docker run --gpus all -it -v /home/user:/outside-home gitlab-master.nvidia.com:5005/dl/ai-services/libraries/rust/nim-nvllm/tensorrt_llm_runtime:85fa4a6f
-```
+TRT-LLM is a C++ library that must have been previously built and installed. It needs a lot of memory to compile.
 
 Copy the trt-llm engine, the model's `.json` files (for the model deployment card) and the `nio` binary built for the correct glibc (container is Ubuntu 22.04 currently) into that container.
 
