@@ -137,8 +137,8 @@ In another terminal:
 ```bash
 # this test request has around 200 tokens isl
 
-curl 10.52.48.3:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
-    "model": "nvidia/Llama-3.1-405B-Instruct-FP8",
+curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "messages": [
     {
         "role": "user",
@@ -160,16 +160,6 @@ See [multinode-examples.md](multinode-examples.md) for more details.
 Kill all dynamo processes managed by circusd.
 
 ```
-function kill_tree() {
-    local parent=$1
-    local children=$(ps -o pid= --ppid $parent)
-    for child in $children; do
-        kill_tree $child
-    done
-    echo "Killing process $parent"
-    kill -9 $parent
-}
-
-# kill process-tree of circusd
-kill_tree $(pgrep circusd)
+ctrl-c
+pkill python3
 ```
