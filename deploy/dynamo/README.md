@@ -17,5 +17,57 @@ limitations under the License.
 
 # End-to-end deployment of a Dynamo NIM to Kubernetes
 
+## Building docker images for Dynamo cloud components
+
+You can build and push Docker images for the Dynamo cloud components (API server, API store, and operator) to any container registry of your choice. Here's how to build each component:
+
+### Prerequisites
+- [Earthly](https://earthly.dev/) installed
+- Docker installed and running
+- Access to a container registry of your choice
+
+### Building and Pushing Images
+
+You can build each component individually or build all components at once:
+
+#### Option 1: Build All Components at Once
+```bash
+cd deploy/dynamo
+earthly --push +all-docker --CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION> --CI_COMMIT_SHA=<TAG>
+```
+
+#### Option 2: Build Components Individually
+
+1. **API Server**
+```bash
+cd deploy/dynamo/api-server
+earthly --push +docker --CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION> --CI_COMMIT_SHA=<TAG>
+```
+
+2. **API Store**
+```bash
+cd deploy/dynamo/api-store
+earthly --push +docker --CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION> --CI_COMMIT_SHA=<TAG>
+```
+
+3. **Operator**
+```bash
+cd deploy/dynamo/operator
+earthly --push +docker --CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION> --CI_COMMIT_SHA=<TAG>
+```
+
+Replace the following placeholders:
+- `<CONTAINER_REGISTRY>/<ORGANIZATION>`: Your container registry and organization name (e.g., `nvcr.io/myorg`, `docker.io/myorg`, etc.)
+- `<TAG>`: The tag you want to use for the image (e.g., `latest`, `v1.0.0`, etc.)
+
+Note: Make sure you're logged in to your container registry before pushing images. For example:
+```bash
+docker login <CONTAINER_REGISTRY>
+```
+
+## Deploy Dynamo cloud components to Kubernetes
+
+For detailed deployment instructions, please refer to the [Helm deployment guide](./helm/README.md) which walks through installing and configuring the Dynamo cloud components on your Kubernetes cluster.
+
 ## Hello World example
 See [examples/hello_world/README.md#deploying-to-kubernetes-using-dynamo-cloud-and-dynamo-deploy-cli](../../examples/hello_world/README.md#deploying-to-kubernetes-using-dynamo-cloud-and-dynamo-deploy-cli)

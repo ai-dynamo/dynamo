@@ -25,9 +25,6 @@
         "source=${localEnv:HOME}${localEnv:USERPROFILE}/.kube,target=/home/vscode/.kube,type=bind,consistency=cached",
         "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
     ],
-    "remoteEnv": {
-        "NGC_API_TOKEN": "${localEnv:NGC_API_TOKEN}"
-    },
     "customizations": {
         "vscode": {
             "extensions": [
