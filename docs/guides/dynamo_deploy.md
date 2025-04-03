@@ -84,19 +84,20 @@ Follow these steps to set up the namespace and install required components:
 ```bash
 export NAMESPACE=dynamo-playground
 export RELEASE_NAME=dynamo-platform
+export PROJECT_ROOT=$(pwd)
 ```
 
 2. Install NATS messaging system:
 ```bash
 # Navigate to dependencies directory
-cd deploy/Kubernetes/pipeline/dependencies
+cd $PROJECT_ROOT/deploy/Kubernetes/pipeline/dependencies
 
 # Add and update NATS Helm repository
 helm repo add nats https://nats-io.github.io/k8s/helm/charts/
 helm repo update
 
 # Install NATS with custom values
-helm install --namespace ${NAMESPACE} dynamo-platform-nats nats/nats \
+helm install --namespace ${NAMESPACE} ${RELEASE_NAME}-nats nats/nats \
     --create-namespace \
     --values nats-values.yaml
 ```
@@ -104,7 +105,7 @@ helm install --namespace ${NAMESPACE} dynamo-platform-nats nats/nats \
 3. Install etcd key-value store:
 ```bash
 # Install etcd using Bitnami chart
-helm install --namespace ${NAMESPACE} dynamo-platform-etcd \
+helm install --namespace ${NAMESPACE} ${RELEASE_NAME}-etcd \
     oci://registry-1.docker.io/bitnamicharts/etcd \
     --values etcd-values.yaml
 ```
@@ -118,7 +119,7 @@ Follow these steps to containerize and deploy your inference pipeline:
 1. Build and containerize the pipeline:
 ```bash
 # Navigate to example directory
-cd examples/hello_world
+cd $PROJECT_ROOT/examples/hello_world
 
 # Set runtime image name
 export DYNAMO_IMAGE=<dynamo_runtime_image_name>
@@ -145,7 +146,7 @@ export HELM_RELEASE=helloworld
 dynamo get frontend > pipeline-values.yaml
 
 # Install/upgrade Helm release
-helm upgrade -i "$HELM_RELEASE" ./chart \
+helm upgrade -i "$HELM_RELEASE" $PROJECT_ROOT/deploy/Kubernetes/common/chart \
     -f pipeline-values.yaml \
     --set image=<TAG> \
     --set dynamoIdentifier="hello_world:Frontend" \

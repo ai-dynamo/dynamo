@@ -18,7 +18,7 @@ kubectl config set-context --current --namespace=$KUBE_NS
 kubectl create secret docker-registry nvcrimagepullsecret \
   --docker-server=nvcr.io \
   --docker-username='$oauthtoken' \
-  --docker-password=$NGC_API_TOKEN \
+  --docker-password=$NGC_API_KEY \
   --namespace=$KUBE_NS
 
 kubectl create secret docker-registry gitlab-imagepull \
@@ -39,7 +39,7 @@ export RELEASE_NAME=$KUBE_NS
 ./deploy.sh
 ```
 
-3. [Optional] Make an example cluster POST:
+3. Make an default cluster:
 
 ```bash
 ./post-cluster.sh
