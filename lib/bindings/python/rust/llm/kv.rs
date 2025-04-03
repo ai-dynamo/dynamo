@@ -404,16 +404,39 @@ impl KvRecorder {
     fn new(component: Component) -> PyResult<Self> {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async {
-            let inner = llm_rs::kv_router::recorder::KvRecorder::new(
-                component.inner.drt().runtime().child_token(),
-            );
-            Ok(Self {
-                inner: Arc::new(inner),
-            })
+            let inner: Arc<llm_rs::kv_router::recorder::KvRecorder> =
+                Arc::new(llm_rs::kv_router::recorder::KvRecorder::new(
+                    component.inner.drt().runtime().child_token(),
+                ));
+
+            // Subscribe to KV events
+            let mut kv_events_rx = component
+                .inner
+                .subscribe(llm_rs::kv_router::KV_EVENT_SUBJECT)
+                .await
+                .map_err(to_pyerr)?;
+            let event_tx = inner.event_sender();
+
+            // Spawn a task to forward events to the recorder
+            tokio::spawn(async move {
+                while let Some(event) = kv_events_rx.next().await {
+                    let event: llm_rs::kv_router::indexer::RouterEvent =
+                        serde_json::from_slice(&event.payload).unwrap();
+                    tracing::debug!("KvRecorder received kv event: {:?}", event);
+                    if let Err(e) = event_tx.send(event).await {
+                        tracing::trace!(
+                            "KvRecorder failed to send kv event; shutting down: {:?}",
+                            e
+                        );
+                    }
+                }
+            });
+
+            Ok(Self { inner })
         })
     }
 
-    fn event_count<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+    fn event_count<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let recorder = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let count = recorder.event_count().await;
@@ -421,7 +444,7 @@ impl KvRecorder {
         })
     }
 
-    fn clear<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+    fn clear<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let recorder = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             recorder.clear().await;
@@ -429,12 +452,13 @@ impl KvRecorder {
         })
     }
 
-    fn to_jsonl<'p>(
+    #[pyo3(signature = (filename, num_events=None))]
+    fn to_jsonl<'py>(
         &self,
-        py: Python<'p>,
+        py: Python<'py>,
         filename: String,
         num_events: Option<usize>,
-    ) -> PyResult<Bound<'p, PyAny>> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let recorder = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             recorder
@@ -446,12 +470,13 @@ impl KvRecorder {
     }
 
     #[staticmethod]
-    fn from_jsonl<'p>(
-        py: Python<'p>,
+    #[pyo3(signature = (filename, component, num_events=None))]
+    fn from_jsonl(
+        py: Python<'_>,
         filename: String,
         component: Component,
         num_events: Option<usize>,
-    ) -> PyResult<Bound<'p, PyAny>> {
+    ) -> PyResult<Bound<'_, PyAny>> {
         let rs_component = component.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let token = rs_component.drt().runtime().child_token();
@@ -465,11 +490,11 @@ impl KvRecorder {
         })
     }
 
-    fn populate_indexer<'p>(
+    fn populate_indexer<'py>(
         &self,
-        py: Python<'p>,
+        py: Python<'py>,
         indexer: &KvIndexer,
-    ) -> PyResult<Bound<'p, PyAny>> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let recorder = self.inner.clone();
         let event_tx = indexer.inner.event_sender();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
