@@ -1785,7 +1785,7 @@ monitoring.options.insecure=true`
 
 	args := make([]string, 0)
 
-	args = append(args, "cd", "src", "&&", "uv", "run", "dynamo", "start")
+	args = append(args, "cd", "src", "&&", "uv", "run", "dynamo", "serve")
 
 	// todo : remove this line when https://github.com/ai-dynamo/dynamo/issues/345 is fixed
 	enableDependsOption := false
