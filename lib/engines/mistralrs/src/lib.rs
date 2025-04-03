@@ -34,10 +34,10 @@ use dynamo_runtime::pipeline::error as pipeline_error;
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 
-use crate::protocols::openai::chat_completions::{
+use dynamo_llm::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
 };
-use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 
 /// How many requests mistral will run at once in the paged attention scheduler.
 /// It actually runs 1 fewer than this.

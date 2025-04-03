@@ -215,7 +215,7 @@ pub async fn run(
             };
             EngineConfig::StaticFull {
                 service_name: model_name,
-                engine: dynamo_llm::engines::mistralrs::make_engine(&model_path).await?,
+                engine: dynamo_engine_mistralrs::make_engine(&model_path).await?,
             }
         }
         #[cfg(feature = "sglang")]

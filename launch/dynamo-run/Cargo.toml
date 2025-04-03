@@ -28,21 +28,22 @@ description = "Dynamo Run CLI"
 # Build with `--no-default-features` to disable these defaults
 # We don't include llamacpp by default until we figure out when it needs external libraries
 default = ["mistralrs", "vllm", "sglang"]
-mistralrs = ["dynamo-llm/mistralrs"]
 sglang = ["dynamo-llm/sglang", "dep:netlink-packet-route", "dep:rtnetlink"]
 vllm = ["dynamo-llm/vllm", "dep:netlink-packet-route", "dep:rtnetlink"]
-llamacpp = ["dynamo-engine-llamacpp"]
 trtllm = ["dynamo-llm/trtllm"]
 python = ["dynamo-llm/python"]
-cuda = ["dynamo-llm/cuda"]
-metal = ["dynamo-llm/metal"]
-vulkan = []
+mistralrs = ["dep:dynamo-engine-mistralrs"]
+llamacpp = ["dep:dynamo-engine-llamacpp"]
+cuda = ["dynamo-engine-llamacpp/cuda", "dynamo-engine-mistralrs/cuda"]
+metal = ["dynamo-engine-llamacpp/metal", "dynamo-engine-mistralrs/metal"]
+vulkan = ["dynamo-engine-llamacpp/vulkan"]
 
 [dependencies]
 dynamo-llm = { workspace = true }
 dynamo-runtime = { workspace = true }
 
 dynamo-engine-llamacpp = { path = "../../lib/engines/llamacpp", optional = true }
+dynamo-engine-mistralrs = { path = "../../lib/engines/mistralrs", optional = true }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }

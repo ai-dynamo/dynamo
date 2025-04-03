@@ -28,16 +28,11 @@ description = "Dynamo LLM Library"
 default = []
 
 cuda_kv = ["dep:cudarc", "dep:ndarray"]
-mistralrs = ["dep:mistralrs"]
 python = ["dep:pyo3-async-runtimes", "dep:pythonize"]
 sglang = []
 sentencepiece = ["dep:sentencepiece"]
 trtllm = []
 vllm = []
-
-cuda = ["mistralrs/cuda", "candle-core/cuda"]
-metal = ["mistralrs/metal"]
-vulkan = []
 
 [dependencies]
 # repo
@@ -93,10 +88,6 @@ unicode-segmentation = "1.12"
 
 # http-service
 axum = "0.8"
-
-# mistralrs
-indexmap = { version = "2.6" }
-mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs.git", rev = "aaafc2ef", optional = true }
 
 # sglang
 libc = "0.2"

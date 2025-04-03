@@ -1513,6 +1513,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-engine-mistralrs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-openai",
+ "async-stream",
+ "async-trait",
+ "candle-core 0.8.4",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "either",
+ "indexmap 2.8.0",
+ "mistralrs",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-llm"
 version = "0.1.0"
 dependencies = [
@@ -1541,14 +1560,12 @@ dependencies = [
  "galil-seiferas",
  "ggus",
  "hf-hub",
- "indexmap 2.8.0",
  "insta",
  "itertools 0.14.0",
  "libc",
  "memmap2",
  "minijinja",
  "minijinja-contrib",
- "mistralrs",
  "ndarray",
  "prometheus",
  "proptest",
@@ -1594,6 +1611,7 @@ dependencies = [
  "clap",
  "dialoguer",
  "dynamo-engine-llamacpp",
+ "dynamo-engine-mistralrs",
  "dynamo-llm",
  "dynamo-runtime",
  "futures",
