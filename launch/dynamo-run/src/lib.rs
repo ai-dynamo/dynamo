@@ -220,7 +220,7 @@ pub async fn run(
         }
         #[cfg(feature = "sglang")]
         Output::SgLang => {
-            use dynamo_llm::engines::sglang;
+            use dynamo_engine_sglang;
             let Some(model_path) = model_path else {
                 anyhow::bail!("out=sglang requires flag --model-path=<full-path-to-model-dir>");
             };
@@ -250,7 +250,7 @@ pub async fn run(
                 }
             }
 
-            let (engine, sglang_process) = sglang::make_engine(
+            let (engine, sglang_process) = dynamo_engine_sglang::make_engine(
                 cancel_token.clone(),
                 &model_path,
                 &sock_prefix,

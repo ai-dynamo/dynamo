@@ -29,7 +29,6 @@ default = []
 
 cuda_kv = ["dep:cudarc", "dep:ndarray"]
 python = ["dep:pyo3-async-runtimes", "dep:pythonize"]
-sglang = []
 sentencepiece = ["dep:sentencepiece"]
 trtllm = []
 vllm = []
@@ -70,6 +69,7 @@ candle-core = { version = "0.8.0" }
 derive-getters = "0.5"
 regex = "1"
 rayon = "1"
+serde-pickle = "1.2.0"
 
 # kv_cuda
 cudarc = { git = "https://github.com/coreylowman/cudarc.git", rev = "8c52e735b55bf8e979e1a16bd85e3dfe4f87c9fe", features = ["cuda-12040"], optional = true }
@@ -88,10 +88,6 @@ unicode-segmentation = "1.12"
 
 # http-service
 axum = "0.8"
-
-# sglang
-libc = "0.2"
-serde-pickle = "1.2.0"
 
 # tokenizers
 tokenizers = { version = "0.21.1", default-features = false, features = [

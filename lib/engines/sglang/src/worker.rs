@@ -40,12 +40,13 @@ use tokio::{io::AsyncReadExt as _, task::JoinHandle};
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::runtime::CancellationToken;
 
-use crate::engines::sglang::MultiGPUConfig;
-use crate::engines::MultiNodeConfig;
-use crate::protocols::common::llm_backend::LLMEngineOutput;
-use crate::protocols::common::preprocessor::PreprocessedRequest;
-use crate::protocols::common::FinishReason;
-use crate::protocols::TokenIdType;
+use dynamo_llm::engines::MultiNodeConfig;
+use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
+use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_llm::protocols::common::FinishReason;
+use dynamo_llm::protocols::TokenIdType;
+
+use crate::MultiGPUConfig;
 
 /// Wait this long for the sglang sub-process to stop after we send it a KILL
 const SGLANG_STOP_TIMEOUT: Duration = Duration::from_millis(1500);
@@ -293,7 +294,7 @@ pub async fn start(
 ) -> anyhow::Result<SgLangWorker> {
     pyo3::prepare_freethreaded_python();
     if let Ok(venv) = env::var("VIRTUAL_ENV") {
-        let _ = Python::with_gil(|py| crate::engines::fix_venv(venv, py));
+        let _ = Python::with_gil(|py| crate::fix_venv(venv, py));
     }
 
     let Sockets {

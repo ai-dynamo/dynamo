@@ -1532,6 +1532,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-engine-sglang"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-openai",
+ "async-stream",
+ "async-trait",
+ "async_zmq",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "libc",
+ "pyo3",
+ "regex",
+ "serde-pickle",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-llm"
 version = "0.1.0"
 dependencies = [
@@ -1562,7 +1582,6 @@ dependencies = [
  "hf-hub",
  "insta",
  "itertools 0.14.0",
- "libc",
  "memmap2",
  "minijinja",
  "minijinja-contrib",
@@ -1612,6 +1631,7 @@ dependencies = [
  "dialoguer",
  "dynamo-engine-llamacpp",
  "dynamo-engine-mistralrs",
+ "dynamo-engine-sglang",
  "dynamo-llm",
  "dynamo-runtime",
  "futures",

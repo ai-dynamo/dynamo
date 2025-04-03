@@ -13,9 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(feature = "sglang")]
-pub mod sglang;
-
 #[cfg(feature = "vllm")]
 pub mod vllm;
 
@@ -45,14 +42,11 @@ impl Default for MultiNodeConfig {
     }
 }
 
-#[cfg(any(feature = "sglang", feature = "vllm", feature = "python"))]
+#[cfg(any(feature = "vllm", feature = "python"))]
 use pyo3::prelude::*;
 
 /// On Mac embedded Python interpreters do not pick up the virtual env.
-#[cfg(all(
-    target_os = "macos",
-    any(feature = "sglang", feature = "vllm", feature = "python")
-))]
+#[cfg(all(target_os = "macos", any(feature = "vllm", feature = "python")))]
 fn fix_venv(venv: String, py: Python<'_>) -> anyhow::Result<()> {
     let version_info = py.version_info();
     let sys: PyObject = py.import("sys")?.into();
@@ -66,10 +60,7 @@ fn fix_venv(venv: String, py: Python<'_>) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(all(
-    target_os = "linux",
-    any(feature = "sglang", feature = "vllm", feature = "python")
-))]
+#[cfg(all(target_os = "linux", any(feature = "vllm", feature = "python")))]
 fn fix_venv(_venv: String, _py: Python<'_>) -> anyhow::Result<()> {
     Ok(())
 }

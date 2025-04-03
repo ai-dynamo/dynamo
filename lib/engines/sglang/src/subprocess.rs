@@ -21,7 +21,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::engines::MultiNodeConfig;
+use dynamo_llm::engines::MultiNodeConfig;
 
 const PY_START_ENGINE: &str = include_str!("sglang_inc.py");
 
@@ -44,7 +44,7 @@ pub fn run_subprocess(
 ) -> anyhow::Result<()> {
     pyo3::prepare_freethreaded_python(); // or enable feature "auto-initialize"
     if let Ok(venv) = env::var("VIRTUAL_ENV") {
-        let _ = Python::with_gil(|py| crate::engines::fix_venv(venv, py));
+        let _ = Python::with_gil(|py| crate::fix_venv(venv, py));
     }
     let dir = model_path.display().to_string();
     let extra_engine_args_str = &extra_engine_args

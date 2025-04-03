@@ -51,8 +51,7 @@ fn main() -> anyhow::Result<()> {
             if cfg!(feature = "sglang") {
                 #[cfg(feature = "sglang")]
                 {
-                    use dynamo_llm::engines::sglang;
-                    let gpu_config = sglang::MultiGPUConfig {
+                    let gpu_config = dynamo_engine_sglang::MultiGPUConfig {
                         tp_size: flags.tensor_parallel_size,
                         tp_rank: sglang_flags.tp_rank,
                         gpu_id: sglang_flags.gpu_id,
@@ -62,7 +61,7 @@ fn main() -> anyhow::Result<()> {
                         node_rank: flags.node_rank,
                         leader_addr: flags.leader_addr.unwrap_or_default(),
                     };
-                    return sglang::run_subprocess(
+                    return dynamo_engine_sglang::run_subprocess(
                         ZMQ_SOCKET_PREFIX,
                         model_path,
                         sglang_flags.pipe_fd as std::os::fd::RawFd,

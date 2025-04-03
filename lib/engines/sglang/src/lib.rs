@@ -16,9 +16,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::backend::ExecutionContext;
+use dynamo_llm::backend::ExecutionContext;
 use dynamo_runtime::pipeline::error as pipeline_error;
 use dynamo_runtime::CancellationToken;
+
+use pyo3::prelude::*;
 
 mod worker;
 
@@ -35,7 +37,7 @@ pub async fn make_engine(
     // Unique string to name zmq sockets
     sock_code: &str,
     // Multi node settings
-    node_conf: super::MultiNodeConfig,
+    node_conf: dynamo_llm::engines::MultiNodeConfig,
     // How many GPUs to use
     tensor_parallel_size: u32,
     // The base GPU ID to start allocating GPUs from
@@ -76,4 +78,23 @@ impl Default for MultiGPUConfig {
             gpu_id: 0,
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn fix_venv(venv: String, py: Python<'_>) -> anyhow::Result<()> {
+    let version_info = py.version_info();
+    let sys: PyObject = py.import("sys")?.into();
+    let sys_path = sys.getattr(py, "path")?;
+    let venv_path = format!(
+        "{venv}/lib/python{}.{}/site-packages",
+        version_info.major, version_info.minor
+    );
+    // TODO: This should go _before_ the site-packages
+    sys_path.call_method1(py, "append", (venv_path,))?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn fix_venv(_venv: String, _py: Python<'_>) -> anyhow::Result<()> {
+    Ok(())
 }
