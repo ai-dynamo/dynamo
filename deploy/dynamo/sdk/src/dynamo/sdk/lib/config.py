@@ -14,8 +14,11 @@
 # limitations under the License.
 
 import json
+import logging
 import os
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class ServiceConfig(dict):
@@ -88,6 +91,6 @@ class ServiceConfig(dict):
         for key, value in self[service_name].items():
             add_to_args(args, value)
 
-        print(f"Running {service_name} with {args=}")
+        logger.info(f"Running {service_name} with {args=}")
 
         return args

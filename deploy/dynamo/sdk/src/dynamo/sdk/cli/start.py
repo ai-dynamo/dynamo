@@ -222,7 +222,7 @@ def build_start_command() -> click.Group:
 
         # Set environment variable with service configuration
         if service_configs:
-            print(f"Running dynamo start with service configs {service_configs}")
+            logger.info(f"Running dynamo start with service configs {service_configs}")
             os.environ["DYNAMO_SERVICE_CONFIG"] = json.dumps(service_configs)
 
         if working_dir is None:

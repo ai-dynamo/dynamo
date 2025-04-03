@@ -413,7 +413,7 @@ def build_serve_command() -> click.Group:
 
         # Set environment variable with service configuration
         if service_configs:
-            print(f"Running dynamo serve with service configs {service_configs}")
+            logger.info(f"Running dynamo serve with service configs {service_configs}")
             os.environ["DYNAMO_SERVICE_CONFIG"] = json.dumps(service_configs)
 
         configure_server_logging()
