@@ -138,9 +138,9 @@ pub fn compute_block_hash_for_seq(tokens: &[u32], kv_block_size: usize) -> Vec<L
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouterEvent {
     /// The ID of the worker emitting the event.
-    pub worker_id: WorkerId,
+    worker_id: WorkerId,
     /// The cache event associated with the worker.
-    pub event: KvCacheEvent,
+    event: KvCacheEvent,
 }
 
 impl RouterEvent {
