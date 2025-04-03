@@ -4,7 +4,7 @@ Table of Contents
 - [Single node sized models](#single-node-sized-models)
 
 ## Single node sized models
-You can deploy our example architectures on multiple nodes via NATS/ETCD based discovery and communication. Here's an example of deploying disaggregated serving on 3 nodes using `nvidia/Llama-3.1-405B-Instruct-FP8`. Each node will need to be properly configured with Infiniband and/or RoCE for communication between decode and prefill workers.
+You can deploy dynamo on multiple nodes via NATS/ETCD based discovery and communication. Here's an example of deploying disaggregated serving on 3 nodes using `nvidia/Llama-3.1-405B-Instruct-FP8`. Each node will need to be properly configured with Infiniband and/or RoCE for communication between decode and prefill workers.
 
 ##### Disaggregated Deployment with KV Routing
 - Node 1: Frontend, Processor, Router, Decode Worker
