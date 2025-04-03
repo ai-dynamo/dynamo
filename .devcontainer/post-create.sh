@@ -17,17 +17,11 @@
 
 set -e
 
-# Create and activate Python virtual environment
-python3 -m venv .dev-venv
-. .dev-venv/bin/activate
-
-# Build Rust components first
 cargo build --release
+mkdir -p /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
+cp /workspace/target/release/http /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
+cp /workspace/target/release/llmctl /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
 
-# Install Dynamo with all dependencies
-pip install -e .[all]
+uv pip install -e .
 
-# Install development tools
-pip install pytest isort mypy pylint pre-commit
-
-echo "Development environment setup complete!"
+echo "source /opt/dynamo/venv/bin/activate" >> ~/.bashrc
