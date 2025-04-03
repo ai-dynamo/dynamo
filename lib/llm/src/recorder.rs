@@ -507,12 +507,12 @@ mod tests {
         let event1 = TestEvent {
             id: 1,
             name: "Event 1".to_string(),
-            value: 3.14,
+            value: std::f64::consts::PI,
         };
         let event2 = TestEvent {
             id: 2,
             name: "Event 2".to_string(),
-            value: 2.71,
+            value: std::f64::consts::E,
         };
 
         event_tx.send(event1).await.unwrap();
