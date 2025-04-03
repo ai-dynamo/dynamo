@@ -499,7 +499,7 @@ impl KvRecorder {
         let event_tx = indexer.inner.event_sender();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let count = recorder
-                .populate_indexer(&event_tx)
+                .send_events(&event_tx)
                 .await
                 .map_err(to_pyerr)?;
             Ok(count)
