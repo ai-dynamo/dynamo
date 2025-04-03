@@ -1513,22 +1513,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-engine-mistral"
-version = "0.1.0"
-
-[[package]]
-name = "dynamo-engine-sglang"
-version = "0.1.0"
-
-[[package]]
-name = "dynamo-engine-trtllm"
-version = "0.1.0"
-
-[[package]]
-name = "dynamo-engine-vllm"
-version = "0.1.0"
-
-[[package]]
 name = "dynamo-llm"
 version = "0.1.0"
 dependencies = [

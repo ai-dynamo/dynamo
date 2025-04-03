@@ -26,12 +26,11 @@ description = "Dynamo Run CLI"
 
 [features]
 # Build with `--no-default-features` to disable these defaults
+# We don't include llamacpp by default until we figure out when it needs external libraries
 default = ["mistralrs", "vllm", "sglang"]
 mistralrs = ["dynamo-llm/mistralrs"]
 sglang = ["dynamo-llm/sglang", "dep:netlink-packet-route", "dep:rtnetlink"]
 vllm = ["dynamo-llm/vllm", "dep:netlink-packet-route", "dep:rtnetlink"]
-# We don't include llamacpp by default until we figure out when it needs external libraries
-# llamacpp = ["dynamo-llm/llamacpp"]
 llamacpp = ["dynamo-engine-llamacpp"]
 trtllm = ["dynamo-llm/trtllm"]
 python = ["dynamo-llm/python"]

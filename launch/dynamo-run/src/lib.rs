@@ -331,7 +331,7 @@ pub async fn run(
         }
         #[cfg(feature = "llamacpp")]
         Output::LlamaCpp => {
-            use dynamo_llm::engines::llamacpp;
+            use dynamo_engine_llamacpp;
             let Some(model_path) = model_path else {
                 anyhow::bail!("out=llamacpp requires flag --model-path=<full-path-to-model-gguf>");
             };
@@ -343,7 +343,8 @@ pub async fn run(
                     "Pass --model-config so we can find the tokenizer, should be an HF checkout."
                 );
             };
-            let engine = llamacpp::make_engine(cancel_token.clone(), &model_path).await?;
+            let engine =
+                dynamo_engine_llamacpp::make_engine(cancel_token.clone(), &model_path).await?;
             EngineConfig::StaticCore {
                 service_name: card.service_name.clone(),
                 engine,
