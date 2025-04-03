@@ -234,6 +234,47 @@ impl KvRecorder {
     pub fn shutdown(&self) {
         self.cancel.cancel();
     }
+
+    /// Populate an indexer with the recorded events
+    ///
+    /// ### Arguments
+    ///
+    /// * `event_tx` - A sender for RouterEvents, typically obtained from a KvIndexer
+    ///
+    /// ### Returns
+    ///
+    /// A Result indicating success or failure
+    pub async fn populate_indexer(
+        &self,
+        event_tx: &mpsc::Sender<RouterEvent>,
+    ) -> Result<usize, mpsc::error::SendError<RouterEvent>> {
+        let events = self.events.lock().unwrap();
+
+        if events.is_empty() {
+            log::warn!("No events to populate indexer with");
+            return Ok(0);
+        }
+
+        // Assert that events are weakly sorted by timestamp (non-decreasing order)
+        for i in 1..events.len() {
+            assert!(
+                events[i-1].0 <= events[i].0,
+                "Events are not in timestamp order: event at index {} has timestamp {:?} which is after event at index {} with timestamp {:?}",
+                i-1, events[i-1].0, i, events[i].0
+            );
+        }
+
+        let mut count = 0;
+
+        // Send each event to the indexer in the order they were recorded
+        for (_, event) in events.iter() {
+            event_tx.send(event.clone()).await?;
+            count += 1;
+        }
+
+        log::info!("Populated indexer with {} events", count);
+        Ok(count)
+    }
 }
 
 #[cfg(test)]
