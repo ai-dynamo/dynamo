@@ -392,3 +392,102 @@ impl KvMetricsAggregator {
         })
     }
 }
+
+#[pyclass]
+pub(crate) struct KvRecorder {
+    inner: Arc<llm_rs::kv_router::recorder::KvRecorder>,
+}
+
+#[pymethods]
+impl KvRecorder {
+    #[new]
+    fn new(component: Component) -> PyResult<Self> {
+        let runtime = pyo3_async_runtimes::tokio::get_runtime();
+        runtime.block_on(async {
+            let inner = llm_rs::kv_router::recorder::KvRecorder::new(
+                component.inner.drt().runtime().child_token(),
+            );
+            Ok(Self {
+                inner: Arc::new(inner),
+            })
+        })
+    }
+
+    fn event_count<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let recorder = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let count = recorder.event_count().await;
+            Ok(count)
+        })
+    }
+
+    fn clear<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let recorder = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            recorder.clear().await;
+            Ok(())
+        })
+    }
+
+    fn to_jsonl<'p>(
+        &self,
+        py: Python<'p>,
+        filename: String,
+        num_events: Option<usize>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let recorder = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            recorder
+                .to_jsonl(filename, num_events)
+                .await
+                .map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
+    #[staticmethod]
+    fn from_jsonl<'p>(
+        py: Python<'p>,
+        filename: String,
+        component: Component,
+        num_events: Option<usize>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let rs_component = component.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let token = rs_component.drt().runtime().child_token();
+            let recorder =
+                llm_rs::kv_router::recorder::KvRecorder::from_jsonl(filename, token, num_events)
+                    .await
+                    .map_err(to_pyerr)?;
+            Ok(KvRecorder {
+                inner: Arc::new(recorder),
+            })
+        })
+    }
+
+    fn populate_indexer<'p>(
+        &self,
+        py: Python<'p>,
+        indexer: &KvIndexer,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let recorder = self.inner.clone();
+        let event_tx = indexer.inner.event_sender();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let count = recorder
+                .populate_indexer(&event_tx)
+                .await
+                .map_err(to_pyerr)?;
+            Ok(count)
+        })
+    }
+
+    fn shutdown(&self) -> PyResult<()> {
+        self.inner.shutdown();
+        Ok(())
+    }
+
+    #[getter]
+    fn time_offset(&self) -> u64 {
+        self.inner.time_offset()
+    }
+}

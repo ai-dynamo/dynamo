@@ -330,6 +330,94 @@ class KvIndexer:
         """
         ...
 
+
+class KvRecorder:
+    """
+    A recorder for KV Router events.
+    """
+
+    ...
+
+    def __init__(self, component: Component) -> None:
+        """
+        Create a new KvRecorder instance.
+
+        Args:
+            component: The component to associate with this recorder
+        """
+        ...
+
+    def event_count(self) -> int:
+        """
+        Get the count of recorded events.
+
+        Returns:
+            The number of events recorded
+        """
+        ...
+
+    def clear(self) -> None:
+        """
+        Clear all recorded events.
+        """
+        ...
+
+    def to_jsonl(self, filename: str, num_events: Optional[int] = None) -> None:
+        """
+        Dump recorded events to a JSONL file.
+
+        Args:
+            filename: Path to the JSONL file to write
+            num_events: Optional limit on the number of events to write
+        """
+        ...
+
+    @staticmethod
+    def from_jsonl(
+        filename: str, component: Component, num_events: Optional[int] = None
+    ) -> "KvRecorder":
+        """
+        Read events from a JSONL file and create a new recorder.
+
+        Args:
+            filename: Path to the JSONL file to read
+            component: The component to associate with the new recorder
+            num_events: Optional limit on the number of events to read
+
+        Returns:
+            A new KvRecorder instance with the loaded events
+        """
+        ...
+
+    def populate_indexer(self, indexer: KvIndexer) -> int:
+        """
+        Populate an indexer with the recorded events.
+
+        Args:
+            indexer: The KvIndexer to populate with events
+
+        Returns:
+            The number of events sent to the indexer
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Shutdown the recorder.
+        """
+        ...
+
+    @property
+    def time_offset(self) -> int:
+        """
+        Get the current time offset in milliseconds.
+
+        Returns:
+            The time offset
+        """
+        ...
+
+
 class AggregatedMetrics:
     """
     A collection of metrics of the endpoints
