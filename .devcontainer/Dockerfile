@@ -34,6 +34,10 @@ WORKDIR /dummy
 RUN echo '[package]\nname = "dummy"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\n' > Cargo.toml
 RUN cargo build --release
 
+# Earthly stage
+FROM earthly/earthly:v0.8.15 as earthly
+RUN which earthly
+
 # Main stage
 FROM ubuntu:24.04
 
@@ -94,6 +98,10 @@ RUN chsh -s /bin/bash $USERNAME
 # Set up Docker CLI
 RUN curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh
 RUN usermod -aG docker $USERNAME
+
+# Copy Earthly binary from the Earthly stage
+COPY --from=earthly /usr/bin/earthly /usr/local/bin/earthly
+RUN chmod +x /usr/local/bin/earthly && /usr/local/bin/earthly bootstrap --with-autocomplete
 
 # Set the working directory
 WORKDIR /workspaces/dynamo

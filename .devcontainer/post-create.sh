@@ -32,10 +32,10 @@ cargo --version
 cargo build --release
 
 # Install development tools with caching
-pip install --upgrade pip setuptools wheel
-pip install --cache-dir /tmp/pip-cache pytest isort mypy pylint pre-commit
+uv pip install --upgrade pip setuptools wheel
+uv pip install --cache-dir /tmp/pip-cache pytest isort mypy pylint pre-commit
 
 # Install Dynamo with all dependencies
-pip install --cache-dir /tmp/pip-cache -e .[all]
+uv pip install --cache-dir /tmp/pip-cache -e .[all]
 
 echo "Development environment setup complete!"
