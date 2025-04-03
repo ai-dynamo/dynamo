@@ -54,19 +54,19 @@ mod tests {
         hashes: Vec<u64>,
         parent: Option<ExternalSequenceBlockHash>,
     ) -> RouterEvent {
-        RouterEvent {
+        RouterEvent::new(
             worker_id,
-            event: KvCacheEvent {
+            KvCacheEvent {
                 event_id,
                 data: add_blocks(hashes, parent),
             },
-        }
+        )
     }
 
     fn create_remove_event(worker_id: WorkerId, event_id: u64, hashes: Vec<u64>) -> RouterEvent {
-        RouterEvent {
+        RouterEvent::new(
             worker_id,
-            event: KvCacheEvent {
+            KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
                     block_hashes: hashes
@@ -75,7 +75,7 @@ mod tests {
                         .collect(),
                 }),
             },
-        }
+        )
     }
 
     #[tokio::test]
