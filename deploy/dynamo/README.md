@@ -28,12 +28,26 @@ You can build and push Docker images for the Dynamo cloud components (API server
 
 ### Building and Pushing Images
 
+First, set the required environment variables:
+```bash
+export CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION> 
+export CI_COMMIT_SHA=<TAG>
+```
+
+As a description of the placeholders:
+- `<CONTAINER_REGISTRY>/<ORGANIZATION>`: Your container registry and organization name (e.g., `nvcr.io/myorg`, `docker.io/myorg`, etc.)
+- `<TAG>`: The tag you want to use for the image (e.g., `latest`, `0.0.1`, etc.)
+
+Note: Make sure you're logged in to your container registry before pushing images. For example:
+```bash
+docker login <CONTAINER_REGISTRY>
+```
+
 You can build each component individually or build all components at once:
 
 #### Option 1: Build All Components at Once
 ```bash
-cd deploy/dynamo
-earthly --push +all-docker --CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION> --CI_COMMIT_SHA=<TAG>
+earthly --push +all-docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
 ```
 
 #### Option 2: Build Components Individually
@@ -41,28 +55,19 @@ earthly --push +all-docker --CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATIO
 1. **API Server**
 ```bash
 cd deploy/dynamo/api-server
-earthly --push +docker --CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION> --CI_COMMIT_SHA=<TAG>
+earthly --push +docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
 ```
 
 2. **API Store**
 ```bash
 cd deploy/dynamo/api-store
-earthly --push +docker --CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION> --CI_COMMIT_SHA=<TAG>
+earthly --push +docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
 ```
 
 3. **Operator**
 ```bash
 cd deploy/dynamo/operator
-earthly --push +docker --CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION> --CI_COMMIT_SHA=<TAG>
-```
-
-Replace the following placeholders:
-- `<CONTAINER_REGISTRY>/<ORGANIZATION>`: Your container registry and organization name (e.g., `nvcr.io/myorg`, `docker.io/myorg`, etc.)
-- `<TAG>`: The tag you want to use for the image (e.g., `latest`, `v1.0.0`, etc.)
-
-Note: Make sure you're logged in to your container registry before pushing images. For example:
-```bash
-docker login <CONTAINER_REGISTRY>
+earthly --push +docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
 ```
 
 ## Deploy Dynamo cloud components to Kubernetes
