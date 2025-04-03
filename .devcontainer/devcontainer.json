@@ -16,25 +16,18 @@
     "name": "NVIDIA Dynamo Development",
     "remoteUser": "ubuntu",
     "updateRemoteUserUID": true,
-    "build": {
-        "dockerfile": "Dockerfile",
-        "context": ".."
-    },
-    "runArgs": [
-        "--gpus=all",
-        "--network=host",
-        "--ipc=host"
-    ],
+    "initializeCommand": ["/bin/bash", "${localWorkspaceFolder}/container/build.sh"],
+    "dockerComposeFile": ["docker-compose.yml"],
+    "service": "dynamo",
     "customizations": {
         "vscode": {
             "extensions": [
                 "ms-python.python",
                 "rust-lang.rust-analyzer",
-                "tamasfe.even-better-toml",
                 "ms-azuretools.vscode-docker"
             ],
             "settings": {
-                "python.defaultInterpreterPath": "/home/ubuntu/dynamo/venv/bin/python",
+                "python.defaultInterpreterPath": "/opt/dynamo/venv/bin/python",
                 "python.linting.enabled": true,
                 "python.linting.pylintEnabled": true,
                 "editor.formatOnSave": true,
@@ -42,11 +35,7 @@
             }
         }
     },
-    "mounts": [
-        "source=dynamo-bashhistory,target=/home/ubuntu/.commandhistory,type=volume"
-    ],
-    "workspaceFolder": "/home/ubuntu/dynamo",
-    "workspaceMount": "source=${localWorkspaceFolder},target=/home/ubuntu/dynamo,type=bind,consistency=cached",
-    "postCreateCommand": "/bin/bash .devcontainer/post-create.sh",
-    "postStartCommand": "grep -q 'source /home/ubuntu/dynamo/.dev-venv/bin/activate' ~/.bashrc || echo 'source /home/ubuntu/dynamo/.dev-venv/bin/activate' >> ~/.bashrc"
+    "workspaceFolder": "/workspace",
+    "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+    "postCreateCommand": "/bin/bash .devcontainer/post-create.sh"
 }
