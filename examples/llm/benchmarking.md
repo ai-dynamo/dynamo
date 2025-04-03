@@ -20,7 +20,7 @@ limitations under the License.
 This guide provides detailed steps on benchmarking Large Language Models (LLMs) in single and multi nodes configurations.
 
 > [!NOTE]
-> We advice trying out the [LLM Deployment Examples](./README.md) before starting on benchmarking.
+> We advice trying out the [LLM Deployment Examples](./README.md) before benchmarking.
 
 ## Build the Benchmarking Image
 
@@ -35,7 +35,7 @@ git clone --single-branch --depth=1 -b main https://github.com/ai-dynamo/dynamo.
 ```
 Note: Make sure to run it in the `dynamo` directory cloned.
 
-## Single Node Benchmarking
+## Disaggregated Single Node Benchmarking
 
 One H100 80GB x8 node is required for this setup.
 
@@ -108,7 +108,7 @@ Key settings:
 cd /workspace/examples/llm
 dynamo serve graphs.disagg:Frontend -f configs/disagg.yaml 1> disagg.log 2>&1 &
 ```
-Note: Check the `disagg.log` to make sure the service is fully started before continuing to the next step.
+Note: Check the `disagg.log` to make sure the service is fully started before collecting performance numbers.
 
 6\. Create and run the benchmarking script
 ```bash
@@ -155,7 +155,7 @@ Key settings:
 * **isl**: Input sequence length.
 * **osl**: Output sequence length requested.
 
-## Multi Node Benchmarking
+## Disaggregated Multi Node Benchmarking
 
 Two H100 80GB x8 node is required for this setup.
 
@@ -249,11 +249,11 @@ dynamo serve components.prefill_worker:PrefillWorker -f configs/disagg_router.ya
 ```
 Note: Check the `prefill_worker.log` to make sure the service is fully started before collecting performance numbers.
 
-8. Collect the performance numbers using the same steps on the [Single Node Benchmarking](#single-node-benchmarking) section above.
+8. Collect the performance numbers as shown on the [Disaggregated Single Node Benchmarking](#disaggregated-single-node-benchmarking) section above.
 
-## Pure vLLM Baseline
+## vLLM Aggregated Baseline Benchmarking
 
-One H100 80GB x8 node is required for this setup.
+One (or Two) H100 80GB x8 node is required for this setup.
 
 With the Dynamo repository and the benchmarking image available, perform the following steps:
 
@@ -270,8 +270,50 @@ huggingface-cli download neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
 
 3\. Start vLLM serve
 ```bash
-vllm serve neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
-    --tensor-parallel-size 4
+CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic --tensor-parallel-size 4 --port 8001 1> vllm_0.log 2>&1 &
+CUDA_VISIBLE_DEVICES=4,5,6,7 vllm serve neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic --tensor-parallel-size 4 --port 8002 1> vllm_1.log 2>&1 &
+```
+Notes:
+* Check the `vllm_0.log` and `vllm_1.log` to make sure the service is fully started before collecting performance numbers.
+* `vllm serve` may also be started similarly on the second node for collecting multi node numbers.
+
+4\. Install NGINX
+```bash
+apt update && apt install -y nginx
 ```
 
-4\. Collect the performance numbers using the same steps on the [Single Node Benchmarking](#single-node-benchmarking) section above.
+5\. Update `/etc/nginx/nginx.conf` to the following
+```conf
+worker_processes 1;
+worker_rlimit_nofile 4096;
+events {
+    worker_connections 2048;
+    multi_accept on;
+    use epoll;
+}
+http {
+    upstream backend_servers {
+        least_conn;
+        server 127.0.0.1:8001 max_fails=3 fail_timeout=10000s;
+        server 127.0.0.1:8002 max_fails=3 fail_timeout=10000s;
+    }
+    server {
+        listen 8000;
+        location / {
+            proxy_pass http://backend_servers;
+            proxy_http_version 1.1;
+            proxy_read_timeout 240s;
+        }
+    }
+}
+```
+Key settings:
+* **least_conn**: To load balance across vLLM servers.
+* **server**: Select all the upstream vLLM servers to load balance across, including those at a different node, if any.
+
+6\. Restart NGINX
+```bash
+service nginx restart
+```
+
+7\. Collect the performance numbers as shown on the [Disaggregated Single Node Benchmarking](#disaggregated-single-node-benchmarking) section above.
