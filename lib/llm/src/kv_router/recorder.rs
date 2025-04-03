@@ -98,11 +98,12 @@ impl KvRecorder {
     /// ### Arguments
     ///
     /// * `filename` - Path to the JSONL file to write
+    /// * `num_events` - Optional limit on the number of events to write
     ///
     /// ### Returns
     ///
     /// A Result indicating success or failure
-    pub fn dump_to_jsonl<P: AsRef<Path>>(&self, filename: P) -> io::Result<()> {
+    pub fn to_jsonl<P: AsRef<Path>>(&self, filename: P, num_events: Option<usize>) -> io::Result<()> {
         let events = self.events.lock().unwrap();
         
         if events.is_empty() {
@@ -116,7 +117,13 @@ impl KvRecorder {
         let file = File::create(filename)?;
         let mut writer = BufWriter::new(file);
         
-        for (timestamp, event) in events.iter() {
+        // Determine how many events to write
+        let event_count = match num_events {
+            Some(limit) => events.len().min(limit),
+            None => events.len(),
+        };
+        
+        for (timestamp, event) in events.iter().take(event_count) {
             // Convert SystemTime to milliseconds since UNIX epoch
             let millis = timestamp
                 .duration_since(UNIX_EPOCH)
@@ -134,7 +141,7 @@ impl KvRecorder {
         }
         
         writer.flush()?;
-        log::info!("Dumped {} events to {}", events.len(), display_name);
+        log::info!("Dumped {} events to {}", event_count, display_name);
         
         Ok(())
     }
@@ -149,7 +156,7 @@ impl KvRecorder {
     /// ### Returns
     ///
     /// A Result with the count of records loaded or an error
-    pub fn from_jsonl<P: AsRef<Path>>(&self, filename: P, num_lines: Option<usize>) -> io::Result<usize> {
+    pub fn from_jsonl<P: AsRef<Path>>(&self, filename: P, num_events: Option<usize>) -> io::Result<usize> {
         // Store the display name before using filename
         let display_name = filename.as_ref().display().to_string();
         
@@ -172,7 +179,7 @@ impl KvRecorder {
         // Process each line
         while let Some(line) = lines.next() {
             // Check if we've reached the requested number of lines
-            if let Some(limit) = num_lines {
+            if let Some(limit) = num_events {
                 if count >= limit {
                     break;
                 }
@@ -323,7 +330,7 @@ mod tests {
         let file_path1 = dir.path().join("events1.jsonl");
         
         // Dump first two events to file1
-        recorder.dump_to_jsonl(&file_path1).unwrap();
+        recorder.to_jsonl(&file_path1, None).unwrap();
         
         // Read the content of the first file
         let content1 = std::fs::read_to_string(&file_path1).unwrap();
@@ -355,7 +362,7 @@ mod tests {
         let file_path2 = dir.path().join("events2.jsonl");
         
         // Dump all 4 events to file2
-        new_recorder.dump_to_jsonl(&file_path2).unwrap();
+        new_recorder.to_jsonl(&file_path2, None).unwrap();
         
         // Read the content of the second file
         let content2 = std::fs::read_to_string(&file_path2).unwrap();
