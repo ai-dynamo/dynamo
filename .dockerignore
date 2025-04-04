@@ -17,6 +17,7 @@
 **/*.plan
 **/*.onnx
 **/*.plan
+**/*.etcd
 **/.cache/*
 **/*onnx*
 # Engine must be allowed because code contains dynamo_engine.py

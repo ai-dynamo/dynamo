@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This configuration file is used in the multinode-examples.md file
+# to start the 405B model on 3 nodes.
+
+Frontend:
+  served_model_name: nvidia/Llama-3.1-405B-Instruct-FP8
+  endpoint: dynamo.Processor.chat/completions
+  port: 8000
+
+Processor:
+  model: nvidia/Llama-3.1-405B-Instruct-FP8
+  block-size: 64
+  max-model-len: 8192
+  router: kv
+
+Router:
+  model-name: nvidia/Llama-3.1-405B-Instruct-FP8
+  min-workers: 1
+
+VllmWorker:
+  model: nvidia/Llama-3.1-405B-Instruct-FP8
+  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
+  block-size: 64
+  max-model-len: 8192
+  max-num-seqs: 16
+  remote-prefill: true
+  conditional-disagg: true
+  max-local-prefill-length: 10
+  max-prefill-queue-size: 2
+  gpu-memory-utilization: 0.95
+  tensor-parallel-size: 8
+  router: kv
+  quantization: modelopt
+  enable-prefix-caching: true
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: 8
+
+PrefillWorker:
+  model: nvidia/Llama-3.1-405B-Instruct-FP8
+  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
+  block-size: 64
+  max-model-len: 8192
+  max-num-seqs: 16
+  gpu-memory-utilization: 0.95
+  tensor-parallel-size: 8
+  quantization: modelopt
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: 8
