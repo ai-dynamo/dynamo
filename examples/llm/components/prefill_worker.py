@@ -14,8 +14,8 @@
 # limitations under the License.
 
 
-import logging
 import asyncio
+import logging
 import os
 import sys
 
@@ -32,6 +32,7 @@ from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
 
 logger = logging.getLogger(__name__)
+
 
 class RequestType(BaseModel):
     text: str
@@ -107,7 +108,9 @@ class PrefillWorker:
             if self.engine_args.served_model_name is not None
             else "vllm"
         )
-        logger.info(f"Prefill queue: {prefill_queue_nats_server}:{prefill_queue_stream_name}")
+        logger.info(
+            f"Prefill queue: {prefill_queue_nats_server}:{prefill_queue_stream_name}"
+        )
         self.initialized = True
         # TODO: integrate prefill_queue to a dynamo endpoint
         async with PrefillQueue.get_instance(
@@ -120,7 +123,9 @@ class PrefillWorker:
                 # need to test and check how much overhead it is
                 prefill_request = await prefill_queue.dequeue_prefill_request()
                 if prefill_request is not None:
-                    logger.info(f"Dequeued prefill request: {prefill_request.request_id}")
+                    logger.info(
+                        f"Dequeued prefill request: {prefill_request.request_id}"
+                    )
                     async for _ in self.generate(prefill_request):
                         pass
 

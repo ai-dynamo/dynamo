@@ -26,6 +26,7 @@ METADATA_DIR = "/tmp/nixl"
 
 logger = logging.getLogger(__name__)
 
+
 @contextmanager
 def temp_metadata_file(engine_id, metadata: NixlMetadata):
     os.makedirs(METADATA_DIR, exist_ok=True)

@@ -14,8 +14,8 @@
 # limitations under the License.
 
 
-import logging
 import argparse
+import logging
 import random
 from argparse import Namespace
 from typing import AsyncIterator
@@ -32,6 +32,7 @@ from dynamo.sdk.lib.config import ServiceConfig
 WorkerId = str
 
 logger = logging.getLogger(__name__)
+
 
 def parse_args(service_name, prefix) -> Namespace:
     parser = argparse.ArgumentParser()
