@@ -17,6 +17,27 @@ limitations under the License.
 
 # End-to-end deployment of a Dynamo NIM to Kubernetes
 
+## Deployment Paths in Dynamo
+
+Dynamo provides two distinct deployment paths, each serving different purposes:
+
+1. **Manual Deployment with Helm Charts** (`deploy/Kubernetes/`)
+   - Used for manually deploying inference graphs to Kubernetes
+   - Contains Helm charts and configurations for deploying individual inference pipelines
+   - Documentation:
+        - [Deploying Dynamo Inference Graphs to Kubernetes using Helm](../../docs/guides/dynamo_deploy.md)
+        - [Dynamo Deploy Guide](../../docs/guides/dynamo_deploy.md)
+
+2. **Dynamo Cloud Platform** (`deploy/dynamo/helm/`)
+   - Contains the infrastructure components required for the Dynamo cloud platform
+   - Used when deploying with the `dynamo deploy` CLI commands
+   - Provides a managed deployment experience
+   - This README focuses on setting up this platform infrastructure
+
+Choose the appropriate deployment path based on your needs:
+- Use `deploy/Kubernetes/` if you want to manually manage your inference graph deployments
+- Use `deploy/dynamo/helm/` if you want to use the Dynamo cloud platform and CLI tools
+
 ## Building docker images for Dynamo cloud components
 
 You can build and push Docker images for the Dynamo cloud components (API server, API store, and operator) to any container registry of your choice. Here's how to build each component:
