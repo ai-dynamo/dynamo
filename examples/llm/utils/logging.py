@@ -1,8 +1,9 @@
 import asyncio
+from dynamo._core import Client
 
 
 async def check_required_workers(
-    workers_client, required_workers, on_change=True, poll_interval=0.5
+    workers_client: Client, required_workers: int, on_change=True, poll_interval=0.5
 ):
     """Wait until the minimum number of workers are ready."""
     worker_ids = workers_client.endpoint_ids()
