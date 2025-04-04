@@ -57,7 +57,9 @@ def configure_server_logging():
     bentoml_logger.setLevel(logging.ERROR)
     bentoml_logger.propagate = True
 
-    # Disable CLI tag warning
-    tag_logger = logging.getLogger("tag")
-    tag_logger.setLevel(logging.ERROR)
-    tag_logger.propagate = True
+    # Override internal BentoML loggers
+    aux_bento_loggers = ["tag"]
+    for logger_name in aux_bento_loggers:
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(logging.ERROR)
+        logger.propagate = True
