@@ -128,7 +128,7 @@ def main(
                 # Set runtime on all dependencies
                 for dep in service.dependencies.values():
                     dep.set_runtime(runtime)
-                    logger.info(f"[{run_id}] Set runtime for dependency: {dep}")
+                    logger.debug(f"[{run_id}] Set runtime for dependency: {dep}")
 
                 # Then register all Dynamo endpoints
                 dynamo_endpoints = service.get_dynamo_endpoints()
@@ -140,7 +140,7 @@ def main(
                 endpoints = []
                 for name, endpoint in dynamo_endpoints.items():
                     td_endpoint = component.endpoint(name)
-                    logger.info(f"[{run_id}] Registering endpoint '{name}'")
+                    logger.debug(f"[{run_id}] Registering endpoint '{name}'")
                     endpoints.append(td_endpoint)
                     # Bind an instance of inner to the endpoint
                 dynamo_context["component"] = component
@@ -161,12 +161,12 @@ def main(
                     if callable(member) and getattr(
                         member, "__bentoml_startup_hook__", False
                     ):
-                        logger.info(f"[{run_id}] Running startup hook: {name}")
+                        logger.debug(f"[{run_id}] Running startup hook: {name}")
                         result = getattr(class_instance, name)()
                         if inspect.isawaitable(result):
                             # await on startup hook async_on_start
                             await result
-                            logger.info(
+                            logger.debug(
                                 f"[{run_id}] Completed async startup hook: {name}"
                             )
                         else:

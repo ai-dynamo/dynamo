@@ -15,6 +15,7 @@
 
 import logging
 import logging.config
+import os
 
 from dynamo.runtime.logging import configure_logger
 
@@ -34,10 +35,29 @@ def configure_server_logging():
 
     # Make sure bentoml's loggers use the same configuration
     bentoml_logger = logging.getLogger("bentoml")
-    bentoml_logger.setLevel(logging.ERROR)
-    bentoml_logger.propagate = True  # Make sure logs propagate to the root logger
 
-    # Disable tag logger to avoid unneeded warnings
+    # Configure vllm loggers to use our format
+    os.environ["VLLM_CONFIGURE_LOGGING"] = "0"  # Disable VLLM's default configuration
+
+    # Get all vllm loggers and configure them
+    vllm_logger = logging.getLogger("vllm")
+    vllm_logger.handlers = []
+    vllm_logger.setLevel(logging.INFO)
+    vllm_logger.propagate = True
+
+    # Also handle any root loggers that VLLM might be using without the vllm prefix
+    other_loggers = ["__init__", "nixl"]
+    for logger_name in other_loggers:
+        logger = logging.getLogger(logger_name)
+        logger.handlers = []
+        logger.setLevel(logging.INFO)
+        logger.propagate = True
+
+    # Bento Logger
+    bentoml_logger.setLevel(logging.ERROR)
+    bentoml_logger.propagate = True
+
+    # Disable CLI tag warning
     tag_logger = logging.getLogger("tag")
     tag_logger.setLevel(logging.ERROR)
     tag_logger.propagate = True
