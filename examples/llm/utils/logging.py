@@ -14,9 +14,11 @@
 # limitations under the License.
 
 import asyncio
+import logging
 
 from dynamo._core import Client
 
+logger = logging.getLogger(__name__)
 
 async def check_required_workers(
     workers_client: Client, required_workers: int, on_change=True, poll_interval=0.5
@@ -31,7 +33,7 @@ async def check_required_workers(
         new_count = len(worker_ids)
 
         if (not on_change) or new_count != num_workers:
-            print(
+            logger.info(
                 f"Waiting for more workers to be ready.\n"
                 f" Current: {new_count},"
                 f" Required: {required_workers}"

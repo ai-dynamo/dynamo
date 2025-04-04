@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import logging
 import argparse
 import random
 from argparse import Namespace
@@ -30,6 +31,7 @@ from dynamo.sdk.lib.config import ServiceConfig
 
 WorkerId = str
 
+logger = logging.getLogger(__name__)
 
 def parse_args(service_name, prefix) -> Namespace:
     parser = argparse.ArgumentParser()
@@ -105,7 +107,7 @@ class Router:
         await kv_listener.create_service()
         self.indexer = KvIndexer(kv_listener, self.args.block_size)
         self.metrics_aggregator = KvMetricsAggregator(kv_listener)
-        print("KV Router initialized")
+        logger.info("KV Router initialized")
 
     def _cost_function(
         self,

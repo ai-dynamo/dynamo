@@ -13,11 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-<<<<<<< HEAD
-import asyncio
 import logging
-=======
->>>>>>> main
 import uuid
 from enum import Enum
 from typing import AsyncIterator, Tuple, Union
@@ -31,7 +27,6 @@ from utils.protocol import MyRequestOutput, Tokens, vLLMGenerateRequest
 from utils.vllm import parse_vllm_args
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
-from vllm.logger import logger as vllm_logger
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
@@ -106,7 +101,7 @@ class Processor(ProcessMixIn):
         request_type: RequestType,
     ):
         request_id = str(uuid.uuid4())
-        vllm_logger.debug(f"Got raw request: {raw_request}")
+        logger.debug(f"Got raw request: {raw_request}")
         (
             request,
             conversation,
@@ -120,7 +115,7 @@ class Processor(ProcessMixIn):
             ):
                 worker_id, prefix_hit_rate = route_response.split("_")
                 prefix_hit_rate = float(prefix_hit_rate)
-                vllm_logger.info(
+                logger.info(
                     f"Worker ID: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
                 )
                 break
