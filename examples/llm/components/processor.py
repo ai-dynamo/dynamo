@@ -15,6 +15,7 @@
 
 import asyncio
 import uuid
+import warnings
 from enum import Enum
 from typing import AsyncIterator, Tuple, Union
 
@@ -113,35 +114,48 @@ class Processor(ProcessMixIn):
             sampling_params,
         ) = await self._parse_raw_request(raw_request)
         if self.router_mode == "kv":
-            async for route_response in self.router.generate(
-                Tokens(tokens=engine_prompt["prompt_token_ids"]).model_dump_json()
-            ):
-                worker_id, prefix_hit_rate = route_response.split("_")
-                prefix_hit_rate = float(prefix_hit_rate)
-                vllm_logger.info(
-                    f"Worker ID: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
-                )
-                break
+            attempt = 1
+            max_attempts = 5
+            base_delay = 0.01
 
-            if worker_id == "":
-                engine_generator = await self.worker_client.generate(
-                    vLLMGenerateRequest(
-                        engine_prompt=engine_prompt,
-                        sampling_params=sampling_params,
-                        request_id=request_id,
-                        prefix_hit_rate=prefix_hit_rate,
-                    ).model_dump_json()
-                )
-            else:
-                engine_generator = await self.worker_client.direct(
-                    vLLMGenerateRequest(
-                        engine_prompt=engine_prompt,
-                        sampling_params=sampling_params,
-                        request_id=request_id,
-                        prefix_hit_rate=prefix_hit_rate,
-                    ).model_dump_json(),
-                    int(worker_id),
-                )
+            # Retry loop for the router.generate call
+            while True:
+                try:
+                    worker_id, prefix_hit_rate = await anext(
+                        self.router.generate(
+                            Tokens(
+                                tokens=engine_prompt["prompt_token_ids"]
+                            ).model_dump_json()
+                        )
+                    )
+                    break  # Successfully completed without exception, exit the loop
+                except Exception as e:
+                    if attempt < max_attempts:
+                        delay = base_delay * (2 ** (attempt - 1))
+                        warnings.warn(
+                            f"Attempt {attempt}/{max_attempts} failed for router.generate. Error: {str(e)}. Retrying after {delay:.4f}s..."
+                        )
+                        await asyncio.sleep(delay)
+                        attempt += 1
+                    else:
+                        warnings.warn(
+                            f"All {max_attempts} attempts failed for router.generate. Last error: {str(e)}"
+                        )
+                        raise  # Re-raise the last exception after all attempts fail
+
+            vllm_logger.info(
+                f"Worker ID: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
+            )
+
+            engine_generator = await self.worker_client.direct(
+                vLLMGenerateRequest(
+                    engine_prompt=engine_prompt,
+                    sampling_params=sampling_params,
+                    request_id=request_id,
+                    prefix_hit_rate=prefix_hit_rate,
+                ).model_dump_json(),
+                int(worker_id),
+            )
         elif self.router_mode == "random":
             engine_generator = await self.worker_client.generate(
                 vLLMGenerateRequest(
