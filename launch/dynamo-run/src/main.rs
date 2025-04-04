@@ -32,7 +32,7 @@ Example:
 
 const ZMQ_SOCKET_PREFIX: &str = "dyn";
 
-const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>|none] out=[See available engines below] [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json]";
+const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>|none] out=[See available engines below] [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin]";
 
 fn main() -> anyhow::Result<()> {
     logging::init();
@@ -94,6 +94,7 @@ fn main() -> anyhow::Result<()> {
                         node_config,
                         flags.tensor_parallel_size,
                         flags.extra_engine_args,
+                        flags.router_mode.is_kv_routing(),
                     );
                 }
             } else {
