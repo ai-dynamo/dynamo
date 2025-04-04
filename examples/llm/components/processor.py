@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
 import uuid
 from enum import Enum
 from typing import AsyncIterator, Tuple, Union
@@ -22,6 +21,7 @@ from components.kv_router import Router
 from components.worker import VllmWorker
 from transformers import AutoTokenizer
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
+from utils.logging import check_required_workers
 from utils.protocol import MyRequestOutput, Tokens, vLLMGenerateRequest
 from utils.vllm import parse_vllm_args
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -90,13 +90,8 @@ class Processor(ProcessMixIn):
             .endpoint("generate")
             .client()
         )
-        while len(self.worker_client.endpoint_ids()) < self.min_workers:
-            print(
-                f"Waiting for workers to be ready.\n"
-                f" Current: {len(self.worker_client.endpoint_ids())},"
-                f" Required: {self.min_workers}"
-            )
-            await asyncio.sleep(2)
+
+        await check_required_workers(self.worker_client, self.min_workers)
 
     async def _generate(
         self,
