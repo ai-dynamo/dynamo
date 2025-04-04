@@ -271,7 +271,7 @@ async fn add_model(
     );
     let etcd_client = distributed
         .etcd_client()
-        .expect("llmctl is only useful with dynamic workers");
+        .expect("unreachable: llmctl is only useful with dynamic workers");
 
     // check if model already exists
     let kvs = etcd_client.kv_get_prefix(&path).await?;

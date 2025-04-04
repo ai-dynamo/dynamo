@@ -149,11 +149,7 @@ impl Component {
 
     pub fn service_name(&self) -> String {
         let service_name = format!("{}_{}", self.namespace.name(), self.name);
-        if self.is_static {
-            Slug::slugify(&service_name).to_string()
-        } else {
-            Slug::slugify_unique(&service_name).to_string()
-        }
+        Slug::slugify_unique(&service_name).to_string()
     }
 
     pub fn path(&self) -> String {
