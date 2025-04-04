@@ -1,15 +1,12 @@
 import logging
 import logging.config
 
-# Import the Dynamo logger
 from dynamo.runtime.logging import configure_logger
-
 
 # Create a replacement for BentoML's configure_server_logging
 def configure_server_logging():
     """
-    Replaces BentoML's logging configuration with Dynamo's.
-    This ensures all logs go through Dynamo's handler.
+    A single place to configure logging for Dynamo that can be used to replace BentoML's logging configuration.
     """
     # First, remove any existing handlers to avoid duplication
     root_logger = logging.getLogger()

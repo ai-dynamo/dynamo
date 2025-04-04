@@ -68,15 +68,15 @@ class VllmWorker:
 
         if self.engine_args.remote_prefill:
             if self.engine_args.enable_chunked_prefill is not False:
-                print("Chunked prefill is not supported yet, setting to False")
+                logger.info("Chunked prefill is not supported yet, setting to False")
                 self.engine_args.enable_chunked_prefill = False
 
             if self.engine_args.preemption_mode != "swap":
-                print("Preemption mode is not supported yet, setting to swap")
+                logger.info("Preemption mode is not supported yet, setting to swap")
                 self.engine_args.preemption_mode = "swap"
 
             if self.engine_args.pipeline_parallel_size != 1:
-                print("Pipeline parallel size is not supported yet, setting to 1")
+                logger.info("Pipeline parallel size is not supported yet, setting to 1")
                 self.engine_args.pipeline_parallel_size = 1
 
         if self.engine_args.router == "kv":
@@ -112,7 +112,7 @@ class VllmWorker:
             )
             task = asyncio.create_task(self.create_metrics_publisher_endpoint())
             task.add_done_callback(
-                lambda _: print("metrics publisher endpoint created")
+                lambda _: logger.info("metrics publisher endpoint created")
             )
 
         runtime = dynamo_context["runtime"]
@@ -131,7 +131,7 @@ class VllmWorker:
             )
         else:
             self.disaggregated_router = None
-        print("VllmWorker has been initialized")
+        logger.info("VllmWorker has been initialized")
 
     async def create_metrics_publisher_endpoint(self):
         component = dynamo_context["component"]
@@ -172,12 +172,12 @@ class VllmWorker:
                 is_remote_prefill=True,
                 remote_prefill_request_callback=self.get_remote_prefill_request_callback(),
             )
-            print(
+            logger.info(
                 f"Prefilling remotely for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
             )
         else:
             remote_prefill_params = None
-            print(
+            logger.info(
                 f"Prefilling locally for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
             )
 
