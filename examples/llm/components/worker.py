@@ -125,6 +125,7 @@ class VllmWorker:
                 runtime,
                 self.model_name,
                 max_local_prefill_length=self.engine_args.max_local_prefill_length,
+                max_prefill_queue_size=self.engine_args.max_prefill_queue_size,
             )
         else:
             self.disaggregated_router = None
@@ -148,9 +149,17 @@ class VllmWorker:
     @dynamo_endpoint()
     async def generate(self, request: vLLMGenerateRequest):
         # TODO: consider prefix hit when deciding prefill locally or remotely
+
         if self.disaggregated_router is not None:
+            async with PrefillQueue.get_instance(
+                nats_server=self._prefill_queue_nats_server,
+                stream_name=self._prefill_queue_stream_name,
+            ) as prefill_queue:
+                prefill_queue_size = await prefill_queue.get_queue_size()
             disagg_router_decision = self.disaggregated_router.prefill_remote(
-                len(request.engine_prompt["prompt_token_ids"]), request.prefix_hit_rate
+                len(request.engine_prompt["prompt_token_ids"]),
+                request.prefix_hit_rate,
+                prefill_queue_size,
             )
         else:
             # always prefill remotely if no disaggregated router is provided

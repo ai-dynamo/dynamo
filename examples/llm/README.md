@@ -105,28 +105,29 @@ This figure shows an overview of the major components to deploy:
 ```
 
 ### Example architectures
+_Note_: For a non-dockerized deployment, first export `DYNAMO_HOME` to point to the dynamo repository root, e.g. `export DYNAMO_HOME=$(pwd)`
 
 #### Aggregated serving
 ```bash
-cd /workspace/examples/llm
+cd $DYNAMO_HOME/examples/llm
 dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
 ```
 
 #### Aggregated serving with KV Routing
 ```bash
-cd /workspace/examples/llm
+cd $DYNAMO_HOME/examples/llm
 dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
 ```
 
 #### Disaggregated serving
 ```bash
-cd /workspace/examples/llm
+cd $DYNAMO_HOME/examples/llm
 dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
 ```
 
 #### Disaggregated serving with KV Routing
 ```bash
-cd /workspace/examples/llm
+cd $DYNAMO_HOME/examples/llm
 dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
 ```
 
@@ -150,21 +151,15 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ```
 
+### Multi-node deployment
+
+See [multinode-examples.md](multinode-examples.md) for more details.
+
 ### Close deployment
 
 Kill all dynamo processes managed by circusd.
 
 ```
-function kill_tree() {
-    local parent=$1
-    local children=$(ps -o pid= --ppid $parent)
-    for child in $children; do
-        kill_tree $child
-    done
-    echo "Killing process $parent"
-    kill -9 $parent
-}
-
-# kill process-tree of circusd
-kill_tree $(pgrep circusd)
+ctrl-c
+pkill python3
 ```

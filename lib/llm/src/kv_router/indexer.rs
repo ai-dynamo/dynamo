@@ -822,9 +822,7 @@ impl KvIndexerInterface for KvIndexerSharded {
                                 - (scores.frequencies.len() as i64);
 
                             if diff > 0 {
-                                scores
-                                    .frequencies
-                                    .extend(iter::repeat(0).take(diff as usize));
+                                scores.frequencies.extend(iter::repeat_n(0, diff as usize));
                             }
 
                             for i in 0..response.frequencies.len() {

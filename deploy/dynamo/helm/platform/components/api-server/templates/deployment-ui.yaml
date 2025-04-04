@@ -36,7 +36,7 @@ spec:
     spec:
       containers:
       - image: nvcr.io/nvidian/nim-llm-dev/compoundai-ui:0.0.11
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
           httpGet:

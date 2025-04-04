@@ -23,10 +23,9 @@ use pyo3::{exceptions::PyException, prelude::*};
 use rs::pipeline::network::Ingress;
 use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
-use tracing_subscriber::FmtSubscriber;
 
 use dynamo_runtime::{
-    self as rs,
+    self as rs, logging,
     pipeline::{EngineStream, ManyOut, SingleIn},
     protocols::annotated::Annotated as RsAnnotated,
     traits::DistributedRuntimeProvider,
@@ -50,13 +49,8 @@ const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 /// import the module.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Sets up RUST_LOG environment variable for logging through the python-wheel
-    // Example: RUST_LOG=debug python3 -m ...
-    let subscriber = FmtSubscriber::builder()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    logging::init();
+    m.add_function(wrap_pyfunction!(log_message, m)?)?;
 
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<CancellationToken>()?;
@@ -92,6 +86,13 @@ where
     E: Display,
 {
     PyException::new_err(format!("{}", err))
+}
+
+/// Log a message from Python with file and line info
+#[pyfunction]
+#[pyo3(text_signature = "(level, message, module, file, line)")]
+fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) {
+    logging::log_message(level, message, module, file, line);
 }
 
 #[pyclass]
@@ -143,7 +144,7 @@ struct Client {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    fn new(event_loop: PyObject) -> PyResult<Self> {
+    fn new(event_loop: PyObject, is_static: bool) -> PyResult<Self> {
         let worker = rs::Worker::from_settings().map_err(to_pyerr)?;
         INIT.get_or_try_init(|| {
             let primary = worker.tokio_runtime()?;
@@ -155,11 +156,17 @@ impl DistributedRuntime {
 
         let runtime = worker.runtime().clone();
 
-        let inner = worker
-            .runtime()
-            .secondary()
-            .block_on(rs::DistributedRuntime::from_settings(runtime))
-            .map_err(to_pyerr)?;
+        let inner =
+            if is_static {
+                runtime.secondary().block_on(
+                    rs::DistributedRuntime::from_settings_without_discovery(runtime),
+                )
+            } else {
+                runtime
+                    .secondary()
+                    .block_on(rs::DistributedRuntime::from_settings(runtime))
+            };
+        let inner = inner.map_err(to_pyerr)?;
 
         Ok(DistributedRuntime { inner, event_loop })
     }
@@ -171,10 +178,11 @@ impl DistributedRuntime {
         })
     }
 
-    fn etcd_client(&self) -> PyResult<EtcdClient> {
-        Ok(EtcdClient {
-            inner: self.inner.etcd_client().clone(),
-        })
+    fn etcd_client(&self) -> PyResult<Option<EtcdClient>> {
+        match self.inner.etcd_client().clone() {
+            Some(etcd_client) => Ok(Some(EtcdClient { inner: etcd_client })),
+            None => Ok(None),
+        }
     }
 
     fn primary_token(&self) -> CancellationToken {
@@ -261,7 +269,11 @@ impl Endpoint {
     }
 
     fn lease_id(&self) -> i64 {
-        self.inner.drt().primary_lease().id()
+        self.inner
+            .drt()
+            .primary_lease()
+            .map(|l| l.id())
+            .unwrap_or(0)
     }
 }
 
@@ -347,7 +359,7 @@ impl EtcdClient {
 impl Client {
     /// Get list of current endpoints
     fn endpoint_ids(&self) -> Vec<i64> {
-        self.inner.endpoint_ids().borrow().clone()
+        self.inner.endpoint_ids()
     }
 
     fn wait_for_endpoints<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
@@ -365,7 +377,11 @@ impl Client {
         request: PyObject,
         annotated: Option<bool>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        self.random(py, request, annotated)
+        if self.inner.is_static() {
+            self.r#static(py, request, annotated)
+        } else {
+            self.random(py, request, annotated)
+        }
     }
 
     /// Send a request to the next endpoint in a round-robin fashion.
@@ -436,6 +452,32 @@ impl Client {
                 .direct(request.into(), endpoint_id)
                 .await
                 .map_err(to_pyerr)?;
+
+            tokio::spawn(process_stream(stream, tx));
+
+            Ok(AsyncResponseStream {
+                rx: Arc::new(Mutex::new(rx)),
+                annotated,
+            })
+        })
+    }
+
+    /// Directly send a request to a pre-defined static worker
+    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING))]
+    fn r#static<'p>(
+        &self,
+        py: Python<'p>,
+        request: PyObject,
+        annotated: Option<bool>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let annotated = annotated.unwrap_or(false);
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let client = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let stream = client.r#static(request.into()).await.map_err(to_pyerr)?;
 
             tokio::spawn(process_stream(stream, tx));
 

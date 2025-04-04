@@ -16,6 +16,7 @@
 
 import asyncio
 import os
+import sys
 
 from pydantic import BaseModel
 from utils.nixl import NixlMetadataStore
@@ -64,6 +65,12 @@ class PrefillWorker:
             print("Prefill must be done eagerly, setting to True")
             self.engine_args.enforce_eager = True
 
+        if self.engine_args.enable_prefix_caching is not False:
+            print(
+                "Prefix caching is not supported yet in prefill worker, setting to False"
+            )
+            self.engine_args.enable_prefix_caching = False
+
     @async_on_start
     async def async_init(self):
         self._engine_context = build_async_engine_client_from_engine_args(
@@ -78,7 +85,16 @@ class PrefillWorker:
         self._metadata_store = NixlMetadataStore("dynamo", runtime)
         await self._metadata_store.put(metadata.engine_id, metadata)
         task = asyncio.create_task(self.prefill_queue_handler())
-        task.add_done_callback(lambda _: print("prefill queue handler created"))
+
+        def prefill_queue_handler_cb(fut):
+            try:
+                fut.result()
+                print("prefill queue handler exited successfully")
+            except Exception as e:
+                print(f"[ERROR] prefill queue handler failed: {e!r}")
+                sys.exit(1)
+
+        task.add_done_callback(prefill_queue_handler_cb)
         print("PrefillWorker initialized")
 
     async def prefill_queue_handler(self):
@@ -115,6 +131,7 @@ class PrefillWorker:
             is_remote_decode=True,
             decode_block_ids=request.block_ids,
             decode_engine_id=request.engine_id,
+            decode_computed_block_ids=request.computed_block_ids,
         )
 
         # TODO check if metadata has changed

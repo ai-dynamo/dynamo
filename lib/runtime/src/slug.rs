@@ -36,26 +36,29 @@ impl Slug {
         Slug::slugify_unique(s.as_ref())
     }
 
-    // /// Turn the string into a valid slug, replacing any not-web-or-nats-safe characters with '-'
-    // fn slugify(s: &str) -> Slug {
-    //     let out = s
-    //         .to_lowercase()
-    //         .chars()
-    //         .map(|c| {
-    //             let is_valid = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_';
-    //             if is_valid {
-    //                 c
-    //             } else {
-    //                 REPLACEMENT_CHAR
-    //             }
-    //         })
-    //         .collect::<String>();
-    //     Slug::new(out)
-    // }
+    /* Not currently used but leave it for now
+     *
+    /// Turn the string into a valid slug, replacing any not-web-or-nats-safe characters with '-'
+    pub fn slugify(s: &str) -> Slug {
+        let out = s
+            .to_lowercase()
+            .chars()
+            .map(|c| {
+                let is_valid = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_';
+                if is_valid {
+                    c
+                } else {
+                    REPLACEMENT_CHAR
+                }
+            })
+            .collect::<String>();
+        Slug::new(out)
+    }
+    */
 
     /// Like slugify but also add a four byte hash on the end, in case two different strings slug
     /// to the same thing.
-    fn slugify_unique(s: &str) -> Slug {
+    pub fn slugify_unique(s: &str) -> Slug {
         let out = s
             .to_lowercase()
             .chars()

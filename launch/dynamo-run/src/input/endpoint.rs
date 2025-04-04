@@ -43,8 +43,6 @@ pub async fn run(
     let cancel_token = runtime.primary_token().clone();
     let endpoint_id: Endpoint = path.parse()?;
 
-    let etcd_client = distributed.etcd_client();
-
     let (ingress, service_name) = match engine_config {
         EngineConfig::StaticFull {
             service_name,
@@ -95,15 +93,18 @@ pub async fn run(
         .create()
         .await?
         .endpoint(endpoint_id.name);
-    let network_name = endpoint.subject();
-    tracing::debug!("Registering with etcd as {network_name}");
-    etcd_client
-        .kv_create(
-            network_name.clone(),
-            serde_json::to_vec_pretty(&model_registration)?,
-            None,
-        )
-        .await?;
+
+    if let Some(etcd_client) = distributed.etcd_client() {
+        let network_name = endpoint.subject();
+        tracing::debug!("Registering with etcd as {network_name}");
+        etcd_client
+            .kv_create(
+                network_name.clone(),
+                serde_json::to_vec_pretty(&model_registration)?,
+                Some(etcd_client.lease_id()),
+            )
+            .await?;
+    }
 
     let rt_fut = endpoint.endpoint_builder().handler(ingress).start();
     tokio::select! {

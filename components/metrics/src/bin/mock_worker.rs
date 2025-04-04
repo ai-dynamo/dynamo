@@ -13,12 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use async_nats::service::endpoint::Stats;
 use dynamo_llm::kv_router::{
     protocols::ForwardPassMetrics, scheduler::KVHitRateEvent, KV_HIT_RATE_SUBJECT,
 };
 use dynamo_runtime::{
-    component::Namespace,
+    component::{service::EndpointStats, Namespace},
     logging,
     pipeline::{
         async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
@@ -107,7 +106,7 @@ async fn mock_event_publisher(namespace: Namespace) {
 }
 
 /// Generates mock forward pass metrics for stats handler
-fn mock_stats_handler(_stats: Stats) -> serde_json::Value {
+fn mock_stats_handler(_stats: EndpointStats) -> serde_json::Value {
     let request_total_slots = 100;
     let request_active_slots = rand::rng().random_range(0..=request_total_slots);
     let kv_total_blocks = 100;

@@ -165,24 +165,21 @@ Any example above using `out=sglang` will work, but our sglang backend is also m
 
 Node 1:
 ```
-dynamo-run in=http out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 0 --dist-init-addr 10.217.98.122:9876
+dynamo-run in=http out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 0 --leader-addr 10.217.98.122:9876
 ```
 
 Node 2:
 ```
-dynamo-run in=none out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 1 --dist-init-addr 10.217.98.122:9876
+dynamo-run in=none out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 1 --leader-addr 10.217.98.122:9876
 ```
+
+To pass extra arguments to the sglang engine see *Extra engine arguments* below.
 
 ## llama_cpp
 
 - `cargo build --features llamacpp,cuda`
 
-- `dynamo-run out=llama_cpp --model-path ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf --model-config ~/llm_models/Llama-3.2-3B-Instruct/`
-
-The extra `--model-config` flag is because:
-- llama_cpp only runs GGUF
-- We send it tokens, meaning we do the tokenization ourself, so we need a tokenizer
-- We don't yet read it out of the GGUF (TODO), so we need an HF repo with `tokenizer.json` et al
+- `dynamo-run out=llama_cp ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf`
 
 If the build step also builds llama_cpp libraries into the same folder as the binary ("libllama.so", "libggml.so", "libggml-base.so", "libggml-cpu.so", "libggml-cuda.so"), then `dynamo-run` will need to find those at runtime. Set `LD_LIBRARY_PATH`, and be sure to deploy them alongside the `dynamo-run` binary.
 
@@ -215,7 +212,7 @@ Run (still inside that virtualenv) - HF repo:
 
 Run (still inside that virtualenv) - GGUF:
 ```
-./dynamo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf --model-config ~/llm_models/Llama-3.2-3B-Instruct/
+./dynamo-run in=http out=vllm ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf
 ```
 
 + Multi-node:
@@ -229,6 +226,8 @@ Node 2:
 ```
 dynamo-run in=none out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 1
 ```
+
+To pass extra arguments to the vllm engine see *Extra engine arguments* below.
 
 ## Python bring-your-own-engine
 
@@ -358,30 +357,9 @@ Run:
 dynamo-run in=text out=trtllm --model-path /app/trtllm_engine/ --model-config ~/llm_models/Llama-3.2-3B-Instruct/
 ```
 
-Note that TRT-LLM uses it's own `.engine` format for weights. Repo models must be converted like so:
-
-+ Get the build container
-```
-docker run --gpus all -it nvcr.io/nvidian/nemo-llm/trtllm-engine-builder:0.2.0 bash
-```
-
-+ Fetch the model and convert
-```
-mkdir /tmp/model
-huggingface-cli download meta-llama/Llama-3.2-3B-Instruct --local-dir /tmp/model
-python convert_checkpoint.py --model_dir /tmp/model/ --output_dir ./converted --dtype [float16|bfloat16|whatever you want] --tp_size X --pp_size Y
-trtllm-build --checkpoint_dir ./converted --output_dir ./final/trtllm_engine --use_paged_context_fmha enable --gemm_plugin auto
-```
+Note that TRT-LLM uses it's own `.engine` format for weights.
 
 The `--model-path` you give to `dynamo-run` must contain the `config.json` (TRT-LLM's , not the model's) and `rank0.engine` (plus other ranks if relevant).
-
-+ Execute
-TRT-LLM is a C++ library that must have been previously built and installed. It needs a lot of memory to compile. Gitlab builds a container you can try:
-```
-sudo docker run --gpus all -it -v /home/user:/outside-home gitlab-master.nvidia.com:5005/dl/ai-services/libraries/rust/nim-nvllm/tensorrt_llm_runtime:85fa4a6f
-```
-
-Copy the trt-llm engine, the model's `.json` files (for the model deployment card) and the `nio` binary built for the correct glibc (container is Ubuntu 22.04 currently) into that container.
 
 ## Echo Engines
 
@@ -438,4 +416,21 @@ The output looks like this:
 ## Defaults
 
 The input defaults to `in=text`. The output will default to `mistralrs` engine. If not available whatever engine you have compiled in (so depending on `--features`).
+
+## Extra engine arguments
+
+The vllm and sglang backends support passing any argument the engine accepts.
+
+Put the arguments in a JSON file:
+```
+{
+    "dtype": "half",
+    "trust_remote_code": true
+}
+```
+
+Pass it like this:
+```
+dynamo-run out=sglang ~/llm_models/Llama-3.2-3B-Instruct --extra-engine-args sglang_extra.json
+```
 

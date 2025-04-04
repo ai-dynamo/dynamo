@@ -16,14 +16,13 @@
 //! Scoring functions for the KV router.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use crate::kv_router::scheduler::Endpoint;
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct ProcessedEndpoints {
-    pub endpoints: Vec<Endpoint>,
-    pub worker_ids: Vec<i64>,
+    pub endpoints: HashMap<i64, Endpoint>,
     pub load_avg: f64,
     pub load_std: f64,
 }
@@ -43,12 +42,10 @@ impl ProcessedEndpoints {
             / load_values.len() as f64;
         let load_std = variance.sqrt();
 
-        let worker_ids: HashSet<i64> = endpoints.iter().map(|x| x.worker_id()).collect();
-        let worker_ids: Vec<i64> = worker_ids.into_iter().collect();
+        let endpoints = endpoints.into_iter().map(|e| (e.worker_id(), e)).collect();
 
         ProcessedEndpoints {
             endpoints,
-            worker_ids,
             load_avg,
             load_std,
         }

@@ -27,17 +27,15 @@ dynamo-llm = { workspace = true }
 dynamo-runtime = { workspace = true }
 
 futures = { workspace = true }
+prometheus = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
-async-nats = { version = "0.38", features = ["service"] }
+# TODO: Update axum to 0.8
 axum = { version = "0.6" }
 clap = { version = "4.5", features = ["derive", "env"] }
-opentelemetry = { version = "0.20" }
-opentelemetry-prometheus = { version = "0.13" }
-prometheus = { version = "0.13" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-thiserror = { version = "1.0" }

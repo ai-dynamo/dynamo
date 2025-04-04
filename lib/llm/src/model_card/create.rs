@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 
-use crate::model_card::model::{File, ModelInfoType, PromptFormatterArtifact, TokenizerKind};
+use crate::model_card::model::{ModelInfoType, PromptFormatterArtifact, TokenizerKind};
 
 impl ModelDeploymentCard {
     /// Creates a ModelDeploymentCard from a local directory path.
@@ -56,6 +56,33 @@ impl ModelDeploymentCard {
                 .ok_or_else(|| anyhow::anyhow!("Invalid model directory name"))?,
         );
         Self::from_repo(&repo_id, model_name).await
+    }
+
+    pub async fn from_gguf(gguf_file: &Path, model_name: Option<&str>) -> anyhow::Result<Self> {
+        let model_name = model_name.map(|s| s.to_string()).or_else(|| {
+            gguf_file
+                .iter()
+                .next_back()
+                .map(|n| n.to_string_lossy().to_string())
+        });
+        let Some(model_name) = model_name else {
+            // I think this would only happy on an empty path
+            anyhow::bail!(
+                "Could not extract model name from path '{}'",
+                gguf_file.display()
+            );
+        };
+        Ok(Self {
+            display_name: model_name.to_string(),
+            service_name: model_name.to_string(),
+            model_info: ModelInfoType::GGUF(gguf_file.to_path_buf()),
+            tokenizer: TokenizerKind::from_gguf(gguf_file)?,
+            prompt_formatter: Some(PromptFormatterArtifact::GGUF(gguf_file.to_path_buf())),
+            prompt_context: None, // TODO - auto-detect prompt context
+            revision: 0,
+            last_published: None,
+            requires_preprocessing: true,
+        })
     }
 
     /// TODO: This will be implemented after nova-hub is integrated with the model-card
@@ -127,7 +154,7 @@ impl TokenizerKind {
 }
 
 /// Checks if the provided path contains the expected file.
-async fn check_for_file(repo_id: &str, file: &str) -> anyhow::Result<File> {
+async fn check_for_file(repo_id: &str, file: &str) -> anyhow::Result<String> {
     let mut files = check_for_files(repo_id, vec![file.to_string()]).await?;
     let file = files
         .remove(file)
@@ -135,7 +162,7 @@ async fn check_for_file(repo_id: &str, file: &str) -> anyhow::Result<File> {
     Ok(file)
 }
 
-async fn check_for_files(repo_id: &str, files: Vec<String>) -> Result<HashMap<String, File>> {
+async fn check_for_files(repo_id: &str, files: Vec<String>) -> Result<HashMap<String, String>> {
     let dir_entries =
         fs::read_dir(repo_id).with_context(|| format!("Failed to read directory: {}", repo_id))?;
     let mut found_files = HashMap::new();

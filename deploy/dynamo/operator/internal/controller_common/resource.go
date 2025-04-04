@@ -35,7 +35,13 @@ const (
 	NvidiaAnnotationHashKey = "nvidia.com/last-applied-hash"
 )
 
-func SyncResource[T client.Object](ctx context.Context, c client.Client, desired T, namespacedName types.NamespacedName, createOnly bool) (T, error) {
+type Resource interface {
+	client.Object
+	GetSpec() any
+	SetSpec(spec any)
+}
+
+func SyncResource[T Resource](ctx context.Context, c client.Client, desired T, namespacedName types.NamespacedName, createOnly bool) (T, error) {
 	// Retrieve the GroupVersionKind (GVK) of the desired object
 	gvk, err := apiutil.GVKForObject(desired, c.Scheme())
 	if err != nil {
@@ -73,7 +79,9 @@ func SyncResource[T client.Object](ctx context.Context, c client.Client, desired
 
 	// Check if the Spec has changed and update if necessary
 	if IsSpecChanged(current, desired) {
-		if err := c.Update(ctx, desired); err != nil {
+		// update the spec of the current object with the desired spec
+		current.SetSpec(desired.GetSpec())
+		if err := c.Update(ctx, current); err != nil {
 			return desired, fmt.Errorf("failed to update resource: %w", err)
 		}
 	}
@@ -83,7 +91,7 @@ func SyncResource[T client.Object](ctx context.Context, c client.Client, desired
 }
 
 // GetResourceHash returns a consistent hash for the given object spec
-func GetResourceHash(obj client.Object) string {
+func GetResourceHash(obj any) string {
 	// Convert obj to a map[string]interface{}
 	objMap, err := json.Marshal(obj)
 	if err != nil {
@@ -112,12 +120,12 @@ func GetResourceHash(obj client.Object) string {
 
 // IsSpecChanged returns true if the spec has changed between the existing one
 // and the new resource spec compared by hash.
-func IsSpecChanged(current client.Object, desired client.Object) bool {
+func IsSpecChanged(current Resource, desired Resource) bool {
 	if current == nil && desired != nil {
 		return true
 	}
 
-	hashStr := GetResourceHash(desired)
+	hashStr := GetResourceHash(desired.GetSpec())
 	foundHashAnnotation := false
 
 	currentAnnotations := current.GetAnnotations()

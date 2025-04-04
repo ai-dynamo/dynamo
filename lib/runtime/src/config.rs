@@ -96,7 +96,7 @@ impl RuntimeConfig {
     /// Load the runtime configuration from the environment and configuration files
     /// Configuration is priorities in the following order, where the last has the lowest priority:
     /// 1. Environment variables (top priority)
-    ///     TO DO: Add documentation for configuration files. Paths should be configurable.
+    ///    TO DO: Add documentation for configuration files. Paths should be configurable.
     /// 2. /opt/dynamo/etc/runtime.toml
     /// 3. /opt/dynamo/defaults/runtime.toml (lowest priority)
     ///
@@ -168,6 +168,12 @@ pub fn jsonl_logging_enabled() -> bool {
 /// Set the `DYN_SDK_DISABLE_ANSI_LOGGING` environment variable a [`is_truthy`] value
 pub fn disable_ansi_logging() -> bool {
     env_is_truthy("DYN_SDK_DISABLE_ANSI_LOGGING")
+}
+
+/// Check whether to use local timezone for logging timestamps (default is UTC)
+/// Set the `DYN_LOG_USE_LOCAL_TZ` environment variable to a [`is_truthy`] value
+pub fn use_local_timezone() -> bool {
+    env_is_truthy("DYN_LOG_USE_LOCAL_TZ")
 }
 
 #[cfg(test)]

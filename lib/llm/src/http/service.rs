@@ -52,6 +52,7 @@ use crate::types::openai::{
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 #[derive(Clone)]
@@ -191,6 +192,7 @@ pub struct DeploymentState {
     completion_engines: Arc<Mutex<ModelEngines<OpenAICompletionsStreamingEngine>>>,
     chat_completion_engines: Arc<Mutex<ModelEngines<OpenAIChatCompletionsStreamingEngine>>>,
     metrics: Arc<Metrics>,
+    sse_keep_alive: Option<Duration>,
 }
 
 impl DeploymentState {
@@ -199,6 +201,7 @@ impl DeploymentState {
             completion_engines: Arc::new(Mutex::new(ModelEngines::default())),
             chat_completion_engines: Arc::new(Mutex::new(ModelEngines::default())),
             metrics: Arc::new(Metrics::default()),
+            sse_keep_alive: None,
         }
     }
 

@@ -30,7 +30,6 @@ mod input;
 #[cfg(any(feature = "vllm", feature = "sglang"))]
 mod net;
 mod opt;
-mod output;
 pub use opt::{Input, Output};
 
 /// How we identify a namespace/component/endpoint URL.
@@ -101,7 +100,7 @@ pub async fn run(
         .or_else(|| {
             model_path
                 .as_ref()
-                .and_then(|p| p.iter().last())
+                .and_then(|p| p.iter().next_back())
                 .map(|n| n.to_string_lossy().into_owned())
         })
         .or_else(|| {
@@ -117,7 +116,7 @@ pub async fn run(
         if !inner_model_path.exists() {
             model_name = inner_model_path
                 .iter()
-                .last()
+                .next_back()
                 .map(|s| s.to_string_lossy().to_string());
             model_path = Some(hub::from_hf(inner_model_path).await?);
         }
@@ -126,46 +125,49 @@ pub async fn run(
     // Load the model deployment card, if any
     // Only used by some engines, so without those feature flags it's unused.
     #[allow(unused_variables)]
-    let (maybe_card_path, maybe_card) = match (&model_path, &flags.model_config) {
+    let maybe_card = match (&model_path, &flags.model_config) {
         // --model-config takes precedence
         (_, Some(model_config)) => {
-            let card =
-                match ModelDeploymentCard::from_local_path(model_config, model_name.as_deref())
-                    .await
-                {
-                    Ok(card) => Some(card),
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to load model card from config path {}: {}",
-                            model_config.display(),
-                            e
-                        );
-                        None
-                    }
-                };
-            (Some(model_config.clone()), card)
-        }
-        // If --model-path is an HF repo use that
-        (Some(model_path), _) if model_path.is_dir() => {
-            let card = match ModelDeploymentCard::from_local_path(model_path, model_name.as_deref())
-                .await
-            {
+            match ModelDeploymentCard::from_local_path(model_config, model_name.as_deref()).await {
                 Ok(card) => Some(card),
                 Err(e) => {
                     tracing::error!(
-                        "Failed to load model card from model path {}: {}",
-                        model_path.display(),
-                        e
+                        "Failed to load model card from --model-config path {}: {e}",
+                        model_config.display(),
                     );
                     None
                 }
-            };
-            (Some(model_path.clone()), card)
+            }
+        }
+        // If --model-path is an HF repo use that
+        (Some(model_path), _) if model_path.is_dir() => {
+            match ModelDeploymentCard::from_local_path(model_path, model_name.as_deref()).await {
+                Ok(card) => Some(card),
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to load model card from --model-path {}: {e}",
+                        model_path.display(),
+                    );
+                    None
+                }
+            }
+        }
+        (Some(model_path), _) if model_path.is_file() => {
+            match ModelDeploymentCard::from_gguf(model_path, model_name.as_deref()).await {
+                Ok(card) => Some(card),
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to load model card from GGUF {}: {e}",
+                        model_path.display(),
+                    );
+                    None
+                }
+            }
         }
         // Otherwise we don't have one, but we only need it if we're tokenizing
         _ => {
             tracing::debug!("No model card path provided (neither --model-config nor a directory in --model-path)");
-            (None, None)
+            None
         }
     };
 
@@ -182,7 +184,7 @@ pub async fn run(
             };
             EngineConfig::StaticFull {
                 service_name: model_name,
-                engine: output::echo_full::make_engine_full(),
+                engine: dynamo_llm::engines::make_engine_full(),
             }
         }
         Output::EchoCore => {
@@ -194,7 +196,7 @@ pub async fn run(
             card.requires_preprocessing = true;
             EngineConfig::StaticCore {
                 service_name: card.service_name.clone(),
-                engine: output::echo_core::make_engine_core(),
+                engine: dynamo_llm::engines::make_engine_core(),
                 card: Box::new(card),
             }
         }
@@ -212,12 +214,12 @@ pub async fn run(
             };
             EngineConfig::StaticFull {
                 service_name: model_name,
-                engine: dynamo_llm::engines::mistralrs::make_engine(&model_path).await?,
+                engine: dynamo_engine_mistralrs::make_engine(&model_path).await?,
             }
         }
         #[cfg(feature = "sglang")]
         Output::SgLang => {
-            use dynamo_llm::engines::sglang;
+            use dynamo_engine_sglang;
             let Some(model_path) = model_path else {
                 anyhow::bail!("out=sglang requires flag --model-path=<full-path-to-model-dir>");
             };
@@ -247,13 +249,14 @@ pub async fn run(
                 }
             }
 
-            let (engine, sglang_process) = sglang::make_engine(
+            let (engine, sglang_process) = dynamo_engine_sglang::make_engine(
                 cancel_token.clone(),
                 &model_path,
                 &sock_prefix,
                 node_conf,
                 flags.tensor_parallel_size,
                 flags.base_gpu_id,
+                flags.extra_engine_args,
             )
             .await?;
             extra = Some(Box::pin(async move {
@@ -267,7 +270,6 @@ pub async fn run(
         }
         #[cfg(feature = "vllm")]
         Output::Vllm => {
-            use dynamo_llm::engines::vllm;
             if flags.base_gpu_id != 0 {
                 anyhow::bail!("vllm does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
             }
@@ -276,17 +278,9 @@ pub async fn run(
                     "out=vllm requires flag --model-path=<full-path-to-hf-repo-or-model-gguf>"
                 );
             };
-            let Some(card_path) = maybe_card_path else {
-                // If we have a gguf we also need a model card because we don't currently parse
-                // tokenizer et al out of gguf.
-                anyhow::bail!(
-                    "Running GGUF files also requires a `--model-config` for the tokenizer et al."
-                );
-            };
             let Some(card) = maybe_card.clone() else {
                 anyhow::bail!(
-                    "Failed to load model card: either unsupported HuggingFace repo format \
-                    or for GGUF files --model-config is missing."
+                    "Unable to build tokenizer. out=vllm requires --model-path to be an HF repo with fast tokenizer (tokenizer.json) or a GGUF file"
                 );
             };
             let Some(sock_prefix) = zmq_socket_prefix else {
@@ -309,13 +303,13 @@ pub async fn run(
             }
             if node_conf.node_rank == 0 {
                 // vllm multi-node only the leader runs vllm
-                let (engine, vllm_future) = vllm::make_leader_engine(
+                let (engine, vllm_future) = dynamo_engine_vllm::make_leader_engine(
                     cancel_token.clone(),
-                    &card_path,
                     &model_path,
                     &sock_prefix,
                     node_conf,
                     flags.tensor_parallel_size,
+                    flags.extra_engine_args,
                 )
                 .await?;
                 extra = Some(Box::pin(async move {
@@ -328,14 +322,15 @@ pub async fn run(
                 }
             } else {
                 // Nodes rank > 0 only run 'ray'
-                let stop_future = vllm::start_follower(cancel_token.clone(), node_conf).await?;
+                let stop_future =
+                    dynamo_engine_vllm::start_follower(cancel_token.clone(), node_conf).await?;
                 extra = Some(Box::pin(stop_future));
                 EngineConfig::None
             }
         }
         #[cfg(feature = "llamacpp")]
         Output::LlamaCpp => {
-            use dynamo_llm::engines::llamacpp;
+            use dynamo_engine_llamacpp;
             let Some(model_path) = model_path else {
                 anyhow::bail!("out=llamacpp requires flag --model-path=<full-path-to-model-gguf>");
             };
@@ -347,7 +342,8 @@ pub async fn run(
                     "Pass --model-config so we can find the tokenizer, should be an HF checkout."
                 );
             };
-            let engine = llamacpp::make_engine(cancel_token.clone(), &model_path).await?;
+            let engine =
+                dynamo_engine_llamacpp::make_engine(cancel_token.clone(), &model_path).await?;
             EngineConfig::StaticCore {
                 service_name: card.service_name.clone(),
                 engine,
@@ -356,7 +352,6 @@ pub async fn run(
         }
         #[cfg(feature = "trtllm")]
         Output::TrtLLM => {
-            use dynamo_llm::engines::trtllm;
             let Some(model_path) = model_path else {
                 anyhow::bail!("out=trtllm requires flag --model-path=<full-path-to-model-dir>");
             };
@@ -367,7 +362,10 @@ pub async fn run(
             }
             // Safety: Earlier we build maybe_card from model_path, which we checked right above
             let card = maybe_card.clone().unwrap();
-            let engine = trtllm::make_engine(model_path.display(), flags.tensor_parallel_size)?;
+            let engine = dynamo_engine_trtllm::make_engine(
+                model_path.display(),
+                flags.tensor_parallel_size,
+            )?;
             EngineConfig::StaticCore {
                 service_name: card.service_name.clone(),
                 engine,
@@ -376,13 +374,13 @@ pub async fn run(
         }
         #[cfg(feature = "python")]
         Output::PythonStr(path_str) => {
-            use dynamo_llm::engines::python;
             let Some(model_name) = model_name else {
                 anyhow::bail!("Provide model service name as `--model-name <this>`");
             };
             let py_args = flags.as_vec(&path_str, &model_name);
             let p = std::path::PathBuf::from(path_str);
-            let engine = python::make_string_engine(cancel_token.clone(), &p, py_args).await?;
+            let engine =
+                dynamo_engine_python::make_string_engine(cancel_token.clone(), &p, py_args).await?;
             EngineConfig::StaticFull {
                 service_name: model_name,
                 engine,
@@ -390,7 +388,6 @@ pub async fn run(
         }
         #[cfg(feature = "python")]
         Output::PythonTok(path_str) => {
-            use dynamo_llm::engines::python;
             let Some(card) = maybe_card.clone() else {
                 anyhow::bail!("Could not find tokenizer. Pass flag --model-path <path>");
             };
@@ -399,7 +396,8 @@ pub async fn run(
             };
             let py_args = flags.as_vec(&path_str, &model_name);
             let p = std::path::PathBuf::from(path_str);
-            let engine = python::make_token_engine(cancel_token.clone(), &p, py_args).await?;
+            let engine =
+                dynamo_engine_python::make_token_engine(cancel_token.clone(), &p, py_args).await?;
             EngineConfig::StaticCore {
                 service_name: model_name.clone(),
                 engine,

@@ -329,6 +329,7 @@ rules:
   - nvidia.com
   resources:
   - dynamonimdeployments
+  - dynamodeployments
   verbs:
   - create
   - delete
@@ -341,12 +342,14 @@ rules:
   - nvidia.com
   resources:
   - dynamonimdeployments/finalizers
+  - dynamodeployments/finalizers
   verbs:
   - update
 - apiGroups:
   - nvidia.com
   resources:
   - dynamonimdeployments/status
+  - dynamodeployments/status
   verbs:
   - get
   - patch
