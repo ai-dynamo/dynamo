@@ -88,14 +88,14 @@ dynamo-builder:
     WORKDIR /workspace
     COPY . /workspace/
     ENV CARGO_TARGET_DIR=/workspace/target
-    
+
     RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
         strip target/release/dynamo-run && \
         strip target/release/http && \
         strip target/release/llmctl && \
         strip target/release/metrics && \
         strip target/release/mock_worker
-    
+
     SAVE ARTIFACT target/release/dynamo-run /dynamo-run
     SAVE ARTIFACT target/release/http /http
     SAVE ARTIFACT target/release/llmctl /llmctl
@@ -109,14 +109,14 @@ dynamo-base-docker:
     FROM +dynamo-base
     WORKDIR /workspace
     COPY . /workspace/
-    
+
     # Copy built binaries from builder target
     COPY +dynamo-builder/dynamo-run /usr/local/bin/dynamo-run
     COPY +dynamo-builder/http /usr/local/bin/http
     COPY +dynamo-builder/llmctl /usr/local/bin/llmctl
     COPY +dynamo-builder/metrics /usr/local/bin/metrics
     COPY +dynamo-builder/mock_worker /usr/local/bin/mock_worker
-    
+
     RUN uv build --wheel --out-dir /workspace/dist && \
         uv pip install /workspace/dist/ai_dynamo*any.whl
     SAVE IMAGE --push $CI_REGISTRY_IMAGE/$IMAGE:$CI_COMMIT_SHA
