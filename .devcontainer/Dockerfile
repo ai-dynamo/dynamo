@@ -103,6 +103,9 @@ RUN curl -fsSL --retry 3 --retry-delay 2 \
     sh get-docker.sh
 RUN usermod -aG docker $USERNAME
 
+# Install uv
+RUN curl -LsSf --retry 3 --retry-delay 2 https://astral.sh/uv/install.sh | bash && cp /root/.local/bin/uv /usr/local/bin/
+
 # Copy Earthly binary from the Earthly stage
 COPY --from=earthly /usr/bin/earthly /usr/local/bin/earthly
 RUN chmod +x /usr/local/bin/earthly && /usr/local/bin/earthly bootstrap --with-autocomplete

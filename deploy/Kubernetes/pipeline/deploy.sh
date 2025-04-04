@@ -21,8 +21,9 @@ set -euo pipefail
 
 
 # Validate input parameters
-if [ "$#" -ne 4 ]; then
-  echo "Usage: $0 <DOCKER_REGISTRY> <NAMESPACE> <DYNAMO_DIRECTORY> <DYNAMO_IDENTIFIER>"
+if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
+  echo "Usage: $0 <DOCKER_REGISTRY> <NAMESPACE> <DYNAMO_DIRECTORY> <DYNAMO_IDENTIFIER> [<DYNAMO_CONFIG_FILE>]"
+  echo "Note: DYNAMO_CONFIG_FILE is optional"
   exit 1
 fi
 
@@ -30,6 +31,7 @@ DOCKER_REGISTRY=$1
 NAMESPACE=$2
 DYNAMO_DIRECTORY=$3
 DYNAMO_IDENTIFIER=$4
+DYNAMO_CONFIG_FILE=$5
 
 # Check if any of the inputs are empty
 if [[ -z "$DOCKER_REGISTRY" || -z "$NAMESPACE" || -z "$DYNAMO_IDENTIFIER" || -z "$DYNAMO_DIRECTORY" ]]; then
@@ -85,4 +87,4 @@ cd -
 # Install the Helm chart with the correct tag (SHA)
 echo "Installing Helm chart with image: $docker_tag_for_registry"
 HELM_RELEASE="${DYNAMO_MODULE//_/\-}"
-helm upgrade -i "$HELM_RELEASE" ./chart -f ~/bentoml/bentos/"$DYNAMO_NAME"/"$docker_sha"/bento.yaml --set image="$docker_tag_for_registry" --set dynamoIdentifier="$DYNAMO_IDENTIFIER" -n "$NAMESPACE"
+helm upgrade -i "$HELM_RELEASE" ./chart -f ~/bentoml/bentos/"$DYNAMO_NAME"/"$docker_sha"/bento.yaml --set image="$docker_tag_for_registry" --set dynamoIdentifier="$DYNAMO_IDENTIFIER" --set configFilePath="$DYNAMO_CONFIG_FILE" -n "$NAMESPACE"
