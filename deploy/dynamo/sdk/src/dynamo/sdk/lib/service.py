@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections import defaultdict
 from dataclasses import asdict, dataclass
@@ -27,6 +28,8 @@ from _bentoml_sdk.service.config import validate
 from dynamo.sdk.lib.decorators import DynamoEndpoint
 
 T = TypeVar("T", bound=object)
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeLinkedServices:
@@ -137,14 +140,14 @@ class DynamoService(Service[T]):
                         # Parse dynamo://namespace/name into (namespace, name)
                         _, path = address.split("://", 1)
                         namespace, name = path.split("/", 1)
-                        print(
+                        logger.debug(
                             f"Resolved Dynamo address from runner map: {namespace}/{name}"
                         )
                         return (namespace, name)
             except (json.JSONDecodeError, ValueError) as e:
                 raise ValueError(f"Failed to parse BENTOML_RUNNER_MAP: {str(e)}") from e
 
-        print(
+        logger.debug(
             f"Using default Dynamo address: {self._dynamo_config.namespace}/{self._dynamo_config.name}"
         )
         return (self._dynamo_config.namespace, self._dynamo_config.name)
