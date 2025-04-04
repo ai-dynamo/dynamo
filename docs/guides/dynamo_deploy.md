@@ -98,7 +98,6 @@ helm repo update
 
 # Install NATS with custom values
 helm install --namespace ${NAMESPACE} ${RELEASE_NAME}-nats nats/nats \
-    --create-namespace \
     --values nats-values.yaml
 ```
 
@@ -117,6 +116,10 @@ After completing these steps, your cluster will have the necessary messaging and
 Follow these steps to containerize and deploy your inference pipeline:
 
 1. Build and containerize the pipeline:
+
+> [!NOTE]
+> For instructions on building the Dynamo base image, see the [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image) section in the main README.
+
 ```bash
 # Navigate to example directory
 cd $PROJECT_ROOT/examples/hello_world

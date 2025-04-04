@@ -30,7 +30,7 @@ You can build and push Docker images for the Dynamo cloud components (API server
 
 First, set the required environment variables:
 ```bash
-export CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION> 
+export CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION>
 export CI_COMMIT_SHA=<TAG>
 ```
 

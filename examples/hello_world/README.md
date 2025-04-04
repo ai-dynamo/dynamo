@@ -125,9 +125,14 @@ dynamo server login --api-token TEST-TOKEN --endpoint $DYNAMO_SERVER
 
 2. **Build the Dynamo Image**
 
+> [!NOTE]
+> For instructions on building the Dynamo base image, see the [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image) section in the main README.
+
 ```bash
+# Set runtime image name
 export DYNAMO_IMAGE=<dynamo_docker_image_name>
-# example dynamo image if you have access to nvcr.io: nvcr.io/nvidian/nim-llm-dev/dynamo-base:cd05fbb91cdeae15efaf56b099b9951db065fd8d-26362190-vllm
+
+# Build and containerize the Frontend service
 cd $PROJECT_ROOT/examples/hello_world
 DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk -F"\"" '{ print $2 }')
 ```
