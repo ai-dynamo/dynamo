@@ -35,12 +35,6 @@ from dynamo.sdk.lib.service import LinkedServices
 logger = logging.getLogger("dynamo.sdk.serve.dynamo")
 logger.setLevel(logging.INFO)
 
-
-def generate_run_id():
-    """Generate a random 6-character run ID"""
-    return "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
-
-
 @click.command()
 @click.argument("bento_identifier", type=click.STRING, required=False, default=".")
 @click.option("--service-name", type=click.STRING, required=False, default="")
@@ -71,9 +65,9 @@ def main(
     from _bentoml_impl.loader import import_service
     from bentoml._internal.container import BentoMLContainer
     from bentoml._internal.context import server_context
-    from bentoml._internal.log import configure_server_logging
+    from dynamo.sdk.lib.logging import configure_server_logging
 
-    run_id = generate_run_id()
+    run_id = service_name
     dynamo_context["service_name"] = service_name
     dynamo_context["runner_map"] = runner_map
     dynamo_context["worker_id"] = worker_id
