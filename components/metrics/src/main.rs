@@ -126,10 +126,11 @@ async fn app(runtime: Runtime) -> Result<()> {
     let key = format!("{}/instance", component.etcd_path());
     tracing::debug!("Creating unique instance of Count at {key}");
     drt.etcd_client()
+        .expect("Unreachable because of DistributedRuntime::from_settings above")
         .kv_create(
             key,
             serde_json::to_vec_pretty(&config)?,
-            Some(drt.primary_lease().id()),
+            Some(drt.primary_lease().unwrap().id()),
         )
         .await
         .context("Unable to create unique instance of Count; possibly one already exists")?;
@@ -141,7 +142,8 @@ async fn app(runtime: Runtime) -> Result<()> {
     let service_subject = target_endpoint.subject();
     tracing::info!("Scraping endpoint {service_path} for stats");
 
-    let token = drt.primary_lease().child_token();
+    // Safety: DistributedRuntime::from_settings ensures this is Some
+    let token = drt.primary_lease().unwrap().child_token();
     let event_name = format!("l2c.{}.{}", config.component_name, config.endpoint_name);
 
     // Initialize Prometheus metrics with the selected mode

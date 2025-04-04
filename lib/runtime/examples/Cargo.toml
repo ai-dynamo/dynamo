@@ -18,7 +18,7 @@ members = [
     "hello_world",
     "service_metrics",
 ]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
 version = "0.1.0"

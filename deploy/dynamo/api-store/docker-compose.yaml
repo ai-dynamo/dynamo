@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+version: "3"
+
+services:
+  ###
+  # Postgres service
+  #  adapted from https://github.com/docker-library/docs/blob/master/postgres/README.md#-via-docker-compose-or-docker-stack-deploy
+  ###
+  postgres:
+    image: postgres:16.2
+    restart: always
+    environment:
+      PGUSER: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: pgadmin
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+  ###
+  # Minio
+  #  adapted from https://github.com/minio/minio/blob/master/docs/orchestration/docker-compose/docker-compose.yaml
+  ###
+  minio:
+    image: quay.io/minio/minio:RELEASE.2024-06-29T01-20-47Z
+    command: minio server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: dynamo-minio
+      MINIO_ROOT_PASSWORD: dynamo-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5

@@ -25,19 +25,21 @@
 //! - Prompt formatter settings (PromptFormatterArtifact)
 //! - Various metadata like revision, publish time, etc.
 
-use crate::protocols::TokenIdType;
-use anyhow::Result;
-use either::Either;
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-
 use std::fmt;
-use std::path::Path;
+use std::fs::File;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::{Context, Result};
 use derive_builder::Builder;
-
 use dynamo_runtime::slug::Slug;
+use either::Either;
+use serde::{Deserialize, Serialize};
+use tokenizers::Tokenizer as HfTokenizer;
+
+use crate::gguf::{Content, ContentConfig};
+use crate::protocols::TokenIdType;
 
 pub const BUCKET_NAME: &str = "mdc";
 
@@ -48,18 +50,18 @@ pub const BUCKET_TTL: Duration = Duration::from_secs(5 * 60);
 /// If a model deployment card hasn't been refreshed in this much time the worker is likely gone
 const CARD_MAX_AGE: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
 
-pub type File = String;
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelInfoType {
-    HfConfigJson(File),
+    HfConfigJson(String),
+    GGUF(PathBuf),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum TokenizerKind {
-    HfTokenizerJson(File),
+    HfTokenizerJson(String),
+    GGUF(Box<HfTokenizer>),
 }
 
 /// Supported types of prompt formatters.
@@ -77,7 +79,8 @@ pub enum TokenizerKind {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptFormatterArtifact {
-    HfTokenizerConfigJson(File),
+    HfTokenizerConfigJson(String),
+    GGUF(PathBuf),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -194,6 +197,15 @@ impl ModelDeploymentCard {
             false
         }
     }
+
+    pub fn tokenizer_hf(&self) -> anyhow::Result<HfTokenizer> {
+        match &self.tokenizer {
+            TokenizerKind::HfTokenizerJson(file) => {
+                HfTokenizer::from_file(file).map_err(anyhow::Error::msg)
+            }
+            TokenizerKind::GGUF(t) => Ok(*t.clone()),
+        }
+    }
 }
 
 impl fmt::Display for ModelDeploymentCard {
@@ -221,13 +233,14 @@ pub trait ModelInfo: Send + Sync {
 impl ModelInfoType {
     pub async fn get_model_info(&self) -> Result<Arc<dyn ModelInfo>> {
         match self {
-            Self::HfConfigJson(info) => HFConfigJsonFile::from_file(info).await,
+            Self::HfConfigJson(info) => HFConfig::from_json_file(info).await,
+            Self::GGUF(path) => HFConfig::from_gguf(path),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct HFConfigJsonFile {
+struct HFConfig {
     bos_token_id: TokenIdType,
 
     #[serde(with = "either::serde_untagged")]
@@ -253,15 +266,46 @@ struct HFConfigJsonFile {
     vocab_size: usize,
 }
 
-impl HFConfigJsonFile {
-    async fn from_file(file: &File) -> Result<Arc<dyn ModelInfo>> {
+impl HFConfig {
+    async fn from_json_file(file: &String) -> Result<Arc<dyn ModelInfo>> {
         let contents = std::fs::read_to_string(file)?;
         let config: Self = serde_json::from_str(&contents)?;
         Ok(Arc::new(config))
     }
+    fn from_gguf(gguf_file: &Path) -> Result<Arc<dyn ModelInfo>> {
+        let content = load_gguf(gguf_file)?;
+        let model_config_metadata: ContentConfig = (&content).into();
+        let num_hidden_layers =
+            content.get_metadata()[&format!("{}.block_count", content.arch())].to_u32()? as usize;
+
+        let bos_token_id = content.get_metadata()["tokenizer.ggml.bos_token_id"].to_u32()?;
+        let eos_token_id = content.get_metadata()["tokenizer.ggml.eos_token_id"].to_u32()?;
+
+        // to_vec returns a Vec that's already there, so it's cheap
+        let vocab_size = content.get_metadata()["tokenizer.ggml.tokens"]
+            .to_vec()?
+            .len();
+
+        let arch = content.arch().to_string();
+        Ok(Arc::new(HFConfig {
+            bos_token_id,
+            eos_token_id: Either::Left(eos_token_id),
+            architectures: vec![format!("{}ForCausalLM", capitalize(&arch))],
+            // "general.architecture"
+            model_type: arch,
+            // "llama.context_length"
+            max_position_embeddings: model_config_metadata.max_seq_len(),
+            // "llama.block_count"
+            num_hidden_layers,
+            // "llama.attention.head_count"
+            num_attention_heads: model_config_metadata.num_attn_heads(),
+            // "tokenizer.ggml.tokens".len()
+            vocab_size,
+        }))
+    }
 }
 
-impl ModelInfo for HFConfigJsonFile {
+impl ModelInfo for HFConfig {
     fn model_type(&self) -> String {
         self.model_type.clone()
     }
@@ -284,4 +328,34 @@ impl ModelInfo for HFConfigJsonFile {
     fn vocab_size(&self) -> usize {
         self.vocab_size
     }
+}
+
+impl TokenizerKind {
+    pub fn from_gguf(gguf_file: &Path) -> anyhow::Result<Self> {
+        let content = load_gguf(gguf_file)?;
+        let out = crate::gguf::convert_gguf_to_hf_tokenizer(&content)
+            .with_context(|| gguf_file.display().to_string())?;
+        Ok(TokenizerKind::GGUF(Box::new(out.tokenizer)))
+    }
+}
+
+fn load_gguf(gguf_file: &Path) -> anyhow::Result<Content> {
+    let filename = gguf_file.display().to_string();
+    let mut f = File::open(gguf_file).with_context(|| filename.clone())?;
+    // vec because GGUF can be split into multiple files (shards)
+    let mut readers = vec![&mut f];
+    crate::gguf::Content::from_readers(&mut readers).with_context(|| filename.clone())
+}
+
+fn capitalize(s: &str) -> String {
+    s.chars()
+        .enumerate()
+        .map(|(i, c)| {
+            if i == 0 {
+                c.to_uppercase().to_string()
+            } else {
+                c.to_lowercase().to_string()
+            }
+        })
+        .collect()
 }

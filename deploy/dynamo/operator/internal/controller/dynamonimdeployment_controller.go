@@ -1163,7 +1163,7 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context
 					Route: []*istioNetworking.HTTPRouteDestination{
 						{
 							Destination: &istioNetworking.Destination{
-								Host: fmt.Sprintf("%s.yatai.svc.cluster.local", dynamoNimDeployment.Name),
+								Host: dynamoNimDeployment.Name,
 								Port: &istioNetworking.PortSelector{
 									Number: 3000,
 								},
@@ -1185,6 +1185,11 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context
 	}
 
 	vsEnabled := dynamoNimDeployment.Spec.Ingress.Enabled && dynamoNimDeployment.Spec.Ingress.UseVirtualService != nil && *dynamoNimDeployment.Spec.Ingress.UseVirtualService
+
+	if err := ctrl.SetControllerReference(dynamoNimDeployment, vs, r.Scheme); err != nil {
+		log.Error(err, "Failed to set controller reference for the VirtualService")
+		return false, err
+	}
 
 	if err != nil {
 		if vsEnabled {
@@ -1209,7 +1214,7 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateVirtualService(ctx context
 	}
 
 	log.Info("VirtualService found, updating", "OldVirtualService", oldVS)
-
+	vs.ObjectMeta.ResourceVersion = oldVS.ObjectMeta.ResourceVersion
 	if err := r.Update(ctx, vs); err != nil {
 		log.Error(err, "Failed to update VirtualService")
 		return false, err
@@ -1478,6 +1483,7 @@ func (r *DynamoNimDeploymentReconciler) generateDeployment(ctx context.Context, 
 	}
 
 	var replicas *int32
+	replicas = opt.dynamoNimDeployment.Spec.Replicas
 	if opt.isStealingTrafficDebugModeEnabled {
 		replicas = &[]int32{int32(1)}[0]
 	}
@@ -1764,34 +1770,12 @@ monitoring.options.insecure=true`
 		// do nothing
 	}
 
-	livenessProbe := &corev1.Probe{
-		InitialDelaySeconds: 10,
-		TimeoutSeconds:      20,
-		FailureThreshold:    6,
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/livez",
-				Port: intstr.FromString(commonconsts.BentoContainerPortName),
-			},
-		},
-	}
-
+	var livenessProbe *corev1.Probe
 	if opt.dynamoNimDeployment.Spec.LivenessProbe != nil {
 		livenessProbe = opt.dynamoNimDeployment.Spec.LivenessProbe
 	}
 
-	readinessProbe := &corev1.Probe{
-		InitialDelaySeconds: 5,
-		TimeoutSeconds:      5,
-		FailureThreshold:    12,
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/readyz",
-				Port: intstr.FromString(commonconsts.BentoContainerPortName),
-			},
-		},
-	}
-
+	var readinessProbe *corev1.Probe
 	if opt.dynamoNimDeployment.Spec.ReadinessProbe != nil {
 		readinessProbe = opt.dynamoNimDeployment.Spec.ReadinessProbe
 	}
@@ -1801,13 +1785,11 @@ monitoring.options.insecure=true`
 
 	args := make([]string, 0)
 
-	args = append(args, "uv", "run", "dynamo", "start")
+	args = append(args, "cd", "src", "&&", "uv", "run", "dynamo", "serve")
 
-	if opt.dynamoNimDeployment.Spec.ServiceName != "" {
-		args = append(args, []string{"--service-name", opt.dynamoNimDeployment.Spec.ServiceName}...)
-	}
-
-	if len(opt.dynamoNimDeployment.Spec.ExternalServices) > 0 {
+	// todo : remove this line when https://github.com/ai-dynamo/dynamo/issues/345 is fixed
+	enableDependsOption := false
+	if len(opt.dynamoNimDeployment.Spec.ExternalServices) > 0 && enableDependsOption {
 		serviceSuffix := fmt.Sprintf("%s.svc.cluster.local:3000", opt.dynamoNimDeployment.Namespace)
 		keys := make([]string, 0, len(opt.dynamoNimDeployment.Spec.ExternalServices))
 
@@ -1823,13 +1805,18 @@ monitoring.options.insecure=true`
 			if service.DeploymentSelectorKey == "name" {
 				dependsFlag := fmt.Sprintf("--depends \"%s=http://%s.%s\"", key, service.DeploymentSelectorValue, serviceSuffix)
 				args = append(args, dependsFlag)
-			} else if service.DeploymentSelectorKey == "nova" {
-				dependsFlag := fmt.Sprintf("--depends \"%s=nova://%s\"", key, service.DeploymentSelectorValue)
+			} else if service.DeploymentSelectorKey == "dynamo" {
+				dependsFlag := fmt.Sprintf("--depends \"%s=dynamo://%s\"", key, service.DeploymentSelectorValue)
 				args = append(args, dependsFlag)
 			} else {
-				return nil, errors.Errorf("DeploymentSelectorKey '%s' not supported. Only 'name' and 'nova' are supported", service.DeploymentSelectorKey)
+				return nil, errors.Errorf("DeploymentSelectorKey '%s' not supported. Only 'name' and 'dynamo' are supported", service.DeploymentSelectorKey)
 			}
 		}
+	}
+
+	if opt.dynamoNimDeployment.Spec.ServiceName != "" {
+		args = append(args, []string{"--service-name", opt.dynamoNimDeployment.Spec.ServiceName}...)
+		args = append(args, opt.dynamoNimDeployment.Spec.DynamoTag)
 	}
 
 	yataiResources := opt.dynamoNimDeployment.Spec.Resources

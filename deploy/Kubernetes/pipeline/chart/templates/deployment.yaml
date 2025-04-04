@@ -40,7 +40,7 @@ spec:
       - name: {{ $.Release.Name }}-{{ .name | lower }}
         image: {{ $.Values.image }}
         args:
-        - uv run dynamo start --service-name {{ .name }} src.{{ $.Values.dynamoIdentifier }}
+        - uv run dynamo serve --service-name {{ .name }} src.{{ $.Values.dynamoIdentifier }}
         command:
         - sh
         - -c

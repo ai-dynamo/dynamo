@@ -139,6 +139,7 @@ addopts = [
     "--strict-config",
     "--mypy",
     "--ignore-glob=*model.py",
+    "--ignore-glob=*_inc.py",
     # FIXME: Get relative/generic blob paths to work here
 ]
 xfail_strict = true
@@ -168,6 +169,7 @@ indent-width = 4
 
 [tool.ruff.lint.extend-per-file-ignores]
 "icp/tests/**/test_*.py" = ["F811", "F401"]
+"*_inc.py" = ["F821"]
 
 [tool.mypy]
 
