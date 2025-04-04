@@ -22,17 +22,19 @@ from components.prefill_worker import PrefillWorker
 from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
 from utils.protocol import MyRequestOutput, vLLMGenerateRequest
+import logging
 from utils.vllm import parse_vllm_args
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
 )
-from vllm.logger import logger as vllm_logger
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
 from dynamo.llm import KvMetricsPublisher
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
+
+logger = logging.getLogger(__name__)
 
 @service(
     dynamo={
@@ -46,6 +48,11 @@ class VllmWorker:
     prefill_worker = depends(PrefillWorker)
 
     def __init__(self):
+        logger.info("VllmWorker working")
+        logger.debug("VllmWorker working")
+        logger.warning("VllmWorker working")
+        logger.error("VllmWorker working")
+        logger.critical("VllmWorker working")
         self.client = None
         self.disaggregated_router: PyDisaggregatedRouter = None  # type: ignore
         class_name = self.__class__.__name__
@@ -60,7 +67,7 @@ class VllmWorker:
             "NATS_SERVER", "nats://localhost:4222"
         )
         self._prefill_queue_stream_name = self.model_name
-        vllm_logger.info(
+        logger.info(
             f"Prefill queue: {self._prefill_queue_nats_server}:{self._prefill_queue_stream_name}"
         )
 
@@ -82,7 +89,7 @@ class VllmWorker:
             os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
             os.environ["VLLM_KV_NAMESPACE"] = "dynamo"
             os.environ["VLLM_KV_COMPONENT"] = class_name
-            vllm_logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
+            logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
         self.metrics_publisher = KvMetricsPublisher()
 
     @async_on_start
