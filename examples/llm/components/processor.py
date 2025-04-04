@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
 import uuid
 from enum import Enum
 from typing import AsyncIterator, Tuple, Union

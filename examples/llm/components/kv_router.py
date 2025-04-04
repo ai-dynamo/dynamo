@@ -15,7 +15,6 @@
 
 
 import argparse
-import asyncio
 import random
 from argparse import Namespace
 from typing import AsyncIterator
