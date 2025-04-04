@@ -88,7 +88,7 @@ mod tests {
 
         // Part 1: Record events to a file
         let token = CancellationToken::new();
-        let recorder = KvRecorder::new(token.clone(), &file_path, None)
+        let recorder = KvRecorder::new(token.clone(), &file_path, None, None, None)
             .await
             .unwrap();
         let event_tx = recorder.event_sender();
@@ -132,7 +132,7 @@ mod tests {
         let indexer_event_tx = indexer.event_sender();
 
         // Use the send_events method to load events from file to indexer
-        let count = KvRecorder::send_events(&file_path, &indexer_event_tx, false)
+        let count = KvRecorder::send_events(&file_path, &indexer_event_tx, false, None, None)
             .await
             .unwrap();
         assert_eq!(count, 2, "Expected to send 2 events from file to indexer");

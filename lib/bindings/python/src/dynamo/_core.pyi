@@ -341,6 +341,8 @@ class KvRecorder:
         component: Component,
         output_path: Optional[str] = None,
         max_lines_per_file: Optional[int] = None,
+        max_count: Optional[int] = None,
+        max_time: Optional[float] = None,
     ) -> None:
         """
         Create a new KvRecorder instance.
@@ -349,6 +351,8 @@ class KvRecorder:
             component: The component to associate with this recorder
             output_path: Path to the JSONL file to write events to
             max_lines_per_file: Maximum number of lines per file before rotating to a new file
+            max_count: Maximum number of events to record before shutting down
+            max_time: Maximum duration in seconds to record before shutting down
         """
         ...
 
@@ -361,12 +365,14 @@ class KvRecorder:
         """
         ...
 
-    def populate_indexer(self, indexer: KvIndexer) -> int:
+    def populate_indexer(self, indexer: KvIndexer, max_count: Optional[int] = None, max_time: Optional[float] = None) -> int:
         """
         Populate an indexer with the recorded events.
 
         Args:
             indexer: The KvIndexer to populate with events
+            max_count: Maximum number of events to send before stopping
+            max_time: Maximum duration in seconds to send events before stopping
 
         Returns:
             The number of events sent to the indexer

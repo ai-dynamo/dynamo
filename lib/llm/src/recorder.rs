@@ -61,6 +61,10 @@ where
     /// * `output_path` - Path to the JSONL file to write events to
     /// * `max_lines_per_file` - Maximum number of lines per file before rotating to a new file.
     ///                         If None, no rotation will occur.
+    /// * `max_count` - Maximum number of events to record before shutting down.
+    ///               If None, no limit will be applied.
+    /// * `max_time` - Maximum duration in seconds to record before shutting down.
+    ///              If None, no time limit will be applied.
     ///
     /// ### Returns
     ///
@@ -69,6 +73,8 @@ where
         token: CancellationToken,
         output_path: P,
         max_lines_per_file: Option<usize>,
+        max_count: Option<usize>,
+        max_time: Option<f64>,
     ) -> io::Result<Self> {
         let (event_tx, mut event_rx) = mpsc::channel::<T>(2048);
         let event_count = Arc::new(Mutex::new(0));
@@ -101,7 +107,26 @@ where
             let mut file_index = 0;
             let base_path = file_path.clone();
 
+            // Set up max time deadline if specified
+            let max_time_deadline = max_time.map(|secs| {
+                let duration = Duration::from_secs_f64(secs);
+                start_time + duration
+            });
+
             loop {
+                // Check time limit if set
+                if let Some(deadline) = max_time_deadline {
+                    if Instant::now() >= deadline {
+                        log::info!("Recorder reached max time limit, shutting down");
+                        // Flush and cancel
+                        if let Err(e) = writer.flush().await {
+                            log::error!("Failed to flush on time limit shutdown: {}", e);
+                        }
+                        cancel_clone.cancel();
+                        return;
+                    }
+                }
+
                 tokio::select! {
                     biased;
 
@@ -186,6 +211,21 @@ where
                         let mut count = event_count_clone.lock().await;
                         *count += 1;
 
+                        // Check if we've reached the maximum count
+                        if let Some(max) = max_count {
+                            if *count >= max {
+                                log::info!("Recorder reached max event count ({}), shutting down", max);
+                                // Flush buffer before shutting down
+                                if let Err(e) = writer.flush().await {
+                                    log::error!("Failed to flush on count limit shutdown: {}", e);
+                                }
+                                // Drop the lock before cancelling
+                                drop(count);
+                                cancel_clone.cancel();
+                                return;
+                            }
+                        }
+
                         // Flush every 100 events for better durability
                         if *count % 100 == 0 {
                             if let Err(e) = writer.flush().await {
@@ -226,6 +266,8 @@ where
     /// * `filename` - Path to the JSONL file to read events from
     /// * `event_tx` - A sender for events
     /// * `timed` - If true, events will be sent according to their recorded timestamps
+    /// * `max_count` - Maximum number of events to send before stopping. If None, all events will be sent.
+    /// * `max_time` - Maximum duration in seconds to send events before stopping. If None, no time limit.
     ///
     /// ### Returns
     ///
@@ -234,6 +276,8 @@ where
         filename: P,
         event_tx: &mpsc::Sender<T>,
         timed: bool,
+        max_count: Option<usize>,
+        max_time: Option<f64>,
     ) -> io::Result<usize> {
         // Store the display name before using filename
         let display_name = filename.as_ref().display().to_string();
@@ -246,6 +290,10 @@ where
             ));
         }
 
+        // Set up start time and deadline if max_time is specified
+        let start_time = Instant::now();
+        let deadline = max_time.map(|secs| start_time + Duration::from_secs_f64(secs));
+
         // Open the file for reading using tokio's async file I/O
         let file = File::open(&filename).await?;
         let reader = BufReader::new(file);
@@ -257,6 +305,22 @@ where
 
         // Read and send events line by line
         while let Some(line) = lines.next_line().await? {
+            // Check if we've reached the maximum count
+            if let Some(max) = max_count {
+                if count >= max {
+                    log::info!("Reached maximum event count ({}), stopping", max);
+                    break;
+                }
+            }
+
+            // Check if we've exceeded the time limit
+            if let Some(end_time) = deadline {
+                if Instant::now() >= end_time {
+                    log::info!("Reached maximum time limit, stopping");
+                    break;
+                }
+            }
+
             line_number += 1;
 
             // Skip empty lines
@@ -370,7 +434,7 @@ mod tests {
         let file_path = dir.path().join("events.jsonl");
 
         let token = CancellationToken::new();
-        let recorder = TestEventRecorder::new(token.clone(), &file_path, None)
+        let recorder = TestEventRecorder::new(token.clone(), &file_path, None, None, None)
             .await
             .unwrap();
         let event_tx = recorder.event_sender();
@@ -428,9 +492,15 @@ mod tests {
 
         // Set max lines per file to 10,000 (should create 10 files total)
         const MAX_LINES_PER_FILE: usize = 10_000;
-        let recorder = TestEventRecorder::new(token.clone(), &file_path, Some(MAX_LINES_PER_FILE))
-            .await
-            .unwrap();
+        let recorder = TestEventRecorder::new(
+            token.clone(),
+            &file_path,
+            Some(MAX_LINES_PER_FILE),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         let event_tx = recorder.event_sender();
 
         // Define number of events to generate

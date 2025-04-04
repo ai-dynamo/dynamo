@@ -401,11 +401,13 @@ pub(crate) struct KvRecorder {
 #[pymethods]
 impl KvRecorder {
     #[new]
-    #[pyo3(signature = (component, output_path=None, max_lines_per_file=None))]
+    #[pyo3(signature = (component, output_path=None, max_lines_per_file=None, max_count=None, max_time=None))]
     fn new(
         component: Component,
         output_path: Option<String>,
         max_lines_per_file: Option<usize>,
+        max_count: Option<usize>,
+        max_time: Option<f64>,
     ) -> PyResult<Self> {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async {
@@ -427,6 +429,8 @@ impl KvRecorder {
                 token.clone(),
                 path,
                 max_lines_per_file,
+                max_count,
+                max_time,
             )
             .await
             .map_err(to_pyerr)?;
@@ -468,10 +472,13 @@ impl KvRecorder {
         })
     }
 
+    #[pyo3(signature = (indexer, max_count=None, max_time=None))]
     fn populate_indexer<'py>(
         &self,
         py: Python<'py>,
         indexer: &KvIndexer,
+        max_count: Option<usize>,
+        max_time: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let event_tx = indexer.inner.event_sender();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -479,6 +486,8 @@ impl KvRecorder {
                 "dummy_path", // This doesn't matter as we'll use the provided event_tx
                 &event_tx,
                 false,
+                max_count,
+                max_time,
             )
             .await
             .map_err(to_pyerr)?;
