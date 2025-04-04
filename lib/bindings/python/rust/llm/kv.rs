@@ -402,24 +402,31 @@ pub(crate) struct KvRecorder {
 impl KvRecorder {
     #[new]
     #[pyo3(signature = (component, output_path=None, max_lines_per_file=None))]
-    fn new(component: Component, output_path: Option<String>, max_lines_per_file: Option<usize>) -> PyResult<Self> {
+    fn new(
+        component: Component,
+        output_path: Option<String>,
+        max_lines_per_file: Option<usize>,
+    ) -> PyResult<Self> {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async {
             let token = component.inner.drt().runtime().child_token();
-            
+
             // Create a temp path if none provided
             let path = match output_path {
                 Some(p) => p,
                 None => {
                     let temp_dir = std::env::temp_dir();
-                    temp_dir.join("kv_events.jsonl").to_string_lossy().to_string()
+                    temp_dir
+                        .join("kv_events.jsonl")
+                        .to_string_lossy()
+                        .to_string()
                 }
             };
-            
+
             let inner = llm_rs::kv_router::recorder::KvRecorder::new(
-                token.clone(), 
-                path, 
-                max_lines_per_file
+                token.clone(),
+                path,
+                max_lines_per_file,
             )
             .await
             .map_err(to_pyerr)?;
@@ -447,7 +454,9 @@ impl KvRecorder {
                 }
             });
 
-            Ok(Self { inner: Arc::new(inner) })
+            Ok(Self {
+                inner: Arc::new(inner),
+            })
         })
     }
 
@@ -469,7 +478,7 @@ impl KvRecorder {
             let count = llm_rs::kv_router::recorder::KvRecorder::send_events(
                 "dummy_path", // This doesn't matter as we'll use the provided event_tx
                 &event_tx,
-                false
+                false,
             )
             .await
             .map_err(to_pyerr)?;
