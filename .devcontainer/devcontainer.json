@@ -31,7 +31,6 @@
                 "ms-python.python",
                 "rust-lang.rust-analyzer",
                 "tamasfe.even-better-toml",
-                "github.copilot",
                 "ms-azuretools.vscode-docker",
                 "donjayamanne.githistory",
                 "waderyan.gitblame",
