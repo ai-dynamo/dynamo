@@ -34,4 +34,10 @@ def configure_server_logging():
 
     # Make sure bentoml's loggers use the same configuration
     bentoml_logger = logging.getLogger("bentoml")
+    bentoml_logger.setLevel(logging.ERROR)
     bentoml_logger.propagate = True  # Make sure logs propagate to the root logger
+
+    # Disable tag logger to avoid unneeded warnings
+    tag_logger = logging.getLogger("tag")
+    tag_logger.setLevel(logging.ERROR)
+    tag_logger.propagate = True
