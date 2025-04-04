@@ -18,6 +18,7 @@ import uuid
 from enum import Enum
 from typing import AsyncIterator, Tuple, Union
 
+import logging
 from components.kv_router import Router
 from components.worker import VllmWorker
 from transformers import AutoTokenizer
@@ -32,6 +33,8 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
+
+logger = logging.getLogger(__name__)
 
 class RequestType(Enum):
     CHAT = "chat"
@@ -91,7 +94,7 @@ class Processor(ProcessMixIn):
             .client()
         )
         while len(self.worker_client.endpoint_ids()) < self.min_workers:
-            print(
+            logger.info(
                 f"Waiting for workers to be ready.\n"
                 f" Current: {len(self.worker_client.endpoint_ids())},"
                 f" Required: {self.min_workers}"
