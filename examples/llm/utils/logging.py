@@ -38,4 +38,5 @@ async def check_required_workers(
             )
         num_workers = new_count
 
+    print(f"Workers ready: {worker_ids}")
     return worker_ids
