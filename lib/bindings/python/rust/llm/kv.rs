@@ -472,8 +472,14 @@ impl KvRecorder {
         })
     }
 
-    fn elapsed_time(&self) -> f64 {
-        self.inner.elapsed_time().as_secs_f64()
+    fn elapsed_time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let recorder = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            match recorder.elapsed_time().await {
+                Ok(elapsed) => Ok(elapsed.as_secs_f64()),
+                Err(_) => Ok(0.0), // Return 0.0 when no events have been received yet
+            }
+        })
     }
 
     #[pyo3(signature = (indexer, timed=false, max_count=None, max_time=None))]

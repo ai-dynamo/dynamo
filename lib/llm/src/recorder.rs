@@ -42,8 +42,8 @@ pub struct Recorder<T> {
     cancel: CancellationToken,
     /// Counter for the number of events written
     event_count: Arc<Mutex<usize>>,
-    /// Start time of the recorder
-    start_time: Instant,
+    /// Time when the first event was received
+    first_event_time: Arc<Mutex<Option<Instant>>>,
 }
 
 impl<T> Recorder<T>
@@ -78,6 +78,8 @@ where
         let event_count_clone = event_count.clone();
         let cancel_clone = token.clone();
         let start_time = Instant::now();
+        let first_event_time = Arc::new(Mutex::new(None));
+        let first_event_time_clone = first_event_time.clone();
 
         // Ensure the directory exists
         if let Some(parent) = output_path.as_ref().parent() {
@@ -138,6 +140,14 @@ where
                     }
 
                     Some(event) = event_rx.recv() => {
+                        // Update first_event_time if this is the first event
+                        {
+                            let mut first_time = first_event_time_clone.lock().await;
+                            if first_time.is_none() {
+                                *first_time = Some(Instant::now());
+                            }
+                        }
+
                         // Calculate elapsed time in milliseconds
                         let elapsed_ms = start_time.elapsed().as_millis() as u64;
 
@@ -231,7 +241,7 @@ where
             event_tx,
             cancel: token,
             event_count,
-            start_time,
+            first_event_time,
         })
     }
 
@@ -245,9 +255,18 @@ where
         *self.event_count.lock().await
     }
 
-    /// Get the elapsed time since the recorder was started
-    pub fn elapsed_time(&self) -> Duration {
-        self.start_time.elapsed()
+    /// Get the elapsed time since the first event was received
+    ///
+    /// Returns a Result with the elapsed time or an error if no events have been received yet
+    pub async fn elapsed_time(&self) -> io::Result<Duration> {
+        let first_time = self.first_event_time.lock().await;
+        match *first_time {
+            Some(time) => Ok(time.elapsed()),
+            None => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "No events received yet",
+            )),
+        }
     }
 
     /// Shutdown the recorder
@@ -441,6 +460,9 @@ mod tests {
         let event1 = events[0].clone();
         let event2 = events[1].clone();
 
+        // Wait some time before the first event
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
         // Send the events
         for event in &events {
             event_tx.send(event.clone()).await.unwrap();
@@ -453,7 +475,7 @@ mod tests {
         assert_eq!(recorder.event_count().await, 2);
 
         // Check that the elapsed time is between 9 and 11 milliseconds
-        let elapsed_ms = recorder.elapsed_time().as_millis();
+        let elapsed_ms = recorder.elapsed_time().await.unwrap().as_millis();
         if !(9..=11).contains(&elapsed_ms) {
             println!("Actual elapsed time: {} ms", elapsed_ms);
             assert!((9..=11).contains(&elapsed_ms));
