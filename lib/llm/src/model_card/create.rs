@@ -62,7 +62,7 @@ impl ModelDeploymentCard {
         let model_name = model_name.map(|s| s.to_string()).or_else(|| {
             gguf_file
                 .iter()
-                .last()
+                .next_back()
                 .map(|n| n.to_string_lossy().to_string())
         });
         let Some(model_name) = model_name else {
