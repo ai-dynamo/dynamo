@@ -89,12 +89,14 @@ async fn app(runtime: Runtime) -> Result<()> {
             drt: distributed.clone(),
         });
 
-        let etcd_client = distributed.etcd_client();
-        let models_watcher: PrefixWatcher = etcd_client.kv_get_and_watch_prefix(etcd_path).await?;
+        if let Some(etcd_client) = distributed.etcd_client() {
+            let models_watcher: PrefixWatcher =
+                etcd_client.kv_get_and_watch_prefix(etcd_path).await?;
 
-        let (_prefix, _watcher, receiver) = models_watcher.dissolve();
-        let watcher_task = tokio::spawn(model_watcher(state, receiver));
-        watcher_tasks.push(watcher_task);
+            let (_prefix, _watcher, receiver) = models_watcher.dissolve();
+            let watcher_task = tokio::spawn(model_watcher(state, receiver));
+            watcher_tasks.push(watcher_task);
+        }
     }
 
     // Run the service

@@ -17,7 +17,7 @@
 //! There are two context object defined in this module:
 //!
 //! - [`Context`] is an input context which is propagated through the processing pipeline,
-//!    up to the point where the input is pass to an [`crate::engine::AsyncEngine`] for processing.
+//!   up to the point where the input is pass to an [`crate::engine::AsyncEngine`] for processing.
 //! - [`StreamContext`] is the input context transformed into to a type erased context that maintains the inputs
 //!   registry and visitors. `StreamAdaptors` will amend themselves to the [`StreamContext`] to allow for the
 

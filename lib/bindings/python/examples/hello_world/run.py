@@ -29,10 +29,11 @@ def random_string(length=10):
     return "".join(random.choices(chars, k=length))
 
 
-@dynamo_worker()
+@dynamo_worker(static=True)
 async def worker(runtime: DistributedRuntime):
     ns = random_string()
     task = asyncio.create_task(server_init(runtime, ns))
+    await asyncio.sleep(0.1)  # let the server start
     await client_init(runtime, ns)
     runtime.shutdown()
     await task

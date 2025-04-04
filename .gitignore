@@ -4,7 +4,6 @@
 .helix
 [Bb]inlog/
 [Bb][Uu][Ii][Ll][Dd]/
-[Cc][Mm][Aa][Kk][Ee]/
 [Oo][Bb][Jj]/
 [Oo][Uu][Tt]/
 [Tt][Mm][Pp]/
@@ -17,6 +16,7 @@
 **/[Oo][Uu][Tt]/
 **/[Rr]elease/
 **/[Tt][Mm][Pp]/
+**/*.etcd
 
 .markdownlint.json
 CMakeCache.txt
@@ -81,3 +81,5 @@ __pycache__/
 *.tgz
 Chart.lock
 generated-values.yaml
+
+TensorRT-LLM
