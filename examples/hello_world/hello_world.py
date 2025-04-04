@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+
 from pydantic import BaseModel
 
 from dynamo.sdk import DYNAMO_IMAGE, api, depends, dynamo_endpoint, service
