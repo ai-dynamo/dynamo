@@ -550,16 +550,41 @@ mod tests {
             }
         }
 
+        // Check that we have exactly 10 files
         assert_eq!(
             found_files.len(),
             10,
             "Expected 10 files due to rotation with 10k events each"
         );
 
+        // Add more stringent check for each file size
+        for (i, file_path) in found_files.iter().enumerate() {
+            let content = fs::read_to_string(file_path).await.unwrap();
+            let line_count = content.lines().count();
+
+            if i < found_files.len() - 1 {
+                // All files except the last one should have exactly MAX_LINES_PER_FILE lines
+                assert_eq!(
+                    line_count,
+                    MAX_LINES_PER_FILE,
+                    "File {} should contain exactly {} lines",
+                    file_path.display(),
+                    MAX_LINES_PER_FILE
+                );
+            } else {
+                // The last file might have fewer lines
+                assert!(
+                    line_count <= MAX_LINES_PER_FILE,
+                    "Last file should contain at most {} lines",
+                    MAX_LINES_PER_FILE
+                );
+            }
+        }
+
         // Count total lines across all files
         let mut total_lines = 0;
 
-        // Check that each file contains expected number of lines and has sorted timestamps
+        // Check that timestamps are weakly sorted within each file
         for (i, file_path) in found_files.iter().enumerate() {
             println!("Checking file {}: {}", i, file_path.display());
 
