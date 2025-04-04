@@ -26,25 +26,32 @@ use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, OK};
 
 use derive_getters::Dissolve;
 use figment::error;
+use tokio_util::sync::CancellationToken;
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
         let secondary = runtime.secondary();
-        let (etcd_config, nats_config) = config.dissolve();
+        let (etcd_config, nats_config, is_static) = config.dissolve();
 
         let runtime_clone = runtime.clone();
 
-        let etcd_client = secondary
-            .spawn(async move {
-                let client = etcd::Client::new(etcd_config.clone(), runtime_clone)
-                    .await
-                    .context(format!(
-                        "Failed to connect to etcd server with config {:?}",
-                        etcd_config
-                    ))?;
-                OK(client)
-            })
-            .await??;
+        let etcd_client = if is_static {
+            None
+        } else {
+            Some(
+                secondary
+                    .spawn(async move {
+                        let client = etcd::Client::new(etcd_config.clone(), runtime_clone)
+                            .await
+                            .context(format!(
+                                "Failed to connect to etcd server with config {:?}",
+                                etcd_config
+                            ))?;
+                        OK(client)
+                    })
+                    .await??,
+            )
+        };
 
         let nats_client = secondary
             .spawn(async move {
@@ -62,11 +69,18 @@ impl DistributedRuntime {
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
             component_registry: component::Registry::new(),
+            is_static,
         })
     }
 
     pub async fn from_settings(runtime: Runtime) -> Result<Self> {
-        let config = DistributedConfig::from_settings();
+        let config = DistributedConfig::from_settings(false);
+        Self::new(runtime, config).await
+    }
+
+    // Call this if you are using static workers that do not need etcd-based discovery.
+    pub async fn from_settings_without_discovery(runtime: Runtime) -> Result<Self> {
+        let config = DistributedConfig::from_settings(true);
         Self::new(runtime, config).await
     }
 
@@ -74,8 +88,10 @@ impl DistributedRuntime {
         &self.runtime
     }
 
-    pub fn primary_lease(&self) -> etcd::Lease {
-        self.etcd_client.primary_lease()
+    /// The etcd lease all our components will be attached to.
+    /// Not available for static workers.
+    pub fn primary_lease(&self) -> Option<etcd::Lease> {
+        self.etcd_client.as_ref().map(|c| c.primary_lease())
     }
 
     pub fn shutdown(&self) {
@@ -84,7 +100,7 @@ impl DistributedRuntime {
 
     /// Create a [`Namespace`]
     pub fn namespace(&self, name: impl Into<String>) -> Result<Namespace> {
-        Namespace::new(self.clone(), name.into())
+        Namespace::new(self.clone(), name.into(), self.is_static)
     }
 
     // /// Create a [`Component`]
@@ -100,7 +116,12 @@ impl DistributedRuntime {
     // }
 
     pub(crate) fn discovery_client(&self, namespace: impl Into<String>) -> DiscoveryClient {
-        DiscoveryClient::new(namespace.into(), self.etcd_client.clone())
+        DiscoveryClient::new(
+            namespace.into(),
+            self.etcd_client
+                .clone()
+                .expect("Attempt to get discovery_client on static DistributedRuntime"),
+        )
     }
 
     pub(crate) fn service_client(&self) -> ServiceClient {
@@ -123,8 +144,12 @@ impl DistributedRuntime {
         self.nats_client.clone()
     }
 
-    pub fn etcd_client(&self) -> etcd::Client {
+    pub fn etcd_client(&self) -> Option<etcd::Client> {
         self.etcd_client.clone()
+    }
+
+    pub fn child_token(&self) -> CancellationToken {
+        self.runtime.child_token()
     }
 }
 
@@ -132,13 +157,15 @@ impl DistributedRuntime {
 pub struct DistributedConfig {
     pub etcd_config: etcd::ClientOptions,
     pub nats_config: nats::ClientOptions,
+    pub is_static: bool,
 }
 
 impl DistributedConfig {
-    pub fn from_settings() -> DistributedConfig {
+    pub fn from_settings(is_static: bool) -> DistributedConfig {
         DistributedConfig {
             etcd_config: etcd::ClientOptions::default(),
             nats_config: nats::ClientOptions::default(),
+            is_static,
         }
     }
 
@@ -146,6 +173,7 @@ impl DistributedConfig {
         let mut config = DistributedConfig {
             etcd_config: etcd::ClientOptions::default(),
             nats_config: nats::ClientOptions::default(),
+            is_static: false,
         };
 
         config.etcd_config.attach_lease = false;

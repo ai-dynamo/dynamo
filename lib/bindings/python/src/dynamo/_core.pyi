@@ -43,9 +43,9 @@ class DistributedRuntime:
         """
         ...
 
-    def etcd_client(self) -> EtcdClient:
+    def etcd_client(self) -> Optional[EtcdClient]:
         """
-        Get the `EtcdClient` object
+        Get the `EtcdClient` object. Not available for static workers.
         """
         ...
 

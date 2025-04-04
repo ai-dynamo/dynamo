@@ -30,7 +30,6 @@ mod input;
 #[cfg(any(feature = "vllm", feature = "sglang"))]
 mod net;
 mod opt;
-mod output;
 pub use opt::{Input, Output};
 
 /// How we identify a namespace/component/endpoint URL.
@@ -185,7 +184,7 @@ pub async fn run(
             };
             EngineConfig::StaticFull {
                 service_name: model_name,
-                engine: output::echo_full::make_engine_full(),
+                engine: dynamo_llm::engines::make_engine_full(),
             }
         }
         Output::EchoCore => {
@@ -197,7 +196,7 @@ pub async fn run(
             card.requires_preprocessing = true;
             EngineConfig::StaticCore {
                 service_name: card.service_name.clone(),
-                engine: output::echo_core::make_engine_core(),
+                engine: dynamo_llm::engines::make_engine_core(),
                 card: Box::new(card),
             }
         }
@@ -215,12 +214,12 @@ pub async fn run(
             };
             EngineConfig::StaticFull {
                 service_name: model_name,
-                engine: dynamo_llm::engines::mistralrs::make_engine(&model_path).await?,
+                engine: dynamo_engine_mistralrs::make_engine(&model_path).await?,
             }
         }
         #[cfg(feature = "sglang")]
         Output::SgLang => {
-            use dynamo_llm::engines::sglang;
+            use dynamo_engine_sglang;
             let Some(model_path) = model_path else {
                 anyhow::bail!("out=sglang requires flag --model-path=<full-path-to-model-dir>");
             };
@@ -250,7 +249,7 @@ pub async fn run(
                 }
             }
 
-            let (engine, sglang_process) = sglang::make_engine(
+            let (engine, sglang_process) = dynamo_engine_sglang::make_engine(
                 cancel_token.clone(),
                 &model_path,
                 &sock_prefix,
@@ -271,7 +270,6 @@ pub async fn run(
         }
         #[cfg(feature = "vllm")]
         Output::Vllm => {
-            use dynamo_llm::engines::vllm;
             if flags.base_gpu_id != 0 {
                 anyhow::bail!("vllm does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
             }
@@ -305,7 +303,7 @@ pub async fn run(
             }
             if node_conf.node_rank == 0 {
                 // vllm multi-node only the leader runs vllm
-                let (engine, vllm_future) = vllm::make_leader_engine(
+                let (engine, vllm_future) = dynamo_engine_vllm::make_leader_engine(
                     cancel_token.clone(),
                     &model_path,
                     &sock_prefix,
@@ -324,14 +322,15 @@ pub async fn run(
                 }
             } else {
                 // Nodes rank > 0 only run 'ray'
-                let stop_future = vllm::start_follower(cancel_token.clone(), node_conf).await?;
+                let stop_future =
+                    dynamo_engine_vllm::start_follower(cancel_token.clone(), node_conf).await?;
                 extra = Some(Box::pin(stop_future));
                 EngineConfig::None
             }
         }
         #[cfg(feature = "llamacpp")]
         Output::LlamaCpp => {
-            use dynamo_llm::engines::llamacpp;
+            use dynamo_engine_llamacpp;
             let Some(model_path) = model_path else {
                 anyhow::bail!("out=llamacpp requires flag --model-path=<full-path-to-model-gguf>");
             };
@@ -343,7 +342,8 @@ pub async fn run(
                     "Pass --model-config so we can find the tokenizer, should be an HF checkout."
                 );
             };
-            let engine = llamacpp::make_engine(cancel_token.clone(), &model_path).await?;
+            let engine =
+                dynamo_engine_llamacpp::make_engine(cancel_token.clone(), &model_path).await?;
             EngineConfig::StaticCore {
                 service_name: card.service_name.clone(),
                 engine,
@@ -352,7 +352,6 @@ pub async fn run(
         }
         #[cfg(feature = "trtllm")]
         Output::TrtLLM => {
-            use dynamo_llm::engines::trtllm;
             let Some(model_path) = model_path else {
                 anyhow::bail!("out=trtllm requires flag --model-path=<full-path-to-model-dir>");
             };
@@ -363,7 +362,10 @@ pub async fn run(
             }
             // Safety: Earlier we build maybe_card from model_path, which we checked right above
             let card = maybe_card.clone().unwrap();
-            let engine = trtllm::make_engine(model_path.display(), flags.tensor_parallel_size)?;
+            let engine = dynamo_engine_trtllm::make_engine(
+                model_path.display(),
+                flags.tensor_parallel_size,
+            )?;
             EngineConfig::StaticCore {
                 service_name: card.service_name.clone(),
                 engine,
@@ -372,13 +374,13 @@ pub async fn run(
         }
         #[cfg(feature = "python")]
         Output::PythonStr(path_str) => {
-            use dynamo_llm::engines::python;
             let Some(model_name) = model_name else {
                 anyhow::bail!("Provide model service name as `--model-name <this>`");
             };
             let py_args = flags.as_vec(&path_str, &model_name);
             let p = std::path::PathBuf::from(path_str);
-            let engine = python::make_string_engine(cancel_token.clone(), &p, py_args).await?;
+            let engine =
+                dynamo_engine_python::make_string_engine(cancel_token.clone(), &p, py_args).await?;
             EngineConfig::StaticFull {
                 service_name: model_name,
                 engine,
@@ -386,7 +388,6 @@ pub async fn run(
         }
         #[cfg(feature = "python")]
         Output::PythonTok(path_str) => {
-            use dynamo_llm::engines::python;
             let Some(card) = maybe_card.clone() else {
                 anyhow::bail!("Could not find tokenizer. Pass flag --model-path <path>");
             };
@@ -395,7 +396,8 @@ pub async fn run(
             };
             let py_args = flags.as_vec(&path_str, &model_name);
             let p = std::path::PathBuf::from(path_str);
-            let engine = python::make_token_engine(cancel_token.clone(), &p, py_args).await?;
+            let engine =
+                dynamo_engine_python::make_token_engine(cancel_token.clone(), &p, py_args).await?;
             EngineConfig::StaticCore {
                 service_name: model_name.clone(),
                 engine,
