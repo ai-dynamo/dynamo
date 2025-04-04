@@ -15,9 +15,9 @@
 
 
 import asyncio
+import logging
 import os
 
-import logging
 from components.disagg_router import PyDisaggregatedRouter
 from components.prefill_worker import PrefillWorker
 from utils.nixl import NixlMetadataStore
@@ -27,15 +27,14 @@ from utils.vllm import parse_vllm_args
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
 )
-from vllm.logger import logger as vllm_logger
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
 from dynamo.llm import KvMetricsPublisher
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
-
 logger = logging.getLogger(__name__)
+
 
 @service(
     dynamo={

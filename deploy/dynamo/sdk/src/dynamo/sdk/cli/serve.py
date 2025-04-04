@@ -155,9 +155,10 @@ def _parse_service_args(args: list[str]) -> t.Dict[str, t.Any]:
 
 
 def build_serve_command() -> click.Group:
-    from dynamo.sdk.lib.logging import configure_server_logging
     from bentoml_cli.env_manager import env_manager
     from bentoml_cli.utils import AliasCommand
+
+    from dynamo.sdk.lib.logging import configure_server_logging
 
     @click.group(name="serve")
     def cli():

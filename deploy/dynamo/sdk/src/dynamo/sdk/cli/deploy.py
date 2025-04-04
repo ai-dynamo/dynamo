@@ -147,6 +147,7 @@ def build_deploy_command() -> click.Command:
         - a path to a built Bento
         """
         from dynamo.sdk.lib.logging import configure_server_logging
+
         configure_server_logging()
 
         # Fix handling of None values

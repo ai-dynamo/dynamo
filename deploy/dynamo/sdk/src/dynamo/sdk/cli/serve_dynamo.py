@@ -20,8 +20,6 @@ import inspect
 import json
 import logging
 import os
-import random
-import string
 import typing as t
 from typing import Any
 
@@ -34,6 +32,7 @@ from dynamo.sdk.lib.service import LinkedServices
 
 logger = logging.getLogger("dynamo.sdk.serve.dynamo")
 logger.setLevel(logging.INFO)
+
 
 @click.command()
 @click.argument("bento_identifier", type=click.STRING, required=False, default=".")
@@ -65,6 +64,7 @@ def main(
     from _bentoml_impl.loader import import_service
     from bentoml._internal.container import BentoMLContainer
     from bentoml._internal.context import server_context
+
     from dynamo.sdk.lib.logging import configure_server_logging
 
     run_id = service_name
