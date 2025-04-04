@@ -21,6 +21,7 @@ from argparse import Namespace
 from typing import AsyncIterator
 
 from components.worker import VllmWorker
+from utils.logging import check_required_workers
 from utils.protocol import Tokens
 from vllm.logger import logger as vllm_logger
 
@@ -98,14 +99,8 @@ class Router:
             .endpoint("generate")
             .client()
         )
-        while len(self.workers_client.endpoint_ids()) < self.args.min_workers:
-            # TODO: replace print w/ vllm_logger.info
-            print(
-                f"Waiting for more workers to be ready.\n"
-                f" Current: {len(self.workers_client.endpoint_ids())},"
-                f" Required: {self.args.min_workers}"
-            )
-            await asyncio.sleep(2)
+
+        await check_required_workers(self.workers_client, self.args.min_workers)
 
         kv_listener = self.runtime.namespace("dynamo").component("VllmWorker")
         await kv_listener.create_service()
