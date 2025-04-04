@@ -251,11 +251,11 @@ where
         let reader = BufReader::new(file);
         let mut lines = reader.lines();
 
-        let mut events: Vec<(u64, T)> = Vec::new();
         let mut count = 0;
         let mut line_number = 0;
+        let mut prev_timestamp: Option<u64> = None;
 
-        // First pass: read and parse all events
+        // Read and send events line by line
         while let Some(line) = lines.next_line().await? {
             line_number += 1;
 
@@ -277,43 +277,34 @@ where
                 }
             };
 
-            events.push((record.timestamp, record.event));
+            let timestamp = record.timestamp;
+            let event = record.event;
+
+            // Handle timing if needed
+            if timed && prev_timestamp.is_some() {
+                let prev = prev_timestamp.unwrap();
+                if timestamp > prev {
+                    let wait_time = timestamp - prev;
+                    tokio::time::sleep(Duration::from_millis(wait_time)).await;
+                }
+            }
+
+            // Send the event
+            event_tx.send(event).await.map_err(|e| {
+                io::Error::new(io::ErrorKind::Other, format!("Failed to send event: {}", e))
+            })?;
+
+            // Update previous timestamp and count
+            prev_timestamp = Some(timestamp);
             count += 1;
         }
 
-        if events.is_empty() {
+        if count == 0 {
             log::warn!("No events to send from file: {}", display_name);
-            return Ok(0);
-        }
-
-        if timed {
-            // Send events with timing based on timestamps
-            let mut prev_timestamp = events[0].0;
-
-            for (timestamp, event) in events {
-                // Calculate time to wait
-                if timestamp > prev_timestamp {
-                    let wait_time = timestamp - prev_timestamp;
-                    tokio::time::sleep(Duration::from_millis(wait_time)).await;
-                }
-
-                // Send the event
-                event_tx.send(event).await.map_err(|e| {
-                    io::Error::new(io::ErrorKind::Other, format!("Failed to send event: {}", e))
-                })?;
-
-                prev_timestamp = timestamp;
-            }
         } else {
-            // Send events as fast as possible without delay
-            for (_, event) in events {
-                event_tx.send(event).await.map_err(|e| {
-                    io::Error::new(io::ErrorKind::Other, format!("Failed to send event: {}", e))
-                })?;
-            }
+            log::info!("Sent {} events from {}", count, display_name);
         }
 
-        log::info!("Sent {} events from {}", count, display_name);
         Ok(count)
     }
 }
