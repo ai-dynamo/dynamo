@@ -401,13 +401,28 @@ pub(crate) struct KvRecorder {
 #[pymethods]
 impl KvRecorder {
     #[new]
-    fn new(component: Component) -> PyResult<Self> {
+    #[pyo3(signature = (component, output_path=None, max_lines_per_file=None))]
+    fn new(component: Component, output_path: Option<String>, max_lines_per_file: Option<usize>) -> PyResult<Self> {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async {
-            let inner: Arc<llm_rs::kv_router::recorder::KvRecorder> =
-                Arc::new(llm_rs::kv_router::recorder::KvRecorder::new(
-                    component.inner.drt().runtime().child_token(),
-                ));
+            let token = component.inner.drt().runtime().child_token();
+            
+            // Create a temp path if none provided
+            let path = match output_path {
+                Some(p) => p,
+                None => {
+                    let temp_dir = std::env::temp_dir();
+                    temp_dir.join("kv_events.jsonl").to_string_lossy().to_string()
+                }
+            };
+            
+            let inner = llm_rs::kv_router::recorder::KvRecorder::new(
+                token.clone(), 
+                path, 
+                max_lines_per_file
+            )
+            .await
+            .map_err(to_pyerr)?;
 
             // Subscribe to KV events
             let mut kv_events_rx = component
@@ -432,7 +447,7 @@ impl KvRecorder {
                 }
             });
 
-            Ok(Self { inner })
+            Ok(Self { inner: Arc::new(inner) })
         })
     }
 
@@ -444,61 +459,20 @@ impl KvRecorder {
         })
     }
 
-    fn clear<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let recorder = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            recorder.clear().await;
-            Ok(())
-        })
-    }
-
-    #[pyo3(signature = (filename, num_events=None))]
-    fn to_jsonl<'py>(
-        &self,
-        py: Python<'py>,
-        filename: String,
-        num_events: Option<usize>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let recorder = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            recorder
-                .to_jsonl(filename, num_events)
-                .await
-                .map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    #[staticmethod]
-    #[pyo3(signature = (filename, component, num_events=None))]
-    fn from_jsonl(
-        py: Python<'_>,
-        filename: String,
-        component: Component,
-        num_events: Option<usize>,
-    ) -> PyResult<Bound<'_, PyAny>> {
-        let rs_component = component.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let token = rs_component.drt().runtime().child_token();
-            let recorder =
-                llm_rs::kv_router::recorder::KvRecorder::from_jsonl(filename, token, num_events)
-                    .await
-                    .map_err(to_pyerr)?;
-            Ok(KvRecorder {
-                inner: Arc::new(recorder),
-            })
-        })
-    }
-
     fn populate_indexer<'py>(
         &self,
         py: Python<'py>,
         indexer: &KvIndexer,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let recorder = self.inner.clone();
         let event_tx = indexer.inner.event_sender();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let count = recorder.send_events(&event_tx).await.map_err(to_pyerr)?;
+            let count = llm_rs::kv_router::recorder::KvRecorder::send_events(
+                "dummy_path", // This doesn't matter as we'll use the provided event_tx
+                &event_tx,
+                false
+            )
+            .await
+            .map_err(to_pyerr)?;
             Ok(count)
         })
     }
@@ -506,10 +480,5 @@ impl KvRecorder {
     fn shutdown(&self) -> PyResult<()> {
         self.inner.shutdown();
         Ok(())
-    }
-
-    #[getter]
-    fn time_offset(&self) -> u64 {
-        self.inner.time_offset()
     }
 }

@@ -108,7 +108,6 @@ class Component:
         """
         ...
 
-
 class Endpoint:
     """
     An Endpoint is a single API endpoint
@@ -330,7 +329,6 @@ class KvIndexer:
         """
         ...
 
-
 class KvRecorder:
     """
     A recorder for KV Router events.
@@ -338,12 +336,19 @@ class KvRecorder:
 
     ...
 
-    def __init__(self, component: Component) -> None:
+    def __init__(
+        self,
+        component: Component,
+        output_path: Optional[str] = None,
+        max_lines_per_file: Optional[int] = None,
+    ) -> None:
         """
         Create a new KvRecorder instance.
 
         Args:
             component: The component to associate with this recorder
+            output_path: Path to the JSONL file to write events to
+            max_lines_per_file: Maximum number of lines per file before rotating to a new file
         """
         ...
 
@@ -353,39 +358,6 @@ class KvRecorder:
 
         Returns:
             The number of events recorded
-        """
-        ...
-
-    def clear(self) -> None:
-        """
-        Clear all recorded events.
-        """
-        ...
-
-    def to_jsonl(self, filename: str, num_events: Optional[int] = None) -> None:
-        """
-        Dump recorded events to a JSONL file.
-
-        Args:
-            filename: Path to the JSONL file to write
-            num_events: Optional limit on the number of events to write
-        """
-        ...
-
-    @staticmethod
-    def from_jsonl(
-        filename: str, component: Component, num_events: Optional[int] = None
-    ) -> "KvRecorder":
-        """
-        Read events from a JSONL file and create a new recorder.
-
-        Args:
-            filename: Path to the JSONL file to read
-            component: The component to associate with the new recorder
-            num_events: Optional limit on the number of events to read
-
-        Returns:
-            A new KvRecorder instance with the loaded events
         """
         ...
 
@@ -406,17 +378,6 @@ class KvRecorder:
         Shutdown the recorder.
         """
         ...
-
-    @property
-    def time_offset(self) -> int:
-        """
-        Get the current time offset in milliseconds.
-
-        Returns:
-            The time offset
-        """
-        ...
-
 
 class AggregatedMetrics:
     """
@@ -450,12 +411,23 @@ class KvEventPublisher:
 
     ...
 
-    def __init__(self, component: Component, worker_id: int, kv_block_size: int) -> None:
+    def __init__(
+        self, component: Component, worker_id: int, kv_block_size: int
+    ) -> None:
         """
         Create a `KvEventPublisher` object
         """
 
-    def publish_stored(self, event_id, int, token_ids: List[int], num_block_tokens: List[int], block_hashes: List[int], lora_id: int, parent_hash: Optional[int] = None) -> None:
+    def publish_stored(
+        self,
+        event_id,
+        int,
+        token_ids: List[int],
+        num_block_tokens: List[int],
+        block_hashes: List[int],
+        lora_id: int,
+        parent_hash: Optional[int] = None,
+    ) -> None:
         """
         Publish a KV stored event.
         """

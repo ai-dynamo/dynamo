@@ -14,11 +14,12 @@
 // limitations under the License.
 
 use serde::{Deserialize, Serialize};
-use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Write};
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio::fs::{self, File, OpenOptions};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing as log;
@@ -35,154 +36,205 @@ where
     event: T,
 }
 
-/// A generic recorder for events
+/// A generic recorder for events that streams directly to a JSONL file
 pub struct Recorder<T>
 where
     T: Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static,
 {
-    /// The time offset in milliseconds to apply to new events
-    time_offset: u64,
-    /// The recorded events - now storing elapsed milliseconds since start
-    events: Arc<Mutex<Vec<(u64, T)>>>,
     /// A sender for events that can be cloned and shared with producers
     event_tx: mpsc::Sender<T>,
     /// A cancellation token for managing shutdown
     cancel: CancellationToken,
+    /// Counter for the number of events written
+    event_count: Arc<Mutex<usize>>,
 }
 
 impl<T> Recorder<T>
 where
     T: Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static,
 {
-    /// Create a new Recorder without a time offset
+    /// Create a new Recorder that streams events directly to a JSONL file
     ///
     /// ### Arguments
     ///
     /// * `token` - A cancellation token for managing shutdown
+    /// * `output_path` - Path to the JSONL file to write events to
+    /// * `max_lines_per_file` - Maximum number of lines per file before rotating to a new file.
+    ///                         If None, no rotation will occur.
     ///
     /// ### Returns
     ///
-    /// A new Recorder instance
-    pub fn new(token: CancellationToken) -> Self {
-        Self::new_with_offset(token, 0)
-    }
-
-    /// Create a new Recorder with a specific time offset
-    ///
-    /// ### Arguments
-    ///
-    /// * `token` - A cancellation token for managing shutdown
-    /// * `time_offset` - The time offset in milliseconds to apply to new events
-    ///
-    /// ### Returns
-    ///
-    /// A new Recorder instance with the specified time offset
-    pub fn new_with_offset(token: CancellationToken, time_offset: u64) -> Self {
+    /// A Result with a new Recorder that streams events to the specified file
+    pub async fn new<P: AsRef<Path>>(
+        token: CancellationToken,
+        output_path: P,
+        max_lines_per_file: Option<usize>,
+    ) -> io::Result<Self> {
         let (event_tx, mut event_rx) = mpsc::channel::<T>(2048);
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let events_clone = events.clone();
+        let event_count = Arc::new(Mutex::new(0));
+        let event_count_clone = event_count.clone();
         let cancel_clone = token.clone();
         let start_time = Instant::now();
 
-        // Spawn a task to receive and record events
+        // Ensure the directory exists
+        if let Some(parent) = output_path.as_ref().parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent).await?;
+            }
+        }
+
+        // Create the file for writing
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&output_path)
+            .await?;
+
+        let file_path = output_path.as_ref().to_path_buf();
+
+        // Spawn a task to receive events and write them to the file
         tokio::spawn(async move {
             let start_time = start_time;
-            let time_offset = time_offset;
+            let mut writer = BufWriter::new(file);
+            let mut line_count = 0;
+            let mut file_index = 0;
+            let base_path = file_path.clone();
+
             loop {
                 tokio::select! {
                     biased;
 
                     _ = cancel_clone.cancelled() => {
+                        // Flush any pending writes before shutting down
+                        if let Err(e) = writer.flush().await {
+                            log::error!("Failed to flush on shutdown: {}", e);
+                        }
+
                         log::debug!("Recorder task shutting down");
                         return;
                     }
 
                     Some(event) = event_rx.recv() => {
-                        // Record the event with elapsed time since start in milliseconds, plus the offset
+                        // Calculate elapsed time in milliseconds
                         let elapsed_ms = start_time.elapsed().as_millis() as u64;
-                        let timestamp = elapsed_ms + time_offset;
-                        let mut events = events_clone.lock().await;
-                        events.push((timestamp, event));
+
+                        // Create the record entry
+                        let entry = RecordEntry {
+                            timestamp: elapsed_ms,
+                            event,
+                        };
+
+                        // Serialize to JSON string
+                        let json = match serde_json::to_string(&entry) {
+                            Ok(json) => json,
+                            Err(e) => {
+                                log::error!("Failed to serialize event: {}", e);
+                                continue;
+                            }
+                        };
+
+                        // Write JSON line
+                        if let Err(e) = writer.write_all(json.as_bytes()).await {
+                            log::error!("Failed to write event: {}", e);
+                            continue;
+                        }
+
+                        // Add a newline
+                        if let Err(e) = writer.write_all(b"\n").await {
+                            log::error!("Failed to write newline: {}", e);
+                            continue;
+                        }
+
+                        // Increment line count
+                        line_count += 1;
+
+                        // Check if we need to rotate to a new file
+                        if let Some(max_lines) = max_lines_per_file {
+                            if line_count >= max_lines {
+                                // Flush the current file
+                                if let Err(e) = writer.flush().await {
+                                    log::error!("Failed to flush file before rotation: {}", e);
+                                }
+
+                                // Create new filename with suffix
+                                file_index += 1;
+                                let new_path = create_rotated_path(&base_path, file_index);
+
+                                // Open new file
+                                match OpenOptions::new()
+                                    .create(true)
+                                    .write(true)
+                                    .truncate(true)
+                                    .open(&new_path)
+                                    .await
+                                {
+                                    Ok(new_file) => {
+                                        writer = BufWriter::new(new_file);
+                                        line_count = 0;
+                                        log::info!("Rotated to new file: {}", new_path.display());
+                                    },
+                                    Err(e) => {
+                                        log::error!("Failed to open rotated file {}: {}", new_path.display(), e);
+                                        // Continue with the existing file if rotation fails
+                                    }
+                                }
+                            }
+                        }
+
+                        // Update event count
+                        let mut count = event_count_clone.lock().await;
+                        *count += 1;
+
+                        // Flush every 100 events for better durability
+                        if *count % 100 == 0 {
+                            if let Err(e) = writer.flush().await {
+                                log::error!("Failed to flush: {}", e);
+                            }
+                        }
                     }
                 }
             }
         });
 
-        Self {
-            time_offset,
-            events,
+        Ok(Self {
             event_tx,
             cancel: token,
-        }
+            event_count,
+        })
     }
 
-    /// Dump recorded events to a JSONL file
+    /// Get a sender that can be used to send events to the recorder
+    pub fn event_sender(&self) -> mpsc::Sender<T> {
+        self.event_tx.clone()
+    }
+
+    /// Get the count of recorded events
+    pub async fn event_count(&self) -> usize {
+        *self.event_count.lock().await
+    }
+
+    /// Shutdown the recorder
+    pub fn shutdown(&self) {
+        self.cancel.cancel();
+    }
+
+    /// Send events from a JSONL file to the provided event sender
     ///
     /// ### Arguments
     ///
-    /// * `filename` - Path to the JSONL file to write
-    /// * `num_events` - Optional limit on the number of events to write
+    /// * `filename` - Path to the JSONL file to read events from
+    /// * `event_tx` - A sender for events
+    /// * `timed` - If true, events will be sent according to their recorded timestamps
     ///
     /// ### Returns
     ///
-    /// A Result indicating success or failure
-    pub async fn to_jsonl<P: AsRef<Path>>(
-        &self,
+    /// A Result indicating success or failure with the number of events sent
+    pub async fn send_events<P: AsRef<Path>>(
         filename: P,
-        num_events: Option<usize>,
-    ) -> io::Result<()> {
-        let events = self.events.lock().await;
-
-        if events.is_empty() {
-            log::warn!("No events to dump");
-            return Ok(());
-        }
-
-        // Store the display name before using filename with File::create
-        let display_name = filename.as_ref().display().to_string();
-
-        let file = File::create(filename)?;
-        let mut writer = BufWriter::new(file);
-
-        // Determine how many events to write
-        let event_count = match num_events {
-            Some(limit) => events.len().min(limit),
-            None => events.len(),
-        };
-
-        for (timestamp, event) in events.iter().take(event_count) {
-            let entry = RecordEntry {
-                timestamp: *timestamp,
-                event: event.clone(),
-            };
-
-            // Serialize and write the entry
-            serde_json::to_writer(&mut writer, &entry)?;
-            writeln!(writer)?;
-        }
-
-        writer.flush()?;
-        log::info!("Dumped {} events to {}", event_count, display_name);
-
-        Ok(())
-    }
-
-    /// Read events from a JSONL file and create a new recorder with appropriate time offset
-    ///
-    /// ### Arguments
-    ///
-    /// * `filename` - Path to the JSONL file to read
-    /// * `token` - A cancellation token for the new recorder
-    /// * `num_events` - Optional limit on the number of events to read
-    ///
-    /// ### Returns
-    ///
-    /// A Result with a new Recorder that contains the loaded events and appropriate time offset
-    pub async fn from_jsonl<P: AsRef<Path>>(
-        filename: P,
-        token: CancellationToken,
-        num_events: Option<usize>,
-    ) -> io::Result<Self> {
+        event_tx: &mpsc::Sender<T>,
+        timed: bool,
+    ) -> io::Result<usize> {
         // Store the display name before using filename
         let display_name = filename.as_ref().display().to_string();
 
@@ -194,141 +246,89 @@ where
             ));
         }
 
-        // Open the file for reading
-        let file = File::open(&filename)?;
+        // Open the file for reading using tokio's async file I/O
+        let file = File::open(&filename).await?;
         let reader = BufReader::new(file);
-        let lines = io::BufRead::lines(reader);
+        let mut lines = reader.lines();
 
-        let mut events = Vec::new();
+        let mut events: Vec<(u64, T)> = Vec::new();
         let mut count = 0;
-        let mut last_timestamp = 0;
+        let mut line_number = 0;
 
-        // Process each line
-        for line in lines {
-            // Check if we've reached the requested number of lines
-            if let Some(limit) = num_events {
-                if count >= limit {
-                    break;
-                }
-            }
+        // First pass: read and parse all events
+        while let Some(line) = lines.next_line().await? {
+            line_number += 1;
 
-            // Parse line
-            let line = line?;
             // Skip empty lines
             if line.trim().is_empty() {
                 continue;
             }
 
-            // Try to parse the JSON, skip on error but log a warning
+            // Try to parse the JSON
             let record: RecordEntry<T> = match serde_json::from_str(&line) {
                 Ok(record) => record,
                 Err(e) => {
                     log::warn!(
                         "Failed to parse JSON on line {}: {}. Skipping.",
-                        count + 1,
+                        line_number,
                         e
                     );
                     continue;
                 }
             };
 
-            // Track the timestamp
-            if record.timestamp > last_timestamp {
-                last_timestamp = record.timestamp;
-            }
-
-            // Store the event with its relative timestamp
             events.push((record.timestamp, record.event));
             count += 1;
         }
 
-        // Create a new recorder with the appropriate time offset
-        let recorder = Self::new_with_offset(token, last_timestamp);
-
-        // Add all events to the new recorder's event list
-        if !events.is_empty() {
-            let mut recorder_events = recorder.events.lock().await;
-            recorder_events.extend(events);
-        }
-
-        log::info!("Loaded {} events from {}", count, display_name);
-        log::info!(
-            "New recorder created with time offset of {} ms",
-            last_timestamp
-        );
-        Ok(recorder)
-    }
-
-    /// Get a sender that can be used to send events to the recorder
-    pub fn event_sender(&self) -> mpsc::Sender<T> {
-        self.event_tx.clone()
-    }
-
-    /// Get the count of recorded events
-    pub async fn event_count(&self) -> usize {
-        self.events.lock().await.len()
-    }
-
-    /// Clear all recorded events
-    pub async fn clear(&self) {
-        self.events.lock().await.clear();
-    }
-
-    /// Shutdown the recorder
-    pub fn shutdown(&self) {
-        self.cancel.cancel();
-    }
-
-    /// Get the current time offset
-    pub fn time_offset(&self) -> u64 {
-        self.time_offset
-    }
-
-    /// Get all recorded events as a vector of (timestamp, event) tuples
-    pub async fn get_events(&self) -> Vec<(u64, T)> {
-        let events = self.events.lock().await;
-        events.clone()
-    }
-
-    /// Send recorded events to the provided sender
-    ///
-    /// ### Arguments
-    ///
-    /// * `event_tx` - A sender for events
-    ///
-    /// ### Returns
-    ///
-    /// A Result indicating success or failure
-    pub async fn send_events(
-        &self,
-        event_tx: &mpsc::Sender<T>,
-    ) -> Result<usize, mpsc::error::SendError<T>> {
-        let events = self.events.lock().await;
-
         if events.is_empty() {
-            log::warn!("No events to send");
+            log::warn!("No events to send from file: {}", display_name);
             return Ok(0);
         }
 
-        // Assert that events are weakly sorted by timestamp (non-decreasing order)
-        for i in 1..events.len() {
-            assert!(
-                events[i-1].0 <= events[i].0,
-                "Events are not in timestamp order: event at index {} has timestamp {} which is after event at index {} with timestamp {}",
-                i-1, events[i-1].0, i, events[i].0
-            );
+        if timed {
+            // Send events with timing based on timestamps
+            let mut prev_timestamp = events[0].0;
+
+            for (timestamp, event) in events {
+                // Calculate time to wait
+                if timestamp > prev_timestamp {
+                    let wait_time = timestamp - prev_timestamp;
+                    tokio::time::sleep(Duration::from_millis(wait_time)).await;
+                }
+
+                // Send the event
+                event_tx.send(event).await.map_err(|e| {
+                    io::Error::new(io::ErrorKind::Other, format!("Failed to send event: {}", e))
+                })?;
+
+                prev_timestamp = timestamp;
+            }
+        } else {
+            // Send events as fast as possible without delay
+            for (_, event) in events {
+                event_tx.send(event).await.map_err(|e| {
+                    io::Error::new(io::ErrorKind::Other, format!("Failed to send event: {}", e))
+                })?;
+            }
         }
 
-        let mut count = 0;
-
-        // Send each event in the order they were recorded
-        for (_, event) in events.iter() {
-            event_tx.send(event.clone()).await?;
-            count += 1;
-        }
-
-        log::info!("Sent {} events", count);
+        log::info!("Sent {} events from {}", count, display_name);
         Ok(count)
+    }
+}
+
+/// Helper function to create a rotated file path with an index suffix
+fn create_rotated_path(base_path: &Path, index: usize) -> PathBuf {
+    let path_str = base_path.to_string_lossy();
+
+    if let Some(ext_pos) = path_str.rfind('.') {
+        // If there's an extension, insert the index before it
+        let (file_path, extension) = path_str.split_at(ext_pos);
+        PathBuf::from(format!("{}{}{}", file_path, index, extension))
+    } else {
+        // If there's no extension, just append the index
+        PathBuf::from(format!("{}{}", path_str, index))
     }
 }
 
@@ -338,29 +338,61 @@ mod tests {
     use std::time::Duration;
     use tempfile::tempdir;
 
-    // Simple event types for testing
-    type IntRecorder = Recorder<i32>;
-    type StringRecorder = Recorder<String>;
+    // Type alias for the TestEvent recorder
+    type TestEventRecorder = Recorder<TestEvent>;
 
     // More complex event type
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     struct TestEvent {
         id: u64,
         name: String,
-        value: f64,
+        values: Vec<i32>,
     }
 
-    type EventRecorder = Recorder<TestEvent>;
+    impl TestEvent {
+        // Helper method to generate a random test event
+        fn new(id: u64) -> Self {
+            // Generate a random number of values between 1 and 100
+            let num_values = rand::random_range(1..=100);
+
+            // Generate random values (integers between -100 and 100)
+            let values = (0..num_values)
+                .map(|_| rand::random_range(-100..=100))
+                .collect();
+
+            // Create a name based on the ID
+            let name = format!("event_{}", id);
+
+            TestEvent { id, name, values }
+        }
+
+        // Helper method to generate a vector of random events
+        fn generate_events(count: usize) -> Vec<Self> {
+            (0..count).map(|i| Self::new(i as u64)).collect()
+        }
+    }
 
     #[tokio::test]
-    async fn test_recorder_records_events() {
+    async fn test_recorder_streams_events_to_file() {
+        // Create a temporary directory for output files
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("events.jsonl");
+
         let token = CancellationToken::new();
-        let recorder = IntRecorder::new(token.clone());
+        let recorder = TestEventRecorder::new(token.clone(), &file_path, None)
+            .await
+            .unwrap();
         let event_tx = recorder.event_sender();
 
-        // Create and send two integer events
-        event_tx.send(42).await.unwrap();
-        event_tx.send(43).await.unwrap();
+        // Create test events using generate_events
+        let events = TestEvent::generate_events(2);
+        let event1 = events[0].clone();
+        let event2 = events[1].clone();
+
+        // Send the events
+        for event in &events {
+            event_tx.send(event.clone()).await.unwrap();
+        }
 
         // Allow some time for processing
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -368,192 +400,58 @@ mod tests {
         // Check that both events were recorded
         assert_eq!(recorder.event_count().await, 2);
 
-        // Clean up
+        // Force shutdown to flush file
         recorder.shutdown();
-    }
-
-    #[tokio::test]
-    async fn test_jsonl_roundtrip_preserves_events() {
-        let token = CancellationToken::new();
-        let recorder = StringRecorder::new(token.clone());
-        let event_tx = recorder.event_sender();
-
-        // Create and send two string events
-        let event1 = "Hello".to_string();
-        let event2 = "World".to_string();
-
-        event_tx.send(event1.clone()).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        event_tx.send(event2.clone()).await.unwrap();
-
-        // Allow some time for processing
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        // Create a temporary directory for output files
-        let dir = tempdir().unwrap();
-        let file_path1 = dir.path().join("events1.jsonl");
+        // Read the file and verify content
+        let content = fs::read_to_string(&file_path).await.unwrap();
+        let lines: Vec<&str> = content.lines().collect();
 
-        // Dump events to file
-        recorder.to_jsonl(&file_path1, None).await.unwrap();
-
-        // Read the content of the file
-        let content1 = std::fs::read_to_string(&file_path1).unwrap();
-        println!("JSONL content of file1:\n{}", content1);
-
-        // Create a new recorder with appropriate time offset based on the loaded file
-        let new_recorder = StringRecorder::from_jsonl(&file_path1, token.clone(), None)
-            .await
-            .unwrap();
-
-        // Verify the new recorder has 2 events
-        assert_eq!(
-            new_recorder.event_count().await,
-            2,
-            "Expected to load 2 events"
-        );
-
-        // Check that time offset is correctly set
-        let first_events = new_recorder.get_events().await;
-        let max_timestamp = first_events.iter().map(|(ts, _)| ts).max().unwrap();
-        assert_eq!(
-            new_recorder.time_offset(),
-            *max_timestamp,
-            "Time offset should match the last timestamp from the file"
-        );
-
-        // Get event sender for the new recorder
-        let new_event_tx = new_recorder.event_sender();
-
-        // Sleep a bit before sending new events
-        tokio::time::sleep(Duration::from_millis(5)).await;
-
-        // Send two more events to the new recorder
-        let event3 = "Testing".to_string();
-        let event4 = "Recorder".to_string();
-
-        new_event_tx.send(event3.clone()).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        new_event_tx.send(event4.clone()).await.unwrap();
-
-        // Allow some time for processing
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        // Verify that the new recorder now has 4 events
-        assert_eq!(
-            new_recorder.event_count().await,
-            4,
-            "Expected 4 events in the new recorder"
-        );
-
-        // Create a second file for output
-        let file_path2 = dir.path().join("events2.jsonl");
-
-        // Dump all 4 events to file2
-        new_recorder.to_jsonl(&file_path2, None).await.unwrap();
-
-        // Read the content of the second file
-        let content2 = std::fs::read_to_string(&file_path2).unwrap();
-        println!("JSONL content of file2:\n{}", content2);
-
-        // Split both contents into lines
-        let lines1: Vec<&str> = content1.lines().collect();
-        let lines2: Vec<&str> = content2.lines().collect();
-
-        // Verify we have the expected number of lines
-        assert_eq!(lines1.len(), 2, "Expected 2 lines in file1");
-        assert_eq!(lines2.len(), 4, "Expected 4 lines in file2");
-
-        // Verify the first two lines of both files are exactly the same
-        assert_eq!(
-            lines1[0], lines2[0],
-            "First line should be identical in both files"
-        );
-        assert_eq!(
-            lines1[1], lines2[1],
-            "Second line should be identical in both files"
-        );
-
-        // Verify that all timestamps in new_recorder are sorted
-        let all_events = new_recorder.get_events().await;
-        for i in 1..all_events.len() {
-            assert!(
-                all_events[i-1].0 <= all_events[i].0,
-                "Events should be in timestamp order: event at index {} has timestamp {} which should be before or equal to event at index {} with timestamp {}",
-                i-1, all_events[i-1].0, i, all_events[i].0
-            );
+        // Print the content of the JSONL file
+        println!("JSONL file content:");
+        for (i, line) in lines.iter().enumerate() {
+            println!("Line {}: {}", i + 1, line);
         }
 
-        // Clean up
-        recorder.shutdown();
-        new_recorder.shutdown();
-    }
+        assert_eq!(lines.len(), 2, "Expected 2 lines in the file");
 
-    #[ignore]
-    #[tokio::test]
-    async fn test_write_to_actual_file() {
-        // Use the manifest directory (project root) as a reference point
-        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        // Create the output path in the same directory as the source file
-        let output_path = manifest_dir.join("src/test_recorder_events.jsonl");
+        // Parse the lines to verify events
+        let entry1: RecordEntry<TestEvent> = serde_json::from_str(lines[0]).unwrap();
+        let entry2: RecordEntry<TestEvent> = serde_json::from_str(lines[1]).unwrap();
 
-        println!("Will write to: {}", output_path.display());
-
-        // Create a recorder and send events with complex event type
-        let token = CancellationToken::new();
-        let recorder = EventRecorder::new(token.clone());
-        let event_tx = recorder.event_sender();
-
-        // Create and send two events
-        let event1 = TestEvent {
-            id: 1,
-            name: "Event 1".to_string(),
-            value: std::f64::consts::PI,
-        };
-        let event2 = TestEvent {
-            id: 2,
-            name: "Event 2".to_string(),
-            value: std::f64::consts::E,
-        };
-
-        event_tx.send(event1).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        event_tx.send(event2).await.unwrap();
-
-        // Allow some time for processing
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        // Write events to the actual file
-        recorder.to_jsonl(&output_path, None).await.unwrap();
-
-        // Verify the file exists
-        assert!(
-            output_path.exists(),
-            "JSONL file should exist at {:?}",
-            output_path
-        );
-        println!("Successfully wrote events to {:?}", output_path);
-
-        // Clean up
-        recorder.shutdown();
-
-        // Note: We intentionally don't delete the file so it can be manually inspected
+        assert_eq!(entry1.event, event1);
+        assert_eq!(entry2.event, event2);
+        assert!(entry2.timestamp >= entry1.timestamp);
     }
 
     #[ignore]
     #[tokio::test]
     async fn load_test_100k_events() {
+        // Create a temporary directory for output files
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("events.jsonl");
+
         // Create a cancellation token for the recorder
         let token = CancellationToken::new();
-        let recorder = IntRecorder::new(token.clone());
+
+        // Set max lines per file to 10,000 (should create 10 files total)
+        const MAX_LINES_PER_FILE: usize = 10_000;
+        let recorder = TestEventRecorder::new(token.clone(), &file_path, Some(MAX_LINES_PER_FILE))
+            .await
+            .unwrap();
         let event_tx = recorder.event_sender();
 
         // Define number of events to generate
         const NUM_EVENTS: usize = 100_000;
         println!("Generating {} events...", NUM_EVENTS);
 
-        // Create and send 100k integer events
-        for i in 0..NUM_EVENTS {
-            event_tx.send(i as i32).await.unwrap();
+        // Generate events using the helper method
+        let events = TestEvent::generate_events(NUM_EVENTS);
+
+        // Send events with progress reporting
+        for (i, event) in events.iter().enumerate() {
+            event_tx.send(event.clone()).await.unwrap();
 
             // Print progress every 10,000 events
             if i > 0 && i % 10_000 == 0 {
@@ -568,24 +466,97 @@ mod tests {
         // Verify that all events were recorded
         let count = recorder.event_count().await;
         println!("Recorded event count: {}", count);
-        assert_eq!(count, NUM_EVENTS, "Expected exactly {} events", NUM_EVENTS);
+        assert_eq!(count, NUM_EVENTS);
 
-        // Optionally, create a temp file and verify serialization works
-        let dir = tempdir().unwrap();
-        let file_path = dir.path().join("load_test_events.jsonl");
+        // Force a clean shutdown to flush all pending writes
+        recorder.shutdown();
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
-        println!("Writing events to temporary file: {}", file_path.display());
-        recorder.to_jsonl(&file_path, None).await.unwrap();
+        // Check for the existence of all expected files
+        let base_file = file_path.clone();
+        let mut found_files = Vec::new();
 
-        // Verify the file exists
-        assert!(
-            file_path.exists(),
-            "JSONL file should exist at {:?}",
-            file_path
+        // Check base file
+        if base_file.exists() {
+            found_files.push(base_file.clone());
+        }
+
+        // Check rotated files (1-9)
+        for i in 1..=9 {
+            let rotated_path = create_rotated_path(&base_file, i);
+            if rotated_path.exists() {
+                found_files.push(rotated_path);
+            }
+        }
+
+        assert_eq!(
+            found_files.len(),
+            10,
+            "Expected 10 files due to rotation with 10k events each"
         );
 
-        // Clean up
-        recorder.shutdown();
-        println!("Load test completed successfully");
+        // Count total lines across all files
+        let mut total_lines = 0;
+
+        // Check that each file contains expected number of lines and has sorted timestamps
+        for (i, file_path) in found_files.iter().enumerate() {
+            println!("Checking file {}: {}", i, file_path.display());
+
+            // Count lines in the file
+            let content = fs::read_to_string(file_path).await.unwrap();
+            let line_count = content.lines().count();
+
+            // Should have MAX_LINES_PER_FILE lines in each file (except maybe the last one)
+            if i < found_files.len() - 1 {
+                assert_eq!(line_count, MAX_LINES_PER_FILE, "Each file except possibly the last should have exactly MAX_LINES_PER_FILE lines");
+            }
+
+            total_lines += line_count;
+
+            // Check that timestamps are weakly sorted within each file
+            let file = File::open(file_path).await.unwrap();
+            let reader = BufReader::new(file);
+            let mut lines = reader.lines();
+
+            let mut prev_timestamp: Option<u64> = None;
+            let mut line_number = 0;
+            let mut unsorted_count = 0;
+
+            // Check timestamps in the file without loading everything into memory
+            while let Some(line) = lines.next_line().await.unwrap() {
+                line_number += 1;
+                let entry: RecordEntry<TestEvent> = serde_json::from_str(&line).unwrap();
+
+                if let Some(prev) = prev_timestamp {
+                    if entry.timestamp < prev {
+                        unsorted_count += 1;
+                        if unsorted_count <= 5 {
+                            // Only log first 5 violations to avoid spam
+                            println!(
+                                "Timestamp order violation in file {} at line {}: {} < {}",
+                                file_path.display(),
+                                line_number,
+                                entry.timestamp,
+                                prev
+                            );
+                        }
+                    }
+                }
+
+                prev_timestamp = Some(entry.timestamp);
+            }
+
+            assert_eq!(
+                unsorted_count, 0,
+                "Timestamps should be weakly sorted within each file"
+            );
+        }
+
+        assert_eq!(
+            total_lines, NUM_EVENTS,
+            "Total lines across all files should match NUM_EVENTS"
+        );
+
+        println!("Load test with file rotation completed successfully");
     }
 }
