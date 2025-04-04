@@ -57,11 +57,11 @@ where
     /// * `token` - A cancellation token for managing shutdown
     /// * `output_path` - Path to the JSONL file to write events to
     /// * `max_lines_per_file` - Maximum number of lines per file before rotating to a new file.
-    ///                         If None, no rotation will occur.
+    ///   If None, no rotation will occur.
     /// * `max_count` - Maximum number of events to record before shutting down.
-    ///               If None, no limit will be applied.
+    ///   If None, no limit will be applied.
     /// * `max_time` - Maximum duration in seconds to record before shutting down.
-    ///              If None, no time limit will be applied.
+    ///   If None, no time limit will be applied.
     ///
     /// ### Returns
     ///
@@ -262,7 +262,7 @@ where
     /// * `filename` - Path to the JSONL file to read events from
     /// * `event_tx` - A sender for events
     /// * `timed` - If true, events will be sent according to their recorded timestamps.
-    ///            If false, events will be sent without any delay in between.
+    ///   If false, events will be sent as fast as possible without delay.
     /// * `max_count` - Maximum number of events to send before stopping. If None, all events will be sent.
     /// * `max_time` - Maximum duration in seconds to send events before stopping. If None, no time limit.
     ///
