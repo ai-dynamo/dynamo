@@ -29,5 +29,3 @@ curl -X POST \
        "description": "Default cluster",
        "kube_config": ""
      }' | jq '.'
-
-# check out ui at https://${NAMESPACE}.dev.aire.nvidia.com
