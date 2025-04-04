@@ -26,10 +26,8 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "pytest>=8.3.4",
-    "bentoml==1.4.1",
-    "types-psutil==7.0.0.20250218",
-    "kubernetes==32.0.1",
     "ai-dynamo-runtime==0.1.0",
+    "ai-dynamo-sdk==0.1.0",
 ]
 
 classifiers = [
@@ -62,28 +60,28 @@ vllm = [
 ]
 
 [project.scripts]
-dynamo = "dynamo.sdk.cli.cli:cli"
-dynamo-run = "dynamo.sdk.cli.run_executable:dynamo_run"
-llmctl = "dynamo.sdk.cli.run_executable:llmctl"
-http = "dynamo.sdk.cli.run_executable:http"
-metrics = "dynamo.sdk.cli.run_executable:metrics"
-mock_worker = "dynamo.sdk.cli.run_executable:mock_worker"
+dynamo = "dynamo.sdk.cli.cli:cli" # The actual dynamo CLI lives with the sdk, here we do a pass through
+dynamo-run = "dynamo.cli.run_executable:dynamo_run"
+llmctl = "dynamo.cli.run_executable:llmctl"
+http = "dynamo.cli.run_executable:http"
+metrics = "dynamo.cli.run_executable:metrics"
+mock_worker = "dynamo.cli.run_executable:mock_worker"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["deploy/dynamo/sdk/src/dynamo"]
+packages = ["dynamo/src/dynamo"]
 
 # This section is for including the binaries in the wheel package
 # but doesn't make them executable scripts in the venv bin directory
 [tool.hatch.build.targets.wheel.force-include]
-"target/release/dynamo-run" = "dynamo/sdk/cli/bin/dynamo-run"
-"target/release/llmctl" = "dynamo/sdk/cli/bin/llmctl"
-"target/release/http" = "dynamo/sdk/cli/bin/http"
-"target/release/metrics" = "dynamo/sdk/cli/bin/metrics"
-"target/release/mock_worker" = "dynamo/sdk/cli/bin/mock_worker"
+"target/release/dynamo-run" = "dynamo/cli/bin/dynamo-run"
+"target/release/llmctl" = "dynamo/cli/bin/llmctl"
+"target/release/http" = "dynamo/cli/bin/http"
+"target/release/metrics" = "dynamo/cli/bin/metrics"
+"target/release/mock_worker" = "dynamo/cli/bin/mock_worker"
 
 [tool.codespell]
 # note: pre-commit passes explicit lists of files here, which this skip file list doesn't override -
