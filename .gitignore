@@ -82,4 +82,5 @@ __pycache__/
 Chart.lock
 generated-values.yaml
 
+**/.devcontainer/.env
 TensorRT-LLM
