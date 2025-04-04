@@ -30,6 +30,7 @@ pub mod indexer;
 pub mod metrics_aggregator;
 pub mod protocols;
 pub mod publisher;
+pub mod recorder;
 pub mod scheduler;
 pub mod scoring;
 
