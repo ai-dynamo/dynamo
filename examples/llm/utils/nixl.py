@@ -64,6 +64,8 @@ class NixlMetadataStore:
 
         self._cached: dict[str, NixlMetadata] = {}
         self._client = runtime.etcd_client()
+        if self._client is None:
+            raise Exception("Cannot be used with static workers")
         self._key_prefix = f"{self._namespace}/{NixlMetadataStore.NIXL_METADATA_KEY}"
 
     async def put(self, engine_id, metadata: NixlMetadata):

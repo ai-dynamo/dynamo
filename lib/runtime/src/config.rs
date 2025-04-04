@@ -96,7 +96,7 @@ impl RuntimeConfig {
     /// Load the runtime configuration from the environment and configuration files
     /// Configuration is priorities in the following order, where the last has the lowest priority:
     /// 1. Environment variables (top priority)
-    ///     TO DO: Add documentation for configuration files. Paths should be configurable.
+    ///    TO DO: Add documentation for configuration files. Paths should be configurable.
     /// 2. /opt/dynamo/etc/runtime.toml
     /// 3. /opt/dynamo/defaults/runtime.toml (lowest priority)
     ///

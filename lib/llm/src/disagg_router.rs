@@ -38,11 +38,14 @@ impl DisaggRouterConf {
     pub async fn from_etcd_with_watcher(
         drt: Arc<DistributedRuntime>,
         model_name: &str,
-    ) -> Result<(Self, watch::Receiver<Self>), Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<(Self, watch::Receiver<Self>)> {
         let etcd_key = format!("public/components/disagg_router/models/chat/{}", model_name);
 
         // Get the initial value if it exists
-        let initial_config = match drt.etcd_client().kv_get_prefix(&etcd_key).await {
+        let Some(etcd_client) = drt.etcd_client() else {
+            anyhow::bail!("Static components don't have an etcd client");
+        };
+        let initial_config = match etcd_client.kv_get_prefix(&etcd_key).await {
             Ok(kvs) => {
                 if let Some(kv) = kvs.first() {
                     match serde_json::from_slice::<DisaggRouterConf>(kv.value()) {
@@ -81,7 +84,7 @@ impl DisaggRouterConf {
         let (watch_tx, watch_rx) = watch::channel(initial_config.clone());
 
         // Set up the watcher after getting the initial value
-        let prefix_watcher = drt.etcd_client().kv_get_and_watch_prefix(&etcd_key).await?;
+        let prefix_watcher = etcd_client.kv_get_and_watch_prefix(&etcd_key).await?;
         let (key, _watcher, mut kv_event_rx) = prefix_watcher.dissolve();
 
         // Spawn background task to watch for config changes
@@ -160,7 +163,7 @@ impl DisaggregatedRouter {
         drt: Arc<DistributedRuntime>,
         model_name: String,
         default_max_local_prefill_length: i32,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<Self> {
         let (mut config, watcher) =
             DisaggRouterConf::from_etcd_with_watcher(drt, &model_name).await?;
 

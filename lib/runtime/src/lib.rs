@@ -74,7 +74,7 @@ pub struct DistributedRuntime {
     runtime: Runtime,
 
     // we might consider a unifed transport manager here
-    etcd_client: transports::etcd::Client,
+    etcd_client: Option<transports::etcd::Client>,
     nats_client: transports::nats::Client,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
 
@@ -84,4 +84,8 @@ pub struct DistributedRuntime {
     // a single endpoint watcher for both clients, this keeps the number background tasking watching specific
     // paths in etcd to a minimum.
     component_registry: component::Registry,
+
+    // Will only have static components that are not discoverable via etcd, they must be know at
+    // startup. Will not start etcd.
+    is_static: bool,
 }
