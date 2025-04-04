@@ -32,7 +32,10 @@
                 "rust-lang.rust-analyzer",
                 "tamasfe.even-better-toml",
                 "github.copilot",
-                "ms-azuretools.vscode-docker"
+                "ms-azuretools.vscode-docker",
+                "donjayamanne.githistory",
+                "waderyan.gitblame",
+                "earthly.earthfile-syntax-highlighting"
             ],
             "settings": {
                 "python.defaultInterpreterPath": "/workspaces/ai-dynamo/venv/bin/python",
