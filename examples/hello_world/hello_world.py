@@ -48,13 +48,10 @@ class ResponseType(BaseModel):
 
 
 @service(
-    resources={"cpu": "2"},
-    traffic={"timeout": 30},
     dynamo={
         "enabled": True,
         "namespace": "inference",
     },
-    workers=3,
     image=DYNAMO_IMAGE,
 )
 class Backend:
@@ -72,8 +69,6 @@ class Backend:
 
 
 @service(
-    resources={"cpu": "2"},
-    traffic={"timeout": 30},
     dynamo={"enabled": True, "namespace": "inference"},
     image=DYNAMO_IMAGE,
 )
@@ -96,8 +91,6 @@ class Middle:
 
 
 @service(
-    resources={"cpu": "1"},
-    traffic={"timeout": 60},
     image=DYNAMO_IMAGE,
 )  # Regular HTTP API
 class Frontend:
