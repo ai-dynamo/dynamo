@@ -89,7 +89,7 @@ pub enum PromptContextMixin {
     /// Support OAI Chat Messages and Tools
     OaiChat,
 
-    /// Enables templates with `{{datatime}}` to be rendered with the current date and time.
+    /// Enables templates with `{{datetime}}` to be rendered with the current date and time.
     Llama3DateTime,
 }
 

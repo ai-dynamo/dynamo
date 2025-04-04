@@ -14,7 +14,11 @@
 # limitations under the License.
 
 import json
+import logging
 import os
+from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class ServiceConfig(dict):
@@ -46,15 +50,23 @@ class ServiceConfig(dict):
             raise ValueError(f"{service_name}.{key} must be specified in configuration")
         return self[service_name][key]
 
-    def as_args(self, service_name, prefix=""):
-        """Extract configs as CLI args for a service, with optional prefix filtering"""
+    def as_args(
+        self, service_name, prefix="", common_config_keys: Optional[set[str]] = None
+    ):
+        """Extract configs as CLI args for a service, with optional prefix filtering.
+
+        Every component will additionally have the args in the `Common` configs
+        applied if it has subscribed to that config key, i.e. the given key is provided in
+        `common_config_keys`, and that key has not been overriden by the component's config.
+        """
         if service_name not in self:
             return []
 
-        args = []
-        for key, value in self[service_name].items():
+        args: list[str] = []
+
+        def add_to_args(args: list[str], value):
             if prefix and not key.startswith(prefix):
-                continue
+                return
 
             # Strip prefix if needed
             arg_key = key[len(prefix) :] if prefix and key.startswith(prefix) else key
@@ -67,5 +79,18 @@ class ServiceConfig(dict):
                 args.extend([f"--{arg_key}", json.dumps(value)])
             else:
                 args.extend([f"--{arg_key}", str(value)])
+
+        if (
+            common_config_keys is not None
+            and (common := self.get("Common")) is not None
+        ):
+            for key in common_config_keys:
+                if key in common and key not in self[service_name]:
+                    add_to_args(args, common[key])
+
+        for key, value in self[service_name].items():
+            add_to_args(args, value)
+
+        logger.info(f"Running {service_name} with {args=}")
 
         return args
