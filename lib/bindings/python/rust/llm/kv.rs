@@ -472,11 +472,16 @@ impl KvRecorder {
         })
     }
 
-    #[pyo3(signature = (indexer, max_count=None, max_time=None))]
-    fn populate_indexer<'py>(
+    fn elapsed_time(&self) -> f64 {
+        self.inner.elapsed_time().as_secs_f64()
+    }
+
+    #[pyo3(signature = (indexer, timed=false, max_count=None, max_time=None))]
+    fn replay_events<'py>(
         &self,
         py: Python<'py>,
         indexer: &KvIndexer,
+        timed: bool,
         max_count: Option<usize>,
         max_time: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
@@ -485,7 +490,7 @@ impl KvRecorder {
             let count = llm_rs::kv_router::recorder::KvRecorder::send_events(
                 "dummy_path", // This doesn't matter as we'll use the provided event_tx
                 &event_tx,
-                false,
+                timed,
                 max_count,
                 max_time,
             )

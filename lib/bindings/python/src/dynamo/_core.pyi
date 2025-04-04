@@ -365,12 +365,29 @@ class KvRecorder:
         """
         ...
 
-    def populate_indexer(self, indexer: KvIndexer, max_count: Optional[int] = None, max_time: Optional[float] = None) -> int:
+    def elapsed_time(self) -> float:
+        """
+        Get the elapsed time since the recorder was started.
+
+        Returns:
+            The elapsed time in seconds as a float
+        """
+        ...
+
+    def replay_events(
+        self,
+        indexer: KvIndexer,
+        timed: bool = False,
+        max_count: Optional[int] = None,
+        max_time: Optional[float] = None,
+    ) -> int:
         """
         Populate an indexer with the recorded events.
 
         Args:
             indexer: The KvIndexer to populate with events
+            timed: If true, events will be sent according to their recorded timestamps.
+                If false, events will be sent without any delay in between.
             max_count: Maximum number of events to send before stopping
             max_time: Maximum duration in seconds to send events before stopping
 

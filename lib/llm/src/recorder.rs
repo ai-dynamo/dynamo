@@ -30,23 +30,20 @@ struct RecordEntry<T>
 where
     T: Clone,
 {
-    /// Time in milliseconds since recording started
     timestamp: u64,
-    /// The event
     event: T,
 }
 
 /// A generic recorder for events that streams directly to a JSONL file
-pub struct Recorder<T>
-where
-    T: Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static,
-{
+pub struct Recorder<T> {
     /// A sender for events that can be cloned and shared with producers
     event_tx: mpsc::Sender<T>,
     /// A cancellation token for managing shutdown
     cancel: CancellationToken,
     /// Counter for the number of events written
     event_count: Arc<Mutex<usize>>,
+    /// Start time of the recorder
+    start_time: Instant,
 }
 
 impl<T> Recorder<T>
@@ -102,7 +99,7 @@ where
         // Spawn a task to receive events and write them to the file
         tokio::spawn(async move {
             let start_time = start_time;
-            let mut writer = BufWriter::new(file);
+            let mut writer = BufWriter::with_capacity(32768, file);
             let mut line_count = 0;
             let mut file_index = 0;
             let base_path = file_path.clone();
@@ -195,7 +192,7 @@ where
                                     .await
                                 {
                                     Ok(new_file) => {
-                                        writer = BufWriter::new(new_file);
+                                        writer = BufWriter::with_capacity(32768, new_file);
                                         line_count = 0;
                                         log::info!("Rotated to new file: {}", new_path.display());
                                     },
@@ -225,13 +222,6 @@ where
                                 return;
                             }
                         }
-
-                        // Flush every 100 events for better durability
-                        if *count % 100 == 0 {
-                            if let Err(e) = writer.flush().await {
-                                log::error!("Failed to flush: {}", e);
-                            }
-                        }
                     }
                 }
             }
@@ -241,6 +231,7 @@ where
             event_tx,
             cancel: token,
             event_count,
+            start_time,
         })
     }
 
@@ -254,6 +245,11 @@ where
         *self.event_count.lock().await
     }
 
+    /// Get the elapsed time since the recorder was started
+    pub fn elapsed_time(&self) -> Duration {
+        self.start_time.elapsed()
+    }
+
     /// Shutdown the recorder
     pub fn shutdown(&self) {
         self.cancel.cancel();
@@ -265,7 +261,8 @@ where
     ///
     /// * `filename` - Path to the JSONL file to read events from
     /// * `event_tx` - A sender for events
-    /// * `timed` - If true, events will be sent according to their recorded timestamps
+    /// * `timed` - If true, events will be sent according to their recorded timestamps.
+    ///            If false, events will be sent without any delay in between.
     /// * `max_count` - Maximum number of events to send before stopping. If None, all events will be sent.
     /// * `max_time` - Maximum duration in seconds to send events before stopping. If None, no time limit.
     ///
@@ -296,7 +293,7 @@ where
 
         // Open the file for reading using tokio's async file I/O
         let file = File::open(&filename).await?;
-        let reader = BufReader::new(file);
+        let reader = BufReader::with_capacity(32768, file);
         let mut lines = reader.lines();
 
         let mut count = 0;
@@ -454,6 +451,13 @@ mod tests {
 
         // Check that both events were recorded
         assert_eq!(recorder.event_count().await, 2);
+
+        // Check that the elapsed time is between 9 and 11 milliseconds
+        let elapsed_ms = recorder.elapsed_time().as_millis();
+        if !(9..=11).contains(&elapsed_ms) {
+            println!("Actual elapsed time: {} ms", elapsed_ms);
+            assert!((9..=11).contains(&elapsed_ms));
+        }
 
         // Force shutdown to flush file
         recorder.shutdown();
