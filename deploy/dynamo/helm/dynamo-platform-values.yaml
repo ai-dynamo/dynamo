@@ -125,6 +125,8 @@ etcd:
     enabled: true
     storageClass: "local-path"
     size: 1Gi
+  preUpgrade:
+    enabled: false
 
 nats:
   enabled: true

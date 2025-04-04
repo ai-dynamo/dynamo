@@ -39,6 +39,24 @@ if [ "$CI_REGISTRY_IMAGE" = "<your-registry>/<your-org>" ]; then
     exit 1
 fi
 
+# Function to retry commands
+retry_command() {
+    local -r cmd="$1"
+    local -r max_attempts=${2:-3}
+    local -r delay=${3:-5}
+    local attempt=1
+
+    until eval "$cmd"; do
+        if ((attempt >= max_attempts)); then
+            echo "Command '$cmd' failed after $attempt attempts"
+            return 1
+        fi
+        echo "Command '$cmd' failed, attempt $attempt of $max_attempts. Retrying in ${delay}s..."
+        ((attempt++))
+        sleep "$delay"
+    done
+}
+
 # Update the helm repo and build the dependencies
 cd platform
 cd components/operator
@@ -47,8 +65,8 @@ cd ../..
 cd components/api-server
 $HELM_CMD dependency update
 cd ../..
-$HELM_CMD dep update
-$HELM_CMD repo update
+retry_command "$HELM_CMD dep update" 5 5
+retry_command "$HELM_CMD repo update" 5 5
 cd ..
 
 # Generate the values file
@@ -64,7 +82,7 @@ envsubst '${NAMESPACE} ${NGC_TOKEN} ${CI_COMMIT_SHA} ${RELEASE_NAME} ${DYNAMO_IN
 
 envsubst '${NAMESPACE} ${NGC_TOKEN} ${CI_COMMIT_SHA} ${RELEASE_NAME} ${DYNAMO_INGRESS_SUFFIX} ${CI_REGISTRY_IMAGE}' < dynamo-platform-values.yaml > generated-values.yaml
 
-echo "Generated values file saved as generated-values.yaml"
+echo "\nGenerated values file saved as generated-values.yaml"
 
 
 # Install/upgrade the helm chart

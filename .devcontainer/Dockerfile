@@ -69,13 +69,15 @@ RUN apt-get update && apt-get install -y \
     lsb-release \
     libglib2.0-0 \
     libgl1 \
+    gettext-base \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Azure CLI
-RUN curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+RUN curl -sL --retry 3 --retry-delay 2 https://aka.ms/InstallAzureCLIDeb | bash
 
 # Install Helm directly from binary
-RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 && \
+RUN wget --retry-connrefused --waitretry=1 --read-timeout=20 --timeout=15 -t 5 -O get_helm.sh \
+    https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 && \
     chmod 700 get_helm.sh && \
     ./get_helm.sh && \
     rm get_helm.sh && \
@@ -96,7 +98,9 @@ RUN groupadd --gid $USER_GID $USERNAME \
 RUN chsh -s /bin/bash $USERNAME
 
 # Set up Docker CLI
-RUN curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh
+RUN curl -fsSL --retry 3 --retry-delay 2 \
+    https://get.docker.com -o get-docker.sh && \
+    sh get-docker.sh
 RUN usermod -aG docker $USERNAME
 
 # Copy Earthly binary from the Earthly stage

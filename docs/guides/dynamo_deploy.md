@@ -146,7 +146,7 @@ docker push <TAG>
 cd $PROJECT_ROOT/deploy/Kubernetes/pipeline
 
 # Set release name for Helm
-export HELM_RELEASE=hello-world
+export HELM_RELEASE=hello-world-manual
 
 # Generate Helm values file from Frontend service
 dynamo get frontend > pipeline-values.yaml

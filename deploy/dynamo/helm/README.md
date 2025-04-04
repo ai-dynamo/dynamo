@@ -33,7 +33,9 @@ export CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION>  # Use the same reg
 export RELEASE_NAME=$KUBE_NS
 
 ./deploy.sh
-```3. Make an default cluster:
+```
+
+3. Make an default cluster:
 
 ```bash
 ./post-cluster.sh
