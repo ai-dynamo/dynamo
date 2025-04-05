@@ -25,7 +25,7 @@ package v1alpha1
 
 import (
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/modelschemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemas"
 	"k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -570,7 +570,7 @@ func (in *DynamoNimRequestSpec) DeepCopyInto(out *DynamoNimRequestSpec) {
 	}
 	if in.ImageBuildTimeout != nil {
 		in, out := &in.ImageBuildTimeout, &out.ImageBuildTimeout
-		*out = new(modelschemas.Duration)
+		*out = new(schemas.Duration)
 		**out = **in
 	}
 	if in.BuildArgs != nil {
