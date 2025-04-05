@@ -94,7 +94,9 @@ dynamo-api-server:
       resource_scope: "user"
   image:
     repository: gitlab-master.nvidia.com:5005/aire/microservices/compoundai/dynamo-api-server
-    tag: ${CI_COMMIT_SHA}
+    # temporarily force to use old commit for api-server 
+    tag: fccbb8777fbd2ac11dad4871c8a8ba6884525e07
+    #tag: ${CI_COMMIT_SHA}
     pullPolicy: IfNotPresent
   storeImage:
     repository: gitlab-master.nvidia.com:5005/aire/microservices/compoundai/dynamo-api-store
