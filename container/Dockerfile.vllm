@@ -350,6 +350,9 @@ ENV PATH="/perf/bin:${PATH}"
 RUN uv pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
 RUN uv pip uninstall tritonclient
 
+# Install modelscope
+RUN uv pip install 'modelscope!=1.15.0'
+
 COPY . /workspace
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
@@ -383,6 +386,9 @@ RUN apt-get update && \
 COPY --from=build /workspace/dist/*.whl wheelhouse/
 RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
     rm -r wheelhouse
+
+# Install modelscope
+RUN uv pip install 'modelscope!=1.15.0'
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
