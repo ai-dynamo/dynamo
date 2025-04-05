@@ -392,3 +392,122 @@ impl KvMetricsAggregator {
         })
     }
 }
+
+#[pyclass]
+pub(crate) struct KvRecorder {
+    inner: Arc<llm_rs::kv_router::recorder::KvRecorder>,
+}
+
+#[pymethods]
+impl KvRecorder {
+    #[new]
+    #[pyo3(signature = (component, output_path=None, max_lines_per_file=None, max_count=None, max_time=None))]
+    fn new(
+        component: Component,
+        output_path: Option<String>,
+        max_lines_per_file: Option<usize>,
+        max_count: Option<usize>,
+        max_time: Option<f64>,
+    ) -> PyResult<Self> {
+        let runtime = pyo3_async_runtimes::tokio::get_runtime();
+        runtime.block_on(async {
+            let token = component.inner.drt().runtime().child_token();
+
+            // Create a temp path if none provided
+            let path = match output_path {
+                Some(p) => p,
+                None => {
+                    let temp_dir = std::env::temp_dir();
+                    temp_dir
+                        .join("kv_events.jsonl")
+                        .to_string_lossy()
+                        .to_string()
+                }
+            };
+
+            let inner = llm_rs::kv_router::recorder::KvRecorder::new(
+                token.clone(),
+                path,
+                max_lines_per_file,
+                max_count,
+                max_time,
+            )
+            .await
+            .map_err(to_pyerr)?;
+
+            // Subscribe to KV events
+            let mut kv_events_rx = component
+                .inner
+                .subscribe(llm_rs::kv_router::KV_EVENT_SUBJECT)
+                .await
+                .map_err(to_pyerr)?;
+            let event_tx = inner.event_sender();
+
+            // Spawn a task to forward events to the recorder
+            tokio::spawn(async move {
+                while let Some(event) = kv_events_rx.next().await {
+                    let event: llm_rs::kv_router::indexer::RouterEvent =
+                        serde_json::from_slice(&event.payload).unwrap();
+                    tracing::debug!("KvRecorder received kv event: {:?}", event);
+                    if let Err(e) = event_tx.send(event).await {
+                        tracing::trace!(
+                            "KvRecorder failed to send kv event; shutting down: {:?}",
+                            e
+                        );
+                    }
+                }
+            });
+
+            Ok(Self {
+                inner: Arc::new(inner),
+            })
+        })
+    }
+
+    fn event_count<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let recorder = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let count = recorder.event_count().await;
+            Ok(count)
+        })
+    }
+
+    fn elapsed_time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let recorder = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            match recorder.elapsed_time().await {
+                Ok(elapsed) => Ok(elapsed.as_secs_f64()),
+                Err(_) => Ok(0.0), // Return 0.0 when no events have been received yet
+            }
+        })
+    }
+
+    #[pyo3(signature = (indexer, timed=false, max_count=None, max_time=None))]
+    fn replay_events<'py>(
+        &self,
+        py: Python<'py>,
+        indexer: &KvIndexer,
+        timed: bool,
+        max_count: Option<usize>,
+        max_time: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let event_tx = indexer.inner.event_sender();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let count = llm_rs::kv_router::recorder::KvRecorder::send_events(
+                "dummy_path", // This doesn't matter as we'll use the provided event_tx
+                &event_tx,
+                timed,
+                max_count,
+                max_time,
+            )
+            .await
+            .map_err(to_pyerr)?;
+            Ok(count)
+        })
+    }
+
+    fn shutdown(&self) -> PyResult<()> {
+        self.inner.shutdown();
+        Ok(())
+    }
+}

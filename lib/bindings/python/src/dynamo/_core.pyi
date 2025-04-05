@@ -108,7 +108,6 @@ class Component:
         """
         ...
 
-
 class Endpoint:
     """
     An Endpoint is a single API endpoint
@@ -330,6 +329,79 @@ class KvIndexer:
         """
         ...
 
+class KvRecorder:
+    """
+    A recorder for KV Router events.
+    """
+
+    ...
+
+    def __init__(
+        self,
+        component: Component,
+        output_path: Optional[str] = None,
+        max_lines_per_file: Optional[int] = None,
+        max_count: Optional[int] = None,
+        max_time: Optional[float] = None,
+    ) -> None:
+        """
+        Create a new KvRecorder instance.
+
+        Args:
+            component: The component to associate with this recorder
+            output_path: Path to the JSONL file to write events to
+            max_lines_per_file: Maximum number of lines per file before rotating to a new file
+            max_count: Maximum number of events to record before shutting down
+            max_time: Maximum duration in seconds to record before shutting down
+        """
+        ...
+
+    def event_count(self) -> int:
+        """
+        Get the count of recorded events.
+
+        Returns:
+            The number of events recorded
+        """
+        ...
+
+    def elapsed_time(self) -> float:
+        """
+        Get the elapsed time since the recorder was started.
+
+        Returns:
+            The elapsed time in seconds as a float
+        """
+        ...
+
+    def replay_events(
+        self,
+        indexer: KvIndexer,
+        timed: bool = False,
+        max_count: Optional[int] = None,
+        max_time: Optional[float] = None,
+    ) -> int:
+        """
+        Populate an indexer with the recorded events.
+
+        Args:
+            indexer: The KvIndexer to populate with events
+            timed: If true, events will be sent according to their recorded timestamps.
+                If false, events will be sent without any delay in between.
+            max_count: Maximum number of events to send before stopping
+            max_time: Maximum duration in seconds to send events before stopping
+
+        Returns:
+            The number of events sent to the indexer
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Shutdown the recorder.
+        """
+        ...
+
 class AggregatedMetrics:
     """
     A collection of metrics of the endpoints
@@ -362,12 +434,23 @@ class KvEventPublisher:
 
     ...
 
-    def __init__(self, component: Component, worker_id: int, kv_block_size: int) -> None:
+    def __init__(
+        self, component: Component, worker_id: int, kv_block_size: int
+    ) -> None:
         """
         Create a `KvEventPublisher` object
         """
 
-    def publish_stored(self, event_id, int, token_ids: List[int], num_block_tokens: List[int], block_hashes: List[int], lora_id: int, parent_hash: Optional[int] = None) -> None:
+    def publish_stored(
+        self,
+        event_id,
+        int,
+        token_ids: List[int],
+        num_block_tokens: List[int],
+        block_hashes: List[int],
+        lora_id: int,
+        parent_hash: Optional[int] = None,
+    ) -> None:
         """
         Publish a KV stored event.
         """
