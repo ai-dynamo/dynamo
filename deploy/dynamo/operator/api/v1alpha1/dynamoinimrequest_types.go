@@ -21,7 +21,7 @@ package v1alpha1
 
 import (
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/modelschemas"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemas"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -53,7 +53,7 @@ type DynamoNimRequestSpec struct {
 	// +kubebuilder:validation:Optional
 	Image string `json:"image,omitempty"`
 
-	ImageBuildTimeout *modelschemas.Duration `json:"imageBuildTimeout,omitempty"`
+	ImageBuildTimeout *schemas.Duration `json:"imageBuildTimeout,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	BuildArgs []string `json:"buildArgs,omitempty"`
