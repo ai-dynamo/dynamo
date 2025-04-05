@@ -227,13 +227,31 @@ async fn app(runtime: Runtime) -> Result<()> {
         let scrape_timeout = Duration::from_secs(1);
         let endpoints =
             collect_endpoints(&target_component, &service_subject, scrape_timeout).await?;
+        if endpoints.is_empty() {
+            tracing::warn!("No endpoints found matching {service_path}");
+            continue;
+        }
+        tracing::debug!(
+            "Found {} endpoints matching {}",
+            endpoints.len(),
+            service_path
+        );
         let metrics = extract_metrics(&endpoints);
+        if metrics.is_empty() {
+            tracing::warn!("Extract metrics from endpoints got empty");
+            continue;
+        }
+        tracing::debug!(
+            "Extracted {} metrics from {} endpoints",
+            metrics.len(),
+            endpoints.len()
+        );
         let processed = postprocess_metrics(&metrics, &endpoints);
         if processed.endpoints.is_empty() {
-            tracing::warn!("No endpoints found matching {service_path}");
-        } else {
-            tracing::info!("Aggregated metrics: {processed:?}");
+            tracing::warn!("No endpoints to aggregated metrics");
+            continue;
         }
+        tracing::info!("Aggregated metrics: {processed:?}");
 
         // Update Prometheus metrics
         metrics_collector.lock().await.update(&config, &processed);
