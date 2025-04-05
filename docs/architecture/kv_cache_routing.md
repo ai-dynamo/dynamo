@@ -220,7 +220,7 @@ GPU Prefix Cache Hit Rate: 0.1
 > **Note**: This example is for building understanding, it will not run outside of the context of dynamo serve. See the examples/ folder for runnable examples.
 
 
-### [KV Router](../examples/llm/components/kv_router.py)
+### [KV Router](https://github.com/ai-dynamo/dynamo/blob/main/examples/llm/components/kv_router.py)
 The Router component makes intelligent worker selection decisions
 1. Receives incoming requests as tokens
 2. Queries the KVIndexer to find potential cache hits across workers

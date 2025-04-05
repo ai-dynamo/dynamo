@@ -42,7 +42,7 @@ The following diagram outlines Dynamo's high-level architecture. To enable large
 
 Every component in the Dynamo architecture is independently scalable and portable. The API server can adapt to task-specific deployment. A smart router processes user requests to route them to the optimal worker for performance. Specifically, for Large Language Models (LLMs), Dynamo employs KV cache-aware routing, which directs requests to the worker with the highest cache hit rate while maintaining load balance, expediting decoding. This routing strategy leverages a KV cache manager that maintains a global radix tree registry for hit rate calculation. The KV cache manager also oversees a multi-tiered memory system, enabling rapid KV cache storage and eviction. This design results in substantial TTFT reductions, increased throughput, and the ability to process extensive context lengths.
 
-![](images/architecture.png "Dynamo Architecture")
+![](../images/architecture.png "Dynamo Architecture")
 
 Dynamo enables dynamic worker scaling, responding to real-time deployment signals. These signals, captured and communicated through an event plane, empower the Planner to make intelligent, zero-downtime adjustments. For instance, if an increase in requests with long input sequences is detected, the Planner automatically scales up prefill workers to meet the heightened demand.
 
@@ -56,33 +56,20 @@ Dynamo prioritizes seamless integration. Its modular design allows it to work ha
 
 Disaggregating prefill and decode significantly boosts performance, gaining efficiency the more GPUs that are involved in inference. For example, for Llama 70B, single-node tests show a 30% throughput/GPU improvement, while two-node setups achieve over 2X gains due to better parallelization.
 
-<figure>
-    <img src='images/disagg_perf_benefit.png' alt='missing' width="1200" height="400" />
-    <p>Tested on H100s with R1 Distilled Llama 70B model FP8 using vLLM. 3K ISL/ 150 OSL</p>
-</figure>
+![](../images/disagg_perf_benefit.png)
 
-<!--
-![](images/disagg_perf_benefit.png)[1]
+* Tested on H100s with R1 Distilled Llama 70B model FP8 using vLLM. 3K ISL/ 150 OSL
 
-[1]: Tested on H100s with R1 Distilled Llama 70B model FP8 using vLLM. 3K ISL/ 150 OSL
--->
 
 
 The disaggregation of prefill and decode phases offers valuable flexibility. Since these phases directly correlate with time-to-first-token (TTFT) and inter-token latency (ITL) respectively, adjusting worker allocation allows for tailored performance. This enables optimization for specific service level agreements (SLAs), whether prioritizing faster TTFT, lower ITL, or higher throughput.
 
 ### KV aware routing
 
+![](../images/kv_routing.png)
 
-<figure>
-    <img src='images/kv_routing.png' alt='missing' />
-    <p>Tested with 100K requests to R1 using R1 Distilled Llama 70B FP8 on 2 nodes of H100s. Avg 4K ISL / 800 OSL</p>
-</figure>
+* Tested with 100K requests to R1 using R1 Distilled Llama 70B FP8 on 2 nodes of H100s. Avg 4K ISL / 800 OSL
 
-<!--
-![](images/kv_routing.png)[2]
-
-[2]: Tested with 100K requests to R1 using R1 Distilled Llama 70B FP8 on 2 nodes of H100s. Avg 4K ISL / 800 OSL
--->
 
 Existing routing methods, including load-based routing, overlook the specific properties of LLMs that could improve performance. Addressing this, routing user queries to workers with the highest KV cache hit rate (rather than simply the least busy node) allows for immediate processing, even under heavy load. The figures above illustrate the effectiveness of KV aware routing on 100,000 real R1 user queries, achieving a 3x improvement in TTFT and a 2x reduction in average request latency. Depending on traffic, this approach can also enhance throughput.
 
@@ -90,10 +77,9 @@ Existing routing methods, including load-based routing, overlook the specific pr
 
 Dynamo's design enables KV cache offloading to system CPU memory, and will be extended to support SSDs and networked object storage in subsequent releases. In many accelerated servers, the CPU (system) memory is much larger than the GPU memory and fast enough to store and serve KV cache data. The following plot highlights the performance gains achieved through system memory offloading, even with prefix caching enabled via inference engine. In a scenario involving 10 multi-turn conversations with 80 users, system memory offloading resulted in a 40% improvement in TTFT, demonstrating additional benefits beyond basic prefix caching.
 
-<figure>
-    <img src='images/kv_manager.png' alt='missing' />
-    <p>Tested with 100K requests to R1 using R1 Distilled Llama 70B FP8 on 2 nodes of H100s. Avg 4K ISL / 800 OSL</p>
-</figure>
+![](../images/kv_manager.png)
+
+* Tested with 100K requests to R1 using R1 Distilled Llama 70B FP8 on 2 nodes of H100s. Avg 4K ISL / 800 OSL
 
 ### NIXL
 
