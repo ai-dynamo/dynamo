@@ -59,7 +59,7 @@ IS_WSL = "microsoft-standard" in platform.release()
 API_SERVER_NAME = "_bento_api_server"
 
 MAX_AF_UNIX_PATH_LENGTH = 103
-logger = logging.getLogger("bentoml.serve")
+logger = logging.getLogger(__name__)
 
 if POSIX and not IS_WSL:
 
@@ -309,8 +309,8 @@ def serve_http(
     # TODO: Only for testing, this will prevent any other dep services from getting started, relying entirely on configured deps in the runner-map
     standalone = False
     if service_name:
-        print("Running in standalone mode")
-        print(f"service_name: {service_name}")
+        logger.info("Running in standalone mode")
+        logger.info(f"service_name: {service_name}")
         standalone = True
 
     if service_name and service_name != svc.name:
@@ -471,7 +471,7 @@ def serve_http(
                 env=worker_env,  # Dependency map will be injected by serve_http
             )
             watchers.append(watcher)
-            print(f"dynamo_service_{svc.name} entrypoint created")
+            logger.info(f"dynamo_service_{svc.name} entrypoint created")
         else:
             # Create regular BentoML service watcher
             watchers.append(

@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 
-from vllm.logger import logger as vllm_logger
+logger = logging.getLogger(__name__)
 
 
 class PyDisaggregatedRouter:
@@ -39,7 +40,7 @@ class PyDisaggregatedRouter:
             absolute_prefill_length > self.max_local_prefill_length
             and queue_size < self.max_prefill_queue_size
         )
-        vllm_logger.info(
+        logger.info(
             f"Remote prefill: {decision} (prefill length: {absolute_prefill_length}/{prompt_length}, prefill queue size: {queue_size}/{self.max_prefill_queue_size})"
         )
         return decision
