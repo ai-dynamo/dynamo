@@ -15,8 +15,10 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.1.0"
 description = "Distributed Inference Framework"
+dynamic = [
+ "version",
+]
 readme = "README.md"
 authors = [
     { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
@@ -70,8 +72,11 @@ metrics = "dynamo.sdk.cli.run_executable:metrics"
 mock_worker = "dynamo.sdk.cli.run_executable:mock_worker"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "uv-dynamic-versioning"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
 
 [tool.hatch.build.targets.wheel]
 packages = ["deploy/dynamo/sdk/src/dynamo"]
