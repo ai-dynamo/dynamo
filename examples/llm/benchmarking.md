@@ -73,12 +73,11 @@ VllmWorker:
   model: neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
   block-size: 128
-  max-model-len: 16384
+  max-model-len: 3500
   remote-prefill: true
-  conditional-disagg: true
-  max-local-prefill-length: 10
-  max-prefill-queue-size: 2
   tensor-parallel-size: 4
+  gpu-memory-utilization: 0.95
+  disable-log-requests: true
   ServiceArgs:
     workers: 1
     resources:
@@ -88,9 +87,11 @@ PrefillWorker:
   model: neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
   block-size: 128
-  max-model-len: 4096
-  max-num-batched-tokens: 4096
+  max-model-len: 3500
+  max-num-batched-tokens: 3500
   tensor-parallel-size: 1
+  gpu-memory-utilization: 0.95
+  disable-log-requests: true
   ServiceArgs:
     workers: 4
     resources:
@@ -206,32 +207,31 @@ VllmWorker:
   model: neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
   block-size: 128
-  max-model-len: 16384
-  max-num-batched-tokens: 16384
+  max-model-len: 3500
   remote-prefill: true
-  conditional-disagg: true
-  max-local-prefill-length: 10
-  max-prefill-queue-size: 2
-  tensor-parallel-size: 8
+  tensor-parallel-size: 4
+  gpu-memory-utilization: 0.95
+  disable-log-requests: true
   router: kv
   enable-prefix-caching: true
   ServiceArgs:
-    workers: 1
+    workers: 2
     resources:
-      gpu: 8
+      gpu: 4
 
 PrefillWorker:
   model: neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
   block-size: 128
-  max-model-len: 4096
-  max-num-batched-tokens: 4096
+  max-model-len: 3500
+  max-num-batched-tokens: 3500
   tensor-parallel-size: 1
+  gpu-memory-utilization: 0.95
+  disable-log-requests: true
   ServiceArgs:
     workers: 8
     resources:
       gpu: 1
-
 ```
 
 6\. Start frontend, processor and decode worker (node 0)
@@ -249,7 +249,7 @@ dynamo serve components.prefill_worker:PrefillWorker -f configs/disagg_router.ya
 ```
 Note: Check the `prefill_worker.log` to make sure the service is fully started before collecting performance numbers.
 
-8. Collect the performance numbers as shown on the [Disaggregated Single Node Benchmarking](#disaggregated-single-node-benchmarking) section above.
+8\. Collect the performance numbers as shown on the [Disaggregated Single Node Benchmarking](#disaggregated-single-node-benchmarking) section above.
 
 ## vLLM Aggregated Baseline Benchmarking
 
@@ -270,8 +270,22 @@ huggingface-cli download neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
 
 3\. Start vLLM serve
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic --tensor-parallel-size 4 --port 8001 1> vllm_0.log 2>&1 &
-CUDA_VISIBLE_DEVICES=4,5,6,7 vllm serve neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic --tensor-parallel-size 4 --port 8002 1> vllm_1.log 2>&1 &
+CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
+  --block-size 128 \
+  --max-model-len 3500 \
+  --max-num-batched-tokens 3500 \
+  --tensor-parallel-size 4 \
+  --gpu-memory-utilization 0.95 \
+  --disable-log-requests \
+  --port 8001 1> vllm_0.log 2>&1 &
+CUDA_VISIBLE_DEVICES=4,5,6,7 vllm serve neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
+  --block-size 128 \
+  --max-model-len 3500 \
+  --max-num-batched-tokens 3500 \
+  --tensor-parallel-size 4 \
+  --gpu-memory-utilization 0.95 \
+  --disable-log-requests \
+  --port 8002 1> vllm_1.log 2>&1 &
 ```
 Notes:
 * Check the `vllm_0.log` and `vllm_1.log` to make sure the service is fully started before collecting performance numbers.
