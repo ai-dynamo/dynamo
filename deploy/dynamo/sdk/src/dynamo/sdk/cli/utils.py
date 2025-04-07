@@ -1,21 +1,29 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+#  SPDX-FileCopyrightText: Copyright (c) 2020 Atalaya Tech. Inc
+#  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-License-Identifier: Apache-2.0
+#  #
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#  #
+#  http://www.apache.org/licenses/LICENSE-2.0
+#  #
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+#  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
 
+import contextlib
+import os
+import pathlib
+import random
+import socket
 import typing as t
 
 import click
+import psutil
 from click import Command, Context
 
 
@@ -73,3 +81,71 @@ class DynamoCommandGroup(click.Group):
             raise ValueError(f"Command '{command_name}' not found in group")
 
         self.add_command(cmd, command_name)
+
+
+@contextlib.contextmanager
+def reserve_free_port(
+    host: str = "localhost",
+    port: int | None = None,
+    prefix: t.Optional[str] = None,
+    max_retry: int = 50,
+    enable_so_reuseport: bool = False,
+) -> t.Iterator[int]:
+    """
+    detect free port and reserve until exit the context
+    """
+    import psutil
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if enable_so_reuseport:
+        if psutil.WINDOWS:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        elif psutil.MACOS or psutil.FREEBSD:
+            sock.setsockopt(socket.SOL_SOCKET, 0x10000, 1)  # SO_REUSEPORT_LB
+        else:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+
+            if sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT) == 0:
+                raise RuntimeError("Failed to set SO_REUSEPORT.") from None
+    if prefix is not None:
+        prefix_num = int(prefix) * 10 ** (5 - len(prefix))
+        suffix_range = min(65535 - prefix_num, 10 ** (5 - len(prefix)))
+        for _ in range(max_retry):
+            suffix = random.randint(0, suffix_range)
+            port = int(f"{prefix_num + suffix}")
+            try:
+                sock.bind((host, port))
+                break
+            except OSError:
+                continue
+        else:
+            raise RuntimeError(
+                f"Cannot find free port with prefix {prefix} after {max_retry} retries."
+            ) from None
+    else:
+        if port:
+            sock.bind((host, port))
+        else:
+            sock.bind((host, 0))
+    try:
+        yield sock.getsockname()[1]
+    finally:
+        sock.close()
+
+
+def path_to_uri(path: str) -> str:
+    """
+    Convert a path to a URI.
+
+    Args:
+        path: Path to convert to URI.
+
+    Returns:
+        URI string. (quoted, absolute)
+    """
+    path = os.path.abspath(path)
+    if psutil.WINDOWS:
+        return pathlib.PureWindowsPath(path).as_uri()
+    if psutil.POSIX:
+        return pathlib.PurePosixPath(path).as_uri()
+    raise ValueError("Unsupported OS")

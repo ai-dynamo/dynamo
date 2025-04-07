@@ -21,6 +21,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple, TypeVar, Union
 
+# WARNING: internal
 from _bentoml_sdk import Service, ServiceConfig
 from _bentoml_sdk.images import Image
 from _bentoml_sdk.service.config import validate
