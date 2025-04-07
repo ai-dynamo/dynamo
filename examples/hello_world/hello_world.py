@@ -13,9 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+
 from pydantic import BaseModel
 
 from dynamo.sdk import DYNAMO_IMAGE, api, depends, dynamo_endpoint, service
+
+logger = logging.getLogger(__name__)
 
 """
 Pipeline Architecture:
@@ -48,32 +52,27 @@ class ResponseType(BaseModel):
 
 
 @service(
-    resources={"cpu": "2"},
-    traffic={"timeout": 30},
     dynamo={
         "enabled": True,
         "namespace": "inference",
     },
-    workers=3,
     image=DYNAMO_IMAGE,
 )
 class Backend:
     def __init__(self) -> None:
-        print("Starting backend")
+        logger.info("Starting backend")
 
     @dynamo_endpoint()
     async def generate(self, req: RequestType):
         """Generate tokens."""
         req_text = req.text
-        print(f"Backend received: {req_text}")
+        logger.info(f"Backend received: {req_text}")
         text = f"{req_text}-back"
         for token in text.split():
             yield f"Backend: {token}"
 
 
 @service(
-    resources={"cpu": "2"},
-    traffic={"timeout": 30},
     dynamo={"enabled": True, "namespace": "inference"},
     image=DYNAMO_IMAGE,
 )
@@ -81,23 +80,21 @@ class Middle:
     backend = depends(Backend)
 
     def __init__(self) -> None:
-        print("Starting middle")
+        logger.info("Starting middle")
 
     @dynamo_endpoint()
     async def generate(self, req: RequestType):
         """Forward requests to backend."""
         req_text = req.text
-        print(f"Middle received: {req_text}")
+        logger.info(f"Middle received: {req_text}")
         text = f"{req_text}-mid"
         next_request = RequestType(text=text).model_dump_json()
         async for response in self.backend.generate(next_request):
-            print(f"Middle received response: {response}")
+            logger.info(f"Middle received response: {response}")
             yield f"Middle: {response}"
 
 
 @service(
-    resources={"cpu": "1"},
-    traffic={"timeout": 60},
     image=DYNAMO_IMAGE,
 )  # Regular HTTP API
 class Frontend:

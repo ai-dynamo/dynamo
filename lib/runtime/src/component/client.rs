@@ -48,12 +48,25 @@ enum EndpointEvent {
     Delete(String),
 }
 
+#[derive(Default, Debug, Clone, Copy)]
+pub enum RouterMode {
+    #[default]
+    Random,
+    RoundRobin,
+    //KV,
+    //
+    // Always and only go to the given endpoint ID.
+    // TODO: Is this useful?
+    Direct(i64),
+}
+
 #[derive(Clone)]
 pub struct Client<T: Data, U: Data> {
     endpoint: Endpoint,
     router: PushRouter<T, U>,
     counter: Arc<AtomicU64>,
     endpoints: EndpointSource,
+    router_mode: RouterMode,
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +87,7 @@ where
             endpoint,
             counter: Arc::new(AtomicU64::new(0)),
             endpoints: EndpointSource::Static,
+            router_mode: Default::default(),
         })
     }
 
@@ -157,6 +171,7 @@ where
             endpoint,
             counter: Arc::new(AtomicU64::new(0)),
             endpoints: EndpointSource::Dynamic(watch_rx),
+            router_mode: Default::default(),
         })
     }
 
@@ -175,6 +190,10 @@ where
             EndpointSource::Static => vec![0],
             EndpointSource::Dynamic(watch_rx) => watch_rx.borrow().clone(),
         }
+    }
+
+    pub fn set_router_mode(&mut self, mode: RouterMode) {
+        self.router_mode = mode
     }
 
     /// Wait for at least one [`Endpoint`] to be available
@@ -213,6 +232,7 @@ where
             let offset = counter % count as u64;
             endpoints[offset as usize]
         };
+        tracing::trace!("round robin router selected {endpoint_id}");
 
         let subject = self.endpoint.subject_to(endpoint_id);
         let request = request.map(|req| AddressedRequest::new(req, subject));
@@ -235,6 +255,7 @@ where
             let offset = counter % count as u64;
             endpoints[offset as usize]
         };
+        tracing::trace!("random router selected {endpoint_id}");
 
         let subject = self.endpoint.subject_to(endpoint_id);
         let request = request.map(|req| AddressedRequest::new(req, subject));
@@ -286,10 +307,13 @@ where
     U: Data + for<'de> Deserialize<'de>,
 {
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
-        tracing::debug!("Client::generate: {:?}", self.endpoints);
         match &self.endpoints {
             EndpointSource::Static => self.r#static(request).await,
-            EndpointSource::Dynamic(_) => self.random(request).await,
+            EndpointSource::Dynamic(_) => match self.router_mode {
+                RouterMode::Random => self.random(request).await,
+                RouterMode::RoundRobin => self.round_robin(request).await,
+                RouterMode::Direct(endpoint_id) => self.direct(request, endpoint_id).await,
+            },
         }
     }
 }

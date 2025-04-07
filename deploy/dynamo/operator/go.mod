@@ -15,9 +15,7 @@ require (
 	github.com/mitchellh/hashstructure/v2 v2.0.2
 	github.com/onsi/ginkgo/v2 v2.19.0
 	github.com/onsi/gomega v1.33.1
-	github.com/pkg/errors v0.9.1
 	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.71.2
-	github.com/prometheus/common v0.55.0
 	github.com/prune998/docker-registry-client v0.0.0-20200114164314-f8cd511a014c
 	github.com/rs/xid v1.4.0
 	github.com/sergeymakinen/go-quote v1.1.0
@@ -30,6 +28,7 @@ require (
 	k8s.io/apimachinery v0.31.3
 	k8s.io/client-go v0.31.3
 	k8s.io/utils v0.0.0-20240711033017-18e509b52bc8
+	resty.dev/v3 v3.0.0-beta.2
 	sigs.k8s.io/controller-runtime v0.19.4
 	volcano.sh/apis v1.11.0
 )
@@ -70,8 +69,10 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.0 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/client_golang v1.19.1 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
+	github.com/prometheus/common v0.55.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
