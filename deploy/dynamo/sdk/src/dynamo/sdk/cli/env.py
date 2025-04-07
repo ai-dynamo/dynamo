@@ -3,7 +3,6 @@ from __future__ import annotations
 import pkg_resources
 import subprocess
 import sys
-from typing import Optional
 
 import click
 import distro
@@ -35,7 +34,7 @@ def get_gpu_architecture() -> str:
     """Get GPU architecture if available"""
     return execute_subprocess_output("nvidia-smi --query-gpu=gpu_name --format=csv,noheader")
 
-def get_cuda_version() -> Optional[str]:
+def get_cuda_version() -> str:
     """Get CUDA version if available."""
     return execute_subprocess_output(r"nvcc --version | grep -Po 'release \K\d+\.\d+'")
 
@@ -71,7 +70,7 @@ def build_env_command() -> click.Group:
                 click.echo(f"  {pkg_name}: {version}")
             else:
                 click.echo(f"  {pkg_name}: Not installed")
-
+        click.echo("")
     return env
 
 
