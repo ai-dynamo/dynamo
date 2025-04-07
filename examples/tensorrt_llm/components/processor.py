@@ -135,9 +135,10 @@ class Processor(ChatProcessorMixin):
             if raw_request.max_completion_tokens is None:
                 raw_request.max_completion_tokens = raw_request.max_tokens
             else:
-                logger.warning(
-                    "Ignoring max_tokens as max_completion_tokens is also provided."
-                )
+                if raw_request.max_tokens != raw_request.max_completion_tokens:
+                    raise ValueError(
+                        "max_tokens and max_completion_tokens must be the same"
+                    )
         async for response in self._generate(raw_request, RequestType.CHAT):
             yield response
 
