@@ -17,6 +17,7 @@ Common:
   model: &model deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   block-size: &block_size 64
   max-model-len: &max_model_len 16384
+  router: &router round-robin
 
 Frontend:
   served_model_name: *model
@@ -27,7 +28,7 @@ Processor:
   model: *model
   block-size: *block_size
   max-model-len: *max_model_len
-  router: round-robin
+  router: *router
 
 VllmWorker:
   model: *model
@@ -36,7 +37,7 @@ VllmWorker:
   max-model-len: *max_model_len
   max-num-batched-tokens: *max_model_len
   enable-prefix-caching: true
-  router: random
+  router: *router
   tensor-parallel-size: 1
   ServiceArgs:
     workers: 1

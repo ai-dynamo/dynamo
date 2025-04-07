@@ -64,6 +64,32 @@ def deprecated_option(*param_decls: str, **attrs: t.Any):
     return decorator
 
 
+def deep_merge(target, source, replacements):
+    """Merge source dict into target dict while tracking original values"""
+    for key, value in source.items():
+        if key in target:
+            if isinstance(value, dict) and isinstance(target[key], dict):
+                # Recurse into sub-dictionaries
+                deep_merge(target[key], value, replacements)
+            else:
+                # Capture original value before overwriting
+                original_val = target[key]
+                target[key] = value
+                replacements[original_val] = value
+        else:
+            # Add new entry
+            target[key] = value
+
+
+def deep_replace(obj, replacements):
+    """Recursively replace values throughout nested structures"""
+    if isinstance(obj, dict):
+        return {k: deep_replace(v, replacements) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [deep_replace(elem, replacements) for elem in obj]
+    return replacements.get(obj, obj)
+
+
 def _parse_service_arg(arg_name: str, arg_value: str) -> tuple[str, str, t.Any]:
     """Parse a single CLI argument into service name, key, and value."""
 
@@ -407,7 +433,6 @@ def build_serve_command() -> click.Group:
             with open(file) as f:
                 yaml_configs = yaml.safe_load(f)
                 # Initialize service_configs as empty dict if it's None
-                # Convert nested YAML structure to flat dict with dot notation
                 for service, configs in yaml_configs.items():
                     for key, value in configs.items():
                         if service not in service_configs:
@@ -416,11 +441,21 @@ def build_serve_command() -> click.Group:
 
         # Process service-specific options
         cmdline_overrides: t.Dict[str, t.Any] = _parse_service_args(ctx.args)
-        for service, configs in cmdline_overrides.items():
-            for key, value in configs.items():
-                if service not in service_configs:
-                    service_configs[service] = {}
-                service_configs[service][key] = value
+        replacements: t.Dict[t.Any, t.Any] = {}
+
+        cmdline_overrides = _parse_service_args(ctx.args)
+        replacements = {}
+
+        # Process command-line overrides with deep merge
+        for service, override_config in cmdline_overrides.items():
+            service_config = service_configs.setdefault(service, {})
+            deep_merge(service_config, override_config, replacements)
+
+        # Apply value-based replacements for all aliases
+        for service in service_configs:
+            service_configs[service] = deep_replace(
+                service_configs[service], replacements
+            )
 
         # Process depends
         if depends:
