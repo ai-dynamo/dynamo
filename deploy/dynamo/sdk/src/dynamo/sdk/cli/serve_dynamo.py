@@ -34,6 +34,7 @@ from dynamo.sdk.lib.service import LinkedServices
 
 logger = logging.getLogger(__name__)
 
+
 @click.command()
 @click.argument("bento_identifier", type=click.STRING, required=False, default=".")
 @click.option("--service-name", type=click.STRING, required=False, default="")
