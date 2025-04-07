@@ -39,12 +39,12 @@ jobs:
 
       - name: Generate documentation
         run: |
-          docker build -t dynamo-docs -f container/Dockerfile.docs .
+          docker build -t docs-builder -f container/Dockerfile.docs .
 
       - name: Copy documentation out of container
         run: |
-          docker create --name docs-container dynamo-docs
-          docker cp docs-container:/workspace/dynamo/docs/build/html docs-output/
+          docker create --name docs-container docs-builder
+          docker cp docs-container:/workspace/dynamo/docs/build/html dynamo-docs/
 
       - name: Remove documentation container
         if: always()
@@ -54,6 +54,6 @@ jobs:
       - name: Upload documentation artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dynamo-documentation
-          path: docs-output
+          name: dynamo-docs-${{ github.run_id }}
+          path: dynamo-docs
           retention-days: 15
