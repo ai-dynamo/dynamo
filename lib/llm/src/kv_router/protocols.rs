@@ -13,7 +13,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::tokens::Token;
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RouterRequest {
+    pub tokens: Vec<Token>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RouterResponse {
+    pub worker_id: i64,
+}
+
+#[derive(Debug)]
+pub struct WorkerSelectionResult {
+    /// The worker id of the selected worker
+    pub worker_id: i64,
+
+    /// The total number of blocks required to prefill the request
+    pub required_blocks: u64,
+
+    /// The number of blocks that the selected worker may already have cached.
+    /// This is not a guarantee, but an estimate.
+    pub overlap_blocks: usize,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ForwardPassMetrics {
