@@ -24,7 +24,7 @@ from components.prefill_worker import PrefillWorker
 from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
 from utils.protocol import MyRequestOutput, vLLMGenerateRequest
-from utils.vllm import parse_vllm_args
+from utils.vllm import parse_vllm_args, shutdown_vllm_engine
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
 )
@@ -88,23 +88,8 @@ class VllmWorker:
             logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
         self.metrics_publisher = KvMetricsPublisher()
 
-        signal.signal(signal.SIGTERM, self._shutdown)
-        signal.signal(signal.SIGINT, self._shutdown)
-
-    def _shutdown(self, signum, frame):
-        """Shutdown the background loop"""
-        print(f"Received signal {signum}, shutting down")
-        loop = asyncio.get_event_loop()
-        try:
-            if hasattr(self, "_engine_context") and self._engine_context is not None:
-                loop.run_until_complete(
-                    self._engine_context.__aexit__(None, None, None)
-                )
-                print("Engine client context shutdown complete")
-        except Exception as e:
-            print(f"Error during shutdown: {e}")
-        finally:
-            loop.stop()
+        signal.signal(signal.SIGTERM, shutdown_vllm_engine(self._engine_context))
+        signal.signal(signal.SIGINT, shutdown_vllm_engine(self._engine_context))
 
     @async_on_start
     async def async_init(self):
