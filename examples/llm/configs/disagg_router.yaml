@@ -24,10 +24,12 @@ Frontend:
   endpoint: dynamo.Processor.chat/completions
   port: 8000
 
-Processor: {}
+Processor:
+  common-configs: [model, block-size, max-model-len, router]
 
 Router:
   min-workers: 1
+  common-configs: [model]
 
 VllmWorker:
   max-num-batched-tokens: 16384
@@ -41,6 +43,7 @@ VllmWorker:
     workers: 1
     resources:
       gpu: 1
+  common-configs: [model, block-size, max-model-len, router, kv-transfer-config]
 
 PrefillWorker:
   max-num-batched-tokens: 16384
@@ -48,3 +51,4 @@ PrefillWorker:
     workers: 1
     resources:
       gpu: 1
+  common-configs: [model, block-size, max-model-len, kv-transfer-config]

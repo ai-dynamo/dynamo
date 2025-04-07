@@ -24,6 +24,7 @@ Frontend:
 
 Processor:
   router: round-robin
+  common-configs: [model, block-size, max-model-len]
 
 VllmWorker:
   enforce-eager: true
@@ -35,3 +36,4 @@ VllmWorker:
     workers: 1
     resources:
       gpu: 1
+  common-configs: [model, block-size, max-model-len]

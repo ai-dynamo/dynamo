@@ -61,9 +61,7 @@ def parse_args(service_name, prefix) -> Namespace:
         help="Whether to use custom router or not",
     )
     config = ServiceConfig.get_instance()
-    config_args = config.as_args(
-        service_name, prefix=prefix, common_config_keys=COMMON_CONFIG_KEYS
-    )
+    config_args = config.as_args(service_name, prefix=prefix)
     args = parser.parse_args(config_args)
     return args
 

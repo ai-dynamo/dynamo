@@ -54,9 +54,7 @@ class RequestType(BaseModel):
 class PrefillWorker:
     def __init__(self):
         class_name = self.__class__.__name__
-        self.engine_args = parse_vllm_args(
-            class_name, "", common_config_keys=COMMON_CONFIG_KEYS
-        )
+        self.engine_args = parse_vllm_args(class_name, "")
         self._loaded_metadata = set()
         self.initialized = False
         if self.engine_args.enable_chunked_prefill is not False:

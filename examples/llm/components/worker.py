@@ -57,9 +57,7 @@ class VllmWorker:
         self.client = None
         self.disaggregated_router: PyDisaggregatedRouter = None  # type: ignore
         class_name = self.__class__.__name__
-        self.engine_args = parse_vllm_args(
-            class_name, "", common_config_keys=COMMON_CONFIG_KEYS
-        )
+        self.engine_args = parse_vllm_args(class_name, "")
         self.do_remote_prefill = self.engine_args.remote_prefill
         self.model_name = (
             self.engine_args.served_model_name
