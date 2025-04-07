@@ -18,6 +18,7 @@
 import asyncio
 from typing import Any, Dict, Optional, TypeVar
 
+# WARNING: internal
 from _bentoml_sdk.service import Service
 from _bentoml_sdk.service.dependency import Dependency
 

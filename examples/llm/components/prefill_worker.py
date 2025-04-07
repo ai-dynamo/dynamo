@@ -15,6 +15,7 @@
 
 
 import asyncio
+import logging
 import os
 import signal
 import sys
@@ -30,6 +31,8 @@ from vllm.inputs.data import TokensPrompt
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
+
+logger = logging.getLogger(__name__)
 
 
 class RequestType(BaseModel):
@@ -51,23 +54,23 @@ class PrefillWorker:
         self._loaded_metadata = set()
         self.initialized = False
         if self.engine_args.enable_chunked_prefill is not False:
-            print("Chunked prefill is not supported yet, setting to False")
+            logger.info("Chunked prefill is not supported yet, setting to False")
             self.engine_args.enable_chunked_prefill = False
 
         if self.engine_args.pipeline_parallel_size != 1:
-            print("Pipeline parallel size is not supported yet, setting to 1")
+            logger.info("Pipeline parallel size is not supported yet, setting to 1")
             self.engine_args.pipeline_parallel_size = 1
 
         if self.engine_args.disable_async_output_proc is not True:
-            print("Async output processing is not supported yet, setting to True")
+            logger.info("Async output processing is not supported yet, setting to True")
             self.engine_args.disable_async_output_proc = True
 
         if self.engine_args.enforce_eager is not True:
-            print("Prefill must be done eagerly, setting to True")
+            logger.info("Prefill must be done eagerly, setting to True")
             self.engine_args.enforce_eager = True
 
         if self.engine_args.enable_prefix_caching is not False:
-            print(
+            logger.info(
                 "Prefix caching is not supported yet in prefill worker, setting to False"
             )
             self.engine_args.enable_prefix_caching = False
@@ -107,36 +110,40 @@ class PrefillWorker:
         def prefill_queue_handler_cb(fut):
             try:
                 fut.result()
-                print("prefill queue handler exited successfully")
+                logger.info("prefill queue handler exited successfully")
             except Exception as e:
-                print(f"[ERROR] prefill queue handler failed: {e!r}")
+                logger.error(f"[ERROR] prefill queue handler failed: {e!r}")
                 sys.exit(1)
 
         task.add_done_callback(prefill_queue_handler_cb)
-        print("PrefillWorker initialized")
+        logger.info("PrefillWorker initialized")
 
     async def prefill_queue_handler(self):
-        print("[DEBUG] prefill queue handler entered")
+        logger.info("Prefill queue handler entered")
         prefill_queue_nats_server = os.getenv("NATS_SERVER", "nats://localhost:4222")
         prefill_queue_stream_name = (
             self.engine_args.served_model_name
             if self.engine_args.served_model_name is not None
             else "vllm"
         )
-        print(f"Prefill queue: {prefill_queue_nats_server}:{prefill_queue_stream_name}")
+        logger.info(
+            f"Prefill queue: {prefill_queue_nats_server}:{prefill_queue_stream_name}"
+        )
         self.initialized = True
         # TODO: integrate prefill_queue to a dynamo endpoint
         async with PrefillQueue.get_instance(
             nats_server=prefill_queue_nats_server,
             stream_name=prefill_queue_stream_name,
         ) as prefill_queue:
-            print("prefill queue handler started")
+            logger.info("prefill queue handler started")
             while True:
                 # TODO: this might add a small overhead to pull prefill from nats
                 # need to test and check how much overhead it is
                 prefill_request = await prefill_queue.dequeue_prefill_request()
                 if prefill_request is not None:
-                    print(f"Dequeued prefill request: {prefill_request.request_id}")
+                    logger.info(
+                        f"Dequeued prefill request: {prefill_request.request_id}"
+                    )
                     async for _ in self.generate(prefill_request):
                         pass
 
@@ -157,7 +164,7 @@ class PrefillWorker:
         if request.engine_id not in self._loaded_metadata:
             remote_metadata = await self._metadata_store.get(request.engine_id)
             await self.engine_client.add_remote_nixl_metadata(remote_metadata)
-            print(
+            logger.info(
                 f"Loaded nixl metadata from engine {request.engine_id} into "
                 f"engine {self.engine_client.nixl_metadata.engine_id}"
             )

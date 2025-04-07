@@ -15,6 +15,7 @@
 
 
 import asyncio
+import logging
 import os
 import signal
 
@@ -27,12 +28,13 @@ from utils.vllm import parse_vllm_args
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
 )
-from vllm.logger import logger as vllm_logger
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
 from dynamo.llm import KvMetricsPublisher
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+
+logger = logging.getLogger(__name__)
 
 
 @service(
@@ -61,21 +63,21 @@ class VllmWorker:
             "NATS_SERVER", "nats://localhost:4222"
         )
         self._prefill_queue_stream_name = self.model_name
-        vllm_logger.info(
+        logger.info(
             f"Prefill queue: {self._prefill_queue_nats_server}:{self._prefill_queue_stream_name}"
         )
 
         if self.engine_args.remote_prefill:
             if self.engine_args.enable_chunked_prefill is not False:
-                print("Chunked prefill is not supported yet, setting to False")
+                logger.info("Chunked prefill is not supported yet, setting to False")
                 self.engine_args.enable_chunked_prefill = False
 
             if self.engine_args.preemption_mode != "swap":
-                print("Preemption mode is not supported yet, setting to swap")
+                logger.info("Preemption mode is not supported yet, setting to swap")
                 self.engine_args.preemption_mode = "swap"
 
             if self.engine_args.pipeline_parallel_size != 1:
-                print("Pipeline parallel size is not supported yet, setting to 1")
+                logger.info("Pipeline parallel size is not supported yet, setting to 1")
                 self.engine_args.pipeline_parallel_size = 1
 
         if self.engine_args.router == "kv":
@@ -83,7 +85,7 @@ class VllmWorker:
             os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
             os.environ["VLLM_KV_NAMESPACE"] = "dynamo"
             os.environ["VLLM_KV_COMPONENT"] = class_name
-            vllm_logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
+            logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
         self.metrics_publisher = KvMetricsPublisher()
 
         signal.signal(signal.SIGTERM, self._shutdown)
@@ -129,7 +131,7 @@ class VllmWorker:
             )
             task = asyncio.create_task(self.create_metrics_publisher_endpoint())
             task.add_done_callback(
-                lambda _: print("metrics publisher endpoint created")
+                lambda _: logger.info("metrics publisher endpoint created")
             )
 
         runtime = dynamo_context["runtime"]
@@ -148,7 +150,7 @@ class VllmWorker:
             )
         else:
             self.disaggregated_router = None
-        print("VllmWorker has been initialized")
+        logger.info("VllmWorker has been initialized")
 
     async def create_metrics_publisher_endpoint(self):
         component = dynamo_context["component"]
@@ -189,12 +191,12 @@ class VllmWorker:
                 is_remote_prefill=True,
                 remote_prefill_request_callback=self.get_remote_prefill_request_callback(),
             )
-            print(
+            logger.info(
                 f"Prefilling remotely for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
             )
         else:
             remote_prefill_params = None
-            print(
+            logger.info(
                 f"Prefilling locally for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
             )
 
