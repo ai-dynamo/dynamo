@@ -33,6 +33,41 @@ if t.TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+def _parse_service_arg(arg_name: str, arg_value: str) -> tuple[str, str, t.Any]:
+    """Parse a single CLI argument into service name, key, and value."""
+
+    parts = arg_name.split(".")
+    service = parts[0]
+    nested_keys = parts[1:]
+
+    # Special case: if this is a ServiceArgs.envs.* path, keep value as string
+    if (
+        len(nested_keys) >= 2
+        and nested_keys[0] == "ServiceArgs"
+        and nested_keys[1] == "envs"
+    ):
+        value: t.Union[str, int, float, bool, dict, list] = arg_value
+    else:
+        # Parse value based on type for non-env vars
+        try:
+            value = json.loads(arg_value)
+        except json.JSONDecodeError:
+            if arg_value.isdigit():
+                value = int(arg_value)
+            elif arg_value.replace(".", "", 1).isdigit() and arg_value.count(".") <= 1:
+                value = float(arg_value)
+            elif arg_value.lower() in ("true", "false"):
+                value = arg_value.lower() == "true"
+            else:
+                value = arg_value
+
+    # Build nested dict structure
+    result = value
+    for key in reversed(nested_keys[1:]):
+        result = {key: result}
+
+    return service, nested_keys[0], result
+
 def _parse_service_args(args: list[str]) -> t.Dict[str, t.Any]:
     service_configs: t.DefaultDict[str, t.Dict[str, t.Any]] = collections.defaultdict(
         dict
@@ -173,8 +208,6 @@ def build_serve_command() -> click.Group:
         **attrs: t.Any,
     ) -> None:
         """Locally run connected Dynamo services. You can pass service-specific configuration options using --ServiceName.param=value format."""
-
-        from bentoml import Service
         # WARNING: internal
         from bentoml._internal.service.loader import load
 
