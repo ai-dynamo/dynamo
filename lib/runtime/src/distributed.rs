@@ -88,6 +88,10 @@ impl DistributedRuntime {
         &self.runtime
     }
 
+    pub fn primary_token(&self) -> CancellationToken {
+        self.runtime.primary_token()
+    }
+
     /// The etcd lease all our components will be attached to.
     /// Not available for static workers.
     pub fn primary_lease(&self) -> Option<etcd::Lease> {

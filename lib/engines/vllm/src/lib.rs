@@ -26,6 +26,7 @@ use dynamo_runtime::CancellationToken;
 
 use dynamo_llm::backend::ExecutionContext;
 use dynamo_llm::engines::MultiNodeConfig;
+use dynamo_llm::kv_router::publisher::KvMetricsPublisher;
 
 mod engine;
 use engine::VllmEngine;
@@ -50,6 +51,8 @@ pub async fn make_leader_engine(
     tensor_parallel_size: u32,
     // Path to extra engine args file
     extra_engine_args: Option<PathBuf>,
+    // When using our vllm fork, this is how we publish it's KV metrics for the KV router
+    kv_metrics_publisher: Option<Arc<KvMetricsPublisher>>,
 ) -> pipeline_error::Result<(ExecutionContext, impl Future<Output = ()>)> {
     let ray_obj = if node_conf.num_nodes > 1 {
         let r = ray::start_leader(node_conf.leader_addr.parse()?)?;
@@ -69,6 +72,7 @@ pub async fn make_leader_engine(
         node_conf,
         tensor_parallel_size,
         extra_engine_args,
+        kv_metrics_publisher,
     )
     .await?;
     let vllm_process = engine.take_vllm_worker_handle();
