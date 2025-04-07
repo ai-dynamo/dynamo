@@ -32,14 +32,6 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
-COMMON_CONFIG_KEYS: set[str] = {
-    "model",
-    "block-size",
-    "max-model-len",
-    "kv-transfer-config",
-    "router",
-}
-
 
 class RequestType(Enum):
     CHAT = "chat"

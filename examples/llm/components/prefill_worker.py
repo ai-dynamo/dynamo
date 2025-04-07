@@ -30,14 +30,6 @@ from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
 
-COMMON_CONFIG_KEYS: set[str] = {
-    "model",
-    "block-size",
-    "max-model-len",
-    "kv-transfer-config",
-    "router",
-}
-
 
 class RequestType(BaseModel):
     text: str

@@ -30,8 +30,6 @@ from dynamo.sdk.lib.config import ServiceConfig
 
 WorkerId = str
 
-COMMON_CONFIG_KEYS: set[str] = {"model", "block-size"}
-
 
 def parse_args(service_name, prefix) -> Namespace:
     parser = argparse.ArgumentParser()
