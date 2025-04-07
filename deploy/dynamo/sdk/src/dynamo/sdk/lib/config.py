@@ -83,7 +83,6 @@ class ServiceConfig(dict):
             else:
                 args.extend([f"--{arg_key}", str(value)])
 
-        common_config_keys = self.get()
         if (common := self.get(COMMON_CONFIG_SERVICE)) is not None and (
             common_config_keys := self[service_name].get(COMMON_CONFIG_KEY)
         ) is not None:
