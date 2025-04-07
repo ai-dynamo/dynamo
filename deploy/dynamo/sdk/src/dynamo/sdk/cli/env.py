@@ -40,6 +40,7 @@ def execute_subprocess_output(command: str) -> str:
     except subprocess.CalledProcessError:
         return "N/A"
 
+
 def get_glibc_version() -> str:
     """Get GLIBC version."""
     return execute_subprocess_output("ldd --version | head -n 1 | awk '{print $NF}'")
@@ -59,6 +60,7 @@ def get_rust_version() -> str:
     """Get Rust version."""
     return execute_subprocess_output("rustc --version | head -n 1 | awk '{print $(NF-2)}'")
 
+
 def get_docker_version() -> str:
     """Get Docker version."""
     return execute_subprocess_output("docker --version | awk '{print $3}' | tr -d ','")
@@ -74,6 +76,7 @@ def query_nvidia_smi(param: str) -> str:
     return execute_subprocess_output(
         f"nvidia-smi --query-gpu={param} --format=csv,noheader"
     )
+
 
 def get_gpu_topo() -> str:
     """Get GPU topology if available"""
