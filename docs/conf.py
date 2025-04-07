@@ -68,8 +68,8 @@ project = "Dynamo"
 copyright = "2025-{}, NVIDIA Corporation".format(date.today().year)
 author = "NVIDIA"
 
-# Get the version of Triton this is building.
-version_long = "0.0.0"
+# Get the version of dynamo this is building.
+version_long = "0.1.0"
 
 version_short = version_long
 version_short_split = version_short.split(".")
