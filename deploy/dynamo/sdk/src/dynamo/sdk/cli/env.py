@@ -15,47 +15,56 @@
 
 from __future__ import annotations
 
-import pkg_resources
 import subprocess
 import sys
 
 import click
 import distro
 import platform
+import pkg_resources
 
 
 def get_os_version() -> str:
     """Get OS version."""
     #TODO: Revisit once we need to support Windows based systems
-    return f'{distro.name()} {distro.version()}'
+    return f"{distro.name()} {distro.version()}"
+
 
 def get_cpu_architecture() -> str:
     """Get CPU architecture."""
     return platform.machine()
 
+
 def execute_subprocess_output(command: str) -> str:
     """Execute a subprocess command and return the output."""
     try:
         out = subprocess.check_output(command, shell=True, stderr=subprocess.DEVNULL)
-        return out.decode('utf-8').strip()
+        return out.decode("utf-8").strip()
     except subprocess.CalledProcessError:
         return "N/A"
+
 
 def get_glibc_version() -> str:
     """Get GLIBC version."""
     return execute_subprocess_output("ldd --version | head -n 1 | awk '{print $NF}'")
 
+
 def get_gpu_architecture() -> str:
     """Get GPU architecture if available"""
-    return execute_subprocess_output("nvidia-smi --query-gpu=gpu_name --format=csv,noheader")
+    return execute_subprocess_output(
+        "nvidia-smi --query-gpu=gpu_name --format=csv,noheader"
+    )
+
 
 def get_cuda_version() -> str:
     """Get CUDA version if available."""
     return execute_subprocess_output(r"nvcc --version | grep -Po 'release \K\d+\.\d+'")
 
+
 def get_installed_packages() -> list[tuple[str, str]]:
     """Get list of installed Python packages and their versions."""
     return [(pkg.key, pkg.version) for pkg in pkg_resources.working_set]
+
 
 def build_env_command() -> click.Group:
     @click.command(name="env")
@@ -88,6 +97,8 @@ def build_env_command() -> click.Group:
             else:
                 click.echo(f"  {pkg_name}: Not installed")
         click.echo("")
+
     return env
+
 
 env_command = build_env_command()
