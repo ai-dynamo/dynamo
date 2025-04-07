@@ -36,17 +36,17 @@ def configure_server_logging():
     os.environ["VLLM_CONFIGURE_LOGGING"] = "0"
 
     # loggers that should be configured to INFO
-    info_lgrs = ["vllm", "nixl", "__init__"]
-    for lgr in info_lgrs:
-        logger = logging.getLogger(lgr)
+    info_loggers = ["vllm", "nixl", "__init__"]
+    for logger in info_loggers:
+        logger = logging.getLogger(logger)
         logger.handlers = []
         logger.setLevel(logging.INFO)
         logger.propagate = True
 
     # loggers that should be configured to ERROR
-    error_lgrs = ["bentoml", "tag"]
-    for lgr in error_lgrs:
-        logger = logging.getLogger(lgr)
+    error_loggers = ["bentoml", "tag"]
+    for logger in error_loggers:
+        logger = logging.getLogger(logger)
         logger.handlers = []
         logger.setLevel(logging.ERROR)
         logger.propagate = True
