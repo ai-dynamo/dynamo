@@ -73,9 +73,9 @@ def parse_chat_message_content(
 
 class BaseChatProcessor:
     def __init__(
-        self, 
+        self,
         model: str,
-        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast], 
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     ):
         self.model = model
         self.tokenizer = tokenizer
@@ -129,8 +129,8 @@ class ChatProcessor(BaseChatProcessor):
     def __init__(
         self,
         model: str,
-        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast], 
-        using_engine_generator: bool = False
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        using_engine_generator: bool = False,
     ):
         super().__init__(model, tokenizer)
         self.using_engine_generator = using_engine_generator
