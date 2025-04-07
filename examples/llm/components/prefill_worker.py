@@ -16,6 +16,7 @@
 
 import asyncio
 import os
+import signal
 import sys
 
 from pydantic import BaseModel
@@ -70,6 +71,21 @@ class PrefillWorker:
                 "Prefix caching is not supported yet in prefill worker, setting to False"
             )
             self.engine_args.enable_prefix_caching = False
+        signal.signal(signal.SIGTERM, self._shutdown)
+        signal.signal(signal.SIGINT, self._shutdown)
+
+    def _shutdown(self, signum, frame):
+        """Shutdown the background loop"""
+        print(f"Received signal {signum}, shutting down")
+        loop = asyncio.get_event_loop()
+        try:
+            if hasattr(self, "_engine_context") and self._engine_context is not None:
+                loop.run_until_complete(self._engine_context.__aexit__(None, None, None))
+                print("Engine client context shutdown complete")
+        except Exception as e:
+            print(f"Error during shutdown: {e}")
+        finally:
+            loop.stop()
 
     @async_on_start
     async def async_init(self):

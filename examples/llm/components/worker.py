@@ -16,6 +16,7 @@
 
 import asyncio
 import os
+import signal
 
 from components.disagg_router import PyDisaggregatedRouter
 from components.prefill_worker import PrefillWorker
@@ -84,6 +85,22 @@ class VllmWorker:
             os.environ["VLLM_KV_COMPONENT"] = class_name
             vllm_logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
         self.metrics_publisher = KvMetricsPublisher()
+
+        signal.signal(signal.SIGTERM, self._shutdown)
+        signal.signal(signal.SIGINT, self._shutdown)
+
+    def _shutdown(self, signum, frame):
+        """Shutdown the background loop"""
+        print(f"Received signal {signum}, shutting down")
+        loop = asyncio.get_event_loop()
+        try:
+            if hasattr(self, "_engine_context") and self._engine_context is not None:
+                loop.run_until_complete(self._engine_context.__aexit__(None, None, None))
+                print("Engine client context shutdown complete")
+        except Exception as e:
+            print(f"Error during shutdown: {e}")
+        finally:
+            loop.stop()
 
     @async_on_start
     async def async_init(self):
