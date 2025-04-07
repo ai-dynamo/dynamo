@@ -6,7 +6,7 @@ ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
-
+ARG MANYLINUX_IMAGE="quay.io/pypa/manylinux_2_28_x86_64"
 ARG GENAI_PERF_TAG="25d0188713adc47868d6b3f22426375237a90529"
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS nixl_base
@@ -16,8 +16,8 @@ ARG NIXL_COMMIT
 # This line acts as a cache key - it only changes when NIXL_COMMIT changes
 RUN echo "NIXL commit: ${NIXL_COMMIT}" > /opt/nixl/commit.txt
 # Copy the nixl source
-COPY --from=nixl . .
 
+COPY --from=nixl . .
 ##################################
 ########## Build Image ###########
 ##################################
@@ -280,6 +280,67 @@ RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
 
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 COPY deploy/dynamo/api-store /workspace/deploy/dynamo/api-store
+
+# Tell vllm to use the Dynamo LLM C API for KV Cache Routing
+ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
+
+# Copy launch banner
+RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
+    sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
+    echo "cat ~/.launch_screen" >> ~/.bashrc
+
+CMD []
+
+###################################
+####### WHEEL BUILD STAGE #########
+###################################
+
+# Build the wheel in the manylinux environment
+FROM ${MANYLINUX_IMAGE} AS wheel_builder
+WORKDIR /workspace
+
+RUN yum install -y \
+    wget \
+    protobuf-devel \
+    python3 \
+    python3-pip \
+    && yum clean all \
+    && rm -rf /var/cache/yum
+
+COPY --from=build /workspace /workspace
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH \
+    RUST_VERSION=1.86.0 \
+    RUSTARCH=x86_64-unknown-linux-gnu
+
+RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
+    echo "a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f *rustup-init" | sha256sum -c - && \
+    chmod +x rustup-init && \
+    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
+    rm rustup-init && \
+    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
+
+# Install uv and create virtualenv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+RUN mkdir /opt/dynamo && \
+    uv venv /opt/dynamo/venv --python 3.12 
+RUN /opt/dynamo/venv/bin/python -m ensurepip --upgrade && \
+    /opt/dynamo/venv/bin/python -m pip install --upgrade pip
+
+RUN /opt/dynamo/venv/bin/python -m pip install -U uv maturin
+
+# Activate virtual environment
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV PATH="$PATH:/usr/local/bin"
+
+RUN cp target/release/dynamo-run /usr/local/bin && \
+    cp target/release/http /usr/local/bin && \
+    cp target/release/llmctl /usr/local/bin && \
+    cp target/release/metrics /usr/local/bin && \
+    cp target/release/mock_worker /usr/local/bin
+
 # Build dynamo wheel
 RUN source /opt/dynamo/venv/bin/activate && \
     cd /workspace/lib/bindings/python && \
@@ -299,22 +360,13 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
     cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
     cp -r lib/bindings/c/include /opt/dynamo/bindings/.
 
-# Tell vllm to use the Dynamo LLM C API for KV Cache Routing
-ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
-
-# Copy launch banner
-RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
-    sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
-    echo "cat ~/.launch_screen" >> ~/.bashrc
-
-CMD []
-
 #######################################
 ########## CI Minimum Image ###########
 #######################################
 FROM build AS ci_minimum
 
 COPY . /workspace
+COPY --from=wheel_builder /workspace/dist/*.whl /workspace/dist/
 
 ##########################################
 ########## Perf Analyzer Image ###########
@@ -341,6 +393,8 @@ RUN mkdir bin &&  \
 FROM build AS dev
 
 ARG GENAI_PERF_TAG
+
+COPY --from=wheel_builder /workspace/dist/*.whl /workspace/dist/
 
 COPY --from=perf_analyzer /workspace/bin/perf-analyzer-build/ /perf/bin
 COPY --from=perf_analyzer /workspace/perf_analyzer /perf_analyzer
@@ -374,15 +428,15 @@ ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/
 # Setup the python environment
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3-dev && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl python3-dev && \
     rm -rf /var/lib/apt/lists/* && \
     uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 # Install the wheels
-COPY --from=build /workspace/dist/*.whl wheelhouse/
-RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
-    rm -r wheelhouse
+COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
+
+RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
