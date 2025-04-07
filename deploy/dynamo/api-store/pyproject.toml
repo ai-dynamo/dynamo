@@ -49,3 +49,13 @@ dev = [
 
 [project.scripts]
 ai-dynamo-store = "ai_dynamo_store.main:main"
+
+[[tool.cloudcoil.codegen.models]]
+namespace = "cloudcoil"
+input = "../operator/config/crd/bases/nvidia.com_dynamodeployments.yaml"
+output = "ai_dynamo_store/models"
+crd-namespace = "nvidia.com"
+exclude-unknown = true
+mode = "resource"
+generate-init = true
+generate-py-typed = true
