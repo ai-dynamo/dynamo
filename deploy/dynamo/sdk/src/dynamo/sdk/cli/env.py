@@ -74,13 +74,15 @@ def build_env_command() -> click.Group:
         click.echo("\nPython Packages:")
         packages = get_installed_packages()
         python_packages = [
-            'ai-dynamo',
-            'ai-dynamo-runtime',
-            'ai-dynamo-vllm',
-            'nixl',
+            "ai-dynamo",
+            "ai-dynamo-runtime",
+            "ai-dynamo-vllm",
+            "nixl",
         ]
         for pkg_name in python_packages:
-            version = next((version for name, version in packages if name == pkg_name), None)
+            version = next(
+                (version for name, version in packages if name == pkg_name), None
+            )
             if version:
                 click.echo(f"  {pkg_name}: {version}")
             else:
