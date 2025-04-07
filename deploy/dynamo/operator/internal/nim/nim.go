@@ -27,12 +27,11 @@ import (
 
 	"emperror.dev/errors"
 	compounaiCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/modelschemas"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemasv1"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemas"
 	yataiclient "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/yatai-client"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
-	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/config"
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/consts"
+	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/config"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
 	"github.com/huandu/xstrings"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -44,7 +43,7 @@ import (
 )
 
 // ServiceConfig represents the YAML configuration structure for a service
-type NovaConfig struct {
+type DynamoConfig struct {
 	Enabled   bool   `yaml:"enabled"`
 	Namespace string `yaml:"namespace"`
 	Name      string `yaml:"name"`
@@ -67,10 +66,10 @@ type Autoscaling struct {
 }
 
 type Config struct {
-	Nova        *NovaConfig  `yaml:"nova,omitempty"`
-	Resources   *Resources   `yaml:"resources,omitempty"`
-	Traffic     *Traffic     `yaml:"traffic,omitempty"`
-	Autoscaling *Autoscaling `yaml:"autoscaling,omitempty"`
+	Dynamo      *DynamoConfig `yaml:"dynamo,omitempty"`
+	Resources   *Resources    `yaml:"resources,omitempty"`
+	Traffic     *Traffic      `yaml:"traffic,omitempty"`
+	Autoscaling *Autoscaling  `yaml:"autoscaling,omitempty"`
 }
 
 type ServiceConfig struct {
@@ -79,17 +78,17 @@ type ServiceConfig struct {
 	Config       Config              `yaml:"config"`
 }
 
-func RetrieveDynamoNimDownloadURL(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDeployment, secretGetter SecretGetter, recorder EventRecorder) (*string, *string, error) {
+func RetrieveDynamoNimDownloadURL(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDeployment, recorder EventRecorder) (*string, *string, error) {
 	dynamoNimDownloadURL := ""
 	dynamoNimApiToken := ""
-	var dynamoNim *schemasv1.BentoFullSchema
+	var dynamoNim *schemas.DynamoNIM
 	dynamoNimRepositoryName, _, dynamoNimVersion := xstrings.Partition(dynamoDeployment.Spec.DynamoNim, ":")
 
 	var err error
 	var yataiClient_ **yataiclient.YataiClient
 	var yataiConf_ **commonconfig.YataiConfig
 
-	yataiClient_, yataiConf_, err = GetYataiClient(ctx, secretGetter)
+	yataiClient_, yataiConf_, err = GetYataiClient(ctx)
 	if err != nil {
 		err = errors.Wrap(err, "get yatai client")
 		return nil, nil, err
@@ -111,8 +110,8 @@ func RetrieveDynamoNimDownloadURL(ctx context.Context, dynamoDeployment *v1alpha
 	}
 	recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got dynamoNim %s from yatai service", dynamoDeployment.Spec.DynamoNim)
 
-	if dynamoNim.TransmissionStrategy != nil && *dynamoNim.TransmissionStrategy == modelschemas.TransmissionStrategyPresignedURL {
-		var dynamoNim_ *schemasv1.BentoSchema
+	if dynamoNim.TransmissionStrategy != nil && *dynamoNim.TransmissionStrategy == schemas.TransmissionStrategyPresignedURL {
+		var dynamoNim_ *schemas.DynamoNIM
 		recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for dynamoNim %s from yatai service", dynamoDeployment.Spec.DynamoNim)
 		dynamoNim_, err = yataiClient.PresignBentoDownloadURL(ctx, dynamoNimRepositoryName, dynamoNimVersion)
 		if err != nil {
@@ -131,7 +130,9 @@ func RetrieveDynamoNimDownloadURL(ctx context.Context, dynamoDeployment *v1alpha
 
 // ServicesConfig represents the top-level YAML structure of a dynamoNim yaml file stored in a dynamoNim tar file
 type DynamoNIMConfig struct {
-	Services []ServiceConfig `yaml:"services"`
+	DynamoTag    string          `yaml:"service"`
+	Services     []ServiceConfig `yaml:"services"`
+	EntryService string          `yaml:"entry_service"`
 }
 
 type EventRecorder interface {
@@ -173,35 +174,8 @@ func RetrieveDynamoNIMConfigurationFile(ctx context.Context, url string, yataiAp
 	return yamlContent, nil
 }
 
-func GetYataiClientWithAuth(ctx context.Context, dynamoNimRequest *v1alpha1.DynamoNimRequest, secretGetter SecretGetter) (**yataiclient.YataiClient, **commonconfig.YataiConfig, error) {
-	orgId, ok := dynamoNimRequest.Labels[commonconsts.NgcOrganizationHeaderName]
-	if !ok {
-		orgId = commonconsts.DefaultOrgId
-	}
-
-	userId, ok := dynamoNimRequest.Labels[commonconsts.NgcUserHeaderName]
-	if !ok {
-		userId = commonconsts.DefaultUserId
-	}
-
-	auth := yataiclient.DynamoAuthHeaders{
-		OrgId:  orgId,
-		UserId: userId,
-	}
-
-	client, yataiConf, err := GetYataiClient(ctx, secretGetter)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	(*client).SetAuth(auth)
-	return client, yataiConf, err
-}
-
-type SecretGetter func(ctx context.Context, namespace, name string) (*corev1.Secret, error)
-
-func GetYataiClient(ctx context.Context, secretGetter SecretGetter) (yataiClient **yataiclient.YataiClient, yataiConf **commonconfig.YataiConfig, err error) {
-	yataiConf_, err := commonconfig.GetYataiConfig(ctx, secretGetter, commonconsts.YataiImageBuilderComponentName, false)
+func GetYataiClient(ctx context.Context) (yataiClient **yataiclient.YataiClient, yataiConf **commonconfig.YataiConfig, err error) {
+	yataiConf_, err := commonconfig.GetYataiConfig(ctx)
 	isNotFound := k8serrors.IsNotFound(err)
 	if err != nil && !isNotFound {
 		err = errors.Wrap(err, "get yatai config")
@@ -235,8 +209,8 @@ func ParseDynamoNIMConfig(ctx context.Context, yamlContent *bytes.Buffer) (*Dyna
 	return &config, err
 }
 
-func GetDynamoNIMConfig(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDeployment, secretGetter SecretGetter, recorder EventRecorder) (*DynamoNIMConfig, error) {
-	dynamoNimDownloadURL, dynamoNimApiToken, err := RetrieveDynamoNimDownloadURL(ctx, dynamoDeployment, secretGetter, recorder)
+func GetDynamoNIMConfig(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDeployment, recorder EventRecorder) (*DynamoNIMConfig, error) {
+	dynamoNimDownloadURL, dynamoNimApiToken, err := RetrieveDynamoNimDownloadURL(ctx, dynamoDeployment, recorder)
 	if err != nil {
 		return nil, err
 	}
@@ -249,16 +223,24 @@ func GetDynamoNIMConfig(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDe
 
 // generate DynamoNIMDeployment from config
 func GenerateDynamoNIMDeployments(parentDynamoDeployment *v1alpha1.DynamoDeployment, config *DynamoNIMConfig) (map[string]*v1alpha1.DynamoNimDeployment, error) {
-	novaServices := make(map[string]string)
+	dynamoServices := make(map[string]string)
 	deployments := make(map[string]*v1alpha1.DynamoNimDeployment)
 	for _, service := range config.Services {
 		deployment := &v1alpha1.DynamoNimDeployment{}
 		deployment.Name = fmt.Sprintf("%s-%s", parentDynamoDeployment.Name, strings.ToLower(service.Name))
 		deployment.Namespace = parentDynamoDeployment.Namespace
-		deployment.Spec.DynamoNim = strings.Split(parentDynamoDeployment.Spec.DynamoNim, ":")[0]
+		deployment.Spec.DynamoTag = config.DynamoTag
+		deployment.Spec.DynamoNim = strings.ReplaceAll(parentDynamoDeployment.Spec.DynamoNim, ":", "--")
 		deployment.Spec.ServiceName = service.Name
-		if service.Config.Nova != nil && service.Config.Nova.Enabled {
-			novaServices[service.Name] = fmt.Sprintf("%s/%s", service.Config.Nova.Name, service.Config.Nova.Namespace)
+		if service.Config.Dynamo != nil && service.Config.Dynamo.Enabled {
+			dynamoServices[service.Name] = fmt.Sprintf("%s/%s", service.Config.Dynamo.Name, service.Config.Dynamo.Namespace)
+		} else {
+			// dynamo is not enabled
+			if config.EntryService == service.Name {
+				// enable virtual service for the entry service
+				deployment.Spec.Ingress.Enabled = true
+				deployment.Spec.Ingress.UseVirtualService = &deployment.Spec.Ingress.Enabled
+			}
 		}
 		if service.Config.Resources != nil {
 			deployment.Spec.Resources = &compounaiCommon.Resources{
@@ -296,10 +278,10 @@ func GenerateDynamoNIMDeployments(parentDynamoDeployment *v1alpha1.DynamoDeploym
 			if dependencyDeployment == nil {
 				return nil, fmt.Errorf("dependency %s not found", dependentServiceName)
 			}
-			if novaService, ok := novaServices[dependentServiceName]; ok {
+			if dynamoService, ok := dynamoServices[dependentServiceName]; ok {
 				deployment.Spec.ExternalServices[dependentServiceName] = v1alpha1.ExternalService{
-					DeploymentSelectorKey:   "nova",
-					DeploymentSelectorValue: novaService,
+					DeploymentSelectorKey:   "dynamo",
+					DeploymentSelectorValue: dynamoService,
 				}
 			} else {
 				deployment.Spec.ExternalServices[dependentServiceName] = v1alpha1.ExternalService{

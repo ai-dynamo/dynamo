@@ -105,28 +105,29 @@ This figure shows an overview of the major components to deploy:
 ```
 
 ### Example architectures
+_Note_: For a non-dockerized deployment, first export `DYNAMO_HOME` to point to the dynamo repository root, e.g. `export DYNAMO_HOME=$(pwd)`
 
 #### Aggregated serving
 ```bash
-cd /workspace/examples/llm
+cd $DYNAMO_HOME/examples/llm
 dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
 ```
 
 #### Aggregated serving with KV Routing
 ```bash
-cd /workspace/examples/llm
+cd $DYNAMO_HOME/examples/llm
 dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
 ```
 
 #### Disaggregated serving
 ```bash
-cd /workspace/examples/llm
+cd $DYNAMO_HOME/examples/llm
 dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
 ```
 
 #### Disaggregated serving with KV Routing
 ```bash
-cd /workspace/examples/llm
+cd $DYNAMO_HOME/examples/llm
 dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
 ```
 
@@ -150,21 +151,14 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ```
 
+### Multi-node deployment
+
+See [multinode-examples.md](multinode-examples.md) for more details.
+
 ### Close deployment
 
-Kill all dynamo processes managed by circusd.
+> [!IMPORTANT]
+> We are aware of an issue where vLLM subprocesses might not be killed when `ctrl-c` is pressed.
+> We are working on addressing this. Relevant vLLM issues can be found [here](https://github.com/vllm-project/vllm/pull/8492) and [here](https://github.com/vllm-project/vllm/issues/6219#issuecomment-2439257824).
 
-```
-function kill_tree() {
-    local parent=$1
-    local children=$(ps -o pid= --ppid $parent)
-    for child in $children; do
-        kill_tree $child
-    done
-    echo "Killing process $parent"
-    kill -9 $parent
-}
-
-# kill process-tree of circusd
-kill_tree $(pgrep circusd)
-```
+To stop the serve, you can press `ctrl-c` which will kill the different components. In order to kill the remaining vLLM subprocesses you can run `nvidia-smi` and `kill -9` the remaining processes or run `pkill python3` from inside of the container.

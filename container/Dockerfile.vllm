@@ -56,6 +56,7 @@ RUN apt-get update -y && apt-get -y install curl \
     libgrpc-dev \
     libgrpc++-dev \
     libprotobuf-dev \
+    libclang-dev \
     protobuf-compiler-grpc \
     pybind11-dev \
     python3-full \
@@ -236,7 +237,7 @@ RUN apt update -y && \
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.85.0 \
+    RUST_VERSION=1.86.0 \
     RUSTARCH=x86_64-unknown-linux-gnu
 
 RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
@@ -262,6 +263,10 @@ COPY components /workspace/components
 COPY launch /workspace/launch
 
 ARG CARGO_BUILD_JOBS
+# Set CARGO_BUILD_JOBS to 16 if not provided
+# This is to prevent cargo from building $(nproc) jobs in parallel,
+# which might exceed the number of opened files limit.
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 
 ENV CARGO_TARGET_DIR=/workspace/target
 
@@ -274,6 +279,7 @@ RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
     cp target/release/mock_worker /usr/local/bin
 
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
+COPY deploy/dynamo/api-store /workspace/deploy/dynamo/api-store
 # Build dynamo wheel
 RUN source /opt/dynamo/venv/bin/activate && \
     cd /workspace/lib/bindings/python && \
@@ -281,7 +287,10 @@ RUN source /opt/dynamo/venv/bin/activate && \
     uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     cd /workspace && \
     uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/ai_dynamo*any.whl
+    uv pip install /workspace/dist/ai_dynamo*any.whl && \
+    cd /workspace/deploy/dynamo/api-store && \
+    uv build --wheel --out-dir /workspace/dist && \
+    uv pip install /workspace/dist/ai_dynamo_store*any.whl
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
@@ -354,6 +363,7 @@ CMD []
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
 WORKDIR /workspace
+ENV DYNAMO_HOME=/workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 
 # Copy NIXL

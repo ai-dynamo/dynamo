@@ -17,6 +17,8 @@ use derive_getters::Dissolve;
 
 use super::*;
 
+pub use async_nats::service::endpoint::Stats as EndpointStats;
+
 #[derive(Educe, Builder, Dissolve)]
 #[educe(Debug)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
@@ -47,18 +49,19 @@ impl EndpointConfigBuilder {
 
     pub fn stats_handler<F>(self, handler: F) -> Self
     where
-        F: FnMut(async_nats::service::endpoint::Stats) -> serde_json::Value + Send + Sync + 'static,
+        F: FnMut(EndpointStats) -> serde_json::Value + Send + Sync + 'static,
     {
         self._stats_handler(Some(Box::new(handler)))
     }
 
     pub async fn start(self) -> Result<()> {
         let (endpoint, lease, handler, stats_handler) = self.build_internal()?.dissolve();
-        let lease = lease.unwrap_or(endpoint.drt().primary_lease());
+        let lease = lease.or(endpoint.drt().primary_lease());
+        let lease_id = lease.as_ref().map(|l| l.id()).unwrap_or(0);
 
         tracing::debug!(
             "Starting endpoint: {}",
-            endpoint.etcd_path_with_id(lease.id())
+            endpoint.etcd_path_with_id(lease_id)
         );
 
         let service_name = endpoint.component.service_name();
@@ -87,16 +90,18 @@ impl EndpointConfigBuilder {
             handler_map
                 .lock()
                 .unwrap()
-                .insert(endpoint.subject_to(lease.id()), stats_handler);
+                .insert(endpoint.subject_to(lease_id), stats_handler);
         }
 
         // creates an endpoint for the service
         let service_endpoint = group
-            .endpoint(&endpoint.name_with_id(lease.id()))
+            .endpoint(&endpoint.name_with_id(lease_id))
             .await
             .map_err(|e| anyhow::anyhow!("Failed to start endpoint: {e}"))?;
 
-        let cancel_token = lease.child_token();
+        let cancel_token = lease
+            .map(|l| l.child_token())
+            .unwrap_or_else(|| endpoint.drt().child_token());
 
         let push_endpoint = PushEndpoint::builder()
             .service_handler(handler)
@@ -114,28 +119,22 @@ impl EndpointConfigBuilder {
             component: endpoint.component.name.clone(),
             endpoint: endpoint.name.clone(),
             namespace: endpoint.component.namespace.name.clone(),
-            lease_id: lease.id(),
-            transport: TransportType::NatsTcp(endpoint.subject_to(lease.id())),
+            lease_id,
+            transport: TransportType::NatsTcp(endpoint.subject_to(lease_id)),
         };
 
         let info = serde_json::to_vec_pretty(&info)?;
 
-        if let Err(e) = endpoint
-            .component
-            .drt
-            .etcd_client
-            .kv_create(
-                endpoint.etcd_path_with_id(lease.id()),
-                info,
-                Some(lease.id()),
-            )
-            .await
-        {
-            tracing::error!("Failed to register discoverable service: {:?}", e);
-            cancel_token.cancel();
-            return Err(error!("Failed to register discoverable service"));
+        if let Some(etcd_client) = &endpoint.component.drt.etcd_client {
+            if let Err(e) = etcd_client
+                .kv_create(endpoint.etcd_path_with_id(lease_id), info, Some(lease_id))
+                .await
+            {
+                tracing::error!("Failed to register discoverable service: {:?}", e);
+                cancel_token.cancel();
+                return Err(error!("Failed to register discoverable service"));
+            }
         }
-
         task.await??;
 
         Ok(())

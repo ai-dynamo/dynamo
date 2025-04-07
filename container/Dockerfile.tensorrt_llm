@@ -68,7 +68,7 @@ RUN apt-get update && \
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.85.0 \
+    RUST_VERSION=1.86.0 \
     RUSTARCH=x86_64-unknown-linux-gnu
 
 RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
@@ -90,6 +90,10 @@ COPY Cargo.lock /workspace/
 COPY rust-toolchain.toml /workspace/
 
 ARG CARGO_BUILD_JOBS
+# Set CARGO_BUILD_JOBS to 16 if not provided
+# This is to prevent cargo from building $(nproc) jobs in parallel,
+# which might exceed the number of opened files limit.
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 
 ENV CARGO_TARGET_DIR=/workspace/target
 
@@ -136,6 +140,7 @@ RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
 
 # Tell TRTLLM worker to use the Dynamo LLM C API for KV Cache Routing
 ENV DYNAMO_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
+ENV DYNAMO_HOME=/workspace
 
 # FIXME: Copy more specific folders in for dev/debug after directory restructure
 COPY . /workspace
