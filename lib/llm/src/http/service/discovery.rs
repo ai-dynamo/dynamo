@@ -22,7 +22,7 @@ use dynamo_runtime::{
     protocols::{self, annotated::Annotated},
     raise,
     transports::etcd::{KeyValue, WatchEvent},
-    DistributedRuntime, Result,
+    DistributedRuntime,
 };
 
 use super::ModelManager;
@@ -60,14 +60,41 @@ pub async fn model_watcher(state: Arc<ModelWatchState>, mut events_rx: Receiver<
 
     while let Some(event) = events_rx.recv().await {
         match event {
-            WatchEvent::Put(kv) => match handle_put(&kv, state.clone()).await {
-                Ok((model_name, model_type)) => {
-                    tracing::info!("added {} model: {}", model_type, model_name);
+            WatchEvent::Put(kv) => {
+                let key = match kv.key_str() {
+                    Ok(key) => key,
+                    Err(err) => {
+                        tracing::error!(%err, ?kv, "Invalid UTF8 in model key");
+                        continue;
+                    }
+                };
+                tracing::debug!(key, "adding model");
+
+                // model_entry.name is the service name (e.g. "Llama-3.2-3B-Instruct")
+                let model_entry = match serde_json::from_slice::<ModelEntry>(kv.value()) {
+                    Ok(model_entry) => model_entry,
+                    Err(err) => {
+                        tracing::error!(%err, ?kv, "Invalid JSON in model entry");
+                        continue;
+                    }
+                };
+                if state.manager.has_model_any(&model_entry.name) {
+                    tracing::trace!(
+                        service_name = model_entry.name,
+                        "New endpoint for existing model"
+                    );
+                    continue;
                 }
-                Err(e) => {
-                    tracing::error!("error adding model: {}", e);
+
+                match handle_put(model_entry, state.clone()).await {
+                    Ok((model_name, model_type)) => {
+                        tracing::info!("added {} model: {}", model_type, model_name);
+                    }
+                    Err(e) => {
+                        tracing::error!("error adding model: {}", e);
+                    }
                 }
-            },
+            }
             WatchEvent::Delete(kv) => match handle_delete(&kv, state.clone()).await {
                 Ok((model_name, model_type)) => {
                     tracing::info!("removed {} model: {}", model_type, model_name);
@@ -80,7 +107,10 @@ pub async fn model_watcher(state: Arc<ModelWatchState>, mut events_rx: Receiver<
     }
 }
 
-async fn handle_delete(kv: &KeyValue, state: Arc<ModelWatchState>) -> Result<(&str, ModelType)> {
+async fn handle_delete(
+    kv: &KeyValue,
+    state: Arc<ModelWatchState>,
+) -> anyhow::Result<(&str, ModelType)> {
     let key = kv.key_str()?;
     tracing::debug!(key, "removing model");
 
@@ -98,14 +128,10 @@ async fn handle_delete(kv: &KeyValue, state: Arc<ModelWatchState>) -> Result<(&s
 // models.
 //
 // If this method errors, for the near term, we will delete the offending key.
-async fn handle_put(kv: &KeyValue, state: Arc<ModelWatchState>) -> Result<(String, ModelType)> {
-    let key = kv.key_str()?;
-    tracing::debug!(key, "adding model");
-
-    // model_entry.name is the service name (e.g. "Llama-3.2-3B-Instruct")
-    let model_entry = serde_json::from_slice::<ModelEntry>(kv.value())?;
-    let service_name = model_entry.name.clone();
-
+async fn handle_put(
+    model_entry: ModelEntry,
+    state: Arc<ModelWatchState>,
+) -> anyhow::Result<(String, ModelType)> {
     if model_entry.model_type != state.model_type {
         raise!(
             "model type mismatch: {} != {}",
@@ -125,7 +151,7 @@ async fn handle_put(kv: &KeyValue, state: Arc<ModelWatchState>) -> Result<(Strin
                 .await?;
             state
                 .manager
-                .add_chat_completions_model(&service_name, Arc::new(client))?;
+                .add_chat_completions_model(&model_entry.name, Arc::new(client))?;
         }
         ModelType::Completion => {
             let client = state
@@ -137,9 +163,9 @@ async fn handle_put(kv: &KeyValue, state: Arc<ModelWatchState>) -> Result<(Strin
                 .await?;
             state
                 .manager
-                .add_completions_model(&service_name, Arc::new(client))?;
+                .add_completions_model(&model_entry.name, Arc::new(client))?;
         }
     }
 
-    Ok((service_name, state.model_type))
+    Ok((model_entry.name, state.model_type))
 }
