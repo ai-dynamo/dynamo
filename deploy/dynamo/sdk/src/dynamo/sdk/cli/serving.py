@@ -256,7 +256,7 @@ def serve_http(
     service_name: str = "",
 ) -> Server:
     # WARNING: internal
-    from _bentoml_impl.loader import import_service, normalize_identifier
+    from _bentoml_impl.loader import load
 
     # WARNING: internal
     from bentoml._internal.utils.circus import create_standalone_arbiter
@@ -276,9 +276,9 @@ def serve_http(
         # use cwd
         bento_path = pathlib.Path(".")
     else:
-        bento_id, bento_path = normalize_identifier(bento_identifier, working_dir)
-
-        svc = import_service(bento_id, bento_path)
+        svc = load(bento_identifier, working_dir)
+        bento_id = bento_identifier
+        bento_path = pathlib.Path(working_dir or ".")
 
     watchers: list[Watcher] = []
     sockets: list[CircusSocket] = []
