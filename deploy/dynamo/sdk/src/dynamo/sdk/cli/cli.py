@@ -35,6 +35,7 @@ def create_bentoml_cli() -> click.Command:
     from dynamo.sdk.cli.serve import serve_command
     from dynamo.sdk.cli.server import cloud_command
     from dynamo.sdk.cli.start import start_command
+    from dynamo.sdk.cli.env import env_command
     from dynamo.sdk.cli.utils import DynamoCommandGroup
 
     # from dynamo.sdk.cli.cloud import cloud_command
@@ -64,6 +65,7 @@ def create_bentoml_cli() -> click.Command:
     # bentoml_cli.add_command(deploy_command)
     # bentoml_cli.add_command(containerize_command)
     bentoml_cli.add_command(deployment_command)
+    bentoml_cli.add_command(env_command)
 
     # Load commands from extensions
     for ep in get_entry_points("bentoml.commands"):
