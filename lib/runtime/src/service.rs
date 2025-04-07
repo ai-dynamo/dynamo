@@ -67,7 +67,7 @@ impl EndpointInfo {
         let id = self
             .subject
             .split('-')
-            .last()
+            .next_back()
             .ok_or_else(|| error!("No id found in subject"))?;
 
         i64::from_str_radix(id, 16).map_err(|e| error!("Invalid id format: {}", e))

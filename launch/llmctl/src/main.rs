@@ -269,7 +269,9 @@ async fn add_model(
         model_type.as_str(),
         model_name
     );
-    let etcd_client = distributed.etcd_client();
+    let etcd_client = distributed
+        .etcd_client()
+        .expect("unreachable: llmctl is only useful with dynamic workers");
 
     // check if model already exists
     let kvs = etcd_client.kv_get_prefix(&path).await?;
@@ -321,7 +323,9 @@ async fn list_single_model(
     );
 
     let mut models = Vec::new();
-    let etcd_client = distributed.etcd_client();
+    let etcd_client = distributed
+        .etcd_client()
+        .expect("llmctl is only useful for dynamic workers");
     let kvs = etcd_client.kv_get_prefix(&path).await?;
 
     for kv in kvs {
@@ -364,7 +368,9 @@ async fn list_models(
     for mt in model_types {
         let prefix = format!("{}/models/{}/", component.etcd_path(), mt.as_str(),);
 
-        let etcd_client = distributed.etcd_client();
+        let etcd_client = distributed
+            .etcd_client()
+            .expect("llmctl is only useful with dynamic workers");
         let kvs = etcd_client.kv_get_prefix(&prefix).await?;
 
         for kv in kvs {
@@ -424,7 +430,11 @@ async fn remove_model(
     log::debug!("deleting key: {}", prefix);
 
     // get the kvs from etcd
-    let mut kv_client = distributed.etcd_client().etcd_client().kv_client();
+    let mut kv_client = distributed
+        .etcd_client()
+        .expect("llmctl is only useful with dynamic workers")
+        .etcd_client()
+        .kv_client();
     match kv_client.delete(prefix.as_bytes(), None).await {
         Ok(_response) => {
             println!(
