@@ -115,6 +115,7 @@ RUN cargo build --release --locked --features mistralrs,sglang,python && \
     cp target/release/mock_worker /usr/local/bin
 
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
+# FIXME: Copy more specific folders in for dev/debug after directory restructure
 COPY . /workspace/
 
 ###################################
@@ -124,7 +125,7 @@ COPY . /workspace/
 # Build the wheel in the manylinux environment
 FROM ${MANYLINUX_IMAGE} AS wheel_builder
 WORKDIR /workspace
-# Install protobuf-compiler
+
 RUN yum install -y \
     protobuf-devel \
     wget \
@@ -132,8 +133,6 @@ RUN yum install -y \
     python3-pip \
     && yum clean all \
     && rm -rf /var/cache/yum
-
-#ENV PROTOC=/usr/bin/protoc
 
 COPY --from=dev /workspace /workspace
 ENV RUSTUP_HOME=/usr/local/rustup \
@@ -158,7 +157,6 @@ RUN /opt/dynamo/venv/bin/python -m ensurepip --upgrade && \
 
 RUN /opt/dynamo/venv/bin/python -m pip install -U uv maturin
 
-# Build dynamo wheel
 # create virtualenv for general use, and build dynamo wheel
 RUN source /opt/dynamo/venv/bin/activate && \
     cd /workspace/lib/bindings/python && \
@@ -179,9 +177,7 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS dev_last
 WORKDIR /workspace
 COPY --from=wheel_builder /workspace/dist /workspace/dist/
 COPY --from=dev . .
-#RUN mkdir -p /workspace/lib
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl
+
 # Install dynamo.runtime and dynamo.llm wheels globally in container for tests that
 # currently run without virtual environment activated.
 # TODO: In future, we may use a virtualenv for everything and remove this.
@@ -191,11 +187,7 @@ RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
 # Tell TRTLLM worker to use the Dynamo LLM C API for KV Cache Routing
 ENV DYNAMO_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
 ENV DYNAMO_HOME=/workspace
-# FIXME: Copy more specific folders in for dev/debug after directory restructure
-#COPY . /workspace
 
 # FIXME: May want a modification with dynamo banner on entry
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
-
-#docker build -f container/Dockerfile.tensorrt_llm --build-context nixl=/home/pvijayakrish/ai-dynamo/dynamo/nixl --build-arg NIXL_COMMIT=1263628f5a01aa07becac3aa33b93b992e013e1d  --progress=plain -t hello_manylinux .
