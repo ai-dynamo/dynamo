@@ -23,7 +23,7 @@ import sys
 from pydantic import BaseModel
 from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
-from utils.vllm import parse_vllm_args, shutdown_vllm_engine
+from utils.vllm import parse_vllm_args
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
 )
@@ -75,8 +75,9 @@ class PrefillWorker:
             )
             self.engine_args.enable_prefix_caching = False
 
-        signal.signal(signal.SIGTERM, shutdown_vllm_engine(self._engine_context))
-        signal.signal(signal.SIGINT, shutdown_vllm_engine(self._engine_context))
+        # setup signal handlers to clean up subprocesses
+        signal.signal(signal.SIGTERM, self.shutdown_vllm_engine)
+        signal.signal(signal.SIGINT, self.shutdown_vllm_engine)
 
     @async_on_start
     async def async_init(self):
@@ -87,11 +88,6 @@ class PrefillWorker:
             self.engine_client = await self._engine_context.__aenter__()
         else:
             raise RuntimeError("Failed to initialize engine client")
-
-        # setup signal handlers to clean up subprocesses
-        signal.signal(signal.SIGTERM, shutdown_vllm_engine(self._engine_context))
-        signal.signal(signal.SIGINT, shutdown_vllm_engine(self._engine_context))
-
         runtime = dynamo_context["runtime"]
         metadata = self.engine_client.nixl_metadata
         self._metadata_store = NixlMetadataStore("dynamo", runtime)
@@ -108,6 +104,18 @@ class PrefillWorker:
 
         task.add_done_callback(prefill_queue_handler_cb)
         logger.info("PrefillWorker initialized")
+
+    def shutdown_vllm_engine(self, signum, frame):
+        """Shutdown the background loop"""
+        logger.info(f"Received signal {signum}, shutting down")
+        loop = asyncio.get_event_loop()
+        try:
+            loop.run_until_complete(self._engine_context.__aexit__(None, None, None))
+            logger.info("Engine client context shutdown complete")
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+        finally:
+            loop.stop()
 
     async def prefill_queue_handler(self):
         logger.info("Prefill queue handler entered")

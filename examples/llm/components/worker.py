@@ -24,7 +24,7 @@ from components.prefill_worker import PrefillWorker
 from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
 from utils.protocol import MyRequestOutput, vLLMGenerateRequest
-from utils.vllm import parse_vllm_args, shutdown_vllm_engine
+from utils.vllm import parse_vllm_args
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
 )
@@ -88,6 +88,10 @@ class VllmWorker:
             logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
         self.metrics_publisher = KvMetricsPublisher()
 
+        # setup signal handlers to clean up subprocesses
+        signal.signal(signal.SIGTERM, self.shutdown_vllm_engine)
+        signal.signal(signal.SIGINT, self.shutdown_vllm_engine)
+
     @async_on_start
     async def async_init(self):
         self._engine_context = build_async_engine_client_from_engine_args(
@@ -97,11 +101,6 @@ class VllmWorker:
             self.engine_client = await self._engine_context.__aenter__()
         else:
             raise RuntimeError("Failed to initialize engine client")
-
-        # setup signal handlers to clean up subprocesses
-        signal.signal(signal.SIGTERM, shutdown_vllm_engine(self._engine_context))
-        signal.signal(signal.SIGINT, shutdown_vllm_engine(self._engine_context))
-
         if self.engine_args.router == "kv":
             assert self.engine_client is not None, "engine_client was not initialized"
             self.engine_client.set_metrics_publisher(self.metrics_publisher)
@@ -138,6 +137,18 @@ class VllmWorker:
         else:
             self.disaggregated_router = None
         logger.info("VllmWorker has been initialized")
+
+    def shutdown_vllm_engine(self, signum, frame):
+        """Shutdown the background loop"""
+        logger.info(f"Received signal {signum}, shutting down")
+        loop = asyncio.get_event_loop()
+        try:
+            loop.run_until_complete(self._engine_context.__aexit__(None, None, None))
+            logger.info("VllmWorker shutdown complete")
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+        finally:
+            loop.stop()
 
     async def create_metrics_publisher_endpoint(self):
         component = dynamo_context["component"]
