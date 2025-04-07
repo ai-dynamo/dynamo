@@ -13,23 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+Common:
+  model: &model deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  block-size: &block_size 64
+  max-model-len: &max_model_len 16384
+
 Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  served_model_name: *model
   endpoint: dynamo.Processor.chat/completions
   port: 8000
 
 Processor:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  block-size: 64
-  max-model-len: 16384
+  model: *model
+  block-size: *block_size
+  max-model-len: *max_model_len
   router: round-robin
 
 VllmWorker:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  model: *model
   enforce-eager: true
-  block-size: 64
-  max-model-len: 16384
-  max-num-batched-tokens: 16384
+  block-size: *block_size
+  max-model-len: *max_model_len
+  max-num-batched-tokens: *max_model_len
   enable-prefix-caching: true
   router: random
   tensor-parallel-size: 1
