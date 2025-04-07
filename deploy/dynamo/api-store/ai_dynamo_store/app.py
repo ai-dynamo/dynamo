@@ -22,6 +22,7 @@ from fastapi import FastAPI
 
 from .api.dynamo import router as dynamo_router  # type: ignore
 from .api.health_check import router as health_check_router
+from .api.deployments import router as deployments_router
 from .api.storage import create_db_and_tables_async
 
 # Configure logging to write to stdout
@@ -66,6 +67,7 @@ async def run_app():
 
     app.include_router(health_check_router)
     app.include_router(dynamo_router)
+    app.include_router(deployments_router)
     port = int(os.getenv("SERVICE_PORT", "8000"))
 
     await initialize_database()
