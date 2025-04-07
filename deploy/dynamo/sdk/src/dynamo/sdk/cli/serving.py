@@ -277,7 +277,7 @@ def serve_http(
         bento_path = pathlib.Path(".")
     else:
         svc = load(bento_identifier, working_dir)
-        bento_id = bento_identifier
+        bento_id = str(bento_identifier)
         bento_path = pathlib.Path(working_dir or ".")
 
     watchers: list[Watcher] = []
