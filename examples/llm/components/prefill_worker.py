@@ -87,6 +87,11 @@ class PrefillWorker:
             self.engine_client = await self._engine_context.__aenter__()
         else:
             raise RuntimeError("Failed to initialize engine client")
+
+        # setup signal handlers to clean up subprocesses
+        signal.signal(signal.SIGTERM, shutdown_vllm_engine(self._engine_context))
+        signal.signal(signal.SIGINT, shutdown_vllm_engine(self._engine_context))
+
         runtime = dynamo_context["runtime"]
         metadata = self.engine_client.nixl_metadata
         self._metadata_store = NixlMetadataStore("dynamo", runtime)
