@@ -58,7 +58,9 @@ def get_cmake_version() -> str:
 
 def get_rust_version() -> str:
     """Get Rust version."""
-    return execute_subprocess_output("rustc --version | head -n 1 | awk '{print $(NF-2)}'")
+    return execute_subprocess_output(
+        "rustc --version | head -n 1 | awk '{print $(NF-2)}'"
+    )
 
 
 def get_docker_version() -> str:
@@ -126,7 +128,7 @@ def get_python_packages() -> str:
         "torch",
         "torchaudio",
         "transformers",
-        "tritonclient"
+        "tritonclient",
     ]
     for pkg_name in search_python_packages:
         version = next(
@@ -151,10 +153,10 @@ def build_env_command() -> click.command:
         click.echo(f"Rust Version: {get_rust_version()}")
         click.echo(f"Docker Version: {get_docker_version()}")
 
-        click.echo(f"\nCPU Information:")
+        click.echo("\nCPU Information:")
         click.echo(f"{get_cpu_architecture()}")
 
-        click.echo(f"\nGPU Information:")
+        click.echo("\nGPU Information:")
         click.echo(f"Models and configurations: {query_nvidia_smi('gpu_name')}")
         click.echo(f"Driver Version: {query_nvidia_smi('driver_version')}")
         click.echo(f"CUDA Runtime Version: {get_cuda_version()}")
@@ -163,7 +165,7 @@ def build_env_command() -> click.command:
         py_version = sys.version.split()[0]
         click.echo(f"\nPython Version: {py_version}")
         click.echo(f"Python Platform: {get_python_platform()}")
-        click.echo(f"\nPython Packages:")
+        click.echo("\nPython Packages:")
         click.echo(f"{get_python_packages()}")
 
     return env
