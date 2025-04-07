@@ -1,17 +1,17 @@
 {
     "$schema": "https://json-schema.org/draft-07/schema#",
     "copyright": [
-      "SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
-      "SPDX-License-Identifier: Apache-2.0",
-      "Licensed under the Apache License, Version 2.0 (the \"License\");",
-      "you may not use this file except in compliance with the License.",
-      "You may obtain a copy of the License at",
-      "http://www.apache.org/licenses/LICENSE-2.0",
-      "Unless required by applicable law or agreed to in writing, software",
-      "distributed under the License is distributed on an \"AS IS\" BASIS,",
-      "WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.",
-      "See the License for the specific language governing permissions and",
-      "limitations under the License."
+        "SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
+        "SPDX-License-Identifier: Apache-2.0",
+        "Licensed under the Apache License, Version 2.0 (the \"License\");",
+        "you may not use this file except in compliance with the License.",
+        "You may obtain a copy of the License at",
+        "http://www.apache.org/licenses/LICENSE-2.0",
+        "Unless required by applicable law or agreed to in writing, software",
+        "distributed under the License is distributed on an \"AS IS\" BASIS,",
+        "WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.",
+        "See the License for the specific language governing permissions and",
+        "limitations under the License."
     ],
     "name": "NVIDIA Dynamo Development",
     "build": {
@@ -21,13 +21,16 @@
     "runArgs": [
         "--gpus=all"
     ],
+    "mounts": [
+        "source=${localEnv:HOME}${localEnv:USERPROFILE}/.kube,target=/home/vscode/.kube,type=bind,consistency=cached",
+        "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+    ],
     "customizations": {
         "vscode": {
             "extensions": [
                 "ms-python.python",
                 "rust-lang.rust-analyzer",
                 "tamasfe.even-better-toml",
-                "github.copilot",
                 "ms-azuretools.vscode-docker",
                 "donjayamanne.githistory",
                 "waderyan.gitblame",
@@ -44,6 +47,6 @@
     },
     "updateRemoteUserUID": true,
     "postCreateCommand": "/bin/bash .devcontainer/post-create.sh",
-    "postStartCommand": "echo 'source /workspaces/ai-dynamo/venv/bin/activate' >> ~/.bashrc",
+    "postStartCommand": "echo 'source /workspaces/ai-dynamo/venv/bin/activate' >> ~/.bashrc && sudo chmod 666 /var/run/docker.sock",
     "remoteUser": "vscode"
 }

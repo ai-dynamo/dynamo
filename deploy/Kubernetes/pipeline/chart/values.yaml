@@ -16,6 +16,7 @@
 imagePullSecrets:
 - name: yatai-regcred
 - name: nvcrimagepullsecret
+- name: docker-imagepullsecret
 - name: gitlab-imagepull
 
 natsAddr: nats://dynamo-platform-nats:4222

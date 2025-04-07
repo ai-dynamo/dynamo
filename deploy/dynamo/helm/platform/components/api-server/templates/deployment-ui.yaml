@@ -71,6 +71,7 @@ spec:
       dnsPolicy: ClusterFirst
       imagePullSecrets:
       - name: nvcrimagepullsecret
+      - name: docker-imagepullsecret
       restartPolicy: Always
       schedulerName: default-scheduler
       securityContext: {}
