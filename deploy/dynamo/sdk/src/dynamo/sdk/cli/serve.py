@@ -160,14 +160,6 @@ def build_serve_command() -> click.Group:
         help="Path to YAML config file for service configuration",
     )
     @click.option(
-        "--development",
-        type=click.BOOL,
-        help="Run the BentoServer in development mode",
-        is_flag=True,
-        default=False,
-        show_default=True,
-    )
-    @click.option(
         "-p",
         "--port",
         type=click.INT,
@@ -202,7 +194,6 @@ def build_serve_command() -> click.Group:
         service_name: str,
         depends: Optional[list[str]],
         dry_run: bool,
-        development: bool,
         port: int,
         host: str,
         file: str | None,
@@ -274,7 +265,6 @@ def build_serve_command() -> click.Group:
             working_dir=working_dir,
             host=host,
             port=port,
-            development_mode=development,
             dependency_map=runner_map_dict,
             service_name=service_name,
         )
