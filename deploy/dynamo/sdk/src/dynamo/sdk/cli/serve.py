@@ -33,6 +33,7 @@ if t.TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
 def _parse_service_arg(arg_name: str, arg_value: str) -> tuple[str, str, t.Any]:
     """Parse a single CLI argument into service name, key, and value."""
 
@@ -67,6 +68,7 @@ def _parse_service_arg(arg_name: str, arg_value: str) -> tuple[str, str, t.Any]:
         result = {key: result}
 
     return service, nested_keys[0], result
+
 
 def _parse_service_args(args: list[str]) -> t.Dict[str, t.Any]:
     service_configs: t.DefaultDict[str, t.Dict[str, t.Any]] = collections.defaultdict(
@@ -265,6 +267,7 @@ def build_serve_command() -> click.Group:
         LinkedServices.remove_unused_edges()
 
         from dynamo.sdk.cli.serving import serve_http  # type: ignore
+
         svc.inject_config()
         serve_http(
             bento,
