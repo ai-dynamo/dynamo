@@ -37,12 +37,10 @@ dynamo-operator:
   dynamo:
     dynamoIngressSuffix: ${DYNAMO_INGRESS_SUFFIX}
     yatai:
-    # todo: only use dns name
       endpoint: http://dynamo-server
       clusterName: default
 
     yataiSystem:
-    # can we just infer this, or change scheme to use default until overridden
       namespace: ""
 
     internalImages:
@@ -63,10 +61,7 @@ dynamo-operator:
       server: 'nvcr.io/nvidian/nim-llm-dev'
       inClusterServer: ''
       username: '$oauthtoken'
-      # Password will use global.NGC_API_KEY by default
-      # password: ""
       passwordExistingSecretName: 'nvcrimagepullsecret'
-      # passwordExistingSecretKey: ''
       secure: true
       bentoRepositoryName: yatai-bentos
 
@@ -80,23 +75,17 @@ dynamo-operator:
       cacheRepo: ''
       snapshotMode: ''
 
-dynamo-api-server:
+dynamo-api-store:
   enabled: true
   namespaceRestriction:
     enabled: true
     targetNamespace: ${NAMESPACE}
   istio:
-    host:
-      ${NAMESPACE}.dev.aire.nvidia.com
+    host: ${NAMESPACE}.dev.aire.nvidia.com
   dynamo:
-    # need to be set to deployment-management
     env:
       resource_scope: "user"
   image:
-    repository: ${CI_REGISTRY_IMAGE}/dynamo-api-server
-    tag: ${CI_COMMIT_SHA}
-    pullPolicy: IfNotPresent
-  storeImage:
     repository: ${CI_REGISTRY_IMAGE}/dynamo-api-store
     tag: ${CI_COMMIT_SHA}
     pullPolicy: IfNotPresent
