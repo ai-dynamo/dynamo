@@ -428,7 +428,7 @@ ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/
 # Setup the python environment
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl python3-dev && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3-dev && \
     rm -rf /var/lib/apt/lists/* && \
     uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
@@ -436,7 +436,8 @@ RUN apt-get update && \
 # Install the wheels
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 
-RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse
+RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
+    rm -r wheelhouse
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
