@@ -68,7 +68,9 @@ rust-base:
         protobuf-compiler \
         cmake \
         libssl-dev \
-        pkg-config
+        pkg-config \
+        libclang-dev \
+        git
 
     ENV RUSTUP_HOME=/usr/local/rustup
     ENV CARGO_HOME=/usr/local/cargo
@@ -116,6 +118,12 @@ dynamo-base-docker:
     COPY +dynamo-builder/llmctl /usr/local/bin/llmctl
     COPY +dynamo-builder/metrics /usr/local/bin/metrics
     COPY +dynamo-builder/mock_worker /usr/local/bin/mock_worker
+
+    COPY +dynamo-builder/dynamo-run /workspace/target/release/dynamo-run
+    COPY +dynamo-builder/http /workspace/target/release/http
+    COPY +dynamo-builder/llmctl /workspace/target/release/llmctl
+    COPY +dynamo-builder/metrics /workspace/target/release/metrics
+    COPY +dynamo-builder/mock_worker /workspace/target/release/mock_worker
 
     RUN uv build --wheel --out-dir /workspace/dist && \
         uv pip install /workspace/dist/ai_dynamo*any.whl
