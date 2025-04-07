@@ -37,11 +37,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build documentation
+      - name: Generate documentation
         run: |
           docker build -t dynamo-docs -f container/Dockerfile.docs .
 
-      - name: Generate documentation
+      - name: Copy documentation out of container
         run: |
           docker create --name docs-container dynamo-docs
           docker cp docs-container:/workspace/dynamo/docs/build/html docs-output/
