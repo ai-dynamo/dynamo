@@ -29,6 +29,7 @@ pub mod model_card;
 pub mod model_type;
 pub mod preprocessor;
 pub mod protocols;
+pub mod recorder;
 pub mod tokenizers;
 pub mod tokens;
 pub mod types;

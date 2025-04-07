@@ -100,7 +100,7 @@ pub async fn run(
         .or_else(|| {
             model_path
                 .as_ref()
-                .and_then(|p| p.iter().last())
+                .and_then(|p| p.iter().next_back())
                 .map(|n| n.to_string_lossy().into_owned())
         })
         .or_else(|| {
@@ -116,7 +116,7 @@ pub async fn run(
         if !inner_model_path.exists() {
             model_name = inner_model_path
                 .iter()
-                .last()
+                .next_back()
                 .map(|s| s.to_string_lossy().to_string());
             model_path = Some(hub::from_hf(inner_model_path).await?);
         }

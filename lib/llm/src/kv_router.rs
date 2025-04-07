@@ -30,6 +30,7 @@ pub mod indexer;
 pub mod metrics_aggregator;
 pub mod protocols;
 pub mod publisher;
+pub mod recorder;
 pub mod scheduler;
 pub mod scoring;
 
@@ -74,7 +75,11 @@ impl KvRouter {
         block_size: usize,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
     ) -> Result<Arc<Self>> {
-        let cancellation_token = component.drt().primary_lease().primary_token();
+        let cancellation_token = component
+            .drt()
+            .primary_lease()
+            .expect("Cannot KV route static workers")
+            .primary_token();
 
         let metrics_aggregator =
             KvMetricsAggregator::new(component.clone(), cancellation_token.clone()).await;
