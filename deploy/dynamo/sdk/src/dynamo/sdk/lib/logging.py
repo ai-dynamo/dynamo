@@ -23,7 +23,7 @@ from dynamo.runtime.logging import configure_logger
 # Create a replacement for BentoML's configure_server_logging
 def configure_server_logging():
     """
-    A single place to configure logging for Dynamo that can be used to replace BentoML's logging configuration.
+    A single place to configure logging for Dynamo.
     """
     # First, remove any existing handlers to avoid duplication
     root_logger = logging.getLogger()
