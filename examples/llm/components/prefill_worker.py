@@ -80,7 +80,9 @@ class PrefillWorker:
         loop = asyncio.get_event_loop()
         try:
             if hasattr(self, "_engine_context") and self._engine_context is not None:
-                loop.run_until_complete(self._engine_context.__aexit__(None, None, None))
+                loop.run_until_complete(
+                    self._engine_context.__aexit__(None, None, None)
+                )
                 print("Engine client context shutdown complete")
         except Exception as e:
             print(f"Error during shutdown: {e}")
