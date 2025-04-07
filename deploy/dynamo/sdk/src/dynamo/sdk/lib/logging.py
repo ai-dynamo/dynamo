@@ -33,33 +33,21 @@ def configure_server_logging():
     # Configure the logger with Dynamo's handler
     configure_logger()
 
-    # Make sure bentoml's loggers use the same configuration
-    bentoml_logger = logging.getLogger("bentoml")
+    # Disable VLLM's default configuration
+    os.environ["VLLM_CONFIGURE_LOGGING"] = "0"
 
-    # Configure vllm loggers to use our format
-    os.environ["VLLM_CONFIGURE_LOGGING"] = "0"  # Disable VLLM's default configuration
-
-    # Get all vllm loggers and configure them
-    vllm_logger = logging.getLogger("vllm")
-    vllm_logger.handlers = []
-    vllm_logger.setLevel(logging.INFO)
-    vllm_logger.propagate = True
-
-    # Also handle any root loggers that VLLM might be using without the vllm prefix
-    other_loggers = ["__init__", "nixl"]
-    for logger_name in other_loggers:
-        logger = logging.getLogger(logger_name)
+    # loggers that should be configured to INFO
+    info_lgrs = ["vllm", "nixl", "__init__"]
+    for lgr in info_lgrs:
+        logger = logging.getLogger(lgr)
         logger.handlers = []
         logger.setLevel(logging.INFO)
         logger.propagate = True
 
-    # Bento Logger
-    bentoml_logger.setLevel(logging.ERROR)
-    bentoml_logger.propagate = True
-
-    # Override internal BentoML loggers
-    aux_bento_loggers = ["tag"]
-    for logger_name in aux_bento_loggers:
-        logger = logging.getLogger(logger_name)
+    # loggers that should be configured to ERROR
+    error_lgrs = ["bentoml", "tag"]
+    for lgr in error_lgrs:
+        logger = logging.getLogger(lgr)
+        logger.handlers = []
         logger.setLevel(logging.ERROR)
         logger.propagate = True
