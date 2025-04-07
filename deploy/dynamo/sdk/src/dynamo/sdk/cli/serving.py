@@ -266,7 +266,7 @@ def serve_http(
     from .allocator import ResourceAllocator
 
     bento_id: str = ""
-    env = {}
+    env: dict[str, Any] = {}
     if isinstance(bento_identifier, Service):
         svc = bento_identifier
         bento_id = svc.import_string
