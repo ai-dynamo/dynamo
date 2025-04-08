@@ -15,13 +15,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -e
+set -xe
 
-cargo build --release
-mkdir -p /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
-cp /workspace/target/release/http /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
-cp /workspace/target/release/llmctl /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
+cd $HOME/dynamo
+
+export CARGO_BUILD_JOBS=32
+export CARGO_TARGET_DIR=$HOME/dynamo/target
+
+cargo build --release --features vllm,python
+
+mkdir -p $HOME/dynamo/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
+ln -sf $HOME/dynamo/target/release/http $HOME/dynamo/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/http
+ln -sf $HOME/dynamo/target/release/llmctl $HOME/dynamo/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/llmctl
+
+sudo chmod -R a+rw /opt/dynamo/venv
 
 uv pip install -e .
 
 echo "source /opt/dynamo/venv/bin/activate" >> ~/.bashrc
+echo "export VLLM_KV_CAPI_PATH=$HOME/dynamo/target/release/libdynamo_llm_capi.so" >> ~/.bashrc
+
+source ~/.bashrc
