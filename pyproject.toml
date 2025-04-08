@@ -29,7 +29,7 @@ dependencies = [
     "bentoml==1.4.7",
     "types-psutil==7.0.0.20250218",
     "kubernetes==32.0.1",
-    "ai-dynamo-runtime==0.1.0",
+    "ai-dynamo-runtime==0.1.1",
 ]
 
 classifiers = [
