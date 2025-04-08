@@ -64,7 +64,7 @@ Users/Clients (HTTP)
 - Processes requests from the Middle service
 - Appends "-back" to the text and yields tokens
 
-## Running the Example
+## Running the Example Locally
 
 ### Running Locally
 
@@ -89,7 +89,7 @@ curl -X 'POST' \
 }'
 ```
 
-### Deploying to and Running in Kubernetes
+## Deploying to and Running the Example in Kubernetes
 
 There are two ways to deploy the hello world example:
 1. Manually using helm charts
@@ -187,6 +187,3 @@ This demonstrates how:
 1. The Frontend receives "test"
 2. The Middle service adds "-mid" to create "test-mid"
 3. The Backend service adds "-back" to create "test-mid-back"
-The API will respond with a stream of generated text based on your input.
-
-For more complex examples, see the [LLM deployment examples](../../examples/llm/README.md)
