@@ -298,7 +298,7 @@ CMD []
 # Build the wheel in the manylinux environment
 FROM ${MANYLINUX_IMAGE} AS wheel_builder
 
-# Use build arg RELEASE_BUILD = true to generate wheels for Python 3.10, 3.11 and 3.12. 
+# Use build arg RELEASE_BUILD = true to generate wheels for Python 3.10, 3.11 and 3.12.
 ARG RELEASE_BUILD
 WORKDIR /workspace
 
@@ -335,7 +335,7 @@ RUN source /opt/dynamo/venv/bin/activate && \
     cd /workspace && \
     uv build --wheel --out-dir /workspace/dist && \
     cd /workspace/deploy/dynamo/api-store && \
-    uv build --wheel --out-dir /workspace/dist 
+    uv build --wheel --out-dir /workspace/dist
 
 RUN rm -rf /opt/dynamo/venv
 #######################################

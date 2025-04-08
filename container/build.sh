@@ -170,7 +170,7 @@ get_options() {
                 missing_requirement $1
             fi
             ;;
-        --release-build)  
+        --release-build)
             RELEASE_BUILD=true
             ;;
         --)
