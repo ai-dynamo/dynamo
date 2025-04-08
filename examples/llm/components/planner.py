@@ -34,6 +34,7 @@ class Planner:
     def __init__(self, runtime: DistributedRuntime, args: argparse.Namespace):
         self.runtime = runtime
         self.args = args
+        self.namespace = args.namespace
 
         self._prefill_queue_nats_server = os.getenv(
             "NATS_SERVER", "nats://localhost:4222"
@@ -44,14 +45,14 @@ class Planner:
 
     async def set_metric_aggregator(self):
         # TODO: separate KV metrics and prefill metrics
-        kv_listener = self.runtime.namespace("dynamo").component("VllmWorker")
+        kv_listener = self.runtime.namespace(self.namespace).component("VllmWorker")
         await kv_listener.create_service()
         self.metrics_aggregator = KvMetricsAggregator(kv_listener)
 
     async def get_workers_info(self):
         try:
             prefill_client = (
-                await self.runtime.namespace("dynamo")
+                await self.runtime.namespace(self.namespace)
                 .component("PrefillWorker")
                 .endpoint("mock")
                 .client()
@@ -62,7 +63,7 @@ class Planner:
             logger.info("No prefill workers found, operating in aggregated mode")
         try:
             workers_client = (
-                await self.runtime.namespace("dynamo")
+                await self.runtime.namespace(self.namespace)
                 .component("VllmWorker")
                 .endpoint("generate")
                 .client()
@@ -235,6 +236,12 @@ async def start_planner(runtime: DistributedRuntime, args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--namespace",
+        type=str,
+        default="dynamo",
+        help="Namespace to use for the planner",
+    )
     parser.add_argument(
         "--served-model-name",
         type=str,
