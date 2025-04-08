@@ -349,6 +349,17 @@ FROM build AS ci_minimum
 COPY . /workspace
 COPY --from=wheel_builder /workspace/dist/ /workspace/dist/
 
+# Package the bindings
+RUN mkdir -p /opt/dynamo/bindings/wheels && \
+    mkdir /opt/dynamo/bindings/lib && \
+    cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
+    cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
+    cp -r lib/bindings/c/include /opt/dynamo/bindings/.
+
+RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
+    uv pip install /workspace/dist/ai_dynamo*any.whl && \
+    uv pip install /workspace/dist/ai_dynamo_store*any.whl
+
 ##########################################
 ########## Perf Analyzer Image ###########
 ##########################################
@@ -371,18 +382,9 @@ RUN mkdir bin &&  \
 ########################################
 ########## Development Image ###########
 ########################################
-FROM build AS dev
+FROM ci_minimum AS dev
 
 ARG GENAI_PERF_TAG
-
-COPY --from=wheel_builder /workspace/dist/ /workspace/dist/
-
-# Package the bindings
-RUN mkdir -p /opt/dynamo/bindings/wheels && \
-    mkdir /opt/dynamo/bindings/lib && \
-    cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
-    cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
-    cp -r lib/bindings/c/include /opt/dynamo/bindings/.
 
 COPY --from=perf_analyzer /workspace/bin/perf-analyzer-build/ /perf/bin
 COPY --from=perf_analyzer /workspace/perf_analyzer /perf_analyzer
@@ -391,9 +393,6 @@ ENV PATH="/perf/bin:${PATH}"
 # Install genai-perf for benchmarking
 RUN uv pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
 RUN uv pip uninstall tritonclient
-RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
-    uv pip install /workspace/dist/ai_dynamo*any.whl && \
-    uv pip install /workspace/dist/ai_dynamo_store*any.whl
 
 COPY . /workspace
 
