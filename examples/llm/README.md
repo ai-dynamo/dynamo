@@ -157,9 +157,4 @@ See [multinode-examples.md](multinode-examples.md) for more details.
 
 ### Close deployment
 
-Kill all dynamo processes managed by circusd.
-
-```
-ctrl-c
-pkill python3
-```
+See [close deployment](../../docs/guides/dynamo_serve.md#close-deployment) section to learn about how to close the deployment.

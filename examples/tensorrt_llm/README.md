@@ -119,7 +119,7 @@ See [client](../llm/README.md#client) section to learn how to send request to th
 
 ### Close deployment
 
-See [close deployment](../llm/README.md#close-deployment) section to learn about how to close the deployment.
+See [close deployment](../../docs/guides/dynamo_serve.md#close-deployment) section to learn about how to close the deployment.
 
 Remaining tasks:
 

@@ -1,4 +1,5 @@
 /*
+ * SPDX-FileCopyrightText: Copyright (c) 2022 Atalaya Tech. Inc
  * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -13,16 +14,15 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ * Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
  */
 
 package controller
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,19 +36,16 @@ import (
 
 	"emperror.dev/errors"
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/modelschemas"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemasv1"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemas"
 	yataiclient "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/yatai-client"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
+	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/config"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/envoy"
-	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/config"
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/consts"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/system"
 	"github.com/cisco-open/k8s-objectmatcher/patch"
 	"github.com/huandu/xstrings"
 	"github.com/jinzhu/copier"
-	"github.com/prometheus/common/version"
 	istioNetworking "istio.io/api/networking/v1beta1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -57,20 +54,16 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	compounadaiConversion "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/conversion"
 )
 
 const (
@@ -393,131 +386,6 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		modified = true
 	}
 
-	if yataiClient != nil && clusterName != nil {
-		yataiClient_ := *yataiClient
-		clusterName_ := *clusterName
-		dynamoNimRepositoryName, dynamoNimVersion := getDynamoNimRepositoryNameAndDynamoNimVersion(dynamoNimCR)
-		_, err = yataiClient_.GetBento(ctx, dynamoNimRepositoryName, dynamoNimVersion)
-
-		dynamoNimIsNotFound := isNotFoundError(err)
-		if err != nil && !dynamoNimIsNotFound {
-			return
-		}
-		if dynamoNimIsNotFound {
-			dynamoNimDeployment, err = r.setStatusConditions(ctx, req,
-				metav1.Condition{
-					Type:    v1alpha1.DynamoDeploymentConditionTypeAvailable,
-					Status:  metav1.ConditionTrue,
-					Reason:  "Reconciling",
-					Message: "Remote dynamoNim from Yatai is not found",
-				},
-			)
-			return
-		}
-		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "GetYataiDeployment", "Fetching yatai deployment %s", dynamoNimDeployment.Name)
-		var oldYataiDeployment *schemasv1.DeploymentSchema
-		oldYataiDeployment, err = yataiClient_.GetDeployment(ctx, clusterName_, dynamoNimDeployment.Namespace, dynamoNimDeployment.Name)
-		isNotFound := isNotFoundError(err)
-		if err != nil && !isNotFound {
-			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "GetYataiDeployment", "Failed to fetch yatai deployment %s: %s", dynamoNimDeployment.Name, err)
-			return
-		}
-		err = nil
-
-		envs := make([]*modelschemas.LabelItemSchema, 0)
-
-		specEnvs := dynamoNimDeployment.Spec.Envs
-
-		for _, env := range specEnvs {
-			envs = append(envs, &modelschemas.LabelItemSchema{
-				Key:   env.Name,
-				Value: env.Value,
-			})
-		}
-
-		var hpaConf *modelschemas.DeploymentTargetHPAConf
-		hpaConf, err = TransformToOldHPA(dynamoNimDeployment.Spec.Autoscaling)
-		if err != nil {
-			return
-		}
-		deploymentTargets := make([]*schemasv1.CreateDeploymentTargetSchema, 0, 1)
-		deploymentTarget := &schemasv1.CreateDeploymentTargetSchema{
-			DeploymentTargetTypeSchema: schemasv1.DeploymentTargetTypeSchema{
-				Type: modelschemas.DeploymentTargetTypeStable,
-			},
-			BentoRepository: dynamoNimRepositoryName,
-			Bento:           dynamoNimVersion,
-			Config: &modelschemas.DeploymentTargetConfig{
-				KubeResourceUid:                        string(dynamoNimDeployment.UID),
-				KubeResourceVersion:                    dynamoNimDeployment.ResourceVersion,
-				Resources:                              compounadaiConversion.ConvertToDeploymentTargetResources(dynamoNimDeployment.Spec.Resources),
-				HPAConf:                                hpaConf,
-				Envs:                                   &envs,
-				EnableIngress:                          &dynamoNimDeployment.Spec.Ingress.Enabled,
-				EnableStealingTrafficDebugMode:         &[]bool{checkIfIsStealingTrafficDebugModeEnabled(dynamoNimDeployment.Spec.Annotations)}[0],
-				EnableDebugMode:                        &[]bool{checkIfIsDebugModeEnabled(dynamoNimDeployment.Spec.Annotations)}[0],
-				EnableDebugPodReceiveProductionTraffic: &[]bool{checkIfIsDebugPodReceiveProductionTrafficEnabled(dynamoNimDeployment.Spec.Annotations)}[0],
-				BentoDeploymentOverrides: &modelschemas.ApiServerBentoDeploymentOverrides{
-					MonitorExporter:  dynamoNimDeployment.Spec.MonitorExporter,
-					ExtraPodMetadata: dynamoNimDeployment.Spec.ExtraPodMetadata,
-					ExtraPodSpec:     dynamoNimDeployment.Spec.ExtraPodSpec,
-				},
-				BentoRequestOverrides: &modelschemas.BentoRequestOverrides{
-					ImageBuildTimeout:              dynamoNimRequest.Spec.ImageBuildTimeout,
-					ImageBuilderExtraPodSpec:       dynamoNimRequest.Spec.ImageBuilderExtraPodSpec,
-					ImageBuilderExtraPodMetadata:   dynamoNimRequest.Spec.ImageBuilderExtraPodMetadata,
-					ImageBuilderExtraContainerEnv:  dynamoNimRequest.Spec.ImageBuilderExtraContainerEnv,
-					ImageBuilderContainerResources: dynamoNimRequest.Spec.ImageBuilderContainerResources,
-					DockerConfigJSONSecretName:     dynamoNimRequest.Spec.DockerConfigJSONSecretName,
-					DownloaderContainerEnvFrom:     dynamoNimRequest.Spec.DownloaderContainerEnvFrom,
-				},
-			},
-		}
-		deploymentTargets = append(deploymentTargets, deploymentTarget)
-		updateSchema := &schemasv1.UpdateDeploymentSchema{
-			Targets:     deploymentTargets,
-			DoNotDeploy: true,
-		}
-		if isNotFound {
-			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "CreateYataiDeployment", "Creating yatai deployment %s", dynamoNimDeployment.Name)
-			_, err = yataiClient_.CreateDeployment(ctx, clusterName_, &schemasv1.CreateDeploymentSchema{
-				Name:                   dynamoNimDeployment.Name,
-				KubeNamespace:          dynamoNimDeployment.Namespace,
-				UpdateDeploymentSchema: *updateSchema,
-			})
-			if err != nil {
-				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "CreateYataiDeployment", "Failed to create yatai deployment %s: %s", dynamoNimDeployment.Name, err)
-				return
-			}
-			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "CreateYataiDeployment", "Created yatai deployment %s", dynamoNimDeployment.Name)
-		} else {
-			noChange := false
-			if oldYataiDeployment != nil && oldYataiDeployment.LatestRevision != nil && len(oldYataiDeployment.LatestRevision.Targets) > 0 {
-				oldYataiDeployment.LatestRevision.Targets[0].Config.KubeResourceUid = updateSchema.Targets[0].Config.KubeResourceUid
-				oldYataiDeployment.LatestRevision.Targets[0].Config.KubeResourceVersion = updateSchema.Targets[0].Config.KubeResourceVersion
-				noChange = reflect.DeepEqual(oldYataiDeployment.LatestRevision.Targets[0].Config, updateSchema.Targets[0].Config)
-			}
-			if noChange {
-				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateYataiDeployment", "No change in yatai deployment %s, skipping", dynamoNimDeployment.Name)
-			} else {
-				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateYataiDeployment", "Updating yatai deployment %s", dynamoNimDeployment.Name)
-				_, err = yataiClient_.UpdateDeployment(ctx, clusterName_, dynamoNimDeployment.Namespace, dynamoNimDeployment.Name, updateSchema)
-				if err != nil {
-					r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "UpdateYataiDeployment", "Failed to update yatai deployment %s: %s", dynamoNimDeployment.Name, err)
-					return
-				}
-				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateYataiDeployment", "Updated yatai deployment %s", dynamoNimDeployment.Name)
-			}
-		}
-		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "SyncYataiDeploymentStatus", "Syncing yatai deployment %s status", dynamoNimDeployment.Name)
-		_, err = yataiClient_.SyncDeploymentStatus(ctx, clusterName_, dynamoNimDeployment.Namespace, dynamoNimDeployment.Name)
-		if err != nil {
-			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "SyncYataiDeploymentStatus", "Failed to sync yatai deployment %s status: %s", dynamoNimDeployment.Name, err)
-			return
-		}
-		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "SyncYataiDeploymentStatus", "Synced yatai deployment %s status", dynamoNimDeployment.Name)
-	}
-
 	if !modified {
 		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateYataiDeployment", "No changes to yatai deployment %s", dynamoNimDeployment.Name)
 	}
@@ -533,14 +401,6 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		},
 	)
 	return
-}
-
-func isNotFoundError(err error) bool {
-	if err == nil {
-		return false
-	}
-	errMsg := strings.ToLower(err.Error())
-	return strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "could not find") || strings.Contains(errMsg, "404")
 }
 
 func (r *DynamoNimDeploymentReconciler) reconcilePVC(ctx context.Context, crd *v1alpha1.DynamoNimDeployment) (*corev1.PersistentVolumeClaim, error) {
@@ -609,21 +469,12 @@ var cachedYataiConf *commonconfig.YataiConfig
 
 //nolint:nakedret
 func (r *DynamoNimDeploymentReconciler) getYataiClient(ctx context.Context) (yataiClient **yataiclient.YataiClient, clusterName *string, err error) {
-	restConfig := config.GetConfigOrDie()
-	clientset, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
-		err = errors.Wrapf(err, "create kubernetes clientset")
-		return
-	}
 	var yataiConf *commonconfig.YataiConfig
 
 	if cachedYataiConf != nil {
 		yataiConf = cachedYataiConf
 	} else {
-		yataiConf, err = commonconfig.GetYataiConfig(ctx, func(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
-			secret, err := clientset.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
-			return secret, errors.Wrap(err, "get secret")
-		}, commonconsts.YataiDeploymentComponentName, false)
+		yataiConf, err = commonconfig.GetYataiConfig(ctx)
 		isNotFound := k8serrors.IsNotFound(err)
 		if err != nil && !isNotFound {
 			err = errors.Wrap(err, "get yatai config")
@@ -1232,130 +1083,15 @@ type createOrUpdateIngressOption struct {
 
 //nolint:nakedret
 func (r *DynamoNimDeploymentReconciler) createOrUpdateIngresses(ctx context.Context, opt createOrUpdateIngressOption) (modified bool, err error) {
-	logs := log.FromContext(ctx)
 
 	dynamoNimDeployment := opt.dynamoNimDeployment
-	dynamoNim := opt.dynamoNim
 
 	modified, err = r.createOrUpdateVirtualService(ctx, dynamoNimDeployment)
 	if err != nil {
 		return false, err
 	}
+	return modified, nil
 
-	// generateIngresses generates an ingress and actively waits for the ingress to come online ....
-	// so disabling it for now unless explicitly enabled
-	if !opt.dynamoNimDeployment.Spec.Ingress.Enabled || (opt.dynamoNimDeployment.Spec.Ingress.UseVirtualService != nil && *opt.dynamoNimDeployment.Spec.Ingress.UseVirtualService) {
-		return false, nil
-	}
-
-	ingresses, err := r.generateIngresses(ctx, generateIngressesOption{
-		yataiClient:         opt.yataiClient,
-		dynamoNimDeployment: dynamoNimDeployment,
-		dynamoNim:           dynamoNim,
-	})
-	if err != nil {
-		return
-	}
-
-	for _, ingress := range ingresses {
-		logs := logs.WithValues("namespace", ingress.Namespace, "ingressName", ingress.Name)
-		ingressNamespacedName := fmt.Sprintf("%s/%s", ingress.Namespace, ingress.Name)
-
-		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "GetIngress", "Getting Ingress %s", ingressNamespacedName)
-
-		oldIngress := &networkingv1.Ingress{}
-		err = r.Get(ctx, types.NamespacedName{Name: ingress.Name, Namespace: ingress.Namespace}, oldIngress)
-		oldIngressIsNotFound := k8serrors.IsNotFound(err)
-		if err != nil && !oldIngressIsNotFound {
-			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "GetIngress", "Failed to get Ingress %s: %s", ingressNamespacedName, err)
-			logs.Error(err, "Failed to get Ingress.")
-			return
-		}
-		err = nil
-
-		if oldIngressIsNotFound {
-			if !dynamoNimDeployment.Spec.Ingress.Enabled {
-				logs.Info("Ingress not enabled. Skipping.")
-				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "GetIngress", "Skipping Ingress %s", ingressNamespacedName)
-				continue
-			}
-
-			logs.Info("Ingress not found. Creating a new one.")
-
-			err = errors.Wrapf(patch.DefaultAnnotator.SetLastAppliedAnnotation(ingress), "set last applied annotation for ingress %s", ingress.Name)
-			if err != nil {
-				logs.Error(err, "Failed to set last applied annotation.")
-				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for Ingress %s: %s", ingressNamespacedName, err)
-				return
-			}
-
-			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "CreateIngress", "Creating a new Ingress %s", ingressNamespacedName)
-			err = r.Create(ctx, ingress)
-			if err != nil {
-				logs.Error(err, "Failed to create Ingress.")
-				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "CreateIngress", "Failed to create Ingress %s: %s", ingressNamespacedName, err)
-				return
-			}
-			logs.Info("Ingress created.")
-			r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "CreateIngress", "Created Ingress %s", ingressNamespacedName)
-			modified = true
-		} else {
-			logs.Info("Ingress found.")
-
-			if !dynamoNimDeployment.Spec.Ingress.Enabled {
-				logs.Info("Ingress not enabled. Deleting.")
-				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "DeleteIngress", "Deleting Ingress %s", ingressNamespacedName)
-				err = r.Delete(ctx, ingress)
-				if err != nil {
-					logs.Error(err, "Failed to delete Ingress.")
-					r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "DeleteIngress", "Failed to delete Ingress %s: %s", ingressNamespacedName, err)
-					return
-				}
-				logs.Info("Ingress deleted.")
-				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "DeleteIngress", "Deleted Ingress %s", ingressNamespacedName)
-				modified = true
-				continue
-			}
-
-			// Keep host unchanged
-			ingress.Spec.Rules[0].Host = oldIngress.Spec.Rules[0].Host
-
-			var patchResult *patch.PatchResult
-			patchResult, err = patch.DefaultPatchMaker.Calculate(oldIngress, ingress)
-			if err != nil {
-				logs.Error(err, "Failed to calculate patch.")
-				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "CalculatePatch", "Failed to calculate patch for Ingress %s: %s", ingressNamespacedName, err)
-				return
-			}
-
-			if !patchResult.IsEmpty() {
-				logs.Info("Ingress spec is different. Updating Ingress.")
-
-				err = errors.Wrapf(patch.DefaultAnnotator.SetLastAppliedAnnotation(ingress), "set last applied annotation for ingress %s", ingress.Name)
-				if err != nil {
-					logs.Error(err, "Failed to set last applied annotation.")
-					r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for Ingress %s: %s", ingressNamespacedName, err)
-					return
-				}
-
-				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateIngress", "Updating Ingress %s", ingressNamespacedName)
-				err = r.Update(ctx, ingress)
-				if err != nil {
-					logs.Error(err, "Failed to update Ingress.")
-					r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "UpdateIngress", "Failed to update Ingress %s: %s", ingressNamespacedName, err)
-					return
-				}
-				logs.Info("Ingress updated.")
-				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateIngress", "Updated Ingress %s", ingressNamespacedName)
-				modified = true
-			} else {
-				logs.Info("Ingress spec is the same. Skipping update.")
-				r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateIngress", "Skipping update Ingress %s", ingressNamespacedName)
-			}
-		}
-	}
-
-	return
 }
 
 func (r *DynamoNimDeploymentReconciler) getKubeName(dynamoNimDeployment *v1alpha1.DynamoNimDeployment, _ *v1alpha1.DynamoNim, debug bool) string {
@@ -1449,9 +1185,9 @@ func (r *DynamoNimDeploymentReconciler) generateDeployment(ctx context.Context, 
 	resourceAnnotations := getResourceAnnotations(opt.dynamoNimDeployment)
 	strategyStr := resourceAnnotations[KubeAnnotationDeploymentStrategy]
 	if strategyStr != "" {
-		strategyType := modelschemas.DeploymentStrategy(strategyStr)
+		strategyType := schemas.DeploymentStrategy(strategyStr)
 		switch strategyType {
-		case modelschemas.DeploymentStrategyRollingUpdate:
+		case schemas.DeploymentStrategyRollingUpdate:
 			strategy = appsv1.DeploymentStrategy{
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &appsv1.RollingUpdateDeployment{
@@ -1459,11 +1195,11 @@ func (r *DynamoNimDeploymentReconciler) generateDeployment(ctx context.Context, 
 					MaxUnavailable: &defaultMaxUnavailable,
 				},
 			}
-		case modelschemas.DeploymentStrategyRecreate:
+		case schemas.DeploymentStrategyRecreate:
 			strategy = appsv1.DeploymentStrategy{
 				Type: appsv1.RecreateDeploymentStrategyType,
 			}
-		case modelschemas.DeploymentStrategyRampedSlowRollout:
+		case schemas.DeploymentStrategyRampedSlowRollout:
 			strategy = appsv1.DeploymentStrategy{
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &appsv1.RollingUpdateDeployment{
@@ -1471,7 +1207,7 @@ func (r *DynamoNimDeploymentReconciler) generateDeployment(ctx context.Context, 
 					MaxUnavailable: &[]intstr.IntOrString{intstr.FromInt(0)}[0],
 				},
 			}
-		case modelschemas.DeploymentStrategyBestEffortControlledRollout:
+		case schemas.DeploymentStrategyBestEffortControlledRollout:
 			strategy = appsv1.DeploymentStrategy{
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &appsv1.RollingUpdateDeployment{
@@ -1693,37 +1429,6 @@ func (r *DynamoNimDeploymentReconciler) generatePodTemplateSpec(ctx context.Cont
 			Name:  "ETCD_ENDPOINTS",
 			Value: r.EtcdAddr,
 		})
-	}
-
-	if opt.yataiClient != nil {
-		yataiClient := *opt.yataiClient
-
-		var cluster *schemasv1.ClusterFullSchema
-		clusterName := DefaultClusterName
-		if opt.clusterName != nil {
-			clusterName = *opt.clusterName
-		}
-		cluster, err = yataiClient.GetCluster(ctx, clusterName)
-		if err != nil {
-			return
-		}
-
-		var version *schemasv1.VersionSchema
-		version, err = yataiClient.GetVersion(ctx)
-		if err != nil {
-			return
-		}
-
-		defaultEnvs = append(defaultEnvs, []corev1.EnvVar{
-			{
-				Name:  commonconsts.EnvYataiVersion,
-				Value: fmt.Sprintf("%s-%s", version.Version, version.GitCommit),
-			},
-			{
-				Name:  commonconsts.EnvYataiClusterUID,
-				Value: cluster.Uid,
-			},
-		}...)
 	}
 
 	for _, env := range defaultEnvs {
@@ -2569,37 +2274,6 @@ func (r *DynamoNimDeploymentReconciler) generateService(opt generateServiceOptio
 	return
 }
 
-func (r *DynamoNimDeploymentReconciler) generateIngressHost(ctx context.Context, dynamoNimDeployment *v1alpha1.DynamoNimDeployment) (string, error) {
-	return r.generateDefaultHostname(ctx, dynamoNimDeployment)
-}
-
-var cachedDomainSuffix *string
-
-func (r *DynamoNimDeploymentReconciler) generateDefaultHostname(ctx context.Context, dynamoNimDeployment *v1alpha1.DynamoNimDeployment) (string, error) {
-	var domainSuffix string
-
-	if cachedDomainSuffix != nil {
-		domainSuffix = *cachedDomainSuffix
-	} else {
-		restConfig := config.GetConfigOrDie()
-		clientset, err := kubernetes.NewForConfig(restConfig)
-		if err != nil {
-			return "", errors.Wrapf(err, "create kubernetes clientset")
-		}
-
-		domainSuffix, err = system.GetDomainSuffix(ctx, func(ctx context.Context, namespace, name string) (*corev1.ConfigMap, error) {
-			configmap, err := clientset.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
-			return configmap, errors.Wrap(err, "get configmap")
-		}, clientset)
-		if err != nil {
-			return "", errors.Wrapf(err, "get domain suffix")
-		}
-
-		cachedDomainSuffix = &domainSuffix
-	}
-	return fmt.Sprintf("%s-%s.%s", dynamoNimDeployment.Name, dynamoNimDeployment.Namespace, domainSuffix), nil
-}
-
 type TLSModeOpt string
 
 const (
@@ -2617,402 +2291,8 @@ type IngressConfig struct {
 	StaticTLSSecretName string
 }
 
-var cachedIngressConfig *IngressConfig
-
-//nolint:nakedret
-func (r *DynamoNimDeploymentReconciler) GetIngressConfig(ctx context.Context) (ingressConfig *IngressConfig, err error) {
-	if cachedIngressConfig != nil {
-		ingressConfig = cachedIngressConfig
-		return
-	}
-
-	restConfig := config.GetConfigOrDie()
-	clientset, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
-		err = errors.Wrapf(err, "create kubernetes clientset")
-		return
-	}
-
-	configMap, err := system.GetNetworkConfigConfigMap(ctx, func(ctx context.Context, namespace, name string) (*corev1.ConfigMap, error) {
-		configmap, err := clientset.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
-		return configmap, errors.Wrap(err, "get network config configmap")
-	})
-	if err != nil {
-		err = errors.Wrapf(err, "failed to get configmap %s", commonconsts.KubeConfigMapNameNetworkConfig)
-		return
-	}
-
-	var className *string
-
-	className_ := strings.TrimSpace(configMap.Data[commonconsts.KubeConfigMapKeyNetworkConfigIngressClass])
-	if className_ != "" {
-		className = &className_
-	}
-
-	annotations := make(map[string]string)
-
-	annotations_ := strings.TrimSpace(configMap.Data[commonconsts.KubeConfigMapKeyNetworkConfigIngressAnnotations])
-	if annotations_ != "" {
-		err = json.Unmarshal([]byte(annotations_), &annotations)
-		if err != nil {
-			err = errors.Wrapf(err, "failed to json unmarshal %s in configmap %s: %s", commonconsts.KubeConfigMapKeyNetworkConfigIngressAnnotations, commonconsts.KubeConfigMapNameNetworkConfig, annotations_)
-			return
-		}
-	}
-
-	path := strings.TrimSpace(configMap.Data["ingress-path"])
-	if path == "" {
-		path = "/"
-	}
-
-	pathType := networkingv1.PathTypeImplementationSpecific
-
-	pathType_ := strings.TrimSpace(configMap.Data["ingress-path-type"])
-	if pathType_ != "" {
-		pathType = networkingv1.PathType(pathType_)
-	}
-
-	tlsMode := TLSModeNone
-	tlsModeStr := strings.TrimSpace(configMap.Data["ingress-tls-mode"])
-	if tlsModeStr != "" && tlsModeStr != "none" {
-		if tlsModeStr == "auto" || tlsModeStr == "static" {
-			tlsMode = TLSModeOpt(tlsModeStr)
-		} else {
-			fmt.Println("Invalid TLS mode:", tlsModeStr)
-			err = errors.Wrapf(err, "Invalid TLS mode: %s", tlsModeStr)
-			return
-		}
-	}
-
-	staticTLSSecretName := strings.TrimSpace(configMap.Data["ingress-static-tls-secret-name"])
-	if tlsMode == TLSModeStatic && staticTLSSecretName == "" {
-		err = errors.Wrapf(err, "TLS mode is static but ingress-static-tls-secret isn't set")
-		return
-	}
-
-	ingressConfig = &IngressConfig{
-		ClassName:           className,
-		Annotations:         annotations,
-		Path:                path,
-		PathType:            pathType,
-		TLSMode:             tlsMode,
-		StaticTLSSecretName: staticTLSSecretName,
-	}
-
-	cachedIngressConfig = ingressConfig
-
-	return
-}
-
-type generateIngressesOption struct {
-	yataiClient         **yataiclient.YataiClient
-	dynamoNimDeployment *v1alpha1.DynamoNimDeployment
-	dynamoNim           *v1alpha1.DynamoNim
-}
-
-//nolint:nakedret
-func (r *DynamoNimDeploymentReconciler) generateIngresses(ctx context.Context, opt generateIngressesOption) (ingresses []*networkingv1.Ingress, err error) {
-	dynamoNimRepositoryName, dynamoNimVersion := getDynamoNimRepositoryNameAndDynamoNimVersion(opt.dynamoNim)
-	dynamoNimDeployment := opt.dynamoNimDeployment
-	dynamoNim := opt.dynamoNim
-
-	kubeName := r.getKubeName(dynamoNimDeployment, dynamoNim, false)
-
-	r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "GenerateIngressHost", "Generating hostname for ingress")
-	internalHost, err := r.generateIngressHost(ctx, dynamoNimDeployment)
-	if err != nil {
-		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeWarning, "GenerateIngressHost", "Failed to generate hostname for ingress: %v", err)
-		return
-	}
-	r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "GenerateIngressHost", "Generated hostname for ingress: %s", internalHost)
-
-	annotations := r.getKubeAnnotations(dynamoNimDeployment, dynamoNim)
-
-	tag := fmt.Sprintf("%s:%s", dynamoNimRepositoryName, dynamoNimVersion)
-	orgName := "unknown"
-
-	annotations["nginx.ingress.kubernetes.io/configuration-snippet"] = fmt.Sprintf(`
-more_set_headers "X-Powered-By: Yatai";
-more_set_headers "X-Yatai-Org-Name: %s";
-more_set_headers "X-Yatai-Bento: %s";
-`, orgName, tag)
-
-	annotations["nginx.ingress.kubernetes.io/ssl-redirect"] = "false"
-
-	labels := r.getKubeLabels(dynamoNimDeployment, dynamoNim)
-
-	kubeNs := dynamoNimDeployment.Namespace
-
-	ingressConfig, err := r.GetIngressConfig(ctx)
-	if err != nil {
-		err = errors.Wrapf(err, "get ingress config")
-		return
-	}
-
-	ingressClassName := ingressConfig.ClassName
-	ingressAnnotations := ingressConfig.Annotations
-	ingressPath := ingressConfig.Path
-	ingressPathType := ingressConfig.PathType
-	ingressTLSMode := ingressConfig.TLSMode
-	ingressStaticTLSSecretName := ingressConfig.StaticTLSSecretName
-
-	for k, v := range ingressAnnotations {
-		annotations[k] = v
-	}
-
-	for k, v := range opt.dynamoNimDeployment.Spec.Ingress.Annotations {
-		annotations[k] = v
-	}
-
-	for k, v := range opt.dynamoNimDeployment.Spec.Ingress.Labels {
-		labels[k] = v
-	}
-
-	var tls []networkingv1.IngressTLS
-
-	// set default tls from network configmap
-	switch ingressTLSMode {
-	case TLSModeNone:
-	case TLSModeAuto:
-		tls = make([]networkingv1.IngressTLS, 0, 1)
-		tls = append(tls, networkingv1.IngressTLS{
-			Hosts:      []string{internalHost},
-			SecretName: kubeName,
-		})
-
-	case TLSModeStatic:
-		tls = make([]networkingv1.IngressTLS, 0, 1)
-		tls = append(tls, networkingv1.IngressTLS{
-			Hosts:      []string{internalHost},
-			SecretName: ingressStaticTLSSecretName,
-		})
-	default:
-		err = errors.Wrapf(err, "TLS mode is invalid: %s", ingressTLSMode)
-		return
-	}
-
-	// override default tls if DynamoNimDeployment defines its own tls section
-	if opt.dynamoNimDeployment.Spec.Ingress.TLS != nil && opt.dynamoNimDeployment.Spec.Ingress.TLS.SecretName != "" {
-		tls = make([]networkingv1.IngressTLS, 0, 1)
-		tls = append(tls, networkingv1.IngressTLS{
-			Hosts:      []string{internalHost},
-			SecretName: opt.dynamoNimDeployment.Spec.Ingress.TLS.SecretName,
-		})
-	}
-
-	serviceName := r.getGenericServiceName(dynamoNimDeployment, dynamoNim)
-
-	interIng := &networkingv1.Ingress{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        kubeName,
-			Namespace:   kubeNs,
-			Labels:      labels,
-			Annotations: annotations,
-		},
-		Spec: networkingv1.IngressSpec{
-			IngressClassName: ingressClassName,
-			TLS:              tls,
-			Rules: []networkingv1.IngressRule{
-				{
-					Host: internalHost,
-					IngressRuleValue: networkingv1.IngressRuleValue{
-						HTTP: &networkingv1.HTTPIngressRuleValue{
-							Paths: []networkingv1.HTTPIngressPath{
-								{
-									Path:     ingressPath,
-									PathType: &ingressPathType,
-									Backend: networkingv1.IngressBackend{
-										Service: &networkingv1.IngressServiceBackend{
-											Name: serviceName,
-											Port: networkingv1.ServiceBackendPort{
-												Name: commonconsts.BentoServicePortName,
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	err = ctrl.SetControllerReference(dynamoNimDeployment, interIng, r.Scheme)
-	if err != nil {
-		err = errors.Wrapf(err, "set ingress %s controller reference", interIng.Name)
-		return
-	}
-
-	ings := []*networkingv1.Ingress{interIng}
-
-	return ings, err
-}
-
-var cachedDynamoNimDeploymentNamespaces *[]string
-
-func (r *DynamoNimDeploymentReconciler) doCleanUpAbandonedRunnerServices() error {
-	logs := log.Log.WithValues("func", "doCleanUpAbandonedRunnerServices")
-	logs.Info("start cleaning up abandoned runner services")
-	ctx, cancel := context.WithTimeout(context.TODO(), time.Minute*10)
-	defer cancel()
-
-	var dynamoNimDeploymentNamespaces []string
-
-	if cachedDynamoNimDeploymentNamespaces != nil {
-		dynamoNimDeploymentNamespaces = *cachedDynamoNimDeploymentNamespaces
-	} else {
-		restConfig := config.GetConfigOrDie()
-		clientset, err := kubernetes.NewForConfig(restConfig)
-		if err != nil {
-			return errors.Wrapf(err, "create kubernetes clientset")
-		}
-
-		dynamoNimDeploymentNamespaces, err = commonconfig.GetBentoDeploymentNamespaces(ctx, func(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
-			secret, err := clientset.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
-			return secret, errors.Wrap(err, "get secret")
-		})
-		if err != nil {
-			err = errors.Wrapf(err, "get dynamoNim deployment namespaces")
-			return err
-		}
-
-		cachedDynamoNimDeploymentNamespaces = &dynamoNimDeploymentNamespaces
-	}
-
-	for _, dynamoNimDeploymentNamespace := range dynamoNimDeploymentNamespaces {
-		serviceList := &corev1.ServiceList{}
-		serviceListOpts := []client.ListOption{
-			client.HasLabels{commonconsts.KubeLabelYataiBentoDeploymentRunner},
-			client.InNamespace(dynamoNimDeploymentNamespace),
-		}
-		err := r.List(ctx, serviceList, serviceListOpts...)
-		if err != nil {
-			return errors.Wrap(err, "list services")
-		}
-		for _, service := range serviceList.Items {
-			service := service
-			podList := &corev1.PodList{}
-			podListOpts := []client.ListOption{
-				client.InNamespace(service.Namespace),
-				client.MatchingLabels(service.Spec.Selector),
-			}
-			err := r.List(ctx, podList, podListOpts...)
-			if err != nil {
-				return errors.Wrap(err, "list pods")
-			}
-			if len(podList.Items) > 0 {
-				continue
-			}
-			createdAt := service.ObjectMeta.CreationTimestamp
-			if time.Since(createdAt.Time) < time.Minute*3 {
-				continue
-			}
-			logs.Info("deleting abandoned runner service", "name", service.Name, "namespace", service.Namespace)
-			err = r.Delete(ctx, &service)
-			if err != nil {
-				return errors.Wrapf(err, "delete service %s", service.Name)
-			}
-		}
-	}
-	logs.Info("finished cleaning up abandoned runner services")
-	return nil
-}
-
-func (r *DynamoNimDeploymentReconciler) cleanUpAbandonedRunnerServices() {
-	logs := log.Log.WithValues("func", "cleanUpAbandonedRunnerServices")
-	err := r.doCleanUpAbandonedRunnerServices()
-	if err != nil {
-		logs.Error(err, "cleanUpAbandonedRunnerServices")
-	}
-	ticker := time.NewTicker(time.Second * 30)
-	for range ticker.C {
-		err := r.doCleanUpAbandonedRunnerServices()
-		if err != nil {
-			logs.Error(err, "cleanUpAbandonedRunnerServices")
-		}
-	}
-}
-
-//nolint:nakedret
-func (r *DynamoNimDeploymentReconciler) doRegisterDynamoComponent() (err error) {
-	logs := log.Log.WithValues("func", "doRegisterYataiComponent")
-
-	ctx, cancel := context.WithTimeout(context.TODO(), time.Minute*5)
-	defer cancel()
-
-	logs.Info("getting yatai client")
-	yataiClient, clusterName, err := r.getYataiClient(ctx)
-	if err != nil {
-		err = errors.Wrap(err, "get yatai client")
-		return
-	}
-
-	if yataiClient == nil {
-		logs.Info("yatai client is nil")
-		return
-	}
-
-	yataiClient_ := *yataiClient
-
-	namespace, err := commonconfig.GetYataiDeploymentNamespace(ctx, func(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
-		secret := &corev1.Secret{}
-		err := r.Client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, secret)
-		return secret, errors.Wrap(err, "get secret")
-	})
-	if err != nil {
-		err = errors.Wrap(err, "get yatai deployment namespace")
-		return
-	}
-
-	_, err = yataiClient_.RegisterYataiComponent(ctx, *clusterName, &schemasv1.RegisterYataiComponentSchema{
-		Name:          modelschemas.YataiComponentNameDeployment,
-		KubeNamespace: namespace,
-		Version:       version.Version,
-		SelectorLabels: map[string]string{
-			"app.kubernetes.io/name": "yatai-deployment",
-		},
-		Manifest: &modelschemas.YataiComponentManifestSchema{
-			SelectorLabels: map[string]string{
-				"app.kubernetes.io/name": "yatai-deployment",
-			},
-			LatestCRDVersion: "v2alpha1",
-		},
-	})
-
-	return err
-}
-
-func (r *DynamoNimDeploymentReconciler) registerDynamoComponent() {
-	logs := log.Log.WithValues("func", "registerYataiComponent")
-	err := r.doRegisterDynamoComponent()
-	if err != nil {
-		logs.Error(err, "registerYataiComponent")
-	}
-	ticker := time.NewTicker(time.Minute * 5)
-	for range ticker.C {
-		err := r.doRegisterDynamoComponent()
-		if err != nil {
-			logs.Error(err, "registerYataiComponent")
-		}
-	}
-}
-
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoNimDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	logs := log.Log.WithValues("func", "SetupWithManager")
-
-	if os.Getenv("DISABLE_CLEANUP_ABANDONED_RUNNER_SERVICES") != commonconsts.KubeLabelValueTrue {
-		go r.cleanUpAbandonedRunnerServices()
-	} else {
-		logs.Info("cleanup abandoned runner services is disabled")
-	}
-
-	if os.Getenv("DISABLE_YATAI_COMPONENT_REGISTRATION") != commonconsts.KubeLabelValueTrue {
-		go r.registerDynamoComponent()
-	} else {
-		logs.Info("yatai component registration is disabled")
-	}
 
 	m := ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.DynamoNimDeployment{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
@@ -3086,59 +2366,4 @@ func (r *DynamoNimDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error
 
 	m.Owns(&autoscalingv2.HorizontalPodAutoscaler{})
 	return m.Complete(r)
-}
-
-//nolint:nakedret
-func TransformToOldHPA(hpa *v1alpha1.Autoscaling) (oldHpa *modelschemas.DeploymentTargetHPAConf, err error) {
-	if hpa == nil {
-		return
-	}
-	minReplicas := int32(hpa.MinReplicas)
-	maxReplicas := int32(hpa.MaxReplicas)
-	oldHpa = &modelschemas.DeploymentTargetHPAConf{
-		MinReplicas: &minReplicas,
-		MaxReplicas: &maxReplicas,
-	}
-
-	for _, metric := range hpa.Metrics {
-		if metric.Type == autoscalingv2.PodsMetricSourceType {
-			if metric.Pods == nil {
-				continue
-			}
-			if metric.Pods.Metric.Name == commonconsts.KubeHPAQPSMetric {
-				if metric.Pods.Target.Type != autoscalingv2.UtilizationMetricType {
-					continue
-				}
-				if metric.Pods.Target.AverageValue == nil {
-					continue
-				}
-				qps := metric.Pods.Target.AverageValue.Value()
-				oldHpa.QPS = &qps
-			}
-		} else if metric.Type == autoscalingv2.ResourceMetricSourceType {
-			if metric.Resource == nil {
-				continue
-			}
-			if metric.Resource.Name == corev1.ResourceCPU {
-				if metric.Resource.Target.Type != autoscalingv2.UtilizationMetricType {
-					continue
-				}
-				if metric.Resource.Target.AverageUtilization == nil {
-					continue
-				}
-				cpu := *metric.Resource.Target.AverageUtilization
-				oldHpa.CPU = &cpu
-			} else if metric.Resource.Name == corev1.ResourceMemory {
-				if metric.Resource.Target.Type != autoscalingv2.UtilizationMetricType {
-					continue
-				}
-				if metric.Resource.Target.AverageUtilization == nil {
-					continue
-				}
-				memory := metric.Resource.Target.AverageValue.String()
-				oldHpa.Memory = &memory
-			}
-		}
-	}
-	return
 }

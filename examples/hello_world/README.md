@@ -17,11 +17,16 @@ limitations under the License.
 
 # Hello World Example
 
-This example demonstrates a basic Dynamo inference graph with three components: a frontend HTTP server, a middle processing layer, and a backend inference engine. This simple architecture showcases Dynamo's core concepts and how to compose services together.
+## Overview
 
-## Architecture Overview
+This example demonstrates the basic concepts of Dynamo by creating a simple multi-service pipeline. It shows how to:
 
-The example implements a three-tier architecture:
+1. Create and connect multiple Dynamo services
+2. Pass data between services using Dynamo's runtime
+3. Set up a simple HTTP API endpoint
+4. Deploy and interact with a Dynamo service graph
+
+Pipeline Architecture:
 
 ```
 Users/Clients (HTTP)
@@ -42,31 +47,35 @@ Users/Clients (HTTP)
 └─────────────┘
 ```
 
-Each component has a specific role:
-- **Frontend**: Handles HTTP requests and provides a REST API endpoint at `/generate`
-- **Middle**: Processes requests and coordinates between frontend and backend
-- **Backend**: Performs the actual inference computation
+## Component Descriptions
 
-## Running Locally
+### Frontend Service
+- Serves as the entry point for external HTTP requests
+- Exposes a `/generate` HTTP API endpoint that clients can call
+- Processes incoming text and passes it to the Middle service
 
-### 1. Launch the Services
+### Middle Service
+- Acts as an intermediary service in the pipeline
+- Receives requests from the Frontend
+- Appends "-mid" to the text and forwards it to the Backend
 
-You can launch all three services using a single command:
+### Backend Service
+- Functions as the final service in the pipeline
+- Processes requests from the Middle service
+- Appends "-back" to the text and yields tokens
+
+## Running the Example Locally
+
+1. Launch all three services using a single command:
 
 ```bash
 cd /workspace/examples/hello_world
 dynamo serve hello_world:Frontend
 ```
 
-This command will:
-1. Start the frontend HTTP server
-2. Initialize the middle processing layer
-3. Launch the backend inference engine
-4. Establish the necessary connections between components
+The `dynamo serve` command deploys the entire service graph, automatically handling the dependencies between Frontend, Middle, and Backend services.
 
-### 2. Test the API
-
-Once the services are running, you can test the API using curl:
+2. Send request to frontend using curl:
 
 ```bash
 curl -X 'POST' \
@@ -80,7 +89,7 @@ curl -X 'POST' \
 
 The API will respond with a stream of generated text based on your input.
 
-## Deploying to Kubernetes
+## Deploying to and Running the Example in Kubernetes
 
 There are two ways to deploy the hello world example:
 1. Manually using helm charts
@@ -167,3 +176,15 @@ curl -X 'POST' 'http://localhost:3000/generate' \
 ```
 
 For more complex examples, see the [LLM deployment examples](../../examples/llm/README.md)
+## Expected Output
+
+When you send the request with "test" as input, the response will show how the text flows through each service:
+
+```
+Frontend: Middle: Backend: test-mid-back
+```
+
+This demonstrates how:
+1. The Frontend receives "test"
+2. The Middle service adds "-mid" to create "test-mid"
+3. The Backend service adds "-back" to create "test-mid-back"

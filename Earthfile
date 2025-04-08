@@ -134,13 +134,11 @@ dynamo-base-docker:
 ############### ALL TARGETS ##############################
 all-test:
     BUILD ./deploy/dynamo/operator+test
-    BUILD ./deploy/dynamo/api-server+test
 
 all-docker:
     ARG CI_REGISTRY_IMAGE=my-registry
     ARG CI_COMMIT_SHA=latest
     BUILD ./deploy/dynamo/operator+docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
-    BUILD ./deploy/dynamo/api-server+docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
     BUILD ./deploy/dynamo/api-store+docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
 
 all-lint:
