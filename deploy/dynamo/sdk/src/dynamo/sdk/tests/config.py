@@ -139,4 +139,4 @@ def test_service_config_override_common_configs():
     for key in ["model", "block-size", "max-model-len"]:
         assert f"--{key}" in vllm_worker_args
 
-    assert vllm_worker_args[vllm_worker_args.index("--block-size") + 1] == 128
+    assert vllm_worker_args[vllm_worker_args.index("--block-size") + 1] == "128"
