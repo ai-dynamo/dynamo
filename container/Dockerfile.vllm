@@ -316,7 +316,7 @@ COPY --from=build $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=build $CARGO_HOME $CARGO_HOME
 
 # Copy uv from build and build wheel in virtualenv
-COPY --from=build /uv /uv
+#COPY --from=build /uv /uv
 RUN mkdir /opt/dynamo && \
     uv venv /opt/dynamo/venv --python 3.12
 
@@ -328,7 +328,7 @@ ENV PATH="$PATH:/usr/local/bin"
 # Build dynamo wheel
 RUN source /opt/dynamo/venv/bin/activate && \
     cd /workspace/lib/bindings/python && \
-    uv build --wheel --out-dir /workspace/dist && \
+    uv build --wheel --out-dir /workspace/dist --python 3.12 && \
     if [ "$RELEASE_BUILD" = "true" ]; then \
         uv build --wheel --out-dir /workspace/dist --python 3.11 && \
         uv build --wheel --out-dir /workspace/dist --python 3.10; \
@@ -338,7 +338,6 @@ RUN source /opt/dynamo/venv/bin/activate && \
     cd /workspace/deploy/dynamo/api-store && \
     uv build --wheel --out-dir /workspace/dist
 
-RUN rm -rf /opt/dynamo/venv
 #######################################
 ########## CI Minimum Image ###########
 #######################################
