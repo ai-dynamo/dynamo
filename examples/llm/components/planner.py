@@ -16,14 +16,14 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import os
-from rich.console import Console
-from rich.table import Table
 import time
-import json
 
 import numpy as np
+from rich.console import Console
+from rich.table import Table
 from utils.prefill_queue import PrefillQueue
 
 from dynamo.llm import KvMetricsAggregator
@@ -32,6 +32,7 @@ from dynamo.runtime.logging import configure_logger
 
 configure_logger()
 logger = logging.getLogger(__name__)
+
 
 class Planner:
     def __init__(self, runtime: DistributedRuntime, args: argparse.Namespace):
@@ -249,9 +250,9 @@ async def start_planner(runtime: DistributedRuntime, args: argparse.Namespace):
                 name = data["component"]
                 endpoint = data["endpoint"]
                 table.add_row(name, endpoint)
-        except Exception as e:
+        except Exception:
             # Some entries may not be valid JSON or might be binary data
-            pass 
+            pass
 
     # Print the table before running the planner
     console.print(table)
