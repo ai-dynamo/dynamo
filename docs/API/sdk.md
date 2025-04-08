@@ -25,7 +25,7 @@ pip install ai-dynamo
 ```
 
 # Core Concepts
-As you read about each concept, it is helpful to have the [basic example](../../examples/hello_world/README.md) up as well so you can refer back to it.
+As you read about each concept, it is helpful to have the [basic example](../Examples/hello_world_readme.md) up as well so you can refer back to it.
 
 ## Defining a Service
 
