@@ -41,6 +41,7 @@
    :hidden:
    :caption: API
    
+   API/sdk.md
    API/python_bindings.md
 
 .. toctree::

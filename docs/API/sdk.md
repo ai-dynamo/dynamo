@@ -150,19 +150,6 @@ This is especially useful for:
 - Initializing external connections
 - Setting up runtime resources that require async operations
 
-#### `@async_on_shutdown`
-The `@async_on_shutdown` hook is called when the service is shutdown handles cleanup.
-
-```python
-@async_on_shutdown
-async def async_shutdown(self):
-    if self._engine_context is not None:
-        await self._engine_context.__aexit__(None, None, None)
-    print("VllmWorkerRouterLess shutting down")
-```
-
-This ensures resources are properly released, preventing memory leaks and making sure external connections are properly closed. This is helpful to clean up vLLM engines that have been started outside of the main process.
-
 ## Configuring a Service
 
 Dynamo SDK provides a flexible configuration system that allows you to define service parameters through multiple methods:
