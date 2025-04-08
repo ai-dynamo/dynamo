@@ -48,12 +48,31 @@ enum EndpointEvent {
     Delete(String),
 }
 
+#[derive(Default, Debug, Clone, Copy)]
+pub enum RouterMode {
+    #[default]
+    Random,
+    RoundRobin,
+    //KV,
+    //
+    // Always and only go to the given endpoint ID.
+    // TODO: Is this useful?
+    Direct(i64),
+}
+
 #[derive(Clone)]
 pub struct Client<T: Data, U: Data> {
     endpoint: Endpoint,
     router: PushRouter<T, U>,
-    watch_rx: tokio::sync::watch::Receiver<Vec<i64>>,
     counter: Arc<AtomicU64>,
+    endpoints: EndpointSource,
+    router_mode: RouterMode,
+}
+
+#[derive(Clone, Debug)]
+enum EndpointSource {
+    Static,
+    Dynamic(tokio::sync::watch::Receiver<Vec<i64>>),
 }
 
 impl<T, U> Client<T, U>
@@ -61,17 +80,24 @@ where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de>,
 {
-    pub(crate) async fn new(endpoint: Endpoint) -> Result<Self> {
-        let router = AddressedPushRouter::new(
-            endpoint.component.drt.nats_client.client().clone(),
-            endpoint.component.drt.tcp_server().await?,
-        )?;
+    // Client will only talk to a single static endpoint
+    pub(crate) async fn new_static(endpoint: Endpoint) -> Result<Self> {
+        Ok(Client {
+            router: router(&endpoint).await?,
+            endpoint,
+            counter: Arc::new(AtomicU64::new(0)),
+            endpoints: EndpointSource::Static,
+            router_mode: Default::default(),
+        })
+    }
 
+    // Client with auto-discover endpoints using etcd
+    pub(crate) async fn new_dynamic(endpoint: Endpoint) -> Result<Self> {
         // create live endpoint watcher
-        let prefix_watcher = endpoint
-            .component
-            .drt
-            .etcd_client
+        let Some(etcd_client) = &endpoint.component.drt.etcd_client else {
+            anyhow::bail!("Attempt to create a dynamic client on a static endpoint");
+        };
+        let prefix_watcher = etcd_client
             .kv_get_and_watch_prefix(endpoint.etcd_path())
             .await?;
 
@@ -141,10 +167,11 @@ where
         });
 
         Ok(Client {
+            router: router(&endpoint).await?,
             endpoint,
-            router,
-            watch_rx,
             counter: Arc::new(AtomicU64::new(0)),
+            endpoints: EndpointSource::Dynamic(watch_rx),
+            router_mode: Default::default(),
         })
     }
 
@@ -158,23 +185,35 @@ where
         self.endpoint.etcd_path()
     }
 
-    pub fn endpoint_ids(&self) -> &tokio::sync::watch::Receiver<Vec<i64>> {
-        &self.watch_rx
+    pub fn endpoint_ids(&self) -> Vec<i64> {
+        match &self.endpoints {
+            EndpointSource::Static => vec![0],
+            EndpointSource::Dynamic(watch_rx) => watch_rx.borrow().clone(),
+        }
+    }
+
+    pub fn set_router_mode(&mut self, mode: RouterMode) {
+        self.router_mode = mode
     }
 
     /// Wait for at least one [`Endpoint`] to be available
     pub async fn wait_for_endpoints(&self) -> Result<()> {
-        let mut rx = self.watch_rx.clone();
-        // wait for there to be 1 or more endpoints
-        loop {
-            if rx.borrow_and_update().is_empty() {
-                rx.changed().await?;
-            } else {
-                break;
+        if let EndpointSource::Dynamic(mut rx) = self.endpoints.clone() {
+            // wait for there to be 1 or more endpoints
+            loop {
+                if rx.borrow_and_update().is_empty() {
+                    rx.changed().await?;
+                } else {
+                    break;
+                }
             }
         }
-
         Ok(())
+    }
+
+    /// Is this component know at startup and not discovered via etcd?
+    pub fn is_static(&self) -> bool {
+        matches!(self.endpoints, EndpointSource::Static)
     }
 
     /// Issue a request to the next available endpoint in a round-robin fashion
@@ -182,7 +221,7 @@ where
         let counter = self.counter.fetch_add(1, Ordering::Relaxed);
 
         let endpoint_id = {
-            let endpoints = self.watch_rx.borrow();
+            let endpoints = self.endpoint_ids();
             let count = endpoints.len();
             if count == 0 {
                 return Err(error!(
@@ -193,6 +232,7 @@ where
             let offset = counter % count as u64;
             endpoints[offset as usize]
         };
+        tracing::trace!("round robin router selected {endpoint_id}");
 
         let subject = self.endpoint.subject_to(endpoint_id);
         let request = request.map(|req| AddressedRequest::new(req, subject));
@@ -203,7 +243,7 @@ where
     /// Issue a request to a random endpoint
     pub async fn random(&self, request: SingleIn<T>) -> Result<ManyOut<U>> {
         let endpoint_id = {
-            let endpoints = self.watch_rx.borrow();
+            let endpoints = self.endpoint_ids();
             let count = endpoints.len();
             if count == 0 {
                 return Err(error!(
@@ -215,6 +255,7 @@ where
             let offset = counter % count as u64;
             endpoints[offset as usize]
         };
+        tracing::trace!("random router selected {endpoint_id}");
 
         let subject = self.endpoint.subject_to(endpoint_id);
         let request = request.map(|req| AddressedRequest::new(req, subject));
@@ -225,7 +266,7 @@ where
     /// Issue a request to a specific endpoint
     pub async fn direct(&self, request: SingleIn<T>, endpoint_id: i64) -> Result<ManyOut<U>> {
         let found = {
-            let endpoints = self.watch_rx.borrow();
+            let endpoints = self.endpoint_ids();
             endpoints.contains(&endpoint_id)
         };
 
@@ -242,6 +283,21 @@ where
 
         self.router.generate(request).await
     }
+
+    pub async fn r#static(&self, request: SingleIn<T>) -> Result<ManyOut<U>> {
+        let subject = self.endpoint.subject();
+        tracing::debug!("static got subject: {subject}");
+        let request = request.map(|req| AddressedRequest::new(req, subject));
+        tracing::debug!("router generate");
+        self.router.generate(request).await
+    }
+}
+
+async fn router(endpoint: &Endpoint) -> Result<Arc<AddressedPushRouter>> {
+    AddressedPushRouter::new(
+        endpoint.component.drt.nats_client.client().clone(),
+        endpoint.component.drt.tcp_server().await?,
+    )
 }
 
 #[async_trait]
@@ -251,6 +307,13 @@ where
     U: Data + for<'de> Deserialize<'de>,
 {
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
-        self.random(request).await
+        match &self.endpoints {
+            EndpointSource::Static => self.r#static(request).await,
+            EndpointSource::Dynamic(_) => match self.router_mode {
+                RouterMode::Random => self.random(request).await,
+                RouterMode::RoundRobin => self.round_robin(request).await,
+                RouterMode::Direct(endpoint_id) => self.direct(request, endpoint_id).await,
+            },
+        }
     }
 }

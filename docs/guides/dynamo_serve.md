@@ -235,20 +235,10 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
   }'
 ```
 
-## Close your deployment
+## Close deployment
 
-If you have any lingering processes after running `ctrl-c`, you can kill them by running
+> [!IMPORTANT]
+> We are aware of an issue where vLLM subprocesses might not be killed when `ctrl-c` is pressed.
+> We are working on addressing this. Relevant vLLM issues can be found [here](https://github.com/vllm-project/vllm/pull/8492) and [here](https://github.com/vllm-project/vllm/issues/6219#issuecomment-2439257824).
 
-```bash
-function kill_tree() {
-local parent=$1
-    local children=$(ps -o pid= --ppid $parent)
-for child in $children; do
-kill_tree $child
-done
-echo "Killing process $parent"
-kill -9 $parent
-}
-
-kill_tree $(pgrep circusd)
-```
+To stop the serve, you can press `ctrl-c` which will kill the different components. In order to kill the remaining vLLM subprocesses you can run `nvidia-smi` and `kill -9` the remaining processes or run `pkill python3` from inside of the container.

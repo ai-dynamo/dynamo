@@ -1,3 +1,4 @@
+#  SPDX-FileCopyrightText: Copyright (c) 2020 Atalaya Tech. Inc
 #  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 #  #
@@ -12,6 +13,8 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
+#  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
+
 from __future__ import annotations
 
 import json
@@ -37,7 +40,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from simple_di import Provide, inject
 
-logger = logging.getLogger("dynamo.deployment")
+logger = logging.getLogger(__name__)
 
 if t.TYPE_CHECKING:
     from bentoml._internal.cloud import BentoCloudClient

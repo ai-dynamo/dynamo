@@ -1,4 +1,5 @@
 /*
+ * SPDX-FileCopyrightText: Copyright (c) 2022 Atalaya Tech. Inc
  * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -13,6 +14,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ * Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
  */
 
 package v1alpha1
@@ -66,6 +68,7 @@ type DynamoNimDeploymentSpec struct {
 
 	LivenessProbe  *corev1.Probe `json:"livenessProbe,omitempty"`
 	ReadinessProbe *corev1.Probe `json:"readinessProbe,omitempty"`
+	Replicas       *int32        `json:"replicas,omitempty"`
 }
 
 type RunMode struct {
@@ -136,4 +139,12 @@ func (s *DynamoNimDeploymentStatus) IsReady() bool {
 		}
 	}
 	return false
+}
+
+func (s *DynamoNimDeployment) GetSpec() any {
+	return s.Spec
+}
+
+func (s *DynamoNimDeployment) SetSpec(spec any) {
+	s.Spec = spec.(DynamoNimDeploymentSpec)
 }

@@ -24,7 +24,7 @@ from dynamo._core import DistributedRuntime
 async def test_simple_put_get():
     # Initialize runtime
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop)
+    runtime = DistributedRuntime(loop, False)
 
     # Get etcd client
     etcd = runtime.etcd_client()

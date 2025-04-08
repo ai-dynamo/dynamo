@@ -19,13 +19,11 @@ use std::sync::Mutex;
 
 use super::*;
 
-use async_nats::service::{endpoint, Service};
-
+pub use super::endpoint::EndpointStats;
 pub type StatsHandler =
-    Box<dyn FnMut(String, endpoint::Stats) -> serde_json::Value + Send + Sync + 'static>;
-
+    Box<dyn FnMut(String, EndpointStats) -> serde_json::Value + Send + Sync + 'static>;
 pub type EndpointStatsHandler =
-    Box<dyn FnMut(endpoint::Stats) -> serde_json::Value + Send + Sync + 'static>;
+    Box<dyn FnMut(EndpointStats) -> serde_json::Value + Send + Sync + 'static>;
 
 pub const PROJECT_NAME: &str = "Dynamo";
 
@@ -71,7 +69,7 @@ impl ServiceConfigBuilder {
         let builder = component.drt.nats_client.client().service_builder();
 
         tracing::debug!("Starting service: {}", service_name);
-        let service = builder
+        let service_builder = builder
             .description(description)
             .stats_handler(move |name, stats| {
                 log::trace!("stats_handler: {name}, {stats:?}");
@@ -80,10 +78,14 @@ impl ServiceConfigBuilder {
                     Some(handler) => handler(stats),
                     None => serde_json::Value::Null,
                 }
-            })
+            });
+        tracing::debug!("Got builder");
+        let service = service_builder
             .start(service_name.clone(), version)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to start service: {e}"))?;
+
+        tracing::debug!("Service started TEMP");
 
         // new copy of service_name as the previous one is moved into the task above
         let service_name = component.service_name();
@@ -99,6 +101,7 @@ impl ServiceConfigBuilder {
         // drop the guard to unlock the mutex
         drop(guard);
 
+        tracing::debug!("create done");
         Ok(component)
     }
 }

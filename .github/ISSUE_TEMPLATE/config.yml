@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Dynamo documentation
+    url: https://www.nvidia.com/en-us/ai/dynamo/
+    about: Refer to the Dynamo documentation to help you get started.
+  - name: Dynamo Community Support
+    url: https://discord.gg/dynamo
+    about: Refer to the Dynamo Discord server for community support.

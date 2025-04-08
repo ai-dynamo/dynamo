@@ -32,7 +32,7 @@ Example:
 
 const ZMQ_SOCKET_PREFIX: &str = "dyn";
 
-const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>|none] out=[mistralrs|sglang|llamacpp|vllm|trtllm|echo_full|echo_core|pystr:<engine.py>|pytok:<engine.py>] [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json]";
+const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>|none] out=[See available engines below] [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin]";
 
 fn main() -> anyhow::Result<()> {
     logging::init();
@@ -51,8 +51,7 @@ fn main() -> anyhow::Result<()> {
             if cfg!(feature = "sglang") {
                 #[cfg(feature = "sglang")]
                 {
-                    use dynamo_llm::engines::sglang;
-                    let gpu_config = sglang::MultiGPUConfig {
+                    let gpu_config = dynamo_engine_sglang::MultiGPUConfig {
                         tp_size: flags.tensor_parallel_size,
                         tp_rank: sglang_flags.tp_rank,
                         gpu_id: sglang_flags.gpu_id,
@@ -62,7 +61,7 @@ fn main() -> anyhow::Result<()> {
                         node_rank: flags.node_rank,
                         leader_addr: flags.leader_addr.unwrap_or_default(),
                     };
-                    return sglang::run_subprocess(
+                    return dynamo_engine_sglang::run_subprocess(
                         ZMQ_SOCKET_PREFIX,
                         model_path,
                         sglang_flags.pipe_fd as std::os::fd::RawFd,
@@ -84,18 +83,18 @@ fn main() -> anyhow::Result<()> {
             if cfg!(feature = "vllm") {
                 #[cfg(feature = "vllm")]
                 {
-                    use dynamo_llm::engines::vllm;
                     let node_config = dynamo_llm::engines::MultiNodeConfig {
                         num_nodes: flags.num_nodes,
                         node_rank: flags.node_rank,
                         leader_addr: flags.leader_addr.unwrap_or_default(),
                     };
-                    return vllm::run_subprocess(
+                    return dynamo_engine_vllm::run_subprocess(
                         ZMQ_SOCKET_PREFIX,
                         &model_path,
                         node_config,
                         flags.tensor_parallel_size,
                         flags.extra_engine_args,
+                        flags.router_mode.is_kv_routing(),
                     );
                 }
             } else {
