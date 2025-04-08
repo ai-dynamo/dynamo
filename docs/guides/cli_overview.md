@@ -1,4 +1,4 @@
-# Dynamo CLI Documentation
+# Dynamo CLI 
 The Dynamo CLI is a powerful tool for serving, containerizing, and deploying Dynamo applications. It leverages core pieces of the BentoML deployment stack and provides a range of commands to manage your Dynamo services.
 
 Overview
@@ -7,9 +7,9 @@ At a high level, the Dynamo CLI allows you to:
 - `serve` - run a set of services locally (via `depends()` or `.link()`)
 - `build` - create an archive of your services (called a `bento`)
 
-# Commands
+## Commands
 
-## `run`
+### `run`
 
 The `run` command allows you to quickly chat with a model. Under the hood - it is running the `dynamo-run` Rust binary. You can find the arguments that it takes here: [dynamo-run docs](../../../../../launch/README.md)
 
@@ -18,7 +18,7 @@ The `run` command allows you to quickly chat with a model. Under the hood - it i
 dynamo run deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
 ```
 
-## `serve`
+### `serve`
 
 The `serve` command lets you run a defined inference graph locally. You must point toward your file and intended class using file:Class syntax
 
@@ -47,7 +47,7 @@ dynamo serve hello_world:Frontend
 dynamo serve  --service-name Middle hello_world:Frontend
 ```
 
-## `build`
+### `build`
 
 The `build` commmand allows you to package up your inference graph and its dependancies and create an archive of it. This is commonly paired with the `--containerize` flag to create a single docker container that runs your inference graph. As with `serve`, you point toward the first service in your dependency graph.
 

@@ -74,11 +74,11 @@ The `llama3B_pool` name is purely symbolic, pick anything as long as it matches 
 
 Run `dynamo run --help` for more options.
 
-# Full documentation
+## Full documentation
 
 `dynamo-run` is what `dynamo run` executes. It is an example of what you can build in Rust with the `dynamo-llm` and `dynamo-runtime`. Here is a list of how to build from source and all the features.
 
-## Setup
+### Setup
 
 Libraries Ubuntu:
 ```
@@ -96,7 +96,7 @@ Libraries macOS:
 ```
 brew install cmake protobuf
 
-# Check that Metal is accessible
+## Check that Metal is accessible
 xcrun -sdk macosx metal
 ```
 If Metal is accessible, you should see an error like `metal: error: no input files`, which confirms it is installed correctly.
@@ -107,7 +107,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 ```
 
-## Build
+### Build
 
 Navigate to launch/ directory
 ```
@@ -141,7 +141,7 @@ cd target/debug
 
 Build with `--release` for a smaller binary and better performance, but longer build times. The binary will be in `target/release`.
 
-## sglang
+### sglang
 
 1. Setup the python virtual env:
 
@@ -175,7 +175,7 @@ dynamo-run in=none out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llam
 
 To pass extra arguments to the sglang engine see *Extra engine arguments* below.
 
-## llama_cpp
+### llama_cpp
 
 - `cargo build --features llamacpp,cuda`
 
@@ -229,7 +229,7 @@ dynamo-run in=none out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --num-nodes 2 --
 
 To pass extra arguments to the vllm engine see *Extra engine arguments* below.
 
-## Python bring-your-own-engine
+### Python bring-your-own-engine
 
 You can provide your own engine in a Python file. The file must provide a generator with this signature:
 ```
@@ -238,7 +238,7 @@ async def generate(request):
 
 Build: `cargo build --features python`
 
-### Python does the pre-processing
+#### Python does the pre-processing
 
 If the Python engine wants to receive and returns strings - it will do the prompt templating and tokenization itself - run it like this:
 
@@ -302,7 +302,7 @@ MAIN: ['my_engine.py', '--model-path', '/opt/models/Llama-3.2-3B-Instruct/', '--
 
 This allows quick iteration on the engine setup. Note how the `-n` `1` is included. Flags `--leader-addr` and `--model-config` will also be added if provided to `dynamo-run`.
 
-### Dynamo does the pre-processing
+#### Dynamo does the pre-processing
 
 If the Python engine wants to receive and return tokens - the prompt templating and tokenization is already done - run it like this:
 ```
@@ -343,7 +343,7 @@ async def generate(request):
 
 `pytok` supports the same ways of passing command line arguments as `pystr` - `initialize` or `main` with `sys.argv`.
 
-## trtllm
+### trtllm
 
 TensorRT-LLM. Requires `clang` and `libclang-dev`.
 
@@ -361,7 +361,7 @@ Note that TRT-LLM uses it's own `.engine` format for weights.
 
 The `--model-path` you give to `dynamo-run` must contain the `config.json` (TRT-LLM's , not the model's) and `rank0.engine` (plus other ranks if relevant).
 
-## Echo Engines
+### Echo Engines
 
 Dynamo includes two echo engines for testing and debugging purposes:
 
@@ -373,7 +373,7 @@ The `echo_core` engine accepts pre-processed requests and echoes the tokens back
 dynamo-run in=http out=echo_core --model-path <hf-repo-checkout>
 ```
 
-### echo_full
+#### echo_full
 
 The `echo_full` engine accepts un-processed requests and echoes the prompt back as the response.
 
@@ -392,7 +392,7 @@ DYN_TOKEN_ECHO_DELAY_MS=1 dynamo-run in=http out=echo_full
 
 The default delay is 10ms, which produces approximately 100 tokens per second.
 
-## Batch mode
+### Batch mode
 
 dynamo-run can take a jsonl file full of prompts and evaluate them all:
 
@@ -413,11 +413,11 @@ The output looks like this:
 {"text":"What is the capital of Spain?","response":".The capital of Spain is Madrid.","tokens_in":7,"tokens_out":7,"elapsed_ms":855}
 ```
 
-## Defaults
+### Defaults
 
 The input defaults to `in=text`. The output will default to `mistralrs` engine. If not available whatever engine you have compiled in (so depending on `--features`).
 
-## Extra engine arguments
+### Extra engine arguments
 
 The vllm and sglang backends support passing any argument the engine accepts.
 

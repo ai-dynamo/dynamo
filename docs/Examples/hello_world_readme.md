@@ -1,1 +1,0 @@
-/home/ubuntu/dynamo/examples/hello_world/README.md

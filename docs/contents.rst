@@ -22,7 +22,7 @@
 
 .. toctree::
    :hidden:
-   :caption: Architecture
+   :caption: Architecture & Features
 
    architecture/arch
 
@@ -30,13 +30,22 @@
    :hidden:
    :caption: API
 
-   API/sdk.md
-   API/python_bindings.md
+   SDK <API/sdk.md>
+   Python <API/python_bindings.md>
+
+.. toctree::
+   :hidden:
+   :caption: Guides
+
+   Dynamo CLI Overview <guides/cli_overview.md>
+   dynamo run <guides/dynamo_run.md>
+   dynamo serve <guides/dynamo_serve.md>
+   dynamo deploy <guides/dynamo_deploy.md>
 
 .. toctree::
    :hidden:
    :caption: Examples
 
-   LLM Deployment <Examples/llm_deployment.md>
-   Multinode <Examples/multinode.md>
+   LLM Deployment <examples/llm_deployment.md>
+   Multinode <examples/multinode.md>
 
