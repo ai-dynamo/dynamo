@@ -15,10 +15,14 @@
 
 ARG BASE_IMAGE="gitlab-master.nvidia.com:5005/dl/dgx/tritonserver/tensorrt-llm/amd64"
 ARG BASE_IMAGE_TAG="krish-fix-trtllm-build.23766174"
-
 ARG MANYLINUX_IMAGE="quay.io/pypa/manylinux_2_28_x86_64"
+ARG RELEASE_BUILD
 
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS dev
+##################################
+########## Build Image ###########
+##################################
+
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS build
 
 USER root
 
@@ -36,9 +40,8 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 
 # TODO: Try using uv to install tensorrtllm
 ARG TENSORRTLLM_PIP_WHEEL_PATH=""
-RUN mkdir -p /workspace/wheels/
-COPY ${TENSORRTLLM_PIP_WHEEL_PATH}/*.whl /workspace/wheels/
-RUN find /workspace/wheels/ -name "*.whl" -exec pip install {} +
+COPY ${TENSORRTLLM_PIP_WHEEL_PATH}/*.whl /tmp/
+RUN find /tmp -name "*.whl" -exec pip install {} +
 
 # Install genai-perf for benchmarking
 # TODO: Move to tag when fix for genai-perf will be released
@@ -115,8 +118,23 @@ RUN cargo build --release --locked --features mistralrs,sglang,python && \
     cp target/release/mock_worker /usr/local/bin
 
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
+
 # FIXME: Copy more specific folders in for dev/debug after directory restructure
 COPY . /workspace/
+
+# Install uv, create virtualenv for general use, and build dynamo wheel
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+RUN mkdir /opt/dynamo && \
+    uv venv /opt/dynamo/venv --python 3.12 && \
+    source /opt/dynamo/venv/bin/activate && \
+    cd /workspace && \
+    uv build --wheel --out-dir /workspace/dist && \
+    uv pip install /workspace/dist/ai_dynamo*any.whl
+
+# Package the bindings
+RUN mkdir -p /opt/dynamo/bindings/lib && \
+    cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
+    cp -r lib/bindings/c/include /opt/dynamo/bindings/.
 
 ###################################
 ####### WHEEL BUILD STAGE #########
@@ -124,59 +142,56 @@ COPY . /workspace/
 
 # Build the wheel in the manylinux environment
 FROM ${MANYLINUX_IMAGE} AS wheel_builder
+ARG RELEASE_BUILD
 WORKDIR /workspace
 
-RUN yum install -y \
-    protobuf-devel \
-    wget \
-    python3 \
-    python3-pip \
+RUN yum install -y protobuf-compiler \
     && yum clean all \
     && rm -rf /var/cache/yum
 
-COPY --from=dev /workspace /workspace
+COPY --from=build /workspace /workspace
+
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
     RUST_VERSION=1.86.0 \
     RUSTARCH=x86_64-unknown-linux-gnu
 
-RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
-    echo "a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f *rustup-init" | sha256sum -c - && \
-    chmod +x rustup-init && \
-    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
-    rm rustup-init && \
-    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
+COPY --from=build $RUSTUP_HOME $RUSTUP_HOME
+COPY --from=build $CARGO_HOME $CARGO_HOME
 
 # Install uv and create virtualenv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN mkdir /opt/dynamo && \
     uv venv /opt/dynamo/venv --python 3.12
-RUN /opt/dynamo/venv/bin/python -m ensurepip --upgrade && \
-     /opt/dynamo/venv/bin/python -m pip install --upgrade pip
 
-RUN /opt/dynamo/venv/bin/python -m pip install -U uv maturin
-
+# Build dynamo wheel
 # create virtualenv for general use, and build dynamo wheel
 RUN source /opt/dynamo/venv/bin/activate && \
     cd /workspace/lib/bindings/python && \
-    uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
-    cd /workspace && \
-    uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/ai_dynamo*any.whl
+    uv build --wheel --out-dir /workspace/dist --python 3.12 && \
+    if [ "$RELEASE_BUILD" = "true" ]; then \
+        uv build --wheel --out-dir /workspace/dist --python 3.11 && \
+        uv build --wheel --out-dir /workspace/dist --python 3.10; \
+    fi
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
-    mkdir /opt/dynamo/bindings/lib && \
-    cp dist/ai_dynamo_runtime*cp312*.whl /opt/dynamo/bindings/wheels/. && \
-    cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
-    cp -r lib/bindings/c/include /opt/dynamo/bindings/.
+    cp dist/ai_dynamo_runtime*.whl /opt/dynamo/bindings/wheels/.
 
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS dev_last
+########################################
+########## Development Image ###########
+########################################
+
+FROM build AS dev
+COPY . /workspace
 WORKDIR /workspace
-COPY --from=wheel_builder /workspace/dist /workspace/dist/
-COPY --from=dev . .
+COPY --from=wheel_builder /workspace/dist/ /workspace/dist/
+COPY --from=wheel_builder /opt/dynamo/bindings/wheels/ /opt/dynamo/bindings/wheels/
+COPY --from=wheel_builder /workspace/target /workspace/target
+
+RUN . /opt/dynamo/venv/bin/activate && \
+    uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl
 
 # Install dynamo.runtime and dynamo.llm wheels globally in container for tests that
 # currently run without virtual environment activated.
