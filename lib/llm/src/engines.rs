@@ -139,7 +139,7 @@ impl
         let (request, context) = incoming_request.transfer(());
         let deltas = request.response_generator();
         let ctx = context.context();
-        let req = request.inner.messages.into_iter().last().unwrap();
+        let req = request.inner.messages.into_iter().next_back().unwrap();
 
         let prompt = match req {
             async_openai::types::ChatCompletionRequestMessage::User(user_msg) => {

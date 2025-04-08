@@ -22,8 +22,6 @@ import (
 	"strings"
 
 	"dario.cat/mergo"
-	"emperror.dev/errors"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -107,7 +105,7 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}()
 
 	// fetch the DynamoNIMConfig
-	dynamoNIMConfig, err := nim.GetDynamoNIMConfig(ctx, dynamoDeployment, r.getSecret, r.Recorder)
+	dynamoNIMConfig, err := nim.GetDynamoNIMConfig(ctx, dynamoDeployment, r.Recorder)
 	if err != nil {
 		reason = "failed_to_get_the_DynamoNIMConfig"
 		return ctrl.Result{}, err
@@ -177,12 +175,6 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	return ctrl.Result{}, nil
 
-}
-
-func (r *DynamoDeploymentReconciler) getSecret(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
-	secret := &corev1.Secret{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, secret)
-	return secret, errors.Wrap(err, "get secret")
 }
 
 // SetupWithManager sets up the controller with the Manager.

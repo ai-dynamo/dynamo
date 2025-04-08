@@ -28,22 +28,21 @@ use dynamo_llm::{
 use dynamo_runtime::pipeline::{
     network::Ingress, ManyOut, Operator, SegmentSource, ServiceBackend, SingleIn, Source,
 };
-use dynamo_runtime::{protocols::Endpoint, DistributedRuntime, Runtime};
+use dynamo_runtime::{protocols::Endpoint, DistributedRuntime};
 
 use crate::EngineConfig;
 
 pub async fn run(
-    runtime: Runtime,
+    distributed_runtime: DistributedRuntime,
     path: String,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
     // This will attempt to connect to NATS and etcd
-    let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
 
-    let cancel_token = runtime.primary_token().clone();
+    let cancel_token = distributed_runtime.primary_token().clone();
     let endpoint_id: Endpoint = path.parse()?;
 
-    let etcd_client = distributed.etcd_client();
+    let etcd_client = distributed_runtime.etcd_client();
 
     let (ingress, service_name) = match engine_config {
         EngineConfig::StaticFull {
@@ -87,7 +86,7 @@ pub async fn run(
         model_type: ModelType::Chat,
     };
 
-    let component = distributed
+    let component = distributed_runtime
         .namespace(endpoint_id.namespace)?
         .component(endpoint_id.component)?;
     let endpoint = component
@@ -95,15 +94,18 @@ pub async fn run(
         .create()
         .await?
         .endpoint(endpoint_id.name);
-    let network_name = endpoint.subject();
-    tracing::debug!("Registering with etcd as {network_name}");
-    etcd_client
-        .kv_create(
-            network_name.clone(),
-            serde_json::to_vec_pretty(&model_registration)?,
-            Some(etcd_client.lease_id()),
-        )
-        .await?;
+
+    if let Some(etcd_client) = etcd_client {
+        let network_name = endpoint.subject_to(etcd_client.lease_id());
+        tracing::debug!("Registering with etcd as {network_name}");
+        etcd_client
+            .kv_create(
+                network_name.clone(),
+                serde_json::to_vec_pretty(&model_registration)?,
+                Some(etcd_client.lease_id()),
+            )
+            .await?;
+    }
 
     let rt_fut = endpoint.endpoint_builder().handler(ingress).start();
     tokio::select! {

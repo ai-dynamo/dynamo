@@ -17,7 +17,7 @@
 # Build the TRT-LLM base image.
 
 # This script builds the TRT-LLM base image for Dynamo with TensorRT-LLM.
-TRTLLM_COMMIT=9b931c0f6
+TRTLLM_COMMIT=0d4d50a745
 
 while getopts "c:" opt; do
   case ${opt} in
@@ -29,12 +29,15 @@ done
 (cd /tmp && \
 # Clone the TensorRT-LLM repository.
 if [ ! -d "TensorRT-LLM" ]; then
-  git clone https://github.com/NVIDIA/TensorRT-LLM.git
+  git clone --single-branch --branch main https://github.com/NVIDIA/TensorRT-LLM.git
 fi
 
 cd TensorRT-LLM
 
 # Checkout the specified commit.
+# Switch to the main branch to pull the latest changes.
+git checkout main
+git pull
 git checkout $TRTLLM_COMMIT
 
 # Update the submodules.
