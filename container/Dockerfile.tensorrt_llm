@@ -123,6 +123,10 @@ COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 # Install uv, create virtualenv for general use, and build dynamo wheel
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
+### VIRTUAL ENVIRONMENT SETUP ###
+RUN mkdir /opt/dynamo && \
+    uv venv /opt/dynamo/venv --python 3.12
+
 ###################################
 ####### WHEEL BUILD STAGE #########
 ###################################
@@ -140,18 +144,13 @@ COPY --from=build /workspace /workspace
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH \
     CARGO_TARGET_DIR=/workspace/target
 
 COPY --from=build $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=build $CARGO_HOME $CARGO_HOME
 
-# Install uv and create virtualenv
-COPY --from=build /uv /uv
-RUN mkdir /opt/dynamo && \
-    uv venv /opt/dynamo/venv --python 3.12
-
-# Build dynamo wheel
-# activate virtualenv and build dynamo wheel
+# Create virtualenv and build dynamo wheel
 RUN mkdir /opt/dynamo && \
     uv venv /opt/dynamo/venv --python 3.12 && \
     source /opt/dynamo/venv/bin/activate && \

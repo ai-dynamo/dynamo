@@ -308,6 +308,7 @@ RUN yum install -y  protobuf-compiler \
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH \
     CARGO_TARGET_DIR=/workspace/target
 
 COPY --from=build /workspace /workspace
