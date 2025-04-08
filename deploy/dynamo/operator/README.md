@@ -1,10 +1,20 @@
 # Dynamo Kubernetes Operator
-The NVIDIA Dynamo Kubernetes Operator uses the [operator framework](https://cloud.redhat.com/blog/introducing-the-operator-framework) within Kubernetes to automate the management of all dynamo resources.
+
+A Kubernetes Operator to manage all Dynamo pipelines using custom resources.
 
 
-## pre-requisites
-NEMO kubernetes operator has been built using [kubebuilder](https://github.com/kubernetes-sigs/kubebuilder)
-you need to install it on your machine
+## Overview
+
+This operator automates the deployment and lifecycle management of `DynamoDeployment` resources in Kubernetes clusters.
+
+Built with [Kubebuilder](https://book.kubebuilder.io/), it follows Kubernetes best practices and supports declarative configuration through CustomResourceDefinitions (CRDs).
+
+## Developer guide
+
+### Pre-requisites
+
+- [Go](https://go.dev/doc/install) >= 1.23
+- [Kubebuilder](https://book.kubebuilder.io/quick-start.html)
 
 ### Build
 

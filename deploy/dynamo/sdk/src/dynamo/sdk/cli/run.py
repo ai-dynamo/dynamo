@@ -27,10 +27,10 @@ def build_run_command() -> click.Group:
     def cli():
         pass
 
+    # set help_option_names to empty to let dynamo-run handles help option, instead of intercepting by "dynamo run"
     @cli.command(
         context_settings=dict(
-            ignore_unknown_options=True,
-            allow_extra_args=True,
+            ignore_unknown_options=True, allow_extra_args=True, help_option_names=()
         ),
     )
     def run() -> None:

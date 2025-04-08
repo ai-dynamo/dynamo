@@ -157,8 +157,4 @@ See [multinode-examples.md](multinode-examples.md) for more details.
 
 ### Close deployment
 
-> [!IMPORTANT]
-> We are aware of an issue where vLLM subprocesses might not be killed when `ctrl-c` is pressed.
-> We are working on addressing this. Relevant vLLM issues can be found [here](https://github.com/vllm-project/vllm/pull/8492) and [here](https://github.com/vllm-project/vllm/issues/6219#issuecomment-2439257824).
-
-To stop the serve, you can press `ctrl-c` which will kill the different components. In order to kill the remaining vLLM subprocesses you can run `nvidia-smi` and `kill -9` the remaining processes or run `pkill python3` from inside of the container.
+See [close deployment](../../docs/guides/dynamo_serve.md#close-deployment) section to learn about how to close the deployment.

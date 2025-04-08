@@ -1,4 +1,5 @@
 /*
+ * SPDX-FileCopyrightText: Copyright (c) 2022 Atalaya Tech. Inc
  * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -13,6 +14,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ * Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
  */
 
 package controller
@@ -34,14 +36,13 @@ import (
 	"time"
 
 	"emperror.dev/errors"
+	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/config"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
-	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/config"
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/pkg/dynamo/consts"
 	"github.com/apparentlymart/go-shquot/shquot"
 	"github.com/ettle/strcase"
 	"github.com/huandu/xstrings"
 	"github.com/mitchellh/hashstructure/v2"
-	"github.com/prometheus/common/version"
 	"github.com/prune998/docker-registry-client/registry"
 	"github.com/rs/xid"
 	"github.com/sergeymakinen/go-quote/unix"
@@ -64,8 +65,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/modelschemas"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemasv1"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemas"
 	yataiclient "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/yatai-client"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 )
@@ -204,17 +204,10 @@ func (r *DynamoNimRequestReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
-	separateModels := isSeparateModels(dynamoNimRequest)
-
-	modelsExists := false
-	var modelsExistsResult ctrl.Result
-	var modelsExistsErr error
-
-	if separateModels {
-		dynamoNimRequest, modelsExists, modelsExistsResult, modelsExistsErr = r.ensureModelsExists(ctx, ensureModelsExistsOption{
-			dynamoNimRequest: dynamoNimRequest,
-			req:              req,
-		})
+	if isSeparateModels(dynamoNimRequest) {
+		err = errors.New("separate models, unsupported feature")
+		logs.Error(err, "unsupported feature")
+		return
 	}
 
 	dynamoNimRequest, imageInfo, imageExists, imageExistsResult, err := r.ensureImageExists(ctx, ensureImageExistsOption{
@@ -243,27 +236,6 @@ func (r *DynamoNimRequestReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return
 	}
 
-	if modelsExistsErr != nil {
-		err = errors.Wrap(modelsExistsErr, "ensure model exists")
-		return
-	}
-
-	if separateModels && !modelsExists {
-		result = modelsExistsResult
-		dynamoNimRequest, err = r.setStatusConditions(ctx, req,
-			metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeDynamoNimAvailable,
-				Status:  metav1.ConditionUnknown,
-				Reason:  "Reconciling",
-				Message: "Model is seeding",
-			},
-		)
-		if err != nil {
-			return
-		}
-		return
-	}
-
 	dynamoNimCR := &nvidiacomv1alpha1.DynamoNim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      dynamoNimRequest.Name,
@@ -276,16 +248,6 @@ func (r *DynamoNimRequestReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			Context:     dynamoNimRequest.Spec.Context,
 			Models:      dynamoNimRequest.Spec.Models,
 		},
-	}
-
-	if separateModels {
-		dynamoNimCR.Annotations = map[string]string{
-			commonconsts.KubeAnnotationYataiImageBuilderSeparateModels: commonconsts.KubeLabelValueTrue,
-		}
-		if isAddNamespacePrefix() { // deprecated
-			dynamoNimCR.Annotations[commonconsts.KubeAnnotationIsMultiTenancy] = commonconsts.KubeLabelValueTrue
-		}
-		dynamoNimCR.Annotations[KubeAnnotationModelStorageNS] = dynamoNimRequest.Annotations[KubeAnnotationModelStorageNS]
 	}
 
 	err = ctrl.SetControllerReference(dynamoNimRequest, dynamoNimCR, r.Scheme)
@@ -303,7 +265,7 @@ func (r *DynamoNimRequestReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	if dynamoNimRequest.Spec.DownloadURL == "" {
-		var dynamoNim *schemasv1.BentoFullSchema
+		var dynamoNim *schemas.DynamoNIM
 		dynamoNim, err = r.getDynamoNim(ctx, dynamoNimRequest)
 		if err != nil {
 			err = errors.Wrap(err, "get dynamoNim")
@@ -657,258 +619,6 @@ func (r *DynamoNimRequestReconciler) ensureImageExists(ctx context.Context, opt 
 	return
 }
 
-type ensureModelsExistsOption struct {
-	dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest
-	req              ctrl.Request
-}
-
-//nolint:gocyclo,nakedret
-func (r *DynamoNimRequestReconciler) ensureModelsExists(ctx context.Context, opt ensureModelsExistsOption) (dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest, modelsExists bool, result ctrl.Result, err error) { // nolint: unparam
-	dynamoNimRequest = opt.dynamoNimRequest
-	modelTags := make([]string, 0)
-	for _, model := range dynamoNimRequest.Spec.Models {
-		modelTags = append(modelTags, model.Tag)
-	}
-
-	modelsExistsCondition := meta.FindStatusCondition(dynamoNimRequest.Status.Conditions, nvidiacomv1alpha1.DynamoNimRequestConditionTypeModelsExists)
-	r.Recorder.Eventf(dynamoNimRequest, corev1.EventTypeNormal, "SeparateModels", "Separate models are enabled")
-	if modelsExistsCondition == nil || modelsExistsCondition.Status == metav1.ConditionUnknown {
-		r.Recorder.Eventf(dynamoNimRequest, corev1.EventTypeNormal, "ModelsExists", "Models are not ready")
-		modelsExistsCondition = &metav1.Condition{
-			Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeModelsExists,
-			Status:  metav1.ConditionFalse,
-			Reason:  "Reconciling",
-			Message: "Models are not ready",
-		}
-		dynamoNimRequest, err = r.setStatusConditions(ctx, opt.req, *modelsExistsCondition)
-		if err != nil {
-			return
-		}
-	}
-
-	modelsExists = modelsExistsCondition != nil && modelsExistsCondition.Status == metav1.ConditionTrue && modelsExistsCondition.Message == fmt.Sprintf("%s:%s", getJuiceFSStorageClassName(), strings.Join(modelTags, ", "))
-	if modelsExists {
-		return
-	}
-
-	modelsMap := make(map[string]*nvidiacomv1alpha1.BentoModel)
-	for _, model := range dynamoNimRequest.Spec.Models {
-		model := model
-		modelsMap[model.Tag] = &model
-	}
-
-	jobLabels := map[string]string{
-		commonconsts.KubeLabelBentoRequest:  dynamoNimRequest.Name,
-		commonconsts.KubeLabelIsModelSeeder: "true",
-	}
-
-	jobs := &batchv1.JobList{}
-	err = r.List(ctx, jobs, client.InNamespace(dynamoNimRequest.Namespace), client.MatchingLabels(jobLabels))
-	if err != nil {
-		err = errors.Wrap(err, "list jobs")
-		return
-	}
-
-	var dynamoNimRequestHashStr string
-	dynamoNimRequestHashStr, err = r.getHashStr(dynamoNimRequest)
-	if err != nil {
-		err = errors.Wrapf(err, "get dynamoNimRequest %s/%s hash string", dynamoNimRequest.Namespace, dynamoNimRequest.Name)
-		return
-	}
-
-	existingJobModelTags := make(map[string]struct{})
-	for _, job_ := range jobs.Items {
-		job_ := job_
-
-		oldHash := job_.Annotations[KubeAnnotationDynamoNimRequestHash]
-		if oldHash != dynamoNimRequestHashStr {
-			r.Recorder.Eventf(dynamoNimRequest, corev1.EventTypeNormal, "DeleteJob", "Because hash changed, delete old job %s, oldHash: %s, newHash: %s", job_.Name, oldHash, dynamoNimRequestHashStr)
-			// --cascade=foreground
-			err = r.Delete(ctx, &job_, &client.DeleteOptions{
-				PropagationPolicy: &[]metav1.DeletionPropagation{metav1.DeletePropagationForeground}[0],
-			})
-			if err != nil {
-				err = errors.Wrapf(err, "delete job %s", job_.Name)
-				return
-			}
-			continue
-		}
-
-		modelTag := fmt.Sprintf("%s:%s", job_.Labels[commonconsts.KubeLabelYataiModelRepository], job_.Labels[commonconsts.KubeLabelYataiModel])
-		_, ok := modelsMap[modelTag]
-
-		if !ok {
-			r.Recorder.Eventf(dynamoNimRequest, corev1.EventTypeNormal, "DeleteJob", "Due to the nonexistence of the model %s, job %s has been deleted.", modelTag, job_.Name)
-			// --cascade=foreground
-			err = r.Delete(ctx, &job_, &client.DeleteOptions{
-				PropagationPolicy: &[]metav1.DeletionPropagation{metav1.DeletePropagationForeground}[0],
-			})
-			if err != nil {
-				err = errors.Wrapf(err, "delete job %s", job_.Name)
-				return
-			}
-		} else {
-			existingJobModelTags[modelTag] = struct{}{}
-		}
-	}
-
-	for _, model := range dynamoNimRequest.Spec.Models {
-		if _, ok := existingJobModelTags[model.Tag]; ok {
-			continue
-		}
-		model := model
-		pvc := &corev1.PersistentVolumeClaim{}
-		pvcName := r.getModelPVCName(dynamoNimRequest, &model)
-		err = r.Get(ctx, client.ObjectKey{
-			Namespace: dynamoNimRequest.Namespace,
-			Name:      pvcName,
-		}, pvc)
-		isPVCNotFound := k8serrors.IsNotFound(err)
-		if err != nil && !isPVCNotFound {
-			err = errors.Wrapf(err, "get PVC %s/%s", dynamoNimRequest.Namespace, pvcName)
-			return
-		}
-		if isPVCNotFound {
-			pvc = r.generateModelPVC(GenerateModelPVCOption{
-				DynamoNimRequest: dynamoNimRequest,
-				Model:            &model,
-			})
-			err = r.Create(ctx, pvc)
-			isPVCAlreadyExists := k8serrors.IsAlreadyExists(err)
-			if err != nil && !isPVCAlreadyExists {
-				err = errors.Wrapf(err, "create model %s/%s pvc", dynamoNimRequest.Namespace, model.Tag)
-				return
-			}
-		}
-		var job *batchv1.Job
-		job, err = r.generateModelSeederJob(ctx, GenerateModelSeederJobOption{
-			DynamoNimRequest: dynamoNimRequest,
-			Model:            &model,
-		})
-		if err != nil {
-			err = errors.Wrap(err, "generate model seeder job")
-			return
-		}
-		oldJob := &batchv1.Job{}
-		err = r.Get(ctx, client.ObjectKeyFromObject(job), oldJob)
-		oldJobIsNotFound := k8serrors.IsNotFound(err)
-		if err != nil && !oldJobIsNotFound {
-			err = errors.Wrap(err, "get job")
-			return
-		}
-		if oldJobIsNotFound {
-			err = r.Create(ctx, job)
-			if err != nil {
-				err = errors.Wrap(err, "create job")
-				return
-			}
-			r.Recorder.Eventf(dynamoNimRequest, corev1.EventTypeNormal, "CreateJob", "Job %s has been created.", job.Name)
-		} else if !reflect.DeepEqual(job.Labels, oldJob.Labels) || !reflect.DeepEqual(job.Annotations, oldJob.Annotations) {
-			job.Labels = oldJob.Labels
-			job.Annotations = oldJob.Annotations
-			err = r.Update(ctx, job)
-			if err != nil {
-				err = errors.Wrap(err, "update job")
-				return
-			}
-			r.Recorder.Eventf(dynamoNimRequest, corev1.EventTypeNormal, "UpdateJob", "Job %s has been updated.", job.Name)
-		}
-	}
-
-	jobs = &batchv1.JobList{}
-	err = r.List(ctx, jobs, client.InNamespace(dynamoNimRequest.Namespace), client.MatchingLabels(jobLabels))
-	if err != nil {
-		err = errors.Wrap(err, "list jobs")
-		return
-	}
-
-	succeedModelTags := make(map[string]struct{})
-	failedJobNames := make([]string, 0)
-	notReadyJobNames := make([]string, 0)
-	for _, job_ := range jobs.Items {
-		if job_.Spec.Completions != nil && job_.Status.Succeeded == *job_.Spec.Completions {
-			modelTag := fmt.Sprintf("%s:%s", job_.Labels[commonconsts.KubeLabelYataiModelRepository], job_.Labels[commonconsts.KubeLabelYataiModel])
-			succeedModelTags[modelTag] = struct{}{}
-			continue
-		}
-		if job_.Status.Failed > 0 {
-			for _, condition := range job_.Status.Conditions {
-				if condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue {
-					failedJobNames = append(failedJobNames, job_.Name)
-					continue
-				}
-			}
-		}
-		notReadyJobNames = append(notReadyJobNames, job_.Name)
-	}
-
-	if len(failedJobNames) > 0 {
-		msg := fmt.Sprintf("Model seeder jobs failed: %s", strings.Join(failedJobNames, ", "))
-		r.Recorder.Event(dynamoNimRequest, corev1.EventTypeNormal, "ModelsExists", msg)
-		dynamoNimRequest, err = r.setStatusConditions(ctx, opt.req,
-			metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeModelsExists,
-				Status:  metav1.ConditionFalse,
-				Reason:  "Reconciling",
-				Message: msg,
-			},
-			metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeDynamoNimAvailable,
-				Status:  metav1.ConditionFalse,
-				Reason:  "Reconciling",
-				Message: msg,
-			},
-		)
-		if err != nil {
-			return
-		}
-		err = errors.New(msg)
-		return
-	}
-
-	modelsExists = true
-
-	for _, model := range dynamoNimRequest.Spec.Models {
-		if _, ok := succeedModelTags[model.Tag]; !ok {
-			modelsExists = false
-			break
-		}
-	}
-
-	if modelsExists {
-		dynamoNimRequest, err = r.setStatusConditions(ctx, opt.req,
-			metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeModelsExists,
-				Status:  metav1.ConditionTrue,
-				Reason:  "Reconciling",
-				Message: fmt.Sprintf("%s:%s", getJuiceFSStorageClassName(), strings.Join(modelTags, ", ")),
-			},
-			metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeModelsSeeding,
-				Status:  metav1.ConditionFalse,
-				Reason:  "Reconciling",
-				Message: "All models have been seeded.",
-			},
-		)
-		if err != nil {
-			return
-		}
-	} else {
-		dynamoNimRequest, err = r.setStatusConditions(ctx, opt.req,
-			metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoNimRequestConditionTypeModelsSeeding,
-				Status:  metav1.ConditionTrue,
-				Reason:  "Reconciling",
-				Message: fmt.Sprintf("Model seeder jobs are not ready: %s.", strings.Join(notReadyJobNames, ", ")),
-			},
-		)
-		if err != nil {
-			return
-		}
-	}
-	return
-}
-
 func (r *DynamoNimRequestReconciler) setStatusConditions(ctx context.Context, req ctrl.Request, conditions ...metav1.Condition) (dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest, err error) {
 	dynamoNimRequest = &nvidiacomv1alpha1.DynamoNimRequest{}
 	/*
@@ -1041,14 +751,7 @@ func (r *DynamoNimRequestReconciler) makeSureDockerConfigJSONSecret(ctx context.
 
 //nolint:nakedret
 func (r *DynamoNimRequestReconciler) getYataiClient(ctx context.Context) (yataiClient **yataiclient.YataiClient, yataiConf **commonconfig.YataiConfig, err error) {
-	yataiConf_, err := commonconfig.GetYataiConfig(ctx, func(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
-		secret := &corev1.Secret{}
-		err := r.Get(ctx, types.NamespacedName{
-			Namespace: namespace,
-			Name:      name,
-		}, secret)
-		return secret, errors.Wrap(err, "get secret")
-	}, commonconsts.YataiImageBuilderComponentName, false)
+	yataiConf_, err := commonconfig.GetYataiConfig(ctx)
 	isNotFound := k8serrors.IsNotFound(err)
 	if err != nil && !isNotFound {
 		err = errors.Wrap(err, "get yatai config")
@@ -1100,7 +803,7 @@ func (r *DynamoNimRequestReconciler) getYataiClientWithAuth(ctx context.Context,
 }
 
 //nolint:nakedret
-func (r *DynamoNimRequestReconciler) getDockerRegistry(ctx context.Context, dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest) (dockerRegistry modelschemas.DockerRegistrySchema, err error) {
+func (r *DynamoNimRequestReconciler) getDockerRegistry(ctx context.Context, dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest) (dockerRegistry schemas.DockerRegistrySchema, err error) {
 	if dynamoNimRequest != nil && dynamoNimRequest.Spec.DockerConfigJSONSecretName != "" {
 		secret := &corev1.Secret{}
 		err = r.Get(ctx, types.NamespacedName{
@@ -1172,14 +875,7 @@ func (r *DynamoNimRequestReconciler) getDockerRegistry(ctx context.Context, dyna
 		return
 	}
 
-	dockerRegistryConfig, err := commonconfig.GetDockerRegistryConfig(ctx, func(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
-		secret := &corev1.Secret{}
-		err := r.Get(ctx, types.NamespacedName{
-			Namespace: namespace,
-			Name:      name,
-		}, secret)
-		return secret, errors.Wrap(err, "get secret")
-	})
+	dockerRegistryConfig, err := commonconfig.GetDockerRegistryConfig()
 	if err != nil {
 		err = errors.Wrap(err, "get docker registry")
 		return
@@ -1209,7 +905,7 @@ func (r *DynamoNimRequestReconciler) getDockerRegistry(ctx context.Context, dyna
 			modelRepositoryInClusterURI = fmt.Sprintf("docker.io/%s", modelRepositoryName)
 		}
 	}
-	dockerRegistry = modelschemas.DockerRegistrySchema{
+	dockerRegistry = schemas.DockerRegistrySchema{
 		Server:                       dockerRegistryConfig.Server,
 		Username:                     dockerRegistryConfig.Username,
 		Password:                     dockerRegistryConfig.Password,
@@ -1241,21 +937,7 @@ func getDynamoNimImagePrefix(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimReques
 	return ""
 }
 
-func getModelNamespace(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest) string {
-	if dynamoNimRequest == nil {
-		return ""
-	}
-	prefix := dynamoNimRequest.Annotations[KubeAnnotationModelStorageNS]
-	if prefix != "" {
-		return prefix
-	}
-	if isAddNamespacePrefix() {
-		return dynamoNimRequest.Namespace
-	}
-	return ""
-}
-
-func getDynamoNimImageName(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest, dockerRegistry modelschemas.DockerRegistrySchema, dynamoNimRepositoryName, dynamoNimVersion string, inCluster bool) string {
+func getDynamoNimImageName(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest, dockerRegistry schemas.DockerRegistrySchema, dynamoNimRepositoryName, dynamoNimVersion string, inCluster bool) string {
 	if dynamoNimRequest != nil && dynamoNimRequest.Spec.Image != "" {
 		return dynamoNimRequest.Spec.Image
 	}
@@ -1290,7 +972,7 @@ func isSeparateModels(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest) (sep
 	return dynamoNimRequest.Annotations[commonconsts.KubeAnnotationYataiImageBuilderSeparateModels] == commonconsts.KubeLabelValueTrue
 }
 
-func checkImageExists(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest, dockerRegistry modelschemas.DockerRegistrySchema, imageName string) (bool, error) {
+func checkImageExists(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest, dockerRegistry schemas.DockerRegistrySchema, imageName string) (bool, error) {
 	if dynamoNimRequest.Annotations["yatai.ai/force-build-image"] == commonconsts.KubeLabelValueTrue {
 		return false, nil
 	}
@@ -1328,7 +1010,7 @@ func checkImageExists(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest, dock
 }
 
 type ImageInfo struct {
-	DockerRegistry             modelschemas.DockerRegistrySchema
+	DockerRegistry             schemas.DockerRegistrySchema
 	DockerConfigJSONSecretName string
 	ImageName                  string
 	InClusterImageName         string
@@ -1360,11 +1042,7 @@ func (r *DynamoNimRequestReconciler) getImageInfo(ctx context.Context, opt GetIm
 
 	if imageInfo.DockerConfigJSONSecretName == "" {
 		var dockerRegistryConf *commonconfig.DockerRegistryConfig
-		dockerRegistryConf, err = commonconfig.GetDockerRegistryConfig(ctx, func(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
-			secret := &corev1.Secret{}
-			err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, secret)
-			return secret, errors.Wrap(err, "get docker registry secret")
-		})
+		dockerRegistryConf, err = commonconfig.GetDockerRegistryConfig()
 		if err != nil {
 			err = errors.Wrap(err, "get docker registry")
 			return
@@ -1385,7 +1063,7 @@ func (r *DynamoNimRequestReconciler) getImageInfo(ctx context.Context, opt GetIm
 	return
 }
 
-func (r *DynamoNimRequestReconciler) getDynamoNim(ctx context.Context, dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest) (dynamoNim *schemasv1.BentoFullSchema, err error) {
+func (r *DynamoNimRequestReconciler) getDynamoNim(ctx context.Context, dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest) (dynamoNim *schemas.DynamoNIM, err error) {
 	dynamoNimRepositoryName, _, dynamoNimVersion := xstrings.Partition(dynamoNimRequest.Spec.BentoTag, ":")
 
 	yataiClient_, _, err := r.getYataiClient(ctx)
@@ -1414,38 +1092,6 @@ func (r *DynamoNimRequestReconciler) getDynamoNim(ctx context.Context, dynamoNim
 func (r *DynamoNimRequestReconciler) getImageBuilderJobName() string {
 	guid := xid.New()
 	return fmt.Sprintf("yatai-dynamonim-image-builder-%s", guid.String())
-}
-
-func (r *DynamoNimRequestReconciler) getModelSeederJobName() string {
-	guid := xid.New()
-	return fmt.Sprintf("yatai-model-seeder-%s", guid.String())
-}
-
-func (r *DynamoNimRequestReconciler) getModelSeederJobLabels(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest, model *nvidiacomv1alpha1.BentoModel) map[string]string {
-	dynamoNimRepositoryName, _, dynamoNimVersion := xstrings.Partition(dynamoNimRequest.Spec.BentoTag, ":")
-	modelRepositoryName, _, modelVersion := xstrings.Partition(model.Tag, ":")
-	return map[string]string{
-		commonconsts.KubeLabelBentoRequest:         dynamoNimRequest.Name,
-		commonconsts.KubeLabelIsModelSeeder:        "true",
-		commonconsts.KubeLabelYataiModelRepository: modelRepositoryName,
-		commonconsts.KubeLabelYataiModel:           modelVersion,
-		commonconsts.KubeLabelYataiBentoRepository: dynamoNimRepositoryName,
-		commonconsts.KubeLabelYataiBento:           dynamoNimVersion,
-	}
-}
-
-func (r *DynamoNimRequestReconciler) getModelSeederPodLabels(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest, model *nvidiacomv1alpha1.BentoModel) map[string]string {
-	dynamoNimRepositoryName, _, dynamoNimVersion := xstrings.Partition(dynamoNimRequest.Spec.BentoTag, ":")
-	modelRepositoryName, _, modelVersion := xstrings.Partition(model.Tag, ":")
-	return map[string]string{
-		commonconsts.KubeLabelBentoRequest:         dynamoNimRequest.Name,
-		commonconsts.KubeLabelIsModelSeeder:        "true",
-		commonconsts.KubeLabelIsBentoImageBuilder:  "true",
-		commonconsts.KubeLabelYataiModelRepository: modelRepositoryName,
-		commonconsts.KubeLabelYataiModel:           modelVersion,
-		commonconsts.KubeLabelYataiBentoRepository: dynamoNimRepositoryName,
-		commonconsts.KubeLabelYataiBento:           dynamoNimVersion,
-	}
 }
 
 func (r *DynamoNimRequestReconciler) getImageBuilderJobLabels(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest) map[string]string {
@@ -1480,402 +1126,6 @@ func hash(text string) string {
 	hasher := md5.New()
 	hasher.Write([]byte(text))
 	return hex.EncodeToString(hasher.Sum(nil))
-}
-
-func (r *DynamoNimRequestReconciler) getModelPVCName(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest, model *nvidiacomv1alpha1.BentoModel) string {
-	storageClassName := getJuiceFSStorageClassName()
-	var hashStr string
-	ns := getModelNamespace(dynamoNimRequest)
-	if ns == "" {
-		hashStr = hash(fmt.Sprintf("%s:%s", storageClassName, model.Tag))
-	} else {
-		hashStr = hash(fmt.Sprintf("%s:%s:%s", storageClassName, ns, model.Tag))
-	}
-	pvcName := fmt.Sprintf("model-seeder-%s", hashStr)
-	if len(pvcName) > 63 {
-		pvcName = pvcName[:63]
-	}
-	return pvcName
-}
-
-func (r *DynamoNimRequestReconciler) getJuiceFSModelPath(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest, model *nvidiacomv1alpha1.BentoModel) string {
-	modelRepositoryName, _, modelVersion := xstrings.Partition(model.Tag, ":")
-	ns := getModelNamespace(dynamoNimRequest)
-	if isHuggingfaceModel(model) {
-		modelVersion = "all"
-	}
-	var path string
-	if ns == "" {
-		path = fmt.Sprintf("models/.shared/%s/%s", modelRepositoryName, modelVersion)
-	} else {
-		path = fmt.Sprintf("models/%s/%s/%s", ns, modelRepositoryName, modelVersion)
-	}
-	return path
-}
-
-func isHuggingfaceModel(model *nvidiacomv1alpha1.BentoModel) bool {
-	return strings.HasPrefix(model.DownloadURL, "hf://")
-}
-
-type GenerateModelPVCOption struct {
-	DynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest
-	Model            *nvidiacomv1alpha1.BentoModel
-}
-
-//nolint:nakedret
-func (r *DynamoNimRequestReconciler) generateModelPVC(opt GenerateModelPVCOption) (pvc *corev1.PersistentVolumeClaim) {
-	storageSize := resource.MustParse("100Gi")
-	if opt.Model.Size != nil {
-		storageSize = *opt.Model.Size
-		minStorageSize := resource.MustParse("1Gi")
-		if storageSize.Value() < minStorageSize.Value() {
-			storageSize = minStorageSize
-		}
-		storageSize.Set(storageSize.Value() * 2)
-	}
-	path := r.getJuiceFSModelPath(opt.DynamoNimRequest, opt.Model)
-	pvcName := r.getModelPVCName(opt.DynamoNimRequest, opt.Model)
-	pvc = &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      pvcName,
-			Namespace: opt.DynamoNimRequest.Namespace,
-			Annotations: map[string]string{
-				"path": path,
-			},
-		},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
-			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceStorage: storageSize,
-				},
-			},
-			StorageClassName: ptr.To(getJuiceFSStorageClassName()),
-		},
-	}
-	return
-}
-
-type GenerateModelSeederJobOption struct {
-	DynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest
-	Model            *nvidiacomv1alpha1.BentoModel
-}
-
-//nolint:nakedret
-func (r *DynamoNimRequestReconciler) generateModelSeederJob(ctx context.Context, opt GenerateModelSeederJobOption) (job *batchv1.Job, err error) {
-	// nolint: gosimple
-	podTemplateSpec, err := r.generateModelSeederPodTemplateSpec(ctx, GenerateModelSeederPodTemplateSpecOption(opt))
-	if err != nil {
-		err = errors.Wrap(err, "generate model seeder pod template spec")
-		return
-	}
-	kubeAnnotations := make(map[string]string)
-	hashStr, err := r.getHashStr(opt.DynamoNimRequest)
-	if err != nil {
-		err = errors.Wrap(err, "failed to get hash string")
-		return
-	}
-	kubeAnnotations[KubeAnnotationDynamoNimRequestHash] = hashStr
-	job = &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        r.getModelSeederJobName(),
-			Namespace:   opt.DynamoNimRequest.Namespace,
-			Labels:      r.getModelSeederJobLabels(opt.DynamoNimRequest, opt.Model),
-			Annotations: kubeAnnotations,
-		},
-		Spec: batchv1.JobSpec{
-			Completions: ptr.To(int32(1)),
-			Parallelism: ptr.To(int32(1)),
-			PodFailurePolicy: &batchv1.PodFailurePolicy{
-				Rules: []batchv1.PodFailurePolicyRule{
-					{
-						Action: batchv1.PodFailurePolicyActionFailJob,
-						OnExitCodes: &batchv1.PodFailurePolicyOnExitCodesRequirement{
-							ContainerName: ptr.To(ModelSeederContainerName),
-							Operator:      batchv1.PodFailurePolicyOnExitCodesOpIn,
-							Values:        []int32{ModelSeederJobFailedExitCode},
-						},
-					},
-				},
-			},
-			Template: *podTemplateSpec,
-		},
-	}
-	err = ctrl.SetControllerReference(opt.DynamoNimRequest, job, r.Scheme)
-	if err != nil {
-		err = errors.Wrapf(err, "set controller reference for job %s", job.Name)
-		return
-	}
-	return
-}
-
-type GenerateModelSeederPodTemplateSpecOption struct {
-	DynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest
-	Model            *nvidiacomv1alpha1.BentoModel
-}
-
-//nolint:nakedret
-func (r *DynamoNimRequestReconciler) generateModelSeederPodTemplateSpec(ctx context.Context, opt GenerateModelSeederPodTemplateSpecOption) (pod *corev1.PodTemplateSpec, err error) {
-	kubeLabels := r.getModelSeederPodLabels(opt.DynamoNimRequest, opt.Model)
-
-	volumes := make([]corev1.Volume, 0)
-
-	volumeMounts := make([]corev1.VolumeMount, 0)
-
-	yataiAPITokenSecretName := ""
-
-	internalImages := commonconfig.GetInternalImages()
-	logrus.Infof("Model seeder is using the images %v", *internalImages)
-
-	downloaderContainerResources := corev1.ResourceRequirements{
-		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("1000m"),
-			corev1.ResourceMemory: resource.MustParse("3000Mi"),
-		},
-		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("100m"),
-			corev1.ResourceMemory: resource.MustParse("1000Mi"),
-		},
-	}
-
-	downloaderContainerEnvFrom := opt.DynamoNimRequest.Spec.DownloaderContainerEnvFrom
-
-	if yataiAPITokenSecretName != "" {
-		downloaderContainerEnvFrom = append(downloaderContainerEnvFrom, corev1.EnvFromSource{
-			SecretRef: &corev1.SecretEnvSource{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: yataiAPITokenSecretName,
-				},
-			},
-		})
-	}
-
-	containers := make([]corev1.Container, 0)
-
-	model := opt.Model
-	modelRepositoryName, _, modelVersion := xstrings.Partition(model.Tag, ":")
-	modelDownloadURL := model.DownloadURL
-	modelDownloadHeader := ""
-	if modelDownloadURL == "" {
-		var yataiClient_ **yataiclient.YataiClient
-		var yataiConf_ **commonconfig.YataiConfig
-
-		yataiClient_, yataiConf_, err = r.getYataiClient(ctx)
-		if err != nil {
-			err = errors.Wrap(err, "get yatai client")
-			return
-		}
-
-		if yataiClient_ == nil || yataiConf_ == nil {
-			err = errors.New("can't get yatai client, please check yatai configuration")
-			return
-		}
-
-		yataiClient := *yataiClient_
-		yataiConf := *yataiConf_
-
-		var model_ *schemasv1.ModelFullSchema
-		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting model %s from yatai service", model.Tag)
-		model_, err = yataiClient.GetModel(ctx, modelRepositoryName, modelVersion)
-		if err != nil {
-			err = errors.Wrap(err, "get model")
-			return
-		}
-		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Model %s is got from yatai service", model.Tag)
-
-		if model_.TransmissionStrategy != nil && *model_.TransmissionStrategy == modelschemas.TransmissionStrategyPresignedURL {
-			var model0 *schemasv1.ModelSchema
-			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for model %s from yatai service", model.Tag)
-			model0, err = yataiClient.PresignModelDownloadURL(ctx, modelRepositoryName, modelVersion)
-			if err != nil {
-				err = errors.Wrap(err, "presign model download url")
-				return
-			}
-			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Presigned url for model %s is got from yatai service", model.Tag)
-			modelDownloadURL = model0.PresignedDownloadUrl
-		} else {
-			modelDownloadURL = fmt.Sprintf("%s/api/v1/model_repositories/%s/models/%s/download", yataiConf.Endpoint, modelRepositoryName, modelVersion)
-			modelDownloadHeader = fmt.Sprintf("%s: %s:%s:$%s", commonconsts.YataiApiTokenHeaderName, commonconsts.YataiImageBuilderComponentName, yataiConf.ClusterName, commonconsts.EnvYataiApiToken)
-		}
-	}
-
-	modelDirPath := "/juicefs-workspace"
-	var modelSeedCommandOutput bytes.Buffer
-	err = template.Must(template.New("script").Parse(`
-set -e
-
-mkdir -p {{.ModelDirPath}}
-url="{{.ModelDownloadURL}}"
-
-if [[ ${url} == hf://* ]]; then
-	if [ -f "{{.ModelDirPath}}/{{.ModelVersion}}.exists" ]; then
-		echo "Model {{.ModelDirPath}}/{{.ModelVersion}}.exists already exists, skip downloading"
-		exit 0
-	fi
-else
-	if [ -f "{{.ModelDirPath}}/.exists" ]; then
-		echo "Model {{.ModelDirPath}} already exists, skip downloading"
-		exit 0
-	fi
-fi
-
-cleanup() {
-	echo "Cleaning up..."
-	rm -rf /tmp/model
-	rm -f /tmp/downloaded.tar
-}
-
-trap cleanup EXIT
-
-if [[ ${url} == hf://* ]]; then
-	mkdir -p /tmp/model
-	hf_url="${url:5}"
-	model_id=$(echo "$hf_url" | awk -F '@' '{print $1}')
-	revision=$(echo "$hf_url" | awk -F '@' '{print $2}')
-	endpoint=$(echo "$hf_url" | awk -F '@' '{print $3}')
-	export HF_ENDPOINT=${endpoint}
-
-	echo "Downloading model ${model_id} (endpoint=${endpoint}, revision=${revision}) from Huggingface..."
-	huggingface-cli download ${model_id} --revision ${revision} --cache-dir {{.ModelDirPath}}
-else
-	echo "Downloading model {{.ModelRepositoryName}}:{{.ModelVersion}} to /tmp/downloaded.tar..."
-	if [[ ${url} == s3://* ]]; then
-		echo "Downloading from s3..."
-		aws s3 cp ${url} /tmp/downloaded.tar
-	elif [[ ${url} == gs://* ]]; then
-		echo "Downloading from GCS..."
-		gsutil cp ${url} /tmp/downloaded.tar
-	else
-		curl --fail -L -H "{{.ModelDownloadHeader}}" ${url} --output /tmp/downloaded.tar --progress-bar
-	fi
-	cd {{.ModelDirPath}}
-	echo "Extracting model tar file..."
-	tar -xvf /tmp/downloaded.tar
-fi
-
-if [[ ${url} == hf://* ]]; then
-	echo "Creating {{.ModelDirPath}}/{{.ModelVersion}}.exists file..."
-	touch {{.ModelDirPath}}/{{.ModelVersion}}.exists
-else
-	echo "Creating {{.ModelDirPath}}/.exists file..."
-	touch {{.ModelDirPath}}/.exists
-fi
-
-echo "Done"
-`)).Execute(&modelSeedCommandOutput, map[string]interface{}{
-		"ModelDirPath":        modelDirPath,
-		"ModelDownloadURL":    modelDownloadURL,
-		"ModelDownloadHeader": modelDownloadHeader,
-		"ModelRepositoryName": modelRepositoryName,
-		"ModelVersion":        modelVersion,
-		"HuggingfaceModelDir": fmt.Sprintf("models--%s", strings.ReplaceAll(modelRepositoryName, "/", "--")),
-	})
-	if err != nil {
-		err = errors.Wrap(err, "failed to generate download command")
-		return
-	}
-	modelSeedCommand := modelSeedCommandOutput.String()
-	pvcName := r.getModelPVCName(opt.DynamoNimRequest, model)
-	volumes = append(volumes, corev1.Volume{
-		Name: pvcName,
-		VolumeSource: corev1.VolumeSource{
-			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-				ClaimName: pvcName,
-			},
-		},
-	})
-	containers = append(containers, corev1.Container{
-		Name:  ModelSeederContainerName,
-		Image: internalImages.BentoDownloader,
-		Command: []string{
-			"bash",
-			"-c",
-			modelSeedCommand,
-		},
-		VolumeMounts: append(volumeMounts, corev1.VolumeMount{
-			Name:      pvcName,
-			MountPath: modelDirPath,
-		}),
-		Resources: downloaderContainerResources,
-		EnvFrom:   downloaderContainerEnvFrom,
-		Env: []corev1.EnvVar{
-			{
-				Name:  "AWS_EC2_METADATA_DISABLED",
-				Value: "true",
-			},
-		},
-	})
-
-	kubeAnnotations := make(map[string]string)
-	kubeAnnotations[KubeAnnotationDynamoNimRequestModelSeederHash] = opt.DynamoNimRequest.Annotations[KubeAnnotationDynamoNimRequestModelSeederHash]
-
-	pod = &corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{
-			Labels:      kubeLabels,
-			Annotations: kubeAnnotations,
-		},
-		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
-			Volumes:       volumes,
-			Containers:    containers,
-		},
-	}
-
-	var globalExtraPodSpec *dynamoCommon.ExtraPodSpec
-
-	configNamespace, err := commonconfig.GetYataiImageBuilderNamespace(ctx, func(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
-		secret := &corev1.Secret{}
-		err := r.Get(ctx, types.NamespacedName{
-			Namespace: namespace,
-			Name:      name,
-		}, secret)
-		return secret, errors.Wrap(err, "get secret")
-	})
-	if err != nil {
-		err = errors.Wrap(err, "failed to get Yatai image builder namespace")
-		return
-	}
-
-	configCmName := "yatai-image-builder-config"
-	r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateModelSeederPod", "Getting configmap %s from namespace %s", configCmName, configNamespace)
-	configCm := &corev1.ConfigMap{}
-	err = r.Get(ctx, types.NamespacedName{Name: configCmName, Namespace: configNamespace}, configCm)
-	configCmIsNotFound := k8serrors.IsNotFound(err)
-	if err != nil && !configCmIsNotFound {
-		err = errors.Wrap(err, "failed to get configmap")
-		return
-	}
-	err = nil
-
-	if !configCmIsNotFound {
-		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateModelSeederPod", "Configmap %s is got from namespace %s", configCmName, configNamespace)
-
-		globalExtraPodSpec = &dynamoCommon.ExtraPodSpec{}
-
-		if val, ok := configCm.Data["extra_pod_spec"]; ok {
-			err = yaml.Unmarshal([]byte(val), globalExtraPodSpec)
-			if err != nil {
-				err = errors.Wrapf(err, "failed to yaml unmarshal extra_pod_spec, please check the configmap %s in namespace %s", configCmName, configNamespace)
-				return
-			}
-		}
-	} else {
-		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateModelSeederPod", "Configmap %s is not found in namespace %s", configCmName, configNamespace)
-	}
-
-	if globalExtraPodSpec != nil {
-		pod.Spec.PriorityClassName = globalExtraPodSpec.PriorityClassName
-		pod.Spec.SchedulerName = globalExtraPodSpec.SchedulerName
-		pod.Spec.NodeSelector = globalExtraPodSpec.NodeSelector
-		pod.Spec.Affinity = globalExtraPodSpec.Affinity
-		pod.Spec.Tolerations = globalExtraPodSpec.Tolerations
-		pod.Spec.TopologySpreadConstraints = globalExtraPodSpec.TopologySpreadConstraints
-		pod.Spec.ServiceAccountName = globalExtraPodSpec.ServiceAccountName
-	}
-
-	injectPodAffinity(&pod.Spec, opt.DynamoNimRequest)
-
-	return
 }
 
 type GenerateImageBuilderJobOption struct {
@@ -2022,7 +1272,7 @@ func (r *DynamoNimRequestReconciler) generateImageBuilderPodTemplateSpec(ctx con
 		})
 	}
 
-	var dynamoNim *schemasv1.BentoFullSchema
+	var dynamoNim *schemas.DynamoNIM
 	yataiAPITokenSecretName := ""
 	dynamoNimDownloadURL := opt.DynamoNimRequest.Spec.DownloadURL
 	dynamoNimDownloadHeader := ""
@@ -2053,8 +1303,8 @@ func (r *DynamoNimRequestReconciler) generateImageBuilderPodTemplateSpec(ctx con
 		}
 		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got dynamoNim %s from yatai service", opt.DynamoNimRequest.Spec.BentoTag)
 
-		if dynamoNim.TransmissionStrategy != nil && *dynamoNim.TransmissionStrategy == modelschemas.TransmissionStrategyPresignedURL {
-			var dynamoNim_ *schemasv1.BentoSchema
+		if dynamoNim.TransmissionStrategy != nil && *dynamoNim.TransmissionStrategy == schemas.TransmissionStrategyPresignedURL {
+			var dynamoNim_ *schemas.DynamoNIM
 			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for dynamoNim %s from yatai service", opt.DynamoNimRequest.Spec.BentoTag)
 			dynamoNim_, err = yataiClient.PresignBentoDownloadURL(ctx, dynamoNimRepositoryName, dynamoNimVersion)
 			if err != nil {
@@ -2210,8 +1460,6 @@ echo "Done"
 
 	containers := make([]corev1.Container, 0)
 
-	separateModels := isSeparateModels(opt.DynamoNimRequest)
-
 	models := opt.DynamoNimRequest.Spec.Models
 	modelsSeen := map[string]struct{}{}
 	for _, model := range models {
@@ -2228,123 +1476,6 @@ echo "Done"
 		}
 	}
 
-	for idx, model := range models {
-		if separateModels {
-			continue
-		}
-		modelRepositoryName, _, modelVersion := xstrings.Partition(model.Tag, ":")
-		modelDownloadURL := model.DownloadURL
-		modelDownloadHeader := ""
-		if modelDownloadURL == "" {
-			if dynamoNim == nil {
-				continue
-			}
-
-			var yataiClient_ **yataiclient.YataiClient
-			var yataiConf_ **commonconfig.YataiConfig
-
-			yataiClient_, yataiConf_, err = r.getYataiClientWithAuth(ctx, opt.DynamoNimRequest)
-
-			if err != nil {
-				err = errors.Wrap(err, "get yatai client")
-				return
-			}
-
-			if yataiClient_ == nil || yataiConf_ == nil {
-				err = errors.New("can't get yatai client, please check yatai configuration")
-				return
-			}
-
-			yataiClient := *yataiClient_
-			yataiConf := *yataiConf_
-
-			var model_ *schemasv1.ModelFullSchema
-			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting model %s from yatai service", model.Tag)
-			model_, err = yataiClient.GetModel(ctx, modelRepositoryName, modelVersion)
-			if err != nil {
-				err = errors.Wrap(err, "get model")
-				return
-			}
-			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Model %s is got from yatai service", model.Tag)
-
-			if model_.TransmissionStrategy != nil && *model_.TransmissionStrategy == modelschemas.TransmissionStrategyPresignedURL {
-				var model0 *schemasv1.ModelSchema
-				r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for model %s from yatai service", model.Tag)
-				model0, err = yataiClient.PresignModelDownloadURL(ctx, modelRepositoryName, modelVersion)
-				if err != nil {
-					err = errors.Wrap(err, "presign model download url")
-					return
-				}
-				r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Presigned url for model %s is got from yatai service", model.Tag)
-				modelDownloadURL = model0.PresignedDownloadUrl
-			} else {
-				modelDownloadURL = fmt.Sprintf("%s/api/v1/model_repositories/%s/models/%s/download", yataiConf.Endpoint, modelRepositoryName, modelVersion)
-				modelDownloadHeader = fmt.Sprintf("%s: %s:%s:$%s", commonconsts.YataiApiTokenHeaderName, commonconsts.YataiImageBuilderComponentName, yataiConf.ClusterName, commonconsts.EnvYataiApiToken)
-			}
-		}
-		modelRepositoryDirPath := fmt.Sprintf("/workspace/buildcontext/models/%s", modelRepositoryName)
-		modelDirPath := filepath.Join(modelRepositoryDirPath, modelVersion)
-		var modelDownloadCommandOutput bytes.Buffer
-		err = template.Must(template.New("script").Parse(`
-set -e
-
-mkdir -p {{.ModelDirPath}}
-url="{{.ModelDownloadURL}}"
-echo "Downloading model {{.ModelRepositoryName}}:{{.ModelVersion}} to /tmp/downloaded.tar..."
-if [[ ${url} == s3://* ]]; then
-	echo "Downloading from s3..."
-	aws s3 cp ${url} /tmp/downloaded.tar
-elif [[ ${url} == gs://* ]]; then
-	echo "Downloading from GCS..."
-	gsutil cp ${url} /tmp/downloaded.tar
-else
-	curl --fail -L -H "{{.ModelDownloadHeader}}" ${url} --output /tmp/downloaded.tar --progress-bar
-fi
-cd {{.ModelDirPath}}
-echo "Extracting model tar file..."
-tar -xvf /tmp/downloaded.tar
-echo -n '{{.ModelVersion}}' > {{.ModelRepositoryDirPath}}/latest
-echo "Removing model tar file..."
-rm /tmp/downloaded.tar
-{{if not .Privileged}}
-echo "Changing directory permission..."
-chown -R 1000:1000 /workspace
-{{end}}
-echo "Done"
-`)).Execute(&modelDownloadCommandOutput, map[string]interface{}{
-			"ModelDirPath":           modelDirPath,
-			"ModelDownloadURL":       modelDownloadURL,
-			"ModelDownloadHeader":    modelDownloadHeader,
-			"ModelRepositoryDirPath": modelRepositoryDirPath,
-			"ModelRepositoryName":    modelRepositoryName,
-			"ModelVersion":           modelVersion,
-			"Privileged":             privileged,
-		})
-		if err != nil {
-			err = errors.Wrap(err, "failed to generate download command")
-			return
-		}
-		modelDownloadCommand := modelDownloadCommandOutput.String()
-		initContainers = append(initContainers, corev1.Container{
-			Name:  fmt.Sprintf("model-downloader-%d", idx),
-			Image: internalImages.BentoDownloader,
-			Command: []string{
-				"bash",
-				"-c",
-				modelDownloadCommand,
-			},
-			VolumeMounts: volumeMounts,
-			Resources:    downloaderContainerResources,
-			EnvFrom:      downloaderContainerEnvFrom,
-			Env: []corev1.EnvVar{
-				{
-					Name:  "AWS_EC2_METADATA_DISABLED",
-					Value: "true",
-				},
-			},
-		})
-	}
-
 	var globalExtraPodMetadata *dynamoCommon.ExtraPodMetadata
 	var globalExtraPodSpec *dynamoCommon.ExtraPodSpec
 	var globalExtraContainerEnv []corev1.EnvVar
@@ -2352,14 +1483,7 @@ echo "Done"
 	var buildArgs []string
 	var builderArgs []string
 
-	configNamespace, err := commonconfig.GetYataiImageBuilderNamespace(ctx, func(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
-		secret := &corev1.Secret{}
-		err := r.Get(ctx, types.NamespacedName{
-			Namespace: namespace,
-			Name:      name,
-		}, secret)
-		return secret, errors.Wrap(err, "get secret")
-	})
+	configNamespace, err := commonconfig.GetYataiImageBuilderNamespace(ctx)
 	if err != nil {
 		err = errors.Wrap(err, "failed to get Yatai image builder namespace")
 		return
@@ -2824,95 +1948,12 @@ func (r *DynamoNimRequestReconciler) getHashStr(dynamoNimRequest *nvidiacomv1alp
 	return hashStr, nil
 }
 
-func getJuiceFSStorageClassName() string {
-	if v := os.Getenv("JUICEFS_STORAGE_CLASS_NAME"); v != "" {
-		return v
-	}
-	return "juicefs-sc"
-}
-
 const (
 	trueStr = "true"
 )
 
-//nolint:nakedret
-func (r *DynamoNimRequestReconciler) doRegisterDynamoComponent() (err error) {
-	logs := log.Log.WithValues("func", "doRegisterYataiComponent")
-
-	ctx, cancel := context.WithTimeout(context.TODO(), time.Minute*5)
-	defer cancel()
-
-	logs.Info("getting yatai client")
-	yataiClient, yataiConf, err := r.getYataiClient(ctx)
-	if err != nil {
-		err = errors.Wrap(err, "get yatai client")
-		return
-	}
-
-	if yataiClient == nil || yataiConf == nil {
-		logs.Info("can't get yatai client, skip registering")
-		return
-	}
-
-	yataiClient_ := *yataiClient
-	yataiConf_ := *yataiConf
-
-	namespace, err := commonconfig.GetYataiImageBuilderNamespace(ctx, func(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
-		secret := &corev1.Secret{}
-		err := r.Get(ctx, types.NamespacedName{
-			Namespace: namespace,
-			Name:      name,
-		}, secret)
-		return secret, errors.Wrap(err, "get secret")
-	})
-	if err != nil {
-		err = errors.Wrap(err, "get yatai image builder namespace")
-		return
-	}
-
-	_, err = yataiClient_.RegisterYataiComponent(ctx, yataiConf_.ClusterName, &schemasv1.RegisterYataiComponentSchema{
-		Name:          modelschemas.YataiComponentNameImageBuilder,
-		KubeNamespace: namespace,
-		Version:       version.Version,
-		SelectorLabels: map[string]string{
-			"app.kubernetes.io/name": "yatai-image-builder",
-		},
-		Manifest: &modelschemas.YataiComponentManifestSchema{
-			SelectorLabels: map[string]string{
-				"app.kubernetes.io/name": "yatai-image-builder",
-			},
-			LatestCRDVersion: "v1alpha1",
-		},
-	})
-
-	err = errors.Wrap(err, "register yatai component")
-	return err
-}
-
-func (r *DynamoNimRequestReconciler) registerDynamoComponent() {
-	logs := log.Log.WithValues("func", "registerYataiComponent")
-	err := r.doRegisterDynamoComponent()
-	if err != nil {
-		logs.Error(err, "registerYataiComponent")
-	}
-	ticker := time.NewTicker(time.Minute * 5)
-	for range ticker.C {
-		err := r.doRegisterDynamoComponent()
-		if err != nil {
-			logs.Error(err, "registerYataiComponent")
-		}
-	}
-}
-
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoNimRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	logs := log.Log.WithValues("func", "SetupWithManager")
-
-	if os.Getenv("DISABLE_YATAI_COMPONENT_REGISTRATION") != trueStr {
-		go r.registerDynamoComponent()
-	} else {
-		logs.Info("yatai component registration is disabled")
-	}
 
 	err := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1alpha1.DynamoNimRequest{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).

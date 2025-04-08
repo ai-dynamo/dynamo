@@ -1,3 +1,4 @@
+#  SPDX-FileCopyrightText: Copyright (c) 2020 Atalaya Tech. Inc
 #  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 #  #
@@ -12,6 +13,7 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
+#  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
 
 from __future__ import annotations
 
@@ -146,7 +148,7 @@ def build_deploy_command() -> click.Command:
         - a tag to a Bento in local Bento store
         - a path to a built Bento
         """
-        from bentoml._internal.log import configure_server_logging
+        from dynamo.sdk.lib.logging import configure_server_logging
 
         configure_server_logging()
 
