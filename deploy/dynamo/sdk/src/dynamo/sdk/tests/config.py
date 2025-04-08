@@ -15,7 +15,11 @@
 
 import os
 
+import pytest
+
 from dynamo.sdk.lib.config import ServiceConfig
+
+pytestmark = pytest.mark.pre_merge
 
 
 def test_service_config_with_common_configs():
