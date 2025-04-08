@@ -7,13 +7,14 @@
 - [Core Concepts](#core-concepts)
 - [Writing a Service](#writing-a-service)
 - [Configuring a Service](#configuring-a-service)
+- [Deploying a Single Service](#deploying-a-single-service)
 - [Composing Services into an Graph](#composing-services-into-an-graph)
 
 # Introduction
 
-Dynamo is a flexible and performant distributed inferencing solution for large-scale deployments. It is an ecosystem of tools, frameworks, and abstractions that makes the design, customization, and deployment of frontier-level models onto datacenter-scale infrastructure easy to reason about and optimized for your specific inferencing workloads. Dynamo's core is written in Rust and contains a set of well-defined Python bindings. Docs and examples for those can be found [here](../../../../../README.md).
+Dynamo is a flexible and performant distributed inferencing solution for large-scale deployments. It is an ecosystem of tools, frameworks, and abstractions that makes the design, customization, and deployment of frontier-level models onto datacenter-scale infrastructure easy to reason about and optimized for your specific inferencing workloads. Dynamo's core is written in Rust and contains a set of well-defined Python bindings. Docs and examples for those can be found [here](./python_bindings.md).
 
-Dynamo SDK is a layer on top of the core. It is a Python framework that makes it easy to create inference graphs and deploy them locally and onto a target K8s cluster. The SDK was heavily inspired by [BentoML's](https://github.com/bentoml/BentoML) open source deployment patterns and leverages many of its core primitives. The Dynamo CLI is a companion tool that allows you to spin up an inference pipeline locally, containerize it, and deploy it. You can find a toy hello-world example [here](../../README.md).
+Dynamo SDK is a layer on top of the core. It is a Python framework that makes it easy to create inference graphs and deploy them locally and onto a target K8s cluster. The SDK was heavily inspired by [BentoML's](https://github.com/bentoml/BentoML) open source deployment patterns and leverages many of its core primitives. The Dynamo CLI is a companion tool that allows you to spin up an inference pipeline locally, containerize it, and deploy it. You can find a toy hello-world example [here](../../examples/hello_world/README.md).
 
 # Installation
 
@@ -24,7 +25,7 @@ pip install ai-dynamo
 ```
 
 # Core Concepts
-As you read about each concept, it is helpful to have the [basic example](../../README.md) up as well so you can refer back to it.
+As you read about each concept, it is helpful to have the [basic example](../../examples/hello_world/README.md) up as well so you can refer back to it.
 
 ## Defining a Service
 
@@ -89,7 +90,7 @@ class ServiceA:
 Dynamo follows a class-based architecture similar to BentoML making it intuitive for users familiar with those frameworks. Each service is defined as a Python class, with the following components:
 1. Class attributes for dependencies using `depends()`
 2. An `__init__` method for standard initialization
-3. Optional lifecycle hooks like `@async_on_start` and `@async_on_shutdown`
+3. Optional lifecycle hooks like `@async_on_start` 
 4. Endpoints defined with `@dynamo_endpoint()`
 
 This approach provides a clean separation of concerns and makes the service structure easy to understand.
@@ -399,7 +400,10 @@ The service will receive the combined configuration with the command-line value 
 
 Following these practices will help you create flexible and maintainable Dynamo services that can be easily configured for different environments and use cases.
 
-### Composing Services into an Graph
+## Deploying a Single Service
+You can deploy a single service for local development even if you have a dependancy graph defined using `depends()` using `dynamo serve --service-name <ClassName> <entrypoint> <configuration arguments>`. You can see an example of this in our multinode documentation [here](../../examples/llm/multinode-examples.md).
+
+## Composing Services into an Graph
 There are two main ways to compose services in Dynamo:
 1. Use `depends()` (Recommended)
 The depends() approach is the recommended way for production deployments:
