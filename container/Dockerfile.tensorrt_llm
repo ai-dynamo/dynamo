@@ -134,6 +134,12 @@ RUN mkdir /opt/dynamo && \
 # Build the wheel in the manylinux environment
 FROM ${MANYLINUX_IMAGE} AS wheel_builder
 ARG RELEASE_BUILD
+ARG CARGO_BUILD_JOBS
+# Set CARGO_BUILD_JOBS to 16 if not provided
+# This is to prevent cargo from building $(nproc) jobs in parallel,
+# which might exceed the number of opened files limit.
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
+
 WORKDIR /workspace
 
 RUN yum install -y protobuf-compiler \
