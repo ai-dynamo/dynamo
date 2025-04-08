@@ -113,3 +113,20 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
     "max_tokens": 300
   }' | jq
 ```
+
+### Local Development
+
+To develop locally, we recommend working inside of the container
+
+```bash
+./container/build.sh
+./container/run.sh -it --mount-workspace
+
+cargo build --release --features=cuda  # alternatives: vulkan/metal or omit for CPU
+mkdir -p /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
+cp /workspace/target/release/http /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
+cp /workspace/target/release/llmctl /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
+cp /workspace/target/release/dynamo-run /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
+
+uv pip install -e .
+```
