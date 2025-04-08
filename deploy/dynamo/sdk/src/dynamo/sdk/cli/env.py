@@ -141,7 +141,7 @@ def get_python_packages() -> str:
     return "\n".join(out)
 
 
-def build_env_command() -> click.command:
+def build_env_command() -> click.Command:
     @click.command(name="env")
     def env() -> None:
         """Display information about the current environment."""
