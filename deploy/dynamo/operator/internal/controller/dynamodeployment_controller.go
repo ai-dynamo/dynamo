@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"dario.cat/mergo"
@@ -70,6 +71,7 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	var err error
 	reason := "undefined"
+	message := ""
 	readyStatus := metav1.ConditionFalse
 	// retrieve the CRD
 	dynamoDeployment := &nvidiacomv1alpha1.DynamoDeployment{}
@@ -82,7 +84,6 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	defer func() {
-		message := ""
 		if err != nil {
 			dynamoDeployment.SetState(FailedState)
 			message = err.Error()
@@ -149,7 +150,7 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
-	allAreReady := true
+	notReadyDeployments := []string{}
 	// reconcile the DynamoNimDeployments
 	for serviceName, dynamoNimDeployment := range dynamoNimDeployments {
 		logger.Info("Reconciling the DynamoNimDeployment", "serviceName", serviceName, "dynamoNimDeployment", dynamoNimDeployment)
@@ -163,13 +164,17 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, err
 		}
 		if !dynamoNimDeployment.Status.IsReady() {
-			allAreReady = false
+			notReadyDeployments = append(notReadyDeployments, dynamoNimDeployment.Name)
 		}
 	}
-	if allAreReady {
+	if len(notReadyDeployments) == 0 {
 		dynamoDeployment.SetState(ReadyState)
+		reason = "all_deployments_are_ready"
+		message = "All deployments are ready"
 		readyStatus = metav1.ConditionTrue
 	} else {
+		reason = "some_deployments_are_not_ready"
+		message = fmt.Sprintf("The following deployments are not ready: %v", notReadyDeployments)
 		dynamoDeployment.SetState(PendingState)
 	}
 
