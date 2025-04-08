@@ -1,0 +1,25 @@
+Thank you for installing {{ .Chart.Name }}.
+
+Your release is named {{ .Release.Name }}.
+
+To learn more about the release, try:
+
+  $ helm status {{ .Release.Name }}
+  $ helm get all {{ .Release.Name }}
+
+The API Store is now running and accessible at:
+{{- if .Values.ingress.enabled }}
+  {{- range .Values.ingress.hosts }}
+  http://{{ .host }}
+  {{- end }}
+{{- else }}
+  http://{{ include "dynamo-api-store.fullname" . }}:{{ .Values.service.port }}
+{{- end }}
+
+The following components are also deployed:
+- PostgreSQL database
+- MinIO object storage
+
+To access the MinIO console:
+  kubectl port-forward svc/{{ include "dynamo-api-store.minio.fullname" . }} 9001:9001
+  Then open http://localhost:9001 in your browser 

@@ -66,6 +66,8 @@ Users/Clients (HTTP)
 
 ## Running the Example
 
+### Running Locally
+
 1. Launch all three services using a single command:
 
 ```bash
@@ -87,6 +89,92 @@ curl -X 'POST' \
 }'
 ```
 
+### Deploying to and Running in Kubernetes
+
+There are two ways to deploy the hello world example:
+1. Manually using helm charts
+2. Using the Dynamo cloud Kubernetes platform and the Dynamo deploy CLI.
+
+#### Deploying with helm charts
+
+The instructions for deploying the hello world example using helm charts can be found at [Deploying Dynamo Inference Graphs to Kubernetes using Helm](../../docs/guides/dynamo_deploy.md). The guide covers:
+
+1. Setting up a local Kubernetes cluster with MicroK8s
+2. Installing required dependencies like NATS and etcd
+3. Building and containerizing the pipeline
+4. Deploying using Helm charts
+5. Testing the deployment
+
+#### Deploying with the Dynamo cloud platform
+
+This example can be deployed to a Kubernetes cluster using Dynamo cloud and the Dynamo deploy CLI.
+
+##### Prerequisites
+
+Before deploying, ensure you have:
+- Dynamo CLI installed
+- Ubuntu 24.04 as the base image
+- Required dependencies:
+  - Helm package manager
+  - Dynamo SDK and CLI tools
+  - Rust packages and toolchain
+
+You must have first followed the instructions in [deploy/dynamo/helm/README.md](../../deploy/dynamo/helm/README.md) to create your Dynamo cloud deployment.
+
+##### Deployment Steps
+
+1. **Login to Dynamo Server**
+
+```bash
+export PROJECT_ROOT=$(pwd)
+export KUBE_NS=hello-world  # Must match your Kubernetes namespace
+export DYNAMO_SERVER=https://${KUBE_NS}.dev.aire.nvidia.com
+dynamo server login --api-token TEST-TOKEN --endpoint $DYNAMO_SERVER
+```
+
+2. **Build the Dynamo Image**
+
+> [!NOTE]
+> For instructions on building the Dynamo base image, see the [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image) section in the main README.
+
+```bash
+# Set runtime image name
+export DYNAMO_IMAGE=<dynamo_docker_image_name>
+
+# Build and containerize the Frontend service
+cd $PROJECT_ROOT/examples/hello_world
+DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk -F"\"" '{ print $2 }')
+```
+
+3. **Deploy to Kubernetes**
+
+```bash
+echo $DYNAMO_TAG
+export HELM_RELEASE=ci-hw
+dynamo deployment create $DYNAMO_TAG --no-wait -n $HELM_RELEASE
+```
+
+To delete an existing Dynamo deployment:
+
+```bash
+kubectl delete dynamodeployment $HELM_RELEASE
+```
+
+4. **Test the deployment**
+
+Once you create the Dynamo deployment, a pod prefixed with `yatai-dynamonim-image-builder` will begin running. Once it finishes running, it will create the pods necessary. Once the pods prefixed with `$HELM_RELEASE` are up and running, you can test out your example!
+
+```bash
+# Forward the service port to localhost
+kubectl -n ${KUBE_NS} port-forward svc/${HELM_RELEASE}-frontend 3000:3000
+
+# Test the API endpoint
+curl -X 'POST' 'http://localhost:3000/generate' \
+    -H 'accept: text/event-stream' \
+    -H 'Content-Type: application/json' \
+    -d '{"text": "test"}'
+```
+
 ## Expected Output
 
 When you send the request with "test" as input, the response will show how the text flows through each service:
@@ -99,3 +187,6 @@ This demonstrates how:
 1. The Frontend receives "test"
 2. The Middle service adds "-mid" to create "test-mid"
 3. The Backend service adds "-back" to create "test-mid-back"
+The API will respond with a stream of generated text based on your input.
+
+For more complex examples, see the [LLM deployment examples](../../examples/llm/README.md)
