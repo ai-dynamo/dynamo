@@ -1,30 +1,19 @@
 #!/usr/bin/env python3
 
-# Copyright 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions
-# are met:
-#  * Redistributions of source code must retain the above copyright
-#    notice, this list of conditions and the following disclaimer.
-#  * Redistributions in binary form must reproduce the above copyright
-#    notice, this list of conditions and the following disclaimer in the
-#    documentation and/or other materials provided with the distribution.
-#  * Neither the name of NVIDIA CORPORATION nor the names of its
-#    contributors may be used to endorse or promote products derived
-#    from this software without specific prior written permission.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
-# EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
-# PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR
-# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-# PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
-# OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # Configuration file for the Sphinx documentation builder.
 #
@@ -36,6 +25,7 @@
 
 import json
 import os
+import re
 from datetime import date
 
 # If extensions (or modules to document with autodoc) are in another directory,
@@ -43,7 +33,10 @@ from datetime import date
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
 import httplib2
+import nvidia_sphinx_theme
+from docutils import nodes
 from packaging.version import Version
+from sphinx import search
 
 # import sys
 # sys.path.insert(0, os.path.abspath('.'))
@@ -121,7 +114,9 @@ napoleon_include_special_with_doc = True
 numfig = True
 
 # final location of docs for seo/sitemap
-html_baseurl = "https://docs.nvidia.com/deeplearning/dynamo/user-guide/docs/"
+html_baseurl = (
+    "https://docs.nvidia.com/deeplearning/dynamo/user-guide/docs/"
+)
 
 myst_enable_extensions = [
     "dollarmath",
@@ -284,7 +279,7 @@ for i, d in enumerate(json_data):
     resp = h.request(d["url"], "HEAD")
     if int(resp[0]["status"]) >= 400:
         print(d["url"], "NOK", resp[0]["status"])
-        # exit(1)
+        #exit(1)
 
 # Write switcher data to file
 with open(switcher_path, "w") as f:
