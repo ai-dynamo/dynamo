@@ -48,7 +48,7 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: Please provide details about your environment. You can run the command `dynamo env` and copy-paste the output below. 
+      description: Please provide details about your environment. You can run the command `dynamo env` and copy-paste the output below.
       placeholder: |
         Operating System, ai-dynamo Version, CPU Architecture, CUDA Version, GPU Architecture, Python Version...
     validations:
