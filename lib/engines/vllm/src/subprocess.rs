@@ -31,7 +31,11 @@ pub fn run_subprocess(
     node_config: MultiNodeConfig,
     tp_size: u32,
     extra_engine_args: Option<PathBuf>,
+    with_kv_routing: bool,
 ) -> anyhow::Result<()> {
+    if with_kv_routing {
+        set_kv_routing_vars()?;
+    }
     pyo3::prepare_freethreaded_python(); // or enable feature "auto-initialize"
     if let Ok(venv) = env::var("VIRTUAL_ENV") {
         let _ = Python::with_gil(|py| crate::fix_venv(venv, py));
@@ -47,6 +51,7 @@ pub fn run_subprocess(
             ("tp_size_str", &tp_size.to_string()),
             ("nnodes_str", &node_config.num_nodes.to_string()),
             ("extra_engine_args", extra_engine_args_str),
+            ("enable_prefix_caching", &with_kv_routing.to_string()),
         ]
         .into_py_dict(py)
         .unwrap();
@@ -56,4 +61,29 @@ pub fn run_subprocess(
         tracing::info!("vllm subprocess exit");
         Ok(())
     })
+}
+
+// These environment variables trigger our vllm patch to emit KV routing events
+fn set_kv_routing_vars() -> anyhow::Result<()> {
+    let exe = env::current_exe()?;
+    let exe_dir = exe
+        .parent()
+        .ok_or(anyhow::anyhow!("Current binary has no directory"))?;
+    let mut lib = PathBuf::from(exe_dir);
+    lib.set_file_name("libdynamo_llm_capi.so");
+    let vars = [
+        // Path to the C API Library
+        ("VLLM_KV_CAPI_PATH", lib.display().to_string()),
+        // Identifiers to publish KV related information
+        ("VLLM_KV_NAMESPACE", "dynamo".to_string()),
+        ("VLLM_KV_COMPONENT", "vllm".to_string()),
+        // Worker ID used for identifying workers in distributed settings
+        ("VLLM_WORKER_ID", "0".to_string()),
+    ];
+    for (kvar, default_v) in vars {
+        if env::var(kvar).is_err() {
+            env::set_var(kvar, default_v);
+        }
+    }
+    Ok(())
 }
