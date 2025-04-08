@@ -102,3 +102,37 @@ def test_service_config_with_direct_configs():
     # Check that each config appears in the arguments
     for key in ["model", "block-size", "max-model-len"]:
         assert f"--{key}" in vllm_worker_args
+
+
+def test_service_config_override_common_configs():
+    # Reset singleton instance
+    ServiceConfig._instance = None
+
+    # Set environment variable with config that includes common-configs
+    # overridden by the subscribing config
+    os.environ[
+        "DYNAMO_SERVICE_CONFIG"
+    ] = """
+    {
+        "Common": {
+            "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+            "block-size": 64,
+            "max-model-len": 16384
+        },
+        "VllmWorker": {
+            "enforce-eager": true,
+            "block-size": 128,
+            "common-configs": ["model", "block-size", "max-model-len"]
+        }
+    }
+    """
+
+    # Get arguments and verify common configs are included
+    service_config = ServiceConfig.get_instance()
+    vllm_worker_args = service_config.as_args("VllmWorker")
+
+    # Check that each common config appears in the arguments
+    for key in ["model", "block-size", "max-model-len"]:
+        assert f"--{key}" in vllm_worker_args
+
+    assert vllm_worker_args[vllm_worker_args.index("--block-size") + 1] == 128
