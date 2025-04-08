@@ -18,50 +18,87 @@ import os
 from dynamo.sdk.lib.config import ServiceConfig
 
 
-def test_service_config_subscribed_correctly():
+def test_service_config_with_common_configs():
+    # Reset singleton instance
     ServiceConfig._instance = None
+
+    # Set environment variable with config that includes common-configs
     os.environ[
         "DYNAMO_SERVICE_CONFIG"
     ] = """
-{"Common": {"model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "block-size": 64, "max-model-len": 16384}, "Frontend": {"served_model_name": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "endpoint": "dynamo.Processor.chat/completions", "port": 8000}, "Processor": {"router": "round-robin", "common-configs": ["model", "block-size", "max-model-len"]}, "VllmWorker": {"enforce-eager": true, "max-num-batched-tokens": 16384, "enable-prefix-caching":
-true, "router": "random", "tensor-parallel-size": 1, "ServiceArgs": {"workers": 1}, "common-configs": ["model", "block-size", "max-model-len"]}}
-"""
+    {
+        "Common": {
+            "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+            "block-size": 64,
+            "max-model-len": 16384
+        },
+        "VllmWorker": {
+            "enforce-eager": true,
+            "common-configs": ["model", "block-size", "max-model-len"]
+        }
+    }
+    """
+
+    # Get arguments and verify common configs are included
     service_config = ServiceConfig.get_instance()
     vllm_worker_args = service_config.as_args("VllmWorker")
-    assert all(
-        any(arg == f"--{key}" for arg in vllm_worker_args)
-        for key in ["model", "block-size", "max-model-len"]
-    )
+
+    # Check that each common config appears in the arguments
+    for key in ["model", "block-size", "max-model-len"]:
+        assert f"--{key}" in vllm_worker_args
 
 
-def test_service_config_not_subscribed():
+def test_service_config_without_common_configs():
+    # Reset singleton instance
     ServiceConfig._instance = None
+
+    # Set environment variable with config that DOESN'T include common-configs
     os.environ[
         "DYNAMO_SERVICE_CONFIG"
     ] = """
-{"Common": {"model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "block-size": 64, "max-model-len": 16384}, "Frontend": {"served_model_name": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "endpoint": "dynamo.Processor.chat/completions", "port": 8000}, "Processor": {"router": "round-robin", "common-configs": ["model", "block-size", "max-model-len"]}, "VllmWorker": {"enforce-eager": true, "max-num-batched-tokens": 16384, "enable-prefix-caching":
-true, "router": "random", "tensor-parallel-size": 1, "ServiceArgs": {"workers": 1}}}
-"""
+    {
+        "Common": {
+            "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+            "block-size": 64,
+            "max-model-len": 16384
+        },
+        "VllmWorker": {
+            "enforce-eager": true
+        }
+    }
+    """
+
+    # Get arguments and verify common configs are NOT included
     service_config = ServiceConfig.get_instance()
     vllm_worker_args = service_config.as_args("VllmWorker")
-    assert all(
-        not arg == f"--{key}"
-        for key in ["model", "block-size", "max-model-len"]
-        for arg in vllm_worker_args
-    )
+
+    # Check that none of the common configs appear in arguments
+    for key in ["model", "block-size", "max-model-len"]:
+        assert f"--{key}" not in vllm_worker_args
 
 
-def test_service_config_no_common_config():
+def test_service_config_with_direct_configs():
+    # Reset singleton instance
     ServiceConfig._instance = None
+
+    # Set environment variable with direct configs (no Common section reference)
     os.environ[
         "DYNAMO_SERVICE_CONFIG"
     ] = """
-{"Frontend": {"served_model_name": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "endpoint": "dynamo.Processor.chat/completions", "port": 8000}, "Processor": {"router": "round-robin", "common-configs": ["model", "block-size", "max-model-len"]}, "VllmWorker": {"enforce-eager": true, "max-num-batched-tokens": 16384, "enable-prefix-caching":
-true, "router": "random", "tensor-parallel-size": 1, "ServiceArgs": {"workers": 1}, "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "block-size": 64, "max-model-len": 16384]}}
-"""
+    {
+        "VllmWorker": {
+            "enforce-eager": true,
+            "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+            "block-size": 64,
+            "max-model-len": 16384
+        }
+    }
+    """
+
+    # Get arguments and verify direct configs are included
     service_config = ServiceConfig.get_instance()
     vllm_worker_args = service_config.as_args("VllmWorker")
-    assert all(
-        any(arg == f"--{key}" for arg in vllm_worker_args)
-        for key in ["model", "block-size", "max-model-len"]
-    )
+
+    # Check that each config appears in the arguments
+    for key in ["model", "block-size", "max-model-len"]:
+        assert f"--{key}" in vllm_worker_args
