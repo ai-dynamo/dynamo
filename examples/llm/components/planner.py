@@ -18,17 +18,20 @@ import argparse
 import asyncio
 import logging
 import os
+from rich.console import Console
+from rich.table import Table
 import time
+import json
 
 import numpy as np
 from utils.prefill_queue import PrefillQueue
 
 from dynamo.llm import KvMetricsAggregator
 from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime.logging import configure_logger
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("Planner")
-
+configure_logger()
+logger = logging.getLogger(__name__)
 
 class Planner:
     def __init__(self, runtime: DistributedRuntime, args: argparse.Namespace):
@@ -231,6 +234,28 @@ class Planner:
 @dynamo_worker()
 async def start_planner(runtime: DistributedRuntime, args: argparse.Namespace):
     planner = Planner(runtime, args)
+    logger.info(f"Components present in namespace: {args.namespace}")
+    console = Console()
+    table = Table()
+    table.add_column("Component", style="cyan")
+    table.add_column("Endpoint", style="green")
+
+    components = await runtime.etcd_client().kv_get_prefix(args.namespace)
+    for component in components:
+        try:
+            # Parse the byte string as JSON and extract component name
+            data = json.loads(component["value"].decode("utf-8"))
+            if "component" in data:
+                name = data["component"]
+                endpoint = data["endpoint"]
+                table.add_row(name, endpoint)
+        except Exception as e:
+            # Some entries may not be valid JSON or might be binary data
+            pass 
+
+    # Print the table before running the planner
+    console.print(table)
+
     await planner.run()
 
 
@@ -239,8 +264,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--namespace",
         type=str,
-        default="dynamo",
-        help="Namespace to use for the planner",
+        required=True,
+        help="Namespace planner will look at",
     )
     parser.add_argument(
         "--served-model-name",
