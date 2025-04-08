@@ -14,7 +14,7 @@ true, "router": "random", "tensor-parallel-size": 1, "ServiceArgs": {"workers": 
     service_config = ServiceConfig.get_instance()
     vllm_worker_args = service_config.as_args("VllmWorker")
     assert any(
-        key in arg
+        arg.startswith(f"--{key}")
         for key in ["model", "block-size", "max-model-len"]
         for arg in vllm_worker_args
     )
@@ -31,7 +31,7 @@ true, "router": "random", "tensor-parallel-size": 1, "ServiceArgs": {"workers": 
     service_config = ServiceConfig.get_instance()
     vllm_worker_args = service_config.as_args("VllmWorker")
     assert all(
-        key not in arg
+        not arg.startswith(f"--{key}")
         for key in ["model", "block-size", "max-model-len"]
         for arg in vllm_worker_args
     )
