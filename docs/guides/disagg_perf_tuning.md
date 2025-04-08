@@ -48,7 +48,9 @@ TP Size | KV Cache Size (GB) | KV Cache per GPU (GB) | Per GPU Improvement over 
 
 The best number of GPUs to use in the prefill and decode engines can be determined by running a few fixed isl/osl/concurrency test using [GenAI-Perf](https://github.com/triton-inference-server/perf_analyzer/tree/main/genai-perf) and compare with the SLA. GenAI-Perf is pre-installed in the dynamo container.
 
-Besides the parallelization mapping, other common knobs to tune are maximum batch size and maximum number of tokens. For prefill engines, usually a small batch size and large max_num_token is preferred. For decode engines, usually a large batch size and medium max_num_token is preferred. More details on tuning the max_num_token and max_batch_size will be covered in the next section.
+Besides the parallelization mapping, other common knobs to tune are maximum batch size, maximum number of tokens, and block size. For prefill engines, usually a small batch size and large max_num_token is preferred. For decode engines, usually a large batch size and medium max_num_token is preferred. More details on tuning the max_num_token and max_batch_size will be covered in the next section.
+
+For block size, if the block size is too small, it leads to small memory chunks in the P->D KV cache transfer and poor performance. Too small block size also leads to memory fragmentation in the attention calculation, but the impact is usually insignificant. If the block size is too large, it leads to low prefix cache hit ratio. For most dense models, we find block size 128 is a good choice.
 
 ## Disaggregated Router
 
