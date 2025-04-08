@@ -243,12 +243,12 @@ def build_serve_command() -> click.Group:
             rich.print(f"DYNAMO_SERVICE_CONFIG={json.dumps(service_configs)}")
             sys.exit(0)
 
+        configure_server_logging()
         # Set environment variable with service configuration
         if service_configs:
             logger.info(f"Running dynamo serve with service configs {service_configs}")
             os.environ["DYNAMO_SERVICE_CONFIG"] = json.dumps(service_configs)
 
-        configure_server_logging()
         if working_dir is None:
             if os.path.isdir(os.path.expanduser(bento)):
                 working_dir = os.path.expanduser(bento)
