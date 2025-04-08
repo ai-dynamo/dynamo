@@ -1,4 +1,4 @@
-# Dynamo CLI 
+# Dynamo CLI
 The Dynamo CLI is a powerful tool for serving, containerizing, and deploying Dynamo applications. It leverages core pieces of the BentoML deployment stack and provides a range of commands to manage your Dynamo services.
 
 Overview
