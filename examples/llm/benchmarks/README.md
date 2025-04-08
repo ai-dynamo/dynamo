@@ -54,7 +54,7 @@ With the Dynamo repository, benchmarking image and model available, and **NATS a
   -v <dynamo_repo>:/workspace
 ```
 
-2\. Start disaggregated service
+2\. Start disaggregated services
 ```bash
 cd /workspace/examples/llm
 dynamo serve benchmarks.disagg:Frontend -f benchmarks/disagg.yaml 1> disagg.log 2>&1 &
@@ -62,59 +62,20 @@ dynamo serve benchmarks.disagg:Frontend -f benchmarks/disagg.yaml 1> disagg.log 
 Note: Check the `disagg.log` to make sure the service is fully started before collecting performance numbers.
 
 Key settings:
-* **PrefillWorker**: Four separate processes (each with 1 GPU) handle the initial prefill (context embedding) phase.
-* **VllmWorker**: One process (using 4 GPUs) generates output tokens (the "decode" phase).
-* **kv-transfer-config**: Uses the DynamoNixlConnector for remote KV cache transfer, so that the KV cache can be passed between prefill workers and the generation worker.
+* **Model**: DeepSeek R1 Distill Llama 70B FP8 (or similar in size).
 * **FP8 Model**: Reduces memory usage for both the model and KV cache, easing remote transfer.
 * **Block Size 128**: Batches token processing for more efficient chunk transfers to GPUs.
+* **PrefillWorker**: Four separate processes (each with 1 GPU) handle the initial prefill (context embedding) phase.
+* **VllmWorker**: One process (using 4 GPUs) generates output tokens (the "decode" phase).
+* **kv-transfer-config**: Uses the DynamoNixlConnector for remote KV cache transfer.
+* **remote-prefill**: KV cache can be passed from prefill to decode workers.
+* **No prefix cache**: All requests are unique and cache should not be used.
 
-## Collecting Performance Numbers
-
-Run the benchmarking script
-```bash
-bash -x /workspace/examples/llm/benchmarks/perf.sh
-```
-Key settings:
-* **streaming**: Enables token streaming for more realistic performance measurements.
-* **concurrency**: Number of simultaneous requests.
-* **isl**: Input sequence length.
-* **osl**: Output sequence length requested.
+Collect the performance numbers as shown on the [Collecting Performance Numbers](#collecting-performance-numbers) section below.
 
 ## Disaggregated Multi Node Benchmarking
 
-Two H100 80GB x8 nodes are required for this setup.
-
-With the Dynamo repository, benchmarking image and model available, and **NATS and ETCD started on node 0**, perform the following steps:
-
-1\. Run benchmarking container (node 0 & 1)
-```bash
-./container/run.sh -it \
-  -v <huggingface_hub>:/root/.cache/huggingface/hub \
-  -v <dynamo_repo>:/workspace
-```
-
-2\. Config NATS and ETCD (node 1)
-```bash
-export NATS_SERVER="nats://<node_0_ip_addr>"
-export ETCD_ENDPOINTS="<node_0_ip_addr>:2379"
-```
-Note: Node 1 must be able to reach Node 0 over the network for the above services.
-
-3\. Start workers (node 0)
-```bash
-cd /workspace/examples/llm
-dynamo serve benchmarks.disagg_multinode:Frontend -f benchmarks/disagg_multinode_0.yaml 1> disagg_multinode.log 2>&1 &
-```
-Note: Check the `disagg_multinode.log` to make sure the service is fully started before collecting performance numbers.
-
-4\. Start workers (node 1)
-```bash
-cd /workspace/examples/llm
-dynamo serve components.prefill_worker:PrefillWorker -f benchmarks/disagg_multinode_1.yaml 1> prefill_worker.log 2>&1 &
-```
-Note: Check the `prefill_worker.log` to make sure the service is fully started before collecting performance numbers.
-
-Collect the performance numbers as shown on the [Collecting Performance Numbers](#collecting-performance-numbers) section above.
+Coming soon...
 
 ## vLLM Aggregated Baseline Benchmarking
 
@@ -151,6 +112,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 vllm serve neuralmagic/DeepSeek-R1-Distill-Llama-70
 Notes:
 * Check the `vllm_0.log` and `vllm_1.log` to make sure the service is fully started before collecting performance numbers.
 * For multi-node benchmarking, use TP=8 and start one instance of `vllm serve` on both node 0 and 1.
+* The `vllm serve` configuration should closely match the corresponding disaggregated benchmarking configuration.
 
 3\. Use NGINX as load balancer
 ```bash
@@ -162,4 +124,20 @@ Key NGINX configurations:
 * **least_conn**: To load balance across vLLM servers.
 * **server**: Select all the upstream vLLM servers to load balance across, including those at a different node if applicable.
 
-Collect the performance numbers as shown on the [Collecting Performance Numbers](#collecting-performance-numbers) section above.
+Collect the performance numbers as shown on the [Collecting Performance Numbers](#collecting-performance-numbers) section below.
+
+## Collecting Performance Numbers
+
+Run the benchmarking script
+```bash
+bash -x /workspace/examples/llm/benchmarks/perf.sh
+```
+Key settings:
+* **streaming**: Enables token streaming for more realistic performance measurements.
+* **concurrency**: Number of simultaneous requests.
+* **isl**: Input sequence length at 3000 tokens.
+* **osl**: Output sequence length requested at 150 tokens.
+
+## Interpreting Results
+
+Coming soon...
