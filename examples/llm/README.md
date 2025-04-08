@@ -105,6 +105,9 @@ This figure shows an overview of the major components to deploy:
 ```
 
 ### Example architectures
+> [!TIP]
+> You can set the`DYN_LOG` environment variable to control logs. By default, logs are set to `INFO`.
+
 _Note_: For a non-dockerized deployment, first export `DYNAMO_HOME` to point to the dynamo repository root, e.g. `export DYNAMO_HOME=$(pwd)`
 
 #### Aggregated serving

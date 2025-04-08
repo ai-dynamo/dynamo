@@ -26,19 +26,17 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-import argparse
 import logging
 import os
 import re
 import subprocess
-from collections import defaultdict
-from functools import partial
 from contextlib import contextmanager
+from functools import partial
 
 # Get the directory of the current file
 dynamo_docs_abspath = os.path.dirname(os.path.abspath(__file__))
 dynamo_abspath = os.path.dirname(dynamo_docs_abspath)
-repo_url = f"https://github.com/ai-dynamo/dynamo/blob/main/"
+repo_url = "https://github.com/ai-dynamo/dynamo/blob/main/"
 
 # Regex patterns
 http_patn = r"^https?://"

@@ -36,7 +36,6 @@
 
 import json
 import os
-import re
 from datetime import date
 
 # If extensions (or modules to document with autodoc) are in another directory,
@@ -44,10 +43,7 @@ from datetime import date
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
 import httplib2
-import nvidia_sphinx_theme
-from docutils import nodes
 from packaging.version import Version
-from sphinx import search
 
 # import sys
 # sys.path.insert(0, os.path.abspath('.'))
@@ -125,9 +121,7 @@ napoleon_include_special_with_doc = True
 numfig = True
 
 # final location of docs for seo/sitemap
-html_baseurl = (
-    "https://docs.nvidia.com/deeplearning/dynamo/user-guide/docs/"
-)
+html_baseurl = "https://docs.nvidia.com/deeplearning/dynamo/user-guide/docs/"
 
 myst_enable_extensions = [
     "dollarmath",
@@ -290,7 +284,7 @@ for i, d in enumerate(json_data):
     resp = h.request(d["url"], "HEAD")
     if int(resp[0]["status"]) >= 400:
         print(d["url"], "NOK", resp[0]["status"])
-        #exit(1)
+        # exit(1)
 
 # Write switcher data to file
 with open(switcher_path, "w") as f:
