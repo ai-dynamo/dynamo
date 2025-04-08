@@ -60,7 +60,6 @@ def create_bentoml_cli() -> click.Command:
     bentoml_cli.add_command(cloud_command)
     bentoml_cli.add_single_command(bento_command, "build")
     bentoml_cli.add_single_command(bento_command, "get")
-    bentoml_cli.add_subcommands(start_command)
     bentoml_cli.add_subcommands(serve_command)
     bentoml_cli.add_subcommands(run_command)
     # bentoml_cli.add_command(deploy_command)

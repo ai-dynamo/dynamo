@@ -22,4 +22,4 @@ The following components are also deployed:
 
 To access the MinIO console:
   kubectl port-forward svc/{{ include "dynamo-api-store.minio.fullname" . }} 9001:9001
-  Then open http://localhost:9001 in your browser 
+  Then open http://localhost:9001 in your browser

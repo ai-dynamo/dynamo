@@ -66,8 +66,6 @@ Users/Clients (HTTP)
 
 ## Running the Example Locally
 
-### Running Locally
-
 1. Launch all three services using a single command:
 
 ```bash

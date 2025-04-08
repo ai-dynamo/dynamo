@@ -58,17 +58,17 @@ retry_command() {
 }
 
 # Update the helm repo and build the dependencies
-retry_command "$HELM_CMD repo add nats https://nats-io.github.io/k8s/helm/charts/" 5 5 || true && \
-retry_command "$HELM_CMD repo add bitnami https://charts.bitnami.com/bitnami" 5 5 || true && \
-retry_command "$HELM_CMD repo add minio https://charts.min.io/" 5 5 || true && \
-retry_command "$HELM_CMD repo update" 5 5 || true
+retry_command "$HELM_CMD repo add nats https://nats-io.github.io/k8s/helm/charts/" 5 5 && \
+retry_command "$HELM_CMD repo add bitnami https://charts.bitnami.com/bitnami" 5 5 && \
+retry_command "$HELM_CMD repo add minio https://charts.min.io/" 5 5 && \
+retry_command "$HELM_CMD repo update" 5 5
 
 cd platform
 cd components/operator
-$HELM_CMD dependency update
+retry_command "$HELM_CMD dependency update" 5 5
 cd ../..
 cd components/api-store
-$HELM_CMD dependency update
+retry_command "$HELM_CMD dependency update" 5 5
 cd ../..
 retry_command "$HELM_CMD dep update" 5 5
 retry_command "$HELM_CMD repo update" 5 5
@@ -87,15 +87,21 @@ envsubst '${NAMESPACE} ${NGC_TOKEN} ${CI_COMMIT_SHA} ${RELEASE_NAME} ${DYNAMO_IN
 
 envsubst '${NAMESPACE} ${NGC_TOKEN} ${CI_COMMIT_SHA} ${RELEASE_NAME} ${DYNAMO_INGRESS_SUFFIX} ${CI_REGISTRY_IMAGE}' < dynamo-platform-values.yaml > generated-values.yaml
 
-echo "\nGenerated values file saved as generated-values.yaml"
+echo ""
+echo "Generated values file saved as generated-values.yaml"
 
-# TODO: We need to add the following fixes
-# helm dep build
+# Build dependencies before installation
+echo "Building helm dependencies..."
+cd platform
+retry_command "$HELM_CMD dep build" 5 5
+cd ..
+
 # Install/upgrade the helm chart
 echo "Installing/upgrading helm chart..."
 $HELM_CMD upgrade --install $RELEASE_NAME platform/ \
   -f generated-values.yaml \
   --create-namespace \
-  --namespace ${NAMESPACE}
+  --namespace ${NAMESPACE} \
+  --debug
 
 echo "Helm chart deployment complete"

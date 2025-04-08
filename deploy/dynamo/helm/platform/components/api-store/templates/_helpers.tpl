@@ -105,4 +105,4 @@ Create the name of the MinIO service
 {{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" }}
 {{- end }}
 {{- end }}
-{{- end }} 
+{{- end }}

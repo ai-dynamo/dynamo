@@ -110,4 +110,4 @@ minio:
     enabled: false
     ingressClassName: nginx
     hostname: minio.example.com
-    pathType: Prefix 
+    pathType: Prefix

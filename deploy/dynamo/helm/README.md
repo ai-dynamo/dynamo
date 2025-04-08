@@ -43,7 +43,6 @@ export CI_COMMIT_SHA=<TAG>  # Use the same tag you used when building the images
 export CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION>  # Use the same registry/org you used when building the images
 export RELEASE_NAME=$KUBE_NS
 
-# TODO: helm dep update fails without first registering all the repos and running helm repo update
 ./deploy.sh
 ```
 

@@ -58,4 +58,4 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "dynamo-api-store.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
-{{- end }} 
+{{- end }}

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 {{- if .Values.ingress.enabled -}}
+---
 {{- $fullName := include "dynamo-api-store.fullname" . -}}
 {{- $svcPort := .Values.service.port -}}
 apiVersion: networking.k8s.io/v1
@@ -54,4 +55,4 @@ spec:
                   number: {{ $svcPort }}
           {{- end }}
     {{- end }}
-{{- end }} 
+{{- end }}

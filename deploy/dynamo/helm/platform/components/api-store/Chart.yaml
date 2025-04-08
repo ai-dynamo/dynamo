@@ -6,10 +6,10 @@ version: 0.1.0
 appVersion: "1.0.0"
 dependencies:
   - name: postgresql
-    version: "12.12.4" # 
+    version: "12.12.4"
     repository: https://charts.bitnami.com/bitnami
     condition: postgresql.enabled
   - name: minio
     version: "5.0.0"
     repository: https://charts.min.io/
-    condition: minio.enabled s
+    condition: minio.enabled
