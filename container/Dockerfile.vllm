@@ -425,7 +425,6 @@ RUN apt-get update && \
 
 # Install the wheels
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
-
 RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse  && \
     rm -r wheelhouse
 
