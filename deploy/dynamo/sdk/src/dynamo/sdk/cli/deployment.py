@@ -40,7 +40,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from simple_di import Provide, inject
 
-logger = logging.getLogger("dynamo.deployment")
+logger = logging.getLogger(__name__)
 
 if t.TYPE_CHECKING:
     from bentoml._internal.cloud import BentoCloudClient

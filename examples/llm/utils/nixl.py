@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+import logging
 import os
 from contextlib import contextmanager
 
@@ -24,6 +24,8 @@ from dynamo.runtime import DistributedRuntime
 
 METADATA_DIR = "/tmp/nixl"
 
+logger = logging.getLogger(__name__)
+
 
 @contextmanager
 def temp_metadata_file(engine_id, metadata: NixlMetadata):
@@ -31,7 +33,7 @@ def temp_metadata_file(engine_id, metadata: NixlMetadata):
     path = f"{METADATA_DIR}/{engine_id}.nixl_meta"
     with open(path, "wb") as f:
         encoded = msgspec.msgpack.encode(metadata)
-        print(f"Size of encoded metadata: {len(encoded)}")
+        logger.info(f"Size of encoded metadata: {len(encoded)}")
         f.write(encoded)
     try:
         yield path
