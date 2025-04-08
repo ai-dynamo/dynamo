@@ -194,7 +194,7 @@ cd target/debug
 
 To pass extra arguments to the sglang engine see *Extra engine arguments* below.
 
-### llama_cpp 
+### llama_cpp
 
 ```
 cargo build --features llamacpp,cuda
@@ -225,7 +225,7 @@ cargo build --features vllm
 cd target/debug
 ```
 
-3. Run 
+3. Run
 Inside that virtualenv:
 
 **HF repo:**
@@ -252,7 +252,7 @@ dynamo-run in=none out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --num-nodes 2 --
 
 To pass extra arguments to the vllm engine see [Extra engine arguments](#extra_engine_arguments) below.
 
-### Python bring-your-own-engine 
+### Python bring-your-own-engine
 
 You can provide your own engine in a Python file. The file must provide a generator with this signature:
 ```
@@ -415,7 +415,7 @@ DYN_TOKEN_ECHO_DELAY_MS=1 dynamo-run in=http out=echo_full
 
 The default delay is 10ms, which produces approximately 100 tokens per second.
 
-### Batch mode 
+### Batch mode
 
 `dynamo-run` can take a jsonl file full of prompts and evaluate them all:
 
