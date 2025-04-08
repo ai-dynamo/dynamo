@@ -316,7 +316,6 @@ COPY --from=build $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=build $CARGO_HOME $CARGO_HOME
 
 # Copy uv from build and build wheel in virtualenv
-#COPY --from=build /uv /uv
 RUN mkdir /opt/dynamo && \
     uv venv /opt/dynamo/venv --python 3.12
 
