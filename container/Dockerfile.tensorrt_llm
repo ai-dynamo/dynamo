@@ -120,22 +120,8 @@ RUN cargo build --release --locked --features mistralrs,sglang,python && \
 
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 
-# FIXME: Copy more specific folders in for dev/debug after directory restructure
-COPY . /workspace/
-
 # Install uv, create virtualenv for general use, and build dynamo wheel
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN mkdir /opt/dynamo && \
-    uv venv /opt/dynamo/venv --python 3.12 && \
-    source /opt/dynamo/venv/bin/activate && \
-    cd /workspace && \
-    uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/ai_dynamo*any.whl
-
-# Package the bindings
-RUN mkdir -p /opt/dynamo/bindings/lib && \
-    cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
-    cp -r lib/bindings/c/include /opt/dynamo/bindings/.
 
 ###################################
 ####### WHEEL BUILD STAGE #########
@@ -154,45 +140,49 @@ COPY --from=build /workspace /workspace
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.86.0 \
-    RUSTARCH=x86_64-unknown-linux-gnu
+    CARGO_TARGET_DIR=/workspace/target
 
 COPY --from=build $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=build $CARGO_HOME $CARGO_HOME
 
 # Install uv and create virtualenv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+COPY --from=build /uv /uv
 RUN mkdir /opt/dynamo && \
     uv venv /opt/dynamo/venv --python 3.12
 
 # Build dynamo wheel
-# create virtualenv for general use, and build dynamo wheel
-RUN source /opt/dynamo/venv/bin/activate && \
+# activate virtualenv and build dynamo wheel
+RUN mkdir /opt/dynamo && \
+    uv venv /opt/dynamo/venv --python 3.12 && \
+    source /opt/dynamo/venv/bin/activate && \
     cd /workspace/lib/bindings/python && \
     uv build --wheel --out-dir /workspace/dist --python 3.12 && \
     if [ "$RELEASE_BUILD" = "true" ]; then \
         uv build --wheel --out-dir /workspace/dist --python 3.11 && \
         uv build --wheel --out-dir /workspace/dist --python 3.10; \
-    fi
-
-# Package the bindings
-RUN mkdir -p /opt/dynamo/bindings/wheels && \
-    cp dist/ai_dynamo_runtime*.whl /opt/dynamo/bindings/wheels/.
+    fi && \
+    cd /workspace && \
+    uv build --wheel --out-dir /workspace/dist
 
 ########################################
 ########## Development Image ###########
 ########################################
 
 FROM build AS dev
-COPY . /workspace
+
 WORKDIR /workspace
 COPY --from=wheel_builder /workspace/dist/ /workspace/dist/
-COPY --from=wheel_builder /opt/dynamo/bindings/wheels/ /opt/dynamo/bindings/wheels/
-COPY --from=wheel_builder /workspace/target /workspace/target
+
+# Package the bindings
+RUN mkdir -p /opt/dynamo/bindings/wheels && \
+    mkdir /opt/dynamo/bindings/lib && \
+    cp dist/ai_dynamo_runtime*cp312*.whl /opt/dynamo/bindings/wheels/. && \
+    cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
+    cp -r lib/bindings/c/include /opt/dynamo/bindings/.
 
 RUN . /opt/dynamo/venv/bin/activate && \
-    uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl
+    uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
+    uv pip install /workspace/dist/ai_dynamo*any.whl
 
 # Install dynamo.runtime and dynamo.llm wheels globally in container for tests that
 # currently run without virtual environment activated.
@@ -203,6 +193,9 @@ RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
 # Tell TRTLLM worker to use the Dynamo LLM C API for KV Cache Routing
 ENV DYNAMO_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
 ENV DYNAMO_HOME=/workspace
+
+# FIXME: Copy more specific folders in for dev/debug after directory restructure
+COPY . /workspace
 
 # FIXME: May want a modification with dynamo banner on entry
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
