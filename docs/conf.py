@@ -136,15 +136,6 @@ myst_fence_as_directive = ["mermaid"]
 # Add any paths that contain templates here, relative to this directory.
 # templates_path = ["_templates"] # disable it for nvidia-sphinx-theme to show footer
 
-# List of patterns, relative to source directory, that match files and
-# directories to ignore when looking for source files.
-# This pattern also affects html_static_path and html_extra_path.
-exclusions = None
-with open("exclusions.txt", "r") as f:
-    exclusions = f.read()
-    f.close()
-exclude_patterns = exclusions.strip().split("\n")
-print(f"exclude_patterns: {exclude_patterns}")
 
 # -- Options for HTML output -------------------------------------------------
 
