@@ -27,7 +27,7 @@ dependencies:
     repository: file://components/operator
     condition: dynamo-operator.enabled
   - name: dynamo-api-store
-    version: 0.0.1
+    version: 0.1.0
     repository: file://components/api-store
     condition: dynamo-api-store.enabled
   - name: nats

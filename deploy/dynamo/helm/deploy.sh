@@ -58,16 +58,26 @@ retry_command() {
 }
 
 # Update the helm repo and build the dependencies
-cd platform
-cd components/operator
-$HELM_CMD dependency update
-cd ../..
-cd components/api-server
-$HELM_CMD dependency update
-cd ../..
-retry_command "$HELM_CMD dep update" 5 5
-retry_command "$HELM_CMD repo update" 5 5
-cd ..
+# TODO: helm repo update fails without first getting all the chart repos
+# e.g 
+# helm repo add nats https://nats-io.github.io/k8s/helm/charts/ && \
+# helm repo add bitnami https://charts.bitnami.com/bitnami && \
+# helm repo add minio https://charts.min.io/ && \
+# helm repo update
+
+# cd platform
+# cd components/operator
+# $HELM_CMD dependency update
+# cd ../..
+# cd components/api-store
+# $HELM_CMD dependency update
+# cd ../..
+
+# # TODO: What does this do exactly?
+# # TODO: We should push the /charts folder for the chart so that users don't have to update
+# retry_command "$HELM_CMD dep update" 5 5
+# retry_command "$HELM_CMD repo update" 5 5
+# cd ..
 
 # Generate the values file
 echo "Generating values file with:"
@@ -84,7 +94,8 @@ envsubst '${NAMESPACE} ${NGC_TOKEN} ${CI_COMMIT_SHA} ${RELEASE_NAME} ${DYNAMO_IN
 
 echo "\nGenerated values file saved as generated-values.yaml"
 
-
+# TODO: We need to add the following fixes
+# helm dep build
 # Install/upgrade the helm chart
 echo "Installing/upgrading helm chart..."
 $HELM_CMD upgrade --install $RELEASE_NAME platform/ \

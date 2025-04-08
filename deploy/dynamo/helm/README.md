@@ -1,4 +1,15 @@
-# Deploy CompoundAI API server and Operator
+# Deploy Dynamo Cloud
+
+### Pre-requisites
+
+- Build and push earthly images to an image registry of your choice.
+
+```
+# Assumes you have previously authenticated with registry using `docker login ..`
+export CI_REGISTRY_IMAGE=nvcr.io/nvidian/nim-llm-dev
+export CI_COMMIT_SHA=dyn-cloud-e2e
+earthly --push +all-docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
+```
 
 ### Manually install etcd and nats
 
@@ -32,6 +43,7 @@ export CI_COMMIT_SHA=<TAG>  # Use the same tag you used when building the images
 export CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION>  # Use the same registry/org you used when building the images
 export RELEASE_NAME=$KUBE_NS
 
+# TODO: helm dep update fails without first registering all the repos and running helm repo update
 ./deploy.sh
 ```
 
