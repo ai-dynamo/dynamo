@@ -49,7 +49,7 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
         "--max-prefill-queue-size",
         type=int,
         default=3,
-        help="Maximum queue size for remote prefill. If the queue size is greater than this value a local prefill request will be sent (assumes disaggregation)",
+        help="Maximum queue size for remote prefill. If the prefill queue size is greater than this value, prefill phase of the incoming request will be executed locally.",
     )
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args(vllm_args)
