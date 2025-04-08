@@ -43,7 +43,7 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
         "--max-local-prefill-length",
         type=int,
         default=1000,
-        help="Maximum length of local prefill",
+        help="Do not prefill locally (prefill remotely) if the prefill length is greater than this value",
     )
     parser.add_argument(
         "--max-prefill-queue-size",
