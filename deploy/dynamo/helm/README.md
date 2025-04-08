@@ -1,6 +1,6 @@
 # Deploy Dynamo Cloud
 
-### Pre-requisites
+## Pre-requisites
 
 - Build and push earthly images to an image registry of your choice.
 
@@ -11,7 +11,7 @@ export CI_COMMIT_SHA=dyn-cloud-e2e
 earthly --push +all-docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
 ```
 
-### Manually install etcd and nats
+## Deploy Dynamo Cloud Platform
 
 Pre-requisite: make sure your terminal is set in the `deploy/dynamo/helm/` directory.
 
