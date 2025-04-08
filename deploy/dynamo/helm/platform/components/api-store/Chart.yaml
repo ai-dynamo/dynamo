@@ -20,8 +20,8 @@ version: 0.1.0
 appVersion: "1.0.0"
 dependencies:
   - name: postgresql
-    version: "12.12.4"
-    repository: https://charts.bitnami.com/bitnami
+    version: "16.6.2"  # This is an example; update with the latest version if needed
+    repository: "https://charts.bitnami.com/bitnami"
   - name: minio
-    version: "5.0.0"
-    repository: https://charts.min.io/
+    version: "16.0.2"
+    repository: "https://charts.bitnami.com/bitnami"

@@ -113,12 +113,32 @@ minio:
     annotations: {}
   podSecurityContext:
     enabled: true
-    fsGroup: 1001
+    fsGroup: 1000
   containerSecurityContext:
     enabled: true
-    runAsUser: 1001
+    runAsUser: 1000
     runAsNonRoot: true
     readOnlyRootFilesystem: false
+  startupProbe:
+    enabled: true
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  persistence:
+    mountPath: /data
+  service:
+    type: ClusterIP
+    ports:
+      api: 9000
+      console: 9001
 
 resources: {}
   # We usually recommend not to specify default resources and to leave this as a conscious
