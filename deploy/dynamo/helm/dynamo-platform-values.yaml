@@ -93,6 +93,14 @@ dynamo-api-store:
     - name: nvcrimagepullsecret
     - name: docker-imagepullsecret
     - name: gitlab-imagepull
+  ingress:
+    enabled: true
+    className: nginx
+    hosts:
+      - host: ${NAMESPACE}.dev.aire.nvidia.com
+        paths:
+          - path: /
+            pathType: Prefix
   postgresql:
     primary:
       persistence:

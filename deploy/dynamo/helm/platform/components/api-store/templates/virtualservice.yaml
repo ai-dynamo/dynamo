@@ -12,16 +12,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-apiVersion: v2
-name: dynamo-api-store
-description: A Helm chart for the Dynamo API Store component
-type: application
-version: 0.1.0
-appVersion: "1.0.0"
-dependencies:
-  - name: postgresql
-    version: "12.12.4"
-    repository: https://charts.bitnami.com/bitnami
-  - name: minio
-    version: "5.0.0"
-    repository: https://charts.min.io/
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: dynamo-ingress
+spec:
+  gateways:
+  - istio-system/ingress-alb
+  hosts:
+  - "{{ .Values.istio.host }}"
+  http:
+  - match:
+    - uri:
+        prefix: /api/
+    route:
+    - destination:
+        host: dynamo-server.{{ .Release.Namespace }}.svc.cluster.local
+        port:
+          number: 80

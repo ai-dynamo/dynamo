@@ -12,50 +12,54 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-{{- if .Values.serviceAccount.create -}}
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: {{ include "dynamo-api-store.serviceAccountName" . }}
-  labels:
-    {{- include "dynamo-api-store.labels" . | nindent 4 }}
-  {{- with .Values.serviceAccount.annotations }}
-  annotations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
----
 apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.namespaceRestriction.enabled }}
 kind: Role
+{{- else }}
+kind: ClusterRole
+{{- end }}
 metadata:
-  name: {{ include "dynamo-api-store.fullname" . }}
-  labels:
-    {{- include "dynamo-api-store.labels" . | nindent 4 }}
+  name: {{ include "helm.fullname" . }}-role
+  {{- if .Values.namespaceRestriction.enabled }}
+  namespace: {{ .Values.namespaceRestriction.targetNamespace }}
+  {{- end }}
 rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamodeployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.namespaceRestriction.enabled }}
 kind: RoleBinding
-metadata:
-  name: {{ include "dynamo-api-store.fullname" . }}
-  labels:
-    {{- include "dynamo-api-store.labels" . | nindent 4 }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: {{ include "dynamo-api-store.fullname" . }}
-subjects:
-  - kind: ServiceAccount
-    name: {{ include "dynamo-api-store.serviceAccountName" . }}
-    namespace: {{ .Release.Namespace }}
+{{- else }}
+kind: ClusterRoleBinding
 {{- end }}
+metadata:
+  name: {{ include "helm.fullname" . }}-role-binding
+  {{- if .Values.namespaceRestriction.enabled }}
+  namespace: {{ .Values.namespaceRestriction.targetNamespace }}
+  {{- end }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "helm.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  {{- if .Values.namespaceRestriction.enabled }}
+  kind: Role
+  {{- else }}
+  kind: ClusterRole
+  {{- end }}
+  name: {{ include "helm.fullname" . }}-role
+  apiGroup: rbac.authorization.k8s.io

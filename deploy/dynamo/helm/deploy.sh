@@ -70,7 +70,7 @@ cd ../..
 cd components/api-store
 retry_command "$HELM_CMD dependency update" 5 5
 cd ../..
-retry_command "$HELM_CMD dep update" 5 5
+retry_command "$HELM_CMD dep update" 7 5
 retry_command "$HELM_CMD repo update" 5 5
 cd ..
 
@@ -101,7 +101,6 @@ echo "Installing/upgrading helm chart..."
 $HELM_CMD upgrade --install $RELEASE_NAME platform/ \
   -f generated-values.yaml \
   --create-namespace \
-  --namespace ${NAMESPACE} \
-  --debug
+  --namespace ${NAMESPACE}
 
 echo "Helm chart deployment complete"
