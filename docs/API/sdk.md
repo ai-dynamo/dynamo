@@ -14,7 +14,7 @@
 
 Dynamo is a flexible and performant distributed inferencing solution for large-scale deployments. It is an ecosystem of tools, frameworks, and abstractions that makes the design, customization, and deployment of frontier-level models onto datacenter-scale infrastructure easy to reason about and optimized for your specific inferencing workloads. Dynamo's core is written in Rust and contains a set of well-defined Python bindings. Docs and examples for those can be found [here](./python_bindings.md).
 
-Dynamo SDK is a layer on top of the core. It is a Python framework that makes it easy to create inference graphs and deploy them locally and onto a target K8s cluster. The SDK was heavily inspired by [BentoML's](https://github.com/bentoml/BentoML) open source deployment patterns and leverages many of its core primitives. The Dynamo CLI is a companion tool that allows you to spin up an inference pipeline locally, containerize it, and deploy it. You can find a toy hello-world example [here](../../examples/hello_world/README.md).
+Dynamo SDK is a layer on top of the core. It is a Python framework that makes it easy to create inference graphs and deploy them locally and onto a target K8s cluster. The SDK was heavily inspired by [BentoML's](https://github.com/bentoml/BentoML) open source deployment patterns and leverages many of its core primitives. The Dynamo CLI is a companion tool that allows you to spin up an inference pipeline locally, containerize it, and deploy it. You can find a toy hello-world example and instructions for deploying it [here](../../examples/hello_world/README.md).
 
 # Installation
 
@@ -43,8 +43,8 @@ A Service is a core building block for a project. You can think of it as a logic
 ```
 
 Key configuration options:
-1. `dynamo`: Dictionary that defines the Dynamo configuration and enables/disables it. When enabled, a dynamo worker is created under the hood which can register with the [Distributed Runtime](../../../../../docs/architecture.md)
-2. `resources`: Dictionary defining resource requirements. Used primarily when deploying to K8s, but gpu is also used for local execution.
+1. `dynamo`: Dictionary that defines the Dynamo configuration and enables/disables it. When enabled, a dynamo worker is created under the hood which can register with the [Distributed Runtime](../architecture/architecture.md)
+2. `resources`: Dictionary defining resource requirements. The GPUs field is used for local and remote deployment. The other fields are used to determine resources when deploying to K8s.
 3. `workers`: Number of parallel instances of the service to spin up.
 
 ## Writing a Service
@@ -68,13 +68,6 @@ class ServiceA:
         # Initialize resources that require async operations
         self.engine = await initialize_model_engine(self.model_name)
         print(f"ServiceA initialized with model: {self.model_name}")
-
-    @async_on_shutdown
-    async def async_shutdown(self):
-        # Clean up resources
-        if self.engine:
-            await self.engine.shutdown()
-            print("ServiceA engine shut down")
 
     @dynamo_endpoint()
     async def generate(self, request: ChatCompletionRequest):
@@ -117,6 +110,7 @@ result = await service_b.preprocess(data)
 ```python
 import VllmWorker
 
+# this runtime object gives you access to the underlying python bindings
 runtime = dynamo_context["runtime"]
 comp_ns, comp_name = VllmWorker.dynamo_address() # dynamo://{namespace}/{name}
 print(f"[Processor] comp_ns: {comp_ns}, comp_name: {comp_name}")
