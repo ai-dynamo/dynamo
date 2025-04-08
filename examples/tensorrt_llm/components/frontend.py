@@ -16,8 +16,8 @@
 import subprocess
 from pathlib import Path
 
-from components.worker import TensorRTLLMWorker
 from components.processor import Processor
+from components.worker import TensorRTLLMWorker
 from pydantic import BaseModel
 
 from dynamo import sdk

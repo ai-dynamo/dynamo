@@ -20,13 +20,12 @@ from common.base_engine import BaseTensorrtLLMEngine, TensorrtLLMEngineConfig
 from common.parser import parse_tensorrt_llm_args
 from common.protocol import TRTLLMWorkerRequest, TRTLLMWorkerResponse
 from tensorrt_llm.executor import CppExecutorError
-from tensorrt_llm.logger import logger
 
 from dynamo.llm import KvMetricsPublisher
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
-logger.set_level("debug")
+logger = logging.getLogger(__name__)
 
 
 @service(
@@ -43,7 +42,7 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
     """
 
     def __init__(self):
-        print("Initializing TensorRT-LLM Worker")
+        logger.info("Initializing TensorRT-LLM Worker")
         class_name = self.__class__.__name__
         config = ServiceConfig.get_instance()
         config_args = config.as_args(class_name, prefix="")

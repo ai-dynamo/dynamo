@@ -15,36 +15,36 @@
 
 
 import asyncio
+import copy
+import logging
+import signal
 import threading
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from queue import Queue
 from typing import Any, Optional
-import copy
-import signal
-from dataclasses import asdict
 
 from common.chat_processor import ChatProcessor, CompletionsProcessor
 from common.parser import LLMAPIConfig
-from common.utils import ManagedThread
 from common.protocol import (
     DisaggregatedTypeConverter,
     TRTLLMWorkerRequest,
     TRTLLMWorkerResponse,
     TRTLLMWorkerResponseOutput,
 )
-
-from tensorrt_llm.serve.openai_protocol import DisaggregatedParams
+from common.utils import ManagedThread
 from tensorrt_llm.executor import CppExecutorError
 from tensorrt_llm.llmapi import LLM
-from tensorrt_llm.logger import logger
+from tensorrt_llm.serve.openai_protocol import DisaggregatedParams
 from transformers import AutoTokenizer
 
 from dynamo.llm import KvMetricsPublisher
 
 from .kv_cache_event_publisher import KVCacheEventPublisher
 
-logger.set_level("info")
+logger = logging.getLogger(__name__)
+
+logger.setLevel(logging.DEBUG)
 
 
 class ChatProcessorMixin:
@@ -397,10 +397,10 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
         ]
         if len(ctx_responses) > 1:
             raise ValueError(
-                "Context server returned more than one response. This is currently not supported in disaggregated server."
+                "Prefill worker returned more than one response. This is currently not supported in remote prefill mode."
             )
         logger.debug(
-            f"[worker] received response from context server: {ctx_responses[0].data()}"
+            f"Received response from prefill worker: {ctx_responses[0].data()}"
         )
         ctx_response_obj = TRTLLMWorkerResponse.model_validate_json(
             ctx_responses[0].data()
@@ -424,11 +424,27 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
 
         try:
             worker_inputs = request.prompt
-            disaggregated_params = None
+            disaggregated_params = (
+                DisaggregatedTypeConverter.to_llm_disaggregated_params(
+                    request.disaggregated_params
+                )
+            )
 
             if self.do_remote_prefill:
                 ctx_response_obj = await self._get_remote_prefill_response(request)
-                worker_inputs = (ctx_response_obj.prompt_token_ids + ctx_response_obj.outputs[0].token_ids)
+                # Remove the disaggregated params so  that it can be sent over the network.
+                output = copy.deepcopy(ctx_response_obj.outputs[0])
+                output.disaggregated_params = None
+                # Yield the first token from the prefill worker.
+                yield TRTLLMWorkerResponse(
+                    request_id=request.id,
+                    prompt=ctx_response_obj.prompt,
+                    prompt_token_ids=ctx_response_obj.prompt_token_ids,
+                    outputs=[asdict(output)],
+                    finished=ctx_response_obj.finished,
+                ).model_dump_json(exclude_unset=True)
+
+                worker_inputs = ctx_response_obj.prompt_token_ids
                 disaggregated_params = (
                     DisaggregatedTypeConverter.to_llm_disaggregated_params(
                         DisaggregatedParams(
@@ -439,7 +455,7 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
                 disaggregated_params.request_type = "generation_only"
 
             logger.debug(
-                f"[worker context] Worker inputs: {worker_inputs}, disaggregated params: {disaggregated_params}"
+                f"Worker inputs: {worker_inputs}, disaggregated params: {disaggregated_params}"
             )
 
             async for response in self._llm_engine.generate_async(
@@ -448,6 +464,14 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
                 disaggregated_params=disaggregated_params,
                 streaming=True,
             ):
+                # Encode the disaggregated params to OAI format so
+                # it can be sent over the network.
+                response.outputs[
+                    0
+                ].disaggregated_params = DisaggregatedTypeConverter.to_oai_disaggregated_params(
+                    response.outputs[0].disaggregated_params
+                )
+                print(f"response debugggggg : {response.outputs[0]}")
                 yield TRTLLMWorkerResponse(
                     request_id=request.id,
                     prompt=response.prompt,

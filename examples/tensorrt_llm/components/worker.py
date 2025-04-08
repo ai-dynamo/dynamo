@@ -13,32 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import logging
 import os
 from typing import Optional
-from common.base_engine import BaseTensorrtLLMEngine, TensorrtLLMEngineConfig
-from common.parser import parse_tensorrt_llm_args, LLMAPIConfig
-from common.protocol import (
-    TRTLLMWorkerRequest,
-)
-from components.prefill_worker import TensorRTLLMPrefillWorker
 
-from mpi4py.futures import MPICommExecutor
-from mpi4py.MPI import COMM_WORLD
-from tensorrt_llm._utils import set_mpi_comm
-from tensorrt_llm.llmapi import MpiCommSession
+from common.base_engine import BaseTensorrtLLMEngine, TensorrtLLMEngineConfig
+from common.parser import LLMAPIConfig, parse_tensorrt_llm_args
+from common.protocol import TRTLLMWorkerRequest
+from components.prefill_worker import TensorRTLLMPrefillWorker
 from tensorrt_llm.llmapi.disagg_utils import (
     CtxGenServerConfig,
     DisaggServerConfig,
     parse_disagg_config_file,
-    split_world_comm,
 )
-from tensorrt_llm.logger import logger
 
 from dynamo.llm import KvMetricsPublisher
-from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service, depends
+from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
-logger.set_level("debug")
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
 
 def update_args_from_disagg_config(
     engine_config: LLMAPIConfig, server_config: CtxGenServerConfig
@@ -48,6 +43,7 @@ def update_args_from_disagg_config(
     engine_config.extra_args.update(**server_config.other_args)
     engine_config.update_sub_configs(server_config.other_args)
     return engine_config
+
 
 @service(
     dynamo={
@@ -61,56 +57,48 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
     prefill_worker = depends(TensorRTLLMPrefillWorker)
 
     def __init__(self):
-        print("Initializing TensorRT-LLM Worker", flush=True)
+        logger.info("Initializing TensorRT-LLM Worker")
         class_name = self.__class__.__name__
         config = ServiceConfig.get_instance()
         config_args = config.as_args(class_name, prefix="")
         self.args, self.engine_config = parse_tensorrt_llm_args(config_args)
         self.do_remote_prefill = self.args.remote_prefill
         self.disagg_config: Optional[DisaggServerConfig] = None
+        self.min_workers = 0
 
         if self.do_remote_prefill:
+            self.min_workers = self.args.min_workers
             if self.args.llmapi_disaggregated_config is None or not os.path.exists(
                 self.args.llmapi_disaggregated_config
-            ):  
+            ):
                 raise ValueError(
                     "llmapi_disaggregated_config file does not exist or not provided"
                 )
             self.disagg_config: DisaggServerConfig = parse_disagg_config_file(
                 self.args.llmapi_disaggregated_config
             )
-            print(f"Parsed disaggregated config: {self.disagg_config}", flush=True)
+            self.server_config: CtxGenServerConfig = None
 
-        if self.disagg_config is not None:
-            is_leader, instance_idx, sub_comm = split_world_comm(self.disagg_config.server_configs)
-            os.environ["TRTLLM_USE_MPI_KVCACHE"] = "1"
-            set_mpi_comm(sub_comm)
+            for config in self.disagg_config.server_configs:
+                # Select the first context server config
+                if config.type == "gen":
+                    self.server_config = config
+                    break
 
-            self.instance_idx = instance_idx
-            self.server_config: CtxGenServerConfig = self.disagg_config.server_configs[
-                self.instance_idx
-            ]
+            if self.server_config is None:
+                raise ValueError(
+                    "No generation server config found. Please check the disaggregated config file."
+                )
+
             self.engine_config = update_args_from_disagg_config(
                 self.engine_config, self.server_config
             )
 
-            if not is_leader:
-                with MPICommExecutor(sub_comm) as executor:
-                    if executor is not None:
-                        raise RuntimeError(f"rank{COMM_WORLD} should not have executor")
-
-            # needed for disagg
-            self._mpi_session = MpiCommSession(sub_comm, n_workers=sub_comm.Get_size())
-            self.engine_config.extra_args[
-                "_mpi_session"
-            ] = self._mpi_session
+        logger.info(f"Engine config: {self.engine_config}")
 
         if self.args.router == "kv":
-            if self.do_remote_prefill:
-                raise RuntimeError("KV router not supported for CTX worker in disaggregated mode")
-            else:
-                publish_stats = True
-                publish_events = True
+            publish_stats = True
+            publish_events = True
         else:
             publish_stats = False
             publish_events = False
@@ -140,18 +128,18 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
             comp_ns, comp_name = TensorRTLLMPrefillWorker.dynamo_address()  # type: ignore
             self.prefill_client = (
                 await runtime.namespace(comp_ns)
-                    .component(comp_name)
-                    .endpoint("generate")
-                    .client()
+                .component(comp_name)
+                .endpoint("generate")
+                .client()
             )
             while len(self.prefill_client.endpoint_ids()) < self.min_workers:
-                print(
+                logger.info(
                     f"Waiting for prefill workers to be ready.\n"
                     f" Current: {len(self.prefill_client.endpoint_ids())},"
                     f" Required: {self.min_workers}"
                 )
-            await asyncio.sleep(2)
-        print("TensorRT-LLM Worker initialized")
+                await asyncio.sleep(2)
+        logger.info("TensorRT-LLM Worker initialized")
 
     @dynamo_endpoint()
     async def generate(self, request: TRTLLMWorkerRequest):

@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from components.worker import TensorRTLLMWorker
 from components.frontend import Frontend
-from components.processor import Processor
 from components.prefill_worker import TensorRTLLMPrefillWorker
+from components.processor import Processor
+from components.worker import TensorRTLLMWorker
 
 Frontend.link(Processor).link(TensorRTLLMWorker).link(TensorRTLLMPrefillWorker)

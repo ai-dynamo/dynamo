@@ -82,14 +82,20 @@ cd /workspace/examples/tensorrt_llm
 dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
 ```
 
+#### Disaggregated serving
+
+# Tanmay: Fix the spacing issue.
+
+```bash
+cd /workspace/examples/llm
+export TRTLLM_USE_UCX_KVCACHE=1
+dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
+```
+
+
 <!--
 This is work in progress and will be enabled soon.
 
-#### Disaggregated serving
-```bash
-cd /workspace/examples/llm
-dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
-```
 
 #### Disaggregated serving with KV Routing
 ```bash

@@ -15,19 +15,19 @@
 
 import asyncio
 import json
+import logging
 
 from common.base_engine import ChatProcessorMixin
 from common.parser import parse_tensorrt_llm_args
 from common.protocol import DynamoTRTLLMChatCompletionRequest
 from common.utils import RequestType, ServerType
-from components.worker import TensorRTLLMWorker
 from components.kv_router import Router
-from tensorrt_llm.logger import logger
+from components.worker import TensorRTLLMWorker
 
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
-logger.set_level("debug")
+logger = logging.getLogger(__name__)
 
 
 @service(
