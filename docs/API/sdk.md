@@ -7,13 +7,14 @@
 - [Core Concepts](#core-concepts)
 - [Writing a Service](#writing-a-service)
 - [Configuring a Service](#configuring-a-service)
+- [Deploying a Single Service](#deploying-a-single-service)
 - [Composing Services into an Graph](#composing-services-into-an-graph)
 
 # Introduction
 
-Dynamo is a flexible and performant distributed inferencing solution for large-scale deployments. It is an ecosystem of tools, frameworks, and abstractions that makes the design, customization, and deployment of frontier-level models onto datacenter-scale infrastructure easy to reason about and optimized for your specific inferencing workloads. Dynamo's core is written in Rust and contains a set of well-defined Python bindings. Docs and examples for those can be found [here](../../../../../README.md).
+Dynamo is a flexible and performant distributed inferencing solution for large-scale deployments. It is an ecosystem of tools, frameworks, and abstractions that makes the design, customization, and deployment of frontier-level models onto datacenter-scale infrastructure easy to reason about and optimized for your specific inferencing workloads. Dynamo's core is written in Rust and contains a set of well-defined Python bindings. Docs and examples for those can be found [here](./python_bindings.md).
 
-Dynamo SDK is a layer on top of the core. It is a Python framework that makes it easy to create inference graphs and deploy them locally and onto a target K8s cluster. The SDK was heavily inspired by [BentoML's](https://github.com/bentoml/BentoML) open source deployment patterns and leverages many of its core primitives. The Dynamo CLI is a companion tool that allows you to spin up an inference pipeline locally, containerize it, and deploy it. You can find a toy hello-world example [here](../../README.md).
+Dynamo SDK is a layer on top of the core. It is a Python framework that makes it easy to create inference graphs and deploy them locally and onto a target K8s cluster. The SDK was heavily inspired by [BentoML's](https://github.com/bentoml/BentoML) open source deployment patterns and leverages many of its core primitives. The Dynamo CLI is a companion tool that allows you to spin up an inference pipeline locally, containerize it, and deploy it. You can find a toy hello-world example and instructions for deploying it [here](../Examples/hello_world_readme.md).
 
 # Installation
 
@@ -24,7 +25,7 @@ pip install ai-dynamo
 ```
 
 # Core Concepts
-As you read about each concept, it is helpful to have the [basic example](../../README.md) up as well so you can refer back to it.
+As you read about each concept, it is helpful to have the [basic example](../Examples/hello_world_readme.md) up as well so you can refer back to it.
 
 ## Defining a Service
 
@@ -42,8 +43,8 @@ A Service is a core building block for a project. You can think of it as a logic
 ```
 
 Key configuration options:
-1. `dynamo`: Dictionary that defines the Dynamo configuration and enables/disables it. When enabled, a dynamo worker is created under the hood which can register with the [Distributed Runtime](../../../../../docs/architecture.md)
-2. `resources`: Dictionary defining resource requirements. Used primarily when deploying to K8s, but gpu is also used for local execution.
+1. `dynamo`: Dictionary that defines the Dynamo configuration and enables/disables it. When enabled, a dynamo worker is created under the hood which can register with the [Distributed Runtime](../architecture/architecture.md)
+2. `resources`: Dictionary defining resource requirements. The GPUs field is used for local and remote deployment. The other fields are used to determine resources when deploying to K8s.
 3. `workers`: Number of parallel instances of the service to spin up.
 
 ## Writing a Service
@@ -68,13 +69,6 @@ class ServiceA:
         self.engine = await initialize_model_engine(self.model_name)
         print(f"ServiceA initialized with model: {self.model_name}")
 
-    @async_on_shutdown
-    async def async_shutdown(self):
-        # Clean up resources
-        if self.engine:
-            await self.engine.shutdown()
-            print("ServiceA engine shut down")
-
     @dynamo_endpoint()
     async def generate(self, request: ChatCompletionRequest):
         # Call dependent service
@@ -89,7 +83,7 @@ class ServiceA:
 Dynamo follows a class-based architecture similar to BentoML making it intuitive for users familiar with those frameworks. Each service is defined as a Python class, with the following components:
 1. Class attributes for dependencies using `depends()`
 2. An `__init__` method for standard initialization
-3. Optional lifecycle hooks like `@async_on_start` and `@async_on_shutdown`
+3. Optional lifecycle hooks like `@async_on_start` 
 4. Endpoints defined with `@dynamo_endpoint()`
 
 This approach provides a clean separation of concerns and makes the service structure easy to understand.
@@ -116,6 +110,7 @@ result = await service_b.preprocess(data)
 ```python
 import VllmWorker
 
+# this runtime object gives you access to the underlying python bindings
 runtime = dynamo_context["runtime"]
 comp_ns, comp_name = VllmWorker.dynamo_address() # dynamo://{namespace}/{name}
 print(f"[Processor] comp_ns: {comp_ns}, comp_name: {comp_name}")
@@ -149,19 +144,6 @@ async def async_init(self):
 This is especially useful for:
 - Initializing external connections
 - Setting up runtime resources that require async operations
-
-#### `@async_on_shutdown`
-The `@async_on_shutdown` hook is called when the service is shutdown handles cleanup.
-
-```python
-@async_on_shutdown
-async def async_shutdown(self):
-    if self._engine_context is not None:
-        await self._engine_context.__aexit__(None, None, None)
-    print("VllmWorkerRouterLess shutting down")
-```
-
-This ensures resources are properly released, preventing memory leaks and making sure external connections are properly closed. This is helpful to clean up vLLM engines that have been started outside of the main process.
 
 ## Configuring a Service
 
@@ -412,7 +394,10 @@ The service will receive the combined configuration with the command-line value 
 
 Following these practices will help you create flexible and maintainable Dynamo services that can be easily configured for different environments and use cases.
 
-### Composing Services into an Graph
+## Deploying a Single Service
+You can deploy a single service for local development even if you have a dependancy graph defined using `depends()` using `dynamo serve --service-name <ClassName> <entrypoint> <configuration arguments>`. You can see an example of this in our multinode documentation [here](../../examples/llm/multinode-examples.md).
+
+## Composing Services into an Graph
 There are two main ways to compose services in Dynamo:
 1. Use `depends()` (Recommended)
 The depends() approach is the recommended way for production deployments:
