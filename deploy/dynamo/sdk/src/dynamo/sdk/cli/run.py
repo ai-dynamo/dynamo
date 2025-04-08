@@ -29,8 +29,7 @@ def build_run_command() -> click.Group:
 
     @cli.command(
         context_settings=dict(
-            ignore_unknown_options=True,
-            allow_extra_args=True,
+            ignore_unknown_options=True, allow_extra_args=True, help_option_names=()
         ),
     )
     def run() -> None:
