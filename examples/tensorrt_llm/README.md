@@ -87,9 +87,23 @@ dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
 # Tanmay: Fix the spacing issue.
 
 ```bash
-cd /workspace/examples/llm
+git clone --single-branch --branch tanmayv-disagg  https://github.com/ai-dynamo/dynamo.git
+./container/run.sh --framework tensorrtllm -it --image gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo-ci:tanmayv-trtllm-updated-4.8 --mount-workspace
+cd /workspace/examples/tensorrt_llm
 export TRTLLM_USE_UCX_KVCACHE=1
-dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
+source setup.sh
+dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml&
+curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+    "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "messages": [
+    {
+        "role": "user",
+        "content": "What is the capital of France?"
+    }
+    ],
+    "stream":false,
+    "max_completion_tokens": 30
+  }'
 ```
 
 
