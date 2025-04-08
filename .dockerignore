@@ -33,7 +33,6 @@
 **/*.model.*/*
 **/*.cache/*
 **/*.libtorch_model_store/*
-**/.git
 **/.github
 **/*backup*/
 .dockerignore

@@ -36,6 +36,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Define Image Tag
@@ -47,6 +49,34 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
         run: |
           ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target ci_minimum --framework ${{ matrix.framework }}
+      - name: Copy Python wheels from test Container
+        run: |
+          mkdir wheels
+          docker run -w /workspace  --name wheel_copy -d ${{ steps.define_image_tag.outputs.image_tag }} tail -f /dev/null
+          docker exec wheel_copy bash -c 'ls dist/*.whl' | while read line; do docker cp wheel_copy:/workspace/$line ./wheels; done
+          docker container stop wheel_copy
+          ls -al wheels
+      - name: Archive ai_dynamo Wheel
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wheel-ai_dynamo
+          if-no-files-found: error
+          path: ./wheels/ai_dynamo-*.whl
+      - name: Archive ai_dynamo_runtime Wheel
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wheel-ai_dynamo_runtime
+          if-no-files-found: error
+          path: ./wheels/ai_dynamo_runtime-*.whl
+      - name: Archive ai_dynamo_vllm Wheel
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wheel-ai_dynamo_vllm
+          if-no-files-found: error
+          path: ./wheels/ai_dynamo_vllm-*.whl
       - name: Run pytest
         env:
           PYTEST_MARKS: "pre_merge or mypy"
@@ -64,14 +94,3 @@ jobs:
           if-no-files-found: error
           path: |
             ${{ env.PYTEST_XML_FILE }}
-
-  event_file:
-    name: "Event File"
-    runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'pull_request' }}
-    steps:
-      - name: Upload
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
-        with:
-          name: Event File
-          path: ${{ github.event_path }}

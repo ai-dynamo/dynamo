@@ -16,7 +16,9 @@
 
 [project]
 name = "ai-dynamo-runtime"
-version = "0.1.0"
+dynamic = [
+ "version",
+]
 description = "Dynamo Inference Framework Runtime"
 readme = "README.md"
 authors = [
