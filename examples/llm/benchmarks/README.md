@@ -43,12 +43,12 @@ docker compose -f deploy/docker_compose.yml up -d
 
 ## Disaggregated Single Node Benchmarking
 
-In the following steps we compare Dynamo disaggregated vLLM single node performance to
-[native vLLM Aggregated Baseline](#vllm-aggregated-baseline-benchmarking). These were chosen to optimize
+*One H100 80GB x8 node is required for this setup.*
+
+In the following setup we compare Dynamo disaggregated vLLM performance to
+[native vLLM Aggregated Baseline](#vllm-aggregated-baseline-benchmarking) on a single node. These were chosen to optimize
 for Output Token Throughput (per sec) when both are performing under similar Inter Token Latency (ms).
 For more details on your use case please see the [Performance Tuning Guide](/docs/guides/disagg_perf_tuning.md).
-
-One H100 80GB x8 node is required for this setup.
 
 With the Dynamo repository, benchmarking image and model available, and **NATS and ETCD started**, perform the following steps:
 
@@ -67,6 +67,47 @@ dynamo serve benchmarks.disagg:Frontend -f benchmarks/disagg.yaml 1> disagg.log 
 Note: Check the `disagg.log` to make sure the service is fully started before collecting performance numbers.
 
 Collect the performance numbers as shown on the [Collecting Performance Numbers](#collecting-performance-numbers) section below.
+
+## Disaggregated Multi Node Benchmarking
+
+*Two H100 80GB x8 nodes are required for this setup.*
+
+In the following steps we compare Dynamo disaggregated vLLM performance to
+[native vLLM Aggregated Baseline](#vllm-aggregated-baseline-benchmarking) on two nodes. These were chosen to optimize
+for Output Token Throughput (per sec) when both are performing under similar Inter Token Latency (ms).
+For more details on your use case please see the [Performance Tuning Guide](/docs/guides/disagg_perf_tuning.md).
+
+With the Dynamo repository, benchmarking image and model available, and **NATS and ETCD started on node 0**, perform the following steps:
+
+1\. Run benchmarking container (node 0 & 1)
+```bash
+./container/run.sh -it \
+  -v <huggingface_hub>:/root/.cache/huggingface/hub \
+  -v <dynamo_repo>:/workspace
+```
+
+2\. Config NATS and ETCD (node 1)
+```bash
+export NATS_SERVER="nats://<node_0_ip_addr>"
+export ETCD_ENDPOINTS="<node_0_ip_addr>:2379"
+```
+Note: Node 1 must be able to reach Node 0 over the network for the above services.
+
+3\. Start workers (node 0)
+```bash
+cd /workspace/examples/llm
+dynamo serve benchmarks.disagg_multinode:Frontend -f benchmarks/disagg_multinode_0.yaml 1> disagg_multinode.log 2>&1 &
+```
+Note: Check the `disagg_multinode.log` to make sure the service is fully started before collecting performance numbers.
+
+4\. Start workers (node 1)
+```bash
+cd /workspace/examples/llm
+dynamo serve components.prefill_worker:PrefillWorker -f benchmarks/disagg_multinode_1.yaml 1> prefill_worker.log 2>&1 &
+```
+Note: Check the `prefill_worker.log` to make sure the service is fully started before collecting performance numbers.
+
+Collect the performance numbers as shown on the [Collecting Performance Numbers](#collecting-performance-numbers) section above.
 
 ## vLLM Aggregated Baseline Benchmarking
 
