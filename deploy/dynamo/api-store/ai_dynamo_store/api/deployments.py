@@ -15,6 +15,32 @@ from .k8s import create_dynamo_deployment
 
 router = APIRouter(prefix="/api/v2/deployments", tags=["deployments"])
 
+def sanitize_deployment_name(name: Optional[str], dynamo_nim: str) -> str:
+    """
+    Resolve a name for the DynamoDeployment that will work safely in k8s
+    
+    Args:
+        name: Optional custom name
+        dynamo_nim: Bento name and version (format: name:version)
+        
+    Returns:
+        A unique deployment name that is at most 63 characters
+    """
+    if name:
+        # If name is provided, truncate it to 55 chars to leave room for UUID
+        base_name = name[:55]
+    else:
+        # Generate base name from dynamoNim
+        dynamo_nim_parts = dynamo_nim.split(":")
+        if len(dynamo_nim_parts) != 2:
+            raise ValueError("Invalid dynamoNim format, expected 'name:version'")
+        base_name = f"dep-{dynamo_nim_parts[0]}-{dynamo_nim_parts[1]}"
+        # Truncate to 55 chars to leave room for UUID
+        base_name = base_name[:55]
+    
+    # Add UUID and ensure total length is <= 63
+    return f"{base_name}-{uuid.uuid4().hex[:7]}"
+
 @router.post("", response_model=DeploymentFullSchema)
 async def create_deployment(deployment: CreateDeploymentSchema):
     """
@@ -27,20 +53,6 @@ async def create_deployment(deployment: CreateDeploymentSchema):
         DeploymentFullSchema: The created deployment details
     """
     try:
-        # Parse dynamoNim into name and version
-        dynamo_nim_parts = deployment.bento.split(":")
-        if len(dynamo_nim_parts) != 2:
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid dynamoNim format, expected 'name:version'"
-            )
-        
-        dynamo_nim_name, dynamo_nim_version = dynamo_nim_parts
-        
-        # Generate deployment name if not provided
-        deployment_name = deployment.name or f"dep-{dynamo_nim_name}-{dynamo_nim_version}--{uuid.uuid4().hex}"
-        deployment_name = deployment_name[:63]  # Max label length for k8s
-        
         # Get ownership info for labels
         ownership = {
             "organization_id": "default-org",
@@ -49,6 +61,9 @@ async def create_deployment(deployment: CreateDeploymentSchema):
 
         # Get the k8s namespace from environment variable
         kube_namespace = os.getenv("DEFAULT_KUBE_NAMESPACE", "dynamo")
+
+        # Generate deployment name
+        deployment_name = sanitize_deployment_name(deployment.name, deployment.bento)
 
         # Create the deployment using helper function
         created_crd = create_dynamo_deployment(
@@ -64,7 +79,7 @@ async def create_deployment(deployment: CreateDeploymentSchema):
         # Create response schema
         resource = ResourceSchema(
             uid=created_crd["metadata"]["uid"],
-            name=deployment_name,
+            name=created_crd["metadata"]["name"],
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
             resource_type="deployment",
@@ -83,7 +98,7 @@ async def create_deployment(deployment: CreateDeploymentSchema):
             cluster=cluster,
             latest_revision=None,
             manifest=None,
-            urls=[f"https://{deployment_name}.dynamo.example.com"]
+            urls=[f"https://{created_crd['metadata']['name']}.dynamo.example.com"]
         )
         
         return deployment_schema
