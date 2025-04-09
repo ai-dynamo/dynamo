@@ -15,24 +15,48 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Function to retry a command up to a specified number of times
+
+retry() {
+    # retries for connectivity issues in pip install
+    local retries=3
+    local count=0
+    until "$@"; do
+        exit_code=$?
+        wait_time=$((2 ** count))
+        echo "Command failed with exit code $exit_code. Retrying in $wait_time seconds..."
+        sleep $wait_time
+        count=$((count + 1))
+        if [ $count -ge $retries ]; then
+            echo "Command failed after $retries attempts."
+            return $exit_code
+        fi
+    done
+    return 0
+}
+
 set -xe
+export CARGO_BUILD_JOBS=32
+export CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 
 cd $HOME/dynamo
+# Treated as a local cache for the build
+mkdir -p $HOME/dynamo/.build
 
-export CARGO_BUILD_JOBS=32
-export CARGO_TARGET_DIR=$HOME/dynamo/target
+# build project, it will be saved at $HOME/dynamo/.build/target
+cargo build --profile dev --locked --features mistralrs,sglang,vllm,python
+cargo doc --no-deps
 
-cargo build --release --features vllm,python
-
+# create symlinks for the binaries in the deploy directory
 mkdir -p $HOME/dynamo/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
-ln -sf $HOME/dynamo/target/release/http $HOME/dynamo/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/http
-ln -sf $HOME/dynamo/target/release/llmctl $HOME/dynamo/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/llmctl
+ln -sf $HOME/dynamo/.build/target/debug/dynamo-run $HOME/dynamo/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/dynamo-run
+ln -sf $HOME/dynamo/.build/target/debug/http $HOME/dynamo/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/http
+ln -sf $HOME/dynamo/.build/target/debug/llmctl $HOME/dynamo/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/llmctl
 
-sudo chmod -R a+rw /opt/dynamo/venv
+# install the python bindings in editable mode
+retry bash -c 'DYNAMO_BIN_PATH=$HOME/dynamo/.build/target/debug uv pip install -e .'
+cd $HOME/dynamo/lib/bindings/python && retry uv pip install -e .
 
-uv pip install -e .
-
+# source the venv and set the VLLM_KV_CAPI_PATH in bashrc
 echo "source /opt/dynamo/venv/bin/activate" >> ~/.bashrc
-echo "export VLLM_KV_CAPI_PATH=$HOME/dynamo/target/release/libdynamo_llm_capi.so" >> ~/.bashrc
-
-source ~/.bashrc
+echo "export VLLM_KV_CAPI_PATH=$HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so" >> ~/.bashrc

@@ -266,7 +266,9 @@ RUN apt-get update && apt-get install -y sudo \
     && mkdir -p /home/$USERNAME \
     && chown -R $USERNAME:$USERNAME /home/$USERNAME \
     && rm -rf /var/lib/apt/lists/* \
-    && chsh -s /bin/bash $USERNAME
+    && chsh -s /bin/bash $USERNAME \
+    && chown -R $USERNAME:$USERNAME /opt/dynamo/venv \
+    && chown -R $USERNAME:$USERNAME /usr/local/bin
 
 USER $USERNAME
 WORKDIR $HOME
@@ -276,6 +278,8 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.comman
     && mkdir -p $HOME/.commandhistory \
     && touch $HOME/.commandhistory/.bash_history \
     && echo "$SNIPPET" >> "$HOME/.bashrc"
+
+RUN mkdir -p /home/$USERNAME/.cache/ &&
 
 ENV VLLM_KV_CAPI_PATH=$HOME/dynamo/target/release/libdynamo_llm_capi.so
 
