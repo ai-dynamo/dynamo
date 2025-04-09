@@ -325,6 +325,26 @@ MAIN: ['my_engine.py', '--model-path', '/opt/models/Llama-3.2-3B-Instruct/', '--
 
 This allows quick iteration on the engine setup. Note how the `-n` `1` is included. Flags `--leader-addr` and `--model-config` will also be added if provided to `dynamo-run`.
 
+#### TensorRT-LLM `pystr` engine
+
+We have a python-based [TensorRT-LLM engine](/examples/tensorrt_llm/engines/agg_engine.py) as dynamo release. This can be used to load TRTLLM model and serve it in dynamo run.
+We also have a [llm_api_config.yaml](/examples/tensorrt_llm/configs/llm_api_config.yaml) file defining the options that need to be passed to LLM engine. Follow the steps below to serve trtllm on dynamo run.
+
+##### Step 1: Build the environment
+
+See instructions [here](/examples/tensorrt_llm/README.md#build-docker) to build the dynamo container with TensorRT-LLM.
+
+##### Step 2: Run the environment
+
+See instructions [here](/examples/tensorrt_llm/README.md#run-container) to run the built environment.
+
+##### Step 3: Execute `dynamo run` command
+
+Execute the following to load the TRTLLM model specified in the configuration.
+```
+dynamo run out=pystr:/workspace/examples/tensorrt_llm/engines/agg_engine.py  -- --engine_args /workspace/examples/tensorrt_llm/configs/llm_api_config.yaml
+```
+
 #### Dynamo does the pre-processing
 
 If the Python engine wants to receive and return tokens - the prompt templating and tokenization is already done - run it like this:
