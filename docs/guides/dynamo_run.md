@@ -327,7 +327,7 @@ This allows quick iteration on the engine setup. Note how the `-n` `1` is includ
 
 #### TensorRT-LLM `pystr` engine
 
-We have a python-based [TensorRT-LLM engine](/examples/tensorrt_llm/engines/agg_engine.py) as dynamo release. This can be used to load TRTLLM model and serve it in dynamo run.
+To run a TRT-LLM model with dynamo-run we have included a python based [async engine] (/examples/tensorrt_llm/engines/agg_engine.py).
 We also have a [llm_api_config.yaml](/examples/tensorrt_llm/configs/llm_api_config.yaml) file defining the options that need to be passed to LLM engine. Follow the steps below to serve trtllm on dynamo run.
 
 ##### Step 1: Build the environment
