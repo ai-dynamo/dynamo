@@ -189,6 +189,12 @@ def build_serve_command() -> click.Group:
         help="Print the final service configuration and exit without starting the server",
         default=False,
     )
+    @click.option(
+        "--save-state",
+        is_flag=True,
+        help="Save the state of the service to a file. Set this as False if you do not want to use planner",
+        default=True,
+    )
     @click.pass_context
     def serve(
         ctx: click.Context,
@@ -200,6 +206,7 @@ def build_serve_command() -> click.Group:
         host: str,
         file: str | None,
         working_dir: str | None,
+        save_state: bool,
         **attrs: t.Any,
     ) -> None:
         """Locally run connected Dynamo services. You can pass service-specific configuration options using --ServiceName.param=value format."""
@@ -269,6 +276,7 @@ def build_serve_command() -> click.Group:
             port=port,
             dependency_map=runner_map_dict,
             service_name=service_name,
+            save_state=save_state,
         )
 
     return cli

@@ -244,6 +244,7 @@ def serve_http(
     port: int = Provide[BentoMLContainer.http.port],
     dependency_map: dict[str, str] | None = None,
     service_name: str = "",
+    save_state: bool = True,
 ) -> Server:
     # WARNING: internal
     from _bentoml_impl.loader import load
@@ -449,29 +450,32 @@ def serve_http(
 
         arbiter = create_standalone_arbiter(**arbiter_kwargs)
         arbiter.exit_stack.callback(shutil.rmtree, uds_path, ignore_errors=True)
-        arbiter.exit_stack.callback(
-            shutil.rmtree,
-            os.environ.get(DYN_LOCAL_STATE_DIR, os.path.expanduser("~/.dynamo/state")),
-            ignore_errors=True,
-        )
-        logger.warn(f"arbiter: {arbiter.endpoint}")
-        # save deployment state for planner
-        if not namespace:
-            raise ValueError("No namespace found for service")
-        save_dynamo_state(
-            namespace,
-            arbiter.endpoint,
-            components={
-                watcher.name: {
-                    "watcher_name": watcher.name,
-                    "cmd": watcher.cmd + " ".join(watcher.args),
-                }
-                for watcher in watchers
-            },
-            environment={
-                "DYNAMO_SERVICE_CONFIG": os.environ["DYNAMO_SERVICE_CONFIG"],
-            },
-        )
+        if save_state:
+            arbiter.exit_stack.callback(
+                shutil.rmtree,
+                os.environ.get(
+                    DYN_LOCAL_STATE_DIR, os.path.expanduser("~/.dynamo/state")
+                ),
+                ignore_errors=True,
+            )
+            logger.warn(f"arbiter: {arbiter.endpoint}")
+            # save deployment state for planner
+            if not namespace:
+                raise ValueError("No namespace found for service")
+            save_dynamo_state(
+                namespace,
+                arbiter.endpoint,
+                components={
+                    watcher.name: {
+                        "watcher_name": watcher.name,
+                        "cmd": watcher.cmd + " ".join(watcher.args),
+                    }
+                    for watcher in watchers
+                },
+                environment={
+                    "DYNAMO_SERVICE_CONFIG": os.environ["DYNAMO_SERVICE_CONFIG"],
+                },
+            )
         arbiter.start(
             cb=lambda _: logger.info(  # type: ignore
                 (
