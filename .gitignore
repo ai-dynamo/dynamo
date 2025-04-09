@@ -86,3 +86,5 @@ TensorRT-LLM
 
 # Local build artifacts for devcontainer
 .build/
+# Copied binaries to ignore
+deploy/dynamo/sdk/src/dynamo/sdk/cli/bin

@@ -260,7 +260,7 @@ ARG USERNAME=ubuntu
 ARG USER_UID=1000
 ARG USER_GID=1000
 
-RUN apt-get update && apt-get install -y sudo \
+RUN apt-get update && apt-get install -y sudo gnupg2 gnupg1 \
     && echo "$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
     && chmod 0440 /etc/sudoers.d/$USERNAME \
     && mkdir -p /home/$USERNAME \

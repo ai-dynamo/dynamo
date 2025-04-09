@@ -46,7 +46,9 @@
     "workspaceFolder": "/home/ubuntu",
     "workspaceMount": "source=${localWorkspaceFolder},target=/home/ubuntu/dynamo,type=bind,consistency=cached",
     "mounts": [
-        "source=${localEnv:HF_HOME},target=/home/ubuntu/.cache/huggingface,type=bind"
+        "source=${localEnv:HF_HOME},target=/home/ubuntu/.cache/huggingface,type=bind",
+        "source=${localEnv:HOME}/.gitconfig,target=/home/ubuntu/.gitconfig,type=bind,readonly",
+        "source=/tmp/,target=/tmp/,type=bind"
     ],
     "postCreateCommand": "/bin/bash /home/ubuntu/dynamo/.devcontainer/post-create.sh", // Runs cargo build and pip installs packages
     "containerEnv": {
