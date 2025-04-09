@@ -50,6 +50,7 @@ Edit `.devcontainer/devcontainer.json` to modify:
 
 ## FAQ
 
+### GPG Keys for Signing Git Commits
 Signing commits using GPG should work out of the box according to [VSCode docs](https://code.visualstudio.com/remote/advancedcontainers/sharing-git-credentials#_sharing-gpg-keys).
 
 If you run into version compatibility issues you can try:
@@ -63,6 +64,29 @@ gpg --export-secret-keys --armor YOUR_KEY_ID > /tmp/key.asc
 gpg1 --import /tmp/key.asc
 git config --local gpg.program gpg1
 ```
+
+### SSH Keys for Git Operations
+
+SSH keys need to be loaded in your SSH agent to work properly in the container:
+
+```bash
+# In devcontainer, Check if your keys are loaded in the agent
+ssh-add -l
+
+# On local host, if your key isn't listed, add it
+eval "$(ssh-agent)"  # Start the agent if not running
+ssh-add ~/.ssh/id_rsa
+
+# On local host, for automatic loading at login (Option 1 - with keychain)
+sudo apt install keychain  # Or brew install keychain on macOS
+echo 'eval "$(keychain --eval --quiet --agents ssh id_rsa)"' >> ~/.bashrc
+
+# On local host, for automatic loading at login (Option 2 - without keychain)
+echo 'eval "$(ssh-agent)" > /dev/null' >> ~/.bashrc
+echo 'ssh-add ~/.ssh/id_rsa > /dev/null' >> ~/.bashrc
+```
+
+Verify access by running `ssh -T git@github.com` in both host and container.
 
 
 See VS Code Dev Containers [documentation](https://code.visualstudio.com/docs/devcontainers/containers) for more details.
