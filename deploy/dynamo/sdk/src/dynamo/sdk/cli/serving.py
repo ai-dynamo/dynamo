@@ -62,6 +62,9 @@ class ServiceProtocol(Protocol):
     def is_dynamo_component(self) -> bool:
         ...
 
+    def dynamo_address(self) -> tuple[str, str]:
+        ...
+
 
 # Use Protocol as the base for type alias
 AnyService = TypeVar("AnyService", bound=ServiceProtocol)
@@ -244,7 +247,7 @@ def serve_http(
     port: int = Provide[BentoMLContainer.http.port],
     dependency_map: dict[str, str] | None = None,
     service_name: str = "",
-    save_state: bool = True,
+    enable_planner: bool = False,
 ) -> Server:
     # WARNING: internal
     from _bentoml_impl.loader import load
@@ -450,7 +453,7 @@ def serve_http(
 
         arbiter = create_standalone_arbiter(**arbiter_kwargs)
         arbiter.exit_stack.callback(shutil.rmtree, uds_path, ignore_errors=True)
-        if save_state:
+        if enable_planner:
             arbiter.exit_stack.callback(
                 shutil.rmtree,
                 os.environ.get(
