@@ -24,9 +24,9 @@ spec:
   http:
   - match:
     - uri:
-        prefix: /api/
+        prefix: /
     route:
     - destination:
-        host: dynamo-server.{{ .Release.Namespace }}.svc.cluster.local
+        host: dynamo-store.{{ .Release.Namespace }}.svc.cluster.local
         port:
           number: 80
