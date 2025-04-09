@@ -340,7 +340,7 @@ See instructions [here](/examples/tensorrt_llm/README.md#run-container) to run t
 
 ##### Step 3: Execute `dynamo run` command
 
-Execute the following to load the TRTLLM model specified in the configuration.
+Execute the following to load the TensorRT-LLM model specified in the configuration.
 ```
 dynamo run out=pystr:/workspace/examples/tensorrt_llm/engines/agg_engine.py  -- --engine_args /workspace/examples/tensorrt_llm/configs/llm_api_config.yaml
 ```
