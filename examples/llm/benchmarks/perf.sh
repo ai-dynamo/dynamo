@@ -16,9 +16,12 @@
 
 model=neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
 
+# Input sequence length.
 isl=3000
+# Output sequence length.
 osl=150
 
+# Concurrency levels to test.
 for concurrency in 1 2 4 8 16 32 64 128 256; do
 
   genai-perf profile \

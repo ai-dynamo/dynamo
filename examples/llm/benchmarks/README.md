@@ -43,6 +43,11 @@ docker compose -f deploy/docker_compose.yml up -d
 
 ## Disaggregated Single Node Benchmarking
 
+In the following steps we compare Dynamo disaggregated vLLM single node performance to
+[native vLLM Aggregated Baseline](#vllm-aggregated-baseline-benchmarking). These were chosen to optimize
+for Output Token Throughput (per sec) when both are performing under similar Inter Token Latency (ms).
+For more details on your use case please see the [Performance Tuning Guide](/docs/guides/disagg_perf_tuning.md).
+
 One H100 80GB x8 node is required for this setup.
 
 With the Dynamo repository, benchmarking image and model available, and **NATS and ETCD started**, perform the following steps:
@@ -61,25 +66,11 @@ dynamo serve benchmarks.disagg:Frontend -f benchmarks/disagg.yaml 1> disagg.log 
 ```
 Note: Check the `disagg.log` to make sure the service is fully started before collecting performance numbers.
 
-Key settings:
-* **Model**: DeepSeek R1 Distill Llama 70B FP8 (or similar in size).
-* **FP8 Model**: Reduces memory usage for both the model and KV cache, easing remote transfer.
-* **Block Size 128**: Batches token processing for more efficient chunk transfers to GPUs.
-* **PrefillWorker**: Four separate processes (each with 1 GPU) handle the initial prefill (context embedding) phase.
-* **VllmWorker**: One process (using 4 GPUs) generates output tokens (the "decode" phase).
-* **kv-transfer-config**: Uses the DynamoNixlConnector for remote KV cache transfer.
-* **remote-prefill**: KV cache can be passed from prefill to decode workers.
-* **No prefix cache**: All requests are unique and cache should not be used.
-
 Collect the performance numbers as shown on the [Collecting Performance Numbers](#collecting-performance-numbers) section below.
-
-## Disaggregated Multi Node Benchmarking
-
-Coming soon...
 
 ## vLLM Aggregated Baseline Benchmarking
 
-One (or Two) H100 80GB x8 node is required for this setup.
+One H100 80GB x8 node is required for this setup.
 
 With the Dynamo repository and the benchmarking image available, perform the following steps:
 
@@ -111,7 +102,6 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 vllm serve neuralmagic/DeepSeek-R1-Distill-Llama-70
 ```
 Notes:
 * Check the `vllm_0.log` and `vllm_1.log` to make sure the service is fully started before collecting performance numbers.
-* For multi-node benchmarking, use TP=8 and start one instance of `vllm serve` on both node 0 and 1.
 * The `vllm serve` configuration should closely match the corresponding disaggregated benchmarking configuration.
 
 3\. Use NGINX as load balancer
@@ -120,9 +110,6 @@ apt update && apt install -y nginx
 cp /workspace/examples/llm/benchmarks/nginx.conf /etc/nginx/nginx.conf
 service nginx restart
 ```
-Key NGINX configurations:
-* **least_conn**: To load balance across vLLM servers.
-* **server**: Select all the upstream vLLM servers to load balance across, including those at a different node if applicable.
 
 Collect the performance numbers as shown on the [Collecting Performance Numbers](#collecting-performance-numbers) section below.
 
@@ -132,12 +119,8 @@ Run the benchmarking script
 ```bash
 bash -x /workspace/examples/llm/benchmarks/perf.sh
 ```
-Key settings:
-* **streaming**: Enables token streaming for more realistic performance measurements.
-* **concurrency**: Number of simultaneous requests.
-* **isl**: Input sequence length at 3000 tokens.
-* **osl**: Output sequence length requested at 150 tokens.
 
-## Interpreting Results
+## Future Roadmap
 
-Coming soon...
+* Disaggregated Multi Node Benchmarking
+* Results Interpretation
