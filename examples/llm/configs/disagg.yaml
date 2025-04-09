@@ -13,20 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+Common:
+  model: &model deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  block-size: &block_size 64
+  max-model-len: &max_model_len 16384
 
 Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  served_model_name: *model
   endpoint: dynamo.Processor.chat/completions
   port: 8000
 
 Processor:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  model: *model
   router: round-robin
 
 VllmWorker:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  model: *model
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-  max-model-len: 16384
+  max-model-len: *max_model_len
   remote-prefill: true
   conditional-disagg: true
   max-local-prefill-length: 10
@@ -37,10 +41,10 @@ VllmWorker:
       gpu: 1
 
 PrefillWorker:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  model: *model
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-  max-model-len: 16384
-  max-num-batched-tokens: 16384
+  max-model-len: *max_model_len
+  max-num-batched-tokens: *max_model_len
   ServiceArgs:
     workers: 1
     resources:

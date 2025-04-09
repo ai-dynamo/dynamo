@@ -16,34 +16,41 @@
 # This configuration file is used in the multinode-examples.md file
 # to start the 405B model on 3 nodes.
 
+Common:
+  model: &model nvidia/Llama-3.1-405B-Instruct-FP8
+  block-size: &block_size 64
+  max-model-len: &max_model_len 8192
+  router: &router kv
+  max-num-seqs: &max_num_seqs 16
+
 Frontend:
-  served_model_name: nvidia/Llama-3.1-405B-Instruct-FP8
+  served_model_name: *model
   endpoint: dynamo.Processor.chat/completions
   port: 8000
 
 Processor:
-  model: nvidia/Llama-3.1-405B-Instruct-FP8
-  block-size: 64
-  max-model-len: 8192
-  router: kv
+  model: *model
+  block-size: *block_size
+  max-model-len: *max_model_len
+  router: *router
 
 Router:
-  model-name: nvidia/Llama-3.1-405B-Instruct-FP8
+  model-name: *model
   min-workers: 1
 
 VllmWorker:
-  model: nvidia/Llama-3.1-405B-Instruct-FP8
+  model: *model
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-  block-size: 64
-  max-model-len: 8192
-  max-num-seqs: 16
+  block-size: *block_size
+  max-model-len: *max_model_len
+  max-num-seqs: *max_num_seqs
   remote-prefill: true
   conditional-disagg: true
   max-local-prefill-length: 10
   max-prefill-queue-size: 2
   gpu-memory-utilization: 0.95
   tensor-parallel-size: 8
-  router: kv
+  router: *router
   quantization: modelopt
   enable-prefix-caching: true
   ServiceArgs:
@@ -52,11 +59,11 @@ VllmWorker:
       gpu: 8
 
 PrefillWorker:
-  model: nvidia/Llama-3.1-405B-Instruct-FP8
+  model: *model
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-  block-size: 64
-  max-model-len: 8192
-  max-num-seqs: 16
+  block-size: *block_size
+  max-model-len: *max_model_len
+  max-num-seqs: *max_num_seqs
   gpu-memory-utilization: 0.95
   tensor-parallel-size: 8
   quantization: modelopt
