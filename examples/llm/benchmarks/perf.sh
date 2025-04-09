@@ -16,12 +16,13 @@
 
 model=neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
 
-# Input sequence length.
+# Input Sequence Length (isl) 3000 and Output Sequence Length (osl) 150 are
+# selected for chat use case. Note that for other use cases, the results and
+# tuning would vary.
 isl=3000
-# Output sequence length.
 osl=150
 
-# Concurrency levels to test.
+# Concurrency levels to test
 for concurrency in 1 2 4 8 16 32 64 128 256; do
 
   genai-perf profile \

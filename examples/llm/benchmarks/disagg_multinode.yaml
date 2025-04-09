@@ -21,8 +21,16 @@ Frontend:
 Processor:
   model: neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
   block-size: 128
-  max-model-len: 16384
-  router: kv
+  max-model-len: 3500
+  # Routing policy determines how remote workers are selected for processing
+  # prefill requests
+  # 1. random: randomly select workers for prefill requests
+  # 2. round-robin: different prefill requests take similar time to complete so
+  #                 selecting workers in round-robin maximizes the chance of
+  #                 selecting the least busy worker for a request
+  # 3. kv: finding prefill workers by KV cache is not beneficial when caching is
+  #        disabled on this setup
+  router: round-robin
 
 Router:
   model-name: neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
@@ -33,16 +41,17 @@ VllmWorker:
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
   block-size: 128
   max-model-len: 3500
+  # Enable only disaggregated prefill
   remote-prefill: true
-  tensor-parallel-size: 4
+  conditional-disagg: false
+  tensor-parallel-size: 8
   gpu-memory-utilization: 0.95
   disable-log-requests: true
-  router: kv
-  enable-prefix-caching: true
+  router: round-robin
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 4
+      gpu: 8
 
 PrefillWorker:
   model: neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
@@ -54,6 +63,8 @@ PrefillWorker:
   gpu-memory-utilization: 0.95
   disable-log-requests: true
   ServiceArgs:
-    workers: 4
+    workers: 8
     resources:
       gpu: 1
+
+# Automatic prefix caching is disabled by default, since all requests are expected to be unique.

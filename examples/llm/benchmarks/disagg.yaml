@@ -57,4 +57,4 @@ PrefillWorker:
     resources:
       gpu: 1
 
-# Note: No prefix cache is used, since all requests are expected to be unique.
+# Automatic prefix caching is disabled by default, since all requests are expected to be unique.

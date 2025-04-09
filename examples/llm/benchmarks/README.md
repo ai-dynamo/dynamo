@@ -96,22 +96,22 @@ Note: Node 1 must be able to reach Node 0 over the network for the above service
 3\. Start workers (node 0)
 ```bash
 cd /workspace/examples/llm
-dynamo serve benchmarks.disagg_multinode:Frontend -f benchmarks/disagg_multinode_0.yaml 1> disagg_multinode.log 2>&1 &
+dynamo serve benchmarks.disagg_multinode:Frontend -f benchmarks/disagg_multinode.yaml 1> disagg_multinode.log 2>&1 &
 ```
 Note: Check the `disagg_multinode.log` to make sure the service is fully started before collecting performance numbers.
 
 4\. Start workers (node 1)
 ```bash
 cd /workspace/examples/llm
-dynamo serve components.prefill_worker:PrefillWorker -f benchmarks/disagg_multinode_1.yaml 1> prefill_worker.log 2>&1 &
+dynamo serve components.prefill_worker:PrefillWorker -f benchmarks/disagg_multinode.yaml 1> prefill_multinode.log 2>&1 &
 ```
-Note: Check the `prefill_worker.log` to make sure the service is fully started before collecting performance numbers.
+Note: Check the `prefill_multinode.log` to make sure the service is fully started before collecting performance numbers.
 
 Collect the performance numbers as shown on the [Collecting Performance Numbers](#collecting-performance-numbers) section above.
 
 ## vLLM Aggregated Baseline Benchmarking
 
-One H100 80GB x8 node is required for this setup.
+One (or two) H100 80GB x8 nodes are required for this setup.
 
 With the Dynamo repository and the benchmarking image available, perform the following steps:
 
@@ -143,7 +143,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 vllm serve neuralmagic/DeepSeek-R1-Distill-Llama-70
 ```
 Notes:
 * Check the `vllm_0.log` and `vllm_1.log` to make sure the service is fully started before collecting performance numbers.
-* The `vllm serve` configuration should closely match the corresponding disaggregated benchmarking configuration.
+* If benchmarking over 2 nodes, `--tensor-parallel-size 8` should be used and only run one `vllm serve` instance per node.
 
 3\. Use NGINX as load balancer
 ```bash
@@ -151,6 +151,7 @@ apt update && apt install -y nginx
 cp /workspace/examples/llm/benchmarks/nginx.conf /etc/nginx/nginx.conf
 service nginx restart
 ```
+Note: If benchmarking over 2 nodes, the `upstream` configuration will need to be updated to link to the `vllm serve` on the second node.
 
 Collect the performance numbers as shown on the [Collecting Performance Numbers](#collecting-performance-numbers) section below.
 
