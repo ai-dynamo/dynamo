@@ -38,7 +38,8 @@ retry() {
 set -xe
 sudo chown -R ubuntu:ubuntu /home/ubuntu/.cache/pre-commit
 cd $HOME/dynamo && pre-commit install && retry pre-commit install-hooks && pre-commit run --all-files
-mkdir -p $HOME/dynamo/.build
+mkdir -p $HOME/dynamo/.build/target
+export CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 
 # build project, it will be saved at $HOME/dynamo/.build/target
 cargo build --profile dev --locked --features mistralrs,sglang,vllm,python
