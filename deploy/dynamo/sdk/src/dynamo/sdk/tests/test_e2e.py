@@ -40,7 +40,7 @@ def setup_and_teardown():
         ]
     )
 
-    time.sleep(10)
+    time.sleep(5)
 
     yield
 
