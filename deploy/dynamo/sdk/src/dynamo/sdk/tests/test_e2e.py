@@ -79,4 +79,4 @@ async def test_pipeline():
             if attempt == max_retries - 1:
                 raise
             print(f"Attempt {attempt + 1} failed, retrying...")
-            await asyncio.sleep(1)
+            await asyncio.sleep(3)
