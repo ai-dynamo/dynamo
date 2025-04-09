@@ -1,16 +1,5 @@
 # Deploy Dynamo Cloud
 
-## Pre-requisites
-
-- Build and push earthly images to an image registry of your choice.
-
-```
-# Assumes you have previously authenticated with registry using `docker login ..`
-export CI_REGISTRY_IMAGE=nvcr.io/nvidian/nim-llm-dev
-export CI_COMMIT_SHA=dyn-cloud-e2e
-earthly --push +all-docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
-```
-
 ## Deploy Dynamo Cloud Platform
 
 Pre-requisite: make sure your terminal is set in the `deploy/dynamo/helm/` directory.
