@@ -37,7 +37,7 @@ dynamo-operator:
   dynamo:
     dynamoIngressSuffix: ${DYNAMO_INGRESS_SUFFIX}
     yatai:
-      endpoint: http://dynamo-server
+      endpoint: http://dynamo-store
       clusterName: default
 
     yataiSystem:

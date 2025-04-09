@@ -100,48 +100,44 @@ async def create_deployment(deployment: CreateDeploymentSchema):
         deployment_name = deployment_name[:63]  # Max label length for k8s
         
         # Get ownership info for labels
-        # TODO: Implement proper ownership info retrieval
         ownership = {
-            "organization_id": "default-org",  # Replace with actual org ID
-            "user_id": "default-user"          # Replace with actual user ID
+            "organization_id": "default-org",
+            "user_id": "default-user"
         }
 
         # Get the k8s namespace from environment variable
         kube_namespace = os.getenv("DEFAULT_KUBE_NAMESPACE", "dynamo")
 
-        # Create DynamoDeployment using Pydantic models
-        type_meta = TypeMeta(
-            api_version="nvidia.com/v1alpha1",
-            kind="DynamoDeployment"
-        )
-        
-        object_meta = ObjectMeta(
-            name=deployment_name,
-            namespace=kube_namespace,
-            labels={
-                "ngc-organization": ownership["organization_id"],
-                "ngc-user": ownership["user_id"]
+        # Create the custom resource directly as a dictionary
+        custom_resource = {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "kind": "DynamoDeployment",
+            "metadata": {
+                "name": deployment_name,
+                "namespace": kube_namespace,
+                "labels": {
+                    "ngc-organization": ownership["organization_id"],
+                    "ngc-user": ownership["user_id"]
+                }
+            },
+            "spec": {
+                "dynamoNim": deployment.bento,
+                "services": {}
             }
-        )
-        
-        spec = DynamoDeploymentSpec(
-            dynamo_nim=deployment.bento,
-            services={}  # Empty services map as per requirement
-        )
-        
-        dynamo_deployment = DynamoDeployment(
-            type_meta=type_meta,
-            object_meta=object_meta,
-            spec=spec
-        )
+        }
         
         # Initialize Kubernetes client
-        config.load_kube_config()
+        try:
+            # Try in-cluster config first (for running in k8s)
+            config.load_incluster_config()
+        except config.config_exception.ConfigException:
+            # Fall back to kube config (for local development)
+            config.load_kube_config()
+            
         api = client.CustomObjectsApi()
 
-        # Print the dynamo deployment
-        print("Dynamo Deployment:")
-        print(dynamo_deployment.dict(by_alias=True))
+        print("Creating CRD in Kubernetes")
+        print(custom_resource)
         
         # Create the CRD in Kubernetes
         created_crd = api.create_namespaced_custom_object(
@@ -149,7 +145,7 @@ async def create_deployment(deployment: CreateDeploymentSchema):
             version="v1alpha1",
             namespace=kube_namespace,
             plural="dynamodeployments",
-            body=dynamo_deployment.dict(by_alias=True)  # Use by_alias to maintain camelCase
+            body=custom_resource
         )
         
         # Create response schema
@@ -192,4 +188,6 @@ async def create_deployment(deployment: CreateDeploymentSchema):
         return full_schema
         
     except Exception as e:
+        print("Error creating deployment:")
+        print(e)
         raise HTTPException(status_code=500, detail=str(e))
