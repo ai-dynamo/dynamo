@@ -24,6 +24,8 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
     libssl-dev \
+    cmake \
+    libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a dummy project to cache dependencies
@@ -53,6 +55,8 @@ RUN apt-get update && apt-get install -y \
     python3-venv \
     pkg-config \
     libssl-dev \
+    cmake \
+    libclang-dev \
     # Version control and networking
     git \
     curl \
@@ -103,8 +107,20 @@ RUN curl -fsSL --retry 3 --retry-delay 2 \
     sh get-docker.sh
 RUN usermod -aG docker $USERNAME
 
-# Install uv
-RUN curl -LsSf --retry 3 --retry-delay 2 https://astral.sh/uv/install.sh | bash && cp /root/.local/bin/uv /usr/local/bin/
+# Install uv with robust error handling
+RUN for i in {1..5}; do \
+    if curl -LsSf --retry 3 --retry-delay 5 https://astral.sh/uv/install.sh | bash; then \
+    if [ -f /root/.local/bin/uv ]; then \
+    cp /root/.local/bin/uv /usr/local/bin/ && \
+    break; \
+    fi; \
+    fi; \
+    if [ $i -eq 5 ]; then \
+    echo "Failed to install uv after 5 attempts" >&2; \
+    exit 1; \
+    fi; \
+    sleep 10; \
+    done
 
 # Copy Earthly binary from the Earthly stage
 COPY --from=earthly /usr/bin/earthly /usr/local/bin/earthly
