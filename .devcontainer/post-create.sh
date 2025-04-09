@@ -18,7 +18,7 @@
 # Function to retry a command up to a specified number of times
 
 retry() {
-    # retries for connectivity issues in pip install
+    # retries for connectivity issues in installs
     local retries=3
     local count=0
     until "$@"; do
@@ -36,9 +36,8 @@ retry() {
 }
 
 set -xe
-
-cd $HOME/dynamo
-# Treated as a local cache for the build
+sudo chown -R ubuntu:ubuntu /home/ubuntu/.cache/pre-commit
+cd $HOME/dynamo && pre-commit install && retry pre-commit install-hooks && pre-commit run --all-files
 mkdir -p $HOME/dynamo/.build
 
 # build project, it will be saved at $HOME/dynamo/.build/target
@@ -53,7 +52,7 @@ ln -sf $HOME/dynamo/.build/target/debug/llmctl $HOME/dynamo/deploy/dynamo/sdk/sr
 
 # install the python bindings in editable mode
 cd $HOME/dynamo/lib/bindings/python && retry uv pip install -e .
-retry bash -c 'cd $HOME/dynamo && DYNAMO_BIN_PATH=$HOME/dynamo/.build/target/debug uv pip install -e .'
+cd $HOME/dynamo && retry env DYNAMO_BIN_PATH=$HOME/dynamo/.build/target/debug uv pip install -e .
 
 # source the venv and set the VLLM_KV_CAPI_PATH in bashrc
 echo "source /opt/dynamo/venv/bin/activate" >> ~/.bashrc
