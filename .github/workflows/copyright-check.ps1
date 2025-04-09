@@ -120,11 +120,11 @@ $global:copyright_results = @{
 
 # === end common.ps1 extensions ===
 
-$ignored_files = @('.clang-format', '.gitattributes', '.gitignore', '.gitkeep', '.patch', 'Cargo.lock', 'LICENSE', 'uv.lock', 'rust-toolchain.toml', 'codespell.txt')
+$ignored_files = @('.clang-format', '.gitattributes', '.gitignore', '.gitkeep', '.patch', 'Cargo.lock', 'LICENSE', 'uv.lock', 'rust-toolchain.toml', 'codespell.txt', 'exclusions.txt')
 write-debug "<copyright-check> ignored_files = ['$($ignored_files -join "','")']."
 $ignored_paths = @('.github', '.mypy_cache', '.pytest_cache', 'lib/llm/tests/data/sample-models')
 write-debug "<copyright-check> ignored_paths = ['$($ignored_paths -join "','")']."
-$ignored_types = @('.bat', '.gif', '.ico', '.ipynb', '.jpg', '.jpeg', '.patch', '.png', '.pyc', '.pyi', '.rst', '.zip', '.md')
+$ignored_types = @('.bat', '.gif', '.ico', '.ipynb', '.jpg', '.jpeg', '.patch', '.png', '.pyc', '.pyi', '.rst', '.zip', '.md', '.json')
 write-debug "<copyright-check> ignored_types = ['$($ignored_types -join "', '")']."
 $ignored_folders = @('.git', '__pycache__')
 

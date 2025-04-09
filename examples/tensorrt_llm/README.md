@@ -82,21 +82,6 @@ cd /workspace/examples/tensorrt_llm
 dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
 ```
 
-#### Aggregated serving using Dynamo Run
-
-```bash
-cd /workspace/examples/tensorrt_llm
-dynamo run out=pystr:./engines/agg_engine.py -- --engine_args ./configs/llm_api_config.yaml
-```
-The above command should load the model specified in `llm_api_config.yaml` and start accepting
-text input from the client. For more details on the `dynamo run` command, please refer to the
-[dynamo run](/docs/guides/dynamo_run.md#python-bring-your-own-engine) documentation.
-
-Currently only aggregated deployment option is supported by `dynamo run` for TensorRT-LLM.
-Adding support for disaggregated deployment is under development. This does *not* require
-any other pre-requisites mentioned in the [Prerequisites](#prerequisites) section.
-
-
 <!--
 This is work in progress and will be enabled soon.
 
