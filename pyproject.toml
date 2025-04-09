@@ -15,7 +15,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.1.0"
+version = "0.1.1"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -26,10 +26,10 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "pytest>=8.3.4",
-    "bentoml==1.4.7",
+    "bentoml==1.4.8",
     "types-psutil==7.0.0.20250218",
     "kubernetes==32.0.1",
-    "ai-dynamo-runtime==0.1.0",
+    "ai-dynamo-runtime==0.1.1",
 ]
 
 classifiers = [
