@@ -45,9 +45,3 @@ export RELEASE_NAME=$KUBE_NS
 
 ./deploy.sh
 ```
-
-3. Make an default cluster:
-
-```bash
-./post-cluster.sh
-```

@@ -7,49 +7,42 @@ from typing import Optional, Dict, List
 from pydantic import BaseModel, Field
 
 # ===== PYDANTIC MODELS FOR API SCHEMAS =====
-class EnvItemSchema(BaseModel):
-    key: str
-    value: str
-
-class LabelItemSchema(BaseModel):
-    key: str
-    value: str
-
-class ResourceSchema(BaseModel):
+class BaseSchema(BaseModel):
     uid: str
-    name: str
     created_at: datetime
-    updated_at: datetime
+    updated_at: Optional[datetime] = None
+    deleted_at: Optional[datetime] = None
+
+class ResourceSchema(BaseSchema):
+    name: str
+    resource_type: str
+    labels: List[Dict[str, str]]
 
 class UserSchema(BaseModel):
-    uid: str
     name: str
     email: str
+    first_name: str
+    last_name: str
 
-class ClusterSchema(BaseModel):
-    uid: str
-    name: str
+
+class ClusterSchema(ResourceSchema):
     description: str
-
-class DeploymentServiceConfig(BaseModel):
-    scaling: Optional[Dict] = None
-    resources: Optional[Dict] = None
-    envs: Optional[List[EnvItemSchema]] = None
-    external_services: Optional[List[str]] = None
+    organization_name: str
+    creator: UserSchema
+    is_first: bool = False
 
 class DeploymentConfigSchema(BaseModel):
     access_authorization: bool = False
-    envs: Optional[List[EnvItemSchema]] = None
-    labels: Optional[List[LabelItemSchema]] = None
+    envs: Optional[List[Dict[str, str]]] = None
+    labels: Optional[List[Dict[str, str]]] = None
     secrets: Optional[List[str]] = None
-    services: Dict[str, DeploymentServiceConfig] = Field(default_factory=dict)
+    services: Dict[str, Dict] = Field(default_factory=dict)
 
-class CreateDeploymentSchema(DeploymentConfigSchema):
+class UpdateDeploymentSchema(DeploymentConfigSchema):
     bento: str
-    name: Optional[str] = None
-    dev: bool = False
 
-class DeploymentManifestSchema(BaseModel):
+class CreateDeploymentSchema(UpdateDeploymentSchema):
+    name: Optional[str] = None
     dev: bool = False
 
 class DeploymentSchema(ResourceSchema):
@@ -58,7 +51,7 @@ class DeploymentSchema(ResourceSchema):
     creator: UserSchema
     cluster: ClusterSchema
     latest_revision: Optional[Dict] = None
-    manifest: Optional[DeploymentManifestSchema] = None
+    manifest: Optional[Dict] = None
 
 class DeploymentFullSchema(DeploymentSchema):
     urls: List[str] = Field(default_factory=list)
@@ -122,7 +115,7 @@ async def create_deployment(deployment: CreateDeploymentSchema):
             },
             "spec": {
                 "dynamoNim": deployment.bento,
-                "services": {}
+                "services": {} # TODO: create a function to parse body into CRD compatible service definition
             }
         }
         
@@ -132,6 +125,7 @@ async def create_deployment(deployment: CreateDeploymentSchema):
             config.load_incluster_config()
         except config.config_exception.ConfigException:
             # Fall back to kube config (for local development)
+            print("Trying kube config")
             config.load_kube_config()
             
         api = client.CustomObjectsApi()
@@ -153,21 +147,31 @@ async def create_deployment(deployment: CreateDeploymentSchema):
             uid=created_crd["metadata"]["uid"],
             name=deployment_name,
             created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
+            updated_at=datetime.utcnow(),
+            resource_type="deployment",
+            labels=[]
         )
         
         # TODO: Replace with actual user info
         creator = UserSchema(
-            uid=ownership["user_id"],
             name="default-user",
-            email="default@example.com"
+            email="default@example.com",
+            first_name="Default",
+            last_name="User"
         )
         
         # TODO: Replace with actual cluster info
         cluster = ClusterSchema(
             uid="default-cluster",
             name="default",
-            description="Default cluster"
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+            resource_type="cluster",
+            labels=[],
+            description="Default cluster",
+            organization_name="default-org",
+            creator=creator,
+            is_first=True
         )
         
         deployment_schema = DeploymentSchema(
