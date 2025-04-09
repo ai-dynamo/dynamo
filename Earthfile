@@ -68,9 +68,7 @@ rust-base:
         protobuf-compiler \
         cmake \
         libssl-dev \
-        pkg-config \
-        libclang-dev \
-        git
+        pkg-config
 
     ENV RUSTUP_HOME=/usr/local/rustup
     ENV CARGO_HOME=/usr/local/cargo
@@ -85,45 +83,25 @@ rust-base:
         rm rustup-init && \
         chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
-dynamo-builder:
-    FROM +rust-base
-    WORKDIR /workspace
-    COPY . /workspace/
-    ENV CARGO_TARGET_DIR=/workspace/target
-
-    RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
-        strip target/release/dynamo-run && \
-        strip target/release/http && \
-        strip target/release/llmctl && \
-        strip target/release/metrics && \
-        strip target/release/mock_worker
-
-    SAVE ARTIFACT target/release/dynamo-run /dynamo-run
-    SAVE ARTIFACT target/release/http /http
-    SAVE ARTIFACT target/release/llmctl /llmctl
-    SAVE ARTIFACT target/release/metrics /metrics
-    SAVE ARTIFACT target/release/mock_worker /mock_worker
 
 dynamo-base-docker:
     ARG IMAGE=dynamo-base-docker
     ARG CI_REGISTRY_IMAGE=my-registry
     ARG CI_COMMIT_SHA=latest
-    FROM +dynamo-base
+    FROM +rust-base
     WORKDIR /workspace
+
     COPY . /workspace/
 
-    # Copy built binaries from builder target
-    COPY +dynamo-builder/dynamo-run /usr/local/bin/dynamo-run
-    COPY +dynamo-builder/http /usr/local/bin/http
-    COPY +dynamo-builder/llmctl /usr/local/bin/llmctl
-    COPY +dynamo-builder/metrics /usr/local/bin/metrics
-    COPY +dynamo-builder/mock_worker /usr/local/bin/mock_worker
+    ENV CARGO_TARGET_DIR=/workspace/target
 
-    COPY +dynamo-builder/dynamo-run /workspace/target/release/dynamo-run
-    COPY +dynamo-builder/http /workspace/target/release/http
-    COPY +dynamo-builder/llmctl /workspace/target/release/llmctl
-    COPY +dynamo-builder/metrics /workspace/target/release/metrics
-    COPY +dynamo-builder/mock_worker /workspace/target/release/mock_worker
+    RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
+        cargo doc --no-deps && \
+        cp target/release/dynamo-run /usr/local/bin && \
+        cp target/release/http /usr/local/bin && \
+        cp target/release/llmctl /usr/local/bin && \
+        cp target/release/metrics /usr/local/bin && \
+        cp target/release/mock_worker /usr/local/bin
 
     RUN uv build --wheel --out-dir /workspace/dist && \
         uv pip install /workspace/dist/ai_dynamo*any.whl
