@@ -47,26 +47,21 @@ source venv/bin/activate
 pip install ai-dynamo[all]
 ```
 
+> [!NOTE]
+> TensorRT-LLM Support is currently available on a [branch](https://github.com/ai-dynamo/dynamo/tree/dynamo/trtllm_llmapi_v1/examples/trtllm#building-the-environment)
+
 ### Development Environment
 
-Many Dynamo components require a base image that can be built and pushed to your container registry. You can use any container registry of your choice, such as:
-- Docker Hub (docker.io)
-- NVIDIA NGC Container Registry (nvcr.io)
-- Any private registry
+For a consistent development environment, you can use the provided devcontainer configuration. This requires:
+- [Docker](https://www.docker.com/products/docker-desktop)
+- [VS Code](https://code.visualstudio.com/) with the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
 
-Here's how to build it:
+To use the devcontainer:
+1. Open the project in VS Code
+2. Click on the button in the bottom-left corner
+3. Select "Reopen in Container"
 
-```bash
-export CI_REGISTRY_IMAGE=<your-registry>
-export CI_COMMIT_SHA=<your-tag>
-
-earthly --push +dynamo-base-docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
-```
-
-After building, you can use this image by setting the `DYNAMO_IMAGE` environment variable to point to your built image:
-```bash
-export DYNAMO_IMAGE=<your-registry>/dynamo-base-docker:<your-tag>
-```
+This will build and start a container with all the necessary dependencies for Dynamo development.
 
 ### Running and Interacting with an LLM Locally
 
@@ -105,6 +100,7 @@ First start the Dynamo Distributed Runtime services:
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
+
 #### Start Dynamo LLM Serving Components
 
 Next serve a minimal configuration with an http server, basic
@@ -147,17 +143,3 @@ cp /workspace/target/release/dynamo-run /workspace/deploy/dynamo/sdk/src/dynamo/
 
 uv pip install -e .
 ```
-
-#### Development Environment
-
-For a consistent development environment, you can use the provided devcontainer configuration. This requires:
-- [Docker](https://www.docker.com/products/docker-desktop)
-- [VS Code](https://code.visualstudio.com/) with the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
-
-To use the devcontainer:
-1. Open the project in VS Code
-2. Click on the button in the bottom-left corner
-3. Select "Reopen in Container"
-
-This will build and start a container with all the necessary dependencies for Dynamo development.
-
