@@ -190,10 +190,10 @@ def build_serve_command() -> click.Group:
         default=False,
     )
     @click.option(
-        "--no-state",
+        "--save-state",
         is_flag=True,
         help="Do not save the state of the service to a file. Set this if you do not want to use a local planner",
-        default=True,
+        default=False,
     )
     @click.pass_context
     def serve(
@@ -206,7 +206,7 @@ def build_serve_command() -> click.Group:
         host: str,
         file: str | None,
         working_dir: str | None,
-        no_state: bool,
+        save_state: bool,
         **attrs: t.Any,
     ) -> None:
         """Locally run connected Dynamo services. You can pass service-specific configuration options using --ServiceName.param=value format."""
@@ -276,7 +276,7 @@ def build_serve_command() -> click.Group:
             port=port,
             dependency_map=runner_map_dict,
             service_name=service_name,
-            save_state=no_state,
+            save_state=save_state,
         )
 
     return cli
