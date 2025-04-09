@@ -1,6 +1,6 @@
-# Deploy CompoundAI API server and Operator
+# Deploy Dynamo Cloud
 
-### Manually install etcd and nats
+## Deploy Dynamo Cloud Platform
 
 Pre-requisite: make sure your terminal is set in the `deploy/dynamo/helm/` directory.
 
@@ -33,10 +33,4 @@ export CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION>  # Use the same reg
 export RELEASE_NAME=$KUBE_NS
 
 ./deploy.sh
-```
-
-3. Make an default cluster:
-
-```bash
-./post-cluster.sh
 ```

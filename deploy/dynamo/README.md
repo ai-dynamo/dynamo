@@ -73,19 +73,13 @@ earthly --push +all-docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SH
 
 #### Option 2: Build Components Individually
 
-1. **API Server**
-```bash
-cd deploy/dynamo/api-server
-earthly --push +docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
-```
-
-2. **API Store**
+1. **API Store**
 ```bash
 cd deploy/dynamo/api-store
 earthly --push +docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
 ```
 
-3. **Operator**
+2. **Operator**
 ```bash
 cd deploy/dynamo/operator
 earthly --push +docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA

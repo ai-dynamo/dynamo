@@ -47,10 +47,7 @@ source venv/bin/activate
 pip install ai-dynamo[all]
 ```
 
-> [!NOTE]
-> TensorRT-LLM Support is currently available on a [branch](https://github.com/ai-dynamo/dynamo/tree/dynamo/trtllm_llmapi_v1/examples/trtllm#building-the-environment)
-
-### Building the Dynamo Base Image
+### Development Environment
 
 Many Dynamo components require a base image that can be built and pushed to your container registry. You can use any container registry of your choice, such as:
 - Docker Hub (docker.io)

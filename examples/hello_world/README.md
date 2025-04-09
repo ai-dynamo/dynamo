@@ -87,15 +87,13 @@ curl -X 'POST' \
 }'
 ```
 
-The API will respond with a stream of generated text based on your input.
-
 ## Deploying to and Running the Example in Kubernetes
 
 There are two ways to deploy the hello world example:
 1. Manually using helm charts
 2. Using the Dynamo cloud Kubernetes platform and the Dynamo deploy CLI.
 
-### Deploying with helm charts
+#### Deploying with helm charts
 
 The instructions for deploying the hello world example using helm charts can be found at [Deploying Dynamo Inference Graphs to Kubernetes using Helm](../../docs/guides/dynamo_deploy.md). The guide covers:
 
@@ -105,11 +103,11 @@ The instructions for deploying the hello world example using helm charts can be 
 4. Deploying using Helm charts
 5. Testing the deployment
 
-### Deploying with the Dynamo cloud platform
+#### Deploying with the Dynamo cloud platform
 
 This example can be deployed to a Kubernetes cluster using Dynamo cloud and the Dynamo deploy CLI.
 
-#### Prerequisites
+##### Prerequisites
 
 Before deploying, ensure you have:
 - Dynamo CLI installed
@@ -121,7 +119,7 @@ Before deploying, ensure you have:
 
 You must have first followed the instructions in [deploy/dynamo/helm/README.md](../../deploy/dynamo/helm/README.md) to create your Dynamo cloud deployment.
 
-#### Deployment Steps
+##### Deployment Steps
 
 1. **Login to Dynamo Server**
 
@@ -175,7 +173,6 @@ curl -X 'POST' 'http://localhost:3000/generate' \
     -d '{"text": "test"}'
 ```
 
-For more complex examples, see the [LLM deployment examples](../../examples/llm/README.md)
 ## Expected Output
 
 When you send the request with "test" as input, the response will show how the text flows through each service:

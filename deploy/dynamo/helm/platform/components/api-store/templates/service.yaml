@@ -15,13 +15,15 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: dynamo-ui
+  name: "dynamo-store"
+  labels:
+    {{- include "helm.labels" . | nindent 4 }}
 spec:
+  type: {{ .Values.service.type }}
   ports:
-  - port: 80
-    protocol: TCP
-    targetPort: 80
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.dynamo.apiStore.port }}
+      protocol: TCP
+      name: http
   selector:
-    app: dynamo-ui
-  sessionAffinity: None
-  type: ClusterIP
+    app: dynamo-api-store

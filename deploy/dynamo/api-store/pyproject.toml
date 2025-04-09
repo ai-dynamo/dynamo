@@ -34,6 +34,8 @@ dependencies = [
     "boto3==1.37.1",
     "botocore==1.37.1",
     "sqlmodel==0.0.22",
+    "kubernetes",
+    "python-kubernetes"
 ]
 
 [project.optional-dependencies]
