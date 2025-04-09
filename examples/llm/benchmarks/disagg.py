@@ -13,22 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-[workspace]
-members = [
-    "hello_world",
-    "service_metrics",
-]
-resolver = "3"
+from components.frontend import Frontend
+from components.prefill_worker import PrefillWorker
+from components.processor import Processor
+from components.worker import VllmWorker
 
-[workspace.package]
-version = "0.1.1"
-edition = "2021"
-authors = ["NVIDIA"]
-license = "Apache-2.0"
-homepage = "https://github.com/ai-dynamo/dynamo"
-repository = "https://github.com/ai-dynamo/dynamo.git"
-
-
-[workspace.dependencies]
-# local or crates.io
-dynamo-runtime = { path = "../" }
+Frontend.link(Processor).link(VllmWorker).link(PrefillWorker)

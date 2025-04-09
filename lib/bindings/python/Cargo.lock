@@ -1007,7 +1007,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-python"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "akin",
  "anyhow",
@@ -1078,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-py3"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dynamo-engine-python",
  "dynamo-llm",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-nats",

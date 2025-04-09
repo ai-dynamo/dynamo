@@ -13,15 +13,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io::Read;
 #[cfg(any(feature = "vllm", feature = "sglang"))]
 use std::{future::Future, pin::Pin};
+use std::{io::Read, sync::Arc};
 
 use dynamo_llm::{
-    backend::ExecutionContext, model_card::model::ModelDeploymentCard,
+    backend::ExecutionContext, kv_router::publisher::KvMetricsPublisher,
+    model_card::model::ModelDeploymentCard,
     types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
-use dynamo_runtime::protocols::Endpoint;
+use dynamo_runtime::{protocols::Endpoint, DistributedRuntime};
 
 mod flags;
 pub use flags::Flags;
@@ -40,6 +41,9 @@ const ENDPOINT_SCHEME: &str = "dyn://";
 /// When `in=text` the user doesn't need to know the model name, and doesn't need to provide it on
 /// the command line. Hence it's optional, and defaults to this.
 const INVISIBLE_MODEL_NAME: &str = "dynamo-run";
+
+/// The component name for the KV publisher, if used
+const KV_PUBLISHER_COMPONENT: &str = "kvpublisher";
 
 /// How we identify a python string endpoint
 #[cfg(feature = "python")]
@@ -68,6 +72,12 @@ pub enum EngineConfig {
 
     /// vllm multi-node doesn't run an engine on nodes other than 0. 'ray' does all the work.
     None,
+}
+
+/// Distributed system values
+struct DynInput {
+    endpoint_id: Endpoint,
+    distributed_runtime: DistributedRuntime,
 }
 
 #[allow(unused_mut)]
@@ -171,6 +181,19 @@ pub async fn run(
         }
     };
 
+    // If we are in a distributed system, we need to know our component upfront
+    let dyn_input = match &in_opt {
+        Input::Endpoint(endpoint_path) => {
+            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
+            let endpoint_id: Endpoint = endpoint_path.parse()?;
+            Some(DynInput {
+                endpoint_id,
+                distributed_runtime,
+            })
+        }
+        _ => None,
+    };
+
     #[cfg(any(feature = "vllm", feature = "sglang"))]
     let mut extra: Option<Pin<Box<dyn Future<Output = ()> + Send>>> = None; // vllm and sglang sub-process
 
@@ -219,7 +242,6 @@ pub async fn run(
         }
         #[cfg(feature = "sglang")]
         Output::SgLang => {
-            use dynamo_engine_sglang;
             let Some(model_path) = model_path else {
                 anyhow::bail!("out=sglang requires flag --model-path=<full-path-to-model-dir>");
             };
@@ -234,7 +256,7 @@ pub async fn run(
             let node_conf = dynamo_llm::engines::MultiNodeConfig {
                 num_nodes: flags.num_nodes,
                 node_rank: flags.node_rank,
-                leader_addr: flags.leader_addr.unwrap_or_default(),
+                leader_addr: flags.leader_addr.clone().unwrap_or_default(),
             };
             if node_conf.num_nodes > 1 {
                 if let Ok(Some(if_name)) = net::get_primary_interface().await {
@@ -256,7 +278,7 @@ pub async fn run(
                 node_conf,
                 flags.tensor_parallel_size,
                 flags.base_gpu_id,
-                flags.extra_engine_args,
+                flags.extra_engine_args.clone(),
             )
             .await?;
             extra = Some(Box::pin(async move {
@@ -289,7 +311,7 @@ pub async fn run(
             let node_conf = dynamo_llm::engines::MultiNodeConfig {
                 num_nodes: flags.num_nodes,
                 node_rank: flags.node_rank,
-                leader_addr: flags.leader_addr.unwrap_or_default(),
+                leader_addr: flags.leader_addr.clone().unwrap_or_default(),
             };
             if node_conf.num_nodes > 1 {
                 if let Ok(Some(if_name)) = net::get_primary_interface().await {
@@ -302,6 +324,19 @@ pub async fn run(
                 }
             }
             if node_conf.node_rank == 0 {
+                let kv_metrics_publisher = if let Some(dyn_input) = &dyn_input {
+                    let kvp_component = dyn_input
+                        .distributed_runtime
+                        .namespace(dyn_input.endpoint_id.namespace.clone())?
+                        .component(KV_PUBLISHER_COMPONENT)?;
+                    let kvp = Arc::new(KvMetricsPublisher::new()?);
+                    let kvp_inner = kvp.clone();
+                    tokio::spawn(async move { kvp_inner.create_endpoint(kvp_component).await });
+                    Some(kvp)
+                } else {
+                    None
+                };
+
                 // vllm multi-node only the leader runs vllm
                 let (engine, vllm_future) = dynamo_engine_vllm::make_leader_engine(
                     cancel_token.clone(),
@@ -309,7 +344,8 @@ pub async fn run(
                     &sock_prefix,
                     node_conf,
                     flags.tensor_parallel_size,
-                    flags.extra_engine_args,
+                    flags.extra_engine_args.clone(),
+                    kv_metrics_publisher,
                 )
                 .await?;
                 extra = Some(Box::pin(async move {
@@ -330,7 +366,6 @@ pub async fn run(
         }
         #[cfg(feature = "llamacpp")]
         Output::LlamaCpp => {
-            use dynamo_engine_llamacpp;
             let Some(model_path) = model_path else {
                 anyhow::bail!("out=llamacpp requires flag --model-path=<full-path-to-model-gguf>");
             };
@@ -408,35 +443,25 @@ pub async fn run(
 
     match in_opt {
         Input::Http => {
-            crate::input::http::run(runtime.clone(), flags.http_port, engine_config).await?;
+            crate::input::http::run(runtime.clone(), flags, engine_config).await?;
         }
         Input::Text => {
-            crate::input::text::run(runtime.clone(), cancel_token.clone(), None, engine_config)
-                .await?;
+            crate::input::text::run(runtime.clone(), flags, None, engine_config).await?;
         }
         Input::Stdin => {
             let mut prompt = String::new();
             std::io::stdin().read_to_string(&mut prompt).unwrap();
-            crate::input::text::run(
-                runtime.clone(),
-                cancel_token.clone(),
-                Some(prompt),
-                engine_config,
-            )
-            .await?;
+            crate::input::text::run(runtime.clone(), flags, Some(prompt), engine_config).await?;
         }
         Input::Batch(path) => {
-            crate::input::batch::run(
-                runtime.clone(),
-                cancel_token.clone(),
-                maybe_card,
-                path,
-                engine_config,
-            )
-            .await?;
+            crate::input::batch::run(runtime.clone(), flags, maybe_card, path, engine_config)
+                .await?;
         }
         Input::Endpoint(path) => {
-            crate::input::endpoint::run(runtime.clone(), path, engine_config).await?;
+            let Some(dyn_input) = dyn_input else {
+                unreachable!("We set dyn_input earlier");
+            };
+            crate::input::endpoint::run(dyn_input.distributed_runtime, path, engine_config).await?;
         }
         Input::None => {
             // Multi-node setup. The engine sub-process has been started and is talking

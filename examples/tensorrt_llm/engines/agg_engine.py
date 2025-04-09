@@ -96,8 +96,6 @@ def init_global_engine(args, engine_config):
     DynamoTRTLLMChatCompletionRequest, DynamoTRTLLMChatCompletionStreamResponse
 )
 async def generate(request):
-    if request.max_completion_tokens is not None:
-        request.max_tokens = request.max_completion_tokens
     async for response in chat_generator(engine, request):
         yield response
 

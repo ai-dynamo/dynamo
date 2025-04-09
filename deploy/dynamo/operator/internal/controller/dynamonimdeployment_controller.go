@@ -1524,6 +1524,14 @@ monitoring.options.insecure=true`
 		args = append(args, opt.dynamoNimDeployment.Spec.DynamoTag)
 	}
 
+	if len(opt.dynamoNimDeployment.Spec.Envs) > 0 {
+		for _, env := range opt.dynamoNimDeployment.Spec.Envs {
+			if env.Name == "DYNAMO_CONFIG_PATH" {
+				args = append(args, "-f", env.Value)
+			}
+		}
+	}
+
 	yataiResources := opt.dynamoNimDeployment.Spec.Resources
 
 	resources, err := getResourcesConfig(yataiResources)

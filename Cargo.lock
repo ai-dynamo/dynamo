@@ -1502,7 +1502,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-llamacpp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-stream",
  "dynamo-llm",
@@ -1514,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-mistralrs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1533,7 +1533,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-python"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1554,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-sglang"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1573,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-trtllm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1596,7 +1596,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-vllm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1616,7 +1616,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "akin",
  "anyhow",
@@ -1676,7 +1676,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-run"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1708,7 +1708,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -2671,7 +2671,7 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "dynamo-llm",
@@ -3318,7 +3318,7 @@ checksum = "c19937216e9d3aa9956d9bb8dfc0b0c8beb6058fc4f7a4dc4d850edf86a237d6"
 
 [[package]]
 name = "libdynamo_llm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -3430,7 +3430,7 @@ dependencies = [
 
 [[package]]
 name = "llmctl"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "dynamo-llm",
@@ -3587,7 +3587,7 @@ dependencies = [
 
 [[package]]
 name = "metrics"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum 0.6.20",
  "clap",
@@ -5276,7 +5276,7 @@ dependencies = [
 
 [[package]]
 name = "router"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "dynamo-llm",

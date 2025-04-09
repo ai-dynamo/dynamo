@@ -170,6 +170,9 @@ get_options() {
                 missing_requirement $1
             fi
             ;;
+        --release-build)
+            RELEASE_BUILD=true
+            ;;
         --)
             shift
             break
@@ -339,6 +342,10 @@ fi
 
 if [ ! -z ${HF_TOKEN} ]; then
     BUILD_ARGS+=" --build-arg HF_TOKEN=${HF_TOKEN} "
+fi
+if [  ! -z ${RELEASE_BUILD} ]; then
+    echo "Performing a release build!"
+    BUILD_ARGS+=" --build-arg RELEASE_BUILD=${RELEASE_BUILD} "
 fi
 
 LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"

@@ -44,6 +44,7 @@ class DynamoTRTLLMCompletionRequest(CompletionRequest):
 class DynamoTRTLLMChatCompletionRequest(ChatCompletionRequest):
     id: str = Field(default_factory=lambda: f"chatcmpl-{str(uuid.uuid4().hex)}")
     max_completion_tokens: Optional[int] = None
+    max_tokens: Optional[int] = None
     disaggregated_params: Optional[DisaggregatedParams] = Field(default=None)
 
 

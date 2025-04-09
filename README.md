@@ -47,9 +47,6 @@ source venv/bin/activate
 pip install ai-dynamo[all]
 ```
 
-> [!NOTE]
-> TensorRT-LLM Support is currently available on a [branch](https://github.com/ai-dynamo/dynamo/tree/dynamo/trtllm_llmapi_v1/examples/trtllm#building-the-environment)
-
 ### Development Environment
 
 For a consistent development environment, you can use the provided devcontainer configuration. This requires:
