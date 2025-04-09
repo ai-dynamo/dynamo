@@ -20,6 +20,7 @@ from typing import Optional
 from common.base_engine import BaseTensorrtLLMEngine, TensorrtLLMEngineConfig
 from common.parser import LLMAPIConfig, parse_tensorrt_llm_args
 from common.protocol import TRTLLMWorkerRequest
+from common.utils import ServerType
 from components.prefill_worker import TensorRTLLMPrefillWorker
 from tensorrt_llm.llmapi.disagg_utils import (
     CtxGenServerConfig,
@@ -122,7 +123,7 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
 
     @async_on_start
     async def async_init(self):
-        super().__init__(self.trtllm_engine_args)
+        super().__init__(self.trtllm_engine_args, ServerType.GEN)
         if self.do_remote_prefill:
             runtime = dynamo_context["runtime"]
             comp_ns, comp_name = TensorRTLLMPrefillWorker.dynamo_address()  # type: ignore

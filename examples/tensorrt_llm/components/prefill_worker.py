@@ -17,6 +17,7 @@ import logging
 from common.base_engine import BaseTensorrtLLMEngine, TensorrtLLMEngineConfig
 from common.parser import LLMAPIConfig, parse_tensorrt_llm_args
 from common.protocol import TRTLLMWorkerRequest
+from common.utils import ServerType
 from tensorrt_llm.llmapi.disagg_utils import (
     CtxGenServerConfig,
     DisaggServerConfig,
@@ -106,7 +107,7 @@ class TensorRTLLMPrefillWorker(BaseTensorrtLLMEngine):
 
     @async_on_start
     async def async_init(self):
-        super().__init__(self.trtllm_engine_args)
+        super().__init__(self.trtllm_engine_args, ServerType.CTX)
         logger.info("TensorRT-LLM Prefill Worker initialized")
 
     @dynamo_endpoint()

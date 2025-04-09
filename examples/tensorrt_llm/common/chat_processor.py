@@ -27,7 +27,7 @@ from common.protocol import (
     TRTLLMWorkerResponse,
     TRTLLMWorkerResponseOutput,
 )
-from common.utils import ConversationMessage, ServerType
+from common.utils import ConversationMessage
 from openai.types.chat import ChatCompletionMessageParam
 from tensorrt_llm.llmapi.llm import RequestOutput
 from tensorrt_llm.logger import logger
@@ -290,6 +290,7 @@ class ChatProcessor(BaseChatProcessor):
 
         return TRTLLMWorkerRequest(
             id=request.id,
+            model=request.model,
             prompt=prompt,
             sampling_params=asdict(sampling_params),
             conversation=conversation,
@@ -303,8 +304,10 @@ class ChatProcessor(BaseChatProcessor):
         engine_generator,
         request,
         conversation,
-        server_type: ServerType,
     ):
+        first_iteration = True
+        last_text_len = 0
+        last_token_ids_len = 0
         async for raw_response in engine_generator:
             if self.using_engine_generator:
                 response = TRTLLMWorkerResponse(
@@ -317,21 +320,27 @@ class ChatProcessor(BaseChatProcessor):
                 response.outputs = [TRTLLMWorkerResponseOutput(**response.outputs[0])]
             else:
                 response = TRTLLMWorkerResponse.model_validate_json(raw_response.data())
+                response.outputs[0]["text"] = self.tokenizer.decode(
+                    response.outputs[0]["token_ids"]
+                )
+                # Need to keep track of the last text and token ids length
+                # to calculate the diff.
+                # TODO: This is a hack to get the diff. We should identify why
+                # the diff is not being calculated in the worker.
+                response.outputs[0]["_last_text_len"] = last_text_len
+                response.outputs[0]["_last_token_ids_len"] = last_token_ids_len
+                last_text_len = len(response.outputs[0]["text"])
+                last_token_ids_len = len(response.outputs[0]["token_ids"])
                 response.outputs = [TRTLLMWorkerResponseOutput(**response.outputs[0])]
 
-            if (
-                request.disaggregated_params is not None
-                and server_type == ServerType.CTX
-            ):
-                response_data = self.yield_first_chat(request, request.id, response)
-            else:
-                response_data = self.create_chat_stream_response(
-                    request,
-                    request.id,
-                    response,
-                    conversation,
-                    first_iteration=(not request.disaggregated_params is not None),
-                )
+            response_data = self.create_chat_stream_response(
+                request,
+                request.id,
+                response,
+                conversation,
+                first_iteration=first_iteration,
+            )
+            first_iteration = False
             logger.debug(f"[postprocessor] Response: {response_data}")
             yield response_data
 

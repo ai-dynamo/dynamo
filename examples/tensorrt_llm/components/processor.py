@@ -20,7 +20,7 @@ import logging
 from common.base_engine import ChatProcessorMixin
 from common.parser import parse_tensorrt_llm_args
 from common.protocol import DynamoTRTLLMChatCompletionRequest
-from common.utils import RequestType, ServerType
+from common.utils import RequestType
 from components.kv_router import Router
 from components.worker import TensorRTLLMWorker
 
@@ -49,6 +49,7 @@ class Processor(ChatProcessorMixin):
         config = ServiceConfig.get_instance()
         config_args = config.as_args(class_name, prefix="")
         self.args, self.engine_config = parse_tensorrt_llm_args(config_args)
+        self.remote_prefill = self.args.remote_prefill
         self.router_mode = self.args.router
         super().__init__(self.engine_config)
         self.min_workers = 1
@@ -116,7 +117,6 @@ class Processor(ChatProcessorMixin):
                 engine_generator,
                 raw_request,
                 preprocessed_request.conversation,
-                ServerType.GEN,
             ):
                 logger.debug(f"[preprocessor] Response: {response}")
                 yield json.loads(response)

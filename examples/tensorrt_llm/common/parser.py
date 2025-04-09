@@ -40,6 +40,13 @@ class LLMAPIConfig:
         self.kv_cache_config = kv_cache_config
         self.extra_args = kwargs
 
+        # Hardcoded to skip tokenizer init for now.
+        # We will handle the tokenization/detokenization
+        #  in the base engine.
+        if "skip_tokenizer_init" in kwargs:
+            kwargs.pop("skip_tokenizer_init")
+        self.skip_tokenizer_init = True
+
     def to_dict(self) -> Dict[str, Any]:
         data = {
             "pytorch_backend_config": self.pytorch_backend_config,

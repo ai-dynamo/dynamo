@@ -32,9 +32,9 @@ from common.protocol import (
     TRTLLMWorkerResponse,
     TRTLLMWorkerResponseOutput,
 )
-from common.utils import ManagedThread
+from common.utils import ManagedThread, ServerType
 from tensorrt_llm.executor import CppExecutorError
-from tensorrt_llm.llmapi import LLM
+from tensorrt_llm.llmapi import LLM, SamplingParams
 from tensorrt_llm.serve.openai_protocol import DisaggregatedParams
 from transformers import AutoTokenizer
 
@@ -80,6 +80,14 @@ class ChatProcessorMixin:
         )
 
 
+def clean_sampling_params(sampling_params):
+    # Use dictionary comprehension to filter out keys starting with '_'
+    cleaned_dict = {
+        key: value for key, value in sampling_params.items() if not key.startswith("_")
+    }
+    return cleaned_dict
+
+
 @dataclass
 class TensorrtLLMEngineConfig:
     namespace_str: str = "dynamo"
@@ -97,6 +105,7 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
     def __init__(
         self,
         trt_llm_engine_config: TensorrtLLMEngineConfig,
+        server_type: ServerType,
     ):
         super().__init__(trt_llm_engine_config.engine_config)
         self._namespace_str = trt_llm_engine_config.namespace_str
@@ -107,6 +116,7 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
         self._publish_kv_cache_events = trt_llm_engine_config.publish_kv_cache_events
         self._kv_block_size = trt_llm_engine_config.kv_block_size
         self._error_queue: Optional[Queue] = None
+        self._server_type = server_type
 
         self._init_engine()
 
@@ -423,26 +433,16 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
         self._ongoing_request_count += 1
 
         try:
-            worker_inputs = request.prompt
+            worker_inputs = request.tokens.tokens
+
             disaggregated_params = (
                 DisaggregatedTypeConverter.to_llm_disaggregated_params(
                     request.disaggregated_params
                 )
             )
 
-            if self.do_remote_prefill:
+            if self.do_remote_prefill and self._server_type == ServerType.GEN:
                 ctx_response_obj = await self._get_remote_prefill_response(request)
-                # Remove the disaggregated params so  that it can be sent over the network.
-                output = copy.deepcopy(ctx_response_obj.outputs[0])
-                output.disaggregated_params = None
-                # Yield the first token from the prefill worker.
-                yield TRTLLMWorkerResponse(
-                    request_id=request.id,
-                    prompt=ctx_response_obj.prompt,
-                    prompt_token_ids=ctx_response_obj.prompt_token_ids,
-                    outputs=[asdict(output)],
-                    finished=ctx_response_obj.finished,
-                ).model_dump_json(exclude_unset=True)
 
                 worker_inputs = ctx_response_obj.prompt_token_ids
                 disaggregated_params = (
@@ -458,11 +458,14 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
                 f"Worker inputs: {worker_inputs}, disaggregated params: {disaggregated_params}"
             )
 
+            sampling_params_dict = clean_sampling_params(request.sampling_params)
+            sampling_params = SamplingParams(**sampling_params_dict)
+
             async for response in self._llm_engine.generate_async(
                 inputs=worker_inputs,
-                sampling_params=request.to_sampling_params(),
+                sampling_params=sampling_params,
                 disaggregated_params=disaggregated_params,
-                streaming=True,
+                streaming=self._server_type == ServerType.GEN,
             ):
                 # Encode the disaggregated params to OAI format so
                 # it can be sent over the network.
@@ -471,10 +474,8 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
                 ].disaggregated_params = DisaggregatedTypeConverter.to_oai_disaggregated_params(
                     response.outputs[0].disaggregated_params
                 )
-                print(f"response debugggggg : {response.outputs[0]}")
                 yield TRTLLMWorkerResponse(
                     request_id=request.id,
-                    prompt=response.prompt,
                     prompt_token_ids=response.prompt_token_ids,
                     outputs=[asdict(response.outputs[0])],
                     finished=response.finished,
