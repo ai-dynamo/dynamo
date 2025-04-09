@@ -56,10 +56,12 @@ If you run into version compatibility issues you can try:
 
 ```bash
 # On Host
+gpg --list-secret-keys
 gpg --export-secret-keys --armor YOUR_KEY_ID > /tmp/key.asc
 
 # In container
 gpg1 --import /tmp/key.asc
+git config --local gpg.program gpg1
 ```
 
 

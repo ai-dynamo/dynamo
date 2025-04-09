@@ -52,8 +52,8 @@ ln -sf $HOME/dynamo/.build/target/debug/http $HOME/dynamo/deploy/dynamo/sdk/src/
 ln -sf $HOME/dynamo/.build/target/debug/llmctl $HOME/dynamo/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/llmctl
 
 # install the python bindings in editable mode
-retry bash -c 'DYNAMO_BIN_PATH=$HOME/dynamo/.build/target/debug uv pip install -e .'
 cd $HOME/dynamo/lib/bindings/python && retry uv pip install -e .
+retry bash -c 'cd $HOME/dynamo && DYNAMO_BIN_PATH=$HOME/dynamo/.build/target/debug uv pip install -e .'
 
 # source the venv and set the VLLM_KV_CAPI_PATH in bashrc
 echo "source /opt/dynamo/venv/bin/activate" >> ~/.bashrc
