@@ -103,6 +103,7 @@ minio:
     enabled: true
     size: 10Gi
     storageClass: ""
+    mountPath: /data
     annotations:
       helm.sh/resource-policy: keep
   apiIngress:
@@ -132,8 +133,6 @@ minio:
     limits:
       memory: "512Mi"
       cpu: "500m"
-  persistence:
-    mountPath: /data
   service:
     type: ClusterIP
     ports:

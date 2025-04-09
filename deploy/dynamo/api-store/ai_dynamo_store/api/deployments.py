@@ -13,31 +13,33 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-from fastapi import APIRouter, HTTPException
-from datetime import datetime
 import os
 import uuid
-from typing import Optional, Dict, List
+from datetime import datetime
+from typing import Optional
+
+from fastapi import APIRouter, HTTPException
 
 from ..models.schemas import (
     CreateDeploymentSchema,
     DeploymentFullSchema,
     ResourceSchema,
+    create_default_cluster,
     create_default_user,
-    create_default_cluster
 )
 from .k8s import create_dynamo_deployment
 
 router = APIRouter(prefix="/api/v2/deployments", tags=["deployments"])
 
+
 def sanitize_deployment_name(name: Optional[str], dynamo_nim: str) -> str:
     """
     Resolve a name for the DynamoDeployment that will work safely in k8s
-    
+
     Args:
         name: Optional custom name
         dynamo_nim: Bento name and version (format: name:version)
-        
+
     Returns:
         A unique deployment name that is at most 63 characters
     """
@@ -52,27 +54,25 @@ def sanitize_deployment_name(name: Optional[str], dynamo_nim: str) -> str:
         base_name = f"dep-{dynamo_nim_parts[0]}-{dynamo_nim_parts[1]}"
         # Truncate to 55 chars to leave room for UUID
         base_name = base_name[:55]
-    
+
     # Add UUID and ensure total length is <= 63
     return f"{base_name}-{uuid.uuid4().hex[:7]}"
+
 
 @router.post("", response_model=DeploymentFullSchema)
 async def create_deployment(deployment: CreateDeploymentSchema):
     """
     Create a new deployment.
-    
+
     Args:
         deployment: The deployment configuration following CreateDeploymentSchema
-        
+
     Returns:
         DeploymentFullSchema: The created deployment details
     """
     try:
         # Get ownership info for labels
-        ownership = {
-            "organization_id": "default-org",
-            "user_id": "default-user"
-        }
+        ownership = {"organization_id": "default-org", "user_id": "default-user"}
 
         # Get the k8s namespace from environment variable
         kube_namespace = os.getenv("DEFAULT_KUBE_NAMESPACE", "dynamo")
@@ -87,10 +87,10 @@ async def create_deployment(deployment: CreateDeploymentSchema):
             dynamo_nim=deployment.bento,
             labels={
                 "ngc-organization": ownership["organization_id"],
-                "ngc-user": ownership["user_id"]
-            }
+                "ngc-user": ownership["user_id"],
+            },
         )
-        
+
         # Create response schema
         resource = ResourceSchema(
             uid=created_crd["metadata"]["uid"],
@@ -98,13 +98,13 @@ async def create_deployment(deployment: CreateDeploymentSchema):
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
             resource_type="deployment",
-            labels=[]
+            labels=[],
         )
-        
+
         # Use helper functions for default resources
         creator = create_default_user()
         cluster = create_default_cluster(creator)
-        
+
         deployment_schema = DeploymentFullSchema(
             **resource.dict(),
             status="running",
@@ -113,11 +113,11 @@ async def create_deployment(deployment: CreateDeploymentSchema):
             cluster=cluster,
             latest_revision=None,
             manifest=None,
-            urls=[f"https://{created_crd['metadata']['name']}.dynamo.example.com"]
+            urls=[f"https://{created_crd['metadata']['name']}.dynamo.example.com"],
         )
-        
+
         return deployment_schema
-        
+
     except Exception as e:
         print("Error creating deployment:")
         print(e)
