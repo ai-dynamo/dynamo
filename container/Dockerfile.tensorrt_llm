@@ -109,7 +109,6 @@ COPY lib/ /workspace/lib/
 COPY components /workspace/components
 COPY launch /workspace/launch
 
-# TODO: Tanmay Add LLMAPI-based feature flag once the engine is ready.
 RUN cargo build --release --locked --features mistralrs,sglang,python && \
     cargo doc --no-deps && \
     cp target/release/dynamo-run /usr/local/bin && \
