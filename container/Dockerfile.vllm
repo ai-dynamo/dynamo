@@ -159,11 +159,11 @@ RUN ls /opt/nixl
 # Install utilities
 RUN apt update -y && apt install -y git wget curl nvtop tmux vim
 # nats
-RUN wget https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-amd64.deb && \
+RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-amd64.deb && \
     dpkg -i nats-server-v2.10.24-amd64.deb && rm nats-server-v2.10.24-amd64.deb
 # etcd
 ENV ETCD_VERSION="v3.5.18"
-RUN wget https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-amd64.tar.gz -O /tmp/etcd.tar.gz && \
+RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-amd64.tar.gz -O /tmp/etcd.tar.gz && \
     mkdir -p /usr/local/bin/etcd && \
     tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
     rm /tmp/etcd.tar.gz
@@ -271,6 +271,7 @@ RUN apt-get update && apt-get install -y sudo \
     && chown -R $USERNAME:$USERNAME /usr/local/bin
 
 USER $USERNAME
+ENV HOME=/home/$USERNAME
 WORKDIR $HOME
 
 # https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
@@ -279,11 +280,11 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.comman
     && touch $HOME/.commandhistory/.bash_history \
     && echo "$SNIPPET" >> "$HOME/.bashrc"
 
-RUN mkdir -p /home/$USERNAME/.cache/ &&
+RUN mkdir -p /home/$USERNAME/.cache/
 
 ENV VLLM_KV_CAPI_PATH=$HOME/dynamo/target/release/libdynamo_llm_capi.so
 
-ENTRYPOINT ["/bin/bash"]
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
 ##################################
 ########## Build Image ###########

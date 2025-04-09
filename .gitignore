@@ -83,3 +83,6 @@ Chart.lock
 generated-values.yaml
 
 TensorRT-LLM
+
+# Local build artifacts for devcontainer
+.build/

@@ -36,8 +36,6 @@ retry() {
 }
 
 set -xe
-export CARGO_BUILD_JOBS=32
-export CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 
 cd $HOME/dynamo
 # Treated as a local cache for the build
