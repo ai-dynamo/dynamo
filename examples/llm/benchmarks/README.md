@@ -17,7 +17,7 @@ limitations under the License.
 
 # LLM Deployment Benchmarking Guide
 
-This guide provides detailed steps on benchmarking Large Language Models (LLMs) in single and multi nodes configurations.
+This guide provides detailed steps on benchmarking Large Language Models (LLMs) in single and multi-node configurations.
 
 > [!NOTE]
 > We recommend trying out the [LLM Deployment Examples](./README.md) before benchmarking.
