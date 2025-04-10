@@ -47,7 +47,7 @@ source venv/bin/activate
 pip install ai-dynamo[all]
 ```
 
-### Development Environment
+### Building the Dynamo Base Image
 
 Many Dynamo components require a base image that can be built and pushed to your container registry. You can use any container registry of your choice, such as:
 - Docker Hub (docker.io)
