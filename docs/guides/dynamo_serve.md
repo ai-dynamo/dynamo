@@ -162,36 +162,36 @@ This will print out something like
 ```bash
 Service Configuration:
 {
+  "Common": {
+    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "block-size": 64,
+    "max-model-len": 16384,
+  },
   "Frontend": {
     "served_model_name": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "endpoint": "dynamo.Processor.chat/completions",
     "port": 8000
   },
   "Processor": {
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    "block-size": 64,
-    "max-model-len": 16384,
-    "router": "round-robin"
+    "router": "round-robin",
+    "common-configs": [model, block-size, max-model-len]
   },
   "VllmWorker": {
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "enforce-eager": true,
-    "block-size": 64,
-    "max-model-len": 16384,
     "max-num-batched-tokens": 16384,
     "enable-prefix-caching": true,
     "router": "random",
     "tensor-parallel-size": 1,
     "ServiceArgs": {
       "workers": 1
-    }
+    },
+    "common-configs": [model, block-size, max-model-len]
   }
 }
 
 Environment Variable that would be set:
-DYNAMO_SERVICE_CONFIG={"Frontend": {"served_model_name": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "endpoint": "dynamo.Processor.chat/completions", "port": 8000}, "Processor": {"model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "block-size": 64,
-"max-model-len": 16384, "router": "round-robin"}, "VllmWorker": {"model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "enforce-eager": true, "block-size": 64, "max-model-len": 16384, "max-num-batched-tokens": 16384, "enable-prefix-caching":
-true, "router": "random", "tensor-parallel-size": 1, "ServiceArgs": {"workers": 1}}}
+DYNAMO_SERVICE_CONFIG={"Common": {"model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "block-size": 64, "max-model-len": 16384}, "Frontend": {"served_model_name": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "endpoint": "dynamo.Processor.chat/completions", "port": 8000}, "Processor": {"router": "round-robin", "common-configs": ["model", "block-size", "max-model-len"]}, "VllmWorker": {"enforce-eager": true, "max-num-batched-tokens": 16384, "enable-prefix-caching":
+true, "router": "random", "tensor-parallel-size": 1, "ServiceArgs": {"workers": 1}, "common-configs": ["model", "block-size", "max-model-len"]}}
 ```
 
 You can override any of these configuration options by passing in CLI flags to serve. For example, to change the routing strategy, you can run

@@ -12,7 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+Common:
+  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  block-size: 64
+  max-model-len: 16384
+  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
 
 Frontend:
   served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
@@ -20,13 +24,10 @@ Frontend:
   port: 8000
 
 Processor:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   router: round-robin
+  common-configs: [model, block-size]
 
 VllmWorker:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-  max-model-len: 16384
   remote-prefill: true
   conditional-disagg: true
   max-local-prefill-length: 10
@@ -35,13 +36,12 @@ VllmWorker:
     workers: 1
     resources:
       gpu: 1
+  common-configs: [model, block-size, max-model-len, kv-transfer-config]
 
 PrefillWorker:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-  max-model-len: 16384
   max-num-batched-tokens: 16384
   ServiceArgs:
     workers: 1
     resources:
       gpu: 1
+  common-configs: [model, block-size, max-model-len, kv-transfer-config]

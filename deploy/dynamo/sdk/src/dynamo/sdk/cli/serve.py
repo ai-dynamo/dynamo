@@ -217,17 +217,17 @@ def build_serve_command() -> click.Group:
                 # Initialize service_configs as empty dict if it's None
                 # Convert nested YAML structure to flat dict with dot notation
                 for service, configs in yaml_configs.items():
+                    if service not in service_configs:
+                        service_configs[service] = {}
                     for key, value in configs.items():
-                        if service not in service_configs:
-                            service_configs[service] = {}
                         service_configs[service][key] = value
 
         # Process service-specific options
         cmdline_overrides: t.Dict[str, t.Any] = _parse_service_args(ctx.args)
         for service, configs in cmdline_overrides.items():
+            if service not in service_configs:
+                service_configs[service] = {}
             for key, value in configs.items():
-                if service not in service_configs:
-                    service_configs[service] = {}
                 service_configs[service][key] = value
 
         # Process depends
@@ -243,11 +243,12 @@ def build_serve_command() -> click.Group:
             rich.print(f"DYNAMO_SERVICE_CONFIG={json.dumps(service_configs)}")
             sys.exit(0)
 
+        configure_server_logging()
         # Set environment variable with service configuration
         if service_configs:
+            logger.info(f"Running dynamo serve with service configs {service_configs}")
             os.environ["DYNAMO_SERVICE_CONFIG"] = json.dumps(service_configs)
 
-        configure_server_logging()
         if working_dir is None:
             if os.path.isdir(os.path.expanduser(bento)):
                 working_dir = os.path.expanduser(bento)
