@@ -140,7 +140,16 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
                     f" Required: {self.min_workers}"
                 )
                 await asyncio.sleep(2)
+
+        if self.trtllm_engine_args.kv_metrics_publisher is not None:
+            task = asyncio.create_task(self.create_metrics_publisher_endpoint())
+            task.add_done_callback(lambda _: print("metrics publisher endpoint created"))
+
         logger.info("TensorRT-LLM Worker initialized")
+
+    async def create_metrics_publisher_endpoint(self):
+        component = dynamo_context["component"]
+        await self.trtllm_engine_args.kv_metrics_publisher.create_endpoint(component)
 
     @dynamo_endpoint()
     async def generate(self, request: TRTLLMWorkerRequest):

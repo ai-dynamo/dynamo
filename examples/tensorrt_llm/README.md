@@ -25,6 +25,12 @@ This directory contains examples and reference implementations for deploying Lar
 See [deployment architectures](../llm/README.md#deployment-architectures) to learn about the general idea of the architecture.
 Note that this TensorRT-LLM version does not support all the options yet.
 
+## Getting Started
+
+1. Choose a deployment architecture based on your requirements
+2. Configure the components as needed
+3. Deploy using the provided scripts
+
 ### Prerequisites
 
 Start required services (etcd and NATS) using [Docker Compose](../../deploy/docker-compose.yml)
@@ -68,6 +74,29 @@ This build script internally points to the base container image built with step 
 ```
 ## Run Deployment
 
+This figure shows an overview of the major components to deploy:
+
+
+
+```
+                      
++------+      +-----------+      +------------------+             +---------------+
+| HTTP |----->| processor |----->|      Worker      |------------>|     Prefill   |
+|      |<-----|           |<-----|                  |<------------|     Worker    |
++------+      +-----------+      +------------------+             +---------------+
+                  |    ^                  |
+       query best |    | return           | publish kv events
+           worker |    | worker_id        v
+                  |    |         +------------------+
+                  |    +---------|     kv-router    |
+                  +------------->|                  |
+                                 +------------------+
+
+```
+
+Note: The above architecture illustrates all the components. The final components
+that get spawned depend upon the chosen graph.
+
 ### Example architectures
 
 #### Aggregated serving
@@ -83,40 +112,16 @@ dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
 ```
 
 #### Disaggregated serving
-
-# Tanmay: Fix the spacing issue.
-
 ```bash
-git clone --single-branch --branch tanmayv-disagg  https://github.com/ai-dynamo/dynamo.git
-./container/run.sh --framework tensorrtllm -it --image gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo-ci:tanmayv-trtllm-updated-4.8 --mount-workspace
 cd /workspace/examples/tensorrt_llm
-export TRTLLM_USE_UCX_KVCACHE=1
-source setup.sh
 dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml&
-curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
-    "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    "messages": [
-    {
-        "role": "user",
-        "content": "What is the capital of France?"
-    }
-    ],
-    "stream":false,
-    "max_completion_tokens": 30
-  }'
 ```
-
-
-<!--
-This is work in progress and will be enabled soon.
-
 
 #### Disaggregated serving with KV Routing
 ```bash
 cd /workspace/examples/llm
 dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
 ```
--->
 
 ### Client
 
@@ -128,7 +133,7 @@ See [close deployment](../../docs/guides/dynamo_serve.md#close-deployment) secti
 
 Remaining tasks:
 
-- [ ] Add support for the disaggregated serving.
+- [x] Add support for the disaggregated serving.
 - [ ] Add integration test coverage.
 - [ ] Add instructions for benchmarking.
 - [ ] Add multi-node support.

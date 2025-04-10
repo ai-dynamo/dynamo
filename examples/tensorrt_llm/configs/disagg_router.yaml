@@ -14,14 +14,15 @@
 # limitations under the License.
 
 Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  served_model_name: TinyLlama/TinyLlama-1.1B-Chat-v1.0
   endpoint: dynamo.Processor.chat/completions
   port: 8000
 
 Processor:
   engine_args: "configs/llm_api_config_router.yaml"
   block-size: 64
-  router: kv
+  router: round-robin
+  remote-prefill: true
 
 Router:
   model-name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
@@ -29,7 +30,19 @@ Router:
 
 TensorRTLLMWorker:
   engine_args: "configs/llm_api_config_router.yaml"
+  llmapi-disaggregated-config: "configs/llmapi_disagg_configs/single_node_config.yaml"
+  remote-prefill: true
+  min-workers: 1
   router: kv
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: 1
+
+TensorRTLLMPrefillWorker:
+  engine_args: "configs/llm_api_config_router.yaml"
+  llmapi-disaggregated-config: "configs/llmapi_disagg_configs/single_node_config.yaml"
+  router: round-robin
   ServiceArgs:
     workers: 1
     resources:

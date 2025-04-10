@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import logging
 
 from common.base_engine import BaseTensorrtLLMEngine, TensorrtLLMEngineConfig
@@ -108,7 +109,15 @@ class TensorRTLLMPrefillWorker(BaseTensorrtLLMEngine):
     @async_on_start
     async def async_init(self):
         super().__init__(self.trtllm_engine_args, ServerType.CTX)
+        if self.trtllm_engine_args.kv_metrics_publisher is not None:
+            task = asyncio.create_task(self.create_metrics_publisher_endpoint())
+            task.add_done_callback(lambda _: print("metrics publisher endpoint created"))
         logger.info("TensorRT-LLM Prefill Worker initialized")
+
+
+    async def create_metrics_publisher_endpoint(self):
+        component = dynamo_context["component"]
+        await self.trtllm_engine_args.kv_metrics_publisher.create_endpoint(component)
 
     @dynamo_endpoint()
     async def generate(self, request: TRTLLMWorkerRequest):
