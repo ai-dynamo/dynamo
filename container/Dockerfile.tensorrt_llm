@@ -143,8 +143,8 @@ WORKDIR /workspace
 
 RUN yum update -y && \
     yum install -y protobuf-compiler && \
-    && yum clean all \
-    && rm -rf /var/cache/yum
+    yum clean all && \
+    rm -rf /var/cache/yum
 
 COPY --from=build /workspace /workspace
 
