@@ -44,6 +44,7 @@ VllmWorker:
   # Enable only disaggregated prefill
   remote-prefill: true
   conditional-disagg: false
+  # TP size is doubled from single node setup
   tensor-parallel-size: 8
   gpu-memory-utilization: 0.95
   disable-log-requests: true
@@ -63,6 +64,7 @@ PrefillWorker:
   gpu-memory-utilization: 0.95
   disable-log-requests: true
   ServiceArgs:
+    # DP size is doubled from single node setup
     workers: 8
     resources:
       gpu: 1

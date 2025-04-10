@@ -32,8 +32,9 @@ VllmWorker:
   # Number of tokens in a batch for more efficient chunked transfers to GPUs.
   block-size: 128
   max-model-len: 3500
-  # Enable KV cache passing from prefill to decode workers
+  # Enable only disaggregated prefill
   remote-prefill: true
+  conditional-disagg: false
   tensor-parallel-size: 4
   gpu-memory-utilization: 0.95
   disable-log-requests: true
