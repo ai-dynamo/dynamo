@@ -130,6 +130,7 @@ addopts = [
     "--mypy",
     "--ignore-glob=*model.py",
     "--ignore-glob=*_inc.py",
+    "--ignore-glob=deploy/dynamo/api-store/*",
     # FIXME: Get relative/generic blob paths to work here
 ]
 xfail_strict = true
