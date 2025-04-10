@@ -33,7 +33,7 @@ export DYNAMO_IMAGE=<dynamo_docker_image_name>
 # Forward the service port to localhost
 kubectl -n <k8s_namespace> port-forward svc/hello-world-frontend 3000:80
 
-# Test the API endpoint
+# In another terminal window, test the API endpoint
 curl -X 'POST' 'http://localhost:3000/generate' \
     -H 'accept: text/event-stream' \
     -H 'Content-Type: application/json' \
