@@ -32,15 +32,15 @@ Development Environment:
 `cargo build --profile dev --locked` to re-build
 
 - Edits to files are propogated to local repo due to the volume mount
-- Mounted .gitconfig to propogate user information for git commits
-- GPG keys passthrough for signed commits from the docker container
+- SSH and GPG agent passthrough orchestrated by devcontainer
 
 File Structure:
 - Local dynamo repo mounts to `/home/ubuntu/dynamo`
 - Python venv in `/opt/dynamo/venv`
-- Build artifacts in .build/target
-- HuggingFace cache preserved between sessions (Mounted to `HF_HOME`)
-- Bash memory preserved between sessions
+- Build artifacts in `.build/target`
+- HuggingFace cache preserved between sessions (Mounting local path `HF_HOME` at `/home/ubuntu/.cache/huggingface`)
+- Bash memory preserved between sessions at `/home/ubuntu/.commandhistory` using docker volume `dynamo-bashhistory`
+- Precommit peeserved between sessions at `/home/ubuntu/.cache/precommit` using docker volume `dynamo-precommit-cache`
 
 ## Customization
 Edit `.devcontainer/devcontainer.json` to modify:
@@ -64,6 +64,8 @@ gpg --export-secret-keys --armor YOUR_KEY_ID > /tmp/key.asc
 gpg1 --import /tmp/key.asc
 git config --local gpg.program gpg1
 ```
+
+> Warning: Switching local gpg to gpg1 can have ramifications when you are not in the container any longer.
 
 ### SSH Keys for Git Operations
 
