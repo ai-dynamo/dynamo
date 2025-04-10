@@ -110,6 +110,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 							},
 						},
 						Autoscaling: &v1alpha1.Autoscaling{
+							Enabled:     true,
 							MinReplicas: 1,
 							MaxReplicas: 5,
 						},
@@ -130,6 +131,9 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						DynamoNim:   "dynamonim--ac4e234",
 						DynamoTag:   "dynamonim:MyService1",
 						ServiceName: "service2",
+						Autoscaling: &v1alpha1.Autoscaling{
+							Enabled: false,
+						},
 					},
 				},
 			},
@@ -206,6 +210,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 							},
 						},
 						Autoscaling: &v1alpha1.Autoscaling{
+							Enabled:     true,
 							MinReplicas: 1,
 							MaxReplicas: 5,
 						},
@@ -230,6 +235,9 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						DynamoNim:   "dynamonim--ac4e234",
 						DynamoTag:   "dynamonim:MyService2",
 						ServiceName: "service2",
+						Autoscaling: &v1alpha1.Autoscaling{
+							Enabled: false,
+						},
 					},
 				},
 			},
