@@ -12,29 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
+apiVersion: v1
+kind: Service
 metadata:
-  name: dynamo-ingress
+  name: "dynamo-store"
+  labels:
+    {{- include "helm.labels" . | nindent 4 }}
 spec:
-  gateways:
-  - istio-system/ingress-alb
-  hosts:
-  - "{{ .Values.istio.host }}"
-  http:
-  - match:
-    - uri:
-        prefix: /api/
-    route:
-    - destination:
-        host: dynamo-server.{{ .Release.Namespace }}.svc.cluster.local
-        port:
-          number: 80
-  - match:
-    - uri:
-        prefix: /
-    route:
-    - destination:
-        host: dynamo-ui.{{ .Release.Namespace }}.svc.cluster.local
-        port:
-          number: 80
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.dynamo.apiStore.port }}
+      protocol: TCP
+      name: http
+  selector:
+    app: dynamo-api-store

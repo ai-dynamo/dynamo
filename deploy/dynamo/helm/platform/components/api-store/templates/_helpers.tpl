@@ -62,6 +62,7 @@ Selector labels
 {{- define "helm.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "helm.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
+app: {{ include "helm.name" . }}
 {{- end }}
 
 {{/*
@@ -74,49 +75,3 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
-
-{{/*
-ObjectStore Secret Name
-*/}}
-{{- define "api-server.objectStore.secretName" -}}
-{{- if .Values.objectStore.existingSecret -}}
-    {{- print .Values.objectStore.existingSecret -}}
-{{- else -}}
-    {{- printf "%s-%s" (include "common.names.fullname" .) "external-objstore" -}}
-{{- end -}}
-{{- end -}}
-
-
-{{/*
-ObjectStore Access Key
-*/}}
-{{- define "api-server.objectStore.accessKey" -}}
-{{- if  .Values.objectStore.existingSecret -}}
-    {{- print .Values.objectStore.existingSecretAccessKey -}}
-{{- else -}}
-    {{- print "accessKey" -}}
-{{- end -}}
-{{- end -}}
-
-
-{{/*
-ObjectStore Access Secret
-*/}}
-{{- define "api-server.objectStore.accessSecret" -}}
-{{- if .Values.objectStore.existingSecret -}}
-    {{- print .Values.objectStore.existingSecretAccessSecret -}}
-{{- else -}}
-    {{- print "accessSecret" -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
-Object Store Endpoint
-*/}}
-{{- define "api-server.objectStore.endpoint" -}}
-{{- if .Values.objectStore.existingSecret -}}
-    {{- print .Values.objectStore.existingSecretEndpoint -}}
-{{- else -}}
-    {{- print "endpoint" -}}
-{{- end -}}
-{{- end -}}
