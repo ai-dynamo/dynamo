@@ -1,4 +1,4 @@
-#!/bin/bash -e
+#!/usr/bin/env bash
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -e
 
 TAG=
 RUN_PREFIX=
@@ -26,7 +27,7 @@ commit_id=$(git rev-parse --short HEAD)
 current_tag=$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//') || true
 
 # Get latest TAG and add COMMIT_ID for dev
-latest_tag=$(git describe --tags --abbrev=0 $(git rev-list --tags --max-count=1 main) | sed 's/^v//') || true
+latest_tag=$(git describe --tags --abbrev=0 "$(git rev-list --tags --max-count=1 main)" | sed 's/^v//') || true
 if [[ -z ${latest_tag} ]]; then
     latest_tag="0.0.1"
     echo "No git release tag found, setting to unknown version: ${latest_tag}"
@@ -61,7 +62,7 @@ VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 NONE_BASE_IMAGE="ubuntu"
 NONE_BASE_IMAGE_TAG="24.04"
 
-NIXL_COMMIT=f35faf8ba4e725f1724177d0772200481d1d3446
+NIXL_COMMIT=3aa8133369566e9ce61301f7eb56ad79b7f4fd92
 NIXL_REPO=ai-dynamo/nixl.git
 
 get_options() {
@@ -76,7 +77,7 @@ get_options() {
                 PLATFORM=$2
                 shift
             else
-                missing_requirement $1
+                missing_requirement "$1"
             fi
             ;;
         --framework)
@@ -84,7 +85,7 @@ get_options() {
                 FRAMEWORK=$2
                 shift
             else
-                missing_requirement $1
+                missing_requirement "$1"
             fi
             ;;
         --tensorrtllm-pip-wheel-path)
@@ -92,7 +93,7 @@ get_options() {
                 TENSORRTLLM_PIP_WHEEL_PATH=$2
                 shift
             else
-                missing_requirement $1
+                missing_requirement "$1"
             fi
             ;;
         --base-image)
@@ -100,7 +101,7 @@ get_options() {
                 BASE_IMAGE=$2
                 shift
             else
-                missing_requirement $1
+                missing_requirement "$1"
             fi
             ;;
         --base-image-tag)
@@ -108,7 +109,7 @@ get_options() {
                 BASE_IMAGE_TAG=$2
                 shift
             else
-                missing_requirement $1
+                missing_requirement "$1"
             fi
             ;;
         --target)
@@ -116,7 +117,7 @@ get_options() {
                 TARGET=$2
                 shift
             else
-                missing_requirement $1
+                missing_requirement "$1"
             fi
             ;;
         --build-arg)
@@ -124,7 +125,7 @@ get_options() {
                 BUILD_ARGS+="--build-arg $2 "
                 shift
             else
-                missing_requirement $1
+                missing_requirement "$1"
             fi
             ;;
         --tag)
@@ -132,7 +133,7 @@ get_options() {
                 TAG="--tag $2"
                 shift
             else
-                missing_requirement $1
+                missing_requirement "$1"
             fi
             ;;
         --dry-run)
@@ -151,7 +152,7 @@ get_options() {
                 CACHE_FROM="--cache-from $2"
                 shift
             else
-                missing_requirement $1
+                missing_requirement "$1"
             fi
             ;;
         --cache-to)
@@ -159,7 +160,7 @@ get_options() {
                 CACHE_TO="--cache-to $2"
                 shift
             else
-                missing_requirement $1
+                missing_requirement "$1"
             fi
             ;;
         --build-context)
@@ -167,7 +168,7 @@ get_options() {
                 BUILD_CONTEXT_ARG="--build-context $2"
                 shift
             else
-                missing_requirement $1
+                missing_requirement "$1"
             fi
             ;;
         --release-build)
@@ -178,10 +179,10 @@ get_options() {
             break
             ;;
          -?*)
-            error 'ERROR: Unknown option: ' $1
+            error 'ERROR: Unknown option: ' "$1"
             ;;
          ?*)
-            error 'ERROR: Unknown option: ' $1
+            error 'ERROR: Unknown option: ' "$1"
             ;;
         *)
             break
@@ -194,24 +195,24 @@ get_options() {
         FRAMEWORK=$DEFAULT_FRAMEWORK
     fi
 
-    if [ ! -z "$FRAMEWORK" ]; then
+    if [ -n "$FRAMEWORK" ]; then
         FRAMEWORK=${FRAMEWORK^^}
 
-        if [[ ! -n "${FRAMEWORKS[$FRAMEWORK]}" ]]; then
-            error 'ERROR: Unknown framework: ' $FRAMEWORK
+        if [[ -z "${FRAMEWORKS[$FRAMEWORK]}" ]]; then
+            error 'ERROR: Unknown framework: ' "$FRAMEWORK"
         fi
 
-        if [ -z $BASE_IMAGE_TAG ]; then
+        if [ -z "$BASE_IMAGE_TAG" ]; then
             BASE_IMAGE_TAG=${FRAMEWORK}_BASE_IMAGE_TAG
             BASE_IMAGE_TAG=${!BASE_IMAGE_TAG}
         fi
 
-        if [ -z $BASE_IMAGE ]; then
+        if [ -z "$BASE_IMAGE" ]; then
             BASE_IMAGE=${FRAMEWORK}_BASE_IMAGE
             BASE_IMAGE=${!BASE_IMAGE}
         fi
 
-        if [ -z $BASE_IMAGE ]; then
+        if [ -z "$BASE_IMAGE" ]; then
             error "ERROR: Framework $FRAMEWORK without BASE_IMAGE"
         fi
 
@@ -222,16 +223,16 @@ get_options() {
 
     if [ -z "$TAG" ]; then
         TAG="--tag dynamo:${VERSION}-${FRAMEWORK,,}"
-        if [ ! -z "${TARGET}" ]; then
+        if [ -n "${TARGET}" ]; then
             TAG="${TAG}-${TARGET}"
         fi
     fi
 
-    if [ ! -z "$PLATFORM" ]; then
+    if [ -n "$PLATFORM" ]; then
         PLATFORM="--platform ${PLATFORM}"
     fi
 
-    if [ ! -z "$TARGET" ]; then
+    if [ -n "$TARGET" ]; then
         TARGET_STR="--target ${TARGET}"
     else
         TARGET_STR="--target dev"
@@ -257,9 +258,9 @@ show_image_options() {
 show_help() {
     echo "usage: build.sh"
     echo "  [--base base image]"
-    echo "  [--base-imge-tag base image tag]"
+    echo "  [--base-image-tag base image tag]"
     echo "  [--platform platform for docker build"
-    echo "  [--framework framework one of ${!FRAMEWORKS[@]}]"
+    echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
     echo "  [--tensorrtllm-pip-wheel-path path to tensorrtllm pip wheel]"
     echo "  [--build-arg additional build args to pass to docker build]"
     echo "  [--cache-from cache location to start from]"
@@ -298,8 +299,8 @@ if [[ $FRAMEWORK == "VLLM" ]]; then
     if [ -d "$NIXL_DIR" ]; then
         echo "Warning: $NIXL_DIR already exists, skipping clone"
     else
-        if [ ! -z ${GITHUB_TOKEN} ]; then
-            git clone https://oauth2:${GITHUB_TOKEN}@github.com/${NIXL_REPO} "$NIXL_DIR"
+        if [ -n "${GITHUB_TOKEN}" ]; then
+            git clone "https://oauth2:${GITHUB_TOKEN}@github.com/${NIXL_REPO}" "$NIXL_DIR"
         else
             # Try HTTPS first with credential prompting disabled, fall back to SSH if it fails
             if ! GIT_TERMINAL_PROMPT=0 git clone https://github.com/${NIXL_REPO} "$NIXL_DIR"; then
@@ -309,7 +310,7 @@ if [[ $FRAMEWORK == "VLLM" ]]; then
         fi
     fi
 
-    cd "$NIXL_DIR"
+    cd "$NIXL_DIR" || exit
     if ! git checkout ${NIXL_COMMIT}; then
         echo "ERROR: Failed to checkout NIXL commit ${NIXL_COMMIT}. The cached directory may be out of date."
         echo "Please delete $NIXL_DIR and re-run the build script."
@@ -326,21 +327,21 @@ fi
 
 BUILD_ARGS+=" --build-arg BASE_IMAGE=$BASE_IMAGE --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG --build-arg FRAMEWORK=$FRAMEWORK --build-arg ${FRAMEWORK}_FRAMEWORK=1 --build-arg VERSION=$VERSION --build-arg PYTHON_PACKAGE_VERSION=$PYTHON_PACKAGE_VERSION"
 
-if [ ! -z ${GITHUB_TOKEN} ]; then
+if [ -n "${GITHUB_TOKEN}" ]; then
     BUILD_ARGS+=" --build-arg GITHUB_TOKEN=${GITHUB_TOKEN} "
 fi
 
-if [ ! -z ${GITLAB_TOKEN} ]; then
+if [ -n "${GITLAB_TOKEN}" ]; then
     BUILD_ARGS+=" --build-arg GITLAB_TOKEN=${GITLAB_TOKEN} "
 fi
 
 if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
-    if [ ! -z ${TENSORRTLLM_PIP_WHEEL_PATH} ]; then
+    if [ -n "${TENSORRTLLM_PIP_WHEEL_PATH}" ]; then
         BUILD_ARGS+=" --build-arg TENSORRTLLM_PIP_WHEEL_PATH=${TENSORRTLLM_PIP_WHEEL_PATH} "
     fi
 fi
 
-if [ ! -z ${HF_TOKEN} ]; then
+if [ -n "${HF_TOKEN}" ]; then
     BUILD_ARGS+=" --build-arg HF_TOKEN=${HF_TOKEN} "
 fi
 if [  ! -z ${RELEASE_BUILD} ]; then
@@ -349,7 +350,7 @@ if [  ! -z ${RELEASE_BUILD} ]; then
 fi
 
 LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
-if [ ! -z ${TARGET} ]; then
+if [ -n "${TARGET}" ]; then
     LATEST_TAG="${LATEST_TAG}-${TARGET}"
 fi
 

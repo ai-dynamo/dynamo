@@ -14,7 +14,9 @@
 # limitations under the License.
 
 import logging
+import signal
 import subprocess
+import sys
 from pathlib import Path
 
 from components.processor import Processor
@@ -44,12 +46,12 @@ class FrontendConfig(BaseModel):
     port: int = 8080
 
 
+# todo this should be called ApiServer
 @service(
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
     image=DYNAMO_IMAGE,
 )
-# todo this should be called ApiServer
 class Frontend:
     worker = depends(VllmWorker)
     processor = depends(Processor)
@@ -57,34 +59,70 @@ class Frontend:
     def __init__(self):
         config = ServiceConfig.get_instance()
         frontend_config = FrontendConfig(**config.get("Frontend", {}))
+        self.frontend_config = frontend_config
+        self.process = None
 
+        signal.signal(signal.SIGTERM, self.handle_exit)
+        signal.signal(signal.SIGINT, self.handle_exit)
+
+        # Initial setup
+        self.setup_model()
+        self.start_http_server()
+
+        try:
+            if self.process:
+                self.process.wait()
+        except KeyboardInterrupt:
+            self.cleanup()
+
+    def setup_model(self):
         subprocess.run(
             [
                 "llmctl",
                 "http",
                 "remove",
                 "chat-models",
-                frontend_config.served_model_name,
+                self.frontend_config.served_model_name,
             ]
         )
+        # Add the model
         subprocess.run(
             [
                 "llmctl",
                 "http",
                 "add",
                 "chat-models",
-                frontend_config.served_model_name,
-                frontend_config.endpoint,
+                self.frontend_config.served_model_name,
+                self.frontend_config.endpoint,
             ]
         )
 
+    def start_http_server(self):
         logger.info("Starting HTTP server")
         http_binary = get_http_binary_path()
-        process = subprocess.Popen(
-            [http_binary, "-p", str(frontend_config.port)], stdout=None, stderr=None
+        self.process = subprocess.Popen(
+            [http_binary, "-p", str(self.frontend_config.port)],
+            stdout=None,
+            stderr=None,
         )
-        try:
-            process.wait()
-        except KeyboardInterrupt:
-            process.terminate()
-            process.wait()
+
+    def cleanup(self):
+        logger.info("Cleaning up before shutdown...")
+        subprocess.run(
+            [
+                "llmctl",
+                "http",
+                "remove",
+                "chat-models",
+                self.frontend_config.served_model_name,
+            ]
+        )
+        if self.process:
+            logger.info("Terminating HTTP process")
+            self.process.terminate()
+            self.process.wait(timeout=10)
+
+    def handle_exit(self, signum, frame):
+        logger.debug(f"Received signal {signum}, shutting down...")
+        self.cleanup()
+        sys.exit(0)
