@@ -15,6 +15,7 @@
 
 import argparse
 import asyncio
+import logging
 import random
 import traceback
 from argparse import Namespace
@@ -22,13 +23,12 @@ from typing import AsyncIterator
 
 from common.protocol import Tokens
 from components.worker import TensorRTLLMWorker
-from tensorrt_llm.logger import logger
 
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
-logger.set_level("debug")
+logger = logging.getLogger(__name__)
 
 WorkerId = str
 
@@ -92,8 +92,7 @@ class Router:
             .client()
         )
         while len(self.workers_client.endpoint_ids()) < self.args.min_workers:
-            # TODO: replace print w/ vllm_logger.info
-            print(
+            logger.info(
                 f"Waiting for more workers to be ready.\n"
                 f" Current: {len(self.workers_client.endpoint_ids())},"
                 f" Required: {self.args.min_workers}"
@@ -104,7 +103,7 @@ class Router:
         await kv_listener.create_service()
         self.indexer = KvIndexer(kv_listener, self.args.block_size)
         self.metrics_aggregator = KvMetricsAggregator(kv_listener)
-        print("KV Router initialized")
+        logger.info("KV Router initialized")
 
     def _cost_function(
         self,

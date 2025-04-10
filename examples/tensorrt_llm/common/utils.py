@@ -15,6 +15,7 @@
 
 
 import asyncio
+import logging
 import threading
 import traceback
 import weakref
@@ -22,9 +23,7 @@ from enum import Enum
 from queue import Queue
 from typing import Callable, Optional, TypedDict, Union
 
-from tensorrt_llm.logger import logger
-
-logger.set_level("info")
+logger = logging.getLogger(__name__)
 
 
 class RoutingStrategy(Enum):

@@ -66,7 +66,7 @@ class Processor(ChatProcessorMixin):
             .client()
         )
         while len(self.worker_client.endpoint_ids()) < self.min_workers:
-            print(
+            logger.info(
                 f"Waiting for workers to be ready.\n"
                 f" Current: {len(self.worker_client.endpoint_ids())},"
                 f" Required: {self.min_workers}"

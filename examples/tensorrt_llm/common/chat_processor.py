@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 from dataclasses import asdict
 from typing import Any, Dict, List, Union
 
@@ -31,7 +32,6 @@ from common.protocol import (
 from common.utils import ConversationMessage
 from openai.types.chat import ChatCompletionMessageParam
 from tensorrt_llm.llmapi.llm import RequestOutput
-from tensorrt_llm.logger import logger
 from tensorrt_llm.serve.openai_protocol import (
     ChatCompletionLogProbs,
     ChatCompletionLogProbsContent,
@@ -46,7 +46,7 @@ from transformers import AutoTokenizer
 from transformers.tokenization_utils import PreTrainedTokenizer
 from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
-logger.set_level("debug")
+logger = logging.getLogger(__name__)
 
 
 class ChatProcessorMixin:

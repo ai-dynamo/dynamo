@@ -25,7 +25,6 @@ from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint,
 from dynamo.sdk.lib.config import ServiceConfig
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 
 @service(
@@ -83,7 +82,7 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
         if self._kv_metrics_publisher is not None:
             task = asyncio.create_task(self.create_metrics_publisher_endpoint())
             task.add_done_callback(
-                lambda _: print("metrics publisher endpoint created")
+                lambda _: logger.info("metrics publisher endpoint created")
             )
 
         logger.info("TensorRT-LLM Worker initialized")

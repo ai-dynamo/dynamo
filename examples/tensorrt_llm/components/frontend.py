@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import subprocess
 from pathlib import Path
 
@@ -24,6 +25,8 @@ from dynamo import sdk
 from dynamo.sdk import depends, service
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
+
+logger = logging.getLogger(__name__)
 
 
 def get_http_binary_path():
@@ -75,7 +78,7 @@ class Frontend:
             ]
         )
 
-        print("Starting HTTP server")
+        logger.info("Starting HTTP server")
         http_binary = get_http_binary_path()
         process = subprocess.Popen(
             [http_binary, "-p", str(frontend_config.port)], stdout=None, stderr=None
