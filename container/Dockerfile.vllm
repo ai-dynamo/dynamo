@@ -190,6 +190,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 ARG VLLM_REF="0.7.2"
 ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
 ARG VLLM_PATCHED_PACKAGE_NAME="ai_dynamo_vllm"
+ARG VLLM_PATCHED_PACKAGE_VERSION="0.7.2.post1"
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     mkdir /tmp/vllm && \
     uv pip install pip wheel && \
@@ -199,12 +200,13 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     cd vllm-${VLLM_REF}/ && \
     patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
     # Rename the package from vllm to ai_dynamo_vllm
-    mv vllm-${VLLM_REF}.dist-info ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info && \
-    sed -i "s/^Name: vllm/Name: ${VLLM_PATCHED_PACKAGE_NAME}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info/METADATA && \
+    mv vllm-${VLLM_REF}.dist-info ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info && \
+    sed -i "s/^Name: vllm/Name: ${VLLM_PATCHED_PACKAGE_NAME}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/METADATA && \
+    sed -i "s/^Version: ${VLLM_REF}/Version: ${VLLM_PATCHED_PACKAGE_VERSION}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/METADATA && \
     # Update wheel tag from linux_x86_64 to manylinux1_x86_64 in WHEEL file
-    sed -i 's/Tag: cp38-abi3-linux_x86_64/Tag: cp38-abi3-manylinux1_x86_64/g' ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info/WHEEL && \
+    sed -i 's/Tag: cp38-abi3-linux_x86_64/Tag: cp38-abi3-manylinux1_x86_64/g' ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/WHEEL && \
     # Also update the tag in RECORD file to match
-    sed -i "s/-cp38-abi3-linux_x86_64.whl/-cp38-abi3-manylinux1_x86_64.whl/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_REF}.dist-info/RECORD && \
+    sed -i "s/-cp38-abi3-linux_x86_64.whl/-cp38-abi3-manylinux1_x86_64.whl/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/RECORD && \
     mkdir -p /workspace/dist && \
     wheel pack . --dest-dir /workspace/dist && \
     uv pip install /workspace/dist/${VLLM_PATCHED_PACKAGE_NAME}-*.whl
