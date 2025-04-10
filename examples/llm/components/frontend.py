@@ -123,6 +123,6 @@ class Frontend:
             self.process.wait(timeout=10)
 
     def handle_exit(self, signum, frame):
-        logger.info(f"Received signal {signum}, shutting down...")
+        logger.debug(f"Received signal {signum}, shutting down...")
         self.cleanup()
         sys.exit(0)
