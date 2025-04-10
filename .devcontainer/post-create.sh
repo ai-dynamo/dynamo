@@ -35,9 +35,17 @@ retry() {
     return 0
 }
 
-set -xe
+set -x
+
+# Changing permission to match local user
+find /opt/dynamo/venv -print0 | xargs -0 -P$(nproc) -n500 sudo chown ubuntu:ubuntu
+find /usr/local/bin -print0 | xargs -0 -P$(nproc) -n50 sudo chown ubuntu:ubuntu
 sudo chown -R ubuntu:ubuntu /home/ubuntu/.cache/pre-commit
+
+# Pre-commit hooks
 cd $HOME/dynamo && pre-commit install && retry pre-commit install-hooks && pre-commit run --all-files
+
+# Set build directory
 mkdir -p $HOME/dynamo/.build/target
 export CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 
