@@ -79,7 +79,7 @@ This figure shows an overview of the major components to deploy:
 
 
 ```
-                      
+
 +------+      +-----------+      +------------------+             +---------------+
 | HTTP |----->| processor |----->|      Worker      |------------>|     Prefill   |
 |      |<-----|           |<-----|                  |<------------|     Worker    |

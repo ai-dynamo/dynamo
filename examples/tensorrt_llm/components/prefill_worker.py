@@ -111,9 +111,10 @@ class TensorRTLLMPrefillWorker(BaseTensorrtLLMEngine):
         super().__init__(self.trtllm_engine_args, ServerType.CTX)
         if self.trtllm_engine_args.kv_metrics_publisher is not None:
             task = asyncio.create_task(self.create_metrics_publisher_endpoint())
-            task.add_done_callback(lambda _: print("metrics publisher endpoint created"))
+            task.add_done_callback(
+                lambda _: print("metrics publisher endpoint created")
+            )
         logger.info("TensorRT-LLM Prefill Worker initialized")
-
 
     async def create_metrics_publisher_endpoint(self):
         component = dynamo_context["component"]

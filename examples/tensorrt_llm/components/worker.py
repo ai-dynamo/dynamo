@@ -143,7 +143,9 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
 
         if self.trtllm_engine_args.kv_metrics_publisher is not None:
             task = asyncio.create_task(self.create_metrics_publisher_endpoint())
-            task.add_done_callback(lambda _: print("metrics publisher endpoint created"))
+            task.add_done_callback(
+                lambda _: print("metrics publisher endpoint created")
+            )
 
         logger.info("TensorRT-LLM Worker initialized")
 
