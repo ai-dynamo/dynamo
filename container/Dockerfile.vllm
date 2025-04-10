@@ -337,8 +337,6 @@ RUN source /opt/dynamo/venv/bin/activate && \
         uv build --wheel --out-dir /workspace/dist --python 3.10; \
     fi && \
     cd /workspace && \
-    uv build --wheel --out-dir /workspace/dist && \
-    cd /workspace/deploy/dynamo/api-store && \
     uv build --wheel --out-dir /workspace/dist
 
 #######################################
@@ -357,8 +355,7 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
     cp -r lib/bindings/c/include /opt/dynamo/bindings/.
 
 RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
-    uv pip install /workspace/dist/ai_dynamo*any.whl && \
-    uv pip install /workspace/dist/ai_dynamo_store*any.whl
+    uv pip install /workspace/dist/ai_dynamo*any.whl
 
 ##########################################
 ########## Perf Analyzer Image ###########
