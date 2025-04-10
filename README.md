@@ -152,7 +152,7 @@ Alternately, you can use a conda environment
 ```bash
 conda activate <ENV_NAME>
 
-# Install https://github.com/ai-dynamo/nixl from source or via pip
+pip install nixl # Or install https://github.com/ai-dynamo/nixl from source
 
 cargo build --release
 
