@@ -37,12 +37,12 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 ## Software Compatibility
 ### Runtime Dependency
-| **Python Package** | **Version** | glibc version |
-|--------------------|-------------|---------------|
-| ai-dynamo          |    0.1.1    |     >=2.28    |
-| ai-dynamo-runtime  |    0.1.1    |     >=2.28    |
-| ai-dynamo-vllm     |    0.7.2*   |     >=2.28    |
-| NIXL               |    0.1.1    |     >=2.34    |
+| **Python Package** | **Version** | glibc version        |
+|--------------------|-------------|----------------------|
+| ai-dynamo          |    0.1.1    |     >=2.28           |
+| ai-dynamo-runtime  |    0.1.1    |     >=2.28           |
+| ai-dynamo-vllm     |    0.7.2*   | >=2.28 (recommended) |
+| NIXL               |    0.1.1    |     >=2.27           |
 
 ### Build Dependency
 | **Build Dependency** | **Version** |
