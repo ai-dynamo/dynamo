@@ -89,7 +89,7 @@ envsubst '${NAMESPACE} ${NGC_TOKEN} ${CI_COMMIT_SHA} ${RELEASE_NAME} ${DYNAMO_IN
 echo ""
 echo "Generated values file saved as generated-values.yaml"
 
-Build dependencies before installation
+# Build dependencies before installation
 echo "Building helm dependencies..."
 cd platform
 retry_command "$HELM_CMD dep build" 5 5
