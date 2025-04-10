@@ -28,7 +28,7 @@ dynamo-operator:
   controllerManager:
     manager:
       image:
-        repository: gitlab-master.nvidia.com:5005/aire/microservices/compoundai/dynamo-operator
+        repository: ${CI_REGISTRY_IMAGE}/dynamo-operator
         tag: ${CI_COMMIT_SHA}
       args:
         - --health-probe-bind-address=:8081
@@ -37,12 +37,10 @@ dynamo-operator:
   dynamo:
     dynamoIngressSuffix: ${DYNAMO_INGRESS_SUFFIX}
     yatai:
-    # todo: only use dns name
-      endpoint: http://dynamo-server
+      endpoint: http://dynamo-store
       clusterName: default
 
     yataiSystem:
-    # can we just infer this, or change scheme to use default until overridden
       namespace: ""
 
     internalImages:
@@ -63,10 +61,7 @@ dynamo-operator:
       server: 'nvcr.io/nvidian/nim-llm-dev'
       inClusterServer: ''
       username: '$oauthtoken'
-      # Password will use global.NGC_API_KEY by default
-      # password: ""
       passwordExistingSecretName: 'nvcrimagepullsecret'
-      # passwordExistingSecretKey: ''
       secure: true
       bentoRepositoryName: yatai-bentos
 
@@ -80,31 +75,32 @@ dynamo-operator:
       cacheRepo: ''
       snapshotMode: ''
 
-dynamo-api-server:
+dynamo-api-store:
   enabled: true
   namespaceRestriction:
     enabled: true
     targetNamespace: ${NAMESPACE}
   istio:
-    host:
-      ${NAMESPACE}.dev.aire.nvidia.com
+    host: ${NAMESPACE}.dev.aire.nvidia.com
   dynamo:
-    # need to be set to deployment-management
     env:
       resource_scope: "user"
   image:
-    repository: gitlab-master.nvidia.com:5005/aire/microservices/compoundai/dynamo-api-server
-    # temporarily force to use old commit for api-server
-    tag: fccbb8777fbd2ac11dad4871c8a8ba6884525e07
-    #tag: ${CI_COMMIT_SHA}
-    pullPolicy: IfNotPresent
-  storeImage:
-    repository: gitlab-master.nvidia.com:5005/aire/microservices/compoundai/dynamo-api-store
+    repository: ${CI_REGISTRY_IMAGE}/dynamo-api-store
     tag: ${CI_COMMIT_SHA}
     pullPolicy: IfNotPresent
   imagePullSecrets:
     - name: nvcrimagepullsecret
+    - name: docker-imagepullsecret
     - name: gitlab-imagepull
+  ingress:
+    enabled: true
+    className: nginx
+    hosts:
+      - host: ${NAMESPACE}.dev.aire.nvidia.com
+        paths:
+          - path: /
+            pathType: Prefix
   postgresql:
     primary:
       persistence:
@@ -126,6 +122,8 @@ etcd:
     enabled: true
     storageClass: "local-path"
     size: 1Gi
+  preUpgrade:
+    enabled: false
 
 nats:
   enabled: true

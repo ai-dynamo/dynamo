@@ -15,16 +15,18 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: dynamo-api-store
+  name: {{ include "helm.fullname" . }}
+  labels:
+    {{- include "helm.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      app: dynamo-api-store
+      {{- include "helm.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app: dynamo-api-store
+        {{- include "helm.selectorLabels" . | nindent 8 }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -41,7 +43,8 @@ spec:
         - name: "api-store"
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
-          imagePullPolicy: {{ .Values.storeImage.pullPolicy }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
               containerPort: {{ .Values.dynamo.apiStore.port }}
@@ -93,7 +96,6 @@ spec:
           envFrom:
           - secretRef:
               name: dynamo-deployment-env
-          image: "{{ .Values.storeImage.repository }}:{{ .Values.storeImage.tag | default .Chart.AppVersion }}"
       {{- with .Values.volumes }}
       volumes:
         {{- toYaml . | nindent 8 }}
