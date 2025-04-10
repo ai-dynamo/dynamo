@@ -41,8 +41,9 @@ VllmWorker:
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
   block-size: 128
   max-model-len: 3500
-  # Enable only disaggregated prefill
+  # Enable prefill at different workers.
   remote-prefill: true
+  # Disable local prefill so only disaggregated prefill is used.
   conditional-disagg: false
   # TP size is doubled from single node setup
   tensor-parallel-size: 8

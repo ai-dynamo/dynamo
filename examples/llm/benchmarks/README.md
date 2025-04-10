@@ -54,10 +54,9 @@ With the Dynamo repository, benchmarking image and model available, and **NATS a
 
 1\. Run benchmarking container
 ```bash
-./container/run.sh -it \
-  -v <huggingface_hub>:/root/.cache/huggingface/hub \
-  -v <dynamo_repo>:/workspace
+./container/run.sh --mount-workspace
 ```
+Note: The huggingface home source mount can be changed by setting `--hf-cache ~/.cache/huggingface`.
 
 2\. Start disaggregated services
 ```bash
@@ -81,10 +80,9 @@ With the Dynamo repository, benchmarking image and model available, and **NATS a
 
 1\. Run benchmarking container (node 0 & 1)
 ```bash
-./container/run.sh -it \
-  -v <huggingface_hub>:/root/.cache/huggingface/hub \
-  -v <dynamo_repo>:/workspace
+./container/run.sh --mount-workspace
 ```
+Note: The huggingface home source mount can be changed by setting `--hf-cache ~/.cache/huggingface`.
 
 2\. Config NATS and ETCD (node 1)
 ```bash
@@ -117,10 +115,9 @@ With the Dynamo repository and the benchmarking image available, perform the fol
 
 1\. Run benchmarking container
 ```bash
-./container/run.sh -it \
-  -v <huggingface_hub>:/root/.cache/huggingface/hub \
-  -v <dynamo_repo>:/workspace
+./container/run.sh --mount-workspace
 ```
+Note: The huggingface home source mount can be changed by setting `--hf-cache ~/.cache/huggingface`.
 
 2\. Start vLLM serve
 ```bash
@@ -164,5 +161,4 @@ bash -x /workspace/examples/llm/benchmarks/perf.sh
 
 ## Future Roadmap
 
-* Disaggregated Multi Node Benchmarking
 * Results Interpretation
