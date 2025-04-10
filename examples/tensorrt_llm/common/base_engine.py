@@ -458,6 +458,8 @@ class BaseTensorrtLLMEngine:
                 DisaggregatedTypeConverter.to_llm_disaggregated_params(
                     request.disaggregated_params
                 )
+                if request.disaggregated_params is not None
+                else None
             )
 
             if self._remote_prefill and self._server_type == ServerType.GEN:

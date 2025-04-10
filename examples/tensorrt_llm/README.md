@@ -25,6 +25,8 @@ This directory contains examples and reference implementations for deploying Lar
 See [deployment architectures](../llm/README.md#deployment-architectures) to learn about the general idea of the architecture.
 Note that this TensorRT-LLM version does not support all the options yet.
 
+Note: TensorRT-LLM disaggregation does not support conditional disaggregation yet. You can only configure the deployment to always use aggregate or disaggregated serving.
+
 ## Getting Started
 
 1. Choose a deployment architecture based on your requirements
@@ -114,14 +116,20 @@ dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
 #### Disaggregated serving
 ```bash
 cd /workspace/examples/tensorrt_llm
-dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml&
+TRTLLM_USE_UCX_KVCACHE=1 dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml&
 ```
+
+We are defining TRTLLM_USE_UCX_KVCACHE so that TRTLLM uses UCX for transfering the KV
+cache between the context and generation workers.
 
 #### Disaggregated serving with KV Routing
 ```bash
 cd /workspace/examples/llm
-dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
+TRTLLM_USE_UCX_KVCACHE=1 dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
 ```
+
+We are defining TRTLLM_USE_UCX_KVCACHE so that TRTLLM uses UCX for transfering the KV
+cache between the context and generation workers.
 
 ### Client
 

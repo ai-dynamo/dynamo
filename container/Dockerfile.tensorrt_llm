@@ -198,8 +198,6 @@ RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
 ENV DYNAMO_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
 ENV DYNAMO_HOME=/workspace
 
-# Enable UCX support for TRTLLM disaggregated deployment
-ENV TRTLLM_USE_UCX_KVCACHE=1
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \

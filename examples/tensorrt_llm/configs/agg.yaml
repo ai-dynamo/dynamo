@@ -20,12 +20,11 @@ Frontend:
 
 Processor:
   engine_args: "configs/llm_api_config.yaml"
-  block-size: 64
   router: round-robin
 
 TensorRTLLMWorker:
   engine_args: "configs/llm_api_config.yaml"
-  router: random
+  router: round-robin
   ServiceArgs:
     workers: 1
     resources:
