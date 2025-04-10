@@ -120,13 +120,15 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
     }
     ],
     "stream":false,
-    "max_tokens": 300
   }' | jq
+    "max_tokens": 300
 ```
 
 ### Local Development
 
-To develop locally, we recommend working inside of the container
+If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions see the [ReadMe](.devcontainer/README.md) for more details.
+
+Otherwise, to develop locally, we recommend working inside of the container
 
 ```bash
 ./container/build.sh

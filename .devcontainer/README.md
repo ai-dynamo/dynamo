@@ -1,0 +1,86 @@
+# NVIDIA Dynamo Development Environment
+## Prerequisites
+- Docker installed and configured on your host system
+- Visual Studio Code with the Dev Containers extension installed
+- Appropriate NVIDIA drivers (compatible with CUDA 12.8)
+- `HF_HOME`, `GITHUB_TOKEN`, and `HF_TOKEN` environment variables
+
+## Quick Start
+1. Build the container image
+
+```bash
+./container/build.sh --target local-dev
+```
+
+> Note: Currently local-dev is only implemented for --framework VLLM
+
+2. Open Dynamo folder in VS Code
+- Press Ctrl + Shift + P
+- Select "Dev Containers: Open Folder in Container"
+
+3. Wait for Initialization
+- The container will mount your local code
+- `post-create.sh` will build the project and configure the environment
+
+## What's Inside
+Development Environment:
+- Rust and Python toolchains
+- GPU acceleration
+- VS Code extensions for Rust and Python
+- Persistent build cache in `.build/` directory enables fast incremental builds (only changed files are recompiled)
+
+`cargo build --profile dev --locked` to re-build
+
+- Edits to files are propogated to local repo due to the volume mount
+- SSH and GPG agent passthrough orchestrated by devcontainer
+
+File Structure:
+- Local dynamo repo mounts to `/home/ubuntu/dynamo`
+- Python venv in `/opt/dynamo/venv`
+- Build artifacts in `.build/target`
+- HuggingFace cache preserved between sessions (Mounting local path `HF_HOME` at `/home/ubuntu/.cache/huggingface`)
+- Bash memory preserved between sessions at `/home/ubuntu/.commandhistory` using docker volume `dynamo-bashhistory`
+- Precommit peeserved between sessions at `/home/ubuntu/.cache/precommit` using docker volume `dynamo-precommit-cache`
+
+## Customization
+Edit `.devcontainer/devcontainer.json` to modify:
+- VS Code settings and extensions
+- Environment variables
+- Container configuration
+
+## FAQ
+
+### GPG Keys for Signing Git Commits
+Signing commits using GPG should work out of the box according to [VSCode docs](https://code.visualstudio.com/remote/advancedcontainers/sharing-git-credentials#_sharing-gpg-keys).
+
+If you run into version compatibility issues you can try:
+
+```bash
+# On Host
+gpg --list-secret-keys
+gpg --export-secret-keys --armor YOUR_KEY_ID > /tmp/key.asc
+
+# In container
+gpg1 --import /tmp/key.asc
+git config --local gpg.program gpg1
+```
+
+> Warning: Switching local gpg to gpg1 can have ramifications when you are not in the container any longer.
+
+### SSH Keys for Git Operations
+
+SSH keys need to be loaded in your SSH agent to work properly in the container. Can check out [VSCode docs](https://code.visualstudio.com/remote/advancedcontainers/sharing-git-credentials) for more details.
+
+```bash
+# In devcontainer, Check if your keys are loaded in the agent
+ssh-add -l
+
+# On local host, if your key isn't listed, add it
+eval "$(ssh-agent)"  # Start the agent if not running
+ssh-add ~/.ssh/id_rsa
+```
+
+Verify access by running `ssh -T git@github.com` in both host and container.
+
+
+See VS Code Dev Containers [documentation](https://code.visualstudio.com/docs/devcontainers/containers) for more details.

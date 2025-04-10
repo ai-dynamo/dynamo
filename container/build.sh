@@ -323,6 +323,10 @@ if [[ $FRAMEWORK == "VLLM" ]]; then
     BUILD_ARGS+=" --build-arg NIXL_COMMIT=${NIXL_COMMIT} "
 fi
 
+if [[ $TARGET == "local-dev" ]]; then
+    BUILD_ARGS+=" --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) "
+fi
+
 # BUILD DEV IMAGE
 
 BUILD_ARGS+=" --build-arg BASE_IMAGE=$BASE_IMAGE --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG --build-arg FRAMEWORK=$FRAMEWORK --build-arg ${FRAMEWORK}_FRAMEWORK=1 --build-arg VERSION=$VERSION --build-arg PYTHON_PACKAGE_VERSION=$PYTHON_PACKAGE_VERSION"
