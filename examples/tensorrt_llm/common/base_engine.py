@@ -25,7 +25,6 @@ from dataclasses import asdict
 from queue import Queue
 from typing import Any, Optional
 
-from common.chat_processor import ChatProcessor, CompletionsProcessor
 from common.parser import LLMAPIConfig
 from common.protocol import (
     DisaggregatedTypeConverter,
@@ -41,7 +40,6 @@ from tensorrt_llm.llmapi.disagg_utils import (
     parse_disagg_config_file,
 )
 from tensorrt_llm.serve.openai_protocol import DisaggregatedParams
-from transformers import AutoTokenizer
 
 from dynamo.llm import KvMetricsPublisher
 
@@ -50,39 +48,6 @@ from .kv_cache_event_publisher import KVCacheEventPublisher
 logger = logging.getLogger(__name__)
 
 logger.setLevel(logging.DEBUG)
-
-
-class ChatProcessorMixin:
-    def __init__(self, engine_config: LLMAPIConfig):
-        self._engine_config = engine_config
-        logger.info(f"Using LLM API config: {self._engine_config.to_dict()}")
-        # model name for chat processor
-        self._model_name = self._engine_config.model_name
-        logger.info(f"Set model name: {self._model_name}")
-
-        # model for LLMAPI input
-        self._model = self._model_name
-
-        if self._engine_config.model_path:
-            self._model = self._engine_config.model_path
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                self._engine_config.model_path
-            )
-            logger.info(f"Using model from path: {self._engine_config.model_path}")
-        else:
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                self._engine_config.model_name
-            )
-
-        if self._engine_config.extra_args.get("tokenizer", None):
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                self._engine_config.extra_args.get("tokenizer", None)
-            )
-
-        self.chat_processor = ChatProcessor(self._model_name, self._tokenizer)
-        self.completions_processor = CompletionsProcessor(
-            self._model_name, self._tokenizer
-        )
 
 
 def update_args_from_disagg_config(
@@ -105,7 +70,7 @@ def get_sampling_params(sampling_params):
     return SamplingParams(**cleaned_dict)
 
 
-class BaseTensorrtLLMEngine(ChatProcessorMixin):
+class BaseTensorrtLLMEngine:
     def __init__(
         self,
         namespace_str: str = "dynamo",
@@ -166,7 +131,7 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
         if self._publish_stats:
             self._kv_metrics_publisher = KvMetricsPublisher()
 
-        super().__init__(engine_config)
+        self._engine_config = engine_config
 
     def _init_engine(self):
         logger.info("Initializing engine")
@@ -378,7 +343,10 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
             try:
                 llm = await loop.run_in_executor(
                     None,
-                    lambda: LLM(model=self._model, **self._engine_config.to_dict()),
+                    lambda: LLM(
+                        model=self._engine_config.model_name,
+                        **self._engine_config.to_dict(),
+                    ),
                 )
                 yield llm
             finally:

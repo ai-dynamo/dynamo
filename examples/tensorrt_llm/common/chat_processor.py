@@ -16,6 +16,7 @@
 from dataclasses import asdict
 from typing import Any, Dict, List, Union
 
+from common.parser import LLMAPIConfig
 from common.protocol import (
     DisaggregatedTypeConverter,
     DynamoTRTLLMChatCompletionResponseStreamChoice,
@@ -41,10 +42,44 @@ from tensorrt_llm.serve.openai_protocol import (
     ToolCall,
     UsageInfo,
 )
+from transformers import AutoTokenizer
 from transformers.tokenization_utils import PreTrainedTokenizer
 from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
 logger.set_level("debug")
+
+
+class ChatProcessorMixin:
+    def __init__(
+        self, engine_config: LLMAPIConfig, using_engine_generator: bool = False
+    ):
+        self._engine_config = engine_config
+        logger.info(f"Using LLM API config: {self._engine_config.to_dict()}")
+        # model name for chat processor
+        self._model_name = self._engine_config.model_name
+        logger.info(f"Set model name: {self._model_name}")
+        # model for LLMAPI input
+        self._model = self._model_name
+        if self._engine_config.model_path:
+            self._model = self._engine_config.model_path
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self._engine_config.model_path
+            )
+            logger.info(f"Using model from path: {self._engine_config.model_path}")
+        else:
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self._engine_config.model_name
+            )
+        if self._engine_config.extra_args.get("tokenizer", None):
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self._engine_config.extra_args.get("tokenizer", None)
+            )
+        self.chat_processor = ChatProcessor(
+            self._model_name, self._tokenizer, using_engine_generator
+        )
+        self.completions_processor = CompletionsProcessor(
+            self._model_name, self._tokenizer
+        )
 
 
 def parse_chat_message_content(
