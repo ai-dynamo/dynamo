@@ -84,7 +84,7 @@ def main(
                     f"the maximum worker ID is {len(env_list)}"
                 )
             os.environ.update(env_list[worker_key])
-    
+
     # Import service first to check configuration
     service = import_service(bento_identifier)
     if service_name and service_name != service.name:
