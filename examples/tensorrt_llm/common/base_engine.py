@@ -486,7 +486,7 @@ class BaseTensorrtLLMEngine:
                 disaggregated_params=disaggregated_params,
                 streaming=(self._server_type == ServerType.GEN),
             ):
-                # Encode the disaggregated params to OAI format so
+                # Convert the disaggregated params to OAI format so
                 # it can be sent over the network.
                 response.outputs[
                     0
