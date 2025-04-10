@@ -142,7 +142,10 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 
 WORKDIR /workspace
 
-RUN yum install -y protobuf-compiler \
+RUN yum update -y \
+    && yum install -y protobuf-compiler \
+    || yum install -y https://raw.repo.almalinux.org/almalinux/8.10/AppStream/x86_64/os/Packages/protobuf-3.5.0-15.el8.x86_64.rpm \
+    https://raw.repo.almalinux.org/almalinux/8.10/AppStream/x86_64/os/Packages/protobuf-compiler-3.5.0-15.el8.x86_64.rpm \
     && yum clean all \
     && rm -rf /var/cache/yum
 
