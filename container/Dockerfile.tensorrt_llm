@@ -142,7 +142,8 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 
 WORKDIR /workspace
 
-RUN yum install -y protobuf-compiler \
+RUN yum update -y && \
+    yum install -y protobuf-compiler && \
     && yum clean all \
     && rm -rf /var/cache/yum
 
