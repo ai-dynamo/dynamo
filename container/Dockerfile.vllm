@@ -256,7 +256,9 @@ FROM base AS local-dev
 # https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
 # Will use the default ubuntu user, but give sudo access
 # Needed so files permissions aren't set to root ownership when writing from inside container
-ARG USERNAME=ubuntu
+
+# Don't want ubuntu to be editable, just change uid and gid. User ubuntu is hardcoded in .devcontainer
+ENV USERNAME=ubuntu
 ARG USER_UID=1000
 ARG USER_GID=1000
 
@@ -266,9 +268,12 @@ RUN apt-get update && apt-get install -y sudo gnupg2 gnupg1 \
     && mkdir -p /home/$USERNAME \
     && chown -R $USERNAME:$USERNAME /home/$USERNAME \
     && rm -rf /var/lib/apt/lists/* \
-    && chsh -s /bin/bash $USERNAME \
-    && chown -R $USERNAME:$USERNAME /opt/dynamo/venv \
-    && chown -R $USERNAME:$USERNAME /usr/local/bin
+    && chsh -s /bin/bash $USERNAME
+
+# This is a slow operation (~40s on my cpu)
+# Much better than chown -R $USERNAME:$USERNAME /opt/dynamo/venv (~10min on my cpu)
+COPY --from=base --chown=$USER_UID:$USER_GID /opt/dynamo/venv/ /opt/dynamo/venv/
+COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
 
 USER $USERNAME
 ENV HOME=/home/$USERNAME
