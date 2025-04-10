@@ -478,12 +478,11 @@ class BaseTensorrtLLMEngine:
             )
 
             sampling_params = get_sampling_params(request.sampling_params)
-
             async for response in self._llm_engine.generate_async(
                 inputs=worker_inputs,
                 sampling_params=sampling_params,
                 disaggregated_params=disaggregated_params,
-                streaming=self._server_type == ServerType.GEN,
+                streaming=(self._server_type == ServerType.GEN),
             ):
                 # Encode the disaggregated params to OAI format so
                 # it can be sent over the network.
