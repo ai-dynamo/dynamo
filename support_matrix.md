@@ -29,6 +29,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 | **Operating System** | **Version** | **Architecture** | **Status**   |
 |----------------------|-------------|------------------|--------------|
+| **Ubuntu**           | 22.04       | x86_64           | Supported    |
 | **Ubuntu**           | 24.04       | x86_64           | Supported    |
 | **Ubuntu**           | 24.04       | ARM64            | Experimental |
 
@@ -38,10 +39,10 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 ### Runtime Dependency
 | **Python Package** | **Version** | glibc version |
 |--------------------|-------------|---------------|
-| ai-dynamo          |    0.1.0    | 2.39          |
-| ai-dynamo-runtime  |    0.1.0    | 2.39          |
-| ai-dynamo-vllm     |    0.7.2*   | 2.39          |
-| NIXL               |    0.1.0    | 2.39          |
+| ai-dynamo          |    0.1.1    |     >=2.28    |
+| ai-dynamo-runtime  |    0.1.1    |     >=2.28    |
+| ai-dynamo-vllm     |    0.7.2*   |     >=2.28    |
+| NIXL               |    0.1.1    |     >=2.34    |
 
 ### Build Dependency
 | **Build Dependency** | **Version** |
@@ -49,7 +50,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | **Base Container**   |    [25.01](https://hub.docker.com/layers/nvidia/cuda/12.8.1-runtime-ubuntu24.04/images/sha256-828c4d878adcaa4265d80c95d8ec877149b49bb2419a4cf3bb6aa889bbb7ca2e)    |
 | **ai-dynamo-vllm**   |    0.7.2*   |
 | **TensorRT-LLM**     |    0.19.0** |
-| **NIXL**             |    0.1.0    |
+| **NIXL**             |    0.1.1    |
 
 > **Note**:
 > - *ai-dynamo-vllm v0.7.2 is a customized patch of v0.7.2 from vLLM.
