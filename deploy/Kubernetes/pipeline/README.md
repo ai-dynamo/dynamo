@@ -13,7 +13,7 @@ This is a proof of concept for a Helm chart to deploy services defined in a bent
   ```bash
   cd deploy/Kubernetes/pipeline
   ```
-- build and set up the DYNAMO_IMAGE as described in the [main README](../../README.md#building-the-dynamo_image-base-image)
+- build and push the DYNAMO_IMAGE as described in the [main README](../../README.md#building-the-dynamo_image-base-image) to an image registry
 - make sure the `nats` and `etcd` dependencies are installed (under the `dependencies` subdirectory). For more details, see [Installing Required Dependencies](../../../docs/guides/dynamo_deploy.md#installing-required-dependencies)
 
 ### Install the Helm chart

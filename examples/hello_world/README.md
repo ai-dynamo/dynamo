@@ -139,7 +139,7 @@ dynamo server login --api-token TEST-TOKEN --endpoint $DYNAMO_SERVER
 # Set runtime image name
 export DYNAMO_IMAGE=<dynamo_docker_image_name>
 
-# Build and containerize the Frontend service
+# Prepare your project for deployment.
 cd $PROJECT_ROOT/examples/hello_world
 DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk -F"\"" '{ print $2 }')
 ```

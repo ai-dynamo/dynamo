@@ -15,7 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# End-to-end deployment of a Dynamo NIM to Kubernetes
+# Deploying Dynamo inference graphs to Kubernetes
 
 ## Deployment Paths in Dynamo
 
