@@ -32,5 +32,5 @@ kv_cache_config:
   free_gpu_memory_fraction: 0.95
 
 pytorch_backend_config:
-  enable_overlap_scheduler: true
-  use_cuda_graph: true
+  enable_overlap_scheduler: false
+  use_cuda_graph: false
