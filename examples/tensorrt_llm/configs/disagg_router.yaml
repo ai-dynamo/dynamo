@@ -21,7 +21,7 @@ Frontend:
 Processor:
   engine_args: "configs/llm_api_config_router.yaml"
   block-size: 64
-  router: round-robin
+  router: "kv"
   remote-prefill: true
 
 Router:

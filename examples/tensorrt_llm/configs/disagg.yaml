@@ -14,7 +14,7 @@
 # limitations under the License.
 
 Frontend:
-  served_model_name: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   endpoint: dynamo.Processor.chat/completions
   port: 8000
 
