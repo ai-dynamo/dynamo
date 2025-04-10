@@ -13,12 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from components.utils import GeneralRequest, GeneralResponse
-from dynamo.sdk import dynamo_endpoint, service
-import socket
 import logging
+import socket
+
+from components.utils import GeneralRequest, GeneralResponse
+
+from dynamo.sdk import dynamo_endpoint, service
 
 logger = logging.getLogger(__name__)
+
 
 @service(
     dynamo={
@@ -37,5 +40,5 @@ class DummyWorker:
         logger.info(f"{self.hostname}: Worker invoked")
         yield GeneralResponse(
             request_id=request.request_id,
-            worker_output=request.prompt+"_GeneratedBy_"+self.hostname,
+            worker_output=request.prompt + "_GeneratedBy_" + self.hostname,
         ).model_dump_json()

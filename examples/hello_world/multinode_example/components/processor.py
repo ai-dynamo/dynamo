@@ -14,15 +14,18 @@
 # limitations under the License.
 
 import asyncio
-from components.worker import DummyWorker
-from components.utils import GeneralRequest, GeneralResponse
-from dynamo.sdk.lib.config import ServiceConfig
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 import logging
 import socket
 from typing import Protocol
 
+from components.utils import GeneralRequest, GeneralResponse
+from components.worker import DummyWorker
+
+from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk.lib.config import ServiceConfig
+
 logger = logging.getLogger(__name__)
+
 
 @service(
     dynamo={
@@ -67,8 +70,7 @@ class Processor(Protocol):
         self,
         raw_request: GeneralRequest,
     ):
-        raw_request.prompt = raw_request.prompt + \
-            "_ProcessedBy_" + self.hostname
+        raw_request.prompt = raw_request.prompt + "_ProcessedBy_" + self.hostname
         if self.router == "random":
             engine_generator = await self.worker_client.random(
                 raw_request.model_dump_json()
@@ -89,5 +91,3 @@ class Processor(Protocol):
         async for response in self._generate(request):
             logger.debug(f"Received response: {response.model_dump_json()}")
             yield response.model_dump_json()
-
-  

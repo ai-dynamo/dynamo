@@ -34,8 +34,8 @@ Users/Clients (HTTP)
       ▼
 ┌─────────────────────┐
 │  Processor (node 1) │  ─────────────────
-└─────────────────────┘   routing         │ 
-      │ dynamo/runtime                    │ dynamo/runtime 
+└─────────────────────┘   routing         │
+      │ dynamo/runtime                    │ dynamo/runtime
       ▼                                   ▼
 ┌─────────────────────┐        ┌─────────────────────┐
 │  Worker_1  (node 2) │        │  Worker_2  (node 3) │
@@ -61,18 +61,18 @@ Users/Clients (HTTP)
 
 ## Prerequisites
 
-Start required services (etcd and NATS) using [Docker Compose](../../deploy/docker-compose.yml)
+Start required services (etcd and NATS) using [Docker Compose](../../../deploy/docker-compose.yml)
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
 ## Running the Single Worker Example
 In this example, we will use two nodes to demo the multinode serving.
-- Node 1  
-      - Runs NATS and etcd services  
+- Node 1
+      - Runs NATS and etcd services
       - Deploys Frontend and Processor
-- Node 2  
-      - Deploys Worker 
+- Node 2
+      - Deploys Worker
 
 1. Set environment variable for NATS and etcd services
 ```bash
@@ -90,6 +90,8 @@ The `dynamo serve` command deploys the entire service graph, automatically handl
 
 3. Go to node 2 and launch Worker service
 ```bash
+export NATS_SERVER="nats://Node_1_IP_ADDRESS:4222"
+export ETCD_ENDPOINTS="http://Node_1_IP_ADDRESS:2379"
 cd dynamo/examples/hello_world/multinode_example
 dynamo serve components.worker:DummyWorker
 ```
@@ -106,18 +108,18 @@ curl -X 'POST' \
   "request_id": "id_number"
 }'
 ```
-4 You should be able to see response as below:  
-`Response: {"worker_output":"test prompt_ProcessedBy_NODE1HOSTNAME_GeneratedBy_NODE2HOSTNAME","request_id":"id_number"}`  
-Here `NODE1HOSTNAME` is the hostname for node 1, and `NODE2HOSTNAME` is the hostname for node 2. 
+4 You should be able to see response as below:
+`Response: {"worker_output":"test prompt_ProcessedBy_NODE1HOSTNAME_GeneratedBy_NODE2HOSTNAME","request_id":"id_number"}`
+Here `NODE1HOSTNAME` is the hostname for node 1, and `NODE2HOSTNAME` is the hostname for node 2.
 
 ## Running the Two Workers Example
 In this example, we will use three nodes to demo the multinode serving.
-- Node 1  
-      - Runs NATS and etcd services  
+- Node 1
+      - Runs NATS and etcd services
       - Deploys Frontend and Processor
-- Node 2  
+- Node 2
       - Deploys Worker 1
-- Node 3  
+- Node 3
       - Deploys Worker 2
 
 1. Launch frontend and processor using the `multi_worker.yaml` config from  node 1. In this config file, we requires 2 minimun workers and set the router mode as **round robin**
@@ -128,13 +130,15 @@ The service is waiting for 2 workers this time.
 
 2. Go to node 2 and node 3, launch worker service separately
 ```bash
+export NATS_SERVER="nats://Node_1_IP_ADDRESS:4222"
+export ETCD_ENDPOINTS="http://Node_1_IP_ADDRESS:2379"
 dynamo serve components.worker:DummyWorker
-``` 
+```
 You should see following message from node 1 terminal window when both workers are deployed
 ![text](./_img/2workerready.png)
 
-3. Query the frontend use the same query as before, and run it multiple time. You should see following two responses in turn because of round-robin routing mode between 2 workers.  
+3. Query the frontend use the same query as before, and run it multiple time. You should see following two responses in turn because of round-robin routing mode between 2 workers.
 
-Respone from worker 1: `Response: {"worker_output":"test prompt_ProcessedBy_NODE1HOSTNAME_GeneratedBy_NODE2HOSTNAME","request_id":"id_number"}`  
+Respone from worker 1: `Response: {"worker_output":"test prompt_ProcessedBy_NODE1HOSTNAME_GeneratedBy_NODE2HOSTNAME","request_id":"id_number"}`
 
-Respone from worker 2: `Response: {"worker_output":"test prompt_ProcessedBy_NODE1HOSTNAME_GeneratedBy_NODE3HOSTNAME","request_id":"id_number"}`  
+Respone from worker 2: `Response: {"worker_output":"test prompt_ProcessedBy_NODE1HOSTNAME_GeneratedBy_NODE3HOSTNAME","request_id":"id_number"}`

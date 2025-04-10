@@ -15,9 +15,11 @@
 
 from pydantic import BaseModel
 
+
 class GeneralRequest(BaseModel):
     prompt: str = "user input"
     request_id: str = None
+
 
 class GeneralResponse(BaseModel):
     worker_output: str = "generated output"
