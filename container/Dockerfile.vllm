@@ -307,9 +307,9 @@ ARG RELEASE_BUILD
 WORKDIR /workspace
 
 RUN yum update -y && \
-  yum install -y protobuf-compiler && \
-  && yum clean all \
-  && rm -rf /var/cache/yum
+    yum install -y protobuf-compiler && \
+    yum clean all && \
+    rm -rf /var/cache/yum
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
