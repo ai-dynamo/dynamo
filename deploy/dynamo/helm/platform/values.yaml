@@ -27,6 +27,7 @@ dynamo-operator:
   imagePullSecrets:
     - name: gitlab-imagepull
     - name: nvcrimagepullsecret
+    - name: docker-imagepullsecret
   controllerManager:
     manager:
       image:
@@ -37,7 +38,7 @@ dynamo-api-server:
   imagePullSecrets:
     - name: gitlab-imagepull
     - name: nvcrimagepullsecret
-
+    - name: docker-imagepullsecret
 etcd:
   enabled: false
   replicaCount: 1

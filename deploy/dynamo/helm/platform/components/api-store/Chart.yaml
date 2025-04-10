@@ -12,16 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-{{- if (not .Values.objectStore.existingSecret) }}
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: {{ include "api-server.objectStore.secretName" . }}
-  namespace: {{ include "common.names.namespace" . | quote }}
-type: Opaque
-data:
-  accessKey: {{ .Values.objectStore.accessKey | b64enc | quote }}
-  accessSecret: {{ .Values.objectStore.accessSecret | b64enc | quote }}
-  endpoint: {{ .Values.objectStore.endpoint | b64enc | quote }}
-{{- end }}
+apiVersion: v2
+name: dynamo-api-store
+description: A Helm chart for the Dynamo API Store component
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+dependencies:
+  - name: postgresql
+    version: "16.6.2"  # This is an example; update with the latest version if needed
+    repository: "https://charts.bitnami.com/bitnami"
+  - name: minio
+    version: "16.0.2"
+    repository: "https://charts.bitnami.com/bitnami"

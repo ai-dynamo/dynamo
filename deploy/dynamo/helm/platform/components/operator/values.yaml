@@ -120,9 +120,6 @@ dynamo:
     cacheRepo: ''
     snapshotMode: '' # options: full, redo, time
 
-
-
-
 imagePullSecrets: []
 kubernetesClusterDomain: cluster.local
 metricsService:

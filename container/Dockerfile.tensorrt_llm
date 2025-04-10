@@ -15,8 +15,14 @@
 
 ARG BASE_IMAGE="tensorrt_llm/release"
 ARG BASE_IMAGE_TAG="latest"
+ARG MANYLINUX_IMAGE="quay.io/pypa/manylinux_2_28_x86_64"
+ARG RELEASE_BUILD
 
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS dev
+##################################
+########## Build Image ###########
+##################################
+
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS build
 
 USER root
 
@@ -103,7 +109,6 @@ COPY lib/ /workspace/lib/
 COPY components /workspace/components
 COPY launch /workspace/launch
 
-# TODO: Tanmay Add LLMAPI-based feature flag once the engine is ready.
 RUN cargo build --release --locked --features mistralrs,sglang,python && \
     cargo doc --no-deps && \
     cp target/release/dynamo-run /usr/local/bin && \
@@ -116,15 +121,61 @@ COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 
 # Install uv, create virtualenv for general use, and build dynamo wheel
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+### VIRTUAL ENVIRONMENT SETUP ###
+RUN mkdir /opt/dynamo && \
+    uv venv /opt/dynamo/venv --python 3.12
+
+###################################
+####### WHEEL BUILD STAGE #########
+###################################
+
+# Build the wheel in the manylinux environment
+FROM ${MANYLINUX_IMAGE} AS wheel_builder
+ARG RELEASE_BUILD
+ARG CARGO_BUILD_JOBS
+# Set CARGO_BUILD_JOBS to 16 if not provided
+# This is to prevent cargo from building $(nproc) jobs in parallel,
+# which might exceed the number of opened files limit.
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
+
+WORKDIR /workspace
+
+RUN yum install -y protobuf-compiler \
+    && yum clean all \
+    && rm -rf /var/cache/yum
+
+COPY --from=build /workspace /workspace
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH \
+    CARGO_TARGET_DIR=/workspace/target
+
+COPY --from=build $RUSTUP_HOME $RUSTUP_HOME
+COPY --from=build $CARGO_HOME $CARGO_HOME
+
+# Create virtualenv and build dynamo wheel
 RUN mkdir /opt/dynamo && \
     uv venv /opt/dynamo/venv --python 3.12 && \
     source /opt/dynamo/venv/bin/activate && \
     cd /workspace/lib/bindings/python && \
-    uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
+    uv build --wheel --out-dir /workspace/dist --python 3.12 && \
+    if [ "$RELEASE_BUILD" = "true" ]; then \
+        uv build --wheel --out-dir /workspace/dist --python 3.11 && \
+        uv build --wheel --out-dir /workspace/dist --python 3.10; \
+    fi && \
     cd /workspace && \
-    uv build --wheel --out-dir /workspace/dist && \
-    uv pip install /workspace/dist/ai_dynamo*any.whl
+    uv build --wheel --out-dir /workspace/dist
+
+########################################
+########## Development Image ###########
+########################################
+
+FROM build AS dev
+
+WORKDIR /workspace
+COPY --from=wheel_builder /workspace/dist/ /workspace/dist/
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
@@ -132,6 +183,10 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
     cp dist/ai_dynamo_runtime*cp312*.whl /opt/dynamo/bindings/wheels/. && \
     cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
     cp -r lib/bindings/c/include /opt/dynamo/bindings/.
+
+RUN . /opt/dynamo/venv/bin/activate && \
+    uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
+    uv pip install /workspace/dist/ai_dynamo*any.whl
 
 # Install dynamo.runtime and dynamo.llm wheels globally in container for tests that
 # currently run without virtual environment activated.

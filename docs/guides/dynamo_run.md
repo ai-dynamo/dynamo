@@ -1,12 +1,28 @@
 # Dynamo Run
 
+* [Quickstart with pip and vllm](#quickstart-with-pip-and-vllm)
+    * [Automatically download a model from Hugging Face](#use-model-from-hugging-face)
+    * [Run a model from local file](#run-a-model-from-local-file)
+    * [Multi-node](#multi-node)
+* [Compiling from Source](#compiling-from-source)
+    * [Setup](#setup)
+    * [sglang](#sglang)
+    * [llama_cpp](#llama_cpp)
+    * [vllm](#vllm)
+    * [Python bring-your-own-engine](#python-bring-your-own-engine)
+    * [trtllm](#trtllm)
+    * [Echo Engines](#echo-engines)
+* [Batch mode](#batch-mode)
+* [Defaults](#defaults)
+* [Extra engine arguments](#extra-engine-arguments)
+
 `dynamo-run` is a CLI tool for exploring the Dynamo components, and an example of how to use them from Rust. It is also available as `dynamo run` if using the Python wheel.
 
 ## Quickstart with pip and vllm
 
-If you used `pip` to install `dynamo` you should have the `dynamo-run` binary pre-installed with the `vllm` engine. You must be in a virtual env with vllm installed to use this. For more options see "Full documentation" below.
+If you used `pip` to install `dynamo` you should have the `dynamo-run` binary pre-installed with the `vllm` engine. You must be in a virtual env with vllm installed to use this. To compile from source, see "Full documentation" below.
 
-### Automatically download a model from [Hugging Face](https://huggingface.co/models)
+### Use model from Hugging Face
 
 This will automatically download Qwen2.5 3B from Hugging Face (6 GiB download) and start it in interactive text mode:
 ```
@@ -22,8 +38,9 @@ For gated models (e.g. meta-llama/Llama-3.2-3B-Instruct) you have to have an `HF
 
 The parameter can be the ID of a HuggingFace repository (it will be downloaded), a GGUF file, or a folder containing safetensors, config.json, etc (a locally checked out HuggingFace repository).
 
-## Manually download a model from Hugging Face
+### Run a model from local file
 
+#### Step 1: Download model from Hugging Face
 One of these models should be high quality and fast on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
 E.g. https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/blob/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf
 
@@ -31,39 +48,37 @@ Download model file:
 ```
 curl -L -o Llama-3.2-3B-Instruct-Q4_K_M.gguf "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf?download=true"
 ```
-
-## Run a model from local file
-
-*Text interface*
+#### Run model from local file
+**Text interface**
 ```
 dynamo run out=vllm Llama-3.2-3B-Instruct-Q4_K_M.gguf # or path to a Hugging Face repo checkout instead of the GGUF
 ```
 
-*HTTP interface*
+**HTTP interface**
 ```
 dynamo run in=http out=vllm Llama-3.2-3B-Instruct-Q4_K_M.gguf
 ```
 
-*List the models*
+**List the models**
 ```
 curl localhost:8080/v1/models
 ```
 
-*Send a request*
+**Send a request**
 ```
 curl -d '{"model": "Llama-3.2-3B-Instruct-Q4_K_M", "max_completion_tokens": 2049, "messages":[{"role":"user", "content": "What is the capital of South Africa?" }]}' -H 'Content-Type: application/json' http://localhost:8080/v1/chat/completions
 ```
 
-*Multi-node*
+### Multi-node
 
 You will need [etcd](https://etcd.io/) and [nats](https://nats.io) installed and accessible from both nodes.
 
-Node 1:
+**Node 1:**
 ```
 dynamo run in=http out=dyn://llama3B_pool
 ```
 
-Node 2:
+**Node 2:**
 ```
 dynamo run in=dyn://llama3B_pool out=vllm ~/llm_models/Llama-3.2-3B-Instruct
 ```
@@ -74,18 +89,19 @@ The `llama3B_pool` name is purely symbolic, pick anything as long as it matches 
 
 Run `dynamo run --help` for more options.
 
-# Full documentation
+## Compiling from Source
 
-`dynamo-run` is what `dynamo run` executes. It is an example of what you can build in Rust with the `dynamo-llm` and `dynamo-runtime`. Here is a list of how to build from source and all the features.
+`dynamo-run` is what `dynamo run` executes. It is an example of what you can build in Rust with the `dynamo-llm` and `dynamo-runtime`. The following guide demonstrates how you can build from source with all the features.
 
-## Setup
+### Setup
 
-Libraries Ubuntu:
+#### Step 1: Install libraries
+**Ubuntu:**
 ```
-apt install -y build-essential libhwloc-dev libudev-dev pkg-config libssl-dev libclang-dev protobuf-compiler python3-dev
+sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libssl-dev libclang-dev protobuf-compiler python3-dev cmake
 ```
 
-Libraries macOS:
+**macOS:**
 - [Homebrew](https://brew.sh/)
 ```
 # if brew is not installed on your system, install it
@@ -101,23 +117,22 @@ xcrun -sdk macosx metal
 ```
 If Metal is accessible, you should see an error like `metal: error: no input files`, which confirms it is installed correctly.
 
-Install Rust:
+#### Step 2: Install Rust
 ```
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 ```
 
-## Build
+#### Step 3: Build
 
-Navigate to launch/ directory
-```
-cd launch/
-```
-Optionally can run `cargo build` from any location with arguments:
-```
---target-dir /path/to/target_directory` specify target_directory with write privileges
---manifest-path /path/to/project/Cargo.toml` if cargo build is run outside of `launch/` directory
-```
+Run `cargo build` to install the `dynamo-run` binary in `target/debug`.
+
+> **Optionally**, you can run `cargo build` from any location with arguments:
+> ```
+> --target-dir /path/to/target_directory` specify target_directory with write privileges
+> --manifest-path /path/to/project/Cargo.toml` if cargo build is run outside of `launch/` directory
+> ```
+
 
 - Linux with GPU and CUDA (tested on Ubuntu):
 ```
@@ -138,10 +153,12 @@ The binary will be called `dynamo-run` in `target/debug`
 ```
 cd target/debug
 ```
+> Note: Build with `--release` for a smaller binary and better performance, but longer build times. The binary will be in `target/release`.
 
-Build with `--release` for a smaller binary and better performance, but longer build times. The binary will be in `target/release`.
+To build for other engines, see the following sections.
 
-## sglang
+
+### sglang
 
 1. Setup the python virtual env:
 
@@ -163,33 +180,36 @@ cargo build --features sglang
 
 Any example above using `out=sglang` will work, but our sglang backend is also multi-gpu and multi-node.
 
-Node 1:
+**Node 1:**
 ```
-dynamo-run in=http out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 0 --leader-addr 10.217.98.122:9876
+cd target/debug
+./dynamo-run in=http out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 0 --leader-addr 10.217.98.122:9876
 ```
 
-Node 2:
+**Node 2:**
 ```
-dynamo-run in=none out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 1 --leader-addr 10.217.98.122:9876
+cd target/debug
+./dynamo-run in=none out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 1 --leader-addr 10.217.98.122:9876
 ```
 
 To pass extra arguments to the sglang engine see *Extra engine arguments* below.
 
-## llama_cpp
+### llama_cpp
 
-- `cargo build --features llamacpp,cuda`
-
-- `dynamo-run out=llama_cp ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf`
-
+```
+cargo build --features llamacpp,cuda
+cd target/debug
+dynamo-run out=llamacpp ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf
+```
 If the build step also builds llama_cpp libraries into the same folder as the binary ("libllama.so", "libggml.so", "libggml-base.so", "libggml-cpu.so", "libggml-cuda.so"), then `dynamo-run` will need to find those at runtime. Set `LD_LIBRARY_PATH`, and be sure to deploy them alongside the `dynamo-run` binary.
 
-## vllm
+### vllm
 
 Using the [vllm](https://github.com/vllm-project/vllm) Python library. We only use the back half of vllm, talking to it over `zmq`. Slow startup, fast inference. Supports both safetensors from HF and GGUF files.
 
 We use [uv](https://docs.astral.sh/uv/) but any virtualenv manager should work.
 
-Setup:
+1. Setup:
 ```
 uv venv
 source .venv/bin/activate
@@ -199,37 +219,40 @@ uv pip install vllm==0.7.3 setuptools
 
 **Note: If you're on Ubuntu 22.04 or earlier, you will need to add `--python=python3.10` to your `uv venv` command**
 
-Build:
+2. Build:
 ```
 cargo build --features vllm
+cd target/debug
 ```
 
-Run (still inside that virtualenv) - HF repo:
+3. Run
+Inside that virtualenv:
+
+**HF repo:**
 ```
 ./dynamo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct/
 
 ```
 
-Run (still inside that virtualenv) - GGUF:
+**GGUF:**
 ```
 ./dynamo-run in=http out=vllm ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf
 ```
 
-+ Multi-node:
-
-Node 1:
+**Multi-node:**
+**Node 1:**
 ```
 dynamo-run in=text out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --tensor-parallel-size 8 --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 0
 ```
 
-Node 2:
+**Node 2:**
 ```
 dynamo-run in=none out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 1
 ```
 
-To pass extra arguments to the vllm engine see *Extra engine arguments* below.
+To pass extra arguments to the vllm engine see [Extra engine arguments](#extra_engine_arguments) below.
 
-## Python bring-your-own-engine
+### Python bring-your-own-engine
 
 You can provide your own engine in a Python file. The file must provide a generator with this signature:
 ```
@@ -238,7 +261,7 @@ async def generate(request):
 
 Build: `cargo build --features python`
 
-### Python does the pre-processing
+#### Python does the pre-processing
 
 If the Python engine wants to receive and returns strings - it will do the prompt templating and tokenization itself - run it like this:
 
@@ -252,7 +275,7 @@ dynamo-run out=pystr:/home/user/my_python_engine.py
 
 The file is loaded once at startup and kept in memory.
 
-Example engine:
+**Example engine:**
 ```
 import asyncio
 
@@ -302,7 +325,27 @@ MAIN: ['my_engine.py', '--model-path', '/opt/models/Llama-3.2-3B-Instruct/', '--
 
 This allows quick iteration on the engine setup. Note how the `-n` `1` is included. Flags `--leader-addr` and `--model-config` will also be added if provided to `dynamo-run`.
 
-### Dynamo does the pre-processing
+#### TensorRT-LLM `pystr` engine
+
+To run a TRT-LLM model with dynamo-run we have included a python based [async engine] (/examples/tensorrt_llm/engines/agg_engine.py).
+To configure the TensorRT-LLM async engine please see [llm_api_config.yaml](/examples/tensorrt_llm/configs/llm_api_config.yaml). The file defines the options that need to be passed to the LLM engine. Follow the steps below to serve trtllm on dynamo run.
+
+##### Step 1: Build the environment
+
+See instructions [here](/examples/tensorrt_llm/README.md#build-docker) to build the dynamo container with TensorRT-LLM.
+
+##### Step 2: Run the environment
+
+See instructions [here](/examples/tensorrt_llm/README.md#run-container) to run the built environment.
+
+##### Step 3: Execute `dynamo run` command
+
+Execute the following to load the TensorRT-LLM model specified in the configuration.
+```
+dynamo run out=pystr:/workspace/examples/tensorrt_llm/engines/agg_engine.py  -- --engine_args /workspace/examples/tensorrt_llm/configs/llm_api_config.yaml
+```
+
+#### Dynamo does the pre-processing
 
 If the Python engine wants to receive and return tokens - the prompt templating and tokenization is already done - run it like this:
 ```
@@ -321,7 +364,7 @@ dynamo-run out=pytok:/home/user/my_python_engine.py --model-path <hf-repo-checko
 
 - Command like flag `--model-path` which must point to a Hugging Face repo checkout containing the `tokenizer.json`. The `--model-name` flag is optional. If not provided we use the HF repo name (directory name) as the model name.
 
-Example engine:
+**Example engine:**
 ```
 import asyncio
 
@@ -343,16 +386,16 @@ async def generate(request):
 
 `pytok` supports the same ways of passing command line arguments as `pystr` - `initialize` or `main` with `sys.argv`.
 
-## trtllm
+### trtllm
 
 TensorRT-LLM. Requires `clang` and `libclang-dev`.
 
-Build:
+1. Build:
 ```
 cargo build --features trtllm
 ```
 
-Run:
+2. Run:
 ```
 dynamo-run in=text out=trtllm --model-path /app/trtllm_engine/ --model-config ~/llm_models/Llama-3.2-3B-Instruct/
 ```
@@ -361,11 +404,11 @@ Note that TRT-LLM uses it's own `.engine` format for weights.
 
 The `--model-path` you give to `dynamo-run` must contain the `config.json` (TRT-LLM's , not the model's) and `rank0.engine` (plus other ranks if relevant).
 
-## Echo Engines
+### Echo Engines
 
 Dynamo includes two echo engines for testing and debugging purposes:
 
-### echo_core
+#### echo_core
 
 The `echo_core` engine accepts pre-processed requests and echoes the tokens back as the response. This is useful for testing pre-processing functionality as the response will include the full prompt template.
 
@@ -373,7 +416,7 @@ The `echo_core` engine accepts pre-processed requests and echoes the tokens back
 dynamo-run in=http out=echo_core --model-path <hf-repo-checkout>
 ```
 
-### echo_full
+#### echo_full
 
 The `echo_full` engine accepts un-processed requests and echoes the prompt back as the response.
 
@@ -381,7 +424,7 @@ The `echo_full` engine accepts un-processed requests and echoes the prompt back 
 dynamo-run in=http out=echo_full --model-name my_model
 ```
 
-### Configuration
+#### Configuration
 
 Both echo engines use a configurable delay between tokens to simulate generation speed. You can adjust this using the `DYN_TOKEN_ECHO_DELAY_MS` environment variable:
 
@@ -392,9 +435,9 @@ DYN_TOKEN_ECHO_DELAY_MS=1 dynamo-run in=http out=echo_full
 
 The default delay is 10ms, which produces approximately 100 tokens per second.
 
-## Batch mode
+### Batch mode
 
-dynamo-run can take a jsonl file full of prompts and evaluate them all:
+`dynamo-run` can take a jsonl file full of prompts and evaluate them all:
 
 ```
 dynamo-run in=batch:prompts.jsonl out=llamacpp <model>
@@ -413,11 +456,11 @@ The output looks like this:
 {"text":"What is the capital of Spain?","response":".The capital of Spain is Madrid.","tokens_in":7,"tokens_out":7,"elapsed_ms":855}
 ```
 
-## Defaults
+### Defaults
 
 The input defaults to `in=text`. The output will default to `mistralrs` engine. If not available whatever engine you have compiled in (so depending on `--features`).
 
-## Extra engine arguments
+### Extra engine arguments
 
 The vllm and sglang backends support passing any argument the engine accepts.
 
@@ -433,4 +476,3 @@ Pass it like this:
 ```
 dynamo-run out=sglang ~/llm_models/Llama-3.2-3B-Instruct --extra-engine-args sglang_extra.json
 ```
-

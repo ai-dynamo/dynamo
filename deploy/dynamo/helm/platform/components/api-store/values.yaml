@@ -17,7 +17,7 @@ replicaCount: 1
 
 # This sets the container image more information can be found here: https://kubernetes.io/docs/concepts/containers/images/
 image:
-  repository: gitlab-master.nvidia.com:5005/aire/microservices/dynamo/api-server
+  repository: "nvcr.io/nvidian/nim-llm-dev/dynamo-api-store"
   # This sets the pull policy for images.
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
@@ -26,28 +26,10 @@ image:
 # This is for the secretes for pulling an image from a private repository more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
 imagePullSecrets:
   - name: nvcrimagepullsecret
+  - name: docker-imagepullsecret
 # This is to override the chart name.
 nameOverride: ""
 fullnameOverride: ""
-
-## @section objectStore
-#
-## Specifies the location and credentials for accessing the external Object Storage.
-## @param endpoint fully qualidfied object store endpoint
-## @param accessKey access key for auth
-## @param accessSecret secret access key for auth
-## @param region the region where bucket is hosted
-## @param ssl enable ssl for object store transport
-objectStore:
-  enabled: false
-  endpoint: ""
-  accessKey: ""
-  accessSecret: ""
-  region: ""
-  ssl: false
-  existingSecret: ""
-  existingSecretAccessKey: ""
-  existingSecretAccessSecret: ""
 
 # This section builds out the service account more information can be found here: https://kubernetes.io/docs/concepts/security/service-accounts/
 serviceAccount:
@@ -109,12 +91,10 @@ istio:
 
 ## In-cluster minio deployment configuration
 ## ref: https://github.com/bitnami/charts/blob/minio/13.3.1/bitnami/minio/values.yaml
-## @param minio.enabled Enable minio deployment
 ## @param minio.apiIngress.enabled Enable ingress controller resource for MinIO API
 ## @param minio.apiIngress.ingressClassName IngressClass that will be be used to implement the Ingress (Kubernetes 1.18+)
 ## @param minio.apiIngress.hostname Default host for the ingress resource
 minio:
-  enabled: false
   mode: standalone
   auth:
     rootUser: minioadmin
@@ -123,6 +103,7 @@ minio:
     enabled: true
     size: 10Gi
     storageClass: ""
+    mountPath: /data
     annotations:
       helm.sh/resource-policy: keep
   apiIngress:
@@ -131,6 +112,32 @@ minio:
     hostname: ""
     pathType: ImplementationSpecific
     annotations: {}
+  podSecurityContext:
+    enabled: true
+    fsGroup: 1000
+  containerSecurityContext:
+    enabled: true
+    runAsUser: 1000
+    runAsNonRoot: true
+    readOnlyRootFilesystem: false
+  startupProbe:
+    enabled: true
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  service:
+    type: ClusterIP
+    ports:
+      api: 9000
+      console: 9001
 
 resources: {}
   # We usually recommend not to specify default resources and to leave this as a conscious
@@ -145,8 +152,6 @@ resources: {}
   #   memory: 128Mi
 
 dynamo:
-  apiServer:
-    port: 8181
   apiStore:
     port: 8000
 
