@@ -53,7 +53,7 @@ logger.setLevel(logging.DEBUG)
 def update_args_from_disagg_config(
     engine_config: LLMAPIConfig, server_config: CtxGenServerConfig
 ):
-    # Overwrite the LLM API config with the disaggregated config
+    # Update the LLM API config with the disaggregated config
     # Allows for different configs for context and generation servers
     engine_config.extra_args.update(**server_config.other_args)
     engine_config.update_sub_configs(server_config.other_args)
