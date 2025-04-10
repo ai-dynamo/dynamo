@@ -23,7 +23,7 @@ This guide will walk you through the process of deploying an inference graph cre
 
 ![Dynamo Deploy](../images/dynamo-deploy.png)
 
-While this guide covers deployment of Dynamo inference graphs using Helm, the preferred method to deploy an inference graph in the future will be via the Dynamo Kubernetes Operator. Dynamo Kubernetes Operator is a soon to be released cloud platform that will simplify the deployment and management of Dynamo inference graphs. It includes a set of components (Operator, UIs, Kubernetes Custom Resources, etc.) to simplify the deployment and management of Dynamo inference graphs.
+While this guide covers deployment of Dynamo inference graphs using Helm, the preferred method to deploy an inference graph is via the Dynamo cloud platform. The Dynamo cloud platform, documented in [deploy/dynamo/README.md](../../deploy/dynamo/README.md), simplifies the deployment and management of Dynamo inference graphs. It includes a set of components (Operator, Kubernetes Custom Resources, etc.) that work together to streamline the deployment and management process.
 
  Once an inference graph is defined using the Dynamo SDK, it can be deployed onto a Kubernetes cluster using a simple `dynamo deploy` command that orchestrates the following deployment steps:
 
