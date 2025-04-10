@@ -16,6 +16,21 @@ This is a proof of concept for a Helm chart to deploy services defined in a bent
 - build and push the DYNAMO_IMAGE as described in the [main README](../../README.md#building-the-dynamo_image-base-image) to an image registry
 - make sure the `nats` and `etcd` dependencies are installed (under the `dependencies` subdirectory). For more details, see [Installing Required Dependencies](../../../docs/guides/dynamo_deploy.md#installing-required-dependencies)
 
+### Setting up Image Pull Secrets
+
+Before deploying, you need to ensure your Kubernetes namespace has the appropriate image pull secret configured. The Helm chart uses `docker-imagepullsecret` by default.
+
+You can create this secret in your namespace using:
+```bash
+kubectl create secret docker-registry docker-imagepullsecret \
+    --docker-server=<registry-server> \
+    --docker-username=<username> \
+    --docker-password=<password> \
+    -n <namespace>
+```
+
+Alternatively, you can modify the `imagePullSecrets` section in `deploy/Kubernetes/pipeline/chart/values.yaml` to match your registry credentials.
+
 ### Install the Helm chart
 
 ```bash

@@ -119,6 +119,21 @@ Before deploying, ensure you have:
 
 You must have first followed the instructions in [deploy/dynamo/helm/README.md](../../deploy/dynamo/helm/README.md) to create your Dynamo cloud deployment.
 
+##### Understanding the Build and Deployment Process
+
+The deployment process involves two distinct build steps:
+
+1. **Local `dynamo build`**: This step creates a Dynamo service archive that contains:
+   - Your service code and dependencies
+   - Service configuration and metadata
+   - Runtime requirements
+   - The service graph definition
+
+2. **Remote Image Build**: When you create a deployment, a `yatai-dynamonim-image-builder` pod is created in your cluster. This pod:
+   - Takes the Dynamo service archive created in step 1
+   - Containerizes it using the specified base image
+   - Pushes the final container image to your cluster's registry
+
 ##### Deployment Steps
 
 1. **Login to Dynamo Server**
