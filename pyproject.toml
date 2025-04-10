@@ -53,12 +53,12 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 
 [project.optional-dependencies]
 all = [
-    "ai-dynamo-vllm==0.7.2",
+    "ai-dynamo-vllm~=0.7.2",
     "nixl",
 ]
 
 vllm = [
-    "ai-dynamo-vllm==0.7.2"
+    "ai-dynamo-vllm~=0.7.2"
 ]
 
 [project.scripts]
