@@ -16,11 +16,14 @@
 from components.utils import GeneralRequest, GeneralResponse
 from dynamo.sdk import dynamo_endpoint, service
 import socket
+import logging
+
+logger = logging.getLogger(__name__)
 
 @service(
     dynamo={
         "enabled": True,
-        "namespace": "dynamo",
+        "namespace": "dynamo-demo",
     },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -31,7 +34,7 @@ class DummyWorker:
 
     @dynamo_endpoint()
     async def generate(self, request: GeneralRequest):
-        print(f"{self.hostname}: Worker invoked")
+        logger.info(f"{self.hostname}: Worker invoked")
         yield GeneralResponse(
             request_id=request.request_id,
             worker_output=request.prompt+"_GeneratedBy_"+self.hostname,

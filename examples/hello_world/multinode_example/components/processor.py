@@ -18,16 +18,17 @@ from components.worker import DummyWorker
 from components.utils import GeneralRequest, GeneralResponse
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+import logging
 import socket
 from typing import Protocol
+
+logger = logging.getLogger(__name__)
 
 @service(
     dynamo={
         "enabled": True,
-        "namespace": "dynamo",
+        "namespace": "dynamo-demo",
     },
-    resources={"cpu": "10", "memory": "20Gi"},
-    workers=1,
 )
 class Processor(Protocol):
     """
@@ -84,9 +85,9 @@ class Processor(Protocol):
     async def generate(self, request: GeneralRequest):
         """Forward requests to backend."""
         mid_request = request.model_dump_json()
-        print(f"---Middle layer received {mid_request=}")
+        logger.info(f"Received request{mid_request=}")
         async for response in self._generate(request):
-            print(f"---Middle layer received response: {response.model_dump_json()}")
+            logger.debug(f"Received response: {response.model_dump_json()}")
             yield response.model_dump_json()
 
   

@@ -13,19 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
-
 from components.processor import Processor
 from components.utils import GeneralRequest
-
 from dynamo.sdk import api, depends, service
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
+import logging
 
 logger = logging.getLogger(__name__)
 
 @service(
-    resources={"cpu": "10", "memory": "20Gi"},
-    workers=1,
     image=DYNAMO_IMAGE,
 )
 class Frontend:
@@ -35,7 +31,7 @@ class Frontend:
     @api
     async def generate(self, prompt, request_id): # from request body keys
         """Stream results from the pipeline."""
-        print(f"-Frontend layer received: {prompt=},{request_id=}")
+        logger.info(f"-Frontend layer received: {prompt=},{request_id=}")
         frontend_request = GeneralRequest(
             prompt=prompt, 
             request_id=request_id).model_dump_json()
