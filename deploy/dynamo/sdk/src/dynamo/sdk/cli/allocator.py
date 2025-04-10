@@ -28,8 +28,8 @@ from bentoml.exceptions import BentoMLConfigException
 from simple_di import Provide, inject
 
 NVIDIA_GPU = "nvidia.com/gpu"
-DISABLE_GPU_ALLOCATION_ENV = "DYNAMO_DISABLE_GPU_ALLOCATION"
-DYNAMO_DEPLOYMENT_ENV = "DYNAMO_DEPLOYMENT_ENV"
+DYN_DISABLE_AUTO_GPU_ALLOCATION = "DYN_DISABLE_AUTO_GPU_ALLOCATION"
+DYN_DEPLOYMENT_ENV = "DYN_DEPLOYMENT_ENV"
 
 
 class ResourceAllocator:
@@ -45,7 +45,7 @@ class ResourceAllocator:
         if count > self.remaining_gpus:
             warnings.warn(
                 f"Requested {count} GPUs, but only {self.remaining_gpus} are remaining. "
-                f"Serving may fail due to inadequate GPUs. Set {DISABLE_GPU_ALLOCATION_ENV}=1 "
+                f"Serving may fail due to inadequate GPUs. Set {DYN_DISABLE_AUTO_GPU_ALLOCATION}=1 "
                 "to disable automatic allocation and allocate GPUs manually.",
                 ResourceWarning,
                 stacklevel=3,
@@ -117,8 +117,8 @@ class ResourceAllocator:
                 return num_workers, resource_envs
             else:  # workers is a number
                 num_workers = workers
-        if num_gpus and DISABLE_GPU_ALLOCATION_ENV not in os.environ:
-            if os.environ.get(DYNAMO_DEPLOYMENT_ENV):
+        if num_gpus and DYN_DISABLE_AUTO_GPU_ALLOCATION not in os.environ:
+            if os.environ.get(DYN_DEPLOYMENT_ENV):
                 # K8s replicas: Assumes DYNAMO_DEPLOYMENT_ENV is set
                 # each pod in replicaset will have separate GPU with same CUDA_VISIBLE_DEVICES
                 assigned = self.assign_gpus(num_gpus)
