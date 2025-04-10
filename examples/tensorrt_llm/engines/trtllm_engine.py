@@ -29,15 +29,12 @@ from tensorrt_llm.logger import logger
 from dynamo.runtime import dynamo_endpoint
 
 # Add the project root to the Python path
-project_root = str(Path(__file__).parents[1])  # Go up to trtllm directory
+project_root = str(Path(__file__).parents[1])  # Go up to llm directory
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from common.base_engine import (  # noqa: E402
-    BaseTensorrtLLMEngine,
-    TensorrtLLMEngineConfig,
-)
-from common.parser import parse_dynamo_run_args  # noqa: E402
+from common.base_engine import BaseTensorrtLLMEngine, get_sampling_params  # noqa: E402
+from common.parser import parse_dynamo_run_args, LLMAPIConfig  # noqa: E402
 from common.protocol import (  # noqa: E402
     DynamoTRTLLMChatCompletionRequest,
     DynamoTRTLLMChatCompletionStreamResponse,
@@ -56,12 +53,12 @@ async def chat_generator(engine: BaseTensorrtLLMEngine, request):
     preprocessed_request = await engine.chat_processor.preprocess(request)
     engine_generator = engine._llm_engine.generate_async(
         inputs=preprocessed_request.prompt,
-        sampling_params=preprocessed_request.to_sampling_params(),
+        sampling_params=get_sampling_params(preprocessed_request.sampling_params),
         disaggregated_params=None,
         streaming=True,
     )
     async for raw_response in engine.chat_processor.postprocess(
-        engine_generator, request, preprocessed_request.conversation, ServerType.GEN
+        engine_generator, request, preprocessed_request.conversation
     ):
         response = DynamoTRTLLMChatCompletionStreamResponse.model_validate_json(
             raw_response
@@ -74,8 +71,10 @@ class DynamoTRTLLMEngine(BaseTensorrtLLMEngine):
     Request handler for the generate endpoint
     """
 
-    def __init__(self, trt_llm_engine_config: TensorrtLLMEngineConfig):
-        super().__init__(trt_llm_engine_config)
+    def __init__(self, engine_config: LLMAPIConfig):
+        super().__init__(engine_config=engine_config, server_type=ServerType.DYN_RUN)
+        # Initialize the engine
+        self._init_engine()
         self.chat_processor.using_engine_generator = True
 
 
@@ -86,10 +85,7 @@ def init_global_engine(args, engine_config):
     global engine
     logger.debug(f"Received args: {args}")
     logger.info(f"Initializing global engine with engine config: {engine_config}")
-    trt_llm_engine_config = TensorrtLLMEngineConfig(
-        engine_config=engine_config,
-    )
-    engine = DynamoTRTLLMEngine(trt_llm_engine_config)
+    engine = DynamoTRTLLMEngine(engine_config)
 
 
 @dynamo_endpoint(

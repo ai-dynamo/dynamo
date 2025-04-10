@@ -43,6 +43,8 @@ class ServerType(Enum):
     GEN = "gen"
     # Context server used for disaggregated requests
     CTX = "ctx"
+    # Dynamo run server used for Dynamo run requests
+    DYN_RUN = "dyn_run"
 
 
 class ConversationMessage(TypedDict):

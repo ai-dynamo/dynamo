@@ -17,10 +17,11 @@
 import asyncio
 import copy
 import logging
+import os
 import signal
 import threading
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from queue import Queue
 from typing import Any, Optional
 
@@ -35,6 +36,10 @@ from common.protocol import (
 from common.utils import ManagedThread, ServerType
 from tensorrt_llm.executor import CppExecutorError
 from tensorrt_llm.llmapi import LLM, SamplingParams
+from tensorrt_llm.llmapi.disagg_utils import (
+    CtxGenServerConfig,
+    parse_disagg_config_file,
+)
 from tensorrt_llm.serve.openai_protocol import DisaggregatedParams
 from transformers import AutoTokenizer
 
@@ -80,45 +85,88 @@ class ChatProcessorMixin:
         )
 
 
-def clean_sampling_params(sampling_params):
-    # Use dictionary comprehension to filter out keys starting with '_'
+def update_args_from_disagg_config(
+    engine_config: LLMAPIConfig, server_config: CtxGenServerConfig
+):
+    # Overwrite the LLM API config with the disaggregated config
+    # Allows for different configs for context and generation servers
+    engine_config.extra_args.update(**server_config.other_args)
+    engine_config.update_sub_configs(server_config.other_args)
+    return engine_config
+
+
+def get_sampling_params(sampling_params):
+    # Removes keys starting with '_' from the sampling params which gets
+    # added by the LLM API. TRTLLM does not support creating SamplingParams
+    # from a dictionary with keys starting with '_'.
     cleaned_dict = {
         key: value for key, value in sampling_params.items() if not key.startswith("_")
     }
-    return cleaned_dict
-
-
-@dataclass
-class TensorrtLLMEngineConfig:
-    namespace_str: str = "dynamo"
-    component_str: str = "tensorrt-llm"
-    engine_config: LLMAPIConfig = None
-    worker_id: Optional[str] = None
-    kv_metrics_publisher: Optional[KvMetricsPublisher] = None
-    publish_stats: bool = False
-    publish_kv_cache_events: bool = False
-    # default block size is 32 for pytorch backend
-    kv_block_size: int = 32
+    return SamplingParams(**cleaned_dict)
 
 
 class BaseTensorrtLLMEngine(ChatProcessorMixin):
     def __init__(
         self,
-        trt_llm_engine_config: TensorrtLLMEngineConfig,
-        server_type: ServerType,
+        namespace_str: str = "dynamo",
+        component_str: str = "tensorrt-llm",
+        worker_id: Optional[str] = None,
+        engine_config: LLMAPIConfig = None,
+        remote_prefill: bool = False,
+        min_workers: int = 0,
+        disagg_config_file: Optional[str] = None,
+        block_size: int = 32,
+        router: str = "round_robin",
+        server_type: ServerType = ServerType.GEN,
     ):
-        super().__init__(trt_llm_engine_config.engine_config)
-        self._namespace_str = trt_llm_engine_config.namespace_str
-        self._component_str = trt_llm_engine_config.component_str
-        self._worker_id = trt_llm_engine_config.worker_id
-        self._kv_metrics_publisher = trt_llm_engine_config.kv_metrics_publisher
-        self._publish_stats = trt_llm_engine_config.publish_stats
-        self._publish_kv_cache_events = trt_llm_engine_config.publish_kv_cache_events
-        self._kv_block_size = trt_llm_engine_config.kv_block_size
-        self._error_queue: Optional[Queue] = None
+        self._namespace_str = namespace_str
+        self._component_str = component_str
+        self._worker_id = worker_id
+        self._remote_prefill = remote_prefill
+        self._min_workers = 0
+        self._kv_block_size = block_size
+        self._router = router
         self._server_type = server_type
+        self._prefill_client = None
+        self._error_queue = None
+        self._kv_metrics_publisher = None
 
-        self._init_engine()
+        if self._remote_prefill:
+            self._min_workers = min_workers
+            if disagg_config_file is None or not os.path.exists(disagg_config_file):
+                raise ValueError(
+                    "llmapi_disaggregated_config file does not exist or not provided"
+                )
+            disagg_config = parse_disagg_config_file(disagg_config_file)
+            server_config: CtxGenServerConfig = None
+
+            for config in disagg_config.server_configs:
+                # Select the first context server config
+                if config.type == server_type.value:
+                    server_config = config
+                    break
+
+            if server_config is None:
+                server_type_str = (
+                    "generation" if server_type == ServerType.GEN else "context"
+                )
+                raise ValueError(
+                    f"No {server_type_str} server config found. Please check the disaggregated config file."
+                )
+
+            engine_config = update_args_from_disagg_config(engine_config, server_config)
+
+        if router == "kv":
+            self._publish_stats = True
+            self._publish_events = True
+        else:
+            self._publish_stats = False
+            self._publish_events = False
+
+        if self._publish_stats:
+            self._kv_metrics_publisher = KvMetricsPublisher()
+
+        super().__init__(engine_config)
 
     def _init_engine(self):
         logger.info("Initializing engine")
@@ -153,7 +201,7 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
             if self._publish_stats:
                 self._init_publish_metrics_thread()
 
-            if self._publish_kv_cache_events:
+            if self._publish_events:
                 self._init_publish_kv_cache_events_thread()
         except Exception as e:
             logger.error(f"Failed to initialize publish metrics threads: {e}")
@@ -398,10 +446,13 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
             request_type="context_only"
         )
 
+        if self._prefill_client is None:
+            raise ValueError("Prefill client not initialized")
+
         # TODO: Use smart KV router to determine which prefill worker to use.
         ctx_responses = [
             ctx_response
-            async for ctx_response in await self.prefill_client.round_robin(
+            async for ctx_response in await self._prefill_client.round_robin(
                 prefill_request.model_dump_json()
             )
         ]
@@ -426,7 +477,7 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
         if self._llm_engine is None:
             raise RuntimeError("Engine not initialized")
 
-        if self._error_queue.qsize() > 0:
+        if self._error_queue and self._error_queue.qsize() > 0:
             error = self._error_queue.get()
             raise error
 
@@ -441,7 +492,7 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
                 )
             )
 
-            if self.do_remote_prefill and self._server_type == ServerType.GEN:
+            if self._remote_prefill and self._server_type == ServerType.GEN:
                 ctx_response_obj = await self._get_remote_prefill_response(request)
 
                 worker_inputs = ctx_response_obj.prompt_token_ids
@@ -458,8 +509,7 @@ class BaseTensorrtLLMEngine(ChatProcessorMixin):
                 f"Worker inputs: {worker_inputs}, disaggregated params: {disaggregated_params}"
             )
 
-            sampling_params_dict = clean_sampling_params(request.sampling_params)
-            sampling_params = SamplingParams(**sampling_params_dict)
+            sampling_params = get_sampling_params(request.sampling_params)
 
             async for response in self._llm_engine.generate_async(
                 inputs=worker_inputs,

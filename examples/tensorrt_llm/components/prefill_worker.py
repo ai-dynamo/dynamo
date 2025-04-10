@@ -15,32 +15,16 @@
 import asyncio
 import logging
 
-from common.base_engine import BaseTensorrtLLMEngine, TensorrtLLMEngineConfig
-from common.parser import LLMAPIConfig, parse_tensorrt_llm_args
+from common.base_engine import BaseTensorrtLLMEngine
+from common.parser import parse_tensorrt_llm_args
 from common.protocol import TRTLLMWorkerRequest
 from common.utils import ServerType
-from tensorrt_llm.llmapi.disagg_utils import (
-    CtxGenServerConfig,
-    DisaggServerConfig,
-    parse_disagg_config_file,
-)
 
-from dynamo.llm import KvMetricsPublisher
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-
-
-def update_args_from_disagg_config(
-    engine_config: LLMAPIConfig, server_config: CtxGenServerConfig
-):
-    # Overwrite the LLM API config with the disaggregated config
-    # Allows for different configs for context and generation servers
-    engine_config.extra_args.update(**server_config.other_args)
-    engine_config.update_sub_configs(server_config.other_args)
-    return engine_config
 
 
 @service(
@@ -57,59 +41,25 @@ class TensorRTLLMPrefillWorker(BaseTensorrtLLMEngine):
         class_name = self.__class__.__name__
         config = ServiceConfig.get_instance()
         config_args = config.as_args(class_name, prefix="")
-        self.args, self.engine_config = parse_tensorrt_llm_args(config_args)
-        self.do_remote_prefill = False  # This is a prefill worker
-
-        self.disagg_config: DisaggServerConfig = parse_disagg_config_file(
-            self.args.llmapi_disaggregated_config
-        )
-
-        self.server_config: CtxGenServerConfig = None
-
-        for config in self.disagg_config.server_configs:
-            if config.type == "ctx":
-                self.server_config = config
-                break
-
-        if self.server_config is None:
-            raise ValueError(
-                "No context server config found. Please check the disaggregated config file."
-            )
-
-        self.engine_config = update_args_from_disagg_config(
-            self.engine_config, self.server_config
-        )
-
-        logger.info(f"Engine config: {self.engine_config}")
-
-        if self.args.router == "kv":
-            publish_stats = True
-            publish_events = True
-        else:
-            publish_stats = False
-            publish_events = False
-
-        trt_llm_engine_config = TensorrtLLMEngineConfig(
+        args, engine_config = parse_tensorrt_llm_args(config_args)
+        worker_id = dynamo_context["endpoints"][0].lease_id()
+        super().__init__(
             namespace_str="dynamo",
             component_str=class_name,
-            engine_config=self.engine_config,
-            publish_stats=publish_stats,
-            publish_kv_cache_events=publish_events,
-            kv_block_size=self.args.block_size,
+            worker_id=worker_id,
+            engine_config=engine_config,
+            remote_prefill=args.remote_prefill,
+            min_workers=args.min_workers,
+            disagg_config_file=args.llmapi_disaggregated_config,
+            block_size=args.block_size,
+            router=args.router,
+            server_type=ServerType.CTX,
         )
-
-        if publish_stats:
-            trt_llm_engine_config.kv_metrics_publisher = KvMetricsPublisher()
-
-        trt_llm_engine_config.worker_id = dynamo_context["endpoints"][0].lease_id()
-        logger.info(f"Generate Prefill endpoint ID: {trt_llm_engine_config.worker_id}")
-
-        self.trtllm_engine_args = trt_llm_engine_config
 
     @async_on_start
     async def async_init(self):
-        super().__init__(self.trtllm_engine_args, ServerType.CTX)
-        if self.trtllm_engine_args.kv_metrics_publisher is not None:
+        self._init_engine()
+        if self._kv_metrics_publisher is not None:
             task = asyncio.create_task(self.create_metrics_publisher_endpoint())
             task.add_done_callback(
                 lambda _: print("metrics publisher endpoint created")
@@ -118,7 +68,7 @@ class TensorRTLLMPrefillWorker(BaseTensorrtLLMEngine):
 
     async def create_metrics_publisher_endpoint(self):
         component = dynamo_context["component"]
-        await self.trtllm_engine_args.kv_metrics_publisher.create_endpoint(component)
+        await self.kv_metrics_publisher.create_endpoint(component)
 
     @dynamo_endpoint()
     async def generate(self, request: TRTLLMWorkerRequest):

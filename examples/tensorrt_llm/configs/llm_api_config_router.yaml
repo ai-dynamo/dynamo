@@ -17,7 +17,7 @@
 # In the case of disaggregated deployment, this config will apply to each server
 # and will be overwritten by the disaggregated config file
 
-model_name: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+model_name: "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 model_path: null
 tensor_parallel_size: 1
 moe_expert_parallel_size: 1
