@@ -174,7 +174,7 @@ get_options() {
 
     if [ -n "$FRAMEWORK" ]; then
 	FRAMEWORK=${FRAMEWORK^^}
-	if [[ -n "${FRAMEWORKS[$FRAMEWORK]}" ]]; then
+	if [[ -z "${FRAMEWORKS[$FRAMEWORK]}" ]]; then
 	    error 'ERROR: Unknown framework: ' "$FRAMEWORK"
 	fi
     fi
