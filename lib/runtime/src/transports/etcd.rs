@@ -496,6 +496,8 @@ impl KvCache {
 
         Ok(())
     }
+
+    // TODO: add a method to create/delete keys
 }
 
 #[cfg(feature = "integration")]
