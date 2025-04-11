@@ -407,9 +407,9 @@ impl KvCache {
         // help refresh the lease.
         for (key, value) in initial_values.iter() {
             let full_key = format!("{}{}", prefix, key);
-            if !cache.contains_key(&full_key) {
+            if let std::collections::hash_map::Entry::Vacant(e) = cache.entry(full_key.clone()) {
                 client.kv_put(&full_key, value.clone(), None).await?;
-                cache.insert(full_key, value.clone());
+                e.insert(value.clone());
             }
         }
 
