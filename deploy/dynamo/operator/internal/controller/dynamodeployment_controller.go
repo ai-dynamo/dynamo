@@ -46,12 +46,17 @@ const (
 	PendingState = "pending"
 )
 
+type etcdStorage interface {
+	DeleteKeys(ctx context.Context, prefix string) error
+}
+
 // DynamoDeploymentReconciler reconciles a DynamoDeployment object
 type DynamoDeploymentReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Config   commonController.Config
-	Recorder record.EventRecorder
+	Scheme      *runtime.Scheme
+	Config      commonController.Config
+	Recorder    record.EventRecorder
+	EtcdStorage etcdStorage
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamodeployments,verbs=get;list;watch;create;update;patch;delete
@@ -106,6 +111,15 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		logger.Info("Reconciliation done")
 	}()
 
+	deleted, err := commonController.HandleFinalizer(ctx, dynamoDeployment, r.Client, r)
+	if err != nil {
+		reason = "failed_to_handle_the_finalizer"
+		return ctrl.Result{}, err
+	}
+	if deleted {
+		return ctrl.Result{}, nil
+	}
+
 	// fetch the DynamoNIMConfig
 	dynamoNIMConfig, err := nim.GetDynamoNIMConfig(ctx, dynamoDeployment, r.Recorder)
 	if err != nil {
@@ -114,7 +128,7 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	// generate the DynamoNimDeployments from the config
-	dynamoNimDeployments, err := nim.GenerateDynamoNIMDeployments(dynamoDeployment, dynamoNIMConfig)
+	dynamoNimDeployments, err := nim.GenerateDynamoNIMDeployments(ctx, dynamoDeployment, dynamoNIMConfig)
 	if err != nil {
 		reason = "failed_to_generate_the_DynamoNimDeployments"
 		return ctrl.Result{}, err
@@ -123,7 +137,7 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// merge the DynamoNimDeployments with the DynamoNimDeployments from the CRD
 	for serviceName, deployment := range dynamoNimDeployments {
 		if _, ok := dynamoDeployment.Spec.Services[serviceName]; ok {
-			err := mergo.Merge(deployment, dynamoDeployment.Spec.Services[serviceName], mergo.WithOverride)
+			err := mergo.Merge(&deployment.Spec.DynamoNimDeploymentSharedSpec, dynamoDeployment.Spec.Services[serviceName].DynamoNimDeploymentSharedSpec, mergo.WithOverride)
 			if err != nil {
 				reason = "failed_to_merge_the_DynamoNimDeployments"
 				return ctrl.Result{}, err
@@ -209,6 +223,31 @@ func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 		merged = append(merged, env)
 	}
 	return merged
+}
+
+func (r *DynamoDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoDeployment) error {
+	logger := log.FromContext(ctx)
+	logger.Info("Finalizing the DynamoDeployment", "dynamoDeployment", dynamoDeployment)
+	// fetch the DynamoNIMConfig
+	dynamoNIMConfig, err := nim.GetDynamoNIMConfig(ctx, dynamoDeployment, r.Recorder)
+	if err != nil {
+		logger.Error(err, "Failed to get the DynamoNIMConfig")
+		return err
+	}
+	// iterate over all the dynamo services and delete associated etcd keys
+	for _, service := range dynamoNIMConfig.Services {
+		namespace := service.GetNamespace()
+		if namespace == nil {
+			// if service was not configured with a namespace, use the default namespace for the deployment
+			namespace = &[]string{nim.GetDefaultNamespace(ctx, dynamoDeployment)}[0]
+		}
+		err = r.EtcdStorage.DeleteKeys(ctx, fmt.Sprintf("/%s/components/%s", *namespace, service.Name))
+		if err != nil {
+			logger.Error(err, "Failed to delete the etcd keys for the service", "service", service.Name)
+			return err
+		}
+	}
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

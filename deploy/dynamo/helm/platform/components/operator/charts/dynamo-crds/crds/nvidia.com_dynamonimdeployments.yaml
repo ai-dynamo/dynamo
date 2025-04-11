@@ -389,6 +389,8 @@ spec:
                   minReplicas:
                     type: integer
                 type: object
+              dynamoNamespace:
+                type: string
               dynamoNim:
                 type: string
               dynamoTag:

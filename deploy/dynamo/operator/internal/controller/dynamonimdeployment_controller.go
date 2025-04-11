@@ -1225,6 +1225,9 @@ monitoring.options.insecure=true`
 	if opt.dynamoNimDeployment.Spec.ServiceName != "" {
 		args = append(args, []string{"--service-name", opt.dynamoNimDeployment.Spec.ServiceName}...)
 		args = append(args, opt.dynamoNimDeployment.Spec.DynamoTag)
+		if opt.dynamoNimDeployment.Spec.DynamoNamespace != nil && *opt.dynamoNimDeployment.Spec.DynamoNamespace != "" {
+			args = append(args, fmt.Sprintf("--%s.ServiceArgs.dynamo.namespace=%s", opt.dynamoNimDeployment.Spec.ServiceName, *opt.dynamoNimDeployment.Spec.DynamoNamespace))
+		}
 	}
 
 	if len(opt.dynamoNimDeployment.Spec.Envs) > 0 {

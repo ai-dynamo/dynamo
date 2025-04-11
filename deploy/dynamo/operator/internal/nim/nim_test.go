@@ -18,6 +18,7 @@
 package nim
 
 import (
+	"context"
 	"testing"
 
 	compounaiCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
@@ -92,32 +93,34 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						DynamoNim:   "dynamonim--ac4e234",
-						DynamoTag:   "dynamonim:MyService1",
-						ServiceName: "service1",
-						Resources: &compounaiCommon.Resources{
-							Requests: &compounaiCommon.ResourceItem{
-								CPU:    "1",
-								Memory: "1Gi",
-								GPU:    "0",
-								Custom: map[string]string{},
+						DynamoNim: "dynamonim--ac4e234",
+						DynamoTag: "dynamonim:MyService1",
+						DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+							ServiceName: "service1",
+							Resources: &compounaiCommon.Resources{
+								Requests: &compounaiCommon.ResourceItem{
+									CPU:    "1",
+									Memory: "1Gi",
+									GPU:    "0",
+									Custom: map[string]string{},
+								},
+								Limits: &compounaiCommon.ResourceItem{
+									CPU:    "1",
+									Memory: "1Gi",
+									GPU:    "0",
+									Custom: map[string]string{},
+								},
 							},
-							Limits: &compounaiCommon.ResourceItem{
-								CPU:    "1",
-								Memory: "1Gi",
-								GPU:    "0",
-								Custom: map[string]string{},
+							Autoscaling: &v1alpha1.Autoscaling{
+								Enabled:     true,
+								MinReplicas: 1,
+								MaxReplicas: 5,
 							},
-						},
-						Autoscaling: &v1alpha1.Autoscaling{
-							Enabled:     true,
-							MinReplicas: 1,
-							MaxReplicas: 5,
-						},
-						ExternalServices: map[string]v1alpha1.ExternalService{
-							"service2": {
-								DeploymentSelectorKey:   "name",
-								DeploymentSelectorValue: "service2",
+							ExternalServices: map[string]v1alpha1.ExternalService{
+								"service2": {
+									DeploymentSelectorKey:   "name",
+									DeploymentSelectorValue: "service2",
+								},
 							},
 						},
 					},
@@ -128,11 +131,13 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						DynamoNim:   "dynamonim--ac4e234",
-						DynamoTag:   "dynamonim:MyService1",
-						ServiceName: "service2",
-						Autoscaling: &v1alpha1.Autoscaling{
-							Enabled: false,
+						DynamoNim: "dynamonim--ac4e234",
+						DynamoTag: "dynamonim:MyService1",
+						DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+							ServiceName: "service2",
+							Autoscaling: &v1alpha1.Autoscaling{
+								Enabled: false,
+							},
 						},
 					},
 				},
@@ -192,37 +197,39 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						DynamoNim:   "dynamonim--ac4e234",
-						DynamoTag:   "dynamonim:MyService2",
-						ServiceName: "service1",
-						Resources: &compounaiCommon.Resources{
-							Requests: &compounaiCommon.ResourceItem{
-								CPU:    "1",
-								Memory: "1Gi",
-								GPU:    "0",
-								Custom: map[string]string{},
+						DynamoNim: "dynamonim--ac4e234",
+						DynamoTag: "dynamonim:MyService2",
+						DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+							ServiceName: "service1",
+							Resources: &compounaiCommon.Resources{
+								Requests: &compounaiCommon.ResourceItem{
+									CPU:    "1",
+									Memory: "1Gi",
+									GPU:    "0",
+									Custom: map[string]string{},
+								},
+								Limits: &compounaiCommon.ResourceItem{
+									CPU:    "1",
+									Memory: "1Gi",
+									GPU:    "0",
+									Custom: map[string]string{},
+								},
 							},
-							Limits: &compounaiCommon.ResourceItem{
-								CPU:    "1",
-								Memory: "1Gi",
-								GPU:    "0",
-								Custom: map[string]string{},
+							Autoscaling: &v1alpha1.Autoscaling{
+								Enabled:     true,
+								MinReplicas: 1,
+								MaxReplicas: 5,
 							},
-						},
-						Autoscaling: &v1alpha1.Autoscaling{
-							Enabled:     true,
-							MinReplicas: 1,
-							MaxReplicas: 5,
-						},
-						ExternalServices: map[string]v1alpha1.ExternalService{
-							"service2": {
-								DeploymentSelectorKey:   "dynamo",
-								DeploymentSelectorValue: "service2/default",
+							ExternalServices: map[string]v1alpha1.ExternalService{
+								"service2": {
+									DeploymentSelectorKey:   "dynamo",
+									DeploymentSelectorValue: "service2/default",
+								},
 							},
-						},
-						Ingress: v1alpha1.IngressSpec{
-							Enabled:           true,
-							UseVirtualService: &[]bool{true}[0],
+							Ingress: v1alpha1.IngressSpec{
+								Enabled:           true,
+								UseVirtualService: &[]bool{true}[0],
+							},
 						},
 					},
 				},
@@ -232,11 +239,121 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						DynamoNim:   "dynamonim--ac4e234",
-						DynamoTag:   "dynamonim:MyService2",
-						ServiceName: "service2",
-						Autoscaling: &v1alpha1.Autoscaling{
-							Enabled: false,
+						DynamoNim: "dynamonim--ac4e234",
+						DynamoTag: "dynamonim:MyService2",
+						DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+							ServiceName: "service2",
+							Autoscaling: &v1alpha1.Autoscaling{
+								Enabled: false,
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "Test GenerateDynamoNIMDeployments dynamo dependency, default namespace",
+			args: args{
+				parentDynamoDeployment: &v1alpha1.DynamoDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dynamodeployment",
+						Namespace: "default",
+					},
+					Spec: v1alpha1.DynamoDeploymentSpec{
+						DynamoNim: "dynamonim:ac4e234",
+					},
+				},
+				config: &DynamoNIMConfig{
+					DynamoTag:    "dynamonim:MyService2",
+					EntryService: "service1",
+					Services: []ServiceConfig{
+						{
+							Name:         "service1",
+							Dependencies: []map[string]string{{"service": "service2"}},
+							Config: Config{
+								Resources: &Resources{
+									CPU:    "1",
+									Memory: "1Gi",
+									GPU:    "0",
+									Custom: map[string]string{},
+								},
+								Autoscaling: &Autoscaling{
+									MinReplicas: 1,
+									MaxReplicas: 5,
+								},
+							},
+						},
+						{
+							Name:         "service2",
+							Dependencies: []map[string]string{},
+							Config: Config{
+								Dynamo: &DynamoConfig{
+									Enabled: true,
+									Name:    "service2",
+								},
+							},
+						},
+					},
+				},
+			},
+			want: map[string]*v1alpha1.DynamoNimDeployment{
+				"service1": {
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dynamodeployment-service1",
+						Namespace: "default",
+					},
+					Spec: v1alpha1.DynamoNimDeploymentSpec{
+						DynamoNim: "dynamonim--ac4e234",
+						DynamoTag: "dynamonim:MyService2",
+						DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+							ServiceName: "service1",
+							Resources: &compounaiCommon.Resources{
+								Requests: &compounaiCommon.ResourceItem{
+									CPU:    "1",
+									Memory: "1Gi",
+									GPU:    "0",
+									Custom: map[string]string{},
+								},
+								Limits: &compounaiCommon.ResourceItem{
+									CPU:    "1",
+									Memory: "1Gi",
+									GPU:    "0",
+									Custom: map[string]string{},
+								},
+							},
+							Autoscaling: &v1alpha1.Autoscaling{
+								Enabled:     true,
+								MinReplicas: 1,
+								MaxReplicas: 5,
+							},
+							ExternalServices: map[string]v1alpha1.ExternalService{
+								"service2": {
+									DeploymentSelectorKey:   "dynamo",
+									DeploymentSelectorValue: "service2/dynamo-test-dynamodeployment",
+								},
+							},
+							Ingress: v1alpha1.IngressSpec{
+								Enabled:           true,
+								UseVirtualService: &[]bool{true}[0],
+							},
+						},
+					},
+				},
+				"service2": {
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dynamodeployment-service2",
+						Namespace: "default",
+					},
+					Spec: v1alpha1.DynamoNimDeploymentSpec{
+						DynamoNim: "dynamonim--ac4e234",
+						DynamoTag: "dynamonim:MyService2",
+						DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+							ServiceName: "service2",
+							Autoscaling: &v1alpha1.Autoscaling{
+								Enabled: false,
+							},
+							DynamoNamespace: &[]string{"dynamo-test-dynamodeployment"}[0],
 						},
 					},
 				},
@@ -299,7 +416,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
-			got, err := GenerateDynamoNIMDeployments(tt.args.parentDynamoDeployment, tt.args.config)
+			got, err := GenerateDynamoNIMDeployments(context.Background(), tt.args.parentDynamoDeployment, tt.args.config)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateDynamoNIMDeployments() error = %v, wantErr %v", err, tt.wantErr)
 				return
