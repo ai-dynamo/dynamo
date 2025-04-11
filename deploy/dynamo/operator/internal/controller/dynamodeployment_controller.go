@@ -105,6 +105,15 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		logger.Info("Reconciliation done")
 	}()
 
+	deleted, err := commonController.HandleFinalizer(ctx, dynamoDeployment, r.Client, r)
+	if err != nil {
+		reason = "failed_to_handle_the_finalizer"
+		return ctrl.Result{}, err
+	}
+	if deleted {
+		return ctrl.Result{}, nil
+	}
+
 	// fetch the DynamoNIMConfig
 	dynamoNIMConfig, err := nim.GetDynamoNIMConfig(ctx, dynamoDeployment, r.Recorder)
 	if err != nil {
@@ -180,6 +189,10 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	return ctrl.Result{}, nil
 
+}
+
+func (r *DynamoDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoDeployment) error {
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
