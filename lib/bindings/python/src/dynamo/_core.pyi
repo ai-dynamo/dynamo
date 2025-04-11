@@ -122,7 +122,8 @@ class EtcdKvCache:
         Get all key-value pairs from the cache.
 
         Returns:
-            A dictionary of all key-value pairs, with keys stripped of the prefix
+            A dictionary of all key-value pairs, with keys stripped of the prefix 
+            (i.e., in the same format as in `initial_values`.keys())
         """
         ...
 
