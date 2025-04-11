@@ -414,6 +414,8 @@ impl KvCache {
         }
 
         // Start watching for changes
+        // we won't miss events bewteen the initial push and the watcher starting because
+        // client.kv_get_and_watch_prefix() will get all kv pairs and put them back again
         let watcher = client.kv_get_and_watch_prefix(&prefix).await?;
 
         let cache = Arc::new(RwLock::new(cache));
