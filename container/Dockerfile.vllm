@@ -349,6 +349,8 @@ RUN source /opt/dynamo/venv/bin/activate && \
 #######################################
 FROM build AS ci_minimum
 
+ENV DYNAMO_HOME=/workspace
+
 COPY . /workspace
 COPY --from=wheel_builder /workspace/dist/ /workspace/dist/
 
