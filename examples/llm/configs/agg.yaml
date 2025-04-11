@@ -30,7 +30,7 @@ VllmWorker:
   enforce-eager: true
   max-num-batched-tokens: 16384
   enable-prefix-caching: true
-  router: random
+  router: round-robin
   tensor-parallel-size: 1
   ServiceArgs:
     workers: 1
