@@ -30,6 +30,7 @@ from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRe
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
+from dynamo._core import EtcdKvCache
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,6 @@ class Processor(ProcessMixIn):
         self.completions_processor = CompletionsProcessor(
             self.tokenizer, self.model_config
         )
-        self.router_mode = self.engine_args.router
         self.min_workers = 1
 
     def _create_tokenizer(self, engine_args: AsyncEngineArgs) -> AnyTokenizer:
@@ -95,6 +95,12 @@ class Processor(ProcessMixIn):
 
         await check_required_workers(self.worker_client, self.min_workers)
 
+        self.etcd_kv_cache = await EtcdKvCache.new(
+            runtime.etcd_client(),
+            "/dynamo/processor/",
+            {"router": self.engine_args.router},
+        )
+
     async def _generate(
         self,
         raw_request: Union[CompletionRequest, ChatCompletionRequest],
@@ -109,7 +115,8 @@ class Processor(ProcessMixIn):
             engine_prompt,
             sampling_params,
         ) = await self._parse_raw_request(raw_request)
-        if self.router_mode == "kv":
+        router_mode = (await self.etcd_kv_cache.get("router")).decode()
+        if router_mode == "kv":
             async for route_response in self.router.generate(
                 Tokens(tokens=engine_prompt["prompt_token_ids"]).model_dump_json()
             ):
@@ -139,7 +146,7 @@ class Processor(ProcessMixIn):
                     ).model_dump_json(),
                     int(worker_id),
                 )
-        elif self.router_mode == "random":
+        elif router_mode == "random":
             engine_generator = await self.worker_client.generate(
                 vLLMGenerateRequest(
                     engine_prompt=engine_prompt,
@@ -147,7 +154,7 @@ class Processor(ProcessMixIn):
                     request_id=request_id,
                 ).model_dump_json()
             )
-        elif self.router_mode == "round-robin":
+        elif router_mode == "round-robin":
             engine_generator = await self.worker_client.round_robin(
                 vLLMGenerateRequest(
                     engine_prompt=engine_prompt,
