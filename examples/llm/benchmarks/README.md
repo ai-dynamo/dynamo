@@ -50,6 +50,9 @@ In the following setup we compare Dynamo disaggregated vLLM performance to
 for Output Token Throughput (per sec) when both are performing under similar Inter Token Latency (ms).
 For more details on your use case please see the [Performance Tuning Guide](/docs/guides/disagg_perf_tuning.md).
 
+In this setup, we will be using 4 prefill workers and 1 decode worker.
+Each prefill worker will use tensor parallel 1 and the decode worker will use tensor parallel 4.
+
 With the Dynamo repository, benchmarking image and model available, and **NATS and ETCD started**, perform the following steps:
 
 1\. Run benchmarking container
@@ -80,6 +83,9 @@ In the following steps we compare Dynamo disaggregated vLLM performance to
 [native vLLM Aggregated Baseline](#vllm-aggregated-baseline-benchmarking) on two nodes. These were chosen to optimize
 for Output Token Throughput (per sec) when both are performing under similar Inter Token Latency (ms).
 For more details on your use case please see the [Performance Tuning Guide](/docs/guides/disagg_perf_tuning.md).
+
+In this setup, we will be using 8 prefill workers and 1 decode worker.
+Each prefill worker will use tensor parallel 1 and the decode worker will use tensor parallel 8.
 
 With the Dynamo repository, benchmarking image and model available, and **NATS and ETCD started on node 0**, perform the following steps:
 
