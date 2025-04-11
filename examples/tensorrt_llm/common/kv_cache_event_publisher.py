@@ -14,11 +14,10 @@
 # limitations under the License.
 
 import ctypes
+import logging
 from ctypes import c_char_p, c_int64, c_uint32
 
-from tensorrt_llm.logger import logger
-
-logger.set_level("info")
+logger = logging.getLogger(__name__)
 
 
 class DynamoResult:
@@ -53,7 +52,7 @@ class KVCacheEventPublisher:
                 logger.info("KVCacheEventPublisher initialization failed!")
 
         except Exception as e:
-            print(f"Failed to load {lib_path}")
+            logger.exception(f"Failed to load {lib_path}")
             raise e
 
         self.lib.dynamo_kv_event_publish_stored.argtypes = [

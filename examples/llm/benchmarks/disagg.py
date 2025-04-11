@@ -12,16 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-{{- if (not .Values.objectStore.existingSecret) }}
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: {{ include "api-server.objectStore.secretName" . }}
-  namespace: {{ include "common.names.namespace" . | quote }}
-type: Opaque
-data:
-  accessKey: {{ .Values.objectStore.accessKey | b64enc | quote }}
-  accessSecret: {{ .Values.objectStore.accessSecret | b64enc | quote }}
-  endpoint: {{ .Values.objectStore.endpoint | b64enc | quote }}
-{{- end }}
+
+from components.frontend import Frontend
+from components.prefill_worker import PrefillWorker
+from components.processor import Processor
+from components.worker import VllmWorker
+
+Frontend.link(Processor).link(VllmWorker).link(PrefillWorker)

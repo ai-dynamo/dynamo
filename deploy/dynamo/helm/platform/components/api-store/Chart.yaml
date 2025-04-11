@@ -12,17 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-{{- if .Values.serviceAccount.create -}}
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: {{ include "helm.serviceAccountName" . }}
-  labels:
-    {{- include "helm.labels" . | nindent 4 }}
-  {{- with .Values.serviceAccount.annotations }}
-  annotations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
-automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
-{{- end }}
+apiVersion: v2
+name: dynamo-api-store
+description: A Helm chart for the Dynamo API Store component
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+dependencies:
+  - name: postgresql
+    version: "16.6.2"  # This is an example; update with the latest version if needed
+    repository: "https://charts.bitnami.com/bitnami"
+  - name: minio
+    version: "16.0.2"
+    repository: "https://charts.bitnami.com/bitnami"

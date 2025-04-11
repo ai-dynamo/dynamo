@@ -12,18 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-apiVersion: v1
-kind: Service
-metadata:
-  name: "dynamo-server"
-  labels:
-    {{- include "helm.labels" . | nindent 4 }}
-spec:
-  type: {{ .Values.service.type }}
-  ports:
-    - port: {{ .Values.service.port }}
-      targetPort: {{ .Values.dynamo.apiServer.port }}
-      protocol: TCP
-      name: http
-  selector:
-    {{- include "helm.selectorLabels" . | nindent 4 }}
+
+from components.frontend import Frontend
+from components.prefill_worker import TensorRTLLMPrefillWorker
+from components.processor import Processor
+from components.worker import TensorRTLLMWorker
+
+Frontend.link(Processor).link(TensorRTLLMWorker).link(TensorRTLLMPrefillWorker)

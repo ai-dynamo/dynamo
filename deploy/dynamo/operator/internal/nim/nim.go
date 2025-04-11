@@ -258,11 +258,13 @@ func GenerateDynamoNIMDeployments(parentDynamoDeployment *v1alpha1.DynamoDeploym
 				},
 			}
 		}
+		deployment.Spec.Autoscaling = &v1alpha1.Autoscaling{
+			Enabled: false,
+		}
 		if service.Config.Autoscaling != nil {
-			deployment.Spec.Autoscaling = &v1alpha1.Autoscaling{
-				MinReplicas: service.Config.Autoscaling.MinReplicas,
-				MaxReplicas: service.Config.Autoscaling.MaxReplicas,
-			}
+			deployment.Spec.Autoscaling.Enabled = true
+			deployment.Spec.Autoscaling.MinReplicas = service.Config.Autoscaling.MinReplicas
+			deployment.Spec.Autoscaling.MaxReplicas = service.Config.Autoscaling.MaxReplicas
 		}
 		deployments[service.Name] = deployment
 	}

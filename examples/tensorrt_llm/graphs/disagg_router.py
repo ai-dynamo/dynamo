@@ -12,16 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-apiVersion: v1
-kind: Service
-metadata:
-  name: dynamo-ui
-spec:
-  ports:
-  - port: 80
-    protocol: TCP
-    targetPort: 80
-  selector:
-    app: dynamo-ui
-  sessionAffinity: None
-  type: ClusterIP
+
+from components.frontend import Frontend
+from components.kv_router import Router
+from components.prefill_worker import TensorRTLLMPrefillWorker
+from components.processor import Processor
+from components.worker import TensorRTLLMWorker
+
+Frontend.link(Processor).link(Router).link(TensorRTLLMWorker).link(
+    TensorRTLLMPrefillWorker
+)

@@ -40,6 +40,13 @@ class LLMAPIConfig:
         self.kv_cache_config = kv_cache_config
         self.extra_args = kwargs
 
+        # Hardcoded to skip tokenizer init for now.
+        # We will handle the tokenization/detokenization
+        # in the base engine.
+        if "skip_tokenizer_init" in self.extra_args:
+            self.extra_args.pop("skip_tokenizer_init")
+        self.skip_tokenizer_init = True
+
     def to_dict(self) -> Dict[str, Any]:
         data = {
             "pytorch_backend_config": self.pytorch_backend_config,
@@ -134,6 +141,12 @@ def parse_tensorrt_llm_args(
         help="Minimum number of workers for aggregated (monolith) server",
     )
     parser.add_argument(
+        "--min-prefill-workers",
+        type=int,
+        default=1,
+        help="Minimum number of prefill workers for disaggregated server",
+    )
+    parser.add_argument(
         "--block-size",
         type=int,
         default=32,
@@ -156,14 +169,6 @@ def parse_dynamo_run_args() -> Tuple[Any, Tuple[Dict[str, Any], Dict[str, Any]]]
     parser.add_argument(
         "--engine_args", type=str, required=True, help="Path to the engine args file"
     )
-    # Disaggregated mode is not supported in dynamo-run launcher yet.
-    # parser.add_argument(
-    #    "--llmapi-disaggregated-config",
-    #    "-c",
-    #    type=str,
-    #    help="Path to the llmapi disaggregated config file",
-    #    default=None,
-    # )
     parser.add_argument(
         "--publish-kv-cache-events",
         action="store_true",

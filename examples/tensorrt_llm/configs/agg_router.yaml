@@ -19,8 +19,7 @@ Frontend:
   port: 8000
 
 Processor:
-  engine_args: "configs/llm_api_config.yaml"
-  block-size: 64
+  engine_args: "configs/llm_api_config_router.yaml"
   router: kv
 
 Router:
@@ -28,7 +27,7 @@ Router:
   min-workers: 1
 
 TensorRTLLMWorker:
-  engine_args: "configs/llm_api_config.yaml"
+  engine_args: "configs/llm_api_config_router.yaml"
   router: kv
   ServiceArgs:
     workers: 1

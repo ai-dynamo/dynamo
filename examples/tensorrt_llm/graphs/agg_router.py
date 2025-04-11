@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from components.agg_worker import TensorRTLLMWorker
 from components.frontend import Frontend
 from components.kv_router import Router
 from components.processor import Processor
+from components.worker import TensorRTLLMWorker
 
 Frontend.link(Processor).link(Router).link(TensorRTLLMWorker)

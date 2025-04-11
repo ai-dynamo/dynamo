@@ -13,9 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 from dataclasses import asdict
 from typing import Any, Dict, List, Union
 
+from common.parser import LLMAPIConfig
 from common.protocol import (
     DisaggregatedTypeConverter,
     DynamoTRTLLMChatCompletionResponseStreamChoice,
@@ -27,10 +29,9 @@ from common.protocol import (
     TRTLLMWorkerResponse,
     TRTLLMWorkerResponseOutput,
 )
-from common.utils import ConversationMessage, ServerType
+from common.utils import ConversationMessage
 from openai.types.chat import ChatCompletionMessageParam
 from tensorrt_llm.llmapi.llm import RequestOutput
-from tensorrt_llm.logger import logger
 from tensorrt_llm.serve.openai_protocol import (
     ChatCompletionLogProbs,
     ChatCompletionLogProbsContent,
@@ -41,10 +42,44 @@ from tensorrt_llm.serve.openai_protocol import (
     ToolCall,
     UsageInfo,
 )
+from transformers import AutoTokenizer
 from transformers.tokenization_utils import PreTrainedTokenizer
 from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
-logger.set_level("debug")
+logger = logging.getLogger(__name__)
+
+
+class ChatProcessorMixin:
+    def __init__(
+        self, engine_config: LLMAPIConfig, using_engine_generator: bool = False
+    ):
+        self._engine_config = engine_config
+        logger.info(f"Using LLM API config: {self._engine_config.to_dict()}")
+        # model name for chat processor
+        self._model_name = self._engine_config.model_name
+        logger.info(f"Set model name: {self._model_name}")
+        # model for LLMAPI input
+        self._model = self._model_name
+        if self._engine_config.model_path:
+            self._model = self._engine_config.model_path
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self._engine_config.model_path
+            )
+            logger.info(f"Using model from path: {self._engine_config.model_path}")
+        else:
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self._engine_config.model_name
+            )
+        if self._engine_config.extra_args.get("tokenizer", None):
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self._engine_config.extra_args.get("tokenizer", None)
+            )
+        self.chat_processor = ChatProcessor(
+            self._model_name, self._tokenizer, using_engine_generator
+        )
+        self.completions_processor = CompletionsProcessor(
+            self._model_name, self._tokenizer
+        )
 
 
 def parse_chat_message_content(
@@ -290,6 +325,7 @@ class ChatProcessor(BaseChatProcessor):
 
         return TRTLLMWorkerRequest(
             id=request.id,
+            model=request.model,
             prompt=prompt,
             sampling_params=asdict(sampling_params),
             conversation=conversation,
@@ -303,8 +339,10 @@ class ChatProcessor(BaseChatProcessor):
         engine_generator,
         request,
         conversation,
-        server_type: ServerType,
     ):
+        first_iteration = True
+        last_text_len = 0
+        last_token_ids_len = 0
         async for raw_response in engine_generator:
             if self.using_engine_generator:
                 response = TRTLLMWorkerResponse(
@@ -317,21 +355,27 @@ class ChatProcessor(BaseChatProcessor):
                 response.outputs = [TRTLLMWorkerResponseOutput(**response.outputs[0])]
             else:
                 response = TRTLLMWorkerResponse.model_validate_json(raw_response.data())
+                response.outputs[0]["text"] = self.tokenizer.decode(
+                    response.outputs[0]["token_ids"]
+                )
+                # Need to keep track of the last text and token ids length
+                # to calculate the diff.
+                # TODO: This is a hack to get the diff. We should identify why
+                # the diff is not being calculated in the worker.
+                response.outputs[0]["_last_text_len"] = last_text_len
+                response.outputs[0]["_last_token_ids_len"] = last_token_ids_len
+                last_text_len = len(response.outputs[0]["text"])
+                last_token_ids_len = len(response.outputs[0]["token_ids"])
                 response.outputs = [TRTLLMWorkerResponseOutput(**response.outputs[0])]
 
-            if (
-                request.disaggregated_params is not None
-                and server_type == ServerType.CTX
-            ):
-                response_data = self.yield_first_chat(request, request.id, response)
-            else:
-                response_data = self.create_chat_stream_response(
-                    request,
-                    request.id,
-                    response,
-                    conversation,
-                    first_iteration=(not request.disaggregated_params is not None),
-                )
+            response_data = self.create_chat_stream_response(
+                request,
+                request.id,
+                response,
+                conversation,
+                first_iteration=first_iteration,
+            )
+            first_iteration = False
             logger.debug(f"[postprocessor] Response: {response_data}")
             yield response_data
 

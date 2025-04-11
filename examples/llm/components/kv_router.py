@@ -43,7 +43,7 @@ def parse_args(service_name, prefix) -> Namespace:
         help="Minimum number of workers required before proceeding",
     )
     parser.add_argument(
-        "--model-name",
+        "--model",
         type=str,
         default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         help="Model that is being served",

@@ -80,8 +80,8 @@ func SyncResource[T Resource](ctx context.Context, c client.Client, desired T, n
 	// Check if the Spec has changed and update if necessary
 	if IsSpecChanged(current, desired) {
 		// update the spec of the current object with the desired spec
-		current.SetSpec(desired.GetSpec())
-		if err := c.Update(ctx, current); err != nil {
+		desired.SetResourceVersion(current.GetResourceVersion())
+		if err := c.Update(ctx, desired); err != nil {
 			return desired, fmt.Errorf("failed to update resource: %w", err)
 		}
 	}
