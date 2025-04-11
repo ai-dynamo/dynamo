@@ -37,6 +37,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 	commonController "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/nim"
+	corev1 "k8s.io/api/core/v1"
 )
 
 const (
@@ -122,11 +123,27 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// merge the DynamoNimDeployments with the DynamoNimDeployments from the CRD
 	for serviceName, deployment := range dynamoNimDeployments {
 		if _, ok := dynamoDeployment.Spec.Services[serviceName]; ok {
+			// First merge the top-level envs if they exist
+			if len(dynamoDeployment.Spec.Envs) > 0 {
+				if deployment.Spec.Envs == nil {
+					deployment.Spec.Envs = make([]corev1.EnvVar, 0)
+				}
+				// Add top-level envs first (they will be overridden by service-specific ones)
+				deployment.Spec.Envs = append(deployment.Spec.Envs, dynamoDeployment.Spec.Envs...)
+			}
+
+			// Then merge the service-specific overrides
 			err := mergo.Merge(deployment, dynamoDeployment.Spec.Services[serviceName], mergo.WithOverride)
 			if err != nil {
 				reason = "failed_to_merge_the_DynamoNimDeployments"
 				return ctrl.Result{}, err
 			}
+		} else if len(dynamoDeployment.Spec.Envs) > 0 {
+			// If no service-specific overrides but top-level envs exist, set them
+			if deployment.Spec.Envs == nil {
+				deployment.Spec.Envs = make([]corev1.EnvVar, 0)
+			}
+			deployment.Spec.Envs = append(deployment.Spec.Envs, dynamoDeployment.Spec.Envs...)
 		}
 	}
 

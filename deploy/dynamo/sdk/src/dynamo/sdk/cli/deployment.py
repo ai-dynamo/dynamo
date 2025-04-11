@@ -636,11 +636,6 @@ def build_deployment_command() -> click.Group:
         rich.print(f"Deployment [green]'{name}'[/] terminated successfully.")
 
     @deployment_command.command()
-    @click.argument(
-        "name",
-        type=click.STRING,
-        required=True,
-    )
     @shared_decorator
     def delete(name: str, cluster: str | None) -> None:  # type: ignore
         """Delete a deployment on BentoCloud."""
@@ -786,8 +781,29 @@ def create_deployment(
     _cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
 ) -> Deployment:
     cfg_dict = None
+    service_config_json = None
+    
     if config_dict is not None and config_dict != "":
         cfg_dict = json.loads(config_dict)
+        service_config_json = config_dict
+    elif config_file is not None:
+        # If config_file is a string path, open it
+        if isinstance(config_file, str):
+            with open(config_file) as f:
+                cfg_dict = yaml.safe_load(f)
+        else:
+            # If it's already a file object, read it directly
+            cfg_dict = yaml.safe_load(config_file)
+        
+        # Convert to JSON string
+        if cfg_dict:
+            service_config_json = json.dumps(cfg_dict)
+            os.environ["DYN_DEPLOYMENT_CONFIG"] = service_config_json
+
+    # Convert env tuple to list of dicts and add service config if present
+    env_dicts = convert_env_to_dict(env) or []
+    if service_config_json:
+        env_dicts.append({"name": "DYN_DEPLOYMENT_CONFIG", "value": service_config_json})
 
     config_params = DeploymentConfigParameters(
         name=name,
@@ -798,7 +814,7 @@ def create_deployment(
         scaling_min=scaling_min,
         instance_type=instance_type,
         strategy=strategy,
-        envs=convert_env_to_dict(env),
+        envs=env_dicts,
         secrets=list(secret) if secret is not None else None,
         config_file=config_file,
         config_dict=cfg_dict,

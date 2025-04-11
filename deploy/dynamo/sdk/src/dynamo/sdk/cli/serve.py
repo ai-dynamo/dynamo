@@ -217,25 +217,35 @@ def build_serve_command() -> click.Group:
 
         service_configs: dict[str, dict[str, t.Any]] = {}
 
-        # Load file if provided
-        if file:
-            with open(file) as f:
-                yaml_configs = yaml.safe_load(f)
-                # Initialize service_configs as empty dict if it's None
-                # Convert nested YAML structure to flat dict with dot notation
-                for service, configs in yaml_configs.items():
-                    if service not in service_configs:
-                        service_configs[service] = {}
-                    for key, value in configs.items():
-                        service_configs[service][key] = value
+        # Check for deployment config first
+        if "DYN_DEPLOYMENT_CONFIG" in os.environ:
+            try:
+                deployment_config = yaml.safe_load(os.environ["DYN_DEPLOYMENT_CONFIG"])
+                # Use deployment config directly
+                service_configs = deployment_config
+                logger.warning("DYN_DEPLOYMENT_CONFIG found in environment - ignoring configuration file and command line arguments")
+            except Exception as e:
+                logger.warning(f"Failed to parse DYN_DEPLOYMENT_CONFIG: {e}")
+        else:
+            # Load file if provided
+            if file:
+                with open(file) as f:
+                    yaml_configs = yaml.safe_load(f)
+                    # Initialize service_configs as empty dict if it's None
+                    # Convert nested YAML structure to flat dict with dot notation
+                    for service, configs in yaml_configs.items():
+                        if service not in service_configs:
+                            service_configs[service] = {}
+                        for key, value in configs.items():
+                            service_configs[service][key] = value
 
-        # Process service-specific options
-        cmdline_overrides: t.Dict[str, t.Any] = _parse_service_args(ctx.args)
-        for service, configs in cmdline_overrides.items():
-            if service not in service_configs:
-                service_configs[service] = {}
-            for key, value in configs.items():
-                service_configs[service][key] = value
+            # Process service-specific options
+            cmdline_overrides: t.Dict[str, t.Any] = _parse_service_args(ctx.args)
+            for service, configs in cmdline_overrides.items():
+                if service not in service_configs:
+                    service_configs[service] = {}
+                for key, value in configs.items():
+                    service_configs[service][key] = value
 
         # Process depends
         if depends:

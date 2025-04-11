@@ -20,6 +20,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -36,6 +37,9 @@ type DynamoDeploymentSpec struct {
 	// if not set, the DynamoNimDeployment will be used as is
 	// +kubebuilder:validation:Optional
 	Services map[string]*DynamoNimDeployment `json:"services,omitempty"`
+	// Environment variables to be set in the deployment
+	// +kubebuilder:validation:Optional
+	Envs []corev1.EnvVar `json:"envs,omitempty"`
 }
 
 // DynamoDeploymentStatus defines the observed state of DynamoDeployment.
