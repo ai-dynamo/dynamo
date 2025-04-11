@@ -1,0 +1,60 @@
+---
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch: { }
+
+name: rust
+
+env:
+  # TODO: See if clang/nettle can be removed
+  APT_PACKAGES: libclang-dev nettle-dev protobuf-compiler
+  CACHE_VERSION: v1
+  RUSTC_WRAPPER: "/home/runner/.cargo/bin/sccache"
+  SCCACHE_VERSION: 0.10.0
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          key: ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-${{ github.job }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ~/.cache/sccache/
+            ~/.rustup/
+            target/
+          restore-keys: |
+            ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-${{ github.job }}-
+            ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}
+      - name: install system packages
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt update
+          sudo DEBIAN_FRONTEND=noninteractive apt install -y ${{ env.APT_PACKAGES }}
+
+      - name: Set up Rust Toolchain Components
+        run: rustup component add rustfmt clippy
+      # TODO: Move script into .github/workflows or install via package manager instead of script
+      - name: Install sccache
+        run: lib/install-sccache
+      - name: Run Cargo Check
+        run: cargo check --locked
+      - name: Verify Code Formatting
+        run: cargo fmt -- --check
+      - name: Run Clippy Checks
+        run: cargo clippy --no-deps --all-targets -- -D warnings
+      - name: Install and Run cargo-deny
+        run: |
+          cargo-deny --version || cargo install cargo-deny@0.16.4
+          cargo-deny check --hide-inclusion-graph licenses --config ${{ github.workspace }}/deny.toml
+      - name: Run Unit Tests
+        run: cargo test --locked --all-targets
