@@ -89,7 +89,7 @@ class ServiceConfig(dict):
         service_config = self[service_name].copy()
         if "ServiceArgs" in service_config:
             del service_config["ServiceArgs"]
-        
+
         if (common := self.get(COMMON_CONFIG_SERVICE)) is not None and (
             common_config_keys := service_config.get(COMMON_CONFIG_KEY)
         ) is not None:

@@ -97,15 +97,19 @@ class DynamoService(Service[T]):
             logger.debug(f"Found dynamo overrides in service_args: {dynamo_overrides}")
 
         # Initialize Dynamo configuration with overrides
-        base_config = dynamo_config if dynamo_config else DynamoConfig(name=inner.__name__, namespace="default")
+        base_config = (
+            dynamo_config
+            if dynamo_config
+            else DynamoConfig(name=inner.__name__, namespace="default")
+        )
         logger.debug(f"Initial base DynamoConfig: {asdict(base_config)}")
-        
+
         # Apply overrides from service_args to base config
         for key, value in dynamo_overrides.items():
             if hasattr(base_config, key):
                 logger.debug(f"Applying override: {key}={value}")
                 setattr(base_config, key, value)
-        
+
         self._dynamo_config = base_config
         if self._dynamo_config.name is None:
             self._dynamo_config.name = inner.__name__
@@ -211,6 +215,7 @@ class DynamoService(Service[T]):
                         "envs": service_args["envs"]
                     }
                     os.environ["DYNAMO_SERVICE_ENVS"] = json.dumps(envs_config)
+
 
 def service(
     inner: Optional[type[T]] = None,
