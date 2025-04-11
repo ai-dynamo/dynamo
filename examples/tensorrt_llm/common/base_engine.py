@@ -99,7 +99,7 @@ class BaseTensorrtLLMEngine:
         self._router = router
         self._server_type = server_type
         self._prefill_client = None
-        self._error_queue = Queue()
+        self._error_queue: Queue = Queue()
         self._kv_metrics_publisher = None
 
         if self._remote_prefill:
@@ -416,7 +416,7 @@ class BaseTensorrtLLMEngine:
         prefill_request = copy.deepcopy(request)
         prefill_request.sampling_params["max_tokens"] = 1
         prefill_request.disaggregated_params = DisaggregatedParams(
-            request_type=DisaggRequestType.CONTEXT_ONLY
+            request_type=DisaggRequestType.CONTEXT_ONLY.value
         )
 
         if self._prefill_client is None:
@@ -475,7 +475,9 @@ class BaseTensorrtLLMEngine:
                         )
                     )
                 )
-                disaggregated_params.request_type = DisaggRequestType.GENERATION_ONLY
+                disaggregated_params.request_type = (
+                    DisaggRequestType.GENERATION_ONLY.value
+                )
 
             logger.debug(
                 f"Worker inputs: {worker_inputs}, disaggregated params: {disaggregated_params}"
