@@ -16,11 +16,12 @@
 use crate::{error, CancellationToken, ErrorContext, Result, Runtime};
 
 use std::sync::Arc;
+use std::collections::HashMap;
 use async_nats::jetstream::kv;
 use derive_builder::Builder;
 use derive_getters::Dissolve;
 use futures::StreamExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use validator::Validate;
 
 use etcd_client::{
@@ -376,74 +377,18 @@ fn default_servers() -> Vec<String> {
     }
 }
 
-#[cfg(feature = "integration")]
-#[cfg(test)]
-mod tests {
-    use crate::{distributed::DistributedConfig, DistributedRuntime};
-
-    use super::*;
-
-    #[test]
-    fn test_ectd_client() {
-        let rt = Runtime::from_settings().unwrap();
-        let rt_clone = rt.clone();
-        let config = DistributedConfig::from_settings();
-
-        rt_clone.primary().block_on(async move {
-            let drt = DistributedRuntime::new(rt, config).await.unwrap();
-            test_kv_create_or_validate(drt).await.unwrap();
-        });
-    }
-
-    async fn test_kv_create_or_validate(drt: DistributedRuntime) -> Result<()> {
-        let key = "__integration_test_key";
-        let value = b"test_value";
-
-        let client = drt.etcd_client();
-        let lease_id = drt.primary_lease().id();
-
-        // Create the key
-        let result = client
-            .kv_create(key.to_string(), value.to_vec(), Some(lease_id))
-            .await;
-        assert!(result.is_ok(), "");
-
-        // Try to create the key again - this should fail
-        let result = client
-            .kv_create(key.to_string(), value.to_vec(), Some(lease_id))
-            .await;
-        assert!(result.is_err());
-
-        // Create or validate should succeed as the values match
-        let result = client
-            .kv_create_or_validate(key.to_string(), value.to_vec(), Some(lease_id))
-            .await;
-        assert!(result.is_ok());
-
-        // Try to create the key with a different value
-        let different_value = b"different_value";
-        let result = client
-            .kv_create_or_validate(key.to_string(), different_value.to_vec(), Some(lease_id))
-            .await;
-        assert!(result.is_err(), "");
-
-        Ok(())
-    }
-}
-
-
 /// A cache for etcd key-value pairs that watches for changes
 pub struct KvCache {
     client: Client,
     pub prefix: String,
-    cache: Arc<tokio::sync::RwLock<std::collections::HashMap<String, Vec<u8>>>>,
+    cache: Arc<RwLock<HashMap<String, Vec<u8>>>>,
     watcher: Option<PrefixWatcher>,
 }
 
 impl KvCache {
     /// Create a new KV cache for the given prefix
-    pub async fn new(client: Client, prefix: String, initial_values: std::collections::HashMap<String, Vec<u8>>) -> Result<Self> {
-        let mut cache = std::collections::HashMap::new();
+    pub async fn new(client: Client, prefix: String, initial_values: HashMap<String, Vec<u8>>) -> Result<Self> {
+        let mut cache = HashMap::new();
 
         // First get all existing keys with this prefix
         let existing_kvs = client.kv_get_prefix(&prefix).await?;
@@ -467,7 +412,7 @@ impl KvCache {
         // Start watching for changes
         let watcher = client.kv_get_and_watch_prefix(&prefix).await?;
 
-        let cache = Arc::new(tokio::sync::RwLock::new(cache));
+        let cache = Arc::new(RwLock::new(cache));
         let mut result = Self {
             client,
             prefix,
@@ -525,7 +470,7 @@ impl KvCache {
     }
 
     /// Get all key-value pairs in the cache
-    pub async fn get_all(&self) -> std::collections::HashMap<String, Vec<u8>> {
+    pub async fn get_all(&self) -> HashMap<String, Vec<u8>> {
         let cache_read = self.cache.read().await;
         cache_read.clone()
     }
@@ -540,6 +485,139 @@ impl KvCache {
         // Then update local cache
         let mut cache_write = self.cache.write().await;
         cache_write.insert(full_key, value);
+
+        Ok(())
+    }
+}
+
+#[cfg(feature = "integration")]
+#[cfg(test)]
+mod tests {
+    use crate::{distributed::DistributedConfig, DistributedRuntime};
+
+    use super::*;
+
+    #[test]
+    fn test_ectd_client() {
+        let rt = Runtime::from_settings().unwrap();
+        let rt_clone = rt.clone();
+        let config = DistributedConfig::from_settings();
+
+        rt_clone.primary().block_on(async move {
+            let drt = DistributedRuntime::new(rt, config).await.unwrap();
+            test_kv_create_or_validate(drt).await.unwrap();
+        });
+    }
+
+    async fn test_kv_create_or_validate(drt: DistributedRuntime) -> Result<()> {
+        let key = "__integration_test_key";
+        let value = b"test_value";
+
+        let client = drt.etcd_client();
+        let lease_id = drt.primary_lease().id();
+
+        // Create the key
+        let result = client
+            .kv_create(key.to_string(), value.to_vec(), Some(lease_id))
+            .await;
+        assert!(result.is_ok(), "");
+
+        // Try to create the key again - this should fail
+        let result = client
+            .kv_create(key.to_string(), value.to_vec(), Some(lease_id))
+            .await;
+        assert!(result.is_err());
+
+        // Create or validate should succeed as the values match
+        let result = client
+            .kv_create_or_validate(key.to_string(), value.to_vec(), Some(lease_id))
+            .await;
+        assert!(result.is_ok());
+
+        // Try to create the key with a different value
+        let different_value = b"different_value";
+        let result = client
+            .kv_create_or_validate(key.to_string(), different_value.to_vec(), Some(lease_id))
+            .await;
+        assert!(result.is_err(), "");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_kv_cache() {
+        let rt = Runtime::from_settings().unwrap();
+        let rt_clone = rt.clone();
+        let config = DistributedConfig::from_settings(false);
+
+        rt_clone.primary().block_on(async move {
+            let drt = DistributedRuntime::new(rt, config).await.unwrap();
+            test_kv_cache_operations(drt).await.unwrap();
+        });
+    }
+
+    async fn test_kv_cache_operations(drt: DistributedRuntime) -> Result<()> {
+        // Get the client and unwrap it
+        let client = drt.etcd_client().expect("etcd client should be available");
+
+        // Create a unique test prefix to avoid conflicts with other tests
+        let test_id = uuid::Uuid::new_v4().to_string();
+        let prefix = format!("test_kv_cache_{}/", test_id);
+
+        // Initial values
+        let mut initial_values = HashMap::new();
+        initial_values.insert("key1".to_string(), b"value1".to_vec());
+        initial_values.insert("key2".to_string(), b"value2".to_vec());
+
+        // Create the KV cache
+        let kv_cache = KvCache::new(client.clone(), prefix.clone(), initial_values).await?;
+
+        // Test get
+        let value1 = kv_cache.get("key1").await;
+        assert_eq!(value1, Some(b"value1".to_vec()));
+
+        let value2 = kv_cache.get("key2").await;
+        assert_eq!(value2, Some(b"value2".to_vec()));
+
+        // Test get_all
+        let all_values = kv_cache.get_all().await;
+        assert_eq!(all_values.len(), 2);
+        assert_eq!(all_values.get(&format!("{}key1", prefix)), Some(&b"value1".to_vec()));
+        assert_eq!(all_values.get(&format!("{}key2", prefix)), Some(&b"value2".to_vec()));
+
+        // Test put - using None for lease_id
+        kv_cache.put("key3", b"value3".to_vec(), None).await?;
+
+        // Allow some time for the update to propagate
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Verify the new value
+        let value3 = kv_cache.get("key3").await;
+        assert_eq!(value3, Some(b"value3".to_vec()));
+
+        // Test update
+        kv_cache.put("key1", b"updated_value1".to_vec(), None).await?;
+
+        // Allow some time for the update to propagate
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Verify the updated value
+        let updated_value1 = kv_cache.get("key1").await;
+        assert_eq!(updated_value1, Some(b"updated_value1".to_vec()));
+
+        // Test external update (simulating another client updating a value)
+        client.kv_put(&format!("{}key2", prefix), b"external_update".to_vec(), None).await?;
+
+        // Allow some time for the update to propagate
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Verify the cache was updated
+        let external_update = kv_cache.get("key2").await;
+        assert_eq!(external_update, Some(b"external_update".to_vec()));
+
+        // Clean up - delete the test keys
+        let etcd_client = client.etcd_client();
+        let _ = etcd_client.kv_client().delete(prefix, Some(etcd_client::DeleteOptions::new().with_prefix())).await?;
 
         Ok(())
     }

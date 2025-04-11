@@ -216,9 +216,9 @@ impl DistributedRuntime {
 impl EtcdKvCache {
     #[new]
     fn py_new(
-        etcd_client: &EtcdClient,
-        prefix: String,
-        initial_values: &Bound<'_, PyDict>,
+        _etcd_client: &EtcdClient,
+        _prefix: String,
+        _initial_values: &Bound<'_, PyDict>,
     ) -> PyResult<Self> {
         // We can't create the KvCache here because it's async, so we'll return an error
         Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -227,6 +227,7 @@ impl EtcdKvCache {
     }
 
     #[staticmethod]
+    #[allow(clippy::new_ret_no_self)]
     fn new<'p>(
         py: Python<'p>,
         etcd_client: &EtcdClient,
@@ -271,7 +272,7 @@ impl EtcdKvCache {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             if let Some(value) = inner.get(&key).await {
                 Ok(Python::with_gil(|py| {
-                    PyBytes::new(py, &value).to_object(py)
+                    PyBytes::new(py, &value).into_py_any(py).unwrap()
                 }))
             } else {
                 Ok(Python::with_gil(|py| py.None()))
@@ -296,7 +297,7 @@ impl EtcdKvCache {
                     };
                     dict.set_item(stripped_key, PyBytes::new(py, &value))?;
                 }
-                Ok(dict.to_object(py))
+                Ok(dict.into_py_any(py).unwrap())
             })
         })
     }
