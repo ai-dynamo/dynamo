@@ -100,14 +100,15 @@ class Processor(ChatProcessorMixin):
 
         if worker_id == "":
             if self.router_mode == "round-robin":
-                engine_generator = await self.worker_client.round_robin(
-                    preprocessed_request.model_dump_json()
-                )
+                self._send_request = self.worker_client.round_robin
             else:
                 # fallback to random
-                engine_generator = await self.worker_client.random(
-                    preprocessed_request.model_dump_json()
-                )
+                self._send_request = self.worker_client.random
+
+            engine_generator = await self._send_request(
+                preprocessed_request.model_dump_json()
+            )
+
         else:
             engine_generator = await self.worker_client.direct(
                 preprocessed_request.model_dump_json(), int(worker_id)

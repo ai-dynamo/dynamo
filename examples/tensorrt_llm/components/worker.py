@@ -45,6 +45,7 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
         config_args = config.as_args(class_name, prefix="")
         args, engine_config = parse_tensorrt_llm_args(config_args)
         worker_id = dynamo_context["endpoints"][0].lease_id()
+        self._min_prefill_workers = args.min_prefill_workers
         super().__init__(
             namespace_str="dynamo",
             component_str=class_name,
@@ -71,11 +72,11 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
                 .endpoint("generate")
                 .client()
             )
-            while len(self._prefill_client.endpoint_ids()) < self._min_workers:
+            while len(self._prefill_client.endpoint_ids()) < self._min_prefill_workers:
                 logger.info(
                     f"Waiting for prefill workers to be ready.\n"
                     f" Current: {len(self._prefill_client.endpoint_ids())},"
-                    f" Required: {self._min_workers}"
+                    f" Required: {self._min_prefill_workers}"
                 )
                 await asyncio.sleep(2)
 

@@ -22,6 +22,7 @@ import signal
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from enum import Enum
 from queue import Queue
 from typing import Any, Optional
 
@@ -48,6 +49,11 @@ from .kv_cache_event_publisher import KVCacheEventPublisher
 logger = logging.getLogger(__name__)
 
 logger.setLevel(logging.DEBUG)
+
+
+class DisaggRequestType(Enum):
+    CONTEXT_ONLY = "context_only"
+    GENERATION_ONLY = "generation_only"
 
 
 def update_args_from_disagg_config(
@@ -93,7 +99,7 @@ class BaseTensorrtLLMEngine:
         self._router = router
         self._server_type = server_type
         self._prefill_client = None
-        self._error_queue = None
+        self._error_queue = Queue()
         self._kv_metrics_publisher = None
 
         if self._remote_prefill:
@@ -161,7 +167,6 @@ class BaseTensorrtLLMEngine:
                 self._event_thread = None
             raise e
 
-        self._error_queue = Queue()
         try:
             if self._publish_stats:
                 self._init_publish_metrics_thread()
@@ -411,7 +416,7 @@ class BaseTensorrtLLMEngine:
         prefill_request = copy.deepcopy(request)
         prefill_request.sampling_params["max_tokens"] = 1
         prefill_request.disaggregated_params = DisaggregatedParams(
-            request_type="context_only"
+            request_type=DisaggRequestType.CONTEXT_ONLY
         )
 
         if self._prefill_client is None:
@@ -445,9 +450,8 @@ class BaseTensorrtLLMEngine:
         if self._llm_engine is None:
             raise RuntimeError("Engine not initialized")
 
-        if self._error_queue and self._error_queue.qsize() > 0:
-            error = self._error_queue.get()
-            raise error
+        if not self._error_queue.empty():
+            raise self._error_queue.get()
 
         self._ongoing_request_count += 1
 
@@ -458,8 +462,6 @@ class BaseTensorrtLLMEngine:
                 DisaggregatedTypeConverter.to_llm_disaggregated_params(
                     request.disaggregated_params
                 )
-                if request.disaggregated_params is not None
-                else None
             )
 
             if self._remote_prefill and self._server_type == ServerType.GEN:
@@ -473,7 +475,7 @@ class BaseTensorrtLLMEngine:
                         )
                     )
                 )
-                disaggregated_params.request_type = "generation_only"
+                disaggregated_params.request_type = DisaggRequestType.GENERATION_ONLY
 
             logger.debug(
                 f"Worker inputs: {worker_inputs}, disaggregated params: {disaggregated_params}"
@@ -484,7 +486,9 @@ class BaseTensorrtLLMEngine:
                 inputs=worker_inputs,
                 sampling_params=sampling_params,
                 disaggregated_params=disaggregated_params,
-                streaming=(self._server_type == ServerType.GEN),
+                streaming=False
+                if self._server_type == ServerType.CTX
+                else request.streaming,
             ):
                 # Convert the disaggregated params to OAI format so
                 # it can be sent over the network.
@@ -493,6 +497,7 @@ class BaseTensorrtLLMEngine:
                 ].disaggregated_params = DisaggregatedTypeConverter.to_oai_disaggregated_params(
                     response.outputs[0].disaggregated_params
                 )
+
                 yield TRTLLMWorkerResponse(
                     request_id=request.id,
                     prompt_token_ids=response.prompt_token_ids,

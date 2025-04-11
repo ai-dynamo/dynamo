@@ -42,9 +42,9 @@ class LLMAPIConfig:
 
         # Hardcoded to skip tokenizer init for now.
         # We will handle the tokenization/detokenization
-        #  in the base engine.
-        if "skip_tokenizer_init" in kwargs:
-            kwargs.pop("skip_tokenizer_init")
+        # in the base engine.
+        if "skip_tokenizer_init" in self.extra_args:
+            self.extra_args.pop("skip_tokenizer_init")
         self.skip_tokenizer_init = True
 
     def to_dict(self) -> Dict[str, Any]:
@@ -139,6 +139,12 @@ def parse_tensorrt_llm_args(
         type=int,
         default=1,
         help="Minimum number of workers for aggregated (monolith) server",
+    )
+    parser.add_argument(
+        "--min-prefill-workers",
+        type=int,
+        default=1,
+        help="Minimum number of prefill workers for disaggregated server",
     )
     parser.add_argument(
         "--block-size",

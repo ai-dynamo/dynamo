@@ -56,7 +56,6 @@ class Processor(ChatProcessorMixin):
         return super().postprocess(engine_generator, request, conversation)
 
 
-# TODO: support disaggregated as well
 async def chat_generator(engine: BaseTensorrtLLMEngine, request):
     if engine._llm_engine is None:
         raise RuntimeError("Engine not initialized")

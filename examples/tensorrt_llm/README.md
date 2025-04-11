@@ -116,7 +116,7 @@ dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
 #### Disaggregated serving
 ```bash
 cd /workspace/examples/tensorrt_llm
-TRTLLM_USE_UCX_KVCACHE=1 dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml&
+TRTLLM_USE_UCX_KVCACHE=1 dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
 ```
 
 We are defining TRTLLM_USE_UCX_KVCACHE so that TRTLLM uses UCX for transfering the KV
@@ -124,7 +124,7 @@ cache between the context and generation workers.
 
 #### Disaggregated serving with KV Routing
 ```bash
-cd /workspace/examples/llm
+cd /workspace/examples/tensorrt_llm
 TRTLLM_USE_UCX_KVCACHE=1 dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
 ```
 

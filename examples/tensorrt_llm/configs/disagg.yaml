@@ -27,7 +27,7 @@ TensorRTLLMWorker:
   engine_args: "configs/llm_api_config.yaml"
   llmapi-disaggregated-config: "configs/llmapi_disagg_configs/single_node_config.yaml"
   remote-prefill: true
-  min-workers: 1
+  min-prefill-workers: 1
   router: round-robin
   ServiceArgs:
     workers: 1

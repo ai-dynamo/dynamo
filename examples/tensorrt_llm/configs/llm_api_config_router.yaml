@@ -17,6 +17,8 @@
 # In the case of disaggregated deployment, this config will apply to each server
 # and will be overwritten by the disaggregated config file
 
+# TODO: figure out how to generate this from the service config or vice versa
+
 model_name: "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 model_path: null
 tensor_parallel_size: 1

@@ -15,6 +15,9 @@
 
 # This will overwrite the llm_api_config.yaml
 
+# TODO: Specifying the context and generation servers in the config file is
+# bit confusing. Investigate if we can clean this up.
+
 hostname: localhost
 port: 8080
 trust_remote_code: true
