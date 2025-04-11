@@ -95,7 +95,7 @@ class Processor(ProcessMixIn):
 
         await check_required_workers(self.worker_client, self.min_workers)
 
-        self.etcd_kv_cache = await EtcdKvCache.new(
+        self.etcd_kv_cache = await EtcdKvCache.create(
             runtime.etcd_client(),
             "/dynamo/processor/",
             {"router": self.engine_args.router},

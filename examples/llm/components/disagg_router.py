@@ -36,7 +36,7 @@ class PyDisaggregatedRouter:
 
     async def async_init(self):
         runtime = dynamo_context["runtime"]
-        self.etcd_kv_cache = await EtcdKvCache.new(
+        self.etcd_kv_cache = await EtcdKvCache.create(
             runtime.etcd_client(),
             "/dynamo/disagg_router/",
             {

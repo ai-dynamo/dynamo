@@ -228,7 +228,7 @@ impl EtcdKvCache {
 
     #[staticmethod]
     #[allow(clippy::new_ret_no_self)]
-    fn new<'p>(
+    fn create<'p>(
         py: Python<'p>,
         etcd_client: &EtcdClient,
         prefix: String,
