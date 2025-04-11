@@ -151,4 +151,4 @@ Remaining tasks:
 - [ ] Add multi-node support.
 - [ ] Merge the code base with llm example to reduce the code duplication.
 - [ ] Use processor from dynamo-llm framework.
-- [ ] Explore NIXL integration with TensorRT-LLM once available. Currently, TensorRT-LLM uses UCX to transfer KV cache.
+- [ ] Enable NIXL integration with TensorRT-LLM once available. Currently, TensorRT-LLM uses UCX to transfer KV cache.
