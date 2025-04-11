@@ -44,7 +44,12 @@ from circus.watcher import Watcher
 from simple_di import Provide, inject
 
 from .allocator import ResourceAllocator
-from .utils import path_to_uri, reserve_free_port
+from .utils import (
+    DYN_LOCAL_STATE_DIR,
+    path_to_uri,
+    reserve_free_port,
+    save_dynamo_state,
+)
 
 
 # Define a Protocol for services to ensure type safety
@@ -55,6 +60,9 @@ class ServiceProtocol(Protocol):
     bento: Any
 
     def is_dynamo_component(self) -> bool:
+        ...
+
+    def dynamo_address(self) -> tuple[str, str]:
         ...
 
 
@@ -115,7 +123,37 @@ else:
 
 
 # WARNING: internal
-_SERVICE_WORKER_SCRIPT = "_bentoml_impl.worker.service"
+_BENTO_WORKER_SCRIPT = "_bentoml_impl.worker.service"
+_DYNAMO_WORKER_SCRIPT = "dynamo.sdk.cli.serve_dynamo"
+
+
+def _get_dynamo_worker_script(bento_identifier: str, svc_name: str) -> list[str]:
+    args = [
+        "-m",
+        _DYNAMO_WORKER_SCRIPT,
+        bento_identifier,
+        "--service-name",
+        svc_name,
+        "--worker-id",
+        "$(CIRCUS.WID)",
+    ]
+    return args
+
+
+def _get_bento_worker_script(bento_identifier: str, svc_name: str) -> list[str]:
+    args = [
+        "-m",
+        _BENTO_WORKER_SCRIPT,
+        bento_identifier,
+        "--service-name",
+        svc_name,
+        "--fd",
+        f"$(circus.sockets.{svc_name})",
+        "--worker-id",
+        "$(CIRCUS.WID)",
+    ]
+
+    return args
 
 
 def create_dependency_watcher(
@@ -131,18 +169,7 @@ def create_dependency_watcher(
 
     num_workers, resource_envs = scheduler.get_resource_envs(svc)
     uri, socket = _get_server_socket(svc, uds_path, port_stack)
-    args = [
-        "-m",
-        _SERVICE_WORKER_SCRIPT,
-        bento_identifier,
-        "--service-name",
-        svc.name,
-        "--fd",
-        f"$(circus.sockets.{svc.name})",
-        "--worker-id",
-        "$(CIRCUS.WID)",
-    ]
-
+    args = _get_bento_worker_script(bento_identifier, svc.name)
     if resource_envs:
         args.extend(["--worker-env", json.dumps(resource_envs)])
 
@@ -168,23 +195,9 @@ def create_dynamo_watcher(
     """Create a watcher for a Dynamo service in the dependency graph"""
     from bentoml.serving import create_watcher
 
-    # Get socket for this service
-    uri, socket = _get_server_socket(svc, uds_path, port_stack)
-
-    # Get worker configuration
     num_workers, resource_envs = scheduler.get_resource_envs(svc)
-
-    # Create Dynamo-specific worker args
-    args = [
-        "-m",
-        "dynamo.sdk.cli.serve_dynamo",  # Use our Dynamo worker module
-        bento_identifier,
-        "--service-name",
-        svc.name,
-        "--worker-id",
-        "$(CIRCUS.WID)",
-    ]
-
+    uri, socket = _get_server_socket(svc, uds_path, port_stack)
+    args = _get_dynamo_worker_script(bento_identifier, svc.name)
     if resource_envs:
         args.extend(["--worker-env", json.dumps(resource_envs)])
 
@@ -209,41 +222,21 @@ def create_dynamo_watcher(
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse DYNAMO_SERVICE_ENVS: {e}")
 
+    # use namespace from the service
+    namespace, _ = svc.dynamo_address()
+
     # Create the watcher with updated environment
     watcher = create_watcher(
-        name=f"dynamo_service_{svc.name}",
+        name=f"{namespace}_{svc.name}",
         args=args,
         numprocesses=num_workers,
         working_dir=working_dir,
         env=worker_env,
     )
 
+    logger.info(f"Created watcher for {svc.name}'s in the {namespace} namespace")
+
     return watcher, socket, uri
-
-
-@inject
-def server_on_deployment(
-    svc: ServiceProtocol, result_file: str = Provide[BentoMLContainer.result_store_file]
-) -> None:
-    # Resolve models before server starts.
-    if hasattr(svc, "bento") and (bento := getattr(svc, "bento")):
-        for model in bento.info.all_models:
-            model.to_model().resolve()
-    elif hasattr(svc, "models"):
-        for model in svc.models:
-            model.resolve()
-
-    if hasattr(svc, "inner"):
-        inner = svc.inner
-        for name in dir(inner):
-            member = getattr(inner, name)
-            if callable(member) and getattr(
-                member, "__bentoml_deployment_hook__", False
-            ):
-                member()
-
-    if os.path.exists(result_file):
-        os.remove(result_file)
 
 
 @inject(squeeze_none=True)
@@ -254,6 +247,7 @@ def serve_http(
     port: int = Provide[BentoMLContainer.http.port],
     dependency_map: dict[str, str] | None = None,
     service_name: str = "",
+    enable_planner: bool = False,
 ) -> Server:
     # WARNING: internal
     from _bentoml_impl.loader import load
@@ -263,9 +257,14 @@ def serve_http(
     from bentoml.serving import create_watcher
     from circus.sockets import CircusSocket
 
+    from dynamo.sdk.lib.logging import configure_server_logging
+
     from .allocator import ResourceAllocator
 
+    configure_server_logging()
+
     bento_id: str = ""
+    namespace: str = ""
     env: dict[str, Any] = {}
     if isinstance(bento_identifier, Service):
         svc = bento_identifier
@@ -296,7 +295,6 @@ def serve_http(
     if service_name and service_name != svc.name:
         svc = svc.find_dependent_by_name(service_name)
     num_workers, resource_envs = allocator.get_resource_envs(svc)
-    server_on_deployment(svc)
     uds_path = tempfile.mkdtemp(prefix="bentoml-uds-")
     try:
         if not service_name and not standalone:
@@ -321,6 +319,7 @@ def serve_http(
                             str(bento_path.absolute()),
                             env=env,
                         )
+                        namespace, _ = dep_svc.dynamo_address()
                     else:
                         # Regular BentoML service
                         new_watcher, new_socket, uri = create_dependency_watcher(
@@ -336,7 +335,6 @@ def serve_http(
                     watchers.append(new_watcher)
                     sockets.append(new_socket)
                     dependency_map[name] = uri
-                    server_on_deployment(dep_svc)
                 # reserve one more to avoid conflicts
                 port_stack.enter_context(reserve_free_port())
 
@@ -365,10 +363,19 @@ def serve_http(
 
         server_args = [
             "-m",
-            _SERVICE_WORKER_SCRIPT,
+            _BENTO_WORKER_SCRIPT,
             bento_identifier,
             "--fd",
             f"$(circus.sockets.{API_SERVER_NAME})",
+            "--service-name",
+            svc.name,
+            "--worker-id",
+            "$(CIRCUS.WID)",
+        ]
+        dynamo_args = [
+            "-m",
+            _DYNAMO_WORKER_SCRIPT,
+            bento_identifier,
             "--service-name",
             svc.name,
             "--worker-id",
@@ -381,20 +388,10 @@ def serve_http(
 
         # Check if this is a Dynamo service
         if hasattr(svc, "is_dynamo_component") and svc.is_dynamo_component():
-            # Create Dynamo-specific watcher using existing socket
-            args = [
-                "-m",
-                "dynamo.sdk.cli.serve_dynamo",  # Use our Dynamo worker module
-                bento_identifier,
-                "--service-name",
-                svc.name,
-                "--worker-id",
-                "$(CIRCUS.WID)",
-            ]
             # resource_envs is the resource allocation (ie CUDA_VISIBLE_DEVICES) for each worker created by the allocator
             # these resource_envs are passed to each individual worker's environment which is set in serve_dynamo
             if resource_envs:
-                args.extend(["--worker-env", json.dumps(resource_envs)])
+                dynamo_args.extend(["--worker-env", json.dumps(resource_envs)])
             # env is the base bentoml environment variables. We make a copy and update it to add any service configurations and additional env vars
             worker_env = env.copy() if env else {}
 
@@ -416,16 +413,17 @@ def serve_http(
                     logger.warning(f"Failed to parse DYNAMO_SERVICE_ENVS: {e}")
 
             watcher = create_watcher(
-                name=f"dynamo_service_{svc.name}",
-                args=args,
+                name=f"{namespace}_{svc.name}",
+                args=dynamo_args,
                 numprocesses=num_workers,
                 working_dir=str(bento_path.absolute()),
-                env=worker_env,  # Dependency map will be injected by serve_http
+                env=worker_env,
             )
             watchers.append(watcher)
-            logger.info(f"dynamo_service_{svc.name} entrypoint created")
+            logger.info(
+                f"Created watcher for {svc.name}'s in the {namespace} namespace"
+            )
         else:
-            # Create regular BentoML service watcher
             watchers.append(
                 create_watcher(
                     name="service",
@@ -455,6 +453,32 @@ def serve_http(
 
         arbiter = create_standalone_arbiter(**arbiter_kwargs)
         arbiter.exit_stack.callback(shutil.rmtree, uds_path, ignore_errors=True)
+        if enable_planner:
+            arbiter.exit_stack.callback(
+                shutil.rmtree,
+                os.environ.get(
+                    DYN_LOCAL_STATE_DIR, os.path.expanduser("~/.dynamo/state")
+                ),
+                ignore_errors=True,
+            )
+            logger.warn(f"arbiter: {arbiter.endpoint}")
+            # save deployment state for planner
+            if not namespace:
+                raise ValueError("No namespace found for service")
+            save_dynamo_state(
+                namespace,
+                arbiter.endpoint,
+                components={
+                    watcher.name: {
+                        "watcher_name": watcher.name,
+                        "cmd": watcher.cmd + " ".join(watcher.args),
+                    }
+                    for watcher in watchers
+                },
+                environment={
+                    "DYNAMO_SERVICE_CONFIG": os.environ["DYNAMO_SERVICE_CONFIG"],
+                },
+            )
         arbiter.start(
             cb=lambda _: logger.info(  # type: ignore
                 (

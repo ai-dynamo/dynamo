@@ -80,6 +80,12 @@ class VllmWorker:
                 self.engine_args.pipeline_parallel_size = 1
 
         if self.engine_args.router == "kv":
+            if not self.engine_args.enable_prefix_caching:
+                logger.info(
+                    "When using KV router, prefix caching must be enabled, setting to True"
+                )
+                self.engine_args.enable_prefix_caching = True
+
             VLLM_WORKER_ID = dynamo_context["endpoints"][0].lease_id()
             os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
             os.environ["VLLM_KV_NAMESPACE"] = "dynamo"

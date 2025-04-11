@@ -12,16 +12,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-{{- if (not .Values.objectStore.existingSecret) }}
----
-apiVersion: v1
-kind: Secret
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
 metadata:
-  name: {{ include "api-server.objectStore.secretName" . }}
-  namespace: {{ include "common.names.namespace" . | quote }}
-type: Opaque
-data:
-  accessKey: {{ .Values.objectStore.accessKey | b64enc | quote }}
-  accessSecret: {{ .Values.objectStore.accessSecret | b64enc | quote }}
-  endpoint: {{ .Values.objectStore.endpoint | b64enc | quote }}
-{{- end }}
+  name: dynamo-ingress
+spec:
+  gateways:
+  - istio-system/ingress-alb
+  hosts:
+  - "{{ .Values.istio.host }}"
+  http:
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: dynamo-store.{{ .Release.Namespace }}.svc.cluster.local
+        port:
+          number: 80
