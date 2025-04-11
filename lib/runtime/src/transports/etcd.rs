@@ -15,12 +15,12 @@
 
 use crate::{error, CancellationToken, ErrorContext, Result, Runtime};
 
-use std::sync::Arc;
-use std::collections::HashMap;
 use async_nats::jetstream::kv;
 use derive_builder::Builder;
 use derive_getters::Dissolve;
 use futures::StreamExt;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use validator::Validate;
 
@@ -387,7 +387,11 @@ pub struct KvCache {
 
 impl KvCache {
     /// Create a new KV cache for the given prefix
-    pub async fn new(client: Client, prefix: String, initial_values: HashMap<String, Vec<u8>>) -> Result<Self> {
+    pub async fn new(
+        client: Client,
+        prefix: String,
+        initial_values: HashMap<String, Vec<u8>>,
+    ) -> Result<Self> {
         let mut cache = HashMap::new();
 
         // First get all existing keys with this prefix
@@ -480,7 +484,9 @@ impl KvCache {
         let full_key = format!("{}{}", self.prefix, key);
 
         // Update etcd first
-        self.client.kv_put(&full_key, value.clone(), lease_id).await?;
+        self.client
+            .kv_put(&full_key, value.clone(), lease_id)
+            .await?;
 
         // Then update local cache
         let mut cache_write = self.cache.write().await;
@@ -582,8 +588,14 @@ mod tests {
         // Test get_all
         let all_values = kv_cache.get_all().await;
         assert_eq!(all_values.len(), 2);
-        assert_eq!(all_values.get(&format!("{}key1", prefix)), Some(&b"value1".to_vec()));
-        assert_eq!(all_values.get(&format!("{}key2", prefix)), Some(&b"value2".to_vec()));
+        assert_eq!(
+            all_values.get(&format!("{}key1", prefix)),
+            Some(&b"value1".to_vec())
+        );
+        assert_eq!(
+            all_values.get(&format!("{}key2", prefix)),
+            Some(&b"value2".to_vec())
+        );
 
         // Test put - using None for lease_id
         kv_cache.put("key3", b"value3".to_vec(), None).await?;
@@ -596,7 +608,9 @@ mod tests {
         assert_eq!(value3, Some(b"value3".to_vec()));
 
         // Test update
-        kv_cache.put("key1", b"updated_value1".to_vec(), None).await?;
+        kv_cache
+            .put("key1", b"updated_value1".to_vec(), None)
+            .await?;
 
         // Allow some time for the update to propagate
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -606,7 +620,13 @@ mod tests {
         assert_eq!(updated_value1, Some(b"updated_value1".to_vec()));
 
         // Test external update (simulating another client updating a value)
-        client.kv_put(&format!("{}key2", prefix), b"external_update".to_vec(), None).await?;
+        client
+            .kv_put(
+                &format!("{}key2", prefix),
+                b"external_update".to_vec(),
+                None,
+            )
+            .await?;
 
         // Allow some time for the update to propagate
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -617,7 +637,13 @@ mod tests {
 
         // Clean up - delete the test keys
         let etcd_client = client.etcd_client();
-        let _ = etcd_client.kv_client().delete(prefix, Some(etcd_client::DeleteOptions::new().with_prefix())).await?;
+        let _ = etcd_client
+            .kv_client()
+            .delete(
+                prefix,
+                Some(etcd_client::DeleteOptions::new().with_prefix()),
+            )
+            .await?;
 
         Ok(())
     }
