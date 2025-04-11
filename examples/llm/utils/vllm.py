@@ -28,7 +28,7 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
         "--router",
         type=str,
         choices=["random", "round-robin", "kv"],
-        default="random",
+        default="round-robin",
         help="Router type to use for scheduling requests to workers",
     )
     parser.add_argument(
