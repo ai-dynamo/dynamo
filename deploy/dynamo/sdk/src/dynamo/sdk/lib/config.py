@@ -14,7 +14,10 @@
 # limitations under the License.
 
 import json
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 
 class ServiceConfig(dict):
@@ -47,14 +50,27 @@ class ServiceConfig(dict):
         return self[service_name][key]
 
     def as_args(self, service_name, prefix=""):
-        """Extract configs as CLI args for a service, with optional prefix filtering"""
+        """Extract configs as CLI args for a service, with optional prefix filtering.
+
+        Every component will additionally have the args in the `Common` configs
+        applied if it has subscribed to that config key, i.e. the given key is provided in
+        the component's `common-configs` setting, and that key has not been overriden by the
+        component's config.
+        """
+        COMMON_CONFIG_SERVICE = "Common"
+        COMMON_CONFIG_KEY = "common-configs"
+
         if service_name not in self:
             return []
 
-        args = []
-        for key, value in self[service_name].items():
+        args: list[str] = []
+
+        def add_to_args(args: list[str], key: str, value):
             if prefix and not key.startswith(prefix):
-                continue
+                return
+
+            if key.endswith(COMMON_CONFIG_KEY):
+                return
 
             # Strip prefix if needed
             arg_key = key[len(prefix) :] if prefix and key.startswith(prefix) else key
@@ -67,5 +83,23 @@ class ServiceConfig(dict):
                 args.extend([f"--{arg_key}", json.dumps(value)])
             else:
                 args.extend([f"--{arg_key}", str(value)])
+
+        # Get service config excluding ServiceArgs if it exists
+        # We never want args to be generated from the ServiceArgs
+        service_config = self[service_name].copy()
+        if "ServiceArgs" in service_config:
+            del service_config["ServiceArgs"]
+
+        if (common := self.get(COMMON_CONFIG_SERVICE)) is not None and (
+            common_config_keys := service_config.get(COMMON_CONFIG_KEY)
+        ) is not None:
+            for key in common_config_keys:
+                if key in common and key not in service_config:
+                    add_to_args(args, key, common[key])
+
+        for key, value in service_config.items():
+            add_to_args(args, key, value)
+
+        logger.info(f"Running {service_name} with {args=}")
 
         return args

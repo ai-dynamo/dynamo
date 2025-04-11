@@ -36,6 +36,7 @@ arg_map = {
     "max_seq_len_to_capture": 8192,
     "tensor_parallel_size": int(tp_size_str),
     "pipeline_parallel_size": int(nnodes_str),
+    "enable_prefix_caching": enable_prefix_caching.lower() == "true",
 }
 json_map = {}
 if extra_engine_args != "":

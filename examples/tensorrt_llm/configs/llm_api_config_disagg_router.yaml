@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# In the case of disaggregated deployment, this config will apply to each server
+# and will be overwritten by the disaggregated config file
+
+# TODO: figure out how to generate this from the service config or vice versa
+
+model_name: "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+model_path: null
+tensor_parallel_size: 1
+moe_expert_parallel_size: 1
+enable_attention_dp: false
+max_num_tokens: 8192
+max_batch_size: 16
+trust_remote_code: true
+backend: pytorch
+enable_chunked_prefill: true
+
+kv_cache_config:
+  free_gpu_memory_fraction: 0.95
+  event_buffer_max_size: 1024
+  enable_block_reuse: true
+
+pytorch_backend_config:
+  enable_overlap_scheduler: false
+  use_cuda_graph: false
+  enable_iter_perf_stats: true

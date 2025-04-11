@@ -25,6 +25,14 @@ This directory contains examples and reference implementations for deploying Lar
 See [deployment architectures](../llm/README.md#deployment-architectures) to learn about the general idea of the architecture.
 Note that this TensorRT-LLM version does not support all the options yet.
 
+Note: TensorRT-LLM disaggregation does not support conditional disaggregation yet. You can only configure the deployment to always use aggregate or disaggregated serving.
+
+## Getting Started
+
+1. Choose a deployment architecture based on your requirements
+2. Configure the components as needed
+3. Deploy using the provided scripts
+
 ### Prerequisites
 
 Start required services (etcd and NATS) using [Docker Compose](../../deploy/docker-compose.yml)
@@ -42,6 +50,10 @@ See [here](https://nvidia.github.io/TensorRT-LLM/installation/linux.html) for mo
 Use the helper script to build a TensorRT-LLM container base image. The script uses a specific commit id from TensorRT-LLM main branch.
 
 ```bash
+# TensorRT-LLM uses git-lfs, which needs to be installed in advance.
+apt-get update && apt-get -y install git git-lfs
+git lfs install
+
 ./container/build_trtllm_base_image.sh
 ```
 
@@ -68,6 +80,29 @@ This build script internally points to the base container image built with step 
 ```
 ## Run Deployment
 
+This figure shows an overview of the major components to deploy:
+
+
+
+```
+
++------+      +-----------+      +------------------+             +---------------+
+| HTTP |----->| processor |----->|      Worker      |------------>|     Prefill   |
+|      |<-----|           |<-----|                  |<------------|     Worker    |
++------+      +-----------+      +------------------+             +---------------+
+                  |    ^                  |
+       query best |    | return           | publish kv events
+           worker |    | worker_id        v
+                  |    |         +------------------+
+                  |    +---------|     kv-router    |
+                  +------------->|                  |
+                                 +------------------+
+
+```
+
+Note: The above architecture illustrates all the components. The final components
+that get spawned depend upon the chosen graph.
+
 ### Example architectures
 
 #### Aggregated serving
@@ -82,36 +117,23 @@ cd /workspace/examples/tensorrt_llm
 dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
 ```
 
-#### Aggregated serving using Dynamo Run
-
-```bash
-cd /workspace/examples/tensorrt_llm
-dynamo run out=pystr:./engines/agg_engine.py -- --engine_args ./configs/llm_api_config.yaml
-```
-The above command should load the model specified in `llm_api_config.yaml` and start accepting
-text input from the client. For more details on the `dynamo run` command, please refer to the
-[dynamo run](/docs/guides/dynamo_run.md#python-bring-your-own-engine) documentation.
-
-Currently only aggregated deployment option is supported by `dynamo run` for TensorRT-LLM.
-Adding support for disaggregated deployment is under development. This does *not* require
-any other pre-requisites mentioned in the [Prerequisites](#prerequisites) section.
-
-
-<!--
-This is work in progress and will be enabled soon.
-
 #### Disaggregated serving
 ```bash
-cd /workspace/examples/llm
-dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
+cd /workspace/examples/tensorrt_llm
+TRTLLM_USE_UCX_KVCACHE=1 dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
 ```
+
+We are defining TRTLLM_USE_UCX_KVCACHE so that TRTLLM uses UCX for transfering the KV
+cache between the context and generation workers.
 
 #### Disaggregated serving with KV Routing
 ```bash
-cd /workspace/examples/llm
-dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
+cd /workspace/examples/tensorrt_llm
+TRTLLM_USE_UCX_KVCACHE=1 dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
 ```
--->
+
+We are defining TRTLLM_USE_UCX_KVCACHE so that TRTLLM uses UCX for transfering the KV
+cache between the context and generation workers.
 
 ### Client
 
@@ -123,7 +145,7 @@ See [close deployment](../../docs/guides/dynamo_serve.md#close-deployment) secti
 
 Remaining tasks:
 
-- [ ] Add support for the disaggregated serving.
+- [x] Add support for the disaggregated serving.
 - [ ] Add integration test coverage.
 - [ ] Add instructions for benchmarking.
 - [ ] Add multi-node support.

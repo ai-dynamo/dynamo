@@ -189,6 +189,12 @@ def build_serve_command() -> click.Group:
         help="Print the final service configuration and exit without starting the server",
         default=False,
     )
+    @click.option(
+        "--enable-planner",
+        is_flag=True,
+        help="Save a snapshot of your service state to a file that allows planner to edit your deployment configuration",
+        default=False,
+    )
     @click.pass_context
     def serve(
         ctx: click.Context,
@@ -200,6 +206,7 @@ def build_serve_command() -> click.Group:
         host: str,
         file: str | None,
         working_dir: str | None,
+        enable_planner: bool,
         **attrs: t.Any,
     ) -> None:
         """Locally run connected Dynamo services. You can pass service-specific configuration options using --ServiceName.param=value format."""
@@ -217,17 +224,17 @@ def build_serve_command() -> click.Group:
                 # Initialize service_configs as empty dict if it's None
                 # Convert nested YAML structure to flat dict with dot notation
                 for service, configs in yaml_configs.items():
+                    if service not in service_configs:
+                        service_configs[service] = {}
                     for key, value in configs.items():
-                        if service not in service_configs:
-                            service_configs[service] = {}
                         service_configs[service][key] = value
 
         # Process service-specific options
         cmdline_overrides: t.Dict[str, t.Any] = _parse_service_args(ctx.args)
         for service, configs in cmdline_overrides.items():
+            if service not in service_configs:
+                service_configs[service] = {}
             for key, value in configs.items():
-                if service not in service_configs:
-                    service_configs[service] = {}
                 service_configs[service][key] = value
 
         # Process depends
@@ -243,11 +250,12 @@ def build_serve_command() -> click.Group:
             rich.print(f"DYNAMO_SERVICE_CONFIG={json.dumps(service_configs)}")
             sys.exit(0)
 
+        configure_server_logging()
         # Set environment variable with service configuration
         if service_configs:
+            logger.info(f"Running dynamo serve with service configs {service_configs}")
             os.environ["DYNAMO_SERVICE_CONFIG"] = json.dumps(service_configs)
 
-        configure_server_logging()
         if working_dir is None:
             if os.path.isdir(os.path.expanduser(bento)):
                 working_dir = os.path.expanduser(bento)
@@ -270,6 +278,7 @@ def build_serve_command() -> click.Group:
             port=port,
             dependency_map=runner_map_dict,
             service_name=service_name,
+            enable_planner=enable_planner,
         )
 
     return cli

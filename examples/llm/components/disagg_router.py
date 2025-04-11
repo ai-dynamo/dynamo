@@ -61,6 +61,6 @@ class PyDisaggregatedRouter:
             and queue_size < max_prefill_queue_size
         )
         logger.info(
-            f"Remote prefill: {decision} (prefill length: {absolute_prefill_length}/{prompt_length}, prefill queue size: {queue_size}/{max_prefill_queue_size})"
+            f"Remote prefill: {decision} (prefill length: {absolute_prefill_length}/{max_local_prefill_length}, prefill queue size: {queue_size}/{max_prefill_queue_size})"
         )
         return decision

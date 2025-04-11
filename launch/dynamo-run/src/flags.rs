@@ -17,6 +17,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use clap::ValueEnum;
+use dynamo_runtime::component::RouterMode as RuntimeRouterMode;
+
 /// Required options depend on the in and out choices
 #[derive(clap::Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
@@ -91,6 +94,13 @@ pub struct Flags {
     ///
     #[arg(long)]
     pub leader_addr: Option<String>,
+
+    /// If using `out=dyn://..` with multiple backends, this says how to route the requests.
+    ///
+    /// Mostly interesting for KV-aware routing.
+    /// Defaults to RouterMode::Random
+    #[arg(long, default_value = "random")]
+    pub router_mode: RouterMode,
 
     /// Internal use only.
     // Start the python vllm engine sub-process.
@@ -197,4 +207,30 @@ fn parse_sglang_flags(s: &str) -> Result<SgLangFlags, String> {
         tp_rank: nums[1],
         gpu_id: nums[2],
     })
+}
+
+#[derive(Default, PartialEq, Eq, ValueEnum, Clone, Debug)]
+pub enum RouterMode {
+    #[default]
+    Random,
+    #[value(name = "round-robin")]
+    RoundRobin,
+    #[value(name = "kv")]
+    KV,
+}
+
+impl RouterMode {
+    pub fn is_kv_routing(&self) -> bool {
+        *self == RouterMode::KV
+    }
+}
+
+impl From<RouterMode> for RuntimeRouterMode {
+    fn from(r: RouterMode) -> RuntimeRouterMode {
+        match r {
+            RouterMode::RoundRobin => RuntimeRouterMode::RoundRobin,
+            RouterMode::KV => todo!("KV not implemented yet"),
+            _ => RuntimeRouterMode::Random,
+        }
+    }
 }
