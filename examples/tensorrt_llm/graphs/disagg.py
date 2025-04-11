@@ -13,23 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  endpoint: dynamo.Processor.chat/completions
-  port: 8000
+from components.frontend import Frontend
+from components.prefill_worker import TensorRTLLMPrefillWorker
+from components.processor import Processor
+from components.worker import TensorRTLLMWorker
 
-Processor:
-  engine_args: "configs/llm_api_config_router.yaml"
-  router: kv
-
-Router:
-  model-name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  min-workers: 1
-
-TensorRTLLMWorker:
-  engine_args: "configs/llm_api_config_router.yaml"
-  router: kv
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: 1
+Frontend.link(Processor).link(TensorRTLLMWorker).link(TensorRTLLMPrefillWorker)

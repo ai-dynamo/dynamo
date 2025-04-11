@@ -15,19 +15,19 @@
 
 import asyncio
 import json
+import logging
 
-from common.base_engine import ChatProcessorMixin
+from common.chat_processor import ChatProcessorMixin
 from common.parser import parse_tensorrt_llm_args
 from common.protocol import DynamoTRTLLMChatCompletionRequest
-from common.utils import RequestType, ServerType
-from components.agg_worker import TensorRTLLMWorker
+from common.utils import RequestType
 from components.kv_router import Router
-from tensorrt_llm.logger import logger
+from components.worker import TensorRTLLMWorker
 
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
-logger.set_level("debug")
+logger = logging.getLogger(__name__)
 
 
 @service(
@@ -48,10 +48,12 @@ class Processor(ChatProcessorMixin):
         class_name = self.__class__.__name__
         config = ServiceConfig.get_instance()
         config_args = config.as_args(class_name, prefix="")
-        self.args, self.engine_config = parse_tensorrt_llm_args(config_args)
-        self.router_mode = self.args.router
-        super().__init__(self.engine_config)
+        args, engine_config = parse_tensorrt_llm_args(config_args)
+        self.remote_prefill = args.remote_prefill
+        self.router_mode = args.router
         self.min_workers = 1
+
+        super().__init__(engine_config)
 
     @async_on_start
     async def async_init(self):
@@ -64,7 +66,7 @@ class Processor(ChatProcessorMixin):
             .client()
         )
         while len(self.worker_client.endpoint_ids()) < self.min_workers:
-            print(
+            logger.info(
                 f"Waiting for workers to be ready.\n"
                 f" Current: {len(self.worker_client.endpoint_ids())},"
                 f" Required: {self.min_workers}"
@@ -97,15 +99,16 @@ class Processor(ChatProcessorMixin):
                 break
 
         if worker_id == "":
-            if self.args.router == "round-robin":
-                engine_generator = await self.worker_client.round_robin(
-                    preprocessed_request.model_dump_json()
-                )
+            if self.router_mode == "round-robin":
+                self._send_request = self.worker_client.round_robin
             else:
                 # fallback to random
-                engine_generator = await self.worker_client.random(
-                    preprocessed_request.model_dump_json()
-                )
+                self._send_request = self.worker_client.random
+
+            engine_generator = await self._send_request(
+                preprocessed_request.model_dump_json()
+            )
+
         else:
             engine_generator = await self.worker_client.direct(
                 preprocessed_request.model_dump_json(), int(worker_id)
@@ -116,7 +119,6 @@ class Processor(ChatProcessorMixin):
                 engine_generator,
                 raw_request,
                 preprocessed_request.conversation,
-                ServerType.GEN,
             ):
                 logger.debug(f"[preprocessor] Response: {response}")
                 yield json.loads(response)
