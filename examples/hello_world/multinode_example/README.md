@@ -52,11 +52,11 @@ Users/Clients (HTTP)
 ### Processor Service
 - Acts as an intermediary service in the pipeline
 - Deployed on the same node as Frontend and receives requests from the Frontend
-- It calls multiple workers based on routing method, random and round-robin.
+- Calls multiple workers based on routing mode, random or round-robin.
 
 ### Worker Service
 - Functions as the final service in the pipeline
-- Deployed on different node from Frontend and Processes
+- Deployed on a different node from Frontend and Processes
 - Appends "GeneratedBy_HostName" to the text and yields tokens
 
 ## Prerequisites
@@ -68,13 +68,13 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ## Running the Single Worker Example
 In this example, we will use two nodes to demo the multinode serving.
-- Node 1
-      - Runs NATS and etcd services
-      - Deploys Frontend and Processor
-- Node 2
-      - Deploys Worker
+- Node 1  
+  - Runs NATS and etcd services
+  - Deploys Frontend and Processor
+- Node 2  
+  - Deploys Worker
 
-1. Set environment variable for NATS and etcd services
+1. Set environment variables for NATS and etcd services
 ```bash
 export NATS_SERVER="nats://Node_1_IP_ADDRESS:4222"
 export ETCD_ENDPOINTS="http://Node_1_IP_ADDRESS:2379"
@@ -108,8 +108,7 @@ curl -X 'POST' \
   "prompt": "test prompt",
   "request_id": "id_number"
 }'
-```
-
+```  
 5. You should be able to see response as below:
 `Response: {"worker_output":"test prompt_ProcessedBy_NODE1HOSTNAME_GeneratedBy_NODE2HOSTNAME","request_id":"id_number"}`
 Here `NODE1HOSTNAME` is the hostname for node 1, and `NODE2HOSTNAME` is the hostname for node 2.
@@ -124,7 +123,7 @@ In this example, we will use three nodes to demo the multinode serving.
 - Node 3
   - Deploys Worker 2
 
-1. Launch frontend and processor using the `multi_worker.yaml` config from  node 1. In this config file, we requires 2 minimun workers and set the router mode as **round robin**
+1. Launch frontend and processor using the `multi_worker.yaml` config from  node 1. In this config file, we require 2 workers and set the router mode as **round robin**
 ```bash
 dynamo serve components.graph:Frontend -f configs/multi_worker.yaml
 ```
@@ -136,10 +135,10 @@ export NATS_SERVER="nats://Node_1_IP_ADDRESS:4222"
 export ETCD_ENDPOINTS="http://Node_1_IP_ADDRESS:2379"
 dynamo serve components.worker:DummyWorker
 ```
-You should see following message from node 1 terminal window when both workers are deployed
+You should see following message from node 1‘s terminal window when both workers are deployed
 ![text](./_img/2workerready.png)
 
-3. Query the frontend use the same query as before, and run it multiple time. You should see following two responses in turn because of round-robin routing mode between 2 workers.
+3. Query the frontend use the same query as before, and run it multiple times. You should see following two responses in turn because of round-robin routing mode between 2 workers.
 
 Respone from worker 1: `Response: {"worker_output":"test prompt_ProcessedBy_NODE1HOSTNAME_GeneratedBy_NODE2HOSTNAME","request_id":"id_number"}`
 
