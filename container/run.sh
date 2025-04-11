@@ -1,4 +1,4 @@
-#!/bin/bash -e
+#!/usr/bin/env bash
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -13,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+set -e
 
 RUN_PREFIX=
 
@@ -50,7 +52,7 @@ get_options() {
                 FRAMEWORK=$2
                 shift
             else
-		missing_requirement $1
+		missing_requirement "$1"
             fi
             ;;
         --image)
@@ -58,7 +60,7 @@ get_options() {
                 IMAGE=$2
                 shift
             else
-		missing_requirement $1
+		missing_requirement "$1"
             fi
             ;;
         --target)
@@ -66,7 +68,7 @@ get_options() {
                 TARGET=$2
                 shift
             else
-                missing_requirement $1
+                missing_requirement "$1"
             fi
             ;;
 	--name)
@@ -74,7 +76,7 @@ get_options() {
                 NAME=$2
                 shift
             else
-		missing_requirement $1
+		missing_requirement "$1"
             fi
             ;;
 	--hf-cache)
@@ -82,7 +84,7 @@ get_options() {
                 HF_CACHE=$2
                 shift
             else
-		missing_requirement $1
+		missing_requirement "$1"
             fi
             ;;
 
@@ -91,7 +93,7 @@ get_options() {
                 GPUS=$2
                 shift
             else
-		missing_requirement $1
+		missing_requirement "$1"
             fi
             ;;
 	--entrypoint)
@@ -99,7 +101,7 @@ get_options() {
                 ENTRYPOINT=$2
                 shift
             else
-		missing_requirement $1
+		missing_requirement "$1"
             fi
             ;;
 	--privileged)
@@ -107,7 +109,7 @@ get_options() {
                 PRIVILEGED=$2
                 shift
             else
-		missing_requirement $1
+		missing_requirement "$1"
             fi
             ;;
 	--rm)
@@ -115,7 +117,7 @@ get_options() {
                 RM=$2
                 shift
             else
-		missing_requirement $1
+		missing_requirement "$1"
             fi
             ;;
 	-v)
@@ -123,7 +125,7 @@ get_options() {
                 VOLUME_MOUNTS+=" -v $2 "
                 shift
             else
-		missing_requirement $1
+		missing_requirement "$1"
             fi
             ;;
 	-e)
@@ -131,7 +133,7 @@ get_options() {
                 ENVIRONMENT_VARIABLES+=" -e $2 "
                 shift
             else
-		missing_requirement $1
+		missing_requirement "$1"
             fi
             ;;
 	-it)
@@ -153,10 +155,10 @@ get_options() {
             break
             ;;
          -?*)
-	    error 'ERROR: Unknown option: ' $1
+	    error 'ERROR: Unknown option: ' "$1"
             ;;
 	 ?*)
-	    error 'ERROR: Unknown option: ' $1
+	    error 'ERROR: Unknown option: ' "$1"
             ;;
         *)
             break
@@ -170,16 +172,16 @@ get_options() {
 	FRAMEWORK=$DEFAULT_FRAMEWORK
     fi
 
-    if [ ! -z "$FRAMEWORK" ]; then
+    if [ -n "$FRAMEWORK" ]; then
 	FRAMEWORK=${FRAMEWORK^^}
-	if [[ ! -n "${FRAMEWORKS[$FRAMEWORK]}" ]]; then
-	    error 'ERROR: Unknown framework: ' $FRAMEWORK
+	if [[ -z "${FRAMEWORKS[$FRAMEWORK]}" ]]; then
+	    error 'ERROR: Unknown framework: ' "$FRAMEWORK"
 	fi
     fi
 
     if [ -z "$IMAGE" ]; then
         IMAGE="dynamo:latest-${FRAMEWORK,,}"
-        if [ ! -z ${TARGET} ]; then
+        if [ -n "${TARGET}" ]; then
             IMAGE="${IMAGE}-${TARGET}"
         fi
     fi
@@ -202,7 +204,7 @@ get_options() {
 	ENTRYPOINT_STRING="--entrypoint ${ENTRYPOINT}"
     fi
 
-    if [ ! -z "$MOUNT_WORKSPACE" ]; then
+    if [ -n "$MOUNT_WORKSPACE" ]; then
 	VOLUME_MOUNTS+=" -v ${SOURCE_DIR}/..:/workspace "
 	VOLUME_MOUNTS+=" -v /tmp:/tmp "
 	VOLUME_MOUNTS+=" -v /mnt/:/mnt "
@@ -211,7 +213,7 @@ get_options() {
 	    HF_CACHE=$DEFAULT_HF_CACHE
 	fi
 
-	if [ -z ${PRIVILEGED} ]; then
+	if [ -z "${PRIVILEGED}" ]; then
 	    PRIVILEGED="TRUE"
 	fi
 
@@ -224,16 +226,16 @@ get_options() {
 	HF_CACHE=
     fi
 
-    if [ ! -z "$HF_CACHE" ]; then
-	mkdir -p $HF_CACHE
+    if [ -n "$HF_CACHE" ]; then
+	mkdir -p "$HF_CACHE"
 	VOLUME_MOUNTS+=" -v $HF_CACHE:/root/.cache/huggingface"
     fi
 
-    if [ -z ${PRIVILEGED} ]; then
+    if [ -z "${PRIVILEGED}" ]; then
 	PRIVILEGED="FALSE"
     fi
 
-    if [ -z ${RM} ]; then
+    if [ -z "${RM}" ]; then
 	RM="TRUE"
     fi
 
@@ -256,7 +258,7 @@ get_options() {
 show_help() {
     echo "usage: run.sh"
     echo "  [--image image]"
-    echo "  [--framework framework one of ${!FRAMEWORKS[@]}]"
+    echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
     echo "  [--name name for launched container, default NONE] "
     echo "  [--privileged whether to launch in privileged mode, default FALSE unless mounting workspace]"
     echo "  [--dry-run print docker commands without running]"

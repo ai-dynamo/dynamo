@@ -40,15 +40,31 @@ spec:
       - name: {{ $.Release.Name }}-{{ .name | lower }}
         image: {{ $.Values.image }}
         args:
-        - uv run dynamo serve --service-name {{ .name }} src.{{ $.Values.dynamoIdentifier }}
+        {{ if $.Values.configFilePath }}
+        - cd src && uv run dynamo serve --service-name {{ .name }} {{ $.Values.dynamoIdentifier }} -f {{ $.Values.configFilePath }}
+        {{ else }}
+        - cd src && uv run dynamo serve --service-name {{ .name }} {{ $.Values.dynamoIdentifier }}
+        {{ end }}
         command:
         - sh
         - -c
         resources:
           requests:
             cpu: "{{ .config.resources.cpu }}"
+            {{ if .config.resources.memory }}
+            memory: "{{ .config.resources.memory }}"
+            {{ end }}
+            {{ if .config.resources.gpu }}
+            nvidia.com/gpu: "{{ .config.resources.gpu }}"
+            {{ end }}
           limits:
             cpu: "{{ .config.resources.cpu }}"
+            {{ if .config.resources.memory }}
+            memory: "{{ .config.resources.memory }}"
+            {{ end }}
+            {{ if .config.resources.gpu }}
+            nvidia.com/gpu: "{{ .config.resources.gpu }}"
+            {{ end }}
         env:
         - name: TRAFFIC_TIMEOUT
           value: "{{ .config.traffic.timeout }}"

@@ -73,12 +73,7 @@ def main(
     dynamo_context["runner_map"] = runner_map
     dynamo_context["worker_id"] = worker_id
 
-    # Import service first to check configuration
-    service = import_service(bento_identifier)
-    if service_name and service_name != service.name:
-        service = service.find_dependent_by_name(service_name)
-
-    # Handle worker environment if specified
+    # Ensure environment variables are set before we initialize
     if worker_env:
         env_list: list[dict[str, t.Any]] = json.loads(worker_env)
         if worker_id is not None:
@@ -89,6 +84,10 @@ def main(
                     f"the maximum worker ID is {len(env_list)}"
                 )
             os.environ.update(env_list[worker_key])
+
+    service = import_service(bento_identifier)
+    if service_name and service_name != service.name:
+        service = service.find_dependent_by_name(service_name)
 
     configure_server_logging()
     if runner_map:

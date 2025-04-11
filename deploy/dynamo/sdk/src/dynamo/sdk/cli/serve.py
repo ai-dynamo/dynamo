@@ -189,6 +189,12 @@ def build_serve_command() -> click.Group:
         help="Print the final service configuration and exit without starting the server",
         default=False,
     )
+    @click.option(
+        "--enable-planner",
+        is_flag=True,
+        help="Save a snapshot of your service state to a file that allows planner to edit your deployment configuration",
+        default=False,
+    )
     @click.pass_context
     def serve(
         ctx: click.Context,
@@ -200,6 +206,7 @@ def build_serve_command() -> click.Group:
         host: str,
         file: str | None,
         working_dir: str | None,
+        enable_planner: bool,
         **attrs: t.Any,
     ) -> None:
         """Locally run connected Dynamo services. You can pass service-specific configuration options using --ServiceName.param=value format."""
@@ -270,6 +277,7 @@ def build_serve_command() -> click.Group:
             port=port,
             dependency_map=runner_map_dict,
             service_name=service_name,
+            enable_planner=enable_planner,
         )
 
     return cli
