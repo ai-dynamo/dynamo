@@ -4214,7 +4214,7 @@ index 819b81fb..2891854b 100644
 +            for notifs in all_new_notifs:
 +                for req_ids in notifs.values():
 +                    for req_id in req_ids:
-+                        request_notif_counter[req_id] += 1
++                        request_notif_counter[req_id.decode("utf-8")] += 1
 +
 +            if request_notif_counter:
 +                logger.debug("Request notif counter: %s", request_notif_counter)
