@@ -68,10 +68,10 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ## Running the Single Worker Example
 In this example, we will use two nodes to demo the multinode serving.
-- Node 1  
+- Node 1
   - Runs NATS and etcd services
   - Deploys Frontend and Processor
-- Node 2  
+- Node 2
   - Deploys Worker
 
 1. Set environment variables for NATS and etcd services
@@ -79,7 +79,7 @@ In this example, we will use two nodes to demo the multinode serving.
 export NATS_SERVER="nats://Node_1_IP_ADDRESS:4222"
 export ETCD_ENDPOINTS="http://Node_1_IP_ADDRESS:2379"
 ```
-2. Launch Frontend and Processor using a single command:
+2. Launch Frontend and Processor services:
 
 ```bash
 cd dynamo/examples/hello_world/multinode_example
@@ -108,9 +108,9 @@ curl -X 'POST' \
   "prompt": "test prompt",
   "request_id": "id_number"
 }'
-```  
+```
 5. You should be able to see response as below:
-`Response: {"worker_output":"test prompt_ProcessedBy_NODE1HOSTNAME_GeneratedBy_NODE2HOSTNAME","request_id":"id_number"}`  
+`Response: {"worker_output":"test prompt_ProcessedBy_NODE1HOSTNAME_GeneratedBy_NODE2HOSTNAME","request_id":"id_number"}`
 Here `NODE1HOSTNAME` is the hostname for node 1, and `NODE2HOSTNAME` is the hostname for node 2.
 
 ## Running the Two Workers Example
