@@ -43,7 +43,7 @@ from circus.sockets import CircusSocket
 from circus.watcher import Watcher
 from simple_di import Provide, inject
 
-from .allocator import ResourceAllocator
+from .allocator import NVIDIA_GPU, ResourceAllocator
 from .utils import (
     DYN_LOCAL_STATE_DIR,
     path_to_uri,
@@ -247,7 +247,7 @@ def serve_http(
     port: int = Provide[BentoMLContainer.http.port],
     dependency_map: dict[str, str] | None = None,
     service_name: str = "",
-    enable_planner: bool = False,
+    enable_local_planner: bool = False,
 ) -> Server:
     # WARNING: internal
     from _bentoml_impl.loader import load
@@ -453,7 +453,7 @@ def serve_http(
 
         arbiter = create_standalone_arbiter(**arbiter_kwargs)
         arbiter.exit_stack.callback(shutil.rmtree, uds_path, ignore_errors=True)
-        if enable_planner:
+        if enable_local_planner:
             arbiter.exit_stack.callback(
                 shutil.rmtree,
                 os.environ.get(
@@ -462,23 +462,74 @@ def serve_http(
                 ignore_errors=True,
             )
             logger.warn(f"arbiter: {arbiter.endpoint}")
-            # save deployment state for planner
             if not namespace:
                 raise ValueError("No namespace found for service")
+
+            # Track GPU allocation for each component
+            component_resources = {}
+            logger.info(f"Building component resources for {len(watchers)} watchers")
+
+            for watcher in watchers:
+                component_name = watcher.name
+                logger.info(f"Processing watcher: {component_name}")
+
+                # Extract worker info including GPU allocation
+                worker_gpu_info = {}
+
+                # Extract service name from watcher name
+                service_name = None
+                if component_name.startswith(f"{namespace}"):
+                    service_name = component_name.replace(f"{namespace}_", "", 1)
+
+                # Get GPU allocation from ResourceAllocator
+                if (
+                    not worker_gpu_info
+                    and hasattr(allocator, "_service_gpu_allocations")
+                    and service_name
+                ):
+                    gpu_allocations = getattr(allocator, "_service_gpu_allocations", {})
+                    if service_name in gpu_allocations:
+                        logger.info(
+                            f"Found GPU allocation for {service_name} in ResourceAllocator: {gpu_allocations[service_name]}"
+                        )
+                        worker_gpu_info["allocated_gpus"] = gpu_allocations[
+                            service_name
+                        ]
+
+                # Store final worker GPU info
+                component_resources[component_name] = worker_gpu_info
+                logger.info(f"Final GPU info for {component_name}: {worker_gpu_info}")
+
+            logger.info(f"Completed component resources: {component_resources}")
+
+            # Now create components dict with resources included
+            components_dict = {
+                watcher.name: {
+                    "watcher_name": watcher.name,
+                    "cmd": watcher.cmd + " -m " + " ".join(watcher.args[1:]) # WAR because it combines python-m into 1 word
+                    if hasattr(watcher, "args")
+                    else watcher.cmd,
+                    "resources": component_resources.get(watcher.name, {}),
+                }
+                for watcher in watchers
+            }
+
             save_dynamo_state(
                 namespace,
                 arbiter.endpoint,
-                components={
-                    watcher.name: {
-                        "watcher_name": watcher.name,
-                        "cmd": watcher.cmd + " ".join(watcher.args),
-                    }
-                    for watcher in watchers
-                },
+                components=components_dict,
                 environment={
                     "DYNAMO_SERVICE_CONFIG": os.environ["DYNAMO_SERVICE_CONFIG"],
+                    "SYSTEM_RESOURCES": {
+                        "total_gpus": len(allocator.system_resources[NVIDIA_GPU]),
+                        "gpu_info": [
+                            str(gpu) for gpu in allocator.system_resources[NVIDIA_GPU]
+                        ],
+                        "cpu_count": int(allocator.system_resources["cpu"]),
+                    },
                 },
             )
+
         arbiter.start(
             cb=lambda _: logger.info(  # type: ignore
                 (

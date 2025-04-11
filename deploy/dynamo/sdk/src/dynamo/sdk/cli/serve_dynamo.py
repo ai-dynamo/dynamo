@@ -31,8 +31,10 @@ import uvloop
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 from dynamo.sdk import dynamo_context
 from dynamo.sdk.lib.service import LinkedServices
+from dynamo.runtime.logging import configure_logger as configure_dynamo_logger
 
 logger = logging.getLogger(__name__)
+configure_dynamo_logger()
 
 
 @click.command()
@@ -74,8 +76,11 @@ def main(
     dynamo_context["worker_id"] = worker_id
 
     # Ensure environment variables are set before we initialize
+    logger.warning(worker_env)
     if worker_env:
         env_list: list[dict[str, t.Any]] = json.loads(worker_env)
+        for env in env_list:
+            logger.warning(env)
         if worker_id is not None:
             worker_key = worker_id - 1
             if worker_key >= len(env_list):

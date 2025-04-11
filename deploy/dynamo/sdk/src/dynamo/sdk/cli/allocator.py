@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import warnings
 from typing import Any
@@ -31,6 +32,8 @@ NVIDIA_GPU = "nvidia.com/gpu"
 DYN_DISABLE_AUTO_GPU_ALLOCATION = "DYN_DISABLE_AUTO_GPU_ALLOCATION"
 DYN_DEPLOYMENT_ENV = "DYN_DEPLOYMENT_ENV"
 
+logger = logging.getLogger(__name__)
+
 
 class ResourceAllocator:
     def __init__(self) -> None:
@@ -40,8 +43,12 @@ class ResourceAllocator:
             (1.0, 1.0)  # each item is (remaining, unit)
             for _ in range(self.remaining_gpus)
         ]
+        self._service_gpu_allocations: dict[str, list[int]] = {}
+        logger.debug(
+            f"ResourceAllocator initialized with {self.remaining_gpus} GPUs available"
+        )
 
-    def assign_gpus(self, count: float) -> list[int]:
+    def assign_gpus(self, count: float, service_name: str = None) -> list[int]:
         if count > self.remaining_gpus:
             warnings.warn(
                 f"Requested {count} GPUs, but only {self.remaining_gpus} are remaining. "
@@ -51,6 +58,9 @@ class ResourceAllocator:
                 stacklevel=3,
             )
         self.remaining_gpus = int(max(0, self.remaining_gpus - count))
+
+        assigned = []  # Will store assigned GPU indices
+
         if count < 1:  # a fractional GPU
             try:
                 # try to find the GPU used with the same fragment
@@ -73,7 +83,7 @@ class ResourceAllocator:
                 self._available_gpus[gpu] = (0.0, count)
             else:
                 self._available_gpus[gpu] = (remaining, count)
-            return [gpu]
+            assigned = [gpu]
         else:  # allocate n GPUs, n is a positive integer
             if int(count) != count:
                 raise BentoMLConfigException(
@@ -95,7 +105,31 @@ class ResourceAllocator:
                     self._available_gpus.append((1.0, 1.0))
             for gpu in unassigned[:count]:
                 self._available_gpus[gpu] = (0.0, 1.0)
-            return unassigned[:count]
+            assigned = unassigned[:count]
+
+        # Store the allocation if service_name is provided
+        if service_name and assigned:
+            if service_name in self._service_gpu_allocations:
+                self._service_gpu_allocations[service_name].extend(assigned)
+                logger.debug(
+                    f"Additional GPUs {assigned} allocated to service '{service_name}', "
+                    f"total GPUs: {self._service_gpu_allocations[service_name]}"
+                )
+            else:
+                self._service_gpu_allocations[service_name] = assigned
+                logger.debug(f"GPUs {assigned} allocated to service '{service_name}'")
+        elif assigned:
+            logger.debug(f"GPUs {assigned} allocated without service name tracking")
+
+        return assigned
+
+    def get_available_gpus(self) -> list[int]:
+        """Return list of available GPU indices."""
+        available = [
+            i for i, (remaining, _) in enumerate(self._available_gpus) if remaining > 0
+        ]
+        logger.debug(f"Available GPUs: {available}")
+        return available
 
     @inject
     def get_resource_envs(
@@ -117,20 +151,38 @@ class ResourceAllocator:
                 return num_workers, resource_envs
             else:  # workers is a number
                 num_workers = workers
+
+        logger.debug(
+            f"Service '{service.name}' requested {num_gpus} GPUs with {num_workers} workers"
+        )
+
         if num_gpus and DYN_DISABLE_AUTO_GPU_ALLOCATION not in os.environ:
             if os.environ.get(DYN_DEPLOYMENT_ENV):
                 # K8s replicas: Assumes DYNAMO_DEPLOYMENT_ENV is set
                 # each pod in replicaset will have separate GPU with same CUDA_VISIBLE_DEVICES
-                assigned = self.assign_gpus(num_gpus)
+                assigned = self.assign_gpus(num_gpus, service.name)
+                logger.debug(
+                    f"K8s deployment: Assigned GPUs {assigned} to service '{service.name}'"
+                )
                 resource_envs = [
                     {"CUDA_VISIBLE_DEVICES": ",".join(map(str, assigned))}
                     for _ in range(num_workers)
                 ]
             else:
                 # local deployment where we split all available GPUs across workers
-                for _ in range(num_workers):
-                    assigned = self.assign_gpus(num_gpus)
+                logger.debug(
+                    f"Local deployment: Allocating GPUs for {num_workers} workers of '{service.name}'"
+                )
+                for i in range(num_workers):
+                    assigned = self.assign_gpus(num_gpus, service.name)
+                    logger.debug(
+                        f"Worker {i} of '{service.name}' assigned GPUs: {assigned}"
+                    )
                     resource_envs.append(
                         {"CUDA_VISIBLE_DEVICES": ",".join(map(str, assigned))}
                     )
+
+        logger.debug(
+            f"Final resource environments for '{service.name}': {resource_envs}"
+        )
         return num_workers, resource_envs
