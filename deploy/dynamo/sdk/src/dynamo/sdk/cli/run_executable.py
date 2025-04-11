@@ -14,6 +14,7 @@
 #  limitations under the License.
 
 import os
+import site
 import subprocess
 import sys
 
@@ -31,20 +32,32 @@ def run_executable(executable_name, args=None, capture_output=True, text=True):
     Returns:
         subprocess.CompletedProcess: The result of the executed command.
     """
+    # Try to find the executable in the installed package first
+    possible_bin_dirs = []
+
+    # Check site-packages location (for installed package)
+    for site_dir in site.getsitepackages():
+        possible_bin_dirs.append(os.path.join(site_dir, "dynamo", "sdk", "cli", "bin"))
+
+    # Also check the source code location (for development)
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    bin_dir = os.path.join(script_dir, "bin")
+    possible_bin_dirs.append(os.path.join(script_dir, "bin"))
 
-    # Construct full path to executable
-    executable_path = os.path.join(bin_dir, executable_name)
-
-    # Check if executable exists
-    if not os.path.isfile(executable_path):
+    # Try to find the executable in any of the possible bin directories
+    executable_path = None
+    for bin_dir in possible_bin_dirs:
+        potential_path = os.path.join(bin_dir, executable_name)
+        if os.path.exists(potential_path):
+            executable_path = potential_path
+            break
+    print(f"Executable path: {potential_path}")
+    # If executable not found in any of the expected locations, raise error
+    if executable_path is None:
+        searched_dirs = "\n  - ".join(possible_bin_dirs)
         raise FileNotFoundError(
-            f"Executable '{executable_name}' not found in {bin_dir}"
+            f"Executable '{executable_name}' not found in any of the following directories:\n  - {searched_dirs}"
         )
-
     # Prepare command
-    command = [executable_path]
     if args:
         command = [executable_path] + args
     else:
