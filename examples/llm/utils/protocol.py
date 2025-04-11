@@ -38,6 +38,7 @@ class Tokens(BaseModel):
 
 class PrefillRequest(Request):
     request_id: str
+    ignore_response: bool = True
 
 
 class Response(BaseModel):
