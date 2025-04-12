@@ -135,6 +135,7 @@ class VllmWorker:
                 max_local_prefill_length=self.engine_args.max_local_prefill_length,
                 max_prefill_queue_size=self.engine_args.max_prefill_queue_size,
             )
+            await self.disaggregated_router.async_init()
         else:
             self.disaggregated_router = None
         logger.info("VllmWorker has been initialized")
@@ -164,7 +165,7 @@ class VllmWorker:
                 stream_name=self._prefill_queue_stream_name,
             ) as prefill_queue:
                 prefill_queue_size = await prefill_queue.get_queue_size()
-            disagg_router_decision = self.disaggregated_router.prefill_remote(
+            disagg_router_decision = await self.disaggregated_router.prefill_remote(
                 len(request.engine_prompt["prompt_token_ids"]),
                 request.prefix_hit_rate,
                 prefill_queue_size,
