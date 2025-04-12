@@ -1,11 +1,27 @@
+#  SPDX-FileCopyrightText: Copyright (c) 2020 Atalaya Tech. Inc
+#  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-License-Identifier: Apache-2.0
+#  #
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#  #
+#  http://www.apache.org/licenses/LICENSE-2.0
+#  #
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+#  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
+
 from __future__ import annotations
 
 import json
 import logging
 import os
 import typing as t
-from datetime import datetime
-from datetime import timezone
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import attr
@@ -15,50 +31,43 @@ import fs.mirror
 import fs.osfs
 import fs.walk
 import yaml
-from cattr.gen import make_dict_structure_fn
-from cattr.gen import make_dict_unstructure_fn
-from cattr.gen import override
-from fs.copy import copy_file
-from fs.tempfs import TempFS
-from simple_di import Provide
-from simple_di import inject
-
-from bentoml.exceptions import BentoMLException
-from bentoml.exceptions import InvalidArgument
-from bentoml.exceptions import NotFound
+from bentoml._internal.bento.build_config import (
+    BentoBuildConfig,
+    BentoEnvSchema,
+    BentoPathSpec,
+    CondaOptions,
+    DockerOptions,
+    PythonOptions,
+)
 from bentoml._internal.configuration import BENTOML_VERSION
 from bentoml._internal.configuration.containers import BentoMLContainer
-from bentoml._internal.models import ModelStore
-from bentoml._internal.models import copy_model
+from bentoml._internal.models import ModelStore, copy_model
 from bentoml._internal.runner import Runner
-from bentoml._internal.store import Store
-from bentoml._internal.store import StoreItem
-from bentoml._internal.tag import Tag
-from bentoml._internal.tag import to_snake_case
+from bentoml._internal.store import Store, StoreItem
+from bentoml._internal.tag import Tag, to_snake_case
 from bentoml._internal.types import PathType
 from bentoml._internal.utils import normalize_labels_value
 from bentoml._internal.utils.cattr import bentoml_cattr
 from bentoml._internal.utils.filesystem import copy_file_to_fs_folder
 from bentoml._internal.utils.uri import encode_path_for_uri
-from bentoml._internal.bento.build_config import BentoBuildConfig
-from bentoml._internal.bento.build_config import BentoEnvSchema
-from bentoml._internal.bento.build_config import BentoPathSpec
-from bentoml._internal.bento.build_config import CondaOptions
-from bentoml._internal.bento.build_config import DockerOptions
-from bentoml._internal.bento.build_config import PythonOptions
+from bentoml.exceptions import BentoMLException, InvalidArgument, NotFound
+from cattr.gen import make_dict_structure_fn, make_dict_unstructure_fn, override
+from fs.copy import copy_file
+from fs.tempfs import TempFS
+from simple_di import Provide, inject
+
+from dynamo.sdk.lib.service import LinkedServices
 
 if TYPE_CHECKING:
-    from fs.base import FS
-
     from _bentoml_sdk import Service as NewService
     from _bentoml_sdk.models import Model
     from _bentoml_sdk.service import ServiceConfig
     from _bentoml_sdk.service.dependency import Dependency
-
     from bentoml._internal.cloud.schemas.modelschemas import BentoManifestSchema
     from bentoml._internal.models import Model as StoredModel
     from bentoml._internal.service import Service
     from bentoml._internal.service.inference_api import InferenceAPI
+    from fs.base import FS
 else:
     ServiceConfig = t.Dict[str, t.Any]
 
@@ -184,9 +193,11 @@ class Bento(StoreItem):
         return self.info.entry_service
 
     def get_manifest(self, dev: bool = False) -> BentoManifestSchema:
-        from bentoml._internal.cloud.schemas.modelschemas import BentoManifestSchema
-        from bentoml._internal.cloud.schemas.modelschemas import BentoRunnerResourceSchema
-        from bentoml._internal.cloud.schemas.modelschemas import BentoRunnerSchema
+        from bentoml._internal.cloud.schemas.modelschemas import (
+            BentoManifestSchema,
+            BentoRunnerResourceSchema,
+            BentoRunnerSchema,
+        )
 
         info = self.info
         models = [str(m.tag) for m in info.all_models]
@@ -243,10 +254,8 @@ class Bento(StoreItem):
         reload: bool = False,
         enabled_features: list[str] = Provide[BentoMLContainer.enabled_features],
     ) -> Bento:
-        from _bentoml_sdk.images import Image
-        from _bentoml_sdk.images import populate_image_from_build_config
+        from _bentoml_sdk.images import Image, populate_image_from_build_config
         from _bentoml_sdk.models import BentoModel
-
         from bentoml._internal.service import Service
         from bentoml._internal.service.loader import load
 
@@ -263,6 +272,10 @@ class Bento(StoreItem):
         BentoMLContainer.model_aliases.set(build_config.model_aliases)
         # This also verifies that svc can be imported correctly
         svc = load(build_config.service, working_dir=build_ctx, reload=reload)
+
+        # TODO: At some point we need this to take place within the load function
+        LinkedServices.remove_unused_edges()
+
         if not build_config.service:
             object.__setattr__(build_config, "service", get_service_import_str(svc))
         is_legacy = isinstance(svc, Service)
@@ -663,8 +676,7 @@ class BentoModelInfo:
         )
 
     def to_model(self) -> Model[t.Any]:
-        from bentoml.models import BentoModel
-        from bentoml.models import HuggingFaceModel
+        from bentoml.models import BentoModel, HuggingFaceModel
 
         if self.registry == "bentoml":
             return BentoModel.from_info(self)
@@ -899,4 +911,4 @@ bentoml_cattr.register_unstructure_hook_factory(
     lambda cls: issubclass(cls, BaseBentoInfo),
     # Ignore tag, tag is saved via the name and version field
     lambda cls: make_dict_unstructure_fn(cls, bentoml_cattr, tag=override(omit=True)),
-) 
+)

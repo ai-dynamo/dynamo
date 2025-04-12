@@ -164,8 +164,9 @@ def build_deploy_command() -> click.Command:
             sys.path.insert(0, working_dir)
 
         # Load the Bento to validate
-        import bentoml
         from bentoml._internal.service.loader import load
+
+        import bentoml
 
         # Check if the bento exists in the local store
         bento_exists = False

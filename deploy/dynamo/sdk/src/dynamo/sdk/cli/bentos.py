@@ -110,14 +110,14 @@ def parse_delete_targets_argument_callback(
 
 
 def bento_management_commands() -> click.Group:
-    import bentoml
-    from bentoml import Tag
     from bentoml._internal.configuration import get_quiet_mode
     from bentoml._internal.configuration.containers import BentoMLContainer
     from bentoml._internal.utils import human_readable_size
-    from bentoml.bentos import build_bentofile, import_bento
     from bentoml_cli.utils import BentoMLCommandGroup
-    from dynamo.sdk.lib.bentos import build_bentofile
+
+    import bentoml
+    from bentoml import Tag
+    from dynamo.sdk.lib.bentos import build_bentofile, import_bento
 
     @click.group(cls=BentoMLCommandGroup)
     def bentos():

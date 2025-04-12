@@ -1,3 +1,20 @@
+#  SPDX-FileCopyrightText: Copyright (c) 2020 Atalaya Tech. Inc
+#  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-License-Identifier: Apache-2.0
+#  #
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#  #
+#  http://www.apache.org/licenses/LICENSE-2.0
+#  #
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+#  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
+
 """
 User facing python APIs for managing local bentos and build new bentos.
 """
@@ -8,30 +25,27 @@ import logging
 import typing as t
 
 import attr
-from simple_di import Provide
-from simple_di import inject
-
 from bentoml._internal.bento.bento import DEFAULT_BENTO_BUILD_FILES
-
-from .bento import Bento
-from .build_config import BentoBuildConfig
+from bentoml._internal.bento.build_config import BentoBuildConfig
 from bentoml._internal.configuration.containers import BentoMLContainer
 from bentoml._internal.tag import Tag
 from bentoml._internal.utils.args import set_arguments
 from bentoml._internal.utils.filesystem import resolve_user_filepath
-from bentoml.exceptions import BadInput
-from bentoml.exceptions import BentoMLException
-from bentoml.exceptions import InvalidArgument
+from bentoml.exceptions import BadInput, BentoMLException, InvalidArgument
+from simple_di import Provide, inject
+
+from dynamo.sdk.lib.bento import Bento
 
 if t.TYPE_CHECKING:
     from _bentoml_sdk import Service as NewService
-
-    from .bento import BentoStore
-    from .build_config import BentoEnvSchema
-    from .build_config import CondaOptions
-    from .build_config import DockerOptions
-    from .build_config import ModelSpec
-    from .build_config import PythonOptions
+    from bentoml._internal.bento.bento import BentoStore
+    from bentoml._internal.bento.build_config import (
+        BentoEnvSchema,
+        CondaOptions,
+        DockerOptions,
+        ModelSpec,
+        PythonOptions,
+    )
     from bentoml._internal.cloud import BentoCloudClient
     from bentoml._internal.service import Service
     from bentoml._internal.utils.circus import Server
@@ -517,7 +531,6 @@ def serve(
     configure_logging()
     if server_type == "http":
         from _bentoml_sdk import Service as NewService
-
         from bentoml._internal.service import load
 
         if not isinstance(bento, (Service, NewService)):
@@ -600,4 +613,4 @@ def serve(
             protocol_version=grpc_protocol_version,
         )
     else:
-        raise BadInput(f"Unknown server type: '{server_type}'") 
+        raise BadInput(f"Unknown server type: '{server_type}'")
