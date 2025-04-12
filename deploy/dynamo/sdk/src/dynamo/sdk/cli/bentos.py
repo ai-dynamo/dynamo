@@ -117,6 +117,7 @@ def bento_management_commands() -> click.Group:
     from bentoml._internal.utils import human_readable_size
     from bentoml.bentos import build_bentofile, import_bento
     from bentoml_cli.utils import BentoMLCommandGroup
+    from dynamo.sdk.lib.bentos import build_bentofile
 
     @click.group(cls=BentoMLCommandGroup)
     def bentos():
