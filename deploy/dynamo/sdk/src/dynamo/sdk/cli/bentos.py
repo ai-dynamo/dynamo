@@ -276,14 +276,12 @@ def build_bentofile(
 
 
 def bento_management_commands() -> click.Group:
+    import bentoml
+    from bentoml import Tag
     from bentoml._internal.configuration import get_quiet_mode
     from bentoml._internal.configuration.containers import BentoMLContainer
     from bentoml._internal.utils import human_readable_size
     from bentoml_cli.utils import BentoMLCommandGroup
-
-    import bentoml
-    from bentoml import Tag
-
     @click.group(cls=BentoMLCommandGroup)
     def bentos():
         """Commands for managing Bento bundles."""
