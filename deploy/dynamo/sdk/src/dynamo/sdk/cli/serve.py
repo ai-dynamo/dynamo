@@ -270,7 +270,6 @@ def build_serve_command() -> click.Group:
         from dynamo.sdk.cli.serving import serve_http  # type: ignore
 
         svc.inject_config()
-
         serve_http(
             bento,
             working_dir=working_dir,
