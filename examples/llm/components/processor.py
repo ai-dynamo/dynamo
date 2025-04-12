@@ -104,7 +104,7 @@ class Processor(ProcessMixIn):
         # Use the put method to update the value
         await self.etcd_kv_cache.put(
             "router",
-            self.engine_args.router.encode()
+            str(self.engine_args.router).encode()
         )
 
     async def _generate(
