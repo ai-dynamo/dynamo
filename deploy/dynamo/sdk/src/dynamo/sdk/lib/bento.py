@@ -13,24 +13,21 @@ import fs
 import fs.errors
 import fs.mirror
 import yaml
+from bentoml._internal.bento.bento import BENTO_PROJECT_DIR_NAME, BENTO_README_FILENAME
+from bentoml._internal.bento.bento import Bento as BaseBento
 from bentoml._internal.bento.bento import (
-    BENTO_PROJECT_DIR_NAME,
-    BENTO_README_FILENAME,
-    Bento as BaseBento,
+    BentoApiInfo,
     BentoInfo,
     BentoInfoV2,
     BentoModelInfo,
     BentoRunnerInfo,
-    BentoApiInfo,
     BentoServiceInfo,
-    get_service_import_str,
     get_default_svc_readme,
+    get_service_import_str,
 )
-from bentoml._internal.bento.build_config import (
-    BentoBuildConfig,
-    BentoPathSpec,
-)
+from bentoml._internal.bento.build_config import BentoBuildConfig, BentoPathSpec
 from bentoml._internal.configuration.containers import BentoMLContainer
+from bentoml._internal.service import Service
 from bentoml._internal.service.loader import load
 from bentoml._internal.tag import Tag, to_snake_case
 from bentoml._internal.utils.filesystem import copy_file_to_fs_folder
@@ -42,13 +39,12 @@ from simple_di import Provide, inject
 
 from dynamo.sdk.lib.service import LinkedServices
 
-from bentoml._internal.service import Service
-
 logger = logging.getLogger(__name__)
+
 
 class Bento(BaseBento):
     """Dynamo's Bento class that extends BentoML's Bento with additional functionality."""
-    
+
     @classmethod
     @inject
     def create(

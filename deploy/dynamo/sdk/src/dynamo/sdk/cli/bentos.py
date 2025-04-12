@@ -18,28 +18,28 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import typing as t
-import logging
 
+import attr
 import click
 import click_option_group as cog
 import rich
 import yaml
-import attr
+from bentoml._internal.bento.bento import DEFAULT_BENTO_BUILD_FILES
+from bentoml._internal.bento.build_config import BentoBuildConfig
+from bentoml._internal.configuration.containers import BentoMLContainer
+from bentoml._internal.utils.args import set_arguments
+from bentoml._internal.utils.filesystem import resolve_user_filepath
+from bentoml.exceptions import InvalidArgument
 from bentoml_cli.utils import is_valid_bento_name, is_valid_bento_tag
 from rich.syntax import Syntax
 from rich.table import Table
 from simple_di import Provide, inject
-from bentoml._internal.bento.bento import DEFAULT_BENTO_BUILD_FILES
+
 from dynamo.sdk.lib.bento import Bento
-from bentoml._internal.bento.build_config import BentoBuildConfig
-from bentoml._internal.configuration.containers import BentoMLContainer
-from bentoml._internal.tag import Tag
-from bentoml._internal.utils.args import set_arguments
-from bentoml._internal.utils.filesystem import resolve_user_filepath
-from bentoml.exceptions import InvalidArgument
 
 if t.TYPE_CHECKING:
     from bentoml._internal.bento import BentoStore
@@ -200,6 +200,7 @@ def import_bento(
         subpath=subpath,
     ).save(_bento_store)
 
+
 @inject
 def build_bentofile(
     bentofile: str | None = None,
@@ -273,13 +274,15 @@ def build_bentofile(
         return bento.save(_bento_store)
     return bento
 
+
 def bento_management_commands() -> click.Group:
-    import bentoml
-    from bentoml import Tag
     from bentoml._internal.configuration import get_quiet_mode
     from bentoml._internal.configuration.containers import BentoMLContainer
     from bentoml._internal.utils import human_readable_size
     from bentoml_cli.utils import BentoMLCommandGroup
+
+    import bentoml
+    from bentoml import Tag
 
     @click.group(cls=BentoMLCommandGroup)
     def bentos():
