@@ -98,7 +98,13 @@ class Processor(ProcessMixIn):
         self.etcd_kv_cache = await EtcdKvCache.create(
             runtime.etcd_client(),
             "/dynamo/processor/",
-            {"router": self.engine_args.router},
+            {},
+        )
+
+        # Use the put method to update the value
+        await self.etcd_kv_cache.put(
+            "router",
+            self.engine_args.router.encode()
         )
 
     async def _generate(

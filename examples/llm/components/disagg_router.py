@@ -39,10 +39,17 @@ class PyDisaggregatedRouter:
         self.etcd_kv_cache = await EtcdKvCache.create(
             runtime.etcd_client(),
             "/dynamo/disagg_router/",
-            {
-                "max_local_prefill_length": str(self.max_local_prefill_length),
-                "max_prefill_queue_size": str(self.max_prefill_queue_size),
-            },
+            {} 
+        )
+        
+        # Use the put method to update the value
+        await self.etcd_kv_cache.put(
+            "max_local_prefill_length",
+            str(self.max_local_prefill_length).encode()
+        )
+        await self.etcd_kv_cache.put(
+            "max_prefill_queue_size",
+            str(self.max_prefill_queue_size).encode()
         )
 
     async def prefill_remote(
