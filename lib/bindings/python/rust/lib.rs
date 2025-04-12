@@ -268,7 +268,7 @@ impl EtcdKvCache {
 
     fn get<'p>(&self, py: Python<'p>, key: String) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.inner.clone();
-    
+
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             if let Some(value) = inner.get(&key).await {
                 match Python::with_gil(|py| {
