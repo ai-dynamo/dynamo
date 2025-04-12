@@ -282,6 +282,7 @@ def bento_management_commands() -> click.Group:
     from bentoml._internal.configuration.containers import BentoMLContainer
     from bentoml._internal.utils import human_readable_size
     from bentoml_cli.utils import BentoMLCommandGroup
+
     @click.group(cls=BentoMLCommandGroup)
     def bentos():
         """Commands for managing Bento bundles."""
