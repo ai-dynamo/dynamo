@@ -15,7 +15,7 @@
 
 import logging
 
-from dynamo._core import EtcdKvCache
+from dynamo.runtime import EtcdKvCache
 from dynamo.sdk import dynamo_context
 
 logger = logging.getLogger(__name__)

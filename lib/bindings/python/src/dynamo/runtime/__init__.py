@@ -28,6 +28,7 @@ from dynamo._core import Component as Component
 from dynamo._core import DistributedRuntime as DistributedRuntime
 from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
 from dynamo._core import OAIChatPreprocessor as OAIChatPreprocessor
+from dynamo._core import EtcdKvCache as EtcdKvCache
 
 
 def dynamo_worker(static=False):
