@@ -253,11 +253,13 @@ def build_bentofile(
         else:
             build_config = BentoBuildConfig(service=service or "")
 
-    new_attrs = {}
+    new_attrs: dict[str, t.Any] = {}
     if name is not None:
         new_attrs["name"] = name
     if labels:
-        new_attrs["labels"] = {**(build_config.labels or {}), **labels}
+        # Ensure both dictionaries are of type dict[str, str]
+        existing_labels: dict[str, str] = build_config.labels or {}
+        new_attrs["labels"] = {**existing_labels, **labels}
 
     if new_attrs:
         build_config = attr.evolve(build_config, **new_attrs)
