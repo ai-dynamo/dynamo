@@ -268,12 +268,16 @@ impl EtcdKvCache {
 
     fn get<'p>(&self, py: Python<'p>, key: String) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.inner.clone();
-
+    
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             if let Some(value) = inner.get(&key).await {
-                Ok(Python::with_gil(|py| {
-                    PyBytes::new(py, &value).into_py_any(py).unwrap()
-                }))
+                match Python::with_gil(|py| {
+                    let py_obj = PyBytes::new(py, &value).into_pyobject(py)?;
+                    Ok(py_obj.unbind().into_any())
+                }) {
+                    Ok(result) => Ok(result),
+                    Err(e) => Err(e),
+                }
             } else {
                 Ok(Python::with_gil(|py| py.None()))
             }
@@ -297,7 +301,8 @@ impl EtcdKvCache {
                     };
                     dict.set_item(stripped_key, PyBytes::new(py, &value))?;
                 }
-                Ok(dict.into_py_any(py).unwrap())
+                let py_obj = dict.into_pyobject(py)?;
+                Ok(py_obj.unbind().into_any())
             })
         })
     }
