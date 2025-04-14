@@ -96,7 +96,8 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						DynamoNim: "dynamonim--ac4e234",
 						DynamoTag: "dynamonim:MyService1",
 						DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
-							ServiceName: "service1",
+							ServiceName:     "service1",
+							DynamoNamespace: &[]string{"default"}[0],
 							Resources: &compounaiCommon.Resources{
 								Requests: &compounaiCommon.ResourceItem{
 									CPU:    "1",
@@ -242,7 +243,8 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						DynamoNim: "dynamonim--ac4e234",
 						DynamoTag: "dynamonim:MyService2",
 						DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
-							ServiceName: "service2",
+							ServiceName:     "service2",
+							DynamoNamespace: &[]string{"default"}[0],
 							Autoscaling: &v1alpha1.Autoscaling{
 								Enabled: false,
 							},
