@@ -66,16 +66,3 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     engine_args.max_local_prefill_length = args.max_local_prefill_length
     engine_args.max_prefill_queue_size = args.max_prefill_queue_size
     return engine_args
-
-
-def shutdown_vllm_engine(engine_context, signum, frame):
-    """Shutdown the background loop"""
-    logger.info(f"Received signal {signum}, shutting down")
-    loop = asyncio.get_event_loop()
-    try:
-        loop.run_until_complete(engine_context.__aexit__(None, None, None))
-        logger.info("Engine client context shutdown complete")
-    except Exception as e:
-        logger.error(f"Error during shutdown: {e}")
-    finally:
-        loop.stop()
