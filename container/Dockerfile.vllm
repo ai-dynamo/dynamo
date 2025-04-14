@@ -289,7 +289,7 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.comman
 
 RUN mkdir -p /home/$USERNAME/.cache/
 
-ENV VLLM_KV_CAPI_PATH=$HOME/dynamo/target/release/libdynamo_llm_capi.so
+ENV VLLM_KV_CAPI_PATH=$HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
