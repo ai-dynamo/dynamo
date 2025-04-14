@@ -53,10 +53,9 @@ type etcdStorage interface {
 // DynamoDeploymentReconciler reconciles a DynamoDeployment object
 type DynamoDeploymentReconciler struct {
 	client.Client
-	Scheme      *runtime.Scheme
-	Config      commonController.Config
-	Recorder    record.EventRecorder
-	EtcdStorage etcdStorage
+	Scheme   *runtime.Scheme
+	Config   commonController.Config
+	Recorder record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamodeployments,verbs=get;list;watch;create;update;patch;delete
@@ -226,27 +225,7 @@ func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 }
 
 func (r *DynamoDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoDeployment) error {
-	logger := log.FromContext(ctx)
-	logger.Info("Finalizing the DynamoDeployment", "dynamoDeployment", dynamoDeployment)
-	// fetch the DynamoNIMConfig
-	dynamoNIMConfig, err := nim.GetDynamoNIMConfig(ctx, dynamoDeployment, r.Recorder)
-	if err != nil {
-		logger.Error(err, "Failed to get the DynamoNIMConfig")
-		return err
-	}
-	// iterate over all the dynamo services and delete associated etcd keys
-	for _, service := range dynamoNIMConfig.Services {
-		namespace := service.GetNamespace()
-		if namespace == nil {
-			// if service was not configured with a namespace, use the default namespace for the deployment
-			namespace = &[]string{nim.GetDefaultNamespace(ctx, dynamoDeployment)}[0]
-		}
-		err = r.EtcdStorage.DeleteKeys(ctx, fmt.Sprintf("/%s/components/%s", *namespace, service.Name))
-		if err != nil {
-			logger.Error(err, "Failed to delete the etcd keys for the service", "service", service.Name)
-			return err
-		}
-	}
+	// for now doing nothing
 	return nil
 }
 

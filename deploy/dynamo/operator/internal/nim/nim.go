@@ -85,7 +85,7 @@ func (s ServiceConfig) GetNamespace() *string {
 	return &s.Config.Dynamo.Namespace
 }
 
-func GetDefaultNamespace(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDeployment) string {
+func GetDefaultDynamoNamespace(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDeployment) string {
 	return fmt.Sprintf("dynamo-%s", dynamoDeployment.Name)
 }
 
@@ -247,9 +247,9 @@ func GenerateDynamoNIMDeployments(ctx context.Context, parentDynamoDeployment *v
 			dynamoNamespace := service.Config.Dynamo.Namespace
 			if dynamoNamespace == "" {
 				// if no namespace is specified, use the default namespace
-				dynamoNamespace = GetDefaultNamespace(ctx, parentDynamoDeployment)
-				deployment.Spec.DynamoNamespace = &dynamoNamespace
+				dynamoNamespace = GetDefaultDynamoNamespace(ctx, parentDynamoDeployment)
 			}
+			deployment.Spec.DynamoNamespace = &dynamoNamespace
 			dynamoServices[service.Name] = fmt.Sprintf("%s/%s", service.Config.Dynamo.Name, dynamoNamespace)
 		} else {
 			// dynamo is not enabled

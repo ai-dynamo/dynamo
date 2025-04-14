@@ -153,13 +153,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create etcd client
+	cli, err := clientv3.New(clientv3.Config{
+		Endpoints:            []string{etcdAddr},
+		DialTimeout:          5 * time.Second,
+		DialKeepAliveTime:    10 * time.Second,
+		DialKeepAliveTimeout: 3 * time.Second,
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to create etcd client")
+		os.Exit(1)
+	}
 	if err = (&controller.DynamoNimDeploymentReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("yatai-deployment"),
-		Config:   ctrlConfig,
-		NatsAddr: natsAddr,
-		EtcdAddr: etcdAddr,
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		Recorder:    mgr.GetEventRecorderFor("yatai-deployment"),
+		Config:      ctrlConfig,
+		NatsAddr:    natsAddr,
+		EtcdAddr:    etcdAddr,
+		EtcdStorage: etcd.NewStorage(cli),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoNimDeployment")
 		os.Exit(1)
@@ -173,23 +185,11 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoNimRequest")
 		os.Exit(1)
 	}
-	// Create etcd client
-	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:            []string{etcdAddr},
-		DialTimeout:          5 * time.Second,
-		DialKeepAliveTime:    10 * time.Second,
-		DialKeepAliveTimeout: 3 * time.Second,
-	})
-	if err != nil {
-		setupLog.Error(err, "unable to create etcd client")
-		os.Exit(1)
-	}
 	if err = (&controller.DynamoDeploymentReconciler{
-		Client:      mgr.GetClient(),
-		Scheme:      mgr.GetScheme(),
-		Recorder:    mgr.GetEventRecorderFor("dynamodeployment"),
-		Config:      ctrlConfig,
-		EtcdStorage: etcd.NewStorage(cli),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("dynamodeployment"),
+		Config:   ctrlConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoDeployment")
 		os.Exit(1)

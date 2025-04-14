@@ -42,6 +42,7 @@ import (
 	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/config"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
+	commonController "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/envoy"
 	"github.com/cisco-open/k8s-objectmatcher/patch"
 	"github.com/huandu/xstrings"
@@ -92,11 +93,12 @@ var ServicePortHTTPNonProxy = commonconsts.BentoServicePort + 1
 // DynamoNimDeploymentReconciler reconciles a DynamoNimDeployment object
 type DynamoNimDeploymentReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
-	Config   controller_common.Config
-	NatsAddr string
-	EtcdAddr string
+	Scheme      *runtime.Scheme
+	Recorder    record.EventRecorder
+	Config      controller_common.Config
+	NatsAddr    string
+	EtcdAddr    string
+	EtcdStorage etcdStorage
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamonimdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -146,6 +148,15 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	logs = logs.WithValues("dynamoNimDeployment", dynamoNimDeployment.Name, "namespace", dynamoNimDeployment.Namespace)
+
+	deleted, err := commonController.HandleFinalizer(ctx, dynamoNimDeployment, r.Client, r)
+	if err != nil {
+		logs.Error(err, "Failed to handle finalizer")
+		return ctrl.Result{}, err
+	}
+	if deleted {
+		return ctrl.Result{}, nil
+	}
 
 	if len(dynamoNimDeployment.Status.Conditions) == 0 {
 		logs.Info("Starting to reconcile DynamoNimDeployment")
@@ -389,6 +400,20 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 	r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "Update", "All resources updated!")
 	err = r.computeAvailableStatusCondition(ctx, req, deployment)
 	return
+}
+
+func (r *DynamoNimDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoNimDeployment *v1alpha1.DynamoNimDeployment) error {
+	logger := log.FromContext(ctx)
+	logger.Info("Finalizing the DynamoNimDeployment", "dynamoNimDeployment", dynamoNimDeployment)
+	if dynamoNimDeployment.Spec.ServiceName != "" && dynamoNimDeployment.Spec.DynamoNamespace != nil && *dynamoNimDeployment.Spec.DynamoNamespace != "" {
+		logger.Info("Deleting the etcd keys for the service", "service", dynamoNimDeployment.Spec.ServiceName, "dynamoNamespace", *dynamoNimDeployment.Spec.DynamoNamespace)
+		err := r.EtcdStorage.DeleteKeys(ctx, fmt.Sprintf("/%s/components/%s", *dynamoNimDeployment.Spec.DynamoNamespace, dynamoNimDeployment.Spec.ServiceName))
+		if err != nil {
+			logger.Error(err, "Failed to delete the etcd keys for the service", "service", dynamoNimDeployment.Spec.ServiceName, "dynamoNamespace", *dynamoNimDeployment.Spec.DynamoNamespace)
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *DynamoNimDeploymentReconciler) computeAvailableStatusCondition(ctx context.Context, req ctrl.Request, deployment *appsv1.Deployment) error {
