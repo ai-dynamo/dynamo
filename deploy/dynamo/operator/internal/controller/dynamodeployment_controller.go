@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"dario.cat/mergo"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -129,6 +130,14 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			}
 		}
 	}
+
+	// Set common env vars on each of the dynamoNimDeployments
+	for _, deployment := range dynamoNimDeployments {
+		if len(dynamoDeployment.Spec.Envs) > 0 {
+			deployment.Spec.Envs = mergeEnvs(dynamoDeployment.Spec.Envs, deployment.Spec.Envs)
+		}
+	}
+
 	// reconcile the dynamoNimRequest
 	dynamoNimRequest := &nvidiacomv1alpha1.DynamoNimRequest{
 		ObjectMeta: metav1.ObjectMeta{
@@ -179,6 +188,27 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	return ctrl.Result{}, nil
 
+}
+
+func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
+	envMap := make(map[string]corev1.EnvVar)
+
+	// Add all common environment variables.
+	for _, env := range common {
+		envMap[env.Name] = env
+	}
+
+	// Override or add with service-specific environment variables.
+	for _, env := range specific {
+		envMap[env.Name] = env
+	}
+
+	// Convert the map back to a slice.
+	merged := make([]corev1.EnvVar, 0, len(envMap))
+	for _, env := range envMap {
+		merged = append(merged, env)
+	}
+	return merged
 }
 
 // SetupWithManager sets up the controller with the Manager.
