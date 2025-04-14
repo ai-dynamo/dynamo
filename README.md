@@ -133,9 +133,9 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ### Local Development
 
-#### Container
+If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions see the [ReadMe](.devcontainer/README.md) for more details.
 
-To develop locally, we recommend working inside of the container
+Otherwise, to develop locally, we recommend working inside of the container
 
 ```bash
 ./container/build.sh
@@ -149,19 +149,6 @@ cp /workspace/target/release/dynamo-run /workspace/deploy/dynamo/sdk/src/dynamo/
 
 uv pip install -e .
 ```
-
-#### Devcontainer Environment
-
-For a consistent development environment, you can use the provided devcontainer configuration. This requires:
-- [Docker](https://www.docker.com/products/docker-desktop)
-- [VS Code](https://code.visualstudio.com/) with the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
-
-To use the devcontainer:
-1. Open the project in VS Code
-2. Click on the button in the bottom-left corner
-3. Select "Reopen in Container"
-
-This will build and start a container with all the necessary dependencies for Dynamo development.
 
 
 #### Conda Environment

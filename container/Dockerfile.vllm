@@ -19,10 +19,10 @@ RUN echo "NIXL commit: ${NIXL_COMMIT}" > /opt/nixl/commit.txt
 COPY --from=nixl . .
 
 ##################################
-########## Build Image ###########
+########## Base Image ############
 ##################################
 
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS build
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
 USER root
 
@@ -159,11 +159,11 @@ RUN ls /opt/nixl
 # Install utilities
 RUN apt update -y && apt install -y git wget curl nvtop tmux vim
 # nats
-RUN wget https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-amd64.deb && \
+RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-amd64.deb && \
     dpkg -i nats-server-v2.10.24-amd64.deb && rm nats-server-v2.10.24-amd64.deb
 # etcd
 ENV ETCD_VERSION="v3.5.18"
-RUN wget https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-amd64.tar.gz -O /tmp/etcd.tar.gz && \
+RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-amd64.tar.gz -O /tmp/etcd.tar.gz && \
     mkdir -p /usr/local/bin/etcd && \
     tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
     rm /tmp/etcd.tar.gz
@@ -249,6 +249,56 @@ RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.
     rm rustup-init && \
     chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
+#######################################
+########## Local Development ##########
+#######################################
+
+FROM base AS local-dev
+
+# https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
+# Will use the default ubuntu user, but give sudo access
+# Needed so files permissions aren't set to root ownership when writing from inside container
+
+# Don't want ubuntu to be editable, just change uid and gid. User ubuntu is hardcoded in .devcontainer
+ENV USERNAME=ubuntu
+ARG USER_UID=1000
+ARG USER_GID=1000
+
+RUN apt-get update && apt-get install -y sudo gnupg2 gnupg1 \
+    && echo "$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
+    && chmod 0440 /etc/sudoers.d/$USERNAME \
+    && mkdir -p /home/$USERNAME \
+    && chown -R $USERNAME:$USERNAME /home/$USERNAME \
+    && rm -rf /var/lib/apt/lists/* \
+    && chsh -s /bin/bash $USERNAME
+
+# This is a slow operation (~40s on my cpu)
+# Much better than chown -R $USERNAME:$USERNAME /opt/dynamo/venv (~10min on my cpu)
+COPY --from=base --chown=$USER_UID:$USER_GID /opt/dynamo/venv/ /opt/dynamo/venv/
+COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
+
+USER $USERNAME
+ENV HOME=/home/$USERNAME
+WORKDIR $HOME
+
+# https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
+RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.commandhistory/.bash_history" \
+    && mkdir -p $HOME/.commandhistory \
+    && touch $HOME/.commandhistory/.bash_history \
+    && echo "$SNIPPET" >> "$HOME/.bashrc"
+
+RUN mkdir -p /home/$USERNAME/.cache/
+
+ENV VLLM_KV_CAPI_PATH=$HOME/dynamo/target/release/libdynamo_llm_capi.so
+
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+
+##################################
+########## Build Image ###########
+##################################
+
+FROM base AS build
+
 # Working directory
 WORKDIR /workspace
 
@@ -259,6 +309,7 @@ COPY LICENSE /workspace/
 COPY Cargo.toml /workspace/
 COPY Cargo.lock /workspace/
 COPY rust-toolchain.toml /workspace/
+COPY hatch_build.py /workspace/
 
 COPY lib/ /workspace/lib/
 COPY components /workspace/components
