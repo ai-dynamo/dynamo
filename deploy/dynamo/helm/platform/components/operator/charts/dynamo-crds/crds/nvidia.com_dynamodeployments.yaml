@@ -2854,9 +2854,6 @@ spec:
                           type: object
                         serviceName:
                           type: string
-                      required:
-                      - dynamoNim
-                      - dynamoTag
                       type: object
                     status:
                       properties:
