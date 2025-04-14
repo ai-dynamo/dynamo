@@ -14,7 +14,7 @@
 # limitations under the License.
 
 Frontend:
-  message: "Hello from Frontend"
+  message: "earth"
   port: 8000
   ServiceArgs:
     workers: 1
@@ -22,14 +22,14 @@ Frontend:
       cpu: "1"
 
 Middle:
-  message: "Hello from Middle"
+  message: "moon"
   ServiceArgs:
     workers: 1
     resources:
       cpu: "1"
 
 Backend:
-  message: "Hello from Backend"
+  message: "mars"
   ServiceArgs:
     workers: 2
     resources:

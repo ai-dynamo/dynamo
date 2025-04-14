@@ -33,7 +33,6 @@ def configure_server_logging():
     if _logging_configured:
         return
 
-    print("configuring server logging")
     # First, remove any existing handlers to avoid duplication
     root_logger = logging.getLogger()
     for handler in root_logger.handlers[:]:

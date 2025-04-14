@@ -13,10 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+
 from pydantic import BaseModel
 
 from dynamo.sdk import DYNAMO_IMAGE, api, depends, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
+from dynamo.sdk.lib.logging import configure_server_logging
+
+# Configure logging
+configure_server_logging()
+logger = logging.getLogger(__name__)
 
 """
 Pipeline Architecture:
@@ -57,19 +64,17 @@ class ResponseType(BaseModel):
 )
 class Backend:
     def __init__(self) -> None:
-        print("Starting backend")
+        logger.info("Starting backend")
         config = ServiceConfig.get_instance()
-        self.message = config.get("Backend", {}).get(
-            "message", "Default Backend Message"
-        )
-        print(f"Backend config message: {self.message}")
+        self.message = config.get("Backend", {}).get("message", "back")
+        logger.info(f"Backend config message: {self.message}")
 
     @dynamo_endpoint()
     async def generate(self, req: RequestType):
         """Generate tokens."""
         req_text = req.text
-        print(f"Backend received: {req_text}")
-        text = f"{req_text}-back"
+        logger.info(f"Backend received: {req_text}")
+        text = f"{req_text}-{self.message}"
         for token in text.split():
             yield f"Backend: {token}"
 
@@ -82,20 +87,20 @@ class Middle:
     backend = depends(Backend)
 
     def __init__(self) -> None:
-        print("Starting middle")
+        logger.info("Starting middle")
         config = ServiceConfig.get_instance()
-        self.message = config.get("Middle", {}).get("message", "Default Middle Message")
-        print(f"Middle config message: {self.message}")
+        self.message = config.get("Middle", {}).get("message", "mid")
+        logger.info(f"Middle config message: {self.message}")
 
     @dynamo_endpoint()
     async def generate(self, req: RequestType):
         """Forward requests to backend."""
         req_text = req.text
-        print(f"Middle received: {req_text}")
-        text = f"{req_text}-mid"
+        logger.info(f"Middle received: {req_text}")
+        text = f"{req_text}-{self.message}"
         next_request = RequestType(text=text).model_dump_json()
         async for response in self.backend.generate(next_request):
-            print(f"Middle received response: {response}")
+            logger.info(f"Middle received response: {response}")
             yield f"Middle: {response}"
 
 
@@ -106,21 +111,19 @@ class Frontend:
     middle = depends(Middle)
 
     def __init__(self) -> None:
-        print("Starting frontend")
+        logger.info("Starting frontend")
         config = ServiceConfig.get_instance()
-        self.message = config.get("Frontend", {}).get(
-            "message", "Default Frontend Message"
-        )
+        self.message = config.get("Frontend", {}).get("message", "front")
         self.port = config.get("Frontend", {}).get("port", 8000)
-        print(f"Frontend config message: {self.message}")
-        print(f"Frontend config port: {self.port}")
+        logger.info(f"Frontend config message: {self.message}")
+        logger.info(f"Frontend config port: {self.port}")
 
     @api
     async def generate(self, text):
         """Stream results from the pipeline."""
-        print(f"Frontend received: {text}")
-        print(f"Frontend received type: {type(text)}")
+        logger.info(f"Frontend received: {text}")
+        logger.info(f"Frontend received type: {type(text)}")
         txt = RequestType(text=text)
-        print(f"Frontend sending: {type(txt)}")
+        logger.info(f"Frontend sending: {type(txt)}")
         async for response in self.middle.generate(txt.model_dump_json()):
             yield f"Frontend: {response}"
