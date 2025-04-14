@@ -34,13 +34,12 @@ from bentoml_cli.utils import BentoMLCommandGroup
 from rich.console import Console
 from simple_di import Provide, inject
 
-from .utils import resolve_service_config
-logger = logging.getLogger(__name__)
-
 from dynamo.sdk.lib.logging import configure_server_logging
 configure_server_logging()
 
+from .utils import resolve_service_config
 
+logger = logging.getLogger(__name__)
 
 if t.TYPE_CHECKING:
     from bentoml._internal.cloud import BentoCloudClient
