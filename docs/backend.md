@@ -128,8 +128,8 @@ components, see the `dynamo serve`
 
 ### Client Example
 
-Here's a simple example of a client that directly calls the TextProcessor
-worker through Dynamo without any intermediate services:
+Here's a simple example of a client that directly calls the example
+worker above through Dynamo without any intermediate services:
 
 ```python
 import asyncio
@@ -155,12 +155,9 @@ async def call_worker():
 
     # Call the dynamo endpoint exposed by the worker
     responses = await client.generate(request)
-
-    # Print the responses
     for response in responses:
         print(f"Response: {response.text}")
 
-# Run the async function
 if __name__ == "__main__":
     asyncio.run(call_worker())
 ```
