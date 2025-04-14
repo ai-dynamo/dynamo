@@ -241,7 +241,7 @@ def _parse_service_args(args: list[str]) -> t.Dict[str, t.Any]:
         service = "Worker"
         nested_keys = ["ServiceArgs", "envs", "CUDA_VISIBLE_DEVICES"]
 
-        And returns returns: ("VllmWorker", "ServiceArgs", {"envs": {"CUDA_VISIBLE_DEVICES": "0,1"}})
+        And returns: ("VllmWorker", "ServiceArgs", {"envs": {"CUDA_VISIBLE_DEVICES": "0,1"}})
 
         We then use deep_update to update the service_configs dictionary with this nested value.
         """
