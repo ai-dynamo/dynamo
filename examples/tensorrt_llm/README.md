@@ -50,6 +50,10 @@ See [here](https://nvidia.github.io/TensorRT-LLM/installation/linux.html) for mo
 Use the helper script to build a TensorRT-LLM container base image. The script uses a specific commit id from TensorRT-LLM main branch.
 
 ```bash
+# TensorRT-LLM uses git-lfs, which needs to be installed in advance.
+apt-get update && apt-get -y install git git-lfs
+git lfs install
+
 ./container/build_trtllm_base_image.sh
 ```
 
@@ -147,4 +151,4 @@ Remaining tasks:
 - [ ] Add multi-node support.
 - [ ] Merge the code base with llm example to reduce the code duplication.
 - [ ] Use processor from dynamo-llm framework.
-- [ ] Explore NIXL integration with TensorRT-LLM.
+- [ ] Enable NIXL integration with TensorRT-LLM once available. Currently, TensorRT-LLM uses UCX to transfer KV cache.
