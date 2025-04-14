@@ -17,6 +17,7 @@
 import asyncio
 import logging
 import os
+import signal
 
 from components.disagg_router import PyDisaggregatedRouter
 from components.prefill_worker import PrefillWorker
@@ -93,6 +94,9 @@ class VllmWorker:
             logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
         self.metrics_publisher = KvMetricsPublisher()
 
+        signal.signal(signal.SIGTERM, self.shutdown_vllm_engine)
+        signal.signal(signal.SIGINT, self.shutdown_vllm_engine)
+
     @async_on_start
     async def async_init(self):
         self._engine_context = build_async_engine_client_from_engine_args(
@@ -139,6 +143,18 @@ class VllmWorker:
         else:
             self.disaggregated_router = None
         logger.info("VllmWorker has been initialized")
+
+    def shutdown_vllm_engine(self, signum, frame):
+        """Shutdown the background loop"""
+        logger.info(f"Received signal {signum}, shutting down")
+        loop = asyncio.get_event_loop()
+        try:
+            self.engine_client.close()
+            logger.info("VllmWorker shutdown complete")
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+        finally:
+            loop.stop()
 
     async def create_metrics_publisher_endpoint(self):
         component = dynamo_context["component"]
