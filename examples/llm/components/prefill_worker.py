@@ -110,7 +110,7 @@ class PrefillWorker:
         loop = asyncio.get_event_loop()
         try:
             self.engine_client.close()
-            logger.info("Engine client context shutdown complete")
+            logger.info("PrefillWorker shutdown complete")
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
         finally:
