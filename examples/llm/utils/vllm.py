@@ -15,16 +15,10 @@
 
 # TODO: rename to avoid ambiguity with vllm package
 
-import asyncio
-import logging
-
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 from dynamo.sdk.lib.config import ServiceConfig
-
-logger = logging.getLogger(__name__)
-
 
 def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     config = ServiceConfig.get_instance()
