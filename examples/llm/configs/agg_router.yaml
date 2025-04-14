@@ -31,7 +31,6 @@ Router:
 VllmWorker:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   enforce-eager: true
-  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
   block-size: 64
   max-model-len: 16384
   max-num-batched-tokens: 16384
