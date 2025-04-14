@@ -201,6 +201,8 @@ def create_deployment(
     if service_configs:
         config_json = json.dumps(service_configs)
         logger.info(f"Deployment service configuration: {config_json}")
+        # TODO: The logger line above this is not working so print is current WAR
+        print(f"Deployment service configuration: {config_json}")
         env_dicts.append({"name": "DYN_DEPLOYMENT_CONFIG", "value": config_json})
 
     config_params = DeploymentConfigParameters(
