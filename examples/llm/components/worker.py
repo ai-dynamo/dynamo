@@ -81,6 +81,12 @@ class VllmWorker:
                 self.engine_args.pipeline_parallel_size = 1
 
         if self.engine_args.router == "kv":
+            if not self.engine_args.enable_prefix_caching:
+                logger.info(
+                    "When using KV router, prefix caching must be enabled, setting to True"
+                )
+                self.engine_args.enable_prefix_caching = True
+
             VLLM_WORKER_ID = dynamo_context["endpoints"][0].lease_id()
             os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
             os.environ["VLLM_KV_NAMESPACE"] = "dynamo"
@@ -133,6 +139,7 @@ class VllmWorker:
                 max_local_prefill_length=self.engine_args.max_local_prefill_length,
                 max_prefill_queue_size=self.engine_args.max_prefill_queue_size,
             )
+            await self.disaggregated_router.async_init()
         else:
             self.disaggregated_router = None
         logger.info("VllmWorker has been initialized")
@@ -174,7 +181,7 @@ class VllmWorker:
                 stream_name=self._prefill_queue_stream_name,
             ) as prefill_queue:
                 prefill_queue_size = await prefill_queue.get_queue_size()
-            disagg_router_decision = self.disaggregated_router.prefill_remote(
+            disagg_router_decision = await self.disaggregated_router.prefill_remote(
                 len(request.engine_prompt["prompt_token_ids"]),
                 request.prefix_hit_rate,
                 prefill_queue_size,

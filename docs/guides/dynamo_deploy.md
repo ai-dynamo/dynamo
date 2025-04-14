@@ -1,3 +1,20 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+
 # Deploying Dynamo Inference Graphs to Kubernetes using Helm
 
 This guide will walk you through the process of deploying an inference graph created using the Dynamo SDK onto a Kubernetes cluster. Note that this is currently an experimental feature.
@@ -6,7 +23,7 @@ This guide will walk you through the process of deploying an inference graph cre
 
 ![Dynamo Deploy](../images/dynamo-deploy.png)
 
-While this guide covers deployment of Dynamo inference graphs using Helm, the preferred method to deploy an inference graph in the future will be via the Dynamo Kubernetes Operator. Dynamo Kubernetes Operator is a soon to be released cloud platform that will simplify the deployment and management of Dynamo inference graphs. It includes a set of components (Operator, UIs, Kubernetes Custom Resources, etc.) to simplify the deployment and management of Dynamo inference graphs.
+While this guide covers deployment of Dynamo inference graphs using Helm, the preferred method to deploy an inference graph is via the Dynamo cloud platform. The Dynamo cloud platform, documented in [deploy/dynamo/README.md](../../deploy/dynamo/README.md), simplifies the deployment and management of Dynamo inference graphs. It includes a set of components (Operator, Kubernetes Custom Resources, etc.) that work together to streamline the deployment and management process.
 
  Once an inference graph is defined using the Dynamo SDK, it can be deployed onto a Kubernetes cluster using a simple `dynamo deploy` command that orchestrates the following deployment steps:
 
@@ -67,27 +84,27 @@ Follow these steps to set up the namespace and install required components:
 ```bash
 export NAMESPACE=dynamo-playground
 export RELEASE_NAME=dynamo-platform
+export PROJECT_ROOT=$(pwd)
 ```
 
 2. Install NATS messaging system:
 ```bash
 # Navigate to dependencies directory
-cd deploy/Kubernetes/pipeline/dependencies
+cd $PROJECT_ROOT/deploy/Kubernetes/pipeline/dependencies
 
 # Add and update NATS Helm repository
 helm repo add nats https://nats-io.github.io/k8s/helm/charts/
 helm repo update
 
 # Install NATS with custom values
-helm install --namespace ${NAMESPACE} dynamo-platform-nats nats/nats \
-    --create-namespace \
+helm install --namespace ${NAMESPACE} ${RELEASE_NAME}-nats nats/nats \
     --values nats-values.yaml
 ```
 
 3. Install etcd key-value store:
 ```bash
 # Install etcd using Bitnami chart
-helm install --namespace ${NAMESPACE} dynamo-platform-etcd \
+helm install --namespace ${NAMESPACE} ${RELEASE_NAME}-etcd \
     oci://registry-1.docker.io/bitnamicharts/etcd \
     --values etcd-values.yaml
 ```
@@ -99,9 +116,13 @@ After completing these steps, your cluster will have the necessary messaging and
 Follow these steps to containerize and deploy your inference pipeline:
 
 1. Build and containerize the pipeline:
+
+> [!NOTE]
+> For instructions on building the Dynamo base image, see the [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image) section in the main README.
+
 ```bash
 # Navigate to example directory
-cd examples/hello_world
+cd $PROJECT_ROOT/examples/hello_world
 
 # Set runtime image name
 export DYNAMO_IMAGE=<dynamo_runtime_image_name>
@@ -121,8 +142,11 @@ docker push <TAG>
 
 3. Deploy using Helm:
 ```bash
+# Navigate to the deployment directory
+cd $PROJECT_ROOT/deploy/Kubernetes/pipeline
+
 # Set release name for Helm
-export HELM_RELEASE=helloworld
+export HELM_RELEASE=hello-world-manual
 
 # Generate Helm values file from Frontend service
 dynamo get frontend > pipeline-values.yaml
@@ -138,7 +162,7 @@ helm upgrade -i "$HELM_RELEASE" ./chart \
 4. Test the deployment:
 ```bash
 # Forward the service port to localhost
-kubectl -n ${NAMESPACE} port-forward svc/helloworld-frontend 3000:80
+kubectl -n ${NAMESPACE} port-forward svc/${HELM_RELEASE}-frontend 3000:80
 
 # Test the API endpoint
 curl -X 'POST' 'http://localhost:3000/generate' \
