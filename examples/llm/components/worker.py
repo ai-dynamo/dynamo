@@ -88,7 +88,6 @@ class VllmWorker:
             logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
         self.metrics_publisher = KvMetricsPublisher()
 
-        # setup signal handlers to clean up subprocesses
         signal.signal(signal.SIGTERM, self.shutdown_vllm_engine)
         signal.signal(signal.SIGINT, self.shutdown_vllm_engine)
 
@@ -143,7 +142,7 @@ class VllmWorker:
         logger.info(f"Received signal {signum}, shutting down")
         loop = asyncio.get_event_loop()
         try:
-            loop.run_until_complete(self._engine_context.__aexit__(None, None, None))
+            self.engine_client.close()
             logger.info("VllmWorker shutdown complete")
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")

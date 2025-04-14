@@ -75,7 +75,6 @@ class PrefillWorker:
             )
             self.engine_args.enable_prefix_caching = False
 
-        # setup signal handlers to clean up subprocesses
         signal.signal(signal.SIGTERM, self.shutdown_vllm_engine)
         signal.signal(signal.SIGINT, self.shutdown_vllm_engine)
 
@@ -110,7 +109,7 @@ class PrefillWorker:
         logger.info(f"Received signal {signum}, shutting down")
         loop = asyncio.get_event_loop()
         try:
-            loop.run_until_complete(self._engine_context.__aexit__(None, None, None))
+            self.engine_client.close()
             logger.info("Engine client context shutdown complete")
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
