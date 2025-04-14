@@ -26,6 +26,8 @@ For more detailed information on these concepts, see the
 Here is the rough outline of what a worker may look like in its simplest form:
 
 ```python
+from dynamo.sdk import DYNAMO_IMAGE, dynamo_endpoint, service
+
 @service(
     dynamo={
         "enabled": True,
