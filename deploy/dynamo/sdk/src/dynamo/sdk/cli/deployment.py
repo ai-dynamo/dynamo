@@ -33,9 +33,9 @@ from simple_di import Provide, inject
 
 from dynamo.sdk.lib.logging import configure_server_logging
 
-configure_server_logging()
-
 from .utils import resolve_service_config
+
+configure_server_logging()
 
 logger = logging.getLogger(__name__)
 
