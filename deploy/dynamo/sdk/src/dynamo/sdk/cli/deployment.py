@@ -19,22 +19,20 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import typing as t
 from http import HTTPStatus
 
 import click
-import yaml
 from bentoml._internal.cloud.base import Spinner
 from bentoml._internal.cloud.deployment import Deployment, DeploymentConfigParameters
 from bentoml._internal.configuration.containers import BentoMLContainer
 from bentoml._internal.utils import add_experimental_docstring
 from bentoml.exceptions import BentoMLException
-from bentoml_cli.utils import BentoMLCommandGroup
 from rich.console import Console
 from simple_di import Provide, inject
 
 from dynamo.sdk.lib.logging import configure_server_logging
+
 configure_server_logging()
 
 from .utils import resolve_service_config

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from pydantic import BaseModel
+
 from dynamo.sdk import DYNAMO_IMAGE, api, depends, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
@@ -58,7 +59,9 @@ class Backend:
     def __init__(self) -> None:
         print("Starting backend")
         config = ServiceConfig.get_instance()
-        self.message = config.get("Backend", {}).get("message", "Default Backend Message")
+        self.message = config.get("Backend", {}).get(
+            "message", "Default Backend Message"
+        )
         print(f"Backend config message: {self.message}")
 
     @dynamo_endpoint()
@@ -105,7 +108,9 @@ class Frontend:
     def __init__(self) -> None:
         print("Starting frontend")
         config = ServiceConfig.get_instance()
-        self.message = config.get("Frontend", {}).get("message", "Default Frontend Message")
+        self.message = config.get("Frontend", {}).get(
+            "message", "Default Frontend Message"
+        )
         self.port = config.get("Frontend", {}).get("port", 8000)
         print(f"Frontend config message: {self.message}")
         print(f"Frontend config port: {self.port}")

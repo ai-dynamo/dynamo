@@ -15,6 +15,7 @@
 #  limitations under the License.
 #  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
 
+import collections
 import contextlib
 import json
 import logging
@@ -23,14 +24,14 @@ import pathlib
 import random
 import socket
 import typing as t
-import collections
-import yaml
 
 import click
 import psutil
+import yaml
 from click import Command, Context
 
 from dynamo.sdk.lib.logging import configure_server_logging
+
 configure_server_logging()
 
 logger = logging.getLogger(__name__)
@@ -284,11 +285,11 @@ def resolve_service_config(
     args: list[str] | None = None,
 ) -> dict[str, dict[str, t.Any]]:
     """Resolve service configuration from file and command line arguments.
-    
+
     Args:
         config_file: Path to YAML config file or file object
         args: List of command line arguments
-        
+
     Returns:
         Dictionary mapping service names to their configurations
     """
@@ -301,13 +302,17 @@ def resolve_service_config(
             # Use deployment config directly
             service_configs = deployment_config
             logger.info(f"Successfully loaded deployment config: {service_configs}")
-            logger.warning("DYN_DEPLOYMENT_CONFIG found in environment - ignoring configuration file and command line arguments")
+            logger.warning(
+                "DYN_DEPLOYMENT_CONFIG found in environment - ignoring configuration file and command line arguments"
+            )
         except Exception as e:
             logger.warning(f"Failed to parse DYN_DEPLOYMENT_CONFIG: {e}")
     else:
         # Load file if provided
         if config_file:
-            with open(config_file) if isinstance(config_file, str) else contextlib.nullcontext(config_file) as f:
+            with open(config_file) if isinstance(
+                config_file, str
+            ) else contextlib.nullcontext(config_file) as f:
                 yaml_configs = yaml.safe_load(f)
                 logger.debug(f"Loaded config from file: {yaml_configs}")
                 # Initialize service_configs as empty dict if it's None

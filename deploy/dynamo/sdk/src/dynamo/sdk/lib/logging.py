@@ -22,16 +22,17 @@ from dynamo.runtime.logging import configure_logger as configure_dynamo_logger
 # Flag to track if logging has been configured
 _logging_configured = False
 
+
 def configure_server_logging():
     """
     A single place to configure logging for Dynamo.
     This function will only run once, subsequent calls will be ignored.
     """
     global _logging_configured
-    
+
     if _logging_configured:
         return
-        
+
     print("configuring server logging")
     # First, remove any existing handlers to avoid duplication
     root_logger = logging.getLogger()
@@ -59,5 +60,5 @@ def configure_server_logging():
         logger.handlers = []
         logger.setLevel(logging.ERROR)
         logger.propagate = True
-        
+
     _logging_configured = True

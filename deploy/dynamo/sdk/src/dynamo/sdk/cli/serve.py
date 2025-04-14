@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-
 import json
 import logging
 import os
@@ -27,7 +26,9 @@ from typing import Optional
 
 import click
 import rich
+
 from .utils import resolve_service_config
+
 if t.TYPE_CHECKING:
     P = t.ParamSpec("P")  # type: ignore
     F = t.Callable[P, t.Any]  # type: ignore
@@ -169,8 +170,8 @@ def build_serve_command() -> click.Group:
             service_name=service_name,
             enable_planner=enable_planner,
         )
+
     return cli
 
 
 serve_command = build_serve_command()
-

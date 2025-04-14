@@ -13,7 +13,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, List, Optional
 
 from kubernetes import client, config
 
@@ -46,7 +46,11 @@ def create_custom_resource(
 
 
 def create_dynamo_deployment(
-    name: str, namespace: str, dynamo_nim: str, labels: Dict[str, str], envs: Optional[List[Dict[str, str]]] = None
+    name: str,
+    namespace: str,
+    dynamo_nim: str,
+    labels: Dict[str, str],
+    envs: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """
     Create a DynamoDeployment custom resource.
@@ -65,11 +69,7 @@ def create_dynamo_deployment(
         "apiVersion": "nvidia.com/v1alpha1",
         "kind": "DynamoDeployment",
         "metadata": {"name": name, "namespace": namespace, "labels": labels},
-        "spec": {
-            "dynamoNim": dynamo_nim,
-            "services": {},
-            "envs": envs if envs else []
-        },
+        "spec": {"dynamoNim": dynamo_nim, "services": {}, "envs": envs if envs else []},
     }
 
     return create_custom_resource(
