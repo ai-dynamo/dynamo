@@ -147,9 +147,11 @@ Deploy the platform:
 ```bash
 ./deploy.sh
 ```
-3. Expose Dynamo Cloud externally
 
-You must also expose the `dynamo-store` service within the namespace externally. This will be the endpoint the CLI uses to interface with Dynamo Cloud. You might setup an Ingress, use an `ExternalService` with Istio, or simply port-forward. In our docs, we refer to this externally available endpoint as `DYNAMO_SERVER`
+3. **Expose Dynamo Cloud Externally**
+
+You must also expose the `dynamo-store` service within the namespace externally. This will be the endpoint the CLI uses to interface with Dynamo Cloud. You might setup an Ingress, use an `ExternalService` with Istio, or simply port-forward. In our docs, we refer to this externally available endpoint as `DYNAMO_SERVER`.
+
 ## Next Steps
 
 After deploying the Dynamo cloud platform, you can:
