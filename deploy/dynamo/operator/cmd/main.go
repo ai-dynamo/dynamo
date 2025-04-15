@@ -23,9 +23,11 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
+	clientv3 "go.etcd.io/etcd/client/v3"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 
@@ -41,6 +43,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/etcd"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
 	//+kubebuilder:scaffold:imports
 )
@@ -150,13 +153,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create etcd client
+	cli, err := clientv3.New(clientv3.Config{
+		Endpoints:            []string{etcdAddr},
+		DialTimeout:          5 * time.Second,
+		DialKeepAliveTime:    10 * time.Second,
+		DialKeepAliveTimeout: 3 * time.Second,
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to create etcd client")
+		os.Exit(1)
+	}
 	if err = (&controller.DynamoNimDeploymentReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("yatai-deployment"),
-		Config:   ctrlConfig,
-		NatsAddr: natsAddr,
-		EtcdAddr: etcdAddr,
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		Recorder:    mgr.GetEventRecorderFor("yatai-deployment"),
+		Config:      ctrlConfig,
+		NatsAddr:    natsAddr,
+		EtcdAddr:    etcdAddr,
+		EtcdStorage: etcd.NewStorage(cli),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoNimDeployment")
 		os.Exit(1)

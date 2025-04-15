@@ -20,8 +20,11 @@
 package controller
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -140,6 +143,88 @@ func TestIsDeploymentReady(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IsDeploymentReady(tt.args.deployment); got != tt.want {
 				t.Errorf("IsDeploymentReady() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+type mockEtcdStorage struct {
+	deleteKeysFunc func(ctx context.Context, prefix string) error
+}
+
+func (m *mockEtcdStorage) DeleteKeys(ctx context.Context, prefix string) error {
+	return m.deleteKeysFunc(ctx, prefix)
+}
+
+func TestDynamoNimDeploymentReconciler_FinalizeResource(t *testing.T) {
+	type fields struct {
+		EtcdStorage etcdStorage
+	}
+	type args struct {
+		ctx                 context.Context
+		dynamoNimDeployment *v1alpha1.DynamoNimDeployment
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		wantErr bool
+	}{
+		{
+			name: "delete etcd keys",
+			fields: fields{
+				EtcdStorage: &mockEtcdStorage{
+					deleteKeysFunc: func(ctx context.Context, prefix string) error {
+						if prefix == "/default/components/service1" {
+							return nil
+						}
+						return fmt.Errorf("invalid prefix: %s", prefix)
+					},
+				},
+			},
+			args: args{
+				ctx: context.Background(),
+				dynamoNimDeployment: &v1alpha1.DynamoNimDeployment{
+					Spec: v1alpha1.DynamoNimDeploymentSpec{
+						DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+							ServiceName:     "service1",
+							DynamoNamespace: &[]string{"default"}[0],
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "delete etcd keys (error)",
+			fields: fields{
+				EtcdStorage: &mockEtcdStorage{
+					deleteKeysFunc: func(ctx context.Context, prefix string) error {
+						return fmt.Errorf("invalid prefix: %s", prefix)
+					},
+				},
+			},
+			args: args{
+				ctx: context.Background(),
+				dynamoNimDeployment: &v1alpha1.DynamoNimDeployment{
+					Spec: v1alpha1.DynamoNimDeploymentSpec{
+						DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+							ServiceName:     "service1",
+							DynamoNamespace: &[]string{"default"}[0],
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &DynamoNimDeploymentReconciler{
+				EtcdStorage: tt.fields.EtcdStorage,
+			}
+			if err := r.FinalizeResource(tt.args.ctx, tt.args.dynamoNimDeployment); (err != nil) != tt.wantErr {
+				t.Errorf("DynamoNimDeploymentReconciler.FinalizeResource() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}

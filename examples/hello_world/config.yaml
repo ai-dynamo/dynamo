@@ -12,9 +12,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-apiVersion: v2
-name: dynamo-crds
-description: A Helm chart for CRDs of dynamo operator
-type: application
-version: 0.1.2
-dependencies: []
+
+Frontend:
+  message: "earth"
+  port: 8000
+  ServiceArgs:
+    workers: 1
+    resources:
+      cpu: "1"
+
+Middle:
+  message: "moon"
+  ServiceArgs:
+    workers: 1
+    resources:
+      cpu: "1"
+
+Backend:
+  message: "mars"
+  ServiceArgs:
+    workers: 2
+    resources:
+      cpu: "1"

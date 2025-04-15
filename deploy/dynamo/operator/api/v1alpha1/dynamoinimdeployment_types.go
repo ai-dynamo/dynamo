@@ -36,18 +36,29 @@ const (
 
 // DynamoNimDeploymentSpec defines the desired state of DynamoNimDeployment
 type DynamoNimDeploymentSpec struct {
+	DynamoNim string `json:"dynamoNim"`
+	// contains the tag of the DynamoNim: for example, "my_package:MyService"
+	DynamoTag string `json:"dynamoTag"`
+
+	DynamoNimDeploymentSharedSpec `json:",inline"`
+}
+
+type DynamoNimDeploymentOverridesSpec struct {
+	DynamoNimDeploymentSharedSpec `json:",inline"`
+}
+
+type DynamoNimDeploymentSharedSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 
-	DynamoNim string `json:"dynamoNim"`
-	// contains the tag of the DynamoNim: for example, "my_package:MyService"
-	DynamoTag string `json:"dynamoTag"`
-
 	// contains the name of the service
 	ServiceName string `json:"serviceName,omitempty"`
+
+	// dynamo namespace of the service (allows to override the dynamo namespace of the service defined in annotations inside the dynamo archive)
+	DynamoNamespace *string `json:"dynamoNamespace,omitempty"`
 
 	Resources        *dynamoCommon.Resources    `json:"resources,omitempty"`
 	Autoscaling      *Autoscaling               `json:"autoscaling,omitempty"`

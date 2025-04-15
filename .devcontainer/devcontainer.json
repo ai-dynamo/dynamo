@@ -1,46 +1,73 @@
 {
     "$schema": "https://json-schema.org/draft-07/schema#",
     "copyright": [
-      "SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
-      "SPDX-License-Identifier: Apache-2.0",
-      "Licensed under the Apache License, Version 2.0 (the \"License\");",
-      "you may not use this file except in compliance with the License.",
-      "You may obtain a copy of the License at",
-      "http://www.apache.org/licenses/LICENSE-2.0",
-      "Unless required by applicable law or agreed to in writing, software",
-      "distributed under the License is distributed on an \"AS IS\" BASIS,",
-      "WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.",
-      "See the License for the specific language governing permissions and",
-      "limitations under the License."
+        "SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
+        "SPDX-License-Identifier: Apache-2.0",
+        "Licensed under the Apache License, Version 2.0 (the \"License\");",
+        "you may not use this file except in compliance with the License.",
+        "You may obtain a copy of the License at",
+        "http://www.apache.org/licenses/LICENSE-2.0",
+        "Unless required by applicable law or agreed to in writing, software",
+        "distributed under the License is distributed on an \"AS IS\" BASIS,",
+        "WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.",
+        "See the License for the specific language governing permissions and",
+        "limitations under the License."
     ],
     "name": "NVIDIA Dynamo Development",
-    "build": {
-        "dockerfile": "Dockerfile",
-        "context": ".."
-    },
+    "remoteUser": "ubuntu", // Matches our container user
+    "updateRemoteUserUID": true, // Updates the UID of the remote user to match the host user, avoids permission errors
+    "image": "dynamo:latest-vllm-local-dev", // Use the latest VLLM local dev image
     "runArgs": [
-        "--gpus=all"
+        "--gpus=all",
+        "--network=host",
+        "--ipc=host",
+        "--cap-add=SYS_PTRACE",
+        "--shm-size=10G",
+        "--ulimit=memlock=-1",
+        "--ulimit=stack=67108864"
     ],
+    "service": "dynamo",
     "customizations": {
         "vscode": {
             "extensions": [
                 "ms-python.python",
-                "rust-lang.rust-analyzer",
-                "tamasfe.even-better-toml",
-                "github.copilot",
-                "ms-azuretools.vscode-docker"
+                "ms-python.pylint",
+                "ms-python.vscode-pylance",
+                "rust-lang.rust-analyzer"
             ],
             "settings": {
-                "python.defaultInterpreterPath": "/workspaces/ai-dynamo/venv/bin/python",
+                "terminal.integrated.defaultProfile.linux": "bash",
+                "terminal.integrated.cwd": "/home/ubuntu/dynamo",
+
+                "python.defaultInterpreterPath": "/opt/dynamo/venv/bin/python",
                 "python.linting.enabled": true,
                 "python.linting.pylintEnabled": true,
-                "editor.formatOnSave": true,
-                "rust-analyzer.checkOnSave.command": "clippy"
+
+                "rust-analyzer.checkOnSave.command": "clippy",
+                "rust-analyzer.checkOnSave.enable": true,
+
+                "files.trimTrailingWhitespace": true,
+                "files.insertFinalNewline": true
             }
         }
     },
-    "updateRemoteUserUID": true,
-    "postCreateCommand": "/bin/bash .devcontainer/post-create.sh",
-    "postStartCommand": "echo 'source /workspaces/ai-dynamo/venv/bin/activate' >> ~/.bashrc",
-    "remoteUser": "vscode"
+    "workspaceFolder": "/home/ubuntu",
+    "workspaceMount": "source=${localWorkspaceFolder},target=/home/ubuntu/dynamo,type=bind,consistency=cached",
+    "userEnvProbe": "interactiveShell",
+    "postCreateCommand": "/bin/bash /home/ubuntu/dynamo/.devcontainer/post-create.sh", // Runs cargo build and pip installs packages
+    "containerEnv": {
+        "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}",
+        "HF_TOKEN": "${localEnv:HF_TOKEN}",
+        "CARGO_HOME": "/home/ubuntu/dynamo/.build/.cargo",
+        "RUSTUP_HOME": "/home/ubuntu/dynamo/.build/.rustup"
+    },
+    "mounts": [
+        // Default mounts
+        "source=/tmp/,target=/tmp/,type=bind",
+        "source=dynamo-bashhistory,target=/home/ubuntu/.commandhistory,type=volume", // For bash history
+        "source=dynamo-precommit-cache,target=/home/ubuntu/.cache/pre-commit,type=volume"  // For pre-commit cache
+
+        // Uncomment for additional functionality
+        // "source=${localEnv:HF_HOME},target=/home/ubuntu/.cache/huggingface,type=bind", // Uncomment to enable HF Cache Mount. Make sure to set HF_HOME env var in you .bashrc
+    ]
 }

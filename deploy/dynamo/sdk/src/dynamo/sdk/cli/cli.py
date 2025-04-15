@@ -24,12 +24,12 @@ import psutil
 def create_bentoml_cli() -> click.Command:
     from bentoml._internal.configuration import BENTOML_VERSION
     from bentoml._internal.context import server_context
-    from bentoml_cli.bentos import bento_command
 
     # from bentoml_cli.cloud import cloud_command
     # from bentoml_cli.containerize import containerize_command
     from bentoml_cli.utils import get_entry_points
 
+    from dynamo.sdk.cli.bentos import bento_command
     from dynamo.sdk.cli.deployment import deployment_command
     from dynamo.sdk.cli.env import env_command
 

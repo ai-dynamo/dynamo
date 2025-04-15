@@ -51,7 +51,7 @@ def parse_args(service_name, prefix) -> Namespace:
     parser.add_argument(
         "--block-size",
         type=int,
-        default=64,
+        default=32,
         help="KV block size",
     )
     parser.add_argument(

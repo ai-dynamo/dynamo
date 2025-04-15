@@ -95,6 +95,7 @@ COPY LICENSE /workspace/
 COPY Cargo.toml /workspace/
 COPY Cargo.lock /workspace/
 COPY rust-toolchain.toml /workspace/
+COPY hatch_build.py /workspace/
 
 ARG CARGO_BUILD_JOBS
 # Set CARGO_BUILD_JOBS to 16 if not provided
@@ -201,6 +202,12 @@ RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
 ENV DYNAMO_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
 ENV DYNAMO_HOME=/workspace
 
+# Needed to use NVLink for TRTLLM KV Cache Transfer
+# https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/advanced/disaggregated-service.md
+ENV UCX_CUDA_COPY_ASYNC_MEM_TYPE=cuda
+ENV UCX_CUDA_COPY_DMABUF=no
+ENV UCX_MEMTYPE_CACHE=no
+ENV UCX_RNDV_PIPELINE_ERROR_HANDLING=y
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
