@@ -37,7 +37,7 @@ Processor:
 
 # x1 process with 4 GPUs generating output tokens (the "decode" phase).
 VllmWorker:
-  common-configs: [model, kv-transfer-config, block-size, max-model-len, gpu-memory-utilization, disable-log-requests]
+  common-configs: [model, kv-transfer-config, router, block-size, max-model-len, gpu-memory-utilization, disable-log-requests]
   # Enable prefill at different workers.
   remote-prefill: true
   # Disable local prefill so only disaggregated prefill is used.
