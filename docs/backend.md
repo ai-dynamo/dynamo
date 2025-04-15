@@ -5,11 +5,11 @@ it via `dynamo serve` or `dynamo deploy`, covering basic concepts as well as
 advanced features like enabling KV routing and disaggregated serving.
 
 For detailed information about `dynamo serve` infrastructure, see the
-[Dynamo SDK Docs](deploy/dynamo/sdk/docs/README.md).
+[Dynamo SDK Docs](../deploy/dynamo/sdk/docs/README.md).
 
 For a guide that walks through how to launch a vLLM-based worker with
 implementation of Disaggregated Serving and KV-Aware Routing included,
-see the [Dynamo Serve Guide](docs/guides/dynamo_serve.md).
+see the [Dynamo Serve Guide](../docs/guides/dynamo_serve.md).
 
 ## Basic Concepts
 
@@ -19,21 +19,20 @@ a Python class based definition that requires a few key decorators to get going:
 - `@dynamo_endpoint`: marks methods that can be called by other workers or clients
 
 For more detailed information on these concepts, see the
-[Dynamo SDK Docs](deploy/dynamo/sdk/docs/README.md).
+[Dynamo SDK Docs](../deploy/dynamo/sdk/docs/README.md).
 
 ### Worker Skeleton
 
 Here is the rough outline of what a worker may look like in its simplest form:
 
 ```python
-from dynamo.sdk import DYNAMO_IMAGE, dynamo_endpoint, service
+from dynamo.sdk import dynamo_endpoint, service
 
 @service(
     dynamo={
         "enabled": True,
         "namespace": "your_namespace",
     },
-    image=DYNAMO_IMAGE,
 )
 class YourWorker:
     # Worker implementation
@@ -53,7 +52,7 @@ based on the definitions above, it would be: `your_namespace/YourWorker/your_end
 - `endpoint="your_endpoint"`: Defined by the `@dynamo_endpoint` decorator, or by default the name of the function being decorated.
 
 For more details about service configuration, resource management, and dynamo endpoints,
-see the [Dynamo SDK Docs](deploy/dynamo/sdk/docs/README.md).
+see the [Dynamo SDK Docs](../deploy/dynamo/sdk/docs/README.md).
 
 ### Request/Response Types
 
@@ -126,7 +125,7 @@ class YourWorker:
 
 To see a minimal worker example like the above used in a larger pipeline of
 components, see the `dynamo serve`
-[Hello World example](examples/hello_world).
+[Hello World example](../examples/hello_world/README.md).
 
 ### Client Example
 
@@ -179,11 +178,11 @@ that does something like the following:
 - Forward responses back to client
 
 This advanced scenario of a separate OpenAI Processor worker is demonstrated in this
-[vLLM example](examples/llm/README.md).
+[vLLM example](../examples/llm/README.md).
 
 For a more minimal example of deploying a pipeline of components with a custom
 API that your client can communicate with, see the
-[Hello World example](examples/hello_world/README.md).
+[Hello World example](../examples/hello_world/README.md).
 
 ## Advanced Features
 
@@ -247,14 +246,14 @@ generation, or you may only want to update once per request, depending on your u
 Assuming long generation time or long output token sequence lengths, it would be more
 accurate to publish metrics at every generation step.
 
-For more details, see the [KV Cache Routing Guide](docs/kv_cache_routing.md).
+For more details, see the [KV Cache Routing Guide](../docs/kv_cache_routing.md).
 
 ### Disaggregated Serving
 
 - TODO: Code snippets about core NIXL concepts for P/D disagg (@ptarasiewiczNV)
 
 For more information on Disaggregated Serving, see the
-[general guide](docs/disagg_serving.md) and [performance tuning guide](docs/guides/disagg_perf_tuning.md).
+[general guide](../docs/disagg_serving.md) and [performance tuning guide](../docs/guides/disagg_perf_tuning.md).
 
 ## Best Practices
 
@@ -279,6 +278,6 @@ For more information on Disaggregated Serving, see the
 
 ## Additional Resources
 
-- Check the [examples](examples/) directory for more detailed implementations
-- Refer to the [Dynamo SDK Docs](deploy/dynamo/sdk/docs/README.md) for API details.
-- For Disaggregated Serving, see the [general guide](docs/disagg_serving.md) and [performance tuning guide](docs/guides/disagg_perf_tuning.md).
+- Check the [examples](../examples/) directory for more detailed implementations
+- Refer to the [Dynamo SDK Docs](../deploy/dynamo/sdk/docs/README.md) for API details.
+- For Disaggregated Serving, see the [general guide](../docs/disagg_serving.md) and [performance tuning guide](../docs/guides/disagg_perf_tuning.md).
