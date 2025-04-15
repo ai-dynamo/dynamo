@@ -79,7 +79,6 @@ class Frontend:
             ],
             check=False,
         )
-        # Add the model
         subprocess.run(
             [
                 "llmctl",
@@ -97,7 +96,6 @@ class Frontend:
         logger.info("Starting HTTP server")
         http_binary = get_http_binary_path()
 
-        # Note: Circusd will manage this subprocess, so we don't need signal handling in this class
         self.process = subprocess.Popen(
             [http_binary, "-p", str(self.frontend_config.port)],
             stdout=None,
@@ -107,6 +105,8 @@ class Frontend:
     @async_on_shutdown
     def cleanup(self):
         """Clean up resources before shutdown."""
+
+        # circusd manages shutdown of http server process, we just need to remove the model using the on_shutdown hook
         subprocess.run(
             [
                 "llmctl",
