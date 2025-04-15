@@ -32,15 +32,18 @@ def configure_server_logging():
     # Configure the logger with Dynamo's handler
     configure_dynamo_logger()
 
+    # map the DYN_LOG variable to a logging level
+    dyn_var = os.environ.get("DYN_LOG", "info")
+    dyn_level = log_level_mapping(dyn_var)
+
     # Disable VLLM's default configuration
     os.environ["VLLM_CONFIGURE_LOGGING"] = "0"
 
-    # loggers that should be configured to INFO
-    info_loggers = ["vllm", "nixl", "__init__"]
-    for logger_name in info_loggers:
+    env_controlled_loggers = ["vllm", "nixl", "__init__"]
+    for logger_name in env_controlled_loggers:
         logger = logging.getLogger(logger_name)
         logger.handlers = []
-        logger.setLevel(logging.INFO)
+        logger.setLevel(dyn_level)
         logger.propagate = True
 
     # loggers that should be configured to ERROR
@@ -50,3 +53,24 @@ def configure_server_logging():
         logger.handlers = []
         logger.setLevel(logging.ERROR)
         logger.propagate = True
+
+
+def log_level_mapping(level: str) -> int:
+    """
+    The DYN_LOG variable is set using "debug" or "trace" or "info.
+    This function maps those to the appropriate logging level and defaults to INFO
+    if the variable is not set or a bad value.
+    """
+    if level == "debug":
+        return logging.DEBUG
+    elif level == "info":
+        return logging.INFO
+    elif level == "warning":
+        return logging.WARNING
+    elif level == "error":
+        return logging.ERROR
+    elif level == "critical":
+        return logging.CRITICAL
+    # python does not have a TRACE level, so we map it to INFO
+    elif level == "trace":
+        return logging.INFO
