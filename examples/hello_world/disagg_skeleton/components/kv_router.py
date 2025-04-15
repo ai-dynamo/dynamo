@@ -64,7 +64,7 @@ class Router:
         print("KV Router initialized")
 
     # A dummy hit rate checking endpoint
-    # The actually worker selection is based on logit (2 * score - gpu_cache_usage - normalized_waiting)
+    # The actual worker selection is based on custom cost function
     # See details at llm/components/kv_router.py
     @dynamo_endpoint()
     async def check_hit_rate(self, request_prompt: str) -> AsyncIterator[WorkerId]:

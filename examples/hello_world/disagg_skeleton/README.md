@@ -1,6 +1,6 @@
 # Deployment Examples
 
-This directory contains a hello world example which implementations a simplified disaggregated serving architecture used for deploying Large Language Models (LLMs). It removes the LLM related inference code and focuses on how Dynamo handles routing, task queue and metadata communication between prefill and decoding workers.
+This directory contains a hello world example which implements a simplified disaggregated serving architecture used for deploying Large Language Models (LLMs). It removes the LLM related inference code and focuses on how Dynamo handles routing, task queue and metadata communication between prefill and decode workers.
 
 ## Components
 
@@ -73,10 +73,28 @@ cd dynamo/examples/hello_world/disagg_skeleton
 dynamo serve components.worker:DummyWorker
 ```
 
-4. Go to Node 2 and start Worker service as in step 3
-Now you should see both worker are ready in Node 1's terminal and
+4. Go to Node 2 and start Worker service as in step 3.
+Now you should see both workers are ready in Node 1's terminal.
 
-5. Query the Fronend.
+5. Query the Fronend with following two prompts first. Then modify the prompt and you will notice prompts with similar prefix (for example, "Tell me a joke" and "Tell me a fact") will be routed to the same worker due to the routing algorithm used in this demo.
+```
+curl -X 'POST' \
+  'http://localhost:3000/fegenerate' \
+  -H 'accept: text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "prompt": "Tell me a joke",
+  "request_id":"12345"
+}'
+curl -X 'POST' \
+  'http://localhost:3000/fegenerate' \
+  -H 'accept: text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "prompt": "Which team won 2020 World Series",
+  "request_id":"12345"
+}'
+```
 
 ## The Disaggregated Deployment
 
@@ -99,4 +117,14 @@ export ETCD_ENDPOINTS="http://Node_1_IP_ADDRESS:2379"
 cd dynamo/examples/hello_world/disagg_skeleton
 dynamo serve components.prefill_worker:PrefillWorker
 ```
-3. Query the Frontend. Decode worker will push requests to the prefill queue, and prefill worker will pull task from the queue.
+3. Query the Frontend. This time decode workers push requests to the prefill queue, and prefill worker pulles task from the queue to simulate the prefill task. The actual prefill is skipped in this demo.
+```
+curl -X 'POST' \
+  'http://localhost:3000/fegenerate' \
+  -H 'accept: text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "prompt": "This is prefill disagg serving example",
+  "request_id":"12345"
+}'
+```
