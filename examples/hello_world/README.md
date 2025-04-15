@@ -136,13 +136,13 @@ The deployment process involves two distinct build steps:
 
 ##### Deployment Steps
 
-1. **Login to Dynamo Server**
+1. **Login to Dynamo Cloud**
 
 ```bash
 export PROJECT_ROOT=$(pwd)
 export KUBE_NS=hello-world  # Must match your Kubernetes namespace
-export DYNAMO_SERVER=https://${KUBE_NS}.dev.aire.nvidia.com
-dynamo server login --api-token TEST-TOKEN --endpoint $DYNAMO_SERVER
+export DYNAMO_CLOUD=https://${KUBE_NS}.dev.aire.nvidia.com
+dynamo cloud login --api-token TEST-TOKEN --endpoint $DYNAMO_CLOUD
 ```
 
 2. **Build the Dynamo Base Image**

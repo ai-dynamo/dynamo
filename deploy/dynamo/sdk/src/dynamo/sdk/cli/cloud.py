@@ -34,18 +34,18 @@ from bentoml.exceptions import CLIException, CloudRESTApiClientError
 
 
 def build_cloud_command() -> click.Group:
-    @click.group(name="server")
+    @click.group(name="cloud")
     @add_experimental_docstring
     def cloud_command():
-        """Interact with your Dynamo Server"""
+        """Interact with your Dynamo Cloud Server"""
 
     @cloud_command.command()
     @click.option(
         "--endpoint",
         type=click.STRING,
-        help="Dynamo Server endpoint",
+        help="Dynamo Cloud endpoint",
         default=DEFAULT_ENDPOINT,
-        envvar="DYNAMO_SERVER_API_ENDPOINT",
+        envvar="DYNAMO_CLOUD_API_ENDPOINT",
         show_default=True,
         show_envvar=True,
         required=True,
@@ -53,13 +53,13 @@ def build_cloud_command() -> click.Group:
     @click.option(
         "--api-token",
         type=click.STRING,
-        help="Dynamo Server user API token",
-        envvar="DYNAMO_SERVER_API_KEY",
+        help="Dynamo Cloud user API token",
+        envvar="DYNAMO_CLOUD_API_KEY",
         show_envvar=True,
         required=True,
     )
     def login(endpoint: str, api_token: str) -> None:  # type: ignore
-        """Connect to your Dynamo Server. You can find deployment instructions for this in our docs"""
+        """Connect to your Dynamo Cloud. You can find deployment instructions for this in our docs"""
         try:
             cloud_rest_client = RestApiClient(endpoint, api_token)
             user = cloud_rest_client.v1.get_current_user()
