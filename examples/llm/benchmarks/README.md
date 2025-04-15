@@ -98,8 +98,16 @@ With the Dynamo repository, benchmarking image and model available, and **NATS a
     > [!Tip]
     > Check the `disagg.log` to make sure the service is fully started before collecting performance numbers.
 
- 3. Collect the performance numbers as shown on the [Collecting Performance Numbers](#collecting-performance-numbers) section below.
+ 3. Collect the performance numbers:
 
+ ```bash
+ bash -x /workspace/examples/llm/benchmarks/perf.sh --mode disaggregated --deployment-kind dynamo_vllm --prefill-tensor-parallelism 1 --prefill-data-parallelism 4 --decode-tensor-parallelism 4 --decode-data-parallelism 1
+ ```
+
+ > [!Important]
+ > We should be careful in specifying these options in `perf.sh` script. They should closely reflect the deployment config that is being benchmarked. See `perf.sh --help` to learn more about these option. In the above command, we described that our deployment is using disaggregated serving in dynamo with vLLM backend. We have also accurately described that we have 4 prefill workers with TP=1 and 1 decode worker with TP=4
+
+For more information see [Collecting Performance Numbers](#collecting-performance-numbers) section below.
 
 ## Disaggregated Multinode Benchmarking
 
@@ -155,7 +163,16 @@ With the Dynamo repository, benchmarking image and model available, and **NATS a
     > [!Tip]
     > Check the `prefill_multinode.log` to make sure the service is fully started before collecting performance numbers.
 
- 5. Collect the performance numbers as shown on the [Collecting Performance Numbers](#collecting-performance-numbers) section above.
+ 5. Collect the performance numbers:
+
+ ```bash
+ bash -x /workspace/examples/llm/benchmarks/perf.sh --mode disaggregated --deployment-kind dynamo_vllm --prefill-tensor-parallelism 1 --prefill-data-parallelism 8 --decode-tensor-parallelism 8 --decode-data-parallelism 1
+ ```
+
+ > [!Important]
+ > We should be careful in specifying these options in `perf.sh` script. They should closely reflect the deployment config that is being benchmarked. See `perf.sh --help` to learn more about these option. In the above command, we described that our deployment is using disaggregated serving in dynamo with vLLM backend. We have also accurately described that we have 8 prefill workers with TP=1 and 1 decode worker with TP=8
+
+For more information see [Collecting Performance Numbers](#collecting-performance-numbers) section below.
 
 
 ## vLLM Aggregated Baseline Benchmarking
@@ -211,22 +228,70 @@ With the Dynamo repository and the benchmarking image available, perform the fol
     > [!Note]
     > If benchmarking over 2 nodes, the `upstream` configuration will need to be updated to link to the `vllm serve` on the second node.
 
- 4. Collect the performance numbers as shown on the [Collecting Performance Numbers](#collecting-performance-numbers) section below.
+ 4. Collect the performance numbers:
 
+### Single-Node
+
+ ```bash
+ bash -x /workspace/examples/llm/benchmarks/perf.sh --mode aggregated --deployment-kind vllm_serve --tensor-parallelism 4 --data-parallelism 2
+ ```
+
+ ### Two Nodes
+
+ ```bash
+ bash -x /workspace/examples/llm/benchmarks/perf.sh --mode aggregated --deployment-kind vllm_serve --tensor-parallelism 4 --data-parallelism 4
+ ```
+
+ > [!Important]
+ > We should be careful in specifying these options in `perf.sh` script. They should closely reflect the deployment config that is being benchmarked. See `perf.sh --help` to learn more about these option. In the above command, we described that our deployment is using aggregated serving in `vllm serve`. We have also accurately described that we have 2 workers(or 4 workers for two nodes) with TP=4.
+
+For more information see [Collecting Performance Numbers](#collecting-performance-numbers) section below.
 
 ## Collecting Performance Numbers
 
-Run the benchmarking script
+Currently, there is no consistent way of obtaining the configuration of deployment service. Hence, we need to provide this information to the script in form of command line arguments. The benchmarking script `/workspace/examples/llm/benchmarks/perf.sh` uses GenAI-Perf tool to collect the performance numbers at various different request concurrencies. The perf.sh script can be run multiple times to collect numbers for various different deployments. Each script execution will create a new artifacts directory in `artifacts_root` and dump these numbers in it. See [Plotting Pareto Graphs](#plotting-pareto-graphs) to learn how to convert the data from this `artifacts_root` to generate pareto graphs for the performance.
 
-```bash
-bash -x /workspace/benchmarks/llm/perf.sh
-```
+Note: As each `perf.sh` adds a new artifacts directory in the `artifacts_root` always, proper care should be taken that we are starting experiment with clean `artifacts_root` so we include only results from runs that we want to compare.
 
 > [!Tip]
 > See [GenAI-Perf tutorial](https://github.com/triton-inference-server/perf_analyzer/blob/main/genai-perf/docs/tutorial.md)
 > @ [GitHub](https://github.com/triton-inference-server/perf_analyzer) for additional information about how to run GenAI-Perf
 > and how to interpret results.
 
+## Iterpreting Results
+
+### Plotting Pareto Graphs
+
+The `artifacts` directory generated by GenAI-Perf contains the raw performance number from the benchmarking.
+
+Using the benchmarking image, install the dependencies for plotting Pareto graph
+```bash
+pip3 install matplotlib seaborn
+```
+At the directory where the artifacts are located, plot the Pareto graph
+```bash
+python3 /workspace/examples/llm/benchmarks/plot_pareto.py
+```
+The graph will be saved to the current directory and named `pareto_plot.png`.
+
+### Interpreting Pareto Graphs
+
+The question we want to answer in this comparison is how much Output Token Throughput can be improved by switching from
+aggregated to disaggregated serving when both are performing under similar Inter Token Latency.
+
+For each concurrency benchmarked, it produces a latency and throughput value pair. The x-axis on the Pareto graph is
+latency (tokens/s/user), which the latency is lower if the value is higher. The y-axis on the Pareto graph is throughput
+(tokens/s/gpu). The latency and throughput value pair forms a dot on the Pareto graph. A line (Pareto Frontier) is
+formed when the dots from different concurrency values are plotted on the graph.
+
+With the Pareto Frontiers of the baseline and the disaggregated results plotted on the graph, we can look for the
+greatest increase in throughput (along the y-axis) between the baseline and the disaggregated result Pareto Frontier,
+over different latencies (along the x-axis).
+
+For example, at <x_value> tokens/s/user, the increase in tokens/s/gpu is `<y_new> - <y_old> = <y_diff>`, from the blue baseline to the
+orange disaggregated line, so the improvement is around <y_diff>/<y_old>x speed up:
+![Example Pareto Plot](example_pareto_plot.png)
+Note: The above example was collected over a single benchmarking run, the actual number may vary between runs, configurations and hardware.
 
 ## Supporting Additional Models
 
@@ -249,3 +314,8 @@ Regardless of the deployment mechanism, the GenAI-Perf tool will report the same
 
 For instructions on how to acquire per worker metrics and visualize them using Grafana,
 please see the provided [Visualization with Prometheus and Grafana](../../../deploy/metrics/README.md).
+## Interpreting Results
+
+In this section, we are comparing the [Disaggregated Single Node Benchmarking](#disaggregated-single-node-benchmarking)
+result to the [vLLM Aggregated Baseline Benchmarking](#vllm-aggregated-baseline-benchmarking) as an example. The multi-node
+results can also be compared in similar steps.
