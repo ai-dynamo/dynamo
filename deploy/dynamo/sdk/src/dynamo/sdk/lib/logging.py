@@ -74,3 +74,5 @@ def log_level_mapping(level: str) -> int:
     # python does not have a TRACE level, so we map it to INFO
     elif level == "trace":
         return logging.INFO
+    else:
+        return logging.INFO
