@@ -54,10 +54,10 @@ export DYNAMO_SERVER=https://${KUBE_NS}.dev.aire.nvidia.com
 dynamo server login --api-token TEST-TOKEN --endpoint $DYNAMO_SERVER
 ```
 
-### 2. Build the Dynamo Image
+### 2. Build the Dynamo Base Image
 
 > [!NOTE]
-> For instructions on building the Dynamo base image, see the [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image) section in the main README.
+> For instructions on building and pushing the Dynamo base image, see the [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image) section in the main README.
 
 ```bash
 # Set your runtime image name

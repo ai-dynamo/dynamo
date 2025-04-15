@@ -57,16 +57,19 @@ Although not needed for local development, deploying your Dynamo pipelines to Ku
 Here's how to build it:
 
 ```bash
-export CI_REGISTRY_IMAGE=<your-registry>
-export CI_COMMIT_SHA=<your-tag>
-
-earthly --push +dynamo-base-docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
+./container/build.sh
+docker tag dynamo:latest-vllm <your-registry>/dynamo-base:latest-vllm
+docker login <your-registry>
+docker push <your-registry>/dynamo-base:latest-vllm
 ```
 
 After building, you can use this image by setting the `DYNAMO_IMAGE` environment variable to point to your built image:
 ```bash
-export DYNAMO_IMAGE=<your-registry>/dynamo-base-docker:<your-tag>
+export DYNAMO_IMAGE=<your-registry>/dynamo-base:latest-vllm
 ```
+
+> [!NOTE]
+> We are working on leaner base images that can be built using the targets in the top-level Earthfile.
 
 ### Running and Interacting with an LLM Locally
 

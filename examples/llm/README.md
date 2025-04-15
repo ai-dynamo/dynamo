@@ -190,18 +190,12 @@ dynamo server login --api-token TEST-TOKEN --endpoint $DYNAMO_SERVER
 
 2. **Build the Dynamo Base Image**
 
+> [!NOTE]
+> For instructions on building and pushing the Dynamo base image, see the [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image) section in the main README.
+
 ```bash
-# Assuming you've already built the image for llm examples as descibed in the earlier steps (./container/build.sh), it will be tagged as `dynamo:latest-vllm`
-
-# Build and push base image for llms to your image registry
-
-# ./container/build.sh # Uncomment if not previously run
-docker tag dynamo:latest-vllm <your-registry>/dynamo:latest-vllm
-docker login <your-registry>
-docker push <your-registry>/dynamo:latest-vllm
-
-# Set the image name for deployment
-export DYNAMO_IMAGE=<your-registry>/dynamo:latest-vllm
+# Set runtime image name
+export DYNAMO_IMAGE=<dynamo_docker_image_name>
 
 # Prepare your project for deployment.
 cd $PROJECT_ROOT/examples/llm
