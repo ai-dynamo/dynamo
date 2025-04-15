@@ -2800,6 +2800,19 @@ index e0eeeffb8..9010c6966 100644
  
  
  def ensure_model_parallel_initialized(
+diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
+index 975afe5ad..2208abea0 100644
+--- a/vllm/engine/arg_utils.py
++++ b/vllm/engine/arg_utils.py
+@@ -1159,7 +1159,7 @@ class EngineArgs:
+         #   features and raise error for unsupported features.
+         # * If VLLM_USE_V1=0, we disable V1.
+         use_v1 = False
+-        try_v1 = envs.VLLM_USE_V1 or not envs.is_set("VLLM_USE_V1")
++        try_v1 = envs.VLLM_USE_V1
+         if try_v1 and self._is_v1_supported_oracle(model_config):
+             use_v1 = True
+ 
 diff --git a/vllm/engine/llm_engine.py b/vllm/engine/llm_engine.py
 index 54f7b8fb6..0559f9db2 100644
 --- a/vllm/engine/llm_engine.py
@@ -3848,7 +3861,7 @@ index dd0b67df4..f436b0752 100644
  
                  generators.append(generator)
 diff --git a/vllm/envs.py b/vllm/envs.py
-index f80bf878f..4c8b009c2 100644
+index f80bf878f..f64c49fe8 100644
 --- a/vllm/envs.py
 +++ b/vllm/envs.py
 @@ -1,4 +1,17 @@
@@ -3869,6 +3882,15 @@ index f80bf878f..4c8b009c2 100644
  
  import hashlib
  import os
+@@ -73,7 +86,7 @@ if TYPE_CHECKING:
+     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
+     VLLM_SKIP_P2P_CHECK: bool = False
+     VLLM_DISABLED_KERNELS: list[str] = []
+-    VLLM_USE_V1: bool = True
++    VLLM_USE_V1: bool = False
+     VLLM_ROCM_USE_AITER: bool = False
+     VLLM_ROCM_USE_AITER_LINEAR: bool = True
+     VLLM_ROCM_USE_AITER_MOE: bool = True
 @@ -107,6 +120,10 @@ if TYPE_CHECKING:
      VLLM_TPU_BUCKET_PADDING_GAP: int = 0
      VLLM_USE_DEEP_GEMM: bool = False
@@ -3880,6 +3902,15 @@ index f80bf878f..4c8b009c2 100644
  
  
  def get_default_cache_root():
+@@ -525,7 +542,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
+ 
+     # If set, use the V1 code path.
+     "VLLM_USE_V1":
+-    lambda: bool(int(os.getenv("VLLM_USE_V1", "1"))),
++    lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
+ 
+     # Disable aiter ops unless specifically enabled.
+     # Acts as a parent switch to enable the rest of the other operations.
 @@ -704,6 +721,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
      # It can be changed with this variable if needed for some reason.
      "VLLM_XGRAMMAR_CACHE_MB":
