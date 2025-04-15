@@ -34,7 +34,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | **Ubuntu**           | 24.04       | ARM64            | Experimental |
 | **CentOS Stream**    | 9           | x86_64           | Experimental |
 
-> **Note**: For **Linux**, the **ARM64** support is experimental and may have limitations.
+> **Note**: For **Linux**, the **ARM64** support is experimental and may have limitations. Wheels are built using a manylinux_2_28-compatible environment and they have been validated on CentOS 9 and Ubuntu (22.04, 24.04). Compatibility with other Linux distributions is expected but has not been officially verified yet.
 
 ## Software Compatibility
 ### Runtime Dependency
