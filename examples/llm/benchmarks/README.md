@@ -83,11 +83,6 @@ Collect the performance numbers as shown on the [Collecting Performance Numbers]
 
 Two H100 80GB x8 nodes are required for this setup.
 
-> [!Note]
-> Nodes used for benchmarking were part of a cluster connected via InfiniBand
-> NDR with 8 connections for compute and 2 for storage. Both fabrics were on
-> their own fat tree non-blocking topology.
-
 In the following steps we compare Dynamo disaggregated vLLM performance to
 [native vLLM Aggregated Baseline](#vllm-aggregated-baseline-benchmarking) on two nodes. These were chosen to optimize
 for Output Token Throughput (per sec) when both are performing under similar Inter Token Latency (ms).
