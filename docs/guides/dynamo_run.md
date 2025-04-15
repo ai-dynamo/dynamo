@@ -214,14 +214,14 @@ We use [uv](https://docs.astral.sh/uv/) but any virtualenv manager should work.
 uv venv
 source .venv/bin/activate
 uv pip install pip
-uv pip install vllm==0.7.3 setuptools
+uv pip install vllm==0.8.4 setuptools
 ```
 
 **Note: If you're on Ubuntu 22.04 or earlier, you will need to add `--python=python3.10` to your `uv venv` command**
 
 2. Build:
 ```
-cargo build --features vllm
+cargo build
 cd target/debug
 ```
 
@@ -230,7 +230,7 @@ Inside that virtualenv:
 
 **HF repo:**
 ```
-./dynamo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct/
+./dynamo-run in=http out=vllm ~/llm_models/Llama-3.2-3B-Instruct/
 
 ```
 

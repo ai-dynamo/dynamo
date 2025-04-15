@@ -56,11 +56,4 @@ ipc_path = f"ipc:///tmp/{socket_id}"
 
 engine_alive = multiprocessing.Value("b", True, lock=False)
 
-# 0.7.3
 run_mp_engine(engine_args, UsageContext.OPENAI_API_SERVER, ipc_path, engine_alive)
-
-# 0.8.1
-# TODO: In 0.8+ first argument is VllmConfig, not AsyncEngineArgs
-# disable_log_stats = False
-# disable_log_requests = True
-# run_mp_engine(engine_args, UsageContext.OPENAI_API_SERVER, ipc_path, disable_log_stats, disable_log_requests, engine_alive)

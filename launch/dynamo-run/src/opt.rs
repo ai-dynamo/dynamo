@@ -111,8 +111,16 @@ pub enum Output {
     LlamaCpp,
 
     #[cfg(feature = "vllm")]
-    /// Run inference using vllm's engine
+    /// Alias for vllm0_8
     Vllm,
+
+    #[cfg(feature = "vllm")]
+    /// Run inference using vllm 0.8.X+
+    Vllm0_8,
+
+    #[cfg(feature = "vllm")]
+    /// Run inference using vllm 0.7.X
+    Vllm0_7,
 
     #[cfg(feature = "trtllm")]
     /// Run inference using trtllm
@@ -148,6 +156,10 @@ impl TryFrom<&str> for Output {
 
             #[cfg(feature = "vllm")]
             "vllm" => Ok(Output::Vllm),
+            #[cfg(feature = "vllm")]
+            "vllm0_8" => Ok(Output::Vllm0_8),
+            #[cfg(feature = "vllm")]
+            "vllm0_7" => Ok(Output::Vllm0_7),
 
             #[cfg(feature = "trtllm")]
             "trtllm" => Ok(Output::TrtLLM),
@@ -195,6 +207,10 @@ impl fmt::Display for Output {
 
             #[cfg(feature = "vllm")]
             Output::Vllm => "vllm",
+            #[cfg(feature = "vllm")]
+            Output::Vllm0_8 => "vllm0_8",
+            #[cfg(feature = "vllm")]
+            Output::Vllm0_7 => "vllm0_7",
 
             #[cfg(feature = "trtllm")]
             Output::TrtLLM => "trtllm",
@@ -269,6 +285,8 @@ impl Output {
         #[cfg(feature = "vllm")]
         {
             out.push(Output::Vllm.to_string());
+            out.push(Output::Vllm0_7.to_string());
+            out.push(Output::Vllm0_8.to_string());
         }
 
         #[cfg(feature = "python")]
