@@ -15,16 +15,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Dynamo Cloud Deployment Platform
+# 🚀 Dynamo Cloud Kubernetes Platform (Dynamo Deploy)
 
-The Dynamo cloud platform is a comprehensive solution for deploying and managing Dynamo inference graphs in Kubernetes environments. It provides a streamlined experience for deploying, scaling, and monitoring your inference services.
+The Dynamo Cloud platform is a comprehensive solution for deploying and managing Dynamo inference graphs (also referred to as pipelines) in Kubernetes environments. It provides a streamlined experience for deploying, scaling, and monitoring your inference services. You can interface with Dynamo Cloud using the `deploy` subcommand available in the Dynamo CLI (e.g `dynamo deploy`)
 
 ## Overview
 
 The Dynamo cloud platform consists of several key components:
 
-- **Dynamo Operator**: A Kubernetes operator that manages the lifecycle of Dynamo inference graphs
-- **API Store**: Stores and manages service configurations and metadata
+- **Dynamo Operator**: A Kubernetes operator that manages the lifecycle of Dynamo inference graphs from build ➡️ deploy.
+- **API Store**: Stores and manages service configurations and metadata related to Dynamo deployments. Needs to be exposed externally.
 - **Custom Resources**: Kubernetes custom resources for defining and managing Dynamo services
 
 These components work together to provide a seamless deployment experience, handling everything from containerization to scaling and monitoring.
@@ -75,7 +75,7 @@ You have two options for building the components:
 
 #### Option 1: Build All Components at Once
 
-This is the simplest approach and builds all components in a single command:
+This is the simplest approach and builds and pushes all components in a single command:
 
 ```bash
 earthly --push +all-docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
@@ -147,13 +147,15 @@ Deploy the platform:
 ```bash
 ./deploy.sh
 ```
+3. Expose Dynamo Cloud externally
 
+You must also expose the `dynamo-store` service within the namespace externally. This will be the endpoint the CLI uses to interface with Dynamo Cloud. You might setup an Ingress, use an `ExternalService` with Istio, or simply port-forward. In our docs, we refer to this externally available endpoint as `DYNAMO_SERVER`
 ## Next Steps
 
 After deploying the Dynamo cloud platform, you can:
 
-1. Deploy your first inference graph using the [Dynamo Deploy CLI](dynamo_deploy/operator_deployment.md)
-2. Monitor your deployments using the Kubernetes dashboard or CLI
-3. Scale your services as needed using the Dynamo operator
+1. Deploy your first inference graph using the [Dynamo CLI](dynamo_deploy/operator_deployment.md)
+2. Deploy Dynamo LLM pipelines to Kubernetes using the [Dynamo CLI](../../examples/llm/README.md)!
+3. Manage your deployments using the Dynamo CLI
 
 For more detailed information about deploying inference graphs, see the [Dynamo Deploy Guide](dynamo_deploy/README.md).

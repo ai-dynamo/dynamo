@@ -14,6 +14,9 @@ Before proceeding with deployment, ensure you have:
   - Dynamo SDK and CLI tools
   - Rust packages and toolchain
 
+You must have first followed the instructions in [deploy/dynamo/helm/README.md](../../deploy/dynamo/helm/README.md) to install Dynamo Cloud on your Kubernetes cluster. 
+
+**Note**: Note the `KUBE_NS` variable in the following steps must match the Kubernetes namespace where you installed Dynamo Cloud. You must also expose the `dynamo-store` service externally. This will be the endpoint the CLI uses to interface with Dynamo Cloud.
 ## Understanding the Deployment Process
 
 The deployment process involves two main steps:
@@ -47,7 +50,7 @@ export PROJECT_ROOT=$(pwd)
 # Set your Kubernetes namespace (must match the namespace where Dynamo cloud is installed)
 export KUBE_NS=hello-world
 
-# Set the Dynamo server endpoint
+# Externally accessible endpoint to the `dynamo-store` service within your Dynamo Cloud installation
 export DYNAMO_SERVER=https://${KUBE_NS}.dev.aire.nvidia.com
 
 # Login to the Dynamo server
@@ -76,28 +79,28 @@ Deploy your service using the Dynamo deployment command:
 
 ```bash
 # Set your Helm release name
-export HELM_RELEASE=ci-hw
+export DEPLOYMENT_NAME=hello-world
 
 # Create the deployment
-dynamo deployment create $DYNAMO_TAG --no-wait -n $HELM_RELEASE
+dynamo deployment create $DYNAMO_TAG --no-wait -n $DEPLOYMENT_NAME
 ```
 
 To delete an existing deployment:
 ```bash
-kubectl delete dynamodeployment $HELM_RELEASE
+kubectl delete dynamodeployment $DEPLOYMENT_NAME
 ```
 
 ### 4. Test the Deployment
 
 The deployment process creates several pods:
 1. A `yatai-dynamonim-image-builder` pod for building the container image
-2. Service pods prefixed with `$HELM_RELEASE` once the build is complete
+2. Service pods prefixed with `$DEPLOYMENT_NAME` once the build is complete
 
 To test your deployment:
 
 ```bash
 # Forward the service port to localhost
-kubectl -n ${KUBE_NS} port-forward svc/${HELM_RELEASE}-frontend 3000:3000
+kubectl -n ${KUBE_NS} port-forward svc/${DEPLOYMENT_NAME}-frontend 3000:3000
 
 # Test the API endpoint
 curl -X 'POST' 'http://localhost:3000/generate' \

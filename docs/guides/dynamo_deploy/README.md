@@ -19,13 +19,11 @@ limitations under the License.
 
 This guide provides an overview of the different deployment options available for Dynamo inference graphs in Kubernetes environments.
 
-![Dynamo Deploy](../images/dynamo-deploy.png)
-
 ## Deployment Options
 
 Dynamo provides two distinct deployment paths, each serving different use cases:
 
-### 1. Dynamo Cloud Platform [PREFERRED]
+### 1. 🚀 Dynamo Cloud Kubernetes Platform [PREFERRED]
 
 The Dynamo Cloud Platform (`deploy/dynamo/helm/`) provides a managed deployment experience:
 
@@ -53,7 +51,8 @@ The manual deployment path (`deploy/Kubernetes/`) is available for users who nee
 
 1. **For Dynamo Cloud Platform**:
    - Follow the [Dynamo Cloud Platform Guide](../dynamo_cloud.md)
-   - Deploy using the [Operator Deployment Guide](operator_deployment.md)
+   - Deploy a Hello World pipeline using the [Operator Deployment Guide](operator_deployment.md)
+   - Deploy a Dynamo LLM pipeline to Kubernetes [Deploy LLM Guide](../../examples/llm/README.md)
 
 2. **For Manual Deployment**:
    - Follow the [Manual Helm Deployment Guide](manual_helm_deployment.md)
