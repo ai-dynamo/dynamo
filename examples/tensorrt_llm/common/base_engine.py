@@ -315,6 +315,7 @@ class BaseTensorrtLLMEngine:
                             tokens,
                             lora_id,
                         )
+                        parent_hash = block["block_hash"]
                 elif data["type"] == "removed":
                     for block_hash in data["block_hashes"]:
                         self._kv_cache_events_publisher.removed_event(block_hash)
