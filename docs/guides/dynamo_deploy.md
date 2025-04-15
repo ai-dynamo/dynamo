@@ -125,7 +125,7 @@ Follow these steps to containerize and deploy your inference pipeline:
 cd $PROJECT_ROOT/examples/hello_world
 
 # Set runtime image name
-export DYNAMO_IMAGE=<dynamo_runtime_image_name>
+export DYNAMO_IMAGE=<dynamo_base_image>
 
 # Build and containerize the Frontend service
 dynamo build --containerize hello_world:Frontend
