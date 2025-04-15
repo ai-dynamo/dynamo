@@ -120,7 +120,7 @@ class YourWorker:
         logger.info(f"Worker endpoint received: {req.text}")
         text = f"{req.text}"
         for token in text.split():
-            yield f"Backend: {token}"
+            yield ResponseType(text=token)
 ```
 
 To see a minimal worker example like the above used in a larger pipeline of
