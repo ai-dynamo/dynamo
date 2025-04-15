@@ -32,7 +32,7 @@ The Dynamo Cloud Platform (`deploy/dynamo/helm/`) provides a managed deployment 
 - Provides a managed deployment experience
 
 For detailed instructions on using the Dynamo Cloud Platform, see:
-- [Dynamo Cloud Platform Guide](../dynamo_cloud.md): walks through installing and configuring the Dynamo cloud components on your Kubernetes cluster.
+- [Dynamo Cloud Platform Guide](dynamo_cloud.md): walks through installing and configuring the Dynamo cloud components on your Kubernetes cluster.
 - [Operator Deployment Guide](operator_deployment.md)
 
 ### 2. Manual Deployment with Helm Charts
@@ -50,7 +50,7 @@ The manual deployment path (`deploy/Kubernetes/`) is available for users who nee
 ## Getting Started
 
 1. **For Dynamo Cloud Platform**:
-   - Follow the [Dynamo Cloud Platform Guide](../dynamo_cloud.md)
+   - Follow the [Dynamo Cloud Platform Guide](dynamo_cloud.md)
    - Deploy a Hello World pipeline using the [Operator Deployment Guide](operator_deployment.md)
    - Deploy a Dynamo LLM pipeline to Kubernetes [Deploy LLM Guide](../../examples/llm/README.md)
 

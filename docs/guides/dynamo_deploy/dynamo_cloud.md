@@ -29,7 +29,7 @@ The Dynamo cloud platform consists of several key components:
 
 These components work together to provide a seamless deployment experience, handling everything from containerization to scaling and monitoring.
 
-![Dynamo Deploy](../images/dynamo-deploy.png)
+![Dynamo Deploy](../../images/dynamo-deploy.png)
 
 ## Prerequisites
 
@@ -154,8 +154,8 @@ You must also expose the `dynamo-store` service within the namespace externally.
 
 After deploying the Dynamo cloud platform, you can:
 
-1. Deploy your first inference graph using the [Dynamo CLI](dynamo_deploy/operator_deployment.md)
-2. Deploy Dynamo LLM pipelines to Kubernetes using the [Dynamo CLI](../../examples/llm/README.md)!
+1. Deploy your first inference graph using the [Dynamo CLI](operator_deployment.md)
+2. Deploy Dynamo LLM pipelines to Kubernetes using the [Dynamo CLI](../../../examples/llm/README.md)!
 3. Manage your deployments using the Dynamo CLI
 
-For more detailed information about deploying inference graphs, see the [Dynamo Deploy Guide](dynamo_deploy/README.md).
+For more detailed information about deploying inference graphs, see the [Dynamo Deploy Guide](README.md).
