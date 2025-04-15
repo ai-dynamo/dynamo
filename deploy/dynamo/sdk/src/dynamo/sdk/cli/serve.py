@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import collections
 import json
 import logging
 import os
@@ -27,103 +26,14 @@ from typing import Optional
 
 import click
 import rich
-import yaml
+
+from .utils import resolve_service_config
 
 if t.TYPE_CHECKING:
     P = t.ParamSpec("P")  # type: ignore
     F = t.Callable[P, t.Any]  # type: ignore
 
 logger = logging.getLogger(__name__)
-
-
-def _parse_service_arg(arg_name: str, arg_value: str) -> tuple[str, str, t.Any]:
-    """Parse a single CLI argument into service name, key, and value."""
-
-    parts = arg_name.split(".")
-    service = parts[0]
-    nested_keys = parts[1:]
-
-    # Special case: if this is a ServiceArgs.envs.* path, keep value as string
-    if (
-        len(nested_keys) >= 2
-        and nested_keys[0] == "ServiceArgs"
-        and nested_keys[1] == "envs"
-    ):
-        value: t.Union[str, int, float, bool, dict, list] = arg_value
-    else:
-        # Parse value based on type for non-env vars
-        try:
-            value = json.loads(arg_value)
-        except json.JSONDecodeError:
-            if arg_value.isdigit():
-                value = int(arg_value)
-            elif arg_value.replace(".", "", 1).isdigit() and arg_value.count(".") <= 1:
-                value = float(arg_value)
-            elif arg_value.lower() in ("true", "false"):
-                value = arg_value.lower() == "true"
-            else:
-                value = arg_value
-
-    # Build nested dict structure
-    result = value
-    for key in reversed(nested_keys[1:]):
-        result = {key: result}
-
-    return service, nested_keys[0], result
-
-
-def _parse_service_args(args: list[str]) -> t.Dict[str, t.Any]:
-    service_configs: t.DefaultDict[str, t.Dict[str, t.Any]] = collections.defaultdict(
-        dict
-    )
-
-    def deep_update(d: dict, key: str, value: t.Any):
-        """
-        Recursively updates nested dictionaries. We use this to process arguments like
-
-        ---Worker.ServiceArgs.env.CUDA_VISIBLE_DEVICES="0,1"
-
-        The _parse_service_arg function will parse this into:
-        service = "Worker"
-        nested_keys = ["ServiceArgs", "envs", "CUDA_VISIBLE_DEVICES"]
-
-        And returns returns: ("VllmWorker", "ServiceArgs", {"envs": {"CUDA_VISIBLE_DEVICES": "0,1"}})
-
-        We then use deep_update to update the service_configs dictionary with this nested value.
-        """
-        if isinstance(value, dict) and key in d and isinstance(d[key], dict):
-            for k, v in value.items():
-                deep_update(d[key], k, v)
-        else:
-            d[key] = value
-
-    index = 0
-    while index < len(args):
-        next_arg = args[index]
-
-        if not (next_arg.startswith("--") or "." not in next_arg):
-            continue
-        try:
-            if "=" in next_arg:
-                arg_name, arg_value = next_arg.split("=", 1)
-                index += 1
-            elif args[index + 1] == "=":
-                arg_name = next_arg
-                arg_value = args[index + 2]
-                index += 3
-            else:
-                arg_name = next_arg
-                arg_value = args[index + 1]
-                index += 2
-            if arg_value.startswith("-"):
-                raise ValueError("Service arg value can not start with -")
-            arg_name = arg_name[2:]
-            service, key, value = _parse_service_arg(arg_name, arg_value)
-            deep_update(service_configs[service], key, value)
-        except Exception:
-            raise ValueError(f"Error parsing service arg: {args[index]}")
-
-    return service_configs
 
 
 def build_serve_command() -> click.Group:
@@ -215,27 +125,8 @@ def build_serve_command() -> click.Group:
 
         from dynamo.sdk.lib.service import LinkedServices
 
-        service_configs: dict[str, dict[str, t.Any]] = {}
-
-        # Load file if provided
-        if file:
-            with open(file) as f:
-                yaml_configs = yaml.safe_load(f)
-                # Initialize service_configs as empty dict if it's None
-                # Convert nested YAML structure to flat dict with dot notation
-                for service, configs in yaml_configs.items():
-                    if service not in service_configs:
-                        service_configs[service] = {}
-                    for key, value in configs.items():
-                        service_configs[service][key] = value
-
-        # Process service-specific options
-        cmdline_overrides: t.Dict[str, t.Any] = _parse_service_args(ctx.args)
-        for service, configs in cmdline_overrides.items():
-            if service not in service_configs:
-                service_configs[service] = {}
-            for key, value in configs.items():
-                service_configs[service][key] = value
+        # Resolve service configs from yaml file, command line args into a python dict
+        service_configs = resolve_service_config(file, ctx.args)
 
         # Process depends
         if depends:

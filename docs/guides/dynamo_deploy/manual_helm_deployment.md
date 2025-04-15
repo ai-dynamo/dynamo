@@ -17,13 +17,9 @@ limitations under the License.
 
 # Deploying Dynamo Inference Graphs to Kubernetes using Helm
 
-This guide will walk you through the process of deploying an inference graph created using the Dynamo SDK onto a Kubernetes cluster. Note that this is currently an experimental feature.
+This guide will walk you through the process of deploying an inference graph created using the Dynamo SDK onto a Kubernetes cluster.
 
-## Dynamo Kubernetes Operator Coming Soon!
-
-![Dynamo Deploy](../images/dynamo-deploy.png)
-
-While this guide covers deployment of Dynamo inference graphs using Helm, the preferred method to deploy an inference graph is via the Dynamo cloud platform. The Dynamo cloud platform, documented in [deploy/dynamo/README.md](../../deploy/dynamo/README.md), simplifies the deployment and management of Dynamo inference graphs. It includes a set of components (Operator, Kubernetes Custom Resources, etc.) that work together to streamline the deployment and management process.
+While this guide covers deployment of Dynamo inference graphs using Helm, the preferred method to deploy an inference graph is to [deploy with the Dynamo cloud platform](operator_deployment.md). The [Dynamo cloud platform](dynamo_cloud.md) simplifies the deployment and management of Dynamo inference graphs. It includes a set of components (Operator, Kubernetes Custom Resources, etc.) that work together to streamline the deployment and management process.
 
  Once an inference graph is defined using the Dynamo SDK, it can be deployed onto a Kubernetes cluster using a simple `dynamo deploy` command that orchestrates the following deployment steps:
 
@@ -118,14 +114,14 @@ Follow these steps to containerize and deploy your inference pipeline:
 1. Build and containerize the pipeline:
 
 > [!NOTE]
-> For instructions on building the Dynamo base image, see the [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image) section in the main README.
+> For instructions on building and pushing the Dynamo base image, see the [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image) section in the main README.
 
 ```bash
 # Navigate to example directory
 cd $PROJECT_ROOT/examples/hello_world
 
 # Set runtime image name
-export DYNAMO_IMAGE=<dynamo_runtime_image_name>
+export DYNAMO_IMAGE=<dynamo_base_image>
 
 # Build and containerize the Frontend service
 dynamo build --containerize hello_world:Frontend

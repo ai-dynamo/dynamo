@@ -17,6 +17,7 @@
 import asyncio
 import logging
 import os
+import signal
 import sys
 
 from pydantic import BaseModel
@@ -74,6 +75,9 @@ class PrefillWorker:
             )
             self.engine_args.enable_prefix_caching = False
 
+        signal.signal(signal.SIGTERM, self.shutdown_vllm_engine)
+        signal.signal(signal.SIGINT, self.shutdown_vllm_engine)
+
     @async_on_start
     async def async_init(self):
         self._engine_context = build_async_engine_client_from_engine_args(
@@ -99,6 +103,18 @@ class PrefillWorker:
 
         task.add_done_callback(prefill_queue_handler_cb)
         logger.info("PrefillWorker initialized")
+
+    def shutdown_vllm_engine(self, signum, frame):
+        """Shutdown the background loop"""
+        logger.info(f"Received signal {signum}, shutting down")
+        loop = asyncio.get_event_loop()
+        try:
+            self.engine_client.close()
+            logger.info("PrefillWorker shutdown complete")
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+        finally:
+            loop.stop()
 
     async def prefill_queue_handler(self):
         logger.info("Prefill queue handler entered")

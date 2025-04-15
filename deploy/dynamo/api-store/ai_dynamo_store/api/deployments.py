@@ -89,6 +89,7 @@ async def create_deployment(deployment: CreateDeploymentSchema):
                 "ngc-organization": ownership["organization_id"],
                 "ngc-user": ownership["user_id"],
             },
+            envs=deployment.envs,
         )
 
         # Create response schema

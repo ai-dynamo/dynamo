@@ -57,16 +57,19 @@ Although not needed for local development, deploying your Dynamo pipelines to Ku
 Here's how to build it:
 
 ```bash
-export CI_REGISTRY_IMAGE=<your-registry>
-export CI_COMMIT_SHA=<your-tag>
-
-earthly --push +dynamo-base-docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
+./container/build.sh
+docker tag dynamo:latest-vllm <your-registry>/dynamo-base:latest-vllm
+docker login <your-registry>
+docker push <your-registry>/dynamo-base:latest-vllm
 ```
 
 After building, you can use this image by setting the `DYNAMO_IMAGE` environment variable to point to your built image:
 ```bash
-export DYNAMO_IMAGE=<your-registry>/dynamo-base-docker:<your-tag>
+export DYNAMO_IMAGE=<your-registry>/dynamo-base:latest-vllm
 ```
+
+> [!NOTE]
+> We are working on leaner base images that can be built using the targets in the top-level Earthfile.
 
 ### Running and Interacting with an LLM Locally
 
@@ -133,9 +136,9 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ### Local Development
 
-#### Container
+If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions see the [ReadMe](.devcontainer/README.md) for more details.
 
-To develop locally, we recommend working inside of the container
+Otherwise, to develop locally, we recommend working inside of the container
 
 ```bash
 ./container/build.sh
@@ -149,19 +152,6 @@ cp /workspace/target/release/dynamo-run /workspace/deploy/dynamo/sdk/src/dynamo/
 
 uv pip install -e .
 ```
-
-#### Devcontainer Environment
-
-For a consistent development environment, you can use the provided devcontainer configuration. This requires:
-- [Docker](https://www.docker.com/products/docker-desktop)
-- [VS Code](https://code.visualstudio.com/) with the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
-
-To use the devcontainer:
-1. Open the project in VS Code
-2. Click on the button in the bottom-left corner
-3. Select "Reopen in Container"
-
-This will build and start a container with all the necessary dependencies for Dynamo development.
 
 
 #### Conda Environment

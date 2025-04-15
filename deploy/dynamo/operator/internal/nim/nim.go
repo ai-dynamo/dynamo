@@ -78,6 +78,17 @@ type ServiceConfig struct {
 	Config       Config              `yaml:"config"`
 }
 
+func (s ServiceConfig) GetNamespace() *string {
+	if s.Config.Dynamo == nil || s.Config.Dynamo.Namespace == "" {
+		return nil
+	}
+	return &s.Config.Dynamo.Namespace
+}
+
+func GetDefaultDynamoNamespace(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDeployment) string {
+	return fmt.Sprintf("dynamo-%s", dynamoDeployment.Name)
+}
+
 func RetrieveDynamoNimDownloadURL(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDeployment, recorder EventRecorder) (*string, *string, error) {
 	dynamoNimDownloadURL := ""
 	dynamoNimApiToken := ""
@@ -222,7 +233,7 @@ func GetDynamoNIMConfig(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDe
 }
 
 // generate DynamoNIMDeployment from config
-func GenerateDynamoNIMDeployments(parentDynamoDeployment *v1alpha1.DynamoDeployment, config *DynamoNIMConfig) (map[string]*v1alpha1.DynamoNimDeployment, error) {
+func GenerateDynamoNIMDeployments(ctx context.Context, parentDynamoDeployment *v1alpha1.DynamoDeployment, config *DynamoNIMConfig) (map[string]*v1alpha1.DynamoNimDeployment, error) {
 	dynamoServices := make(map[string]string)
 	deployments := make(map[string]*v1alpha1.DynamoNimDeployment)
 	for _, service := range config.Services {
@@ -233,7 +244,13 @@ func GenerateDynamoNIMDeployments(parentDynamoDeployment *v1alpha1.DynamoDeploym
 		deployment.Spec.DynamoNim = strings.ReplaceAll(parentDynamoDeployment.Spec.DynamoNim, ":", "--")
 		deployment.Spec.ServiceName = service.Name
 		if service.Config.Dynamo != nil && service.Config.Dynamo.Enabled {
-			dynamoServices[service.Name] = fmt.Sprintf("%s/%s", service.Config.Dynamo.Name, service.Config.Dynamo.Namespace)
+			dynamoNamespace := service.Config.Dynamo.Namespace
+			if dynamoNamespace == "" {
+				// if no namespace is specified, use the default namespace
+				dynamoNamespace = GetDefaultDynamoNamespace(ctx, parentDynamoDeployment)
+			}
+			deployment.Spec.DynamoNamespace = &dynamoNamespace
+			dynamoServices[service.Name] = fmt.Sprintf("%s/%s", service.Config.Dynamo.Name, dynamoNamespace)
 		} else {
 			// dynamo is not enabled
 			if config.EntryService == service.Name {

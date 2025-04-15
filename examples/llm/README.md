@@ -158,3 +158,82 @@ See [multinode-examples.md](multinode-examples.md) for more details.
 ### Close deployment
 
 See [close deployment](../../docs/guides/dynamo_serve.md#close-deployment) section to learn about how to close the deployment.
+
+## Deploy to Kubernetes
+
+These examples can be deployed to a Kubernetes cluster using Dynamo Cloud and the Dynamo deploy CLI.
+
+### Prerequisites
+
+Before deploying, ensure you have:
+- Dynamo CLI installed
+- Ubuntu 24.04 as the base image
+- Required dependencies:
+  - Helm package manager
+  - Dynamo SDK and CLI tools
+  - Rust packages and toolchain
+
+You must have first followed the instructions in [deploy/dynamo/helm/README.md](../../deploy/dynamo/helm/README.md) to install Dynamo Cloud on your Kubernetes cluster.
+
+**Note**: Note the `KUBE_NS` variable in the following steps must match the Kubernetes namespace where you installed Dynamo Cloud. You must also expose the `dynamo-store` service externally. This will be the endpoint the CLI uses to interface with Dynamo Cloud.
+
+### Deployment Steps
+
+1. **Login to Dynamo Cloud**
+
+```bash
+export PROJECT_ROOT=$(pwd)
+export KUBE_NS=dynamo-cloud  # Note: This must match the Kubernetes namespace where you installed Dynamo Cloud
+export DYNAMO_SERVER=https://${KUBE_NS}.dev.aire.nvidia.com # Externally accessible endpoint to the `dynamo-store` service within your Dynamo Cloud installation
+dynamo server login --api-token TEST-TOKEN --endpoint $DYNAMO_SERVER
+```
+
+2. **Build the Dynamo Base Image**
+
+> [!NOTE]
+> For instructions on building and pushing the Dynamo base image, see the [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image) section in the main README.
+
+```bash
+# Set runtime image name
+export DYNAMO_IMAGE=<dynamo_docker_image_name>
+
+# Prepare your project for deployment.
+cd $PROJECT_ROOT/examples/llm
+DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk '{ print $NF }' | sed 's/\.$//')
+```
+
+3. **Deploy to Kubernetes**
+
+```bash
+echo $DYNAMO_TAG
+export DEPLOYMENT_NAME=llm-agg
+dynamo deployment create $DYNAMO_TAG --no-wait -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
+```
+
+To delete an existing Dynamo deployment:
+
+```bash
+kubectl delete dynamodeployment $DEPLOYMENT_NAME
+```
+
+4. **Test the deployment**
+
+Once you create the Dynamo deployment, a pod prefixed with `yatai-dynamonim-image-builder` will begin running. Once it finishes running, pods will be created using the image that was built. Once the pods prefixed with `$DEPLOYMENT_NAME` are up and running, you can test out your example!
+
+```bash
+# Forward the service port to localhost
+kubectl -n ${KUBE_NS} port-forward svc/${DEPLOYMENT_NAME}-frontend 3000:3000
+
+# Test the API endpoint
+curl localhost:3000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "messages": [
+    {
+        "role": "user",
+        "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
+    }
+    ],
+    "stream":false,
+    "max_tokens": 30
+  }'
+```

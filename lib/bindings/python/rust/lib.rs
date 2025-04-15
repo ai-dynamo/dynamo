@@ -76,6 +76,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpError>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
+    m.add_class::<EtcdKvCache>()?;
 
     engine::add_to_module(m)?;
 
@@ -94,6 +95,12 @@ where
 #[pyo3(text_signature = "(level, message, module, file, line)")]
 fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) {
     logging::log_message(level, message, module, file, line);
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct EtcdKvCache {
+    inner: Arc<rs::transports::etcd::KvCache>,
 }
 
 #[pyclass]
@@ -202,6 +209,118 @@ impl DistributedRuntime {
 
     fn event_loop(&self) -> PyObject {
         self.event_loop.clone()
+    }
+}
+
+#[pymethods]
+impl EtcdKvCache {
+    #[new]
+    fn py_new(
+        _etcd_client: &EtcdClient,
+        _prefix: String,
+        _initial_values: &Bound<'_, PyDict>,
+    ) -> PyResult<Self> {
+        // We can't create the KvCache here because it's async, so we'll return an error
+        Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "EtcdKvCache must be created using the 'new' class method",
+        ))
+    }
+
+    #[staticmethod]
+    #[allow(clippy::new_ret_no_self)]
+    fn create<'p>(
+        py: Python<'p>,
+        etcd_client: &EtcdClient,
+        prefix: String,
+        initial_values: &Bound<'p, PyDict>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let client = etcd_client.inner.clone();
+
+        // Convert Python dict to Rust HashMap
+        let mut rust_initial_values = std::collections::HashMap::new();
+        for (key, value) in initial_values.iter() {
+            let key_str = key.extract::<String>()?;
+
+            // Handle both string and bytes values
+            let value_bytes = if let Ok(bytes) = value.extract::<Vec<u8>>() {
+                bytes
+            } else if let Ok(string) = value.extract::<String>() {
+                string.into_bytes()
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Values must be either strings or bytes",
+                ));
+            };
+
+            rust_initial_values.insert(key_str, value_bytes);
+        }
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let kv_cache = rs::transports::etcd::KvCache::new(client, prefix, rust_initial_values)
+                .await
+                .map_err(to_pyerr)?;
+
+            Ok(EtcdKvCache {
+                inner: Arc::new(kv_cache),
+            })
+        })
+    }
+
+    fn get<'p>(&self, py: Python<'p>, key: String) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            if let Some(value) = inner.get(&key).await {
+                match Python::with_gil(|py| {
+                    let py_obj = PyBytes::new(py, &value).into_pyobject(py)?;
+                    Ok(py_obj.unbind().into_any())
+                }) {
+                    Ok(result) => Ok(result),
+                    Err(e) => Err(e),
+                }
+            } else {
+                Ok(Python::with_gil(|py| py.None()))
+            }
+        })
+    }
+
+    fn get_all<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let all_values = inner.get_all().await;
+
+            Python::with_gil(|py| {
+                let dict = PyDict::new(py);
+                for (key, value) in all_values {
+                    // Strip the prefix from the key
+                    let stripped_key = if let Some(stripped) = key.strip_prefix(&inner.prefix) {
+                        stripped.to_string()
+                    } else {
+                        key
+                    };
+                    dict.set_item(stripped_key, PyBytes::new(py, &value))?;
+                }
+                let py_obj = dict.into_pyobject(py)?;
+                Ok(py_obj.unbind().into_any())
+            })
+        })
+    }
+
+    #[pyo3(signature = (key, value, lease_id=None))]
+    fn put<'p>(
+        &self,
+        py: Python<'p>,
+        key: String,
+        value: Vec<u8>,
+        lease_id: Option<i64>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner.put(&key, value, lease_id).await.map_err(to_pyerr)?;
+            Ok(())
+        })
     }
 }
 

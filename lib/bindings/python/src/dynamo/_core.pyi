@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import AsyncGenerator, AsyncIterator, Callable, Dict, List, Optional
+from typing import AsyncGenerator, AsyncIterator, Callable, Dict, List, Optional, Union
 
 def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
     """
@@ -73,6 +73,73 @@ class EtcdClient:
     async def kv_get_prefix(self, prefix: str) -> List[Dict[str, JsonLike]]:
         """
         Get all keys with a given prefix
+        """
+        ...
+
+class EtcdKvCache:
+    """
+    A cache for key-value pairs stored in etcd.
+    """
+
+    @staticmethod
+    async def new(
+        etcd_client: EtcdClient,
+        prefix: str,
+        initial_values: Dict[str, Union[str, bytes]]
+    ) -> "EtcdKvCache":
+        """
+        Create a new EtcdKvCache instance.
+
+        Args:
+            etcd_client: The etcd client to use for operations
+            prefix: The prefix to use for all keys in this cache.
+                EtcdKvCache will continuously watch the changes of the keys under this prefix.
+            initial_values: Initial key-value pairs to populate the cache with
+                NOTE: if the key already exists, it won't be updated
+
+        Returns:
+            A new EtcdKvCache instance
+        """
+        ...
+
+    async def get(self, key: str) -> Optional[bytes]:
+        """
+        Get a value from the cache.
+
+        Args:
+            key: The key to retrieve
+
+        Returns:
+            The value as bytes if found, None otherwise
+
+        NOTE: this get is cheap because internally there is a cache that holds the latest kv pairs.
+        To prevent race condition, there is a lock when reading/writing the internal cache.
+        """
+        ...
+
+    async def get_all(self) -> Dict[str, bytes]:
+        """
+        Get all key-value pairs from the cache.
+
+        Returns:
+            A dictionary of all key-value pairs, with keys stripped of the prefix
+            (i.e., in the same format as in `initial_values`.keys())
+        """
+        ...
+
+    async def put(
+        self,
+        key: str,
+        value: bytes,
+        lease_id: Optional[int] = None
+    ) -> None:
+        """
+        Put a key-value pair into the cache and etcd.
+
+        Args:
+            key: The key to store
+            value: The value to store
+            lease_id: Optional lease ID to associate with this key-value pair
         """
         ...
 

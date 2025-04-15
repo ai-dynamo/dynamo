@@ -18,7 +18,11 @@ import logging
 from pydantic import BaseModel
 
 from dynamo.sdk import DYNAMO_IMAGE, api, depends, dynamo_endpoint, service
+from dynamo.sdk.lib.config import ServiceConfig
+from dynamo.sdk.lib.logging import configure_server_logging
 
+# Configure logging
+configure_server_logging()
 logger = logging.getLogger(__name__)
 
 """
@@ -61,13 +65,16 @@ class ResponseType(BaseModel):
 class Backend:
     def __init__(self) -> None:
         logger.info("Starting backend")
+        config = ServiceConfig.get_instance()
+        self.message = config.get("Backend", {}).get("message", "back")
+        logger.info(f"Backend config message: {self.message}")
 
     @dynamo_endpoint()
     async def generate(self, req: RequestType):
         """Generate tokens."""
         req_text = req.text
         logger.info(f"Backend received: {req_text}")
-        text = f"{req_text}-back"
+        text = f"{req_text}-{self.message}"
         for token in text.split():
             yield f"Backend: {token}"
 
@@ -81,13 +88,16 @@ class Middle:
 
     def __init__(self) -> None:
         logger.info("Starting middle")
+        config = ServiceConfig.get_instance()
+        self.message = config.get("Middle", {}).get("message", "mid")
+        logger.info(f"Middle config message: {self.message}")
 
     @dynamo_endpoint()
     async def generate(self, req: RequestType):
         """Forward requests to backend."""
         req_text = req.text
         logger.info(f"Middle received: {req_text}")
-        text = f"{req_text}-mid"
+        text = f"{req_text}-{self.message}"
         next_request = RequestType(text=text).model_dump_json()
         async for response in self.backend.generate(next_request):
             logger.info(f"Middle received response: {response}")
@@ -101,14 +111,19 @@ class Frontend:
     middle = depends(Middle)
 
     def __init__(self) -> None:
-        print("Starting frontend")
+        logger.info("Starting frontend")
+        config = ServiceConfig.get_instance()
+        self.message = config.get("Frontend", {}).get("message", "front")
+        self.port = config.get("Frontend", {}).get("port", 8000)
+        logger.info(f"Frontend config message: {self.message}")
+        logger.info(f"Frontend config port: {self.port}")
 
     @api
     async def generate(self, text):
         """Stream results from the pipeline."""
-        print(f"Frontend received: {text}")
-        print(f"Frontend received type: {type(text)}")
+        logger.info(f"Frontend received: {text}")
+        logger.info(f"Frontend received type: {type(text)}")
         txt = RequestType(text=text)
-        print(f"Frontend sending: {type(txt)}")
+        logger.info(f"Frontend sending: {type(txt)}")
         async for response in self.middle.generate(txt.model_dump_json()):
             yield f"Frontend: {response}"
