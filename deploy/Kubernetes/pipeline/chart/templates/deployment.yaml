@@ -72,18 +72,20 @@ spec:
             {{ end }}
         {{ end }}
         env:
+        {{- if and .config.traffic .config.traffic.timeout }}
         - name: TRAFFIC_TIMEOUT
           value: "{{ .config.traffic.timeout }}"
-      {{- if and .config.dynamo .config.dynamo.enabled }}
+        {{- end }}
+        {{- if and .config.dynamo .config.dynamo.enabled }}
         - name: DYNAMO_NAMESPACE
           value: "{{ .config.dynamo.namespace }}"
         - name: DYNAMO_NAME
           value: "{{ .config.dynamo.name }}"
-      {{- end }}
-      {{- if .config.workers }}
+        {{- end }}
+        {{- if .config.workers }}
         - name: WORKERS
           value: "{{ .config.workers }}"
-      {{- end }}
+        {{- end }}
         - name: PORT
           value: "3000"
         {{- if $.Values.natsAddr }}
