@@ -48,9 +48,12 @@ spec:
         command:
         - sh
         - -c
+        {{ if .config.resources }}
         resources:
           requests:
+            {{ if .config.resources.cpu }}
             cpu: "{{ .config.resources.cpu }}"
+            {{ end }}
             {{ if .config.resources.memory }}
             memory: "{{ .config.resources.memory }}"
             {{ end }}
@@ -58,13 +61,16 @@ spec:
             nvidia.com/gpu: "{{ .config.resources.gpu }}"
             {{ end }}
           limits:
+            {{ if .config.resources.cpu }}
             cpu: "{{ .config.resources.cpu }}"
+            {{ end }}
             {{ if .config.resources.memory }}
             memory: "{{ .config.resources.memory }}"
             {{ end }}
             {{ if .config.resources.gpu }}
             nvidia.com/gpu: "{{ .config.resources.gpu }}"
             {{ end }}
+        {{ end }}
         env:
         - name: TRAFFIC_TIMEOUT
           value: "{{ .config.traffic.timeout }}"
