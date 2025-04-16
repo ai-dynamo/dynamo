@@ -52,6 +52,7 @@ class Processor(ChatProcessorMixin):
         self.remote_prefill = args.remote_prefill
         self.router_mode = args.router
         self.min_workers = 1
+        self.args = args
 
         super().__init__(engine_config)
 
@@ -66,7 +67,7 @@ class Processor(ChatProcessorMixin):
             .client()
         )
 
-        if self.engine_args.router == "kv":
+        if self.args.router == "kv":
             router_ns, router_name = Router.dynamo_address()  # type: ignore
             self.router_client = (
                 await runtime.namespace(router_ns)
