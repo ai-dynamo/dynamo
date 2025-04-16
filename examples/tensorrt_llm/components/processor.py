@@ -66,13 +66,15 @@ class Processor(ChatProcessorMixin):
             .client()
         )
 
-        router_ns, router_name = Router.dynamo_address()  # type: ignore
-        self.router_client = (
-            await runtime.namespace(router_ns)
-            .component(router_name)
-            .endpoint("generate")
-            .client()
-        )
+        if self.engine_args.router == "kv":
+            router_ns, router_name = Router.dynamo_address()  # type: ignore
+            self.router_client = (
+                await runtime.namespace(router_ns)
+                .component(router_name)
+                .endpoint("generate")
+                .client()
+            )
+
         while len(self.worker_client.endpoint_ids()) < self.min_workers:
             logger.info(
                 f"Waiting for workers to be ready.\n"

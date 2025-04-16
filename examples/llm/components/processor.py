@@ -67,6 +67,7 @@ class Processor(ProcessMixIn):
             self.tokenizer, self.model_config
         )
         self.min_workers = 1
+        print(f"Processor init: {self.engine_args.router}")
 
     def _create_tokenizer(self, engine_args: AsyncEngineArgs) -> AnyTokenizer:
         """Create a TokenizerGroup using engine arguments similar to VLLM's approach"""
@@ -93,13 +94,14 @@ class Processor(ProcessMixIn):
             .client()
         )
 
-        router_ns, router_name = Router.dynamo_address()  # type: ignore
-        self.router_client = (
-            await runtime.namespace(router_ns)
-            .component(router_name)
-            .endpoint("generate")
-            .client()
-        )
+        if self.engine_args.router == "kv":
+            router_ns, router_name = Router.dynamo_address()  # type: ignore
+            self.router_client = (
+                await runtime.namespace(router_ns)
+                .component(router_name)
+                .endpoint("generate")
+                .client()
+            )
 
         await check_required_workers(self.worker_client, self.min_workers)
 
