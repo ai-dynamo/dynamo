@@ -126,7 +126,7 @@ class YourWorker:
 
 To see a minimal worker example like the above used in a larger pipeline of
 components, see the `dynamo serve`
-[Hello World example](../examples/hello_world/README.md).
+[Hello World example](../examples/hello_world).
 
 ### Client Example
 
@@ -176,12 +176,14 @@ that does something like the following:
 - Convert responses from the worker's ResponseType back into Chat Completions response format
 - Forward responses back to client
 
-This advanced scenario of a separate OpenAI Processor worker is demonstrated in this
-[vLLM example](../examples/llm/README.md).
+This advanced scenario of a separate
+[OpenAI Processor worker](../examples/llm/components/processor.py)
+is demonstrated in this
+[vLLM example](../examples/llm/).
 
 For a more minimal example of deploying a pipeline of components with a custom
 API that your client can communicate with, see the
-[Hello World example](../examples/hello_world/README.md).
+[Hello World example](../examples/hello_world).
 
 ## Advanced Features
 
@@ -191,7 +193,8 @@ KV-aware routing is a powerful feature of Dynamo that optimizes for routing
 requests to specific workers while minimizing a specific KV-cache based cost function.
 
 In its simplest form, all a worker needs to do to enable KV-aware routing is to
-publish KV metrics for Dynamo's KV Router to consume through the `KvMetricsPublisher`:
+publish KV metrics through the `KvMetricsPublisher`, which will be consumed
+by a Dynamo KV Router through the `KvMetricsAggregator`:
 
 ```python
 # kv_metrics_worker.py
@@ -223,6 +226,8 @@ class YourWorker:
         # Initialize metrics publisher from Dynamo
         self.component = dynamo_context["component"]
         self.metrics_publisher = KvMetricsPublisher()
+        # Register an endpoint for consumers of the KV Metrics
+        # (KvMetricsAggregator) to listen/gather on.
         self.metrics_publisher.create_endpoint(self.component)
 
         # Initialize some metrics for the worker/class to track
@@ -291,7 +296,22 @@ generation, or you may only want to update once per request, depending on your u
 Assuming long generation time or long output token sequence lengths, it would be more
 accurate to publish metrics at every generation step.
 
-For more details, see the [KV Cache Routing Guide](../docs/kv_cache_routing.md).
+With the worker publishing KV metrics, you should now be able to connect it
+to a KV Router through the `KvMetricsAggregator`.
+```python
+# Initialize a listener/aggregator for collecting KV metrics
+# from the specified component (workers) publishing them
+kv_listener = runtime.namespace("your_namespace").component("YourWorker")
+await kv_listener.create_service()
+metrics_aggregator = KvMetricsAggregator(kv_listener)
+
+# Gather KV Metrics from the worker endpoints publishing them
+for endpoint in metrics_aggregator.get_metrics().endpoints:
+    print(endpoint)
+```
+
+For more details on receiving and routing based on the worker's published KV
+metrics, see the [KV Cache Routing Guide](../docs/kv_cache_routing.md).
 
 ### Disaggregated Serving
 
