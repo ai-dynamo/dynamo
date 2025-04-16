@@ -3996,6 +3996,20 @@ index 014e8d5d8..3ffc0f354 100644
  @dataclass
  class CompletionOutput:
      """The output data of one completion output of a request.
+diff --git a/vllm/platforms/__init__.py b/vllm/platforms/__init__.py
+index 0ed221043..995e32f86 100644
+--- a/vllm/platforms/__init__.py
++++ b/vllm/platforms/__init__.py
+@@ -20,7 +20,8 @@ def vllm_version_matches_substr(substr: str) -> bool:
+     """
+     from importlib.metadata import PackageNotFoundError, version
+     try:
+-        vllm_version = version("vllm")
++        logger.warning("Using ai_dynamo_vllm version instead of vllm")
++        vllm_version = version("ai_dynamo_vllm")
+     except PackageNotFoundError as e:
+         logger.warning(
+             "The vLLM package was not found, so its version could not be "
 diff --git a/vllm/remote_prefill.py b/vllm/remote_prefill.py
 new file mode 100644
 index 000000000..83f6cd575
