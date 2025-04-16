@@ -94,9 +94,6 @@ via custom RequestType/ResponseType definitions:
 # basic_worker.py
 # This can be run standalone with `dynamo serve basic_worker:YourWorker`
 
-import logging
-from typing import AsyncIterator
-
 from pydantic import BaseModel
 from dynamo.sdk import dynamo_endpoint, service
 
@@ -119,11 +116,11 @@ class YourWorker:
         logger.info("Starting worker...")
 
     @dynamo_endpoint()
-    async def generate(self, request: RequestType) -> AsyncIterator[ResponseType]:
+    async def generate(self, request: RequestType):
         """Generate tokens and stream them back"""
         logger.info(f"Worker endpoint received: {request.text}")
+
         for token in request.text.split():
-            print("Returning token:", token)
             yield ResponseType(text=token).model_dump_json()
 ```
 
@@ -274,8 +271,8 @@ class YourWorker:
         """Generate tokens, update KV Cache metrics, and stream the tokens back"""
         # Increment the number of active requests on receiving one
         self.request_active_slots += 1
-
         logger.info(f"Worker endpoint received: {request.text}")
+
         # Simulate each step of token generation
         for token in request.text.split():
             # Update the metrics with the current state
@@ -308,9 +305,12 @@ Aside from the NIXL specifics above, at its core, disaggregation in Dynamo build
 on the same concepts used for any Dynamo client<->worker or worker<->worker
 interaction over the DistributedRuntime.
 
-First you can define a worker as usual:
+First you can define a worker for each as usual:
 ```python
 class DecodeWorker:
+    # ...
+
+class PrefillWorker:
     # ...
 ```
 
