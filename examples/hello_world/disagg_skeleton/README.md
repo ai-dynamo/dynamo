@@ -76,7 +76,9 @@ dynamo serve components.worker:DummyWorker
 4. Go to Node 2 and start Worker service as in step 3.
 Now you should see both workers are ready in Node 1's terminal.
 
-5. Query the Fronend with following two prompts first. Then modify the prompt and you will notice prompts with similar prefix (for example, "Tell me a joke" and "Tell me a fact") will be routed to the same worker due to the routing algorithm used in this demo.
+5. Query the Frontend with following two prompts. The router would assign different workers for each prompt and you can observe it from the responses.
+- `Response: {"worker_output":"Tell me a joke_GeneratedBy_NODE1HOSTNAME","request_id":"id_number"}`
+- `Response: {"worker_output":"Which team won 2020 World Series_GeneratedBy_NODE2HOSTNAME","request_id":"id_number"}`
 ```
 curl -X 'POST' \
   'http://localhost:3000/fegenerate' \
@@ -84,7 +86,7 @@ curl -X 'POST' \
   -H 'Content-Type: application/json' \
   -d '{
   "prompt": "Tell me a joke",
-  "request_id":"12345"
+  "request_id":"id_number"
 }'
 curl -X 'POST' \
   'http://localhost:3000/fegenerate' \
@@ -92,9 +94,21 @@ curl -X 'POST' \
   -H 'Content-Type: application/json' \
   -d '{
   "prompt": "Which team won 2020 World Series",
-  "request_id":"12345"
+  "request_id":"id_number"
 }'
 ```
+6. Then modify the prompt and you will notice prompts with similar prefix will be routed to the same worker due to the simply routing algorithm used in this demo. For example, following query will be routed to the worker proceesed "Tell me a joke" prompt.
+```
+curl -X 'POST' \
+  'http://localhost:3000/fegenerate' \
+  -H 'accept: text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "prompt": "Tell me a fact",
+  "request_id":"id_number"
+}'
+```
+-`Response: {"worker_output":"Tell me a fact_GeneratedBy_NODE1HOSTNAME","request_id":"id_number"}`
 
 ## The Disaggregated Deployment
 
