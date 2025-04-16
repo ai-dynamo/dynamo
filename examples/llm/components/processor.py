@@ -93,6 +93,14 @@ class Processor(ProcessMixIn):
             .client()
         )
 
+        router_ns, router_name = Router.dynamo_address()  # type: ignore
+        self.router_client = (
+            await runtime.namespace(router_ns)
+            .component(router_name)
+            .endpoint("generate")
+            .client()
+        )
+
         await check_required_workers(self.worker_client, self.min_workers)
 
         self.etcd_kv_cache = await EtcdKvCache.create(
@@ -117,7 +125,7 @@ class Processor(ProcessMixIn):
         ) = await self._parse_raw_request(raw_request)
         router_mode = (await self.etcd_kv_cache.get("router")).decode()
         if router_mode == "kv":
-            async for route_response in self.router.generate(
+            async for route_response in self.router_client.generate(
                 Tokens(tokens=engine_prompt["prompt_token_ids"]).model_dump_json()
             ):
                 worker_id, prefix_hit_rate = route_response.split("_")

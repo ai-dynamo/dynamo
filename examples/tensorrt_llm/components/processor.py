@@ -65,6 +65,14 @@ class Processor(ChatProcessorMixin):
             .endpoint("generate")
             .client()
         )
+
+        router_ns, router_name = Router.dynamo_address()  # type: ignore
+        self.router_client = (
+            await runtime.namespace(router_ns)
+            .component(router_name)
+            .endpoint("generate")
+            .client()
+        )
         while len(self.worker_client.endpoint_ids()) < self.min_workers:
             logger.info(
                 f"Waiting for workers to be ready.\n"
@@ -88,7 +96,7 @@ class Processor(ChatProcessorMixin):
 
         worker_id = ""
         if self.router_mode == "kv":
-            async for route_response in self.router.generate(
+            async for route_response in self.router_client.generate(
                 preprocessed_request.tokens.model_dump_json()
             ):
                 worker_id, prefix_hit_rate = route_response.split("_")
