@@ -21,7 +21,6 @@ Common:
   block-size: 128
   max-model-len: 3500
   max-num-batched-tokens: 3500
-  gpu-memory-utilization: 0.95
   disable-log-requests: true
 
 Frontend:
@@ -37,11 +36,12 @@ Processor:
 
 # x1 process with 4 GPUs generating output tokens (the "decode" phase).
 VllmWorker:
-  common-configs: [model, kv-transfer-config, router, block-size, max-model-len, gpu-memory-utilization, disable-log-requests]
+  common-configs: [model, kv-transfer-config, router, block-size, max-model-len, disable-log-requests]
   # Enable prefill at different workers.
   remote-prefill: true
   # Disable local prefill so only disaggregated prefill is used.
   conditional-disagg: false
+  gpu-memory-utilization: 0.95
   tensor-parallel-size: 4
   ServiceArgs:
     workers: 1

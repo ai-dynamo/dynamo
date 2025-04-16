@@ -29,7 +29,6 @@ Common:
   block-size: 128
   max-model-len: 3500
   max-num-batched-tokens: 3500
-  gpu-memory-utilization: 0.95
   disable-log-requests: true
 
 Frontend:
@@ -45,11 +44,13 @@ Router:
   min-workers: 1
 
 VllmWorker:
-  common-configs: [model, kv-transfer-config, router, block-size, max-model-len, gpu-memory-utilization, disable-log-requests]
+  common-configs: [model, kv-transfer-config, router, block-size, max-model-len, disable-log-requests]
   # Enable prefill at different workers.
   remote-prefill: true
   # Disable local prefill so only disaggregated prefill is used.
   conditional-disagg: false
+  # The GPU memory utilization do not have to match between VllmWorker and PrefillWorker.
+  gpu-memory-utilization: 0.95
   # TP size is doubled from single node setup
   tensor-parallel-size: 8
   ServiceArgs:
@@ -58,7 +59,8 @@ VllmWorker:
       gpu: 8
 
 PrefillWorker:
-  common-configs: [model, kv-transfer-config, block-size, max-model-len, max-num-batched-tokens, gpu-memory-utilization, disable-log-requests]
+  common-configs: [model, kv-transfer-config, block-size, max-model-len, max-num-batched-tokens, disable-log-requests]
+  gpu-memory-utilization: 0.95
   tensor-parallel-size: 1
   ServiceArgs:
     # DP size is doubled from single node setup
