@@ -34,6 +34,7 @@ Dynamo CLI has the following 4 sub-commands.
 - :palm_up_hand: dynamo serve: compose a graph of workers locally and serve.
 - :hammer: (Experimental) dynamo build: containerize either the entire graph or parts of graph to multiple containers
 - :rocket: (Experimental) dynamo deploy: deploy to K8 with helm charts or custom operators
+- :cloud: (Experimental) dynamo cloud: interact with your dynamo cloud server
 
 For more detailed examples on serving LLMs with disaggregated serving, KV aware routing, etc,  please refer to [LLM deployment examples](https://github.com/ai-dynamo/dynamo/blob/main/examples/llm/README.md)
 

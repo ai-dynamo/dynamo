@@ -39,9 +39,9 @@ The deployment process involves two main steps:
 
 ## Deployment Steps
 
-### 1. Login to Dynamo Server
+### 1. Login to Dynamo Cloud
 
-First, configure your environment and login to the Dynamo server:
+First, configure your environment and login to the Dynamo cloud:
 
 ```bash
 # Set your project root directory
@@ -51,10 +51,10 @@ export PROJECT_ROOT=$(pwd)
 export KUBE_NS=hello-world
 
 # Externally accessible endpoint to the `dynamo-store` service within your Dynamo Cloud installation
-export DYNAMO_SERVER=https://${KUBE_NS}.dev.aire.nvidia.com
+export DYNAMO_CLOUD=https://${KUBE_NS}.dev.aire.nvidia.com
 
-# Login to the Dynamo server
-dynamo server login --api-token TEST-TOKEN --endpoint $DYNAMO_SERVER
+# Login to the Dynamo cloud
+dynamo cloud login --api-token TEST-TOKEN --endpoint $DYNAMO_CLOUD
 ```
 
 ### 2. Build the Dynamo Base Image

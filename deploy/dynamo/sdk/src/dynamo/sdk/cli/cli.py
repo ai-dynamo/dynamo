@@ -30,16 +30,14 @@ def create_bentoml_cli() -> click.Command:
     from bentoml_cli.utils import get_entry_points
 
     from dynamo.sdk.cli.bentos import bento_command
+    from dynamo.sdk.cli.cloud import cloud_command
     from dynamo.sdk.cli.deployment import deployment_command
     from dynamo.sdk.cli.env import env_command
 
     # from dynamo.sdk.cli.deploy import deploy_command
     from dynamo.sdk.cli.run import run_command
     from dynamo.sdk.cli.serve import serve_command
-    from dynamo.sdk.cli.server import cloud_command
     from dynamo.sdk.cli.utils import DynamoCommandGroup
-
-    # from dynamo.sdk.cli.cloud import cloud_command
 
     server_context.service_type = "cli"
 
@@ -53,8 +51,8 @@ def create_bentoml_cli() -> click.Command:
         It takes inspiration from and leverages core pieces of the BentoML deployment stack.
 
         At a high level, you use `serve` to run a set of dynamo services locally,
-        `build` and `containerize` to package them  up for deployment, and then `server`
-        and `deploy` to deploy them to a K8s cluster running the Dynamo Server
+        `build` and `containerize` to package them up for deployment, and then `cloud`
+        and `deploy` to deploy them to a K8s cluster running the Dynamo Cloud Server
         """
 
     # Add top-level CLI commands
