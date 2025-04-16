@@ -124,7 +124,7 @@ class Processor(ProcessMixIn):
             sampling_params,
         ) = await self._parse_raw_request(raw_request)
         router_mode = (await self.etcd_kv_cache.get("router")).decode()
-        if router_mode == "kv":
+        if router_mode == "kv"
             router_generator = await self.router_client.generate(
                 Tokens(tokens=engine_prompt["prompt_token_ids"]).model_dump_json()
             )
