@@ -314,11 +314,19 @@ class DecodeWorker:
     # ...
 ```
 
-Second, you decide when/how the (Decode) worker should do Prefill remotely (by calling a separate Prefill worker),
-or simply do the Prefill itself. In some scenarios, it may be more efficient for the Decode worker to just do
-the Prefill itself rather than do the extra communication, such as if the input sequence length is below
-some small threshold.
+Second, you decide when/how the (Decode) worker should decide to Prefill remotely
+(by calling a separate Prefill worker), or decide to simply do the Prefill itself.
+In some scenarios, it may be more efficient for the Decode worker to just do the
+Prefill itself rather than do the extra communication, such as if the input
+sequence length is below some small threshold. If you wanted to disable
+disaggregation, the DecodeWorker could just always do the Prefill step as well.
 ```python
+@service(
+    dynamo={
+        "enabled": True,
+        "namespace": "your_namespace",
+    },
+)
 class DecodeWorker:
     def __init__(self):
         self.runtime = dynamo_context["runtime"]
@@ -326,15 +334,34 @@ class DecodeWorker:
         # Whether the decode worker should call a separate Prefill worker or not
         self.do_remote_prefill = True
 
-        # Client to PrefillWorker
-        self.prefill_worker = self.runtime.namespace("your_namespace").component("PrefillWorker").endpoint("generate")
+        # Initialize client to PrefillWorker
+        self.prefill_client = await self.runtime
+                .namespace("your_namespace")
+                .component("PrefillWorker")
+                .endpoint("generate")
+                .client()
 
-    async def generate(...):
+    @dynamo_endpoint
+    async def generate(self, request):
         if self.do_remote_prefill:
             # Forward the request to the prefill worker
-            prefill_response = await self.prefill_worker.generate(...)
+            prefill_response = await self.prefill_client.generate(...)
 
-        # ... decode ...
+        # ... framework-specific decode logic ...
+
+@service(
+    dynamo={
+        "enabled": True,
+        "namespace": "your_namespace",
+    },
+)
+class PrefillWorker:
+    def __init__(self):
+        # ...
+
+    @dynamo_endpoint
+    async def generate(self, request):
+        # ... framework-specific prefill logic ...
 ```
 
 Depending on the load distribution of requests and number of Prefill/Decode
