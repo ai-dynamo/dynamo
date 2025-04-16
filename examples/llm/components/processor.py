@@ -125,15 +125,16 @@ class Processor(ProcessMixIn):
         ) = await self._parse_raw_request(raw_request)
         router_mode = (await self.etcd_kv_cache.get("router")).decode()
         if router_mode == "kv":
-            async for route_response in self.router_client.generate(
+            router_generator = await self.router_client.generate(
                 Tokens(tokens=engine_prompt["prompt_token_ids"]).model_dump_json()
-            ):
-                worker_id, prefix_hit_rate = route_response.split("_")
-                prefix_hit_rate = float(prefix_hit_rate)
-                logger.info(
-                    f"Worker ID: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
-                )
-                break
+            )
+            decision = await router_generator.__anext__()
+            decision = decision.data()
+            worker_id, prefix_hit_rate = decision.split("_")
+            prefix_hit_rate = float(prefix_hit_rate)
+            logger.info(
+                f"Worker ID: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
+            )
 
             if worker_id == "":
                 engine_generator = await self.worker_client.generate(

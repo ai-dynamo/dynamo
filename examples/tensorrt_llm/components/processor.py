@@ -96,15 +96,16 @@ class Processor(ChatProcessorMixin):
 
         worker_id = ""
         if self.router_mode == "kv":
-            async for route_response in self.router_client.generate(
+            router_generator = await self.router_client.generate(
                 preprocessed_request.tokens.model_dump_json()
-            ):
-                worker_id, prefix_hit_rate = route_response.split("_")
-                prefix_hit_rate = float(prefix_hit_rate)
-                logger.info(
-                    f"Worker ID: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
-                )
-                break
+            )
+            decision = await router_generator.__anext__()
+            decision = decision.data()
+            worker_id, prefix_hit_rate = decision.split("_")
+            prefix_hit_rate = float(prefix_hit_rate)
+            logger.info(
+                f"Worker ID: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
+            )
 
         if worker_id == "":
             if self.router_mode == "round-robin":
