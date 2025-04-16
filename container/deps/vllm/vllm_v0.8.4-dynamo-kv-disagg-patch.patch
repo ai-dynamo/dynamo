@@ -1,5 +1,5 @@
 diff --git a/vllm/config.py b/vllm/config.py
-index 9ba497576..db2dc002f 100644
+index 2912361ee..eea9cb65d 100644
 --- a/vllm/config.py
 +++ b/vllm/config.py
 @@ -1,4 +1,17 @@
@@ -20,7 +20,7 @@ index 9ba497576..db2dc002f 100644
  
  import ast
  import copy
-@@ -2620,6 +2633,9 @@ class KVTransferConfig(BaseModel):
+@@ -3091,6 +3104,9 @@ class KVTransferConfig(BaseModel):
      # The KV connector for vLLM to transmit KV caches between vLLM instances.
      kv_connector: Optional[str] = None
  
@@ -30,7 +30,7 @@ index 9ba497576..db2dc002f 100644
      # The device used by kv connector to buffer the KV cache.
      # Currently only support 'cuda'.
      kv_buffer_device: Optional[str] = "cuda"
-@@ -2629,7 +2645,7 @@ class KVTransferConfig(BaseModel):
+@@ -3100,7 +3116,7 @@ class KVTransferConfig(BaseModel):
      kv_buffer_size: float = 1e9
  
      # Whether this vLLM instance produces, consumes KV cache, or both. Choices
@@ -39,22 +39,7 @@ index 9ba497576..db2dc002f 100644
      kv_role: Optional[str] = None
  
      # The rank of this vLLM instance in the KV cache transfer. Typical value:
-@@ -2647,6 +2663,14 @@ class KVTransferConfig(BaseModel):
-     # The KV connector port, used to build distributed connection
-     kv_port: int = 14579
- 
-+
-+    # This does not need to be set by the user. It is set by the connector.
-+    kv_producers_parallel_size: Optional[int] = None
-+    kv_producers_tensor_parallel_size: Optional[int] = None
-+    kv_producers_pipeline_parallel_size: Optional[int] = None
-+    kv_consumers_tensor_parallel_size: Optional[int] = None
-+    kv_consumers_pipeline_parallel_size: Optional[int] = None
-+
-     def compute_hash(self) -> str:
-         """
-         WARNING: Whenever a new field is added to this config,
-@@ -2680,11 +2704,16 @@ class KVTransferConfig(BaseModel):
+@@ -3155,11 +3171,16 @@ class KVTransferConfig(BaseModel):
                  f"Supported roles are `kv_producer`, `kv_consumer`, "
                  f"and `kv_both`")
  
@@ -72,36 +57,8 @@ index 9ba497576..db2dc002f 100644
      @property
      def is_kv_transfer_instance(self) -> bool:
          return self.kv_connector is not None and \
-@@ -2694,6 +2723,8 @@ class KVTransferConfig(BaseModel):
-     def need_kv_parallel_group(self) -> bool:
-         # for those database-based connector, vLLM does not need to create
-         # parallel group, and in that case the kv parallel size will be 1.
-+        if self.kv_connector == "DynamoNixlConnector":
-+            return False
-         return self.kv_connector is not None and self.kv_parallel_size > 1
- 
-     @property
-@@ -2706,6 +2737,18 @@ class KVTransferConfig(BaseModel):
-         return self.kv_connector is not None and \
-             self.kv_role in ["kv_consumer", "kv_both"]
- 
-+    @property
-+    def tensor_parallel_multiplier(self) -> int:
-+        return self.kv_consumers_tensor_parallel_size // self.kv_producers_tensor_parallel_size
-+
-+    @property
-+    def kv_consumers_parallel_size(self) -> int:
-+        return self.kv_parallel_size - self.kv_producers_parallel_size
-+
-+    @property
-+    def kv_world_size(self) -> int:
-+        return self.kv_producers_parallel_size + self.kv_consumers_parallel_size * self.tensor_parallel_multiplier
-+
- 
- class CompilationLevel:
-     # constants for the levels of the compilation process
 diff --git a/vllm/core/block/cpu_gpu_block_allocator.py b/vllm/core/block/cpu_gpu_block_allocator.py
-index 359b5b263..7bac45ff0 100644
+index d64142e77..6279767cb 100644
 --- a/vllm/core/block/cpu_gpu_block_allocator.py
 +++ b/vllm/core/block/cpu_gpu_block_allocator.py
 @@ -1,4 +1,17 @@
@@ -332,7 +289,7 @@ index 1ca9e49da..26fabb243 100644
      def _track_block_id(self, block_id: Optional[BlockId],
                          computed: bool) -> None:
 diff --git a/vllm/core/block_manager.py b/vllm/core/block_manager.py
-index c5b3b04f3..d3a4b77f8 100644
+index c6bf6d163..c5514f935 100644
 --- a/vllm/core/block_manager.py
 +++ b/vllm/core/block_manager.py
 @@ -1,4 +1,17 @@
@@ -551,10 +508,10 @@ index 000000000..79eb8db67
 +
 +        self.event_id_counter += 1
 diff --git a/vllm/core/scheduler.py b/vllm/core/scheduler.py
-index f507847ad..3f3cba766 100644
+index cf85a2135..f9087b5c3 100644
 --- a/vllm/core/scheduler.py
 +++ b/vllm/core/scheduler.py
-@@ -1,25 +1,38 @@
+@@ -1,16 +1,30 @@
 +# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  # SPDX-License-Identifier: Apache-2.0
 +#
@@ -587,17 +544,15 @@ index f507847ad..3f3cba766 100644
  from vllm.core.interfaces import AllocStatus, BlockSpaceManager
  from vllm.logger import init_logger
  from vllm.lora.request import LoRARequest
- from vllm.prompt_adapter.request import PromptAdapterRequest
- from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
-                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
--                           SequenceStatus)
-+                           SequenceStatus, SequenceStage)
+@@ -20,7 +34,6 @@ from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
+                            SequenceGroupMetadataDelta, SequenceStage,
+                            SequenceStatus)
  from vllm.utils import Device, PyObjectCache
 -
  logger = init_logger(__name__)
  
  # Test-only. If configured, decode is preempted with
-@@ -285,6 +298,7 @@ class SchedulerPrefillOutputs:
+@@ -292,6 +305,7 @@ class SchedulerPrefillOutputs:
      # Ignored sequence groups.
      ignored_seq_groups: List[SequenceGroup]
      num_lookahead_slots: int
@@ -605,7 +560,7 @@ index f507847ad..3f3cba766 100644
  
      @classmethod
      def create_empty(cls) -> "SchedulerPrefillOutputs":
-@@ -292,6 +306,7 @@ class SchedulerPrefillOutputs:
+@@ -299,6 +313,7 @@ class SchedulerPrefillOutputs:
              seq_groups=[],
              ignored_seq_groups=[],
              num_lookahead_slots=0,
@@ -613,7 +568,7 @@ index f507847ad..3f3cba766 100644
          )
  
  
-@@ -325,12 +340,14 @@ class Scheduler:
+@@ -426,12 +441,14 @@ class Scheduler:
  
      def __init__(
          self,
@@ -628,7 +583,7 @@ index f507847ad..3f3cba766 100644
          self.scheduler_config = scheduler_config
          self.cache_config = cache_config
          # Note for LoRA scheduling: the current policy is extremely
-@@ -356,6 +373,7 @@ class Scheduler:
+@@ -457,6 +474,7 @@ class Scheduler:
  
          # Create the block space manager.
          self.block_manager = BlockSpaceManagerImpl(
@@ -636,7 +591,7 @@ index f507847ad..3f3cba766 100644
              block_size=self.cache_config.block_size,
              num_gpu_blocks=num_gpu_blocks,
              num_cpu_blocks=num_cpu_blocks,
-@@ -371,6 +389,16 @@ class Scheduler:
+@@ -473,6 +491,16 @@ class Scheduler:
          # Sequence groups in the SWAPPED state.
          # Contain decode requests that are swapped out.
          self.swapped: Deque[SequenceGroup] = deque()
@@ -653,34 +608,37 @@ index f507847ad..3f3cba766 100644
          # Sequence groups finished requests ids since last step iteration.
          # It lets the model know that any state associated with these requests
          # can and must be released after the current step.
-@@ -501,7 +529,7 @@ class Scheduler:
+@@ -628,8 +656,8 @@ class Scheduler:
+             self.block_manager.free_cross(seq_group)
  
      def has_unfinished_seqs(self) -> bool:
-         return len(self.waiting) != 0 or len(self.running) != 0 or len(
--            self.swapped) != 0
+-        return (len(self.waiting) != 0 or len(self.running) != 0
+-                or len(self.swapped) != 0)
++        return len(self.waiting) != 0 or len(self.running) != 0 or len(
 +            self.swapped) != 0 or len(self.remote_prefilling) != 0 or len(self.prefill_sending) != 0
  
      def get_prefix_cache_hit_rate(self, device: Device) -> float:
          return self.block_manager.get_prefix_cache_hit_rate(device)
-@@ -523,6 +551,8 @@ class Scheduler:
-         budget: SchedulingBudget,
+@@ -652,6 +680,8 @@ class Scheduler:
          curr_loras: Optional[Set[int]],
          enable_chunking: bool = False,
+         partial_prefill_metadata: Optional[PartialPrefillMetadata] = None,
 +        finished_prefills: Optional[Set[str]] = None,
-+        finished_transfers: Optional[Set[str]] = None
++        finished_transfers: Optional[Set[str]] = None,
      ) -> SchedulerRunningOutputs:
          """Schedule sequence groups that are running.
  
-@@ -537,6 +567,8 @@ class Scheduler:
-                 chunked number of tokens are scheduled  if
-                 `budget.num_batched_tokens` has not enough capacity to schedule
-                 all tokens.
+@@ -669,6 +699,9 @@ class Scheduler:
+             partial_prefill_metadata: information about the partial prefills
+             that are currently running
+ 
 +            finished_remote_prefill_request_ids: Set of request ids of remote
 +                prefills that have finished.
-     
++    
          Returns:
              SchedulerRunningOutputs.
-@@ -566,6 +598,38 @@ class Scheduler:
+         """
+@@ -697,6 +730,38 @@ class Scheduler:
          preempted: List[SequenceGroup] = ret.preempted
          swapped_out: List[SequenceGroup] = ret.swapped_out
  
@@ -719,7 +677,7 @@ index f507847ad..3f3cba766 100644
          running_queue = self.running
          assert len(self._async_stopped) == 0
          while running_queue:
-@@ -925,6 +989,7 @@ class Scheduler:
+@@ -1073,6 +1138,7 @@ class Scheduler:
          seq_groups: List[ScheduledSequenceGroup] = []
  
          waiting_queue = self.waiting
@@ -727,7 +685,7 @@ index f507847ad..3f3cba766 100644
  
          leftover_waiting_sequences: Deque[SequenceGroup] = deque()
          while self._passed_delay(time.time()) and waiting_queue:
-@@ -961,8 +1026,10 @@ class Scheduler:
+@@ -1121,8 +1187,10 @@ class Scheduler:
                      True, enable_chunking)
  
              # If the sequence group cannot be allocated, stop.
@@ -739,7 +697,7 @@ index f507847ad..3f3cba766 100644
              if can_allocate == AllocStatus.LATER:
                  break
              elif can_allocate == AllocStatus.NEVER:
-@@ -1008,7 +1075,18 @@ class Scheduler:
+@@ -1170,7 +1238,18 @@ class Scheduler:
              if curr_loras is not None and lora_int_id > 0:
                  curr_loras.add(lora_int_id)
              waiting_queue.popleft()
@@ -757,39 +715,31 @@ index f507847ad..3f3cba766 100644
 +                self._allocate_and_set_running_or_remote_prefill(seq_group_copy)
 +                self.prefill_sending.append(seq_group_copy)
  
-             if enable_chunking and self.scheduler_config.is_multi_step:
-                 blocks_to_copy: List[Tuple[int, int]] = []
-@@ -1046,9 +1124,11 @@ class Scheduler:
-             seq_groups=seq_groups,
+             if partial_prefill_metadata is not None:
+                 partial_prefill_metadata.maybe_increment_partial_prefills(
+@@ -1214,9 +1293,10 @@ class Scheduler:
              ignored_seq_groups=ignored_seq_groups,
              num_lookahead_slots=self._get_num_lookahead_slots(
--                is_prefill=True, enable_chunking=enable_chunking))
-+                is_prefill=True, enable_chunking=enable_chunking),
+                 is_prefill=True, enable_chunking=enable_chunking),
 +            num_remote_prefill_groups=num_remote_prefill_groups
-+        )
+         )
  
 -    def _schedule_default(self) -> SchedulerOutputs:
 +    def _schedule_default(self, finished_prefills: Optional[Set[str]] = None, finished_transfers: Optional[Set[str]] = None) -> SchedulerOutputs:
          """Schedule queued requests.
-         
+ 
          The current policy is designed to optimize the throughput. First,
-@@ -1066,9 +1146,13 @@ class Scheduler:
+@@ -1234,6 +1314,9 @@ class Scheduler:
          for seq_group in self.running:
              budget.add_num_seqs(seq_group.request_id,
                                  seq_group.get_max_num_running_seqs())
--        curr_loras = set(
 +        for seq_group in self.remote_prefilling:
 +            budget.add_num_seqs(seq_group.request_id,
 +                                seq_group.get_max_num_running_seqs())
-+            
-+        curr_loras = (set(
+         curr_loras = (set(
              seq_group.lora_int_id for seq_group in self.running
--            if seq_group.lora_int_id > 0) if self.lora_enabled else None
-+            if seq_group.lora_int_id > 0) if self.lora_enabled else None)
- 
-         prefills = SchedulerPrefillOutputs.create_empty()
-         running_scheduled = SchedulerRunningOutputs.create_empty()
-@@ -1090,7 +1174,9 @@ class Scheduler:
+             if seq_group.lora_int_id > 0) if self.lora_enabled else None)
+@@ -1258,7 +1341,9 @@ class Scheduler:
          if len(prefills.seq_groups) == 0:
              running_scheduled = self._schedule_running(budget,
                                                         curr_loras,
@@ -800,7 +750,7 @@ index f507847ad..3f3cba766 100644
  
              # If any sequence group is preempted, do not swap in any sequence
              # group. because it means there's no slot for new running requests.
-@@ -1106,7 +1192,12 @@ class Scheduler:
+@@ -1275,7 +1360,12 @@ class Scheduler:
          self.waiting.extendleft(running_scheduled.preempted)
          # Update new running requests.
          if len(prefills.seq_groups) > 0:
@@ -814,9 +764,9 @@ index f507847ad..3f3cba766 100644
  
          self.running.extend(running_scheduled.decode_seq_groups_list)
  
-@@ -1248,12 +1339,14 @@ class Scheduler:
-                        len(running_scheduled.swapped_out)),
-         )
+@@ -1452,12 +1542,14 @@ class Scheduler:
+         ]
+         return finishing + not_finishing
  
 -    def _schedule(self) -> SchedulerOutputs:
 +    def _schedule(self, finished_prefills: Optional[Set[str]] = None, finished_transfers: Optional[Set[str]] = None) -> SchedulerOutputs:
@@ -831,7 +781,7 @@ index f507847ad..3f3cba766 100644
  
      def _can_append_slots(self, seq_group: SequenceGroup,
                            enable_chunking: bool) -> bool:
-@@ -1287,14 +1380,16 @@ class Scheduler:
+@@ -1491,14 +1583,16 @@ class Scheduler:
          return no_single_seq
  
      def schedule(
@@ -851,7 +801,7 @@ index f507847ad..3f3cba766 100644
          now = time.time()
  
          if not self.cache_config.enable_prefix_caching:
-@@ -1333,7 +1428,8 @@ class Scheduler:
+@@ -1537,7 +1631,8 @@ class Scheduler:
                  encoder_seq_data = None
                  cross_block_table = None
  
@@ -861,7 +811,7 @@ index f507847ad..3f3cba766 100644
                  seq_id = seq.seq_id
                  seq_data[seq_id] = seq.data
                  block_tables[seq_id] = self.block_manager.get_block_table(seq)
-@@ -1342,7 +1438,9 @@ class Scheduler:
+@@ -1546,7 +1641,9 @@ class Scheduler:
              if self.cache_config.enable_prefix_caching:
                  common_computed_block_nums = (
                      self.block_manager.get_common_computed_block_ids(
@@ -872,7 +822,7 @@ index f507847ad..3f3cba766 100644
  
              do_sample = True
              is_prompt = seq_group.is_prefill()
-@@ -1364,9 +1462,30 @@ class Scheduler:
+@@ -1568,9 +1665,30 @@ class Scheduler:
                          < seqs[0].data.get_len()):
                      do_sample = False
  
@@ -903,15 +853,15 @@ index f507847ad..3f3cba766 100644
                  seq_group_metadata = SequenceGroupMetadata(
                      request_id=seq_group.request_id,
                      is_prompt=is_prompt,
-@@ -1392,6 +1511,7 @@ class Scheduler:
-                     if scheduler_outputs.num_prefill_groups > 0 else None,
+@@ -1598,6 +1716,7 @@ class Scheduler:
+                         if scheduler_outputs.num_prefill_groups > 0 else None),
                      mm_processor_kwargs=seq_group.mm_processor_kwargs,
                      prompt_adapter_request=seq_group.prompt_adapter_request,
 +                    do_remote_prefill=is_remote_prefill,
                  )
              else:
                  # When SPMD mode is enabled, we only send delta data except for
-@@ -1490,11 +1610,17 @@ class Scheduler:
+@@ -1696,10 +1815,16 @@ class Scheduler:
  
              self._async_stopped.clear()
  
@@ -921,17 +871,15 @@ index f507847ad..3f3cba766 100644
 +        is_remote_prefill = False
          for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
 -            seq.status = SequenceStatus.RUNNING
--
 +            if seq_group.remote_prefill_params is not None and seq_group.remote_prefill_params.is_remote_prefill:
 +                seq.status = SequenceStatus.REMOTE_PREFILLING
 +                is_remote_prefill = True
 +            else:
 +                seq.status = SequenceStatus.RUNNING
 +        return is_remote_prefill
-+    
-     def _append_slots(self,
-                       seq_group: SequenceGroup,
-                       blocks_to_copy: List[Tuple[int, int]],
+ 
+     def _append_slots(
+         self,
 diff --git a/vllm/distributed/device_communicators/kv_rearrange.py b/vllm/distributed/device_communicators/kv_rearrange.py
 new file mode 100644
 index 000000000..a2f9ce99e
@@ -1834,7 +1782,7 @@ index 000000000..418fc7154
 +        self.config.kv_consumers_pipeline_parallel_size = kv_config_enhanced["kv_consumers_pipeline_parallel_size"]
 +        self.config.kv_producers_parallel_size = kv_config_enhanced["kv_producers_parallel_size"]
 diff --git a/vllm/distributed/kv_transfer/kv_connector/factory.py b/vllm/distributed/kv_transfer/kv_connector/factory.py
-index fe4805334..0e16f0b31 100644
+index e37ce6dc7..f1ba144c7 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/factory.py
 +++ b/vllm/distributed/kv_transfer/kv_connector/factory.py
 @@ -1,4 +1,17 @@
@@ -1871,17 +1819,8 @@ index fe4805334..0e16f0b31 100644
  
  
  # Register various connectors here.
-@@ -48,3 +61,8 @@ KVConnectorFactory.register_connector(
-     "MooncakeConnector",
-     "vllm.distributed.kv_transfer.kv_connector.simple_connector",
-     "SimpleConnector")
-+
-+KVConnectorFactory.register_connector(
-+    "DynamoNcclConnector",
-+    "vllm.distributed.kv_transfer.kv_connector.dynamo_connector",
-+    "DynamoConnector")
 diff --git a/vllm/distributed/kv_transfer/kv_connector/simple_connector.py b/vllm/distributed/kv_transfer/kv_connector/simple_connector.py
-index 2033e9762..983bc69a3 100644
+index 49b97d7b5..c77c570ea 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/simple_connector.py
 +++ b/vllm/distributed/kv_transfer/kv_connector/simple_connector.py
 @@ -1,4 +1,17 @@
@@ -1902,7 +1841,7 @@ index 2033e9762..983bc69a3 100644
  """
  Simple KV Cache Connector for Distributed Machine Learning Inference
  
-@@ -8,13 +21,15 @@ MooncakePipe.
+@@ -8,14 +21,16 @@ MooncakePipe.
  
  But the logic can be extended to support other pipe and lookup buffer.
  """
@@ -1911,6 +1850,7 @@ index 2033e9762..983bc69a3 100644
  
  import torch
  
+ import vllm.envs as envs
  from vllm import _custom_ops as ops
 -from vllm.config import VllmConfig
 +from vllm.config import VllmConfig, KVTransferConfig
@@ -1919,7 +1859,7 @@ index 2033e9762..983bc69a3 100644
  from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer import (
      SimpleBuffer)
  from vllm.logger import init_logger
-@@ -33,6 +48,7 @@ class SimpleConnector(KVConnectorBase):
+@@ -34,9 +49,11 @@ class SimpleConnector(KVConnectorBase):
          rank: int,
          local_rank: int,
          config: VllmConfig,
@@ -1927,7 +1867,11 @@ index 2033e9762..983bc69a3 100644
      ):
  
          self.config = config.kv_transfer_config
-@@ -71,20 +87,31 @@ class SimpleConnector(KVConnectorBase):
++        self.kv_group_rank = self._get_kv_group_rank(self.config.kv_rank, rank, self.config)
+         self.tp_size = config.parallel_config.tensor_parallel_size
+         self.is_deepseek_mla = config.model_config.is_deepseek_mla
+         self.use_mla_opt = not envs.VLLM_MLA_DISABLE
+@@ -74,20 +91,31 @@ class SimpleConnector(KVConnectorBase):
          self.producer_signal_pipe: Union[PyNcclPipe, MooncakePipe]
          self.consumer_signal_pipe: Union[PyNcclPipe, MooncakePipe]
  
@@ -1960,7 +1904,7 @@ index 2033e9762..983bc69a3 100644
                      local_rank=local_rank,
                      config=self.config,
                      port_offset=port_offset_base + 1,
-@@ -108,11 +135,13 @@ class SimpleConnector(KVConnectorBase):
+@@ -111,11 +139,13 @@ class SimpleConnector(KVConnectorBase):
              # its recv pipe to the send pipe of KV producder
              if self.config.kv_connector == "PyNcclConnector":
                  self.consumer_data_pipe = PyNcclPipe(
@@ -1974,7 +1918,7 @@ index 2033e9762..983bc69a3 100644
                      local_rank=local_rank,
                      config=self.config,
                      port_offset=port_offset_base + 1,
-@@ -131,21 +160,25 @@ class SimpleConnector(KVConnectorBase):
+@@ -134,21 +164,25 @@ class SimpleConnector(KVConnectorBase):
                  self.config.kv_buffer_size,
              )
  
@@ -2004,60 +1948,48 @@ index 2033e9762..983bc69a3 100644
  
      def send_kv_caches_and_hidden_states(
          self,
-@@ -161,12 +194,20 @@ class SimpleConnector(KVConnectorBase):
-         slot_mapping_flat = model_input.attn_metadata.slot_mapping.flatten()
+@@ -165,6 +199,7 @@ class SimpleConnector(KVConnectorBase):
+         num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
          start_layer = model_executable.model.start_layer
          end_layer = model_executable.model.end_layer
 +        request_ids = list(model_input.request_ids_to_seq_ids.keys())
  
          model_config = model_executable.model.config
--        num_heads = int(model_config.num_key_value_heads / self.tp_size)
--        hidden_size = model_config.hidden_size
--        num_attention_heads = model_config.num_attention_heads
--        head_size = int(hidden_size / num_attention_heads)
-+        is_deepseek = "deepseek" in model_config.architectures[0].lower()
-+        if not is_deepseek:
-+            num_heads = int(model_config.num_key_value_heads / self.tp_size)
-+            hidden_size = model_config.hidden_size
-+            num_attention_heads = model_config.num_attention_heads
-+            head_size = int(hidden_size / num_attention_heads)
-+        else:
-+            num_heads = int(model_config.num_key_value_heads / self.tp_size)
-+            hidden_size = model_config.hidden_size
-+            num_attention_heads = model_config.num_attention_heads
-+            head_size = int(4.5 * hidden_size / num_attention_heads)
+         num_heads = int(model_config.num_key_value_heads / self.tp_size)
+@@ -207,11 +242,11 @@ class SimpleConnector(KVConnectorBase):
+                 break
  
-         # query_lens contains new KV caches that are added to vLLM.
-         # so we will send them to decode instance
-@@ -175,27 +216,40 @@ class SimpleConnector(KVConnectorBase):
-             start_pos = sum(seq_lens[:idx])
-             end_pos = start_pos + slen
              current_tokens = input_tokens_tensor[start_pos:end_pos]
 +            current_request_id = request_ids[idx]
 +            _, decode_kv_rank = self.parse_request_id(current_request_id)
 +            starting_kv_group_rank = self._get_kv_group_rank(decode_kv_rank, 0, self.config)
-+
-+            for target_rank in range(self.config.tensor_parallel_multiplier):
  
 -            keys, values = [], []
-+                keys, values = [], []
- 
+-
 -            for layer_id in range(start_layer, end_layer):
 -                kv_cache = kv_caches[layer_id - start_layer]
-+                for layer_id in range(start_layer, end_layer):
-+                    kv_cache = kv_caches[layer_id - start_layer]
++            for target_rank in range(self.config.tensor_parallel_multiplier):
  
--                key_cache = kv_cache[0].reshape(-1, num_heads, head_size)
--                value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
-+                    current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
+                 if self.is_deepseek_mla and self.use_mla_opt:
+                     key_cache = kv_cache.reshape(-1, num_heads, head_size)
+@@ -220,18 +255,32 @@ class SimpleConnector(KVConnectorBase):
+                     key_cache = kv_cache[0].reshape(-1, num_heads, head_size)
+                     value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
  
 -                current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
++                for layer_id in range(start_layer, end_layer):
++                    kv_cache = kv_caches[layer_id - start_layer]
++
++                    current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
+ 
+-                keys.append(key_cache[current_slot_mapping].unsqueeze(0))
+-                values.append(value_cache[current_slot_mapping].unsqueeze(0))
 +                    num_heads_per_rank = num_heads // self.config.tensor_parallel_multiplier
 +                    head_start = target_rank * num_heads_per_rank
 +                    head_end = head_start + num_heads_per_rank
  
--                keys.append(key_cache[current_slot_mapping].unsqueeze(0))
--                values.append(value_cache[current_slot_mapping].unsqueeze(0))
+-            keys = torch.cat(keys, dim=0)
+-            values = torch.cat(values, dim=0)
 +                    if not is_deepseek:
 +                        key_cache = kv_cache[0].reshape(-1, num_heads, head_size)
 +                        value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
@@ -2068,15 +2000,13 @@ index 2033e9762..983bc69a3 100644
 +                        keys.append(key_cache[current_slot_mapping].unsqueeze(0))
 +                        values.append(torch.empty(0))
  
--            keys = torch.cat(keys, dim=0)
--            values = torch.cat(values, dim=0)
-+                keys = torch.cat(keys, dim=0)
-+                values = torch.cat(values, dim=0)
- 
 -            self.insert(current_tokens,
 -                        torch.ones_like(current_tokens,
 -                                        dtype=bool), keys, values,
 -                        hidden_or_intermediate_states[start_pos:end_pos])
++                keys = torch.cat(keys, dim=0)
++                values = torch.cat(values, dim=0)
++
 +                self.insert(starting_kv_group_rank, target_rank, current_tokens,
 +                            torch.ones_like(current_tokens,
 +                                            dtype=bool), keys, values,
@@ -2084,15 +2014,15 @@ index 2033e9762..983bc69a3 100644
  
          logger.debug("[rank%d]: KV send DONE.", torch.distributed.get_rank())
  
-@@ -215,6 +269,7 @@ class SimpleConnector(KVConnectorBase):
-         input_tokens_tensor = model_input.input_tokens
+@@ -254,6 +303,7 @@ class SimpleConnector(KVConnectorBase):
          seq_lens = model_input.attn_metadata.seq_lens
+         num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
          slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
 +        request_ids = list(model_input.request_ids_to_seq_ids.keys())
  
          hidden_or_intermediate_states_for_one_req = []
  
-@@ -222,6 +277,9 @@ class SimpleConnector(KVConnectorBase):
+@@ -261,6 +311,9 @@ class SimpleConnector(KVConnectorBase):
          num_computed_tokens_list = []
          start_pos_list = []
  
@@ -2102,9 +2032,9 @@ index 2033e9762..983bc69a3 100644
          # enumerate different requests
          # FIXME(Kuntai): This impl assumes that all requests are prefill.
          for idx, slen in enumerate(seq_lens):
-@@ -229,13 +287,15 @@ class SimpleConnector(KVConnectorBase):
-             start_pos = sum(seq_lens[:idx])
-             end_pos = start_pos + slen
+@@ -280,13 +333,15 @@ class SimpleConnector(KVConnectorBase):
+                 break
+ 
              current_tokens = input_tokens_tensor[start_pos:end_pos]
 +            current_request_id = request_ids[idx]
 +            prefill_rank, _ = self.parse_request_id(current_request_id)
@@ -2119,46 +2049,7 @@ index 2033e9762..983bc69a3 100644
                                torch.ones_like(current_tokens, dtype=bool))
              if ret[0] is None:
                  # didn't find any match.
-@@ -267,19 +327,25 @@ class SimpleConnector(KVConnectorBase):
-                 kv_cache = kv_caches[i - model_executable.model.start_layer]
-                 layer = model_executable.model.layers[i]
- 
--                key_cache, value_cache = kv_cache[0], kv_cache[1]
--                ops.reshape_and_cache_flash(
--                    keys[i - model_executable.model.start_layer].to(
--                        key_cache.device),
--                    values[i - model_executable.model.start_layer].to(
--                        value_cache.device),
--                    key_cache,
--                    value_cache,
--                    slot_mapping[start_pos:end_pos],
--                    layer.self_attn.attn.kv_cache_dtype,
--                    layer.self_attn.attn._k_scale,
--                    layer.self_attn.attn._v_scale,
--                )
-+                if not is_deepseek:
-+                    key_cache, value_cache = kv_cache[0], kv_cache[1]
-+                    ops.reshape_and_cache_flash(
-+                        keys[i - model_executable.model.start_layer].to(
-+                            key_cache.device),
-+                        values[i - model_executable.model.start_layer].to(
-+                            value_cache.device),
-+                        key_cache,
-+                        value_cache,
-+                        slot_mapping[start_pos:end_pos],
-+                        layer.self_attn.attn.kv_cache_dtype,
-+                        layer.self_attn.attn._k_scale,
-+                        layer.self_attn.attn._v_scale,
-+                    )
-+                else:
-+                    key_cache = kv_cache
-+                    copy_from =keys[i - model_executable.model.start_layer].to(
-+                            key_cache.device)
-+                    kv_cache[slot_mapping[start_pos:end_pos]] = copy_from
- 
-             hidden_or_intermediate_states_for_one_req.append(hidden)
- 
-@@ -312,3 +378,77 @@ class SimpleConnector(KVConnectorBase):
+@@ -379,3 +434,77 @@ class SimpleConnector(KVConnectorBase):
              # MooncakePipe reuses data_pipe for signal_pipe, so we only have to
              # close the data_pipe.
              pass
@@ -2237,7 +2128,7 @@ index 2033e9762..983bc69a3 100644
 +        self.config.kv_consumers_pipeline_parallel_size = kv_config_enhanced["kv_consumers_pipeline_parallel_size"]
 +        self.config.kv_producers_parallel_size = kv_config_enhanced["kv_producers_parallel_size"]
 diff --git a/vllm/distributed/kv_transfer/kv_lookup_buffer/simple_buffer.py b/vllm/distributed/kv_transfer/kv_lookup_buffer/simple_buffer.py
-index 5e1b62352..7b4cb406e 100644
+index 10bbfe1dd..8268bf3eb 100644
 --- a/vllm/distributed/kv_transfer/kv_lookup_buffer/simple_buffer.py
 +++ b/vllm/distributed/kv_transfer/kv_lookup_buffer/simple_buffer.py
 @@ -1,4 +1,17 @@
@@ -2258,9 +2149,9 @@ index 5e1b62352..7b4cb406e 100644
  """
      Implements a distributed key-value (KV) cache transfer mechanism.
  
-@@ -12,7 +25,8 @@
+@@ -11,7 +24,8 @@
+ """
  import threading
- import time
  from collections import deque
 -from typing import Deque, List, Optional, Union
 +from concurrent.futures import ThreadPoolExecutor
@@ -2268,8 +2159,8 @@ index 5e1b62352..7b4cb406e 100644
  
  import torch
  
-@@ -46,7 +60,7 @@ class SimpleBuffer(KVLookupBufferBase):
-         self.buffer_lock = threading.Lock()
+@@ -45,7 +59,7 @@ class SimpleBuffer(KVLookupBufferBase):
+         self.buffer_cv = threading.Condition()
          self.signal_pipe = signal_pipe
          self.data_pipe = data_pipe
 -        self.request_handling_thread: Optional[threading.Thread] = None
@@ -2277,7 +2168,7 @@ index 5e1b62352..7b4cb406e 100644
  
          self.normal_signal = torch.tensor([0], device="cpu")
          self.end_signal = None
-@@ -57,10 +71,16 @@ class SimpleBuffer(KVLookupBufferBase):
+@@ -56,10 +70,16 @@ class SimpleBuffer(KVLookupBufferBase):
          # tokens_roi_sender: tokens and roi of the producer (in the buffer)
          # tokens_roi_recver: tokens and roi of the consumer (query)
  
@@ -2298,7 +2189,7 @@ index 5e1b62352..7b4cb406e 100644
  
          if tokens_recver is None:
              # consumer sends an empty request
-@@ -80,14 +100,14 @@ class SimpleBuffer(KVLookupBufferBase):
+@@ -79,14 +99,14 @@ class SimpleBuffer(KVLookupBufferBase):
  
          return 0
  
@@ -2316,7 +2207,7 @@ index 5e1b62352..7b4cb406e 100644
  
      def _get_element_size(self, data: Optional[Union[List, torch.Tensor]]):
  
-@@ -100,7 +120,7 @@ class SimpleBuffer(KVLookupBufferBase):
+@@ -99,7 +119,7 @@ class SimpleBuffer(KVLookupBufferBase):
  
          raise AssertionError(f"Unknown data type {type(data)}")
  
@@ -2325,16 +2216,7 @@ index 5e1b62352..7b4cb406e 100644
                         key: torch.Tensor, value: torch.Tensor,
                         hidden: torch.Tensor):
  
-@@ -115,7 +135,7 @@ class SimpleBuffer(KVLookupBufferBase):
-         if isinstance(hidden, torch.Tensor):
-             hidden = hidden.clone()
- 
--        buffer_item = [input_tokens, roi, key, value, hidden]
-+        buffer_item = [torch.tensor(target_rank), input_tokens, roi, key, value, hidden]
- 
-         with self.buffer_lock:
-             for data in buffer_item:
-@@ -125,53 +145,54 @@ class SimpleBuffer(KVLookupBufferBase):
+@@ -132,23 +152,54 @@ class SimpleBuffer(KVLookupBufferBase):
      def _is_end_signal(self, signal):
          return signal is None
  
@@ -2348,44 +2230,6 @@ index 5e1b62352..7b4cb406e 100644
 -                if self._is_end_signal(signal):
 -                    logger.info("Received end signal!")
 -                    break
--
--                input_tokens = self.data_pipe.recv_tensor()
--
--                roi = self.data_pipe.recv_tensor()
--                assert roi is not None, "Please provide the roi when sending "\
--                    "drop-select request"
--                roi = (roi > 0.5)
--                tokens_roi_recver = [input_tokens, roi]
--
--                matched_length = 0
--
--                # perform input tokens and roi matching
--                # FIXME: this matching is O(n), ideally it should be O(1)
--                # but this buffer size won't (and shouldn't) be too large so
--                # the fix is not urgent.
--                with self.buffer_lock:
--
--                    for _ in range(len(self.buffer)):
--
--                        temp_length = self._matches(self.buffer[0],
--                                                    tokens_roi_recver)
--                        if temp_length > 0:
--                            matched_length = temp_length
--                            break
--                        # rotate the element we just accessed to the end
--                        self.buffer.rotate(-1)
--
--                    if matched_length > 0:
--                        # need to clone the tensor
--                        # in case the tensor is freed before sending finishes
--                        matched_item = self.buffer.popleft()
--                        for tensor in matched_item:
--                            self._send_tensor_and_dec_size(tensor)
--
--                    else:
--                        # no match, just send None
--                        for _ in range(5):
--                            self.data_pipe.send_tensor(None)
 +            signal = self.signal_pipe.recv_tensor(rank)
 +            if self._is_end_signal(signal):
 +                logger.info("Received end signal!")
@@ -2409,7 +2253,8 @@ index 5e1b62352..7b4cb406e 100644
 +            with self.buffer_lock:
 +
 +                for _ in range(len(self.buffer)):
-+
+ 
+-                input_tokens = self.data_pipe.recv_tensor()
 +                    temp_length = self._matches(self.buffer[0],
 +                                                tokens_roi_recver)
 +                    if temp_length > 0:
@@ -2417,7 +2262,12 @@ index 5e1b62352..7b4cb406e 100644
 +                        break
 +                    # rotate the element we just accessed to the end
 +                    self.buffer.rotate(-1)
-+
+ 
+-                roi = self.data_pipe.recv_tensor()
+-                assert roi is not None, "Please provide the roi when sending "\
+-                    "drop-select request"
+-                roi = (roi > 0.5)
+-                tokens_roi_recver = [input_tokens, roi]
 +                if matched_length > 0:
 +                    # need to clone the tensor
 +                    # in case the tensor is freed before sending finishes
@@ -2431,11 +2281,13 @@ index 5e1b62352..7b4cb406e 100644
 +                    for _ in range(5):
 +                        self.data_pipe.send_tensor(None, rank)
  
-         except RuntimeError as e:
-             if 'Connection closed by peer' not in str(e):
-@@ -180,10 +201,10 @@ class SimpleBuffer(KVLookupBufferBase):
+                 def is_buffer_available(
+                     tokens_roi_recver: List[torch.Tensor], ) -> bool:
+@@ -182,11 +233,12 @@ class SimpleBuffer(KVLookupBufferBase):
+ 
          logger.debug("Closing drop_select_handler")
  
++
      def drop_select(
 -            self, input_tokens: Optional[torch.Tensor],
 +            self, rank: int, kv_rank: int, input_tokens: Optional[torch.Tensor],
@@ -2446,7 +2298,7 @@ index 5e1b62352..7b4cb406e 100644
              "drop_select should be called by the KV cache consumer "\
              "(e.g. the decode vLLM instance)"
  
-@@ -192,26 +213,28 @@ class SimpleBuffer(KVLookupBufferBase):
+@@ -195,19 +247,21 @@ class SimpleBuffer(KVLookupBufferBase):
          if isinstance(roi, torch.Tensor):
              roi = roi.clone().float()
  
@@ -2476,30 +2328,15 @@ index 5e1b62352..7b4cb406e 100644
  
          return [input_tokens, roi, key, value, hidden]
  
-     def full_handler(self):
-         time.sleep(0.001)
- 
--    def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
-+    def insert(self, kv_group_rank: int, target_rank: int, input_tokens: torch.Tensor, roi: torch.Tensor,
-                key: torch.Tensor, value: torch.Tensor,
-                hidden: torch.Tensor) -> None:
- 
-@@ -222,20 +245,19 @@ class SimpleBuffer(KVLookupBufferBase):
-         while self.buffer_size > self.buffer_size_threshold:
-             self.full_handler()
- 
--        self._add_to_buffer(input_tokens, roi, key, value, hidden)
-+        self._add_to_buffer(target_rank, input_tokens, roi, key, value, hidden)
- 
+@@ -220,15 +274,13 @@ class SimpleBuffer(KVLookupBufferBase):
          # when calling the insert, the current process is a sender
          # need to launch the request handler and start listening to request.
-+        target_rank_global = target_rank + kv_group_rank
          if self.request_handling_thread is None:
 -            self.request_handling_thread = threading.Thread(
 -                target=self.drop_select_handler)
 -            self.request_handling_thread.start()
 +            self.request_handling_thread = ThreadPoolExecutor(max_workers=1)
-+        self.request_handling_thread.submit(self.drop_select_handler, target_rank_global)
++        self.request_handling_thread.submit(self.drop_select_handler)
  
      def close(self):
  
@@ -2697,7 +2534,7 @@ index 000000000..ca5345359
 +                # dtype = getattr(torch, dtype)
 +                self._receive_tensor(tensor_id, rank)
 diff --git a/vllm/distributed/kv_transfer/kv_pipe/pynccl_pipe.py b/vllm/distributed/kv_transfer/kv_pipe/pynccl_pipe.py
-index 7aa53d07a..8fb256aff 100644
+index e8bf607eb..fa5543fa9 100644
 --- a/vllm/distributed/kv_transfer/kv_pipe/pynccl_pipe.py
 +++ b/vllm/distributed/kv_transfer/kv_pipe/pynccl_pipe.py
 @@ -1,4 +1,17 @@
@@ -2716,9 +2553,9 @@ index 7aa53d07a..8fb256aff 100644
 +# See the License for the specific language governing permissions and
 +# limitations under the License.
  """
-     This module implements a PyNccl pipe for sending and receiving 
-     Optional[torch.Tensor] between distributed ranks with advanced 
-@@ -45,33 +58,33 @@ class PyNcclPipe(KVPipeBase):
+     This module implements a PyNccl pipe for sending and receiving
+     Optional[torch.Tensor] between distributed ranks with advanced
+@@ -45,14 +58,16 @@ class PyNcclPipe(KVPipeBase):
      METADATA_DTYPE = torch.int64
  
      def __init__(self,
@@ -2736,19 +2573,7 @@ index 7aa53d07a..8fb256aff 100644
          if device is None:
              self.device = self._select_device(self.config.kv_buffer_device)
          else:
-             self.device = self._select_device(device)
- 
-         # build distributed connection and send/recv implementation
-+        logger.info("Creating process group for kv transfer with rank %d and world size %d, ip: %s, port: %d", self.kv_group_rank, self.kv_world_size, self.config.kv_ip, self.config.kv_port + port_offset)
-         self.group = StatelessProcessGroup.create(
-             host=self.config.kv_ip,
-             port=self.config.kv_port + port_offset,
--            rank=self.kv_rank,
--            world_size=self.kv_parallel_size,
-+            rank=self.kv_group_rank,
-+            world_size=self.kv_world_size,
-         )
-         # add a barrier to make sure the connection is initiated properly
+@@ -71,9 +86,6 @@ class PyNcclPipe(KVPipeBase):
          self.group.barrier()
          impl = self._get_device_send_recv_impl(self.group)
          self.device_send_func, self.device_recv_func = impl
@@ -2758,7 +2583,7 @@ index 7aa53d07a..8fb256aff 100644
  
          # transportation-related variables
          self.transport_thread: Optional[ThreadPoolExecutor] = None
-@@ -145,16 +158,16 @@ class PyNcclPipe(KVPipeBase):
+@@ -147,16 +159,16 @@ class PyNcclPipe(KVPipeBase):
                             dtype=metadata["dtype"],
                             device=self.device)
  
@@ -2778,8 +2603,8 @@ index 7aa53d07a..8fb256aff 100644
          """
          Receive the metadata dictionary from the target rank.
  
-@@ -162,9 +175,9 @@ class PyNcclPipe(KVPipeBase):
-             - metadata: A dictionary with keys "dtype" and "shape" describing 
+@@ -164,9 +176,9 @@ class PyNcclPipe(KVPipeBase):
+             - metadata: A dictionary with keys "dtype" and "shape" describing
                the tensor.
          """
 -        return self.group.recv_obj(self.target_rank_for_recv)
@@ -2788,9 +2613,9 @@ index 7aa53d07a..8fb256aff 100644
 -    def _send_impl(self, tensor: Optional[torch.Tensor]) -> None:
 +    def _send_impl(self, tensor: Optional[torch.Tensor], target_rank: int) -> None:
          """
-         The actual implementation of sending the tensor and its metadata to the 
+         The actual implementation of sending the tensor and its metadata to the
          target rank.
-@@ -174,12 +187,12 @@ class PyNcclPipe(KVPipeBase):
+@@ -176,12 +188,12 @@ class PyNcclPipe(KVPipeBase):
                being sent.
          """
          metadata = self._make_metadata(tensor)
@@ -2804,9 +2629,9 @@ index 7aa53d07a..8fb256aff 100644
 -    def _recv_impl(self) -> Optional[torch.Tensor]:
 +    def _recv_impl(self, src_rank: int) -> Optional[torch.Tensor]:
          """
-         The actual implementation of receiving a tensor and its metadata from 
+         The actual implementation of receiving a tensor and its metadata from
          the target rank.
-@@ -187,21 +200,22 @@ class PyNcclPipe(KVPipeBase):
+@@ -189,21 +201,22 @@ class PyNcclPipe(KVPipeBase):
          Returns:
              - buffer: The received tensor, or None if no tensor is received.
          """
@@ -2833,16 +2658,16 @@ index 7aa53d07a..8fb256aff 100644
  
              with self.buffer_size_lock:
                  self.buffer_size -= tensor_size
-@@ -220,7 +234,7 @@ class PyNcclPipe(KVPipeBase):
+@@ -222,7 +235,7 @@ class PyNcclPipe(KVPipeBase):
              logger.debug("KV cache transfer pipe is full. Waiting...")
              time.sleep(0.05)
  
 -    def send_tensor(self, tensor: Optional[torch.Tensor]) -> None:
 +    def send_tensor(self, tensor: Optional[torch.Tensor], target_rank: int) -> None:
          """
-         Sends a tensor and its metadata to the destination rank in a 
+         Sends a tensor and its metadata to the destination rank in a
          non-blocking way.
-@@ -228,6 +242,7 @@ class PyNcclPipe(KVPipeBase):
+@@ -230,6 +243,7 @@ class PyNcclPipe(KVPipeBase):
          Parameters:
              - tensor: The tensor to send, or None if no tensor is being sent.
          """
@@ -2850,7 +2675,7 @@ index 7aa53d07a..8fb256aff 100644
          if self.transport_thread is None:
              self.transport_thread = ThreadPoolExecutor(max_workers=1)
  
-@@ -241,32 +256,39 @@ class PyNcclPipe(KVPipeBase):
+@@ -243,32 +257,39 @@ class PyNcclPipe(KVPipeBase):
          with self.buffer_size_lock:
              self.buffer_size += tensor_size
  
@@ -2944,7 +2769,7 @@ index 1e80e0bd7..f06c7a5f6 100644
      def send_kv_caches_and_hidden_states(
          self,
 diff --git a/vllm/distributed/parallel_state.py b/vllm/distributed/parallel_state.py
-index 321902d11..03409899e 100644
+index e0eeeffb8..9010c6966 100644
 --- a/vllm/distributed/parallel_state.py
 +++ b/vllm/distributed/parallel_state.py
 @@ -1,4 +1,17 @@
@@ -2965,7 +2790,7 @@ index 321902d11..03409899e 100644
  
  # Copyright 2023 The vLLM team.
  # Adapted from
-@@ -1085,7 +1098,8 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
+@@ -979,7 +992,8 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
          _KV_TRANSFER = kv_transfer.KVTransferAgent(
              rank=get_world_group().rank,
              local_rank=get_world_group().local_rank,
@@ -2975,11 +2800,24 @@ index 321902d11..03409899e 100644
  
  
  def ensure_model_parallel_initialized(
+diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
+index 975afe5ad..2208abea0 100644
+--- a/vllm/engine/arg_utils.py
++++ b/vllm/engine/arg_utils.py
+@@ -1159,7 +1159,7 @@ class EngineArgs:
+         #   features and raise error for unsupported features.
+         # * If VLLM_USE_V1=0, we disable V1.
+         use_v1 = False
+-        try_v1 = envs.VLLM_USE_V1 or not envs.is_set("VLLM_USE_V1")
++        try_v1 = envs.VLLM_USE_V1
+         if try_v1 and self._is_v1_supported_oracle(model_config):
+             use_v1 = True
+ 
 diff --git a/vllm/engine/llm_engine.py b/vllm/engine/llm_engine.py
-index d82d9ad9d..61c1e429d 100644
+index 54f7b8fb6..0559f9db2 100644
 --- a/vllm/engine/llm_engine.py
 +++ b/vllm/engine/llm_engine.py
-@@ -1,14 +1,31 @@
+@@ -1,11 +1,28 @@
 +# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  # SPDX-License-Identifier: Apache-2.0
 +#
@@ -3006,23 +2844,19 @@ index d82d9ad9d..61c1e429d 100644
  from dataclasses import dataclass
 +from concurrent.futures import ThreadPoolExecutor
  from functools import partial
- from typing import (TYPE_CHECKING, Callable, ClassVar, Deque, Dict, Iterable,
--                    List, Mapping, NamedTuple, Optional)
-+                    List, Mapping, NamedTuple, Optional, Tuple)
- from typing import Sequence as GenericSequence
- from typing import Set, Type, Union, cast, overload
- 
-@@ -60,6 +77,9 @@ from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
-                                   usage_message)
- from vllm.utils import Counter, Device, deprecate_kwargs, weak_bind
+ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
+                     Iterable, List, Literal, Mapping, NamedTuple, Optional)
+@@ -62,6 +79,9 @@ from vllm.utils import (Counter, Device, deprecate_kwargs,
+                         resolve_obj_by_qualname, weak_bind)
  from vllm.version import __version__ as VLLM_VERSION
+ from vllm.worker.model_runner_base import InputProcessingError
 +from vllm.remote_prefill import RemotePrefillRequest, RemotePrefillParams, MemoryTransferRequest, MemoryOpType
 +from vllm.distributed.device_communicators.nixl import NixlMetadata
 +
  
  logger = init_logger(__name__)
  _LOCAL_LOGGING_INTERVAL_SEC = 5
-@@ -90,7 +110,7 @@ class OutputData(NamedTuple):
+@@ -93,7 +113,7 @@ class OutputData(NamedTuple):
      # outputs from multiple steps.
      is_first_step_output: Optional[bool]
      skip: List[int]
@@ -3031,7 +2865,7 @@ index d82d9ad9d..61c1e429d 100644
  
  class SchedulerContext:
  
-@@ -104,11 +124,14 @@ class SchedulerContext:
+@@ -107,11 +127,14 @@ class SchedulerContext:
  
          self.multi_step_stream_outputs: bool = multi_step_stream_outputs
  
@@ -3047,7 +2881,7 @@ index d82d9ad9d..61c1e429d 100644
          self.output_queue.append(
              OutputData(outputs=outputs,
                         seq_group_metadata_list=seq_group_metadata_list,
-@@ -116,7 +139,9 @@ class SchedulerContext:
+@@ -119,7 +142,9 @@ class SchedulerContext:
                         is_async=is_async,
                         is_last_step=is_last_step,
                         is_first_step_output=is_first_step_output,
@@ -3058,8 +2892,8 @@ index d82d9ad9d..61c1e429d 100644
  
  
  class LLMEngine:
-@@ -348,7 +373,7 @@ class LLMEngine:
-         # GPU and CPU blocks, which are profiled in the distributed executor.
+@@ -362,7 +387,7 @@ class LLMEngine:
+             Scheduler = self.vllm_config.scheduler_config.scheduler_cls
          self.scheduler = [
              Scheduler(
 -                self.scheduler_config, self.cache_config, self.lora_config,
@@ -3067,10 +2901,10 @@ index d82d9ad9d..61c1e429d 100644
                  self.parallel_config.pipeline_parallel_size,
                  self.async_callbacks[v_id]
                  if self.model_config.use_async_output_proc else None)
-@@ -405,6 +430,40 @@ class LLMEngine:
- 
-         self.seq_id_to_seq_group: Dict[str, SequenceGroupBase] = {}
- 
+@@ -422,6 +447,39 @@ class LLMEngine:
+         # Flag to set when an input fails to process and the engine should run
+         # the next step without re-scheduling.
+         self._skip_scheduling_next_step = False
 +        self.engine_id = str(uuid.uuid4())
 +        self._nixl_agents_names: Optional[List[str]] = None
 +        if self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.kv_connector == "DynamoNixlConnector":
@@ -3104,11 +2938,10 @@ index d82d9ad9d..61c1e429d 100644
 +    def _initialize_nixl(self) -> List[bytes]:
 +        agents_names = self.model_executor.collective_rpc("initialize_nixl", args=(self.engine_id,))
 +        return agents_names
-+
+ 
      def _initialize_kv_caches(self) -> None:
          """Initialize the KV cache in the worker(s).
- 
-@@ -500,6 +559,8 @@ class LLMEngine:
+@@ -535,6 +593,8 @@ class LLMEngine:
          # Shutdown model executor when engine is garbage collected
          # Use getattr since __init__ can fail before the field is set
          if model_executor := getattr(self, "model_executor", None):
@@ -3117,7 +2950,7 @@ index d82d9ad9d..61c1e429d 100644
              model_executor.shutdown()
  
      def get_tokenizer_group(
-@@ -552,11 +613,14 @@ class LLMEngine:
+@@ -587,11 +647,14 @@ class LLMEngine:
          prompt_adapter_request: Optional[PromptAdapterRequest],
          trace_headers: Optional[Mapping[str, str]] = None,
          priority: int = 0,
@@ -3132,7 +2965,7 @@ index d82d9ad9d..61c1e429d 100644
              ParallelSampleSequenceGroup.add_request(
                  request_id,
                  self,
-@@ -574,6 +638,8 @@ class LLMEngine:
+@@ -609,12 +672,14 @@ class LLMEngine:
          # Create the sequences.
          block_size = self.cache_config.block_size
          seq_id = next(self.seq_counter)
@@ -3140,9 +2973,7 @@ index d82d9ad9d..61c1e429d 100644
 +            next(self.seq_counter) # empty sequence for staging
          eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
  
-         if is_encoder_decoder_inputs(processed_inputs):
-@@ -584,7 +650,7 @@ class LLMEngine:
-             encoder_inputs = None
+         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
  
          seq = Sequence(seq_id, decoder_inputs, block_size, eos_token_id,
 -                       lora_request, prompt_adapter_request)
@@ -3150,7 +2981,7 @@ index d82d9ad9d..61c1e429d 100644
  
          encoder_seq = (None if encoder_inputs is None else Sequence(
              seq_id, encoder_inputs, block_size, eos_token_id, lora_request,
-@@ -601,8 +667,12 @@ class LLMEngine:
+@@ -631,8 +696,12 @@ class LLMEngine:
                  trace_headers=trace_headers,
                  prompt_adapter_request=prompt_adapter_request,
                  encoder_seq=encoder_seq,
@@ -3164,7 +2995,7 @@ index d82d9ad9d..61c1e429d 100644
              seq_group = self._create_sequence_group_with_pooling(
                  request_id,
                  seq,
-@@ -673,6 +743,7 @@ class LLMEngine:
+@@ -703,6 +772,7 @@ class LLMEngine:
              trace_headers: Optional[Mapping[str, str]] = None,
              prompt_adapter_request: Optional[PromptAdapterRequest] = None,
              priority: int = 0,
@@ -3172,7 +3003,7 @@ index d82d9ad9d..61c1e429d 100644
              *,
              inputs: Optional[PromptType] = None,  # DEPRECATED
      ) -> None:
-@@ -765,6 +836,7 @@ class LLMEngine:
+@@ -794,6 +864,7 @@ class LLMEngine:
              prompt_adapter_request=prompt_adapter_request,
              trace_headers=trace_headers,
              priority=priority,
@@ -3180,7 +3011,7 @@ index d82d9ad9d..61c1e429d 100644
          )
  
      def _validate_token_prompt(self, prompt: PromptType,
-@@ -799,6 +871,7 @@ class LLMEngine:
+@@ -828,6 +899,7 @@ class LLMEngine:
          prompt_adapter_request: Optional[PromptAdapterRequest] = None,
          encoder_seq: Optional[Sequence] = None,
          priority: int = 0,
@@ -3188,18 +3019,18 @@ index d82d9ad9d..61c1e429d 100644
      ) -> SequenceGroup:
          """Creates a SequenceGroup with SamplingParams."""
          max_logprobs = self.get_model_config().max_logprobs
-@@ -829,7 +902,9 @@ class LLMEngine:
-             trace_headers=trace_headers,
+@@ -863,7 +935,9 @@ class LLMEngine:
              prompt_adapter_request=prompt_adapter_request,
              encoder_seq=encoder_seq,
--            priority=priority)
-+            priority=priority,
-+            remote_prefill_params=remote_prefill_params
+             priority=priority,
+-            draft_size=draft_size)
++            draft_size=draft_size,
++            remote_prefill_params=remote_prefill_params,
 +        )
  
          return seq_group
  
-@@ -995,11 +1070,11 @@ class LLMEngine:
+@@ -1030,11 +1104,11 @@ class LLMEngine:
              # When we process only one request, no pop is required
              # (since later we will process all of the rest)
              (outputs, seq_group_metadata_list, scheduler_outputs, is_async,
@@ -3213,23 +3044,21 @@ index d82d9ad9d..61c1e429d 100644
  
          # Sanity check
          assert len(seq_group_metadata_list) == len(
-@@ -1325,15 +1400,55 @@ class LLMEngine:
+@@ -1360,6 +1434,12 @@ class LLMEngine:
  
          # Clear outputs for each new scheduler iteration
          ctx.request_outputs.clear()
 +        ctx.remote_prefill_requests.clear()
- 
-         # Skip the scheduler if there are any remaining steps in the seq groups.
-         # This ensures that the scheduler is only called again when the current
-         # batch has completed.
++
 +        remote_prefill_seq_group_metadata_list: List[SequenceGroupMetadata] = []
 +        running_seq_group_metadata_list: List[SequenceGroupMetadata] = []
 +        remote_prefill_scheduled_seq_groups: List[ScheduledSequenceGroup] = []
 +        running_scheduled_seq_groups: List[ScheduledSequenceGroup] = []
-+        
-         if not self._has_remaining_steps(seq_group_metadata_list):
--            # Schedule iteration
-+
+ 
+         # Skip the scheduler if there are any remaining steps in the seq groups.
+         # This ensures that the scheduler is only called again when the current
+@@ -1372,7 +1452,41 @@ class LLMEngine:
+             # Schedule iteration
              (seq_group_metadata_list, scheduler_outputs,
               allow_async_output_proc
 -             ) = self.scheduler[virtual_engine].schedule()
@@ -3271,11 +3100,10 @@ index d82d9ad9d..61c1e429d 100644
  
              ctx.seq_group_metadata_list = seq_group_metadata_list
              ctx.scheduler_outputs = scheduler_outputs
-@@ -1383,9 +1498,46 @@ class LLMEngine:
+@@ -1427,8 +1541,46 @@ class LLMEngine:
                  execute_model_req.async_callback = self.async_callbacks[
                      virtual_engine]
  
--            outputs = self.model_executor.execute_model(
 +            # After model execution, we need to transfer the memory from the prefill to the decode
 +            memory_transfer_reqs = []
 +            for scheduled_seq_group, seq_group_metadata in zip(scheduler_outputs.scheduled_seq_groups, seq_group_metadata_list):
@@ -3314,13 +3142,21 @@ index d82d9ad9d..61c1e429d 100644
 +                    memory_transfer_reqs.append(kv_send_req)
 +            execute_model_req.memory_transfer_requests = memory_transfer_reqs
 +
-+            outputs, request_notif_counter, request_done_counter = self.model_executor.execute_model(
-                 execute_model_req=execute_model_req)
+             try:
+-                outputs = self.model_executor.execute_model(
++                outputs, request_notif_counter, request_done_counter = self.model_executor.execute_model(
+                     execute_model_req=execute_model_req)
+                 self._skip_scheduling_next_step = False
+             except InputProcessingError as e:
+@@ -1444,7 +1596,6 @@ class LLMEngine:
+                     allow_async_output_proc=allow_async_output_proc)
+                 # Raise so the caller is notified that this request failed
+                 raise
 -
              # We need to do this here so that last step's sampled_token_ids can
              # be passed to the next iteration for PP.
              if self.scheduler_config.is_multi_step:
-@@ -1396,7 +1548,26 @@ class LLMEngine:
+@@ -1455,7 +1606,26 @@ class LLMEngine:
              if len(ctx.output_queue) > 0:
                  self._process_model_outputs(ctx=ctx)
              # No outputs in this case
@@ -3348,7 +3184,7 @@ index d82d9ad9d..61c1e429d 100644
  
          # Finish the current step for all the sequence groups.
          if self.scheduler_config.is_multi_step:
-@@ -1456,7 +1627,7 @@ class LLMEngine:
+@@ -1515,7 +1685,7 @@ class LLMEngine:
              # queued control plane messages, such as add/remove lora adapters.
              logger.debug("Stopping remote worker execution loop.")
              self.model_executor.stop_remote_worker_execution_loop()
@@ -3356,9 +3192,9 @@ index d82d9ad9d..61c1e429d 100644
 +            
          return ctx.request_outputs
  
-     def _has_remaining_steps(
+     def _abort_and_cache_schedule(
 diff --git a/vllm/engine/multiprocessing/__init__.py b/vllm/engine/multiprocessing/__init__.py
-index 3cf1850ee..d20a5f20b 100644
+index cafd8150b..ab1c11329 100644
 --- a/vllm/engine/multiprocessing/__init__.py
 +++ b/vllm/engine/multiprocessing/__init__.py
 @@ -1,4 +1,17 @@
@@ -3382,7 +3218,7 @@ index 3cf1850ee..d20a5f20b 100644
 @@ -14,13 +27,17 @@ from vllm.outputs import RequestOutput
  from vllm.prompt_adapter.request import PromptAdapterRequest
  from vllm.sampling_params import SamplingParams
- from vllm.utils import deprecate_kwargs
+ from vllm.utils import Device, deprecate_kwargs
 -
 +from vllm.remote_prefill import RemotePrefillParams
 +from vllm.distributed.device_communicators.nixl import NixlMetadata
@@ -3432,7 +3268,7 @@ index 3cf1850ee..d20a5f20b 100644
  
  class RPCUProfileRequest(Enum):
      START_PROFILE = 1
-@@ -157,3 +176,13 @@ def ENGINE_DEAD_ERROR(
+@@ -181,3 +200,13 @@ def ENGINE_DEAD_ERROR(
      return MQEngineDeadError(
          "Engine loop is not running. Inspect the stacktrace to "
          f"find the original error: {repr(error)}.")
@@ -3447,7 +3283,7 @@ index 3cf1850ee..d20a5f20b 100644
 +    gpu_cache_usage_perc: float
 +    gpu_prefix_cache_hit_rate: float
 diff --git a/vllm/engine/multiprocessing/client.py b/vllm/engine/multiprocessing/client.py
-index 85b5f31e3..c53b9eced 100644
+index f058b1329..fa99e635c 100644
 --- a/vllm/engine/multiprocessing/client.py
 +++ b/vllm/engine/multiprocessing/client.py
 @@ -1,4 +1,17 @@
@@ -3476,10 +3312,10 @@ index 85b5f31e3..c53b9eced 100644
  import psutil
  import zmq
  import zmq.asyncio
-@@ -19,20 +33,23 @@ from vllm import PoolingParams
+@@ -18,14 +32,17 @@ from zmq.asyncio import Socket
+ from vllm import PoolingParams
  from vllm.config import DecodingConfig, ModelConfig, VllmConfig
  from vllm.core.scheduler import SchedulerOutputs
- from vllm.engine.arg_utils import AsyncEngineArgs
 +from vllm.engine.metrics import Stats
  # yapf conflicts with isort for this block
  # yapf: disable
@@ -3494,25 +3330,27 @@ index 85b5f31e3..c53b9eced 100644
 +                                         VLLM_RPC_SUCCESS_STR, IPC_REMOTE_NIXL_METADATA_EXT, RPCAbortRequest,
 +                                         IPC_METRICS_EXT,
                                           RPCAdapterLoadedResponse, RPCError,
-                                          RPCLoadAdapterRequest,
-                                          RPCProcessRequest,
+                                          RPCIsSleepingRequest,
+                                          RPCIsSleepingResponse,
+@@ -34,7 +51,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                           RPCResetPrefixCacheRequest,
-                                          RPCStartupRequest, RPCStartupResponse,
--                                         RPCUProfileRequest)
-+                                         RPCUProfileRequest, KvMetrics)
+                                          RPCSleepRequest, RPCStartupRequest,
+                                          RPCStartupResponse,
+-                                         RPCUProfileRequest, RPCWakeUpRequest)
++                                         RPCUProfileRequest, KvMetrics, RPCWakeUpRequest)
  from vllm.engine.protocol import EngineClient
  # yapf: enable
  from vllm.envs import VLLM_RPC_TIMEOUT
-@@ -46,6 +63,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
+@@ -48,6 +65,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
  from vllm.sampling_params import SamplingParams
  from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
- from vllm.utils import deprecate_kwargs
+ from vllm.utils import Device, deprecate_kwargs
 +from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest, RemotePrefillRequestCallback
 +from vllm.distributed.device_communicators.nixl import NixlMetadata
  
  logger = init_logger(__name__)
  
-@@ -91,6 +110,7 @@ class MQLLMEngineClient(EngineClient):
+@@ -93,6 +112,7 @@ class MQLLMEngineClient(EngineClient):
          self._errored_with: Optional[BaseException] = None
  
          # Get the configs.
@@ -3520,7 +3358,7 @@ index 85b5f31e3..c53b9eced 100644
          self.model_config = engine_config.model_config
          self.decoding_config = engine_config.decoding_config
  
-@@ -115,6 +135,10 @@ class MQLLMEngineClient(EngineClient):
+@@ -117,6 +137,10 @@ class MQLLMEngineClient(EngineClient):
          self.heartbeat_socket: Socket = self.context.socket(zmq.constants.PULL)
          self.heartbeat_socket.connect(f"{ipc_path}{IPC_HEALTH_EXT}")
  
@@ -3531,7 +3369,7 @@ index 85b5f31e3..c53b9eced 100644
          # IPC path for the data socket.
          self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
  
-@@ -129,8 +153,27 @@ class MQLLMEngineClient(EngineClient):
+@@ -131,8 +155,27 @@ class MQLLMEngineClient(EngineClient):
          # Loop to check health of the LLMEngine periodically.
          # Started after the MQLLMEngine is ready.
          self.health_loop: Optional[asyncio.Task] = None
@@ -3557,9 +3395,9 @@ index 85b5f31e3..c53b9eced 100644
 +        return self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.kv_connector == "DynamoNixlConnector"
 +
      @staticmethod
-     def is_unsupported_config(engine_args: AsyncEngineArgs):
+     def is_unsupported_config(vllm_config: VllmConfig):
          # Pipeline parallel not yet supported
-@@ -180,6 +223,61 @@ class MQLLMEngineClient(EngineClient):
+@@ -182,6 +225,61 @@ class MQLLMEngineClient(EngineClient):
          except Exception as e:
              self._set_errored(e)
  
@@ -3621,7 +3459,7 @@ index 85b5f31e3..c53b9eced 100644
      async def run_output_handler_loop(self):
          """Get RequestOutputs from Engine and stream to Request Queues"""
  
-@@ -278,12 +376,26 @@ class MQLLMEngineClient(EngineClient):
+@@ -283,12 +381,26 @@ class MQLLMEngineClient(EngineClient):
              # Wait until server is ready.
              response = await self._wait_for_server_rpc(socket)
  
@@ -3648,7 +3486,7 @@ index 85b5f31e3..c53b9eced 100644
  
      def close(self):
          """Destroy the ZeroMQ Context."""
-@@ -293,6 +405,8 @@ class MQLLMEngineClient(EngineClient):
+@@ -298,6 +410,8 @@ class MQLLMEngineClient(EngineClient):
          # Cancel background tasks.
          if self.health_loop is not None:
              self.health_loop.cancel()
@@ -3657,7 +3495,7 @@ index 85b5f31e3..c53b9eced 100644
          if self.output_loop is not None:
              self.output_loop.cancel()
  
-@@ -415,6 +529,9 @@ class MQLLMEngineClient(EngineClient):
+@@ -420,6 +534,9 @@ class MQLLMEngineClient(EngineClient):
          """
          if self._errored_with is not None:
              raise self._errored_with
@@ -3667,7 +3505,7 @@ index 85b5f31e3..c53b9eced 100644
  
      @property
      def is_running(self) -> bool:
-@@ -473,6 +590,7 @@ class MQLLMEngineClient(EngineClient):
+@@ -478,6 +595,7 @@ class MQLLMEngineClient(EngineClient):
          trace_headers: Optional[Mapping[str, str]] = None,
          prompt_adapter_request: Optional[PromptAdapterRequest] = None,
          priority: int = 0,
@@ -3675,7 +3513,7 @@ index 85b5f31e3..c53b9eced 100644
          *,
          inputs: Optional[PromptType] = None  # DEPRECATED
      ) -> AsyncGenerator[RequestOutput, None]:
-@@ -502,7 +620,8 @@ class MQLLMEngineClient(EngineClient):
+@@ -507,7 +625,8 @@ class MQLLMEngineClient(EngineClient):
  
          return self._process_request(prompt, sampling_params, request_id,
                                       lora_request, trace_headers,
@@ -3685,7 +3523,7 @@ index 85b5f31e3..c53b9eced 100644
  
      @overload
      def encode(
-@@ -586,6 +705,7 @@ class MQLLMEngineClient(EngineClient):
+@@ -591,6 +710,7 @@ class MQLLMEngineClient(EngineClient):
          trace_headers: Optional[Mapping[str, str]] = None,
          prompt_adapter_request: Optional[PromptAdapterRequest] = None,
          priority: int = 0,
@@ -3693,7 +3531,7 @@ index 85b5f31e3..c53b9eced 100644
      ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
              PoolingRequestOutput, None]]:
          """Send an RPCGenerateRequest to the RPCServer and stream responses."""
-@@ -630,6 +750,12 @@ class MQLLMEngineClient(EngineClient):
+@@ -636,6 +756,12 @@ class MQLLMEngineClient(EngineClient):
              else:
                  lp_bytes = None
  
@@ -3706,7 +3544,7 @@ index 85b5f31e3..c53b9eced 100644
              request_bytes = pickle.dumps(
                  RPCProcessRequest(
                      prompt=prompt,
-@@ -639,11 +765,11 @@ class MQLLMEngineClient(EngineClient):
+@@ -645,11 +771,11 @@ class MQLLMEngineClient(EngineClient):
                      trace_headers=trace_headers,
                      prompt_adapter_request=prompt_adapter_request,
                      priority=priority,
@@ -3720,7 +3558,7 @@ index 85b5f31e3..c53b9eced 100644
              await self.input_socket.send_multipart(parts, copy=False)
  
              # 4) Stream the RequestOutputs from the output queue. Note
-@@ -705,3 +831,6 @@ class MQLLMEngineClient(EngineClient):
+@@ -740,3 +866,6 @@ class MQLLMEngineClient(EngineClient):
          # Raise on error, otherwise happily return None
          if isinstance(request_output, BaseException):
              raise request_output
@@ -3728,10 +3566,10 @@ index 85b5f31e3..c53b9eced 100644
 +    def set_metrics_publisher(self, metrics_publisher):
 +        self.metrics_publisher = metrics_publisher
 diff --git a/vllm/engine/multiprocessing/engine.py b/vllm/engine/multiprocessing/engine.py
-index a0dd79586..ea0d2cd68 100644
+index 6ed5ae0a9..af4bd942b 100644
 --- a/vllm/engine/multiprocessing/engine.py
 +++ b/vllm/engine/multiprocessing/engine.py
-@@ -1,37 +1,130 @@
+@@ -1,13 +1,27 @@
 +# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  # SPDX-License-Identifier: Apache-2.0
 +#
@@ -3759,8 +3597,9 @@ index a0dd79586..ea0d2cd68 100644
 -
 +import msgspec
  from vllm import AsyncEngineArgs, SamplingParams
+ from vllm.config import VllmConfig
  from vllm.engine.llm_engine import LLMEngine
- # yapf conflicts with isort for this block
+@@ -15,8 +29,10 @@ from vllm.engine.llm_engine import LLMEngine
  # yapf: disable
  from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                           IPC_HEALTH_EXT, IPC_INPUT_EXT,
@@ -3771,25 +3610,30 @@ index a0dd79586..ea0d2cd68 100644
 +                                         RPCAbortRequest,
 +                                         IPC_OUTPUT_EXT, IPC_METRICS_EXT,
                                           RPCAdapterLoadedResponse, RPCError,
-                                          RPCLoadAdapterRequest,
-                                          RPCProcessRequest,
+                                          RPCIsSleepingRequest,
+                                          RPCIsSleepingResponse,
+@@ -25,13 +41,19 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                           RPCResetPrefixCacheRequest,
-                                          RPCStartupRequest, RPCStartupResponse,
--                                         RPCUProfileRequest)
-+                                         RPCUProfileRequest, IPC_REMOTE_NIXL_METADATA_EXT,
-+                                         KvMetrics)
+                                          RPCSleepRequest, RPCStartupRequest,
+                                          RPCStartupResponse,
+-                                         RPCUProfileRequest, RPCWakeUpRequest)
++                                         RPCUProfileRequest, RPCWakeUpRequest, KvMetrics,
++                                         IPC_REMOTE_NIXL_METADATA_EXT)
  # yapf: enable
  from vllm.logger import init_logger
  from vllm.outputs import RequestOutput
+ from vllm.transformers_utils.config import (
+     maybe_register_config_serialize_by_value)
  from vllm.usage.usage_lib import UsageContext
 +from vllm.remote_prefill import RemotePrefillRequest
 +from vllm.distributed.device_communicators.nixl import NixlMetadata
 +
 +from vllm.engine.metrics_types import StatLoggerBase, Stats, SupportsMetricsInfo
 +from dataclasses import dataclass, field
+ from vllm.worker.model_runner_base import InputProcessingError
  
  logger = init_logger(__name__)
- 
+@@ -39,6 +61,77 @@ logger = init_logger(__name__)
  POLLING_TIMEOUT_MS = 10000
  HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
  
@@ -3867,7 +3711,7 @@ index a0dd79586..ea0d2cd68 100644
  
  class MQLLMEngine:
      """A multiprocessing wrapper for :class:`LLMEngine`.
-@@ -94,12 +187,37 @@ class MQLLMEngine:
+@@ -101,12 +194,37 @@ class MQLLMEngine:
          self.heartbeat_socket = self.ctx.socket(zmq.constants.PUSH)
          self.heartbeat_socket.bind(f"{ipc_path}{IPC_HEALTH_EXT}")
  
@@ -3905,7 +3749,7 @@ index a0dd79586..ea0d2cd68 100644
      @property
      def dead_error(self) -> BaseException:
          if self._errored_with is not None:
-@@ -171,8 +289,17 @@ class MQLLMEngine:
+@@ -192,8 +310,17 @@ class MQLLMEngine:
                  # Handle the query from the Client.
                  if request == RPCStartupRequest.IS_SERVER_READY:
                      tracing_enabled = self.engine.is_tracing_enabled()
@@ -3925,7 +3769,7 @@ index a0dd79586..ea0d2cd68 100644
  
              except Exception as e:
                  response = e
-@@ -185,6 +312,7 @@ class MQLLMEngine:
+@@ -206,6 +333,7 @@ class MQLLMEngine:
  
          while True:
              if not self.engine.has_unfinished_requests():
@@ -3933,7 +3777,7 @@ index a0dd79586..ea0d2cd68 100644
                  # Poll until there is work to do.
                  while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
                      # When there's no work, check on engine health and send
-@@ -220,6 +348,13 @@ class MQLLMEngine:
+@@ -249,6 +377,13 @@ class MQLLMEngine:
      def handle_new_input(self):
          """Handle new input from the socket"""
          try:
@@ -3947,7 +3791,7 @@ index a0dd79586..ea0d2cd68 100644
              while self.input_socket.poll(timeout=0) != 0:
                  frames = self.input_socket.recv_multipart(copy=False)
                  request = pickle.loads(frames[0].buffer)
-@@ -262,6 +397,11 @@ class MQLLMEngine:
+@@ -297,6 +432,11 @@ class MQLLMEngine:
              self._send_outputs(rpc_err)
  
          try:
@@ -3959,7 +3803,7 @@ index a0dd79586..ea0d2cd68 100644
              self.engine.add_request(
                  request_id=request_id,
                  prompt=request.prompt,
-@@ -269,7 +409,9 @@ class MQLLMEngine:
+@@ -304,7 +444,9 @@ class MQLLMEngine:
                  lora_request=request.lora_request,
                  trace_headers=request.trace_headers,
                  prompt_adapter_request=request.prompt_adapter_request,
@@ -3971,7 +3815,7 @@ index a0dd79586..ea0d2cd68 100644
              if self.log_requests:
                  logger.info("Added request %s.", request.request_id)
 diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
-index 107220d54..e0e0590b6 100644
+index dd0b67df4..f436b0752 100644
 --- a/vllm/entrypoints/openai/serving_chat.py
 +++ b/vllm/entrypoints/openai/serving_chat.py
 @@ -1,4 +1,17 @@
@@ -3992,15 +3836,15 @@ index 107220d54..e0e0590b6 100644
  
  import asyncio
  import json
-@@ -34,6 +47,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
- from vllm.sequence import Logprob
- from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
- from vllm.transformers_utils.tokenizers import maybe_serialize_tool_calls
+@@ -41,6 +54,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+ from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
+                                                 truncate_tool_call_ids,
+                                                 validate_request_params)
 +from vllm.remote_prefill import RemotePrefillParams
  
  logger = init_logger(__name__)
  
-@@ -112,6 +126,7 @@ class OpenAIServingChat(OpenAIServing):
+@@ -122,6 +136,7 @@ class OpenAIServingChat(OpenAIServing):
          self,
          request: ChatCompletionRequest,
          raw_request: Optional[Request] = None,
@@ -4008,7 +3852,7 @@ index 107220d54..e0e0590b6 100644
      ) -> Union[AsyncGenerator[str, None], ChatCompletionResponse,
                 ErrorResponse]:
          """
-@@ -243,6 +258,7 @@ class OpenAIServingChat(OpenAIServing):
+@@ -247,6 +262,7 @@ class OpenAIServingChat(OpenAIServing):
                          trace_headers=trace_headers,
                          prompt_adapter_request=prompt_adapter_request,
                          priority=request.priority,
@@ -4017,7 +3861,7 @@ index 107220d54..e0e0590b6 100644
  
                  generators.append(generator)
 diff --git a/vllm/envs.py b/vllm/envs.py
-index 745b068b7..0f1a022fb 100644
+index f80bf878f..f64c49fe8 100644
 --- a/vllm/envs.py
 +++ b/vllm/envs.py
 @@ -1,4 +1,17 @@
@@ -4036,12 +3880,21 @@ index 745b068b7..0f1a022fb 100644
 +# See the License for the specific language governing permissions and
 +# limitations under the License.
  
+ import hashlib
  import os
- import tempfile
-@@ -87,6 +100,10 @@ if TYPE_CHECKING:
-     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
-     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
-     VLLM_RAY_BUNDLE_INDICES: str = ""
+@@ -73,7 +86,7 @@ if TYPE_CHECKING:
+     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
+     VLLM_SKIP_P2P_CHECK: bool = False
+     VLLM_DISABLED_KERNELS: list[str] = []
+-    VLLM_USE_V1: bool = True
++    VLLM_USE_V1: bool = False
+     VLLM_ROCM_USE_AITER: bool = False
+     VLLM_ROCM_USE_AITER_LINEAR: bool = True
+     VLLM_ROCM_USE_AITER_MOE: bool = True
+@@ -107,6 +120,10 @@ if TYPE_CHECKING:
+     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
+     VLLM_USE_DEEP_GEMM: bool = False
+     VLLM_XGRAMMAR_CACHE_MB: int = 0
 +    VLLM_KV_CAPI_PATH: Optional[str] = None
 +    VLLM_KV_NAMESPACE: Optional[str] = None
 +    VLLM_KV_COMPONENT: Optional[str] = None
@@ -4049,10 +3902,19 @@ index 745b068b7..0f1a022fb 100644
  
  
  def get_default_cache_root():
-@@ -572,6 +589,21 @@ environment_variables: Dict[str, Callable[[], Any]] = {
-     # models the alignment is already naturally aligned to 256 bytes.
-     "VLLM_CUDA_MEM_ALIGN_KV_CACHE":
-     lambda: bool(int(os.getenv("VLLM_CUDA_MEM_ALIGN_KV_CACHE", "1"))),
+@@ -525,7 +542,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
+ 
+     # If set, use the V1 code path.
+     "VLLM_USE_V1":
+-    lambda: bool(int(os.getenv("VLLM_USE_V1", "1"))),
++    lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
+ 
+     # Disable aiter ops unless specifically enabled.
+     # Acts as a parent switch to enable the rest of the other operations.
+@@ -704,6 +721,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
+     # It can be changed with this variable if needed for some reason.
+     "VLLM_XGRAMMAR_CACHE_MB":
+     lambda: int(os.getenv("VLLM_XGRAMMAR_CACHE_MB", "512")),
 +
 +    # Path to the C API Library
 +    "VLLM_KV_CAPI_PATH":
@@ -4072,7 +3934,7 @@ index 745b068b7..0f1a022fb 100644
  
  # end-env-vars-definition
 diff --git a/vllm/model_executor/models/deepseek_v2.py b/vllm/model_executor/models/deepseek_v2.py
-index 773f5abe7..365685e13 100644
+index 23b450aed..23fe6d7b8 100644
 --- a/vllm/model_executor/models/deepseek_v2.py
 +++ b/vllm/model_executor/models/deepseek_v2.py
 @@ -1,4 +1,17 @@
@@ -4093,17 +3955,8 @@ index 773f5abe7..365685e13 100644
  
  # Adapted from
  # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
-@@ -585,6 +598,8 @@ class DeepseekV2Model(nn.Module):
-         cache_config = vllm_config.cache_config
-         quant_config = vllm_config.quant_config
- 
-+        self.config = config
-+
-         self.padding_idx = config.pad_token_id
-         self.vocab_size = config.vocab_size
- 
 diff --git a/vllm/outputs.py b/vllm/outputs.py
-index 786380c37..e9c3a5e16 100644
+index 014e8d5d8..3ffc0f354 100644
 --- a/vllm/outputs.py
 +++ b/vllm/outputs.py
 @@ -1,4 +1,17 @@
@@ -4123,10 +3976,10 @@ index 786380c37..e9c3a5e16 100644
 +# limitations under the License.
  
  import time
+ from collections.abc import MutableSequence
+@@ -6,16 +19,16 @@ from collections.abc import Sequence as GenericSequence
  from dataclasses import dataclass
-@@ -6,16 +19,16 @@ from typing import Dict, Generic, List, MutableSequence, Optional
- from typing import Sequence as GenericSequence
- from typing import Union
+ from typing import Generic, Optional, Union
  
 +import msgspec
  import torch
@@ -4143,6 +3996,20 @@ index 786380c37..e9c3a5e16 100644
  @dataclass
  class CompletionOutput:
      """The output data of one completion output of a request.
+diff --git a/vllm/platforms/__init__.py b/vllm/platforms/__init__.py
+index 0ed221043..08dbc0e78 100644
+--- a/vllm/platforms/__init__.py
++++ b/vllm/platforms/__init__.py
+@@ -20,7 +20,8 @@ def vllm_version_matches_substr(substr: str) -> bool:
+     """
+     from importlib.metadata import PackageNotFoundError, version
+     try:
+-        vllm_version = version("vllm")
++        logger.warning("Using ai_dynamo_vllm")
++        vllm_version = version("ai_dynamo_vllm")
+     except PackageNotFoundError as e:
+         logger.warning(
+             "The vLLM package was not found, so its version could not be "
 diff --git a/vllm/remote_prefill.py b/vllm/remote_prefill.py
 new file mode 100644
 index 000000000..83f6cd575
@@ -4233,7 +4100,7 @@ index 000000000..83f6cd575
 +    remote_prefill_request_callback: Optional[RemotePrefillRequestCallback] = None
 \ No newline at end of file
 diff --git a/vllm/sampling_params.py b/vllm/sampling_params.py
-index 97f9e2129..5849befba 100644
+index 68ed99664..5b0b7e6dc 100644
 --- a/vllm/sampling_params.py
 +++ b/vllm/sampling_params.py
 @@ -1,4 +1,18 @@
@@ -4255,9 +4122,9 @@ index 97f9e2129..5849befba 100644
  """Sampling parameters for text generation."""
  import copy
  from dataclasses import dataclass
-@@ -83,7 +97,7 @@ class RequestOutputKind(Enum):
+@@ -103,7 +117,7 @@ class RequestOutputKind(Enum):
      DELTA = 1
-     # Do not return intermediate RequestOuputs
+     # Do not return intermediate RequestOutput
      FINAL_ONLY = 2
 -
 +    
@@ -4265,7 +4132,7 @@ index 97f9e2129..5849befba 100644
  class SamplingParams(
          msgspec.Struct,
 diff --git a/vllm/sequence.py b/vllm/sequence.py
-index 534b9e606..c33bbde1c 100644
+index 61867b025..8a07cf39e 100644
 --- a/vllm/sequence.py
 +++ b/vllm/sequence.py
 @@ -1,4 +1,18 @@
@@ -4316,7 +4183,7 @@ index 534b9e606..c33bbde1c 100644
  
      @staticmethod
      def is_finished(status: "SequenceStatus") -> bool:
-@@ -409,6 +425,7 @@ class Sequence:
+@@ -417,6 +433,7 @@ class Sequence:
          eos_token_id: Optional[int] = None,
          lora_request: Optional[LoRARequest] = None,
          prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -4324,7 +4191,7 @@ index 534b9e606..c33bbde1c 100644
      ) -> None:
          self.seq_id = seq_id
          self.inputs = SingletonInputsAdapter(inputs)
-@@ -416,7 +433,7 @@ class Sequence:
+@@ -424,7 +441,7 @@ class Sequence:
          self.eos_token_id = eos_token_id
          self.lora_request = lora_request
          self.prompt_adapter_request = prompt_adapter_request
@@ -4333,23 +4200,25 @@ index 534b9e606..c33bbde1c 100644
          self.data = SequenceData.from_seqs(self.prompt_token_ids)
          self.output_logprobs: SampleLogprobs = []
          self.output_text = ""
-@@ -639,6 +656,7 @@ class SequenceGroup:
-         trace_headers: OpenTelemetry trace headers.
-         prompt_adapter_request: Prompt Adapter request.
-         priority: User-defined priority of the request.
+@@ -651,6 +668,7 @@ class SequenceGroup:
+                     model; equal to max number of tokens a step can generate
+                     for single-draft speculative decoding but larger than 
+                     that for multi-draft SD (currently not supported).
 +        remote_prefill_params: Remote prefill parameters.
      """
  
-     def __init__(
-@@ -654,6 +672,7 @@ class SequenceGroup:
-         trace_headers: Optional[Mapping[str, str]] = None,
-         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-         priority: int = 0,
-+        remote_prefill_params: Optional[RemotePrefillParams] = None,
-     ) -> None:
+     def __init__(self,
+@@ -665,7 +683,8 @@ class SequenceGroup:
+                  trace_headers: Optional[Mapping[str, str]] = None,
+                  prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+                  priority: int = 0,
+-                 draft_size: int = 1) -> None:
++                 draft_size: int = 1,
++                 remote_prefill_params: Optional[RemotePrefillParams] = None) -> None:
          self.request_id = request_id
          self.seqs = seqs
-@@ -678,7 +697,7 @@ class SequenceGroup:
+         self.first_seq = seqs[0]
+@@ -691,7 +710,7 @@ class SequenceGroup:
          self.encoder_seq = encoder_seq
          self.trace_headers = trace_headers
          self.priority = priority
@@ -4358,7 +4227,7 @@ index 534b9e606..c33bbde1c 100644
          self.cached_request_output = None
  
      @property
-@@ -927,6 +946,9 @@ class SequenceGroupMetadata(
+@@ -940,6 +959,9 @@ class SequenceGroupMetadata(
              query tokens for prefill, we don't need sampling.
          token_chunk_size: The number of tokens to be processed (per sequence).
              None if chunking is not required.
@@ -4368,8 +4237,8 @@ index 534b9e606..c33bbde1c 100644
          lora_request: LoRA request.
          computed_block_nums: The block numbers that are already computed,
              used in prefix caching.
-@@ -966,6 +988,9 @@ class SequenceGroupMetadata(
-     cross_block_table: Optional[List[int]] = None
+@@ -979,6 +1001,9 @@ class SequenceGroupMetadata(
+     cross_block_table: Optional[list[int]] = None
      prompt_adapter_request: Optional[PromptAdapterRequest] = None
      token_chunk_size: Optional[int] = None
 +    do_remote_prefill: bool = False
@@ -4378,17 +4247,17 @@ index 534b9e606..c33bbde1c 100644
  
      ### Stateful fields that are lazily defined. ###
      # The number of speculative tokens adopted in this request.
-@@ -1310,6 +1335,8 @@ class ExecuteModelRequest(
+@@ -1329,6 +1354,8 @@ class ExecuteModelRequest(
      last_sampled_token_ids: Optional[torch.Tensor] = None
      # Async callback
      async_callback: Optional[Callable] = None
 +    # The memory transfer requests.
-+    memory_transfer_requests: Optional[List[MemoryTransferRequest]] = None
++    memory_transfer_requests: Optional[list[MemoryTransferRequest]] = None
  
      @property
      def is_first_multi_step(self) -> bool:
 diff --git a/vllm/worker/model_runner.py b/vllm/worker/model_runner.py
-index 12baecde6..11034b391 100644
+index 9524a69f6..c314fbe8f 100644
 --- a/vllm/worker/model_runner.py
 +++ b/vllm/worker/model_runner.py
 @@ -1,4 +1,17 @@
@@ -4409,7 +4278,7 @@ index 12baecde6..11034b391 100644
  
  import dataclasses
  import gc
-@@ -1824,6 +1837,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
+@@ -1875,6 +1888,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
  
          if self.vllm_config.kv_transfer_config is None:
              return False
@@ -4419,7 +4288,7 @@ index 12baecde6..11034b391 100644
  
          prefill_meta = model_input.attn_metadata.prefill_metadata
  
-@@ -1849,6 +1865,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
+@@ -1900,6 +1916,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
  
          if self.vllm_config.kv_transfer_config is None:
              return False
@@ -4430,7 +4299,7 @@ index 12baecde6..11034b391 100644
          prefill_meta = model_input.attn_metadata.prefill_metadata
  
 diff --git a/vllm/worker/worker.py b/vllm/worker/worker.py
-index 582aa460e..0be784a40 100644
+index d59f20f49..4c78301a9 100644
 --- a/vllm/worker/worker.py
 +++ b/vllm/worker/worker.py
 @@ -1,8 +1,22 @@
@@ -4467,7 +4336,7 @@ index 582aa460e..0be784a40 100644
  
  logger = init_logger(__name__)
  
-@@ -306,6 +323,46 @@ class Worker(LocalOrDistributedWorkerBase):
+@@ -307,6 +324,46 @@ class Worker(LocalOrDistributedWorkerBase):
              self._init_cache_engine()
          self._warm_up_model()
  
@@ -4514,7 +4383,7 @@ index 582aa460e..0be784a40 100644
      def _init_cache_engine(self):
          assert self.cache_config.num_gpu_blocks is not None
          self.cache_engine = [
-@@ -367,6 +424,8 @@ class Worker(LocalOrDistributedWorkerBase):
+@@ -368,6 +425,8 @@ class Worker(LocalOrDistributedWorkerBase):
          blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
                                        device=self.device,
                                        dtype=torch.int64).view(-1, 2)
@@ -4523,7 +4392,7 @@ index 582aa460e..0be784a40 100644
  
          return WorkerInput(
              num_seq_groups=num_seq_groups,
-@@ -375,6 +434,12 @@ class Worker(LocalOrDistributedWorkerBase):
+@@ -376,6 +435,12 @@ class Worker(LocalOrDistributedWorkerBase):
              blocks_to_copy=blocks_to_copy,
              virtual_engine=virtual_engine,
              num_steps=num_steps,
@@ -4537,7 +4406,7 @@ index 582aa460e..0be784a40 100644
  
      @torch.inference_mode()
 diff --git a/vllm/worker/worker_base.py b/vllm/worker/worker_base.py
-index 819b81fbf..7d1b1836d 100644
+index e5662e693..ffcf1193a 100644
 --- a/vllm/worker/worker_base.py
 +++ b/vllm/worker/worker_base.py
 @@ -1,4 +1,18 @@
@@ -4567,7 +4436,7 @@ index 819b81fbf..7d1b1836d 100644
  
  from vllm.config import (ObservabilityConfig, VllmConfig,
                           set_current_vllm_config)
-@@ -23,6 +38,9 @@ from vllm.utils import (enable_trace_function_call_for_thread,
+@@ -24,6 +39,9 @@ from vllm.utils import (enable_trace_function_call_for_thread,
  from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                             ModelRunnerBase,
                                             ModelRunnerInputBase)
@@ -4577,16 +4446,17 @@ index 819b81fbf..7d1b1836d 100644
  
  logger = init_logger(__name__)
  
-@@ -53,6 +71,8 @@ class WorkerBase(ABC):
+@@ -55,6 +73,9 @@ class WorkerBase:
          from vllm.platforms import current_platform
          self.current_platform = current_platform
  
 +        self.nixl_connector: Optional[DynamoNixlConnector] = None
 +
-     @abstractmethod
++    @abstractmethod
      def init_device(self) -> None:
          """Initialize device state, such as loading the model or other on-device
-@@ -216,6 +236,13 @@ class WorkerInput:
+         memory allocations.
+@@ -221,6 +242,13 @@ class WorkerInput:
      virtual_engine: int = 0
      num_steps: int = 1
  
@@ -4600,7 +4470,7 @@ index 819b81fbf..7d1b1836d 100644
      @classmethod
      def from_broadcasted_tensor_dict(
          cls: Type["WorkerInput"],
-@@ -232,6 +259,12 @@ class WorkerInput:
+@@ -237,6 +265,12 @@ class WorkerInput:
              blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
              virtual_engine=tensor_dict["virtual_engine"],
              num_steps=tensor_dict.pop("num_steps"),
@@ -4613,7 +4483,7 @@ index 819b81fbf..7d1b1836d 100644
          )
  
      def as_broadcastable_tensor_dict(
-@@ -246,6 +279,12 @@ class WorkerInput:
+@@ -251,6 +285,12 @@ class WorkerInput:
              "blocks_to_copy": self.blocks_to_copy,
              "virtual_engine": self.virtual_engine,
              "num_steps": self.num_steps,
@@ -4626,7 +4496,7 @@ index 819b81fbf..7d1b1836d 100644
          }
  
          return tensor_dict
-@@ -316,13 +355,16 @@ class LocalOrDistributedWorkerBase(WorkerBase):
+@@ -321,13 +361,16 @@ class LocalOrDistributedWorkerBase(WorkerBase):
              return None
  
          worker_input = WorkerInput.from_broadcasted_tensor_dict(broadcast_data)
@@ -4648,19 +4518,12 @@ index 819b81fbf..7d1b1836d 100644
  
      def _get_driver_input_and_broadcast(
          self, execute_model_req: ExecuteModelRequest
-@@ -396,49 +438,88 @@ class LocalOrDistributedWorkerBase(WorkerBase):
+@@ -403,49 +446,88 @@ class LocalOrDistributedWorkerBase(WorkerBase):
          self.execute_worker(worker_input)
  
          # If there is no input, we don't need to execute the model.
 -        if worker_input.num_seq_groups == 0:
 -            return []
--
--        intermediate_tensors = None
--        orig_model_execute_time = 0.0
--        if not get_pp_group().is_first_rank:
--            intermediate_tensors = IntermediateTensors(
--                get_pp_group().recv_tensor_dict(
--                    all_gather_group=get_tp_group()))
 +        if worker_input.num_seq_groups > 0:
 +
 +            self._read_blocks(worker_input)
@@ -4684,7 +4547,13 @@ index 819b81fbf..7d1b1836d 100644
 +                num_steps=num_steps,
 +                **kwargs,
 +            )
-+
+ 
+-        intermediate_tensors = None
+-        orig_model_execute_time = 0.0
+-        if not get_pp_group().is_first_rank:
+-            intermediate_tensors = IntermediateTensors(
+-                get_pp_group().recv_tensor_dict(
+-                    all_gather_group=get_tp_group()))
 +            model_execute_time = time.perf_counter() - start_time
 +            if not get_pp_group().is_last_rank:
 +                # output is IntermediateTensors
@@ -4700,12 +4569,7 @@ index 819b81fbf..7d1b1836d 100644
 -                    and self.observability_config.collect_model_execute_time):
 -                orig_model_execute_time = intermediate_tensors.tensors.get(
 -                    "model_execute_time", torch.tensor(0)).item()
-+                    and self.observability_config.collect_model_execute_time
-+                    and output is not None):
-+                for o in output:
-+                    o.model_execute_time = (orig_model_execute_time +
-+                                            model_execute_time)
- 
+-
 -        output = self.model_runner.execute_model(
 -            model_input=model_input,
 -            kv_caches=self.kv_cache[worker_input.virtual_engine]
@@ -4714,7 +4578,12 @@ index 819b81fbf..7d1b1836d 100644
 -            num_steps=num_steps,
 -            **kwargs,
 -        )
--
++                    and self.observability_config.collect_model_execute_time
++                    and output is not None):
++                for o in output:
++                    o.model_execute_time = (orig_model_execute_time +
++                                            model_execute_time)
+ 
 -        model_execute_time = time.perf_counter() - start_time
 -        if not get_pp_group().is_last_rank:
 -            # output is IntermediateTensors
