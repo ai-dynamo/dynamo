@@ -91,9 +91,14 @@ Here's a simple example of a worker that takes text in and streams text out
 via custom RequestType/ResponseType definitions:
 
 ```python
+# basic_worker.py
+# This can be run standalone with `dynamo serve basic_worker:YourWorker`
+
 import logging
+from typing import AsyncIterator
+
 from pydantic import BaseModel
-from dynamo.sdk import DYNAMO_IMAGE, dynamo_endpoint, service
+from dynamo.sdk import dynamo_endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -107,20 +112,19 @@ class ResponseType(BaseModel):
     dynamo={
         "enabled": True,
         "namespace": "your_namespace",
-    },
-    image=DYNAMO_IMAGE,
+    }
 )
 class YourWorker:
     def __init__(self) -> None:
         logger.info("Starting worker...")
 
     @dynamo_endpoint()
-    async def generate(self, req: RequestType):
+    async def generate(self, request: RequestType) -> AsyncIterator[ResponseType]:
         """Generate tokens and stream them back"""
-        logger.info(f"Worker endpoint received: {req.text}")
-        text = f"{req.text}"
-        for token in text.split():
-            yield ResponseType(text=token)
+        logger.info(f"Worker endpoint received: {request.text}")
+        for token in request.text.split():
+            print("Returning token:", token)
+            yield ResponseType(text=token).model_dump_json()
 ```
 
 To see a minimal worker example like the above used in a larger pipeline of
@@ -135,7 +139,7 @@ worker above through Dynamo without any intermediate services:
 ```python
 import asyncio
 from pydantic import BaseModel
-from dynamo.sdk import get_runtime
+from dynamo.runtime import dynamo_worker, DistributedRuntime
 
 # These could also be imported from a shared file/definition
 class RequestType(BaseModel):
@@ -144,23 +148,21 @@ class RequestType(BaseModel):
 class ResponseType(BaseModel):
     text: str
 
-async def call_worker():
-    # Get the runtime
-    runtime = await get_runtime()
-
-    # Get a client to the worker endpoint
+@dynamo_worker()
+async def client_worker(runtime: DistributedRuntime):
+    # Get a client to the worker endpoint from the distributed runtime
     client = await runtime.namespace("your_namespace").component("YourWorker").endpoint("generate").client()
 
     # Create a request
     request = RequestType(text="Hello, Dynamo!")
 
     # Call the dynamo endpoint exposed by the worker
-    responses = await client.generate(request)
-    for response in responses:
-        print(f"Response: {response.text}")
+    responses = await client.generate(request.model_dump_json())
+    async for response in responses:
+        print(response)
 
 if __name__ == "__main__":
-    asyncio.run(call_worker())
+    asyncio.run(client_worker())
 ```
 
 If putting a worker defined to handle OpenAI objects like ChatCompletions
@@ -192,52 +194,98 @@ KV-aware routing is a powerful feature of Dynamo that optimizes for routing
 requests to specific workers while minimizing a specific KV-cache based cost function.
 
 In its simplest form, all a worker needs to do to enable KV-aware routing is to
-publish KV metrics for Dynamo's KV Router to consume:
-```python
-from dynamo.llm import KvMetricsPublisher
+publish KV metrics for Dynamo's KV Router to consume through the `KvMetricsPublisher`:
 
+```python
+# kv_metrics_worker.py
+# This can be run standalone with `dynamo serve kv_metrics_worker:YourWorker`
+
+import logging
+import random
+
+from pydantic import BaseModel
+from dynamo.llm import KvMetricsPublisher
+from dynamo.sdk import dynamo_endpoint, service, dynamo_context
+
+logger = logging.getLogger(__name__)
+
+class RequestType(BaseModel):
+    text: str
+
+class ResponseType(BaseModel):
+    text: str
+
+@service(
+    dynamo={
+        "enabled": True,
+        "namespace": "your_namespace",
+    }
+)
 class YourWorker:
     def __init__(self):
         # Initialize metrics publisher from Dynamo
+        self.component = dynamo_context["component"]
         self.metrics_publisher = KvMetricsPublisher()
+        self.metrics_publisher.create_endpoint(self.component)
 
-        # (Optional) Initialize some metrics for the worker/class to track
+        # Initialize some metrics for the worker/class to track
         self.request_active_slots = 0
+        self.request_total_slots = 1024
+        self.kv_active_blocks = 0
+        self.kv_total_blocks = 1024
+        self.num_requests_waiting = 0
+        self.gpu_cache_usage_perc = 0.0
+        self.gpu_prefix_cache_hit_rate = 0.0
 
-        ###
-        ###  TODO: Verify this code, see if async_init/async_on_start needed
-        ###
-
-        # Send some dummy metrics at initialization time
+        # Publish some initial metrics to register
+        # this worker as a candidate for KV Routing.
         self.metrics_publisher.publish(
-            0,     # request_active_slots
-            1024,  # request_total_slots
-            0,     # kv_active_blocks
-            1024,  # kv_total_blocks
-            0,     # num_requests_waiting
-            0.0,   # gpu_cache_usage_perc
-            0.0,   # gpu_prefix_cache_hit_rate
+            self.request_active_slots,
+            self.request_total_slots,
+            self.kv_active_blocks,
+            self.kv_total_blocks,
+            self.num_requests_waiting,
+            self.gpu_cache_usage_perc,
+            self.gpu_prefix_cache_hit_rate,
         )
 
-        # (Optional) To expose a metrics endpoint on this component for
-        # querying or visualizing the metrics.
-        self.metrics_publisher.create_endpoint("YourWorker")
+    def publish_kv_metrics(self):
+        # Populate the frequently changing metrics with random data for
+        # demonstration. These values should be tracked by the implementation,
+        # or queried from the underlying inference framework.
+        self.kv_active_blocks = random.randint(0, 1024)
+        self.num_requests_waiting = random.randint(0, 100)
+        self.gpu_cache_usage_perc = random.uniform(0, 1.0)
+        self.gpu_prefix_cache_hit_rate = random.uniform(0, 1.0)
+
+        # Publish the metrics with the current state
+        self.metrics_publisher.publish(
+            self.request_active_slots,
+            self.request_total_slots,
+            self.kv_active_blocks,
+            self.kv_total_blocks,
+            self.num_requests_waiting,
+            self.gpu_cache_usage_perc,
+            self.gpu_prefix_cache_hit_rate,
+        )
 
     @dynamo_endpoint()
-    async def generate(self, req: RequestType):
+    async def generate(self, request: RequestType):
         """Generate tokens, update KV Cache metrics, and stream the tokens back"""
         # Increment the number of active requests on receiving one
         self.request_active_slots += 1
 
-        self.metrics_publisher.publish(
-            self.request_active_slots, # request_active_slots
-            1024,  # request_total_slots
-            0,     # kv_active_blocks
-            1024,  # kv_total_blocks
-            0,     # num_requests_waiting
-            0.0,   # gpu_cache_usage_perc
-            0.0,   # gpu_prefix_cache_hit_rate
-        )
+        logger.info(f"Worker endpoint received: {request.text}")
+        # Simulate each step of token generation
+        for token in request.text.split():
+            # Update the metrics with the current state
+            self.publish_kv_metrics()
+
+            print("Returning token:", token)
+            yield ResponseType(text=token).model_dump_json()
+
+        # Decrement the number of active requests when complete with one
+        self.request_active_slots -= 1
 ```
 
 The granularity at which metrics are published is up to the backend/worker implementation.
@@ -250,7 +298,55 @@ For more details, see the [KV Cache Routing Guide](../docs/kv_cache_routing.md).
 
 ### Disaggregated Serving
 
+#### NIXL
+
 - TODO: Code snippets about core NIXL concepts for P/D disagg (@ptarasiewiczNV)
+
+#### Disaggregation in Dynamo
+
+Aside from the NIXL specifics above, at its core, disaggregation in Dynamo builds
+on the same concepts used for any Dynamo client<->worker or worker<->worker
+interaction over the DistributedRuntime.
+
+First you can define a worker as usual:
+```python
+class DecodeWorker:
+    # ...
+```
+
+Second, you decide when/how the (Decode) worker should do Prefill remotely (by calling a separate Prefill worker),
+or simply do the Prefill itself. In some scenarios, it may be more efficient for the Decode worker to just do
+the Prefill itself rather than do the extra communication, such as if the input sequence length is below
+some small threshold.
+```python
+class DecodeWorker:
+    def __init__(self):
+        self.runtime = dynamo_context["runtime"]
+
+        # Whether the decode worker should call a separate Prefill worker or not
+        self.do_remote_prefill = True
+
+        # Client to PrefillWorker
+        self.prefill_worker = self.runtime.namespace("your_namespace").component("PrefillWorker").endpoint("generate")
+
+    async def generate(...):
+        if self.do_remote_prefill:
+            # Forward the request to the prefill worker
+            prefill_response = await self.prefill_worker.generate(...)
+
+        # ... decode ...
+```
+
+Depending on the load distribution of requests and number of Prefill/Decode
+worker instances, instead of directly forwarding requests to the Prefill
+worker endpoint, it may be advantageous to send Prefill requests into a queue
+that the Prefill workers can pull from on-demand instead. You can see an example
+of that [here](https://github.com/ai-dynamo/dynamo/blob/83dfedff5f19e67fc3bc4684d7778e282fb4fbfb/examples/hello_world/disagg_skeleton/components/prefill_worker.py).
+- TODO: Update this with a real link after https://github.com/ai-dynamo/dynamo/pull/683 is merged
+
+For an introductory example on doing disaggregation with Dynamo using simple models, see
+[this example](https://github.com/ai-dynamo/dynamo/blob/83dfedff5f19e67fc3bc4684d7778e282fb4fbfb/examples/hello_world/disagg_skeleton/README.md).
+- TODO: Update this with a real link after https://github.com/ai-dynamo/dynamo/pull/683 is merged
 
 For more information on Disaggregated Serving, see the
 [general guide](../docs/disagg_serving.md) and [performance tuning guide](../docs/guides/disagg_perf_tuning.md).
