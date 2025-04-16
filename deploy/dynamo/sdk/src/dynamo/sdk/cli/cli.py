@@ -17,12 +17,13 @@
 
 from __future__ import annotations
 
-import click
-import psutil
 import importlib.metadata
 
+import click
+import psutil
+
+
 def create_bentoml_cli() -> click.Command:
-    from bentoml._internal.configuration import BENTOML_VERSION
     from bentoml._internal.context import server_context
 
     # from bentoml_cli.cloud import cloud_command
