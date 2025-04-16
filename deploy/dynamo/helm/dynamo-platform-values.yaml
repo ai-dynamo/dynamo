@@ -22,6 +22,8 @@ dynamo-operator:
   enabled: true
   natsAddr: "nats://${RELEASE_NAME}-nats:4222"
   etcdAddr: "${RELEASE_NAME}-etcd:2379"
+  istioVirtualServiceEnabled: false
+  ingressControllerClassName: ""
   namespaceRestriction:
     enabled: true
     targetNamespace: ${NAMESPACE}

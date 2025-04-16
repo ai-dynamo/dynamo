@@ -25,8 +25,12 @@ import (
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
+	"github.com/bsm/gomega"
+	istioNetworking "istio.io/api/networking/v1beta1"
+	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -226,6 +230,267 @@ func TestDynamoNimDeploymentReconciler_FinalizeResource(t *testing.T) {
 			if err := r.FinalizeResource(tt.args.ctx, tt.args.dynamoNimDeployment); (err != nil) != tt.wantErr {
 				t.Errorf("DynamoNimDeploymentReconciler.FinalizeResource() error = %v, wantErr %v", err, tt.wantErr)
 			}
+		})
+	}
+}
+
+func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
+	type fields struct {
+		IngressControllerClassName string
+		IstioVirtualServiceEnabled bool
+	}
+	type args struct {
+		ctx context.Context
+		opt generateResourceOption
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		want    *networkingv1.Ingress
+		want1   bool
+		wantErr bool
+	}{
+		{
+			name: "generate ingress",
+			fields: fields{
+				IngressControllerClassName: "nginx",
+				IstioVirtualServiceEnabled: false,
+			},
+			args: args{
+				ctx: context.Background(),
+				opt: generateResourceOption{
+					dynamoNimDeployment: &v1alpha1.DynamoNimDeployment{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "service1",
+							Namespace: "default",
+						},
+						Spec: v1alpha1.DynamoNimDeploymentSpec{
+							DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+								ServiceName:     "service1",
+								DynamoNamespace: &[]string{"default"}[0],
+								Ingress: v1alpha1.IngressSpec{
+									Enabled: true,
+								},
+							},
+						},
+					},
+				},
+			},
+			want: &networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "service1",
+					Namespace: "default",
+				},
+				Spec: networkingv1.IngressSpec{
+					IngressClassName: &[]string{"nginx"}[0],
+					Rules: []networkingv1.IngressRule{
+						{
+							Host: "service1.local",
+							IngressRuleValue: networkingv1.IngressRuleValue{
+								HTTP: &networkingv1.HTTPIngressRuleValue{
+									Paths: []networkingv1.HTTPIngressPath{
+										{
+											Path:     "/",
+											PathType: &[]networkingv1.PathType{networkingv1.PathTypePrefix}[0],
+											Backend: networkingv1.IngressBackend{
+												Service: &networkingv1.IngressServiceBackend{
+													Name: "service1",
+													Port: networkingv1.ServiceBackendPort{Number: 3000},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want1:   false,
+			wantErr: false,
+		},
+		{
+			name: "generate ingress, disabled",
+			fields: fields{
+				IngressControllerClassName: "nginx",
+				IstioVirtualServiceEnabled: false,
+			},
+			args: args{
+				ctx: context.Background(),
+				opt: generateResourceOption{
+					dynamoNimDeployment: &v1alpha1.DynamoNimDeployment{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "service1",
+							Namespace: "default",
+						},
+						Spec: v1alpha1.DynamoNimDeploymentSpec{
+							DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+								ServiceName:     "service1",
+								DynamoNamespace: &[]string{"default"}[0],
+								Ingress: v1alpha1.IngressSpec{
+									Enabled: false,
+								},
+							},
+						},
+					},
+				},
+			},
+			want: &networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "service1",
+					Namespace: "default",
+				},
+			},
+			want1:   true,
+			wantErr: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+			r := &DynamoNimDeploymentReconciler{
+				IngressControllerClassName: tt.fields.IngressControllerClassName,
+				IstioVirtualServiceEnabled: tt.fields.IstioVirtualServiceEnabled,
+			}
+			got, got1, err := r.generateIngress(tt.args.ctx, tt.args.opt)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("DynamoNimDeploymentReconciler.generateIngress() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			g.Expect(got).To(gomega.Equal(tt.want))
+			g.Expect(got1).To(gomega.Equal(tt.want1))
+		})
+	}
+}
+
+func TestDynamoNimDeploymentReconciler_generateVirtualService(t *testing.T) {
+	type fields struct {
+		IngressControllerClassName string
+		IstioVirtualServiceEnabled bool
+	}
+	type args struct {
+		ctx context.Context
+		opt generateResourceOption
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		want    *networkingv1beta1.VirtualService
+		want1   bool
+		wantErr bool
+	}{
+		{
+			name: "generate virtual service, disabled in operator config",
+			fields: fields{
+				IngressControllerClassName: "",
+				IstioVirtualServiceEnabled: false,
+			},
+			args: args{
+				ctx: context.Background(),
+				opt: generateResourceOption{
+					dynamoNimDeployment: &v1alpha1.DynamoNimDeployment{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "service1",
+							Namespace: "default",
+						},
+						Spec: v1alpha1.DynamoNimDeploymentSpec{
+							DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+								ServiceName:     "service1",
+								DynamoNamespace: &[]string{"default"}[0],
+								Ingress: v1alpha1.IngressSpec{
+									Enabled: true,
+								},
+							},
+						},
+					},
+				},
+			},
+			want: &networkingv1beta1.VirtualService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "service1",
+					Namespace: "default",
+				},
+			},
+			want1:   true,
+			wantErr: false,
+		},
+		{
+			name: "generate virtual service, enabled in operator config",
+			fields: fields{
+				IngressControllerClassName: "",
+				IstioVirtualServiceEnabled: true,
+			},
+			args: args{
+				ctx: context.Background(),
+				opt: generateResourceOption{
+					dynamoNimDeployment: &v1alpha1.DynamoNimDeployment{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "service1",
+							Namespace: "default",
+						},
+						Spec: v1alpha1.DynamoNimDeploymentSpec{
+							DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+								ServiceName:     "service1",
+								DynamoNamespace: &[]string{"default"}[0],
+								Ingress: v1alpha1.IngressSpec{
+									Enabled: true,
+								},
+							},
+						},
+					},
+				},
+			},
+			want: &networkingv1beta1.VirtualService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "service1",
+					Namespace: "default",
+				},
+				Spec: istioNetworking.VirtualService{
+					Hosts:    []string{"service1.local"},
+					Gateways: []string{"istio-system/ingress-alb"},
+					Http: []*istioNetworking.HTTPRoute{
+						{
+							Match: []*istioNetworking.HTTPMatchRequest{
+								{
+									Uri: &istioNetworking.StringMatch{
+										MatchType: &istioNetworking.StringMatch_Prefix{Prefix: "/"},
+									},
+								},
+							},
+							Route: []*istioNetworking.HTTPRouteDestination{
+								{
+									Destination: &istioNetworking.Destination{
+										Host: "service1",
+										Port: &istioNetworking.PortSelector{
+											Number: 3000,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want1:   false,
+			wantErr: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+			r := &DynamoNimDeploymentReconciler{
+				IngressControllerClassName: tt.fields.IngressControllerClassName,
+				IstioVirtualServiceEnabled: tt.fields.IstioVirtualServiceEnabled,
+			}
+			got, got1, err := r.generateVirtualService(tt.args.ctx, tt.args.opt)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("DynamoNimDeploymentReconciler.generateVirtualService() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			g.Expect(got).To(gomega.Equal(tt.want))
+			g.Expect(got1).To(gomega.Equal(tt.want1))
 		})
 	}
 }

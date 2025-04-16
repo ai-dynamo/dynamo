@@ -72,6 +72,12 @@ spec:
         {{- if .Values.etcdAddr }}
           - --etcdAddr={{ .Values.etcdAddr }}
         {{- end }}
+        {{- if .Values.istioVirtualServiceEnabled }}
+          - --istio-virtual-service-enabled
+        {{- end }}
+        {{- if .Values.ingressControllerClassName }}
+          - --ingress-controller-class-name={{ .Values.ingressControllerClassName }}
+        {{- end }}
         command:
         - /manager
         env:
