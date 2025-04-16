@@ -5,7 +5,7 @@ it via `dynamo serve` or `dynamo deploy`, covering basic concepts as well as
 advanced features like enabling KV routing and disaggregated serving.
 
 For detailed information about `dynamo serve` infrastructure, see the
-[Dynamo SDK Docs](../deploy/dynamo/sdk/docs/README.md).
+[Dynamo SDK Docs](../deploy/dynamo/sdk/docs/sdk/README.md).
 
 For a guide that walks through how to launch a vLLM-based worker with
 implementation of Disaggregated Serving and KV-Aware Routing included,
@@ -19,7 +19,7 @@ a Python class based definition that requires a few key decorators to get going:
 - `@dynamo_endpoint`: marks methods that can be called by other workers or clients
 
 For more detailed information on these concepts, see the
-[Dynamo SDK Docs](../deploy/dynamo/sdk/docs/README.md).
+[Dynamo SDK Docs](../deploy/dynamo/sdk/docs/sdk/README.md).
 
 ### Worker Skeleton
 
@@ -162,10 +162,10 @@ if __name__ == "__main__":
     asyncio.run(client_worker())
 ```
 
-If putting a worker defined to handle OpenAI objects like ChatCompletions
-directly behind an OpenAI `http` service via `llmctl`, you could instead use
-an OpenAI-based client (or `curl`) that communicates with the OpenAI HTTP Service
-and internally routes the requests to the worker(s) instead.
+If there is an OpenAI `http` service in front of your worker and the worker
+is defined to accept ChatCompletions-like requests, you could also use an
+OpenAI-based client (or `curl`) that sends requests to the OpenAI HTTP Service,
+and internally these requests would be routed to the attached worker endpoints instead.
 
 In more advanced scenarios where your worker may operate on some other intermediate format
 that may not directly match an OpenAI-like format, you could setup a separate processor worker
@@ -402,5 +402,5 @@ For more information on Disaggregated Serving, see the
 ## Additional Resources
 
 - Check the [examples](../examples/) directory for more detailed implementations
-- Refer to the [Dynamo SDK Docs](../deploy/dynamo/sdk/docs/README.md) for API details.
+- Refer to the [Dynamo SDK Docs](../deploy/dynamo/sdk/docs/sdk/README.md) for API details.
 - For Disaggregated Serving, see the [general guide](../docs/disagg_serving.md) and [performance tuning guide](../docs/guides/disagg_perf_tuning.md).
