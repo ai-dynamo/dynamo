@@ -22,6 +22,7 @@ from components.worker import DummyWorker
 
 from dynamo._core import Client
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk.lib.dependency import DynamoClient
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ class Processor(Protocol):
     vLLM pre and post processing
     """
 
-    router = depends(Router)
+    router: DynamoClient = depends(Router)
     router_mode: str
     min_workers: int
     worker_client: Client
@@ -57,7 +58,7 @@ class Processor(Protocol):
             .endpoint("worker_generate")
             .client()
         )
-        print("async_init", type(self.worker_client))
+
         await check_required_workers(
             self.worker_client, self.min_workers, tag="processor"
         )
