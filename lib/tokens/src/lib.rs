@@ -13,6 +13,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![deny(missing_docs)]
+
+//! Token handling utilities for the Dynamo framework.
+//!
+//! This library provides types and functions for working with tokens,
+//! including hashing and sequence-aware operations.
+
 use bytemuck::cast_slice;
 use derive_getters::{Dissolve, Getters};
 use rayon::prelude::*;
@@ -41,6 +48,13 @@ pub fn compute_hash(data: &[u8], seed: u64) -> u64 {
 /// A collection of tokens.
 #[derive(Debug, Clone, Dissolve, Default)]
 pub struct Tokens(Vec<Token>);
+
+impl Tokens {
+    /// Create a new [Tokens] from a vector of tokens.
+    pub fn new(tokens: impl Into<Tokens>) -> Self {
+        tokens.into()
+    }
+}
 
 impl AsRef<[Token]> for Tokens {
     fn as_ref(&self) -> &[Token] {
@@ -93,6 +107,24 @@ impl From<Tokens> for Vec<Token> {
 }
 
 impl Tokens {
+    /// Convert the tokens into a sequence of token blocks.
+    ///
+    /// The sequence is computed using the given block size and salt hash.
+    ///
+    /// The salt hash is optional and if not provided, the default value of 0 will be used.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// use dynamo_tokens::Tokens;
+    ///
+    /// let tokens = Tokens::new(vec![1, 2, 3, 4, 5]);
+    /// let sequence = tokens.into_sequence(4, Some(1337));
+    ///
+    /// assert_eq!(sequence.blocks().len(), 1);
+    /// assert_eq!(sequence.current_block().tokens().len(), 1);
+    /// assert_eq!(sequence.blocks()[0].sequence_hash(), 14643705804678351452);
+    /// ```
     pub fn into_sequence(
         self,
         block_size: usize,
@@ -102,6 +134,9 @@ impl Tokens {
     }
 }
 
+/// A [PartialTokenBlock] is a block of tokens that is not yet complete.
+/// The state of the block can be updated by pushing tokens onto the block.
+/// When the block is full, it will be converted into a [TokenBlock].
 #[derive(Debug)]
 pub struct PartialTokenBlock {
     tokens: Tokens,
@@ -130,6 +165,7 @@ impl PartialTokenBlock {
         }
     }
 
+    /// Get the tokens in the block.
     pub fn tokens(&self) -> &Tokens {
         &self.tokens
     }
@@ -172,6 +208,9 @@ impl TokenBlockChunk {
     }
 }
 
+/// A [TokenBlock] is a complete block of tokens that has been hashed and has a sequence hash.
+///
+/// [TokenBlocks][TokenBlock] can only be created via a [TokenBlockSequence].
 #[derive(Debug, Clone, Getters, Default)]
 pub struct TokenBlock {
     tokens: Tokens,
@@ -236,6 +275,22 @@ pub struct TokenBlockSequence {
 }
 
 impl TokenBlockSequence {
+    /// Create a new [TokenBlockSequence] from a sequence of tokens.
+    ///
+    /// The sequence is computed using the given block size and salt hash.
+    ///
+    /// The salt hash is optional and if not provided, the default value of 0 will be used.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// use dynamo_tokens::TokenBlockSequence;
+    ///
+    /// let mut sequence = TokenBlockSequence::new(vec![1, 2, 3, 4, 5].into(), 4, Some(1337 as u64));
+    /// assert_eq!(sequence.blocks().len(), 1);
+    /// assert_eq!(sequence.current_block().tokens().len(), 1);
+    /// assert_eq!(sequence.blocks()[0].sequence_hash(), 14643705804678351452);
+    /// ```
     pub fn new(tokens: Tokens, block_size: usize, salt_hash: Option<SaltHash>) -> Self {
         let salt_hash = salt_hash.unwrap_or(0);
         let (blocks, current_block) = Self::split_tokens(tokens, block_size, salt_hash);
@@ -247,6 +302,27 @@ impl TokenBlockSequence {
         }
     }
 
+    /// Push a token onto the current block.
+    ///
+    /// If the block is full, it will be converted into a [TokenBlock]
+    /// and added to the sequence.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// use dynamo_tokens::{Tokens, TokenBlockSequence};
+    /// let mut sequence = TokenBlockSequence::new(Tokens::default(), 4, Some(1337 as u64));
+    ///
+    /// sequence.push_token(1);
+    /// sequence.push_token(2);
+    /// sequence.push_token(3);
+    /// sequence.push_token(4);
+    /// sequence.push_token(5);
+    ///
+    /// assert_eq!(sequence.blocks().len(), 1);
+    /// assert_eq!(sequence.current_block().tokens().len(), 1);
+    /// assert_eq!(sequence.blocks()[0].sequence_hash(), 14643705804678351452);
+    /// ```
     pub fn push_token(&mut self, token: Token) -> Option<&TokenBlock> {
         if let Some(block) = self.current_block.push_token(token) {
             self.blocks.push(block);
@@ -256,18 +332,22 @@ impl TokenBlockSequence {
         }
     }
 
+    /// Get the last block in the sequence.
     pub fn last(&self) -> Option<&TokenBlock> {
         self.blocks.last()
     }
 
+    /// Get all the blocks in the sequence.
     pub fn blocks(&self) -> &[TokenBlock] {
         &self.blocks
     }
 
+    /// Get the current block in the sequence.
     pub fn current_block(&self) -> &PartialTokenBlock {
         &self.current_block
     }
 
+    /// Get the parts of the sequence as a tuple of blocks and the current block.
     pub fn into_parts(self) -> (Vec<TokenBlock>, PartialTokenBlock) {
         (self.blocks, self.current_block)
     }
@@ -277,6 +357,9 @@ impl TokenBlockSequence {
         self.salt_hash
     }
 
+    /// Split the tokens into blocks of the given size.
+    ///
+    /// The salt hash is optional and if not provided, the default value of 0 will be used.
     pub fn split_tokens(
         tokens: Tokens,
         block_size: usize,
