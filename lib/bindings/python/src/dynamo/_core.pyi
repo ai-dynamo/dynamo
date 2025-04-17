@@ -60,9 +60,9 @@ class PyLease:
         """
         ...
 
-    def cancel(self) -> None:
+    def revoke(self) -> None:
         """
-        Cancel the lease
+        Revoke the lease
         """
         ...
 

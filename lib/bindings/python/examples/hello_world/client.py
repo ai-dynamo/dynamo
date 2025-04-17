@@ -39,7 +39,7 @@ async def init(runtime: DistributedRuntime, ns: str):
     await client.wait_for_endpoints()
 
     # issue request
-    stream = await client.generate("hello world 1234567890!")
+    stream = await client.generate("hello world")
 
     # process the stream
     async for char in stream:

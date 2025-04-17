@@ -161,7 +161,7 @@ impl PyLease {
         self.inner.id()
     }
 
-    fn cancel(&self) {
+    fn revoke(&self) {
         self.inner.revoke();
     }
 
