@@ -38,6 +38,8 @@ class Processor(Protocol):
     """
 
     router = depends(Router)
+    router_mode: str
+    min_workers: int
 
     def __init__(self):
         self.router_mode = "kv"
@@ -50,7 +52,7 @@ class Processor(Protocol):
         self.worker_client = (
             await runtime.namespace(comp_ns)
             .component(comp_name)
-            .endpoint("begenerate")
+            .endpoint("worker_generate")
             .client()
         )
 
@@ -92,7 +94,6 @@ class Processor(Protocol):
             yield GeneralResponse.model_validate_json(resp.data())
 
     @dynamo_endpoint()
-    async def mdgenerate(self, raw_request: GeneralRequest):
-        print("In processor mdgenerate...")
+    async def processor_generate(self, raw_request: GeneralRequest):
         async for response in self._generate(raw_request):
             yield response.model_dump_json()

@@ -34,17 +34,17 @@ logger = logging.getLogger(__name__)
 
 class GeneralRequest(BaseModel):
     prompt: str = "user input"
-    request_id: str = None
+    request_id: str = "id_string"
 
 
 class GeneralResponse(BaseModel):
     worker_output: str = "generated output"
-    request_id: str = None
+    request_id: str = "id_string"
 
 
 class RemotePrefillRequest(msgspec.Struct, omit_defaults=True, dict=True):
     engine_id: str = "Engine ID"
-    request_id: str = None
+    request_id: str = "id_string"
 
 
 class NATSQueue:

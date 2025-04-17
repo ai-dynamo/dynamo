@@ -42,11 +42,11 @@ class Frontend:
         sys.exit(0)
 
     @api
-    async def fegenerate(self, prompt, request_id):  # from request body keys
+    async def generate(self, prompt, request_id):  # from request body keys
         """Stream results from the pipeline."""
-        logger.info(f"-Frontend layer received: {prompt=},{request_id=}")
+        logger.info(f"Received: {prompt=},{request_id=}")
         frontend_request = GeneralRequest(
             prompt=prompt, request_id=request_id
         ).model_dump_json()
-        async for response in self.processor.mdgenerate(frontend_request):
+        async for response in self.processor.processor_generate(frontend_request):
             yield f"Response: {response}\n"

@@ -41,7 +41,7 @@ class Router:
     Request handler for the generate endpoint
     """
 
-    kv_cache = {}
+    kv_cache: dict[str, str] = {}
     threshold = 0.6
     worker = depends(DummyWorker)
 
@@ -55,7 +55,7 @@ class Router:
         self.workers_client = (
             await self.runtime.namespace("dynamo-demo")
             .component("DummyWorker")
-            .endpoint("begenerate")
+            .endpoint("worker_generate")
             .client()
         )
 
@@ -63,14 +63,10 @@ class Router:
 
         print("KV Router initialized")
 
-    # A dummy hit rate checking endpoint
-    # The actual worker selection is based on custom cost function
-    # See details at llm/components/kv_router.py
-    @dynamo_endpoint()
-    async def check_hit_rate(self, request_prompt: str) -> AsyncIterator[WorkerId]:
+    def _cost_function(self, request_prompt):
         worker_ids = self.workers_client.endpoint_ids()
         num_workers = len(worker_ids)
-        max_hit_rate = -1
+        max_hit_rate = -1.0
         for curr_id in self.kv_cache.keys():
             # Estimate hit rate by string matching
             hit_rate = SequenceMatcher(
@@ -82,14 +78,22 @@ class Router:
         print(f"{max_hit_rate=},{len(self.kv_cache.keys())=}")
         if max_hit_rate > self.threshold:
             # Found the hit rate larger than the threshold
-            yield f"{max_id}_{max_hit_rate}"
+            return max_id, max_hit_rate
         elif len(self.kv_cache.keys()) == num_workers:
             # Cache is already full, return the max rate
-            yield f"{max_id}_{max_hit_rate}"
+            return max_id, max_hit_rate
         else:
             # Add current request into the cache
             for curr_id in worker_ids:
                 if curr_id not in self.kv_cache.keys():
                     self.kv_cache[curr_id] = request_prompt
                     break
-            yield f"{curr_id}_-1.00"
+            return curr_id, -1
+
+    # A dummy hit rate checking endpoint
+    # The actual worker selection is based on custom cost function
+    # See details at examples/llm/components/kv_router.py
+    @dynamo_endpoint()
+    async def check_hit_rate(self, request_prompt: str) -> AsyncIterator[WorkerId]:
+        max_id, max_hit_rate = self._cost_function(request_prompt)
+        yield f"{max_id}_{max_hit_rate}"

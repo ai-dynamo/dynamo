@@ -20,10 +20,10 @@ import socket
 from components.utils import (
     GeneralRequest,
     GeneralResponse,
+    NixlMetadataStore,
     PrefillQueue,
     RemotePrefillRequest,
 )
-from utils.nixl import NixlMetadataStore
 from vllm.distributed.device_communicators.nixl import NixlMetadata
 
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
@@ -87,7 +87,7 @@ class DummyWorker:
         return callback
 
     @dynamo_endpoint()
-    async def begenerate(self, request: GeneralRequest):
+    async def worker_generate(self, request: GeneralRequest):
         # TODO: consider prefix hit when deciding prefill locally or remotely
 
         if self.disaggregated_router is not None:

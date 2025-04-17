@@ -86,10 +86,10 @@ class PrefillWorker:
                 prefill_request = await prefill_queue.dequeue_prefill_request()
                 if prefill_request is not None:
                     print(f"Dequeued prefill request: {prefill_request.request_id}")
-                    async for _ in self.pfgenerate(prefill_request):
+                    async for _ in self.prefill_generate(prefill_request):
                         pass
 
-    async def pfgenerate(self, request: RemotePrefillRequest):
+    async def prefill_generate(self, request: RemotePrefillRequest):
         # TODO check if metadata has changed
         # and reload - currently only loading once
         print(f"prefill invoked {request.engine_id}{self._loaded_metadata=}")
@@ -103,5 +103,5 @@ class PrefillWorker:
         yield "prefill invoked"
 
     @dynamo_endpoint()
-    async def mock(self, req):
+    async def mock(self, req: RemotePrefillRequest):
         yield f"mock_response: {req}"
