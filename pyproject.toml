@@ -15,7 +15,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.1.1"
+version = "0.1.1.post1"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
