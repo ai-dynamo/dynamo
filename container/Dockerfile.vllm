@@ -7,7 +7,6 @@ ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 ARG MANYLINUX_IMAGE="quay.io/pypa/manylinux_2_28_x86_64"
-ARG GENAI_PERF_TAG="25d0188713adc47868d6b3f22426375237a90529"
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS nixl_base
 WORKDIR /opt/nixl
@@ -415,39 +414,14 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
 RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/dist/ai_dynamo*any.whl
 
-##########################################
-########## Perf Analyzer Image ###########
-##########################################
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS perf_analyzer
-
-ARG GENAI_PERF_TAG
-
-WORKDIR /workspace
-
-# Build and install Perf Analyzer for benchmarking
-RUN apt-get update -y && apt-get -y install cmake g++ libssl-dev python3 rapidjson-dev zlib1g-dev
-RUN git clone https://github.com/triton-inference-server/perf_analyzer.git
-RUN git -C perf_analyzer checkout ${GENAI_PERF_TAG}
-RUN mkdir perf_analyzer/build
-RUN cmake -B perf_analyzer/build -S perf_analyzer -D TRITON_ENABLE_PERF_ANALYZER_OPENAI=ON
-RUN cmake --build perf_analyzer/build -- -j8
-RUN mkdir bin &&  \
-    cp -r perf_analyzer/build/perf_analyzer/src/perf-analyzer-build /workspace/bin/
-
 ########################################
 ########## Development Image ###########
 ########################################
 FROM ci_minimum AS dev
 
-ARG GENAI_PERF_TAG
-
-COPY --from=perf_analyzer /workspace/bin/perf-analyzer-build/ /perf/bin
-COPY --from=perf_analyzer /workspace/perf_analyzer /perf_analyzer
-ENV PATH="/perf/bin:${PATH}"
-
 # Install genai-perf for benchmarking
-RUN uv pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
-RUN uv pip uninstall tritonclient
+RUN uv pip uninstall tritonclient || true
+RUN uv pip install genai-perf
 
 COPY . /workspace
 
