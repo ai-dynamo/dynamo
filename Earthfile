@@ -174,10 +174,10 @@ all-test:
     BUILD ./deploy/dynamo/operator+test
 
 all-docker:
-    ARG CI_REGISTRY_IMAGE=my-registry
-    ARG CI_COMMIT_SHA=latest
-    BUILD ./deploy/dynamo/operator+docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
-    BUILD ./deploy/dynamo/api-store+docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
+    ARG DOCKER_SERVER=my-registry
+    ARG IMAGE_TAG=latest
+    BUILD ./deploy/dynamo/operator+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+    BUILD ./deploy/dynamo/api-store+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 
 all-lint:
     BUILD ./deploy/dynamo/operator+lint
@@ -189,6 +189,6 @@ all:
 
 # For testing
 custom:
-    ARG CI_REGISTRY_IMAGE=my-registry
-    ARG CI_COMMIT_SHA=latest
+    ARG DOCKER_SERVER=my-registry
+    ARG IMAGE_TAG=latest
     BUILD +all-test
