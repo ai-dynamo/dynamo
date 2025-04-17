@@ -58,13 +58,13 @@ class PyLease:
         """
         Get the lease id
         """
-        ... 
-    
+        ...
+
     def cancel(self) -> None:
         """
         Cancel the lease
         """
-        ... 
+        ...
 
     def cancelled(self) -> None:
         """
@@ -103,7 +103,7 @@ class EtcdClient:
         """
         Revoke a lease
         """
-        ... 
+        ...
 
 class EtcdKvCache:
     """

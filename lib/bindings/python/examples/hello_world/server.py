@@ -49,9 +49,9 @@ async def init(runtime: DistributedRuntime, ns: str):
 
     endpoint = component.endpoint("generate")
     print("Started server instance")
-    
+
     # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
-    # after the lease is revoked 
+    # after the lease is revoked
     await endpoint.serve_endpoint_with_lease(RequestHandler().generate, lease)
 
 

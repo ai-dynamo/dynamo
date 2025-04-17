@@ -17,9 +17,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
 use anyhow::Result;
-use tokio::sync::Notify;
 use async_nats::service::endpoint::Endpoint;
 use derive_builder::Builder;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Builder)]
