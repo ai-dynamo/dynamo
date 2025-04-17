@@ -457,7 +457,7 @@ impl Endpoint {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             // Start the endpoint
-            let _endpoint_handle = builder.start().await.map_err(to_pyerr)?;
+            builder.start().await.map_err(to_pyerr)?;
 
             Ok(())
         })

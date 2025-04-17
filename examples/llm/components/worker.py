@@ -172,7 +172,6 @@ class VllmWorker:
 
         return callback
 
-
     # TODO: use the same child lease for metrics publisher endpoint and generate endpoint
     @dynamo_endpoint()
     async def generate(self, request: vLLMGenerateRequest):
