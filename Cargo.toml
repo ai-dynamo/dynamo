@@ -21,7 +21,7 @@ members = [
     "lib/runtime",
     "lib/tokens",
     "lib/bindings/c",
-    "lib/engines/*",
+    "lib/engines/*", 
 ]
 resolver = "3"
 
@@ -39,6 +39,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 # Local crates
 dynamo-runtime = { path = "lib/runtime" }
 dynamo-llm = { path = "lib/llm" }
+dynamo-tokens = { path = "lib/tokens" }
 
 # External dependencies
 anyhow = { version = "1" }

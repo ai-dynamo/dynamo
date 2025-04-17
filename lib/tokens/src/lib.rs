@@ -123,6 +123,7 @@ impl Tokens {
     ///
     /// assert_eq!(sequence.blocks().len(), 1);
     /// assert_eq!(sequence.current_block().tokens().len(), 1);
+    /// assert_eq!(sequence.current_block().remaining_tokens(), 3);
     /// assert_eq!(sequence.blocks()[0].sequence_hash(), 14643705804678351452);
     /// ```
     pub fn into_sequence(
@@ -168,6 +169,11 @@ impl PartialTokenBlock {
     /// Get the tokens in the block.
     pub fn tokens(&self) -> &Tokens {
         &self.tokens
+    }
+
+    /// Get the number of remaining tokens that can be added to the block.
+    pub fn remaining_tokens(&self) -> usize {
+        self.block_size - self.tokens.0.len()
     }
 }
 
