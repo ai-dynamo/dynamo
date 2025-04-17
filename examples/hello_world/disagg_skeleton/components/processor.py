@@ -20,6 +20,7 @@ from components.kv_router import Router
 from components.utils import GeneralRequest, GeneralResponse, check_required_workers
 from components.worker import DummyWorker
 
+from dynamo._core import Client
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ class Processor(Protocol):
     router = depends(Router)
     router_mode: str
     min_workers: int
+    worker_client: Client
 
     def __init__(self):
         self.router_mode = "kv"
@@ -55,7 +57,7 @@ class Processor(Protocol):
             .endpoint("worker_generate")
             .client()
         )
-
+        print("async_init", type(self.worker_client))
         await check_required_workers(
             self.worker_client, self.min_workers, tag="processor"
         )
