@@ -49,6 +49,29 @@ class DistributedRuntime:
         """
         ...
 
+class PyLease:
+    """
+    A lease object
+    """
+
+    def id(self) -> int:
+        """
+        Get the lease id
+        """
+        ... 
+    
+    def cancel(self) -> None:
+        """
+        Cancel the lease
+        """
+        ... 
+
+    def cancelled(self) -> None:
+        """
+        Check if the lease has been cancelled
+        """
+        ...
+
 class EtcdClient:
     """
     Etcd is used for discovery in the DistributedRuntime
@@ -75,6 +98,12 @@ class EtcdClient:
         Get all keys with a given prefix
         """
         ...
+
+    async def revoke_lease(self, lease_id: int) -> None:
+        """
+        Revoke a lease
+        """
+        ... 
 
 class EtcdKvCache:
     """
@@ -172,6 +201,12 @@ class Component:
     def endpoint(self, name: str) -> Endpoint:
         """
         Create an endpoint
+        """
+        ...
+
+    def create_service_with_custom_lease(self, ttl: int) -> None:
+        """
+        Create a service with a custom lease
         """
         ...
 
