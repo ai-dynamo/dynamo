@@ -1,0 +1,17 @@
+[package]
+name = "dynamo-tokens"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+
+[dependencies]
+derive-getters = { workspace = true }
+xxhash-rust = { workspace = true }
+
+bytemuck = "1.22"
+rayon = "1"
