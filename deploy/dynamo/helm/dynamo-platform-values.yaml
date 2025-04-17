@@ -40,7 +40,7 @@ dynamo-api-store:
     enabled: true
     targetNamespace: ${NAMESPACE}
   istio:
-    host: ${NAMESPACE}.dev.aire.nvidia.com
+    host: ${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
   image:
     repository: ${DOCKER_SERVER}/dynamo-api-store
     tag: ${IMAGE_TAG}
@@ -48,7 +48,7 @@ dynamo-api-store:
   imagePullSecrets:
   ingress:
     hosts:
-      - host: ${NAMESPACE}.dev.aire.nvidia.com
+      - host: ${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
         paths:
           - path: /
             pathType: Prefix

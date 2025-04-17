@@ -35,7 +35,7 @@ export IMAGE_TAG=<TAG>
 ```
 
 As a description of the placeholders:
-- `<CONTAINER_REGISTRY>`: Your container registry (e.g., `nvcr.io`, `docker.io`, etc.)
+- `<CONTAINER_REGISTRY>`: Your container registry (e.g., `nvcr.io`, `docker.io/<your-username>`, etc.)
 - `<TAG>`: The tag you want to use for the image (e.g., `latest`, `0.0.1`, etc.)
 
 Note: Make sure you're logged in to your container registry before pushing images. For example:
@@ -45,28 +45,42 @@ docker login <CONTAINER_REGISTRY>
 
 You can build each component individually or build all components at once:
 
-#### Option 1: Build All Components at Once
+#### Build and push platform components
 ```bash
 earthly --push +all-docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 ```
 
-#### Option 2: Build Components Individually
-
-1. **API Store**
-```bash
-cd deploy/dynamo/api-store
-earthly --push +docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
-```
-
-2. **Operator**
-```bash
-cd deploy/dynamo/operator
-earthly --push +docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
-```
 
 ## Deploy Dynamo Cloud Platform
 
-Pre-requisite: make sure your terminal is set in the `deploy/dynamo/helm/` directory.
+### Prerequisites
+Before deploying Dynamo Cloud, ensure your Kubernetes cluster meets the following requirements:
+
+#### 1. Istio Installation
+Dynamo Cloud requires Istio for service mesh capabilities. Verify Istio is installed and running:
+
+```bash
+# Check if Istio is installed
+kubectl get pods -n istio-system
+
+# Expected output should show running Istio pods
+# istiod-* pods should be in Running state
+```
+
+#### 2. PVC Support with Default Storage Class
+Dynamo Cloud requires Persistent Volume Claim (PVC) support with a default storage class. Verify your cluster configuration:
+
+```bash
+# Check if default storage class exists
+kubectl get storageclass
+
+# Expected output should show at least one storage class marked as (default)
+# Example:
+# NAME                 PROVISIONER             RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
+# standard (default)   kubernetes.io/gce-pd    Delete          Immediate              true                   1d
+```
+
+### Installation
 
 ```bash
 cd deploy/dynamo/helm

@@ -26,8 +26,8 @@ export RELEASE_NAME="${RELEASE_NAME:=${NAMESPACE}}"  # Default release name is s
 export DOCKER_USERNAME="${DOCKER_USERNAME:=<your-docker-username>}"  # Default docker username
 export DOCKER_PASSWORD="${DOCKER_PASSWORD:=<your-docker-password>}"  # Default docker password
 export DOCKER_SERVER="${DOCKER_SERVER:=<your-docker-server>}"  # Default docker server
-export IMAGE_TAG="${IMAGE_TAG:=250e2e0f93f7af3d83a4a0ff992e56956f7651f2}"  # Default image tag
-export DYNAMO_INGRESS_SUFFIX="${DYNAMO_INGRESS_SUFFIX:=}"
+export IMAGE_TAG="${IMAGE_TAG:=latest}"  # Default image tag
+export DYNAMO_INGRESS_SUFFIX="${DYNAMO_INGRESS_SUFFIX:=dynamo-cloud.com}"
 
 # Check if required variables are set
 if [ "$DOCKER_USERNAME" = "<your-docker-username>" ]; then
