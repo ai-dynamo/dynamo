@@ -524,7 +524,7 @@ mod tests {
         let tokens = Tokens(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 
         // NOTE: 1337 was the original seed, so we are temporarily using that here to prove the logic has not changed
-        let sequence = TokenBlockSequence::new(tokens, 4, Some(1337 as u64));
+        let sequence = TokenBlockSequence::new(tokens, 4, Some(1337_u64));
 
         assert_eq!(sequence.blocks().len(), 2);
         assert_eq!(sequence.current_block().len(), 2);
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn test_build_sequence() {
-        let mut sequence = TokenBlockSequence::new(Tokens::default(), 4, Some(1337 as u64));
+        let mut sequence = TokenBlockSequence::new(Tokens::default(), 4, Some(1337_u64));
 
         assert_eq!(sequence.blocks().len(), 0);
         assert_eq!(sequence.current_block().tokens().len(), 0);
