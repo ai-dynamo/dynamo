@@ -242,10 +242,10 @@ async fn handle_reader(
                            }
                         }
                     }
-                    Some(Err(_)) => {
+                    Some(Err(e)) => {
                         // TODO(#171) - address fatal errors
                         // in this case the binary representation of the message is invalid
-                        panic!("fatal error - failed to decode message from stream; invalid line protocol");
+                        panic!("fatal error - failed to decode message from stream; invalid line protocol: {:?}", e);
                     }
                     None => {
                         tracing::debug!("tcp stream closed by server");

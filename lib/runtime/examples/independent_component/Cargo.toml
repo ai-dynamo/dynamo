@@ -13,26 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-[workspace]
-members = [
-    "hello_world",
-    "independent_component",
-    "service_metrics",
-]
-resolver = "3"
+[package]
+name = "independent_component"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
 
-[workspace.package]
-version = "0.1.1"
-edition = "2021"
-authors = ["NVIDIA"]
-license = "Apache-2.0"
-homepage = "https://github.com/ai-dynamo/dynamo"
-repository = "https://github.com/ai-dynamo/dynamo.git"
+[dependencies]
+dynamo-runtime = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 
-
-[workspace.dependencies]
-# local or crates.io
-dynamo-runtime = { path = "../" }
-tracing = { version = "0.1" }
-tokio = { version = "1", features = ["full"] }
-
+# third-party
+async-stream = "0.3.6"

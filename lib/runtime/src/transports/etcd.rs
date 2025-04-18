@@ -43,7 +43,7 @@ pub struct Client {
     runtime: Runtime,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Lease {
     /// ETCD lease ID
     id: i64,
@@ -73,6 +73,12 @@ impl Lease {
     /// Revoke the lease triggering the [`CancellationToken`].
     pub fn revoke(&self) {
         self.cancel_token.cancel();
+    }
+}
+
+impl std::fmt::Debug for Lease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Lease(id: {}/{:#x})", self.id, self.id)
     }
 }
 
