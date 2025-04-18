@@ -110,14 +110,6 @@ impl KvMetricsPublisher {
 
         builder.start().await
     }
-
-    pub async fn create_endpoint_with_lease(
-        &self,
-        component: Component,
-        lease: Lease,
-    ) -> Result<()> {
-        self.create_endpoint(component, Some(lease)).await
-    }
 }
 
 struct KvLoadEndpoingHander {
