@@ -15,18 +15,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Deploy Dynamo Cloud to Kubernetes
+# 🚀 Deploy Dynamo Cloud to Kubernetes
 
-## Building Docker images for Dynamo Cloud components
+## 🏗️ Building Docker images for Dynamo Cloud components
 
 You can build and push Docker images for the Dynamo cloud components (API server, API store, and operator) to any container registry of your choice. Here's how to build each component:
 
-### Prerequisites
+### 📋 Prerequisites
 - [Earthly](https://earthly.dev/) installed
 - Docker installed and running
 - Access to a container registry of your choice
 
-### Building and Pushing Images
+### ⚙️ Building and Pushing Images
 
 First, set the required environment variables:
 ```bash
@@ -45,17 +45,17 @@ docker login <CONTAINER_REGISTRY>
 
 You can build each component individually or build all components at once:
 
-#### Build and push platform components
+#### 🛠️ Build and push platform components
 ```bash
 earthly --push +all-docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 ```
 
-## Deploy Dynamo Cloud Platform
+## 🚀 Deploy Dynamo Cloud Platform
 
-### Prerequisites
+### 📋 Prerequisites
 Before deploying Dynamo Cloud, ensure your Kubernetes cluster meets the following requirements:
 
-#### 1. Istio Installation
+#### 1. 🛡️ Istio Installation
 Dynamo Cloud requires Istio for service mesh capabilities. Verify Istio is installed and running:
 
 ```bash
@@ -66,7 +66,7 @@ kubectl get pods -n istio-system
 # istiod-* pods should be in Running state
 ```
 
-#### 2. PVC Support with Default Storage Class
+#### 2. 💾 PVC Support with Default Storage Class
 Dynamo Cloud requires Persistent Volume Claim (PVC) support with a default storage class. Verify your cluster configuration:
 
 ```bash
@@ -79,7 +79,10 @@ kubectl get storageclass
 # standard (default)   kubernetes.io/gce-pd    Delete          Immediate              true                   1d
 ```
 
-### Installation
+> [!TIP]
+> Don't have a Kubernetes cluster? Check out our [Minikube setup guide](../../docs/guides/dynamo_deploy/minikube.md) to set up a local environment! 🏠
+
+### 📥 Installation
 
 1. Set the required environment variables:
 ```bash
