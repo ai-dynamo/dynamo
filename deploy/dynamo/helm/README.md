@@ -100,7 +100,6 @@ cd deploy/dynamo/helm
 kubectl create namespace $NAMESPACE
 kubectl config set-context --current --namespace=$NAMESPACE
 
-# [Optional] if needed, create image pull secrets
 kubectl create secret docker-registry docker-imagepullsecret \
   --docker-server=$DOCKER_SERVER \
   --docker-username=$DOCKER_USERNAME \
