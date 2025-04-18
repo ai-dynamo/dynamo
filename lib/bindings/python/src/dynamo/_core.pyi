@@ -56,19 +56,15 @@ class PyLease:
 
     def id(self) -> int:
         """
-        Get the lease id
+        Return the id of the lease
+        Refer to https://etcd.io/docs/v3.4/learning/api/ for examples on how to use the lease id
         """
         ...
 
     def revoke(self) -> None:
         """
-        Revoke the lease
-        """
-        ...
-
-    def cancelled(self) -> None:
-        """
-        Check if the lease has been cancelled
+        Revoke the lease by triggering the cancellation token
+        This will invalidate the kv pairs associated with this lease
         """
         ...
 
@@ -204,9 +200,11 @@ class Component:
         """
         ...
 
-    def create_service_with_custom_lease(self, ttl: int) -> None:
+    def create_service_with_custom_lease(self, ttl: int) -> PyLease:
         """
         Create a service with a custom lease
+        The lease needs to be tied to the endpoint of this services when creating the endpoints later
+        TODO: tie the lease to the service instead of the endpoint
         """
         ...
 

@@ -164,14 +164,6 @@ impl PyLease {
     fn revoke(&self) {
         self.inner.revoke();
     }
-
-    fn cancelled<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let token = self.inner.child_token();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            token.cancelled().await;
-            Ok(())
-        })
-    }
 }
 
 #[pymethods]
@@ -402,7 +394,8 @@ impl Component {
 
             tracing::info!("created custom lease: {:?}", custom_lease);
 
-            // Create a service with the custom lease
+            // Create a service
+            // TODO: tie the lease to service instead of endpoint
             let _service = component
                 .service_builder()
                 .create()
