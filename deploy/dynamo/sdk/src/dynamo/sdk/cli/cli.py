@@ -17,12 +17,13 @@
 
 from __future__ import annotations
 
+import importlib.metadata
+
 import click
 import psutil
 
 
 def create_bentoml_cli() -> click.Command:
-    from bentoml._internal.configuration import BENTOML_VERSION
     from bentoml._internal.context import server_context
 
     # from bentoml_cli.cloud import cloud_command
@@ -40,11 +41,12 @@ def create_bentoml_cli() -> click.Command:
     from dynamo.sdk.cli.utils import DynamoCommandGroup
 
     server_context.service_type = "cli"
+    dynamo_version = importlib.metadata.version("ai-dynamo")
 
     CONTEXT_SETTINGS = {"help_option_names": ("-h", "--help")}
 
     @click.group(cls=DynamoCommandGroup, context_settings=CONTEXT_SETTINGS)
-    @click.version_option(BENTOML_VERSION, "-v", "--version")
+    @click.version_option(dynamo_version, "-v", "--version")
     def bentoml_cli():  # TODO: to be renamed to something....
         """
         The Dynamo CLI is a CLI for serving, containerizing, and deploying Dynamo applications.

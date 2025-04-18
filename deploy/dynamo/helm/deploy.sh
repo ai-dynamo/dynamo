@@ -21,21 +21,27 @@ set -euo pipefail
 HELM_CMD=$(which helm)
 
 # Set default values only if not already set
-export NAMESPACE="${NAMESPACE:=cai-system}"  # Default namespace
-export NGC_TOKEN="${NGC_TOKEN:=<your-ngc-token>}"  # Default NGC token
-export CI_REGISTRY_IMAGE="${CI_REGISTRY_IMAGE:=<your-registry>/<your-org>}"  # Default registry/org
-export CI_COMMIT_SHA="${CI_COMMIT_SHA:=250e2e0f93f7af3d83a4a0ff992e56956f7651f2}"  # Default commit SHA
-export RELEASE_NAME="${RELEASE_NAME:=dynamo-platform}"  # Default release name
-export DYNAMO_INGRESS_SUFFIX="${DYNAMO_INGRESS_SUFFIX:=}"
+export NAMESPACE="${NAMESPACE:=dynamo-cloud}"  # Default namespace
+export RELEASE_NAME="${RELEASE_NAME:=${NAMESPACE}}"  # Default release name is same as namespace
+export DOCKER_USERNAME="${DOCKER_USERNAME:=<your-docker-username>}"  # Default docker username
+export DOCKER_PASSWORD="${DOCKER_PASSWORD:=<your-docker-password>}"  # Default docker password
+export DOCKER_SERVER="${DOCKER_SERVER:=<your-docker-server>}"  # Default docker server
+export IMAGE_TAG="${IMAGE_TAG:=latest}"  # Default image tag
+export DYNAMO_INGRESS_SUFFIX="${DYNAMO_INGRESS_SUFFIX:=dynamo-cloud.com}"
 
 # Check if required variables are set
-if [ "$NGC_TOKEN" = "<your-ngc-token>" ]; then
-    echo "Error: Please set your NGC_TOKEN in the script or via environment variable"
+if [ "$DOCKER_USERNAME" = "<your-docker-username>" ]; then
+    echo "Error: Please set your DOCKER_USERNAME in the script or via environment variable"
     exit 1
 fi
 
-if [ "$CI_REGISTRY_IMAGE" = "<your-registry>/<your-org>" ]; then
-    echo "Error: Please set your CI_REGISTRY_IMAGE in the script or via environment variable"
+if [ "$DOCKER_PASSWORD" = "<your-docker-password>" ]; then
+    echo "Error: Please set your DOCKER_PASSWORD in the script or via environment variable"
+    exit 1
+fi
+
+if [ "$DOCKER_SERVER" = "<your-docker-server>" ]; then
+    echo "Error: Please set your DOCKER_SERVER in the script or via environment variable"
     exit 1
 fi
 
@@ -76,15 +82,16 @@ cd ..
 # Generate the values file
 echo "Generating values file with:"
 echo "NAMESPACE: $NAMESPACE"
-echo "CI_COMMIT_SHA: $CI_COMMIT_SHA"
-echo "CI_REGISTRY_IMAGE: $CI_REGISTRY_IMAGE"
-echo "NGC_TOKEN: [HIDDEN]"
 echo "RELEASE_NAME: $RELEASE_NAME"
+echo "IMAGE_TAG: $IMAGE_TAG"
+echo "DOCKER_USERNAME: $DOCKER_USERNAME"
+echo "DOCKER_SERVER: $DOCKER_SERVER"
+echo "DOCKER_PASSWORD: [HIDDEN]"
 
 echo "generated file contents:"
-envsubst '${NAMESPACE} ${NGC_TOKEN} ${CI_COMMIT_SHA} ${RELEASE_NAME} ${DYNAMO_INGRESS_SUFFIX} ${CI_REGISTRY_IMAGE}' < dynamo-platform-values.yaml
+envsubst '${NAMESPACE} ${RELEASE_NAME} ${DOCKER_USERNAME} ${DOCKER_PASSWORD} ${DOCKER_SERVER} ${IMAGE_TAG} ${DYNAMO_INGRESS_SUFFIX}' < dynamo-platform-values.yaml
 
-envsubst '${NAMESPACE} ${NGC_TOKEN} ${CI_COMMIT_SHA} ${RELEASE_NAME} ${DYNAMO_INGRESS_SUFFIX} ${CI_REGISTRY_IMAGE}' < dynamo-platform-values.yaml > generated-values.yaml
+envsubst '${NAMESPACE} ${RELEASE_NAME} ${DOCKER_USERNAME} ${DOCKER_PASSWORD} ${DOCKER_SERVER} ${IMAGE_TAG} ${DYNAMO_INGRESS_SUFFIX}' < dynamo-platform-values.yaml > generated-values.yaml
 
 echo ""
 echo "Generated values file saved as generated-values.yaml"

@@ -42,6 +42,9 @@ use dynamo_llm::{engines::MultiNodeConfig, kv_router::publisher::KvMetricsPublis
 /// Wait this long for the vllm sub-process to stop after we send it a KILL
 const VLLM_STOP_TIMEOUT: Duration = Duration::from_millis(1500);
 
+// The minor revision version of vllm that this engine supports. 0.8+ is in a different engine.
+const VLLM_VERSION: &str = "0.7";
+
 type RequestID = String;
 
 pub struct VllmWorker {
@@ -254,6 +257,16 @@ fn python_imports() -> Imports {
                 panic!("Failed to import python 'vllm' module. Are we running in the correct venv? {err}");
             }
         };
+
+        // While we're here check vllm version
+        let version = vllm_module
+            .getattr(py, "__version__")
+            .expect("vllm missing __version__ field")
+            .extract::<String>(py)
+            .expect("vllm.__version__ is not a string");
+        if !version.starts_with(VLLM_VERSION) {
+            panic!("Expected vllm version {VLLM_VERSION}, found {version}");
+        }
 
         let tokens_prompt_type: PyObject = vllm_module.getattr(py, "TokensPrompt").unwrap();
         let sample_params_type: PyObject = vllm_module.getattr(py, "SamplingParams").unwrap();
