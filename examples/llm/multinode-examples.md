@@ -89,15 +89,18 @@ Multinode model support is coming soon. You can track progress [here](https://gi
 The steps for aggregated deployment of multi-node sized models is similar to
 single-node sized models, except that you need to first configure the nodes
 to be interconnected according to the framework's multi-node deployment guide.
-In the below example, vLLM will be used as the framework to serve `DeepSeek-R1` model.
+In the below example, vLLM will be used as the framework to serve `DeepSeek-R1` model
+using tensor parallel 16 on two H100x8 nodes.
 
 **Step 1**: On each of the nodes, set up Ray cluster so that vLLM can access the resource
 collectively:
 ```bash
 # head node
 ray start --head --port=6379
+
 # example output and keep note of the IP address of the head node
-Local node IP: <head-node-address>
+# Local node IP: <head-node-address>
+
 # set vLLM env arg
 export VLLM_HOST_IP=<head-node-address>
 
@@ -107,6 +110,28 @@ export VLLM_HOST_IP=<current-node-address>
 
 # verify the accessibility by checking aggregated GPU count shown in ray status
 ray status
+
+# Expected/Sample output for 2 nodes:
+# ```bash
+# ======== Autoscaler status: 2025-04-16 15:35:42.751688 ========
+# Node status
+# ---------------------------------------------------------------
+# Active:
+#  1 node_<hash_1>
+#  1 node_<hash_2>
+# Pending:
+#  (no pending nodes)
+# Recent failures:
+#  (no failures)
+# Resources
+# ---------------------------------------------------------------
+# Usage:
+# XXX CPU
+# XXX GPU
+# XXX memory
+# XXX object_store_memory
+# Demands:
+#  (no resource demands)
 ```
 
 **Step 2**: On the head node, follow [LLM Deployment Guide](./README.md#getting-started) to
