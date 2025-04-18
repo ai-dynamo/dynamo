@@ -182,14 +182,11 @@ def main(
                     f"Starting {service.name} instance with all registered endpoints"
                 )
                 # TODO:bis: convert to list
-                if lease:
-                    logger.info(
-                        f"Serving {service.name} with custom lease id {lease_id}"
-                    )
-                    result = await endpoints[0].serve_endpoint_with_lease(twm[0], lease)
+                if lease is None:
+                    logger.info("Serving {service.name} with primary lease")
                 else:
-                    logger.info(f"Serving {service.name}")
-                    result = await endpoints[0].serve_endpoint(twm[0])
+                    logger.info(f"Serving {service.name} with lease: {lease}")
+                result = await endpoints[0].serve_endpoint(twm[0], lease)
 
             except Exception as e:
                 logger.error(f"Error in Dynamo component setup: {str(e)}")

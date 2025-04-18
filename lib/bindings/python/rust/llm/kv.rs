@@ -73,34 +73,19 @@ impl KvMetricsPublisher {
         })
     }
 
+    #[pyo3(signature = (component, lease=None))]
     fn create_endpoint<'p>(
         &self,
         py: Python<'p>,
         component: Component,
+        lease: Option<&PyLease>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let rs_publisher = self.inner.clone();
         let rs_component = component.inner.clone();
+        let lease = lease.map(|l| l.inner.clone());
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             rs_publisher
-                .create_endpoint(rs_component, None)
-                .await
-                .map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    fn create_endpoint_with_lease<'p>(
-        &self,
-        py: Python<'p>,
-        component: Component,
-        lease: PyLease,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let rs_publisher = self.inner.clone();
-        let rs_component = component.inner.clone();
-        let lease = lease.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            rs_publisher
-                .create_endpoint_with_lease(rs_component, lease)
+                .create_endpoint(rs_component, lease)
                 .await
                 .map_err(to_pyerr)?;
             Ok(())
