@@ -94,7 +94,7 @@ Generate docker config json for registry credentials
 {{- define "dynamo-operator.dockerconfig" -}}
 {{- $server := .Values.dynamo.dockerRegistry.server -}}
 {{- $username := .Values.dynamo.dockerRegistry.username -}}
-{{- $password := default .Values.global.NGC_API_KEY .Values.dynamo.dockerRegistry.password -}}
+{{- $password := .Values.dynamo.dockerRegistry.password -}}
 {{- if .Values.dynamo.dockerRegistry.passwordExistingSecretName -}}
   {{- $secretName := .Values.dynamo.dockerRegistry.passwordExistingSecretName -}}
   {{- $secretKey := .Values.dynamo.dockerRegistry.passwordExistingSecretKey -}}
@@ -119,7 +119,7 @@ Generate docker config json for registry credentials
     {{- end -}}
   {{- else -}}
     {{/* If no secret is found, use the default password */}}
-    {{- $password = .Values.dynamo.dockerRegistry.password | default .Values.global.NGC_API_KEY }}
+    {{- $password = .Values.dynamo.dockerRegistry.password }}
     {
       "auths": {
         "{{ $server }}": {
@@ -151,7 +151,7 @@ Extract username and password from docker registry configuration
 {{- define "dynamo-operator.extractDockerCredentials" -}}
 {{- $server := .Values.dynamo.dockerRegistry.server -}}
 {{- $username := .Values.dynamo.dockerRegistry.username -}}
-{{- $password := default .Values.global.NGC_API_KEY .Values.dynamo.dockerRegistry.password -}}
+{{- $password := .Values.dynamo.dockerRegistry.password -}}
 {{- $result := dict "username" $username "password" $password }}
 
 {{- if .Values.dynamo.dockerRegistry.passwordExistingSecretName }}

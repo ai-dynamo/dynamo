@@ -16,10 +16,6 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
-global:
-  # NGC API Key to use as default for docker registry password
-  NGC_API_KEY: ""
-
 # Namespace restriction configuration for the operator
 # If enabled: true and targetNamespace is empty, the operator will be restricted to the release namespace
 # If enabled: true and targetNamespace is set, the operator will be restricted to the specified namespace
@@ -103,12 +99,11 @@ dynamo:
     server: 'nvcr.io/nvidian/nim-llm-dev'
     inClusterServer: ''
     username: '$oauthtoken'
-    # If not set, will use global.NGC_API_KEY
     password: ""
     passwordExistingSecretName: ''
     passwordExistingSecretKey: ''
     secure: true
-    bentoRepositoryName: yatai-bentos
+    bentoRepositoryName: dynamo-pipelines
 
   bentoImageBuildEngine: buildkit # options: kaniko, buildkit, buildkit-rootless
   addNamespacePrefixToImageName: false
