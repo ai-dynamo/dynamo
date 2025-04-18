@@ -13,16 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
 import logging
 import socket
 from typing import Protocol
 
-from components.utils import GeneralRequest, GeneralResponse
+from components.utils import GeneralRequest, GeneralResponse, check_required_workers
 from components.worker import DummyWorker
 
+from dynamo._core import Client
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
+from dynamo.sdk.lib.dependency import DynamoClient
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,11 @@ class Processor(Protocol):
     Pre and Post Processing
     """
 
-    worker = depends(DummyWorker)
+    worker: DynamoClient = depends(DummyWorker)
+    router: str
+    hostname: str
+    min_workers: int
+    worker_client: Client
 
     def __init__(self):
         config = ServiceConfig.get_instance()
@@ -57,14 +62,11 @@ class Processor(Protocol):
             .endpoint("generate")
             .client()
         )
-        while len(self.worker_client.endpoint_ids()) < self.min_workers:
-            print(
-                f"Waiting for workers to be ready.\n"
-                f" Current: {len(self.worker_client.endpoint_ids())},"
-                f" Required: {self.min_workers}"
-            )
-            await asyncio.sleep(5)
-        print(f"----workers are all ready {self.worker_client.endpoint_ids()}")
+
+        await check_required_workers(
+            self.worker_client, self.min_workers, tag="processor"
+        )
+        logger.info(f"----workers are all ready {self.worker_client.endpoint_ids()}")
 
     async def _generate(
         self,
