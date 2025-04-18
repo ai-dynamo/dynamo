@@ -185,7 +185,7 @@ def main(
                 if lease is None:
                     logger.info(f"Serving {service.name} with primary lease")
                 else:
-                    logger.info(f"Serving {service.name} with lease: {lease}")
+                    logger.info(f"Serving {service.name} with lease: {lease.id()}")
                 result = await endpoints[0].serve_endpoint(twm[0], lease)
 
             except Exception as e:
