@@ -80,7 +80,7 @@ kubectl get storageclass
 ```
 
 > [!TIP]
-> Don't have a Kubernetes cluster? Check out our [Minikube setup guide](../../docs/guides/dynamo_deploy/minikube.md) to set up a local environment! 🏠
+> Don't have a Kubernetes cluster? Check out our [Minikube setup guide](../../../docs/guides/dynamo_deploy/minikube.md) to set up a local environment! 🏠
 
 ### 📥 Installation
 
