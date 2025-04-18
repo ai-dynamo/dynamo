@@ -52,8 +52,8 @@ DOCKERFILE=${SOURCE_DIR}/Dockerfile
 BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
-TENSORRTLLM_BASE_IMAGE=tensorrt_llm/release
-TENSORRTLLM_BASE_IMAGE_TAG=latest
+TENSORRTLLM_BASE_IMAGE="ubuntu"
+TENSORRTLLM_BASE_IMAGE_TAG="24.04"
 TENSORRTLLM_PIP_WHEEL_PATH=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
@@ -362,19 +362,6 @@ show_image_options
 
 if [ -z "$RUN_PREFIX" ]; then
     set -x
-fi
-
-# Check if the TensorRT-LLM base image exists
-if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
-    if docker inspect --type=image "$BASE_IMAGE:$BASE_IMAGE_TAG" > /dev/null 2>&1; then
-        echo "Image '$BASE_IMAGE:$BASE_IMAGE_TAG' is found."
-    else
-        echo "Image '$BASE_IMAGE:$BASE_IMAGE_TAG' is not found." >&2
-        echo "Please build the TensorRT-LLM base image first. Run ./build_trtllm_base_image.sh" >&2
-        echo "or use --base-image and --base-image-tag to an existing TensorRT-LLM base image." >&2
-        echo "See https://nvidia.github.io/TensorRT-LLM/installation/build-from-source-linux.html for more information." >&2
-        exit 1
-    fi
 fi
 
 $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE

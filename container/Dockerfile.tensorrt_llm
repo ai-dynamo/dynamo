@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG BASE_IMAGE="tensorrt_llm/release"
-ARG BASE_IMAGE_TAG="latest"
+ARG BASE_IMAGE="ubuntu"
+ARG BASE_IMAGE_TAG="24.04"
 ARG MANYLINUX_IMAGE="quay.io/pypa/manylinux_2_28_x86_64"
 ARG RELEASE_BUILD
 
@@ -24,13 +24,14 @@ ARG RELEASE_BUILD
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS build
 
-USER root
+# libclang-dev && git needed for llamacpp engine deps in dynamo-run build
+RUN apt update && \
+    DEBIAN_FRONTEND=noninteractive apt install -yq python3-dev python3-pip python3-venv libucx0 libclang-dev git wget curl nvtop tmux vim
 
-# Install utilities
-RUN apt update -y && apt install -y git wget curl nvtop tmux vim
 # nats
 RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-amd64.deb && \
     dpkg -i nats-server-v2.10.24-amd64.deb && rm nats-server-v2.10.24-amd64.deb
+
 # etcd
 ENV ETCD_VERSION="v3.5.18"
 RUN wget https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-amd64.tar.gz -O /tmp/etcd.tar.gz && \
@@ -39,7 +40,28 @@ RUN wget https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$E
     rm /tmp/etcd.tar.gz
 ENV PATH=/usr/local/bin/etcd/:$PATH
 
+SHELL ["/bin/bash", "-c"]
+
+
+# Activate virtual environment
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV PATH="$PATH:/usr/local/bin"
+
+
 # TODO: Try using uv to install tensorrtllm
+# Install uv, create virtualenv for general use.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# Copy uv from build and build wheel in virtualenv
+RUN mkdir /opt/dynamo && \
+    uv venv ${VIRTUAL_ENV} --python 3.12
+
+RUN apt-get -y install libopenmpi-dev && \
+    source ${VIRTUAL_ENV}/bin/activate && \
+    uv pip install flashinfer-python && \
+    uv pip install --extra-index-url https://pypi.nvidia.com tensorrt-llm==0.19.0rc0
+
 ARG TENSORRTLLM_PIP_WHEEL_PATH=""
 COPY ${TENSORRTLLM_PIP_WHEEL_PATH}/*.whl /tmp/
 RUN find /tmp -name "*.whl" -exec pip install {} +
@@ -47,11 +69,12 @@ RUN find /tmp -name "*.whl" -exec pip install {} +
 # Install genai-perf for benchmarking
 # TODO: Move to published pypi tags
 ARG GENAI_PERF_TAG="e67e853413a07a778dd78a55e299be7fba9c9c24"
-RUN pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
+RUN uv pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
 
 # Install test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
-    pip install --requirement /tmp/requirements.txt
+    uv pip install --requirement /tmp/requirements.txt
+
 
 ### MISC UTILITY SETUP ###
 
@@ -64,9 +87,10 @@ RUN printf "[safe]\n      directory=/workspace\n" > /root/.gitconfig
 RUN ln -sf /bin/bash /bin/sh
 
 # Rust build/dev dependencies
-RUN apt-get update && \
-    apt-get install --no-install-recommends -y \
-    gdb \
+RUN apt update -y && \
+    apt install --no-install-recommends -y \
+    wget \
+    build-essential \
     protobuf-compiler \
     cmake \
     libssl-dev \
@@ -120,13 +144,6 @@ RUN cargo build --release --locked --features mistralrs,sglang,python && \
 
 COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 
-# Install uv, create virtualenv for general use, and build dynamo wheel
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-
-### VIRTUAL ENVIRONMENT SETUP ###
-RUN mkdir /opt/dynamo && \
-    uv venv /opt/dynamo/venv --python 3.12
-
 ###################################
 ####### WHEEL BUILD STAGE #########
 ###################################
@@ -160,10 +177,7 @@ COPY --from=build $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=build $CARGO_HOME $CARGO_HOME
 
 # Create virtualenv and build dynamo wheel
-RUN mkdir /opt/dynamo && \
-    uv venv /opt/dynamo/venv --python 3.12 && \
-    source /opt/dynamo/venv/bin/activate && \
-    cd /workspace/lib/bindings/python && \
+RUN cd /workspace/lib/bindings/python && \
     uv build --wheel --out-dir /workspace/dist --python 3.12 && \
     if [ "$RELEASE_BUILD" = "true" ]; then \
         uv build --wheel --out-dir /workspace/dist --python 3.11 && \
@@ -195,8 +209,8 @@ RUN . /opt/dynamo/venv/bin/activate && \
 # Install dynamo.runtime and dynamo.llm wheels globally in container for tests that
 # currently run without virtual environment activated.
 # TODO: In future, we may use a virtualenv for everything and remove this.
-RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
-    pip install dist/ai_dynamo*any.whl
+RUN uv pip install dist/ai_dynamo_runtime*cp312*.whl  && \
+    uv pip install dist/ai_dynamo*any.whl
 
 # Tell TRTLLM worker to use the Dynamo LLM C API for KV Cache Routing
 ENV DYNAMO_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
@@ -217,6 +231,5 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
 # FIXME: Copy more specific folders in for dev/debug after directory restructure
 COPY . /workspace
 
-# FIXME: May want a modification with dynamo banner on entry
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+ENTRYPOINT [ "/usr/bin/bash" ]
 CMD []
