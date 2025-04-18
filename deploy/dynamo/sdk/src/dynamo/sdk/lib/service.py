@@ -66,7 +66,13 @@ class DynamoConfig:
     enabled: bool = False
     name: str | None = None
     namespace: str | None = None
+    custom_lease: LeaseConfig | None = None
 
+@dataclass
+class LeaseConfig:
+    """Configuration for custom dynamo leases"""
+
+    ttl: int = 1
 
 class DynamoService(Service[T]):
     """A custom service class that extends BentoML's base Service with Dynamo capabilities"""

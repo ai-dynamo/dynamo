@@ -33,6 +33,7 @@ from vllm.sampling_params import RequestOutputKind
 
 from dynamo.llm import KvMetricsPublisher
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk.lib.service import LeaseConfig
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ logger = logging.getLogger(__name__)
     dynamo={
         "enabled": True,
         "namespace": "dynamo",
+        "custom_lease": LeaseConfig(ttl=1),
     },
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -142,6 +144,8 @@ class VllmWorker:
             await self.disaggregated_router.async_init()
         else:
             self.disaggregated_router = None
+        
+        self.lease = dynamo_context["lease"] if "lease" in dynamo_context else None
         logger.info("VllmWorker has been initialized")
 
     def shutdown_vllm_engine(self, signum, frame):
