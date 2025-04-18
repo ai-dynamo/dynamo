@@ -50,7 +50,6 @@ You can build each component individually or build all components at once:
 earthly --push +all-docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 ```
 
-
 ## Deploy Dynamo Cloud Platform
 
 ### Prerequisites
@@ -82,32 +81,32 @@ kubectl get storageclass
 
 ### Installation
 
-```bash
-cd deploy/dynamo/helm
-export NAMESPACE=dynamo-cloud    # change this to whatever you want!
-```
-
-1. [One-time Action] Create a new kubernetes namespace and set it as your default. Create image pull secrets if needed.
-
-```bash
-kubectl create namespace $NAMESPACE
-kubectl config set-context --current --namespace=$NAMESPACE
-
-# [Optional] if needed, create image pull secrets
-kubectl create secret docker-registry docker-imagepullsecret \
-  --docker-server=<your-registry> \
-  --docker-username=<your-username> \
-  --docker-password=<your-password> \
-  --namespace=$NAMESPACE
-```
-
-2. Deploy the helm chart using the deploy script:
-
+1. Set the required environment variables:
 ```bash
 export DOCKER_USERNAME=<your-docker-username>
 export DOCKER_PASSWORD=<your-docker-password>
 export DOCKER_SERVER=<your-docker-server>
 export IMAGE_TAG=<TAG>  # Use the same tag you used when building the images
+export NAMESPACE=dynamo-cloud    # change this to whatever you want!
+```
 
+2. [One-time Action] Create a new kubernetes namespace and set it as your default. Create image pull secrets if needed.
+
+```bash
+cd deploy/dynamo/helm
+kubectl create namespace $NAMESPACE
+kubectl config set-context --current --namespace=$NAMESPACE
+
+# [Optional] if needed, create image pull secrets
+kubectl create secret docker-registry docker-imagepullsecret \
+  --docker-server=$DOCKER_SERVER \
+  --docker-username=$DOCKER_USERNAME \
+  --docker-password=$DOCKER_PASSWORD \
+  --namespace=$NAMESPACE
+```
+
+3. Deploy the helm chart using the deploy script:
+
+```bash
 ./deploy.sh
 ```

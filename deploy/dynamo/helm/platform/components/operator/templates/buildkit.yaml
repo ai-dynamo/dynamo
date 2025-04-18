@@ -101,7 +101,6 @@ spec:
       spec:
         accessModes:
           - ReadWriteOnce
-        storageClassName: ""
         resources:
           requests:
             storage: 1000Gi
