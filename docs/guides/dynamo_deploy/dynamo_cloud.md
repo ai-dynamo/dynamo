@@ -19,7 +19,7 @@ limitations under the License.
 
 The Dynamo Cloud platform is a comprehensive solution for deploying and managing Dynamo inference graphs (also referred to as pipelines) in Kubernetes environments. It provides a streamlined experience for deploying, scaling, and monitoring your inference services. You can interface with Dynamo Cloud using the `deploy` subcommand available in the Dynamo CLI (e.g `dynamo deploy`)
 
-## Overview
+## 📋 Overview
 
 The Dynamo cloud platform consists of several key components:
 
@@ -31,7 +31,7 @@ These components work together to provide a seamless deployment experience, hand
 
 ![Dynamo Deploy](../../images/dynamo-deploy.png)
 
-## Prerequisites
+## 🎯 Prerequisites
 
 Before getting started with the Dynamo cloud platform, ensure you have:
 
@@ -42,11 +42,14 @@ Before getting started with the Dynamo cloud platform, ensure you have:
 - `kubectl` configured to access your cluster
 - Helm installed (version 3.0 or later)
 
-## Building Docker Images for Dynamo Cloud Components
+> [!TIP]
+> Don't have a Kubernetes cluster? Check out our [Minikube setup guide](./minikube.md) to set up a local environment! 🏠
+
+## 🏗️ Building Docker Images for Dynamo Cloud Components
 
 The Dynamo cloud platform components need to be built and pushed to a container registry before deployment. You can build these components individually or all at once.
 
-### Setting Up Environment Variables
+### ⚙️ Setting Up Environment Variables
 
 First, set the required environment variables for building and pushing images:
 
@@ -67,7 +70,7 @@ Where:
 > docker login <CONTAINER_REGISTRY>
 > ```
 
-### Building Components
+### 🛠️ Building Components
 
 You can build and push all platform components at once:
 
@@ -75,15 +78,15 @@ You can build and push all platform components at once:
 earthly --push +all-docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 ```
 
-## Deploying the Dynamo Cloud Platform
+## 🚀 Deploying the Dynamo Cloud Platform
 
 Once you've built and pushed the components, you can deploy the platform to your Kubernetes cluster.
 
-### Prerequisites
+### 📋 Prerequisites
 
 Before deploying Dynamo Cloud, ensure your Kubernetes cluster meets the following requirements:
 
-#### 1. Istio Installation
+#### 1. 🛡️ Istio Installation
 Dynamo Cloud requires Istio for service mesh capabilities. Verify Istio is installed and running:
 
 ```bash
@@ -94,7 +97,7 @@ kubectl get pods -n istio-system
 # istiod-* pods should be in Running state
 ```
 
-#### 2. PVC Support with Default Storage Class
+#### 2. 💾 PVC Support with Default Storage Class
 Dynamo Cloud requires Persistent Volume Claim (PVC) support with a default storage class. Verify your cluster configuration:
 
 ```bash
@@ -107,7 +110,7 @@ kubectl get storageclass
 # standard (default)   kubernetes.io/gce-pd    Delete          Immediate              true                   1d
 ```
 
-### Installation
+### 📥 Installation
 
 1. Set the required environment variables:
 ```bash
@@ -139,11 +142,11 @@ kubectl create secret docker-registry docker-imagepullsecret \
 ./deploy.sh
 ```
 
-4. **Expose Dynamo Cloud Externally**
+4. 🌐 **Expose Dynamo Cloud Externally**
 
 You must also expose the `dynamo-store` service within the namespace externally. This will be the endpoint the CLI uses to interface with Dynamo Cloud. You might setup an Ingress, use an `ExternalService` with Istio, or simply port-forward. In our docs, we refer to this externally available endpoint as `DYNAMO_CLOUD`.
 
-## Next Steps
+## 🎯 Next Steps
 
 After deploying the Dynamo cloud platform, you can:
 
