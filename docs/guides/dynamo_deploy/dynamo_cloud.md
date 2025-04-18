@@ -51,17 +51,15 @@ The Dynamo cloud platform components need to be built and pushed to a container 
 First, set the required environment variables for building and pushing images:
 
 ```bash
-# Set your container registry and organization
-export CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION>
+# Set your container registry
+export DOCKER_SERVER=<CONTAINER_REGISTRY>
 # Set the image tag (e.g., latest, 0.0.1, etc.)
-export CI_COMMIT_SHA=<TAG>
+export IMAGE_TAG=<TAG>
 ```
 
 Where:
-- `<CONTAINER_REGISTRY>/<ORGANIZATION>`: Your container registry and organization name
-  - Examples: `nvcr.io/myorg`, `docker.io/myorg`
-- `<TAG>`: The version tag for your images
-  - Examples: `latest`, `0.0.1`, `v1.0.0`
+- `<CONTAINER_REGISTRY>`: Your container registry (e.g., `nvcr.io`, `docker.io/<your-username>`, etc.)
+- `<TAG>`: The version tag for your images (e.g., `latest`, `0.0.1`, `v1.0.0`)
 
 > [!IMPORTANT]
 > Make sure you're logged in to your container registry before pushing images:
@@ -71,30 +69,10 @@ Where:
 
 ### Building Components
 
-You have two options for building the components:
-
-#### Option 1: Build All Components at Once
-
-This is the simplest approach and builds and pushes all components in a single command:
+You can build and push all platform components at once:
 
 ```bash
-earthly --push +all-docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
-```
-
-#### Option 2: Build Components Individually
-
-If you need to build components separately:
-
-1. **API Store**
-```bash
-cd deploy/dynamo/api-store
-earthly --push +docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
-```
-
-2. **Operator**
-```bash
-cd deploy/dynamo/operator
-earthly --push +docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
+earthly --push +all-docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 ```
 
 ## Deploying the Dynamo Cloud Platform
@@ -103,52 +81,65 @@ Once you've built and pushed the components, you can deploy the platform to your
 
 ### Prerequisites
 
-Make sure you're in the correct directory:
+Before deploying Dynamo Cloud, ensure your Kubernetes cluster meets the following requirements:
+
+#### 1. Istio Installation
+Dynamo Cloud requires Istio for service mesh capabilities. Verify Istio is installed and running:
+
+```bash
+# Check if Istio is installed
+kubectl get pods -n istio-system
+
+# Expected output should show running Istio pods
+# istiod-* pods should be in Running state
+```
+
+#### 2. PVC Support with Default Storage Class
+Dynamo Cloud requires Persistent Volume Claim (PVC) support with a default storage class. Verify your cluster configuration:
+
+```bash
+# Check if default storage class exists
+kubectl get storageclass
+
+# Expected output should show at least one storage class marked as (default)
+# Example:
+# NAME                 PROVISIONER             RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
+# standard (default)   kubernetes.io/gce-pd    Delete          Immediate              true                   1d
+```
+
+### Installation
+
+1. Set the required environment variables:
+```bash
+export DOCKER_USERNAME=<your-docker-username>
+export DOCKER_PASSWORD=<your-docker-password>
+export DOCKER_SERVER=<your-docker-server>
+export IMAGE_TAG=<TAG>  # Use the same tag you used when building the images
+export NAMESPACE=dynamo-cloud    # change this to whatever you want!
+```
+
+2. [One-time Action] Create a new kubernetes namespace and set it as your default. Create image pull secrets if needed.
+
 ```bash
 cd deploy/dynamo/helm
-```
+kubectl create namespace $NAMESPACE
+kubectl config set-context --current --namespace=$NAMESPACE
 
-Set your namespace (this will be used for all deployments):
-```bash
-export KUBE_NS=hello-world    # Change this to your preferred namespace
-```
-
-### Deployment Steps
-
-1. **Create Namespace and Set Context**
-
-```bash
-# Create a new namespace
-kubectl create namespace $KUBE_NS
-
-# Set the namespace as your default context
-kubectl config set-context --current --namespace=$KUBE_NS
-
-# [Optional] Create image pull secrets if your registry requires authentication
+# [Optional] if needed, create image pull secrets
 kubectl create secret docker-registry docker-imagepullsecret \
-  --docker-server=<your-registry> \
-  --docker-username=<your-username> \
-  --docker-password=<your-password> \
-  --namespace=$KUBE_NS
+  --docker-server=$DOCKER_SERVER \
+  --docker-username=$DOCKER_USERNAME \
+  --docker-password=$DOCKER_PASSWORD \
+  --namespace=$NAMESPACE
 ```
 
-2. **Deploy Using the Helm Chart**
+3. Deploy the helm chart using the deploy script:
 
-Set the required environment variables:
-```bash
-export NGC_TOKEN=$NGC_API_TOKEN
-export NAMESPACE=$KUBE_NS
-export CI_COMMIT_SHA=<TAG>  # Use the same tag you used when building the images
-export CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION>  # Use the same registry/org you used when building the images
-export RELEASE_NAME=$KUBE_NS
-```
-
-Deploy the platform:
 ```bash
 ./deploy.sh
 ```
 
-3. **Expose Dynamo Cloud Externally**
+4. **Expose Dynamo Cloud Externally**
 
 You must also expose the `dynamo-store` service within the namespace externally. This will be the endpoint the CLI uses to interface with Dynamo Cloud. You might setup an Ingress, use an `ExternalService` with Istio, or simply port-forward. In our docs, we refer to this externally available endpoint as `DYNAMO_CLOUD`.
 
