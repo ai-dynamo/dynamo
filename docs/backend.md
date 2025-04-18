@@ -73,8 +73,9 @@ class ResponseType(BaseModel):
     # Add other fields as needed
 ```
 
-For example, if putting your worker directly behind an OpenAI `http` service via `llmctl`,
-you could define the Request/Response types to be Chat Completions objects, such as:
+For example, if you deploy your worker directly behind an OpenAI HTTP (`http`) service
+using `llmctl`, you can define the request and response types to correspond to
+Chat Completions objects, such as the ones specified in the OpenAI API. For example:
 ```python
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 
@@ -484,12 +485,10 @@ Depending on the load distribution of requests and number of Prefill/Decode
 worker instances, instead of directly forwarding requests to the Prefill
 worker endpoint, it may be advantageous to send Prefill requests into a queue
 that the Prefill workers can pull from on-demand instead. You can see an example
-of that [here](https://github.com/ai-dynamo/dynamo/blob/83dfedff5f19e67fc3bc4684d7778e282fb4fbfb/examples/hello_world/disagg_skeleton/components/prefill_worker.py).
-- TODO: Update this with a real link after https://github.com/ai-dynamo/dynamo/pull/683 is merged
+of that [here](../examples/hello_world/disagg_skeleton/components/prefill_worker.py).
 
 For an introductory example on doing disaggregation with Dynamo using simple models, see
-[this example](https://github.com/ai-dynamo/dynamo/blob/83dfedff5f19e67fc3bc4684d7778e282fb4fbfb/examples/hello_world/disagg_skeleton/README.md).
-- TODO: Update this with a real link after https://github.com/ai-dynamo/dynamo/pull/683 is merged
+[this example](../examples/hello_world/disagg_skeleton).
 
 For more information on Disaggregated Serving, see the
 [general guide](../docs/disagg_serving.md) and [performance tuning guide](../docs/guides/disagg_perf_tuning.md).
