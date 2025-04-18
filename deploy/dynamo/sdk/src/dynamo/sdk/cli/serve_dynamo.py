@@ -183,7 +183,7 @@ def main(
                 )
                 # TODO:bis: convert to list
                 if lease is None:
-                    logger.info("Serving {service.name} with primary lease")
+                    logger.info(f"Serving {service.name} with primary lease")
                 else:
                     logger.info(f"Serving {service.name} with lease: {lease}")
                 result = await endpoints[0].serve_endpoint(twm[0], lease)
