@@ -32,7 +32,6 @@ mistralrs = ["dep:dynamo-engine-mistralrs"]
 llamacpp = ["dep:dynamo-engine-llamacpp"]
 vllm = ["dep:dynamo-engine-vllm0_7", "dep:dynamo-engine-vllm0_8", "dep:netlink-packet-route", "dep:rtnetlink"]
 sglang = ["dep:dynamo-engine-sglang", "dep:netlink-packet-route", "dep:rtnetlink"]
-trtllm = ["dep:dynamo-engine-trtllm"]
 python = ["dep:dynamo-engine-python"]
 
 cuda = ["dynamo-engine-llamacpp/cuda", "dynamo-engine-mistralrs/cuda"]
@@ -48,7 +47,6 @@ dynamo-engine-mistralrs = { path = "../../lib/engines/mistralrs", optional = tru
 dynamo-engine-sglang = { path = "../../lib/engines/sglang", optional = true }
 dynamo-engine-vllm0_7 = { path = "../../lib/engines/vllm0_7", optional = true }
 dynamo-engine-vllm0_8 = { path = "../../lib/engines/vllm0_8", optional = true }
-dynamo-engine-trtllm = { path = "../../lib/engines/trtllm", optional = true }
 dynamo-engine-python = { path = "../../lib/engines/python", optional = true }
 
 anyhow = { workspace = true }

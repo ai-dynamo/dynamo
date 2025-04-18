@@ -122,10 +122,6 @@ pub enum Output {
     /// Run inference using vllm 0.7.X
     Vllm0_7,
 
-    #[cfg(feature = "trtllm")]
-    /// Run inference using trtllm
-    TrtLLM,
-
     /// Run inference using a user supplied python file that accepts and returns
     /// strings. It does it's own pre-processing.
     #[cfg(feature = "python")]
@@ -160,9 +156,6 @@ impl TryFrom<&str> for Output {
             "vllm0_8" => Ok(Output::Vllm0_8),
             #[cfg(feature = "vllm")]
             "vllm0_7" => Ok(Output::Vllm0_7),
-
-            #[cfg(feature = "trtllm")]
-            "trtllm" => Ok(Output::TrtLLM),
 
             "echo_full" => Ok(Output::EchoFull),
             "echo_core" => Ok(Output::EchoCore),
@@ -211,9 +204,6 @@ impl fmt::Display for Output {
             Output::Vllm0_8 => "vllm0_8",
             #[cfg(feature = "vllm")]
             Output::Vllm0_7 => "vllm0_7",
-
-            #[cfg(feature = "trtllm")]
-            Output::TrtLLM => "trtllm",
 
             Output::EchoFull => "echo_full",
             Output::EchoCore => "echo_core",
@@ -293,11 +283,6 @@ impl Output {
         {
             out.push(Output::PythonStr("file.py".to_string()).to_string());
             out.push(Output::PythonTok("file.py".to_string()).to_string());
-        }
-
-        #[cfg(feature = "trtllm")]
-        {
-            out.push(Output::TrtLLM.to_string());
         }
 
         out

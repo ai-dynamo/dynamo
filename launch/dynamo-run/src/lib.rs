@@ -421,28 +421,6 @@ pub async fn run(
                 card: Box::new(card),
             }
         }
-        #[cfg(feature = "trtllm")]
-        Output::TrtLLM => {
-            let Some(model_path) = model_path else {
-                anyhow::bail!("out=trtllm requires flag --model-path=<full-path-to-model-dir>");
-            };
-            if !model_path.is_dir() {
-                anyhow::bail!(
-                    "--model-path should point at a directory containing `.engine` files."
-                );
-            }
-            // Safety: Earlier we build maybe_card from model_path, which we checked right above
-            let card = maybe_card.clone().unwrap();
-            let engine = dynamo_engine_trtllm::make_engine(
-                model_path.display(),
-                flags.tensor_parallel_size,
-            )?;
-            EngineConfig::StaticCore {
-                service_name: card.service_name.clone(),
-                engine,
-                card: Box::new(card),
-            }
-        }
         #[cfg(feature = "python")]
         Output::PythonStr(path_str) => {
             let Some(model_name) = model_name else {
