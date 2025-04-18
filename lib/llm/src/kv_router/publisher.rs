@@ -98,18 +98,15 @@ impl KvMetricsPublisher {
         let handler = Arc::new(KvLoadEndpoingHander::new(metrics_rx.clone()));
         let handler = Ingress::for_engine(handler)?;
 
-        let mut builder = component
+        let builder = component
             .endpoint(KV_METRICS_ENDPOINT)
             .endpoint_builder()
             .stats_handler(move |_| {
                 let metrics = metrics_rx.borrow_and_update().clone();
                 serde_json::to_value(&*metrics).unwrap()
             })
-            .handler(handler);
-
-        if let Some(lease) = lease {
-            builder = builder.lease(Some(lease));
-        }
+            .handler(handler)
+            .lease(lease);
 
         builder.start().await
     }

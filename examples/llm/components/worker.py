@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
     dynamo={
         "enabled": True,
         "namespace": "dynamo",
-        "custom_lease": LeaseConfig(ttl=1),
+        "custom_lease": LeaseConfig(ttl=1),  # 1 second
     },
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -162,8 +162,14 @@ class VllmWorker:
 
     async def create_metrics_publisher_endpoint(self):
         component = dynamo_context["component"]
-        logger.info(f"Creating metrics publisher endpoint with lease: {self.lease}")
-        await self.metrics_publisher.create_endpoint_with_lease(component, self.lease)
+        if self.lease is not None:
+            logger.info(f"Creating metrics publisher endpoint with lease: {self.lease}")
+            await self.metrics_publisher.create_endpoint_with_lease(
+                component, self.lease
+            )
+        else:
+            logger.info("Creating metrics publisher tied to primary lease")
+            await self.metrics_publisher.create_endpoint(component)
 
     def get_remote_prefill_request_callback(self):
         # TODO: integrate prefill_queue to dynamo endpoint
