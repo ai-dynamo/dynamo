@@ -21,8 +21,6 @@ from dynamo.sdk import DYNAMO_IMAGE, api, depends, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk.lib.logging import configure_server_logging
 
-# Configure logging
-configure_server_logging()
 logger = logging.getLogger(__name__)
 
 """
@@ -111,6 +109,9 @@ class Frontend:
     middle = depends(Middle)
 
     def __init__(self) -> None:
+        # Configure logging
+        configure_server_logging(service_name="Frontend")
+
         logger.info("Starting frontend")
         config = ServiceConfig.get_instance()
         self.message = config.get("Frontend", {}).get("message", "front")
