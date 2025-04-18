@@ -261,7 +261,7 @@ def serve_http(
 
     from .allocator import ResourceAllocator
 
-    configure_server_logging()
+    configure_server_logging(service_name=service_name)
 
     bento_id: str = ""
     namespace: str = ""
@@ -288,8 +288,7 @@ def serve_http(
     # TODO: Only for testing, this will prevent any other dep services from getting started, relying entirely on configured deps in the runner-map
     standalone = False
     if service_name:
-        logger.info("Running in standalone mode")
-        logger.info(f"service_name: {service_name}")
+        logger.info(f"Service '{service_name}' running in standalone mode")
         standalone = True
 
     if service_name and service_name != svc.name:
@@ -421,7 +420,7 @@ def serve_http(
             )
             watchers.append(watcher)
             logger.info(
-                f"Created watcher for {svc.name}'s in the {namespace} namespace"
+                f"Created watcher for {svc.name} with {num_workers} workers in the {namespace} namespace"
             )
         else:
             watchers.append(
@@ -433,6 +432,7 @@ def serve_http(
                     env=env,
                 )
             )
+            logger.info(f"Created watcher for service with {num_workers} workers")
 
         log_host = "localhost" if host in ["0.0.0.0", "::"] else host
         dependency_map[svc.name] = f"{scheme}://{log_host}:{port}"
@@ -461,7 +461,7 @@ def serve_http(
                 ),
                 ignore_errors=True,
             )
-            logger.warn(f"arbiter: {arbiter.endpoint}")
+            logger.warning(f"arbiter: {arbiter.endpoint}")
             # save deployment state for planner
             if not namespace:
                 raise ValueError("No namespace found for service")

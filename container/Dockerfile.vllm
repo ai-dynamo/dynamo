@@ -7,7 +7,8 @@ ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 ARG MANYLINUX_IMAGE="quay.io/pypa/manylinux_2_28_x86_64"
-ARG GENAI_PERF_TAG="25d0188713adc47868d6b3f22426375237a90529"
+# TODO: Move to published pypi tags
+ARG GENAI_PERF_TAG="e67e853413a07a778dd78a55e299be7fba9c9c24"
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS nixl_base
 WORKDIR /opt/nixl
