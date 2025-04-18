@@ -126,7 +126,9 @@ def main(
                     )
                     lease_id = lease.id()
                     dynamo_context["lease"] = lease
-                    logger.info(f"Created {service.name} component with custom lease id {lease_id}")
+                    logger.info(
+                        f"Created {service.name} component with custom lease id {lease_id}"
+                    )
                 else:
                     # Create service first
                     await component.create_service()
@@ -181,7 +183,9 @@ def main(
                 )
                 # TODO:bis: convert to list
                 if lease:
-                    logger.info(f"Serving {service.name} with custom lease id {lease_id}")
+                    logger.info(
+                        f"Serving {service.name} with custom lease id {lease_id}"
+                    )
                     result = await endpoints[0].serve_endpoint_with_lease(twm[0], lease)
                 else:
                     logger.info(f"Serving {service.name}")
