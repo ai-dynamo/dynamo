@@ -73,7 +73,7 @@ class DynamoConfig:
 class LeaseConfig:
     """Configuration for custom dynamo leases"""
 
-    ttl: int = 1
+    ttl: int = 1  # seconds
 
 
 class DynamoService(Service[T]):
