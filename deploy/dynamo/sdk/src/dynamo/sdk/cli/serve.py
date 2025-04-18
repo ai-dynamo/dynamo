@@ -141,7 +141,7 @@ def build_serve_command() -> click.Group:
             rich.print(f"DYNAMO_SERVICE_CONFIG={json.dumps(service_configs)}")
             sys.exit(0)
 
-        configure_server_logging()
+        configure_server_logging(service_name=service_name)
         # Set environment variable with service configuration
         if service_configs:
             logger.info(f"Running dynamo serve with service configs {service_configs}")

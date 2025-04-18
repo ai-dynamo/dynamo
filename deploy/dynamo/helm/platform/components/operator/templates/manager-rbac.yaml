@@ -277,6 +277,7 @@ rules:
   - patch
   - update
   - watch
+{{- if .Values.istioVirtualServiceEnabled }}
 - apiGroups:
   - networking.istio.io
   resources:
@@ -289,6 +290,7 @@ rules:
   - patch
   - update
   - watch
+{{- end }}
 - apiGroups:
   - networking.k8s.io
   resources:
