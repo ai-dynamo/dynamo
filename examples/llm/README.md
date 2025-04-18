@@ -184,7 +184,8 @@ You must have first followed the instructions in [deploy/dynamo/helm/README.md](
 ```bash
 export PROJECT_ROOT=$(pwd)
 export KUBE_NS=dynamo-cloud  # Note: This must match the Kubernetes namespace where you installed Dynamo Cloud
-export DYNAMO_CLOUD=https://${KUBE_NS}.dev.aire.nvidia.com # Externally accessible endpoint to the `dynamo-store` service within your Dynamo Cloud installation
+export DYNAMO_INGRESS_SUFFIX=dynamo-cloud.com # Note: this must match the ingress suffix from the cloud platform deploy
+export DYNAMO_CLOUD=https://${KUBE_NS}.${DYNAMO_INGRESS_SUFFIX} # Externally accessible endpoint to the `dynamo-store` service within your Dynamo Cloud installation
 dynamo cloud login --api-token TEST-TOKEN --endpoint $DYNAMO_CLOUD
 ```
 
@@ -222,7 +223,7 @@ Once you create the Dynamo deployment, a pod prefixed with `yatai-dynamonim-imag
 
 ```bash
 # Forward the service port to localhost
-kubectl -n ${KUBE_NS} port-forward svc/${DEPLOYMENT_NAME}-frontend 3000:3000
+kubectl port-forward svc/${DEPLOYMENT_NAME}-frontend 3000:3000 -n ${KUBE_NS}
 
 # Test the API endpoint
 curl localhost:3000/v1/chat/completions   -H "Content-Type: application/json"   -d '{

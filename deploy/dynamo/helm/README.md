@@ -86,17 +86,19 @@ kubectl get storageclass
 
 1. Set the required environment variables:
 ```bash
+export PROJECT_ROOT=($pwd)
 export DOCKER_USERNAME=<your-docker-username>
 export DOCKER_PASSWORD=<your-docker-password>
 export DOCKER_SERVER=<your-docker-server>
 export IMAGE_TAG=<TAG>  # Use the same tag you used when building the images
 export NAMESPACE=dynamo-cloud    # change this to whatever you want!
+export DYNAMO_INGRESS_SUFFIX=dynamo-cloud.com # change this to whatever you want!
 ```
 
 2. [One-time Action] Create a new kubernetes namespace and set it as your default. Create image pull secrets if needed.
 
 ```bash
-cd deploy/dynamo/helm
+cd $PROJECT_ROOT/deploy/dynamo/helm
 kubectl create namespace $NAMESPACE
 kubectl config set-context --current --namespace=$NAMESPACE
 
