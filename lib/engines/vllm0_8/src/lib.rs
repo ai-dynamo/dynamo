@@ -58,7 +58,7 @@ pub async fn make_engine(
     // Path to extra engine args file
     extra_engine_args: Option<PathBuf>,
 ) -> pipeline_error::Result<ExecutionContext> {
-    let engine = VllmV1Engine::new(
+    let engine = VllmEngine::new(
         cancel_token,
         model_path,
         node_conf,
@@ -70,7 +70,7 @@ pub async fn make_engine(
     Ok(engine)
 }
 
-struct VllmV1Engine {
+struct VllmEngine {
     cancel_token: CancellationToken,
     // How we send requests to Python / vllm
     request_queue: Arc<PyObject>,
@@ -82,7 +82,7 @@ struct VllmV1Engine {
     sampling_params: PyObject,
 }
 
-impl VllmV1Engine {
+impl VllmEngine {
     pub async fn new(
         cancel_token: CancellationToken,
         model_path: &Path,
@@ -97,8 +97,8 @@ impl VllmV1Engine {
             PyModule::from_code(
                 py,
                 &CString::new(PY_MAIN_MOD).expect("vllm_inc.py contains a null byte!"),
-                &CString::new("_synthetic/dynamo_engine_vllmv1.py").unwrap(),
-                &CString::new("dynamo_engine_vllmv1").unwrap(),
+                &CString::new("_synthetic/dynamo_engine_vllm.py").unwrap(),
+                &CString::new("dynamo_engine_vllm").unwrap(),
             )
             .map(|p| p.into())
         })?;
@@ -132,7 +132,7 @@ impl VllmV1Engine {
         let event_loop = tokio::select! {
             ev = rx => ev,
             _ = cancel_token.cancelled() => {
-                anyhow::bail!("VllmV1Engine create cancelled");
+                anyhow::bail!("VllmEngine create cancelled");
             }
         };
         let event_loop = event_loop?;
@@ -143,11 +143,11 @@ impl VllmV1Engine {
                 tracing::trace!("vllm worker is ready");
             }
             _ = cancel_token.cancelled() => {
-                anyhow::bail!("VllmV1Engine cancelled waiting for vllm to start");
+                anyhow::bail!("VllmEngine cancelled waiting for vllm to start");
             }
         };
 
-        let engine = VllmV1Engine {
+        let engine = VllmEngine {
             cancel_token,
             request_queue: Arc::new(request_queue_rs),
             event_loop,
@@ -160,7 +160,7 @@ impl VllmV1Engine {
 
 #[async_trait]
 impl AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-    for VllmV1Engine
+    for VllmEngine
 {
     async fn generate(
         &self,
@@ -222,7 +222,7 @@ impl AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<LLMEngineOutput>>, Er
             loop {
                 tokio::select! {
                     _ = cancel_token.cancelled() => {
-                        tracing::trace!(request_id, "VllmV1Engine.generate stopped by cancel token");
+                        tracing::trace!(request_id, "VllmEngine.generate stopped by cancel token");
                         break;
                     }
                     item = from_vllm.next() => {
@@ -408,7 +408,7 @@ async fn run_vllm_worker(
 
     tokio::select! {
         _ = cancel_token.cancelled() => {
-            tracing::trace!("VllmV1Engine worker stopped by cancel token");
+            tracing::trace!("VllmEngine worker stopped by cancel token");
             // Stop vllm
             let vllm_stop_fut = Python::with_gil(|py| {
                 let locals = TaskLocals::new(event_loop.bind(py).clone());
@@ -425,7 +425,7 @@ async fn run_vllm_worker(
             };
         }
         _ = vllm_fut => {
-            tracing::warn!("VllmV1Engine worker unexpected worker task completed");
+            tracing::warn!("VllmEngine worker unexpected worker task completed");
         }
     }
     Ok(())
