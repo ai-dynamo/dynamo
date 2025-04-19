@@ -145,7 +145,7 @@ class VllmWorker:
         else:
             self.disaggregated_router = None
 
-        self.lease = dynamo_context["lease"] if "lease" in dynamo_context else None
+        self.lease = dynamo_context.get("lease")
         logger.info("VllmWorker has been initialized")
 
     def shutdown_vllm_engine(self, signum, frame):
