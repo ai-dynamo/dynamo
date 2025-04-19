@@ -211,10 +211,10 @@ export DEPLOYMENT_NAME=llm-agg
 dynamo deployment create $DYNAMO_TAG --no-wait -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
 ```
 
-To delete an existing Dynamo deployment:
+To delete an existing Dynamo deployment, call `kubectl get dynamodeployments` to get the deployment name (it should be `$DEPLOYMENT_NAME-<suffix>`). You can then delete it by calling:
 
 ```bash
-kubectl delete dynamodeployment $DEPLOYMENT_NAME
+kubectl delete dynamodeployment $DEPLOYMENT_NAME-<suffix>
 ```
 
 4. **Test the deployment**
