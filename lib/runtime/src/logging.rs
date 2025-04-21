@@ -85,6 +85,12 @@ impl Default for LoggingConfig {
                 ("hyper_util".to_string(), "error".to_string()),
                 ("neli".to_string(), "error".to_string()),
                 ("async_nats".to_string(), "error".to_string()),
+                ("rustls".to_string(), "error".to_string()),
+                ("tokenizers".to_string(), "error".to_string()),
+                ("axum".to_string(), "error".to_string()),
+                ("tonic".to_string(), "error".to_string()),
+                ("mistralrs_core".to_string(), "error".to_string()),
+                ("hf_hub".to_string(), "error".to_string()),
             ]),
         }
     }
