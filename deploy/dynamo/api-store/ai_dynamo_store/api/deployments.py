@@ -13,7 +13,6 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-import os
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -27,7 +26,12 @@ from ..models.schemas import (
     create_default_cluster,
     create_default_user,
 )
-from .k8s import create_dynamo_deployment, get_dynamo_deployment, get_namespace, delete_dynamo_deployment
+from .k8s import (
+    create_dynamo_deployment,
+    get_dynamo_deployment,
+    get_namespace,
+    delete_dynamo_deployment,
+)
 
 router = APIRouter(prefix="/api/v2/deployments", tags=["deployments"])
 
@@ -124,7 +128,6 @@ async def create_deployment(deployment: CreateDeploymentSchema):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-
 @router.get("/{name}")
 def get_deployment(name: str) -> DeploymentFullSchema:
     try:
@@ -137,7 +140,7 @@ def get_deployment(name: str) -> DeploymentFullSchema:
             **cr,
             kube_namespace=kube_namespace,
             status=get_deployment_status(cr),
-            urls=get_urls(cr)
+            urls=get_urls(cr),
         )
         return deployment_schema
     except HTTPException as e:
@@ -147,7 +150,6 @@ def get_deployment(name: str) -> DeploymentFullSchema:
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
 
-    
 
 # function to look for a condition with type "Ready" in the status of the deployment
 # and return the "message" field
