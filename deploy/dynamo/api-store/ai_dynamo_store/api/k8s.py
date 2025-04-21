@@ -16,7 +16,7 @@
 from typing import Any, Dict, List, Optional
 import os
 from kubernetes import client, config
-
+from fastapi import HTTPException
 class K8sResource:
     def __init__(self, group: str, version: str, plural: str):
         self.group = group
@@ -105,6 +105,9 @@ def get_dynamo_deployment(name: str, namespace: str) -> Dict[str, Any]:
 
     Returns:
         Deployment  
+    
+    Raises:
+        HTTPException: If the deployment is not found or an error occurs
     """
     try:
         config.load_incluster_config()
@@ -112,16 +115,46 @@ def get_dynamo_deployment(name: str, namespace: str) -> Dict[str, Any]:
         config.load_kube_config()   
 
     api = client.CustomObjectsApi()
-    return api.get_namespaced_custom_object(
-        group=DynamoDeployment.group,
-        version=DynamoDeployment.version,
-        namespace=namespace,
-        plural=DynamoDeployment.plural,
-        name=name,
-    )
+    try:
+        return api.get_namespaced_custom_object(
+            group=DynamoDeployment.group,
+            version=DynamoDeployment.version,
+            namespace=namespace,
+            plural=DynamoDeployment.plural,
+            name=name,
+        )
+    except client.rest.ApiException as e:
+        if e.status == 404:
+            raise HTTPException(status_code=404, detail="Deployment not found")
+        else:
+            raise HTTPException(status_code=500, detail=str(e))
 
 def get_namespace() -> str:
     """
     Get the namespace from the environment variable.
     """
     return os.getenv("DEFAULT_KUBE_NAMESPACE", "dynamo")
+
+def delete_dynamo_deployment(name: str, namespace: str) -> Dict[str, Any]:
+    """
+    Delete a DynamoDeployment custom resource.
+    """
+    try:
+        config.load_incluster_config()
+    except config.config_exception.ConfigException:
+        config.load_kube_config()
+
+    api = client.CustomObjectsApi()
+    try:
+        return api.delete_namespaced_custom_object(
+            group=DynamoDeployment.group,
+            version=DynamoDeployment.version,
+            namespace=namespace,
+            plural=DynamoDeployment.plural,
+            name=name,
+        )
+    except client.rest.ApiException as e:
+        if e.status == 404:
+            raise HTTPException(status_code=404, detail="Deployment not found")
+        else:
+            raise HTTPException(status_code=500, detail=str(e))

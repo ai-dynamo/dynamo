@@ -27,7 +27,7 @@ from ..models.schemas import (
     create_default_cluster,
     create_default_user,
 )
-from .k8s import create_dynamo_deployment, get_dynamo_deployment, get_namespace
+from .k8s import create_dynamo_deployment, get_dynamo_deployment, get_namespace, delete_dynamo_deployment
 
 router = APIRouter(prefix="/api/v2/deployments", tags=["deployments"])
 
@@ -140,10 +140,13 @@ def get_deployment(name: str) -> DeploymentFullSchema:
             urls=get_urls(cr)
         )
         return deployment_schema
+    except HTTPException as e:
+        raise e
     except Exception as e:
         print("Error retrieving deployment:")
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
+
     
 
 # function to look for a condition with type "Ready" in the status of the deployment
@@ -162,3 +165,15 @@ def get_urls(resource: Dict[str, Any]) -> List[str]:
         if condition.get("type") == "IngressHostSet":
             urls.append(f"https://{condition.get('message')}")
     return urls
+
+@router.delete("/{name}")
+def delete_deployment(name: str) -> DeploymentFullSchema:
+    try:
+        kube_namespace = get_namespace()
+        delete_dynamo_deployment(name, kube_namespace)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print("Error deleting deployment:")
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
