@@ -20,8 +20,6 @@ global:
 dynamo-operator:
   natsAddr: "nats://${RELEASE_NAME}-nats:4222"
   etcdAddr: "${RELEASE_NAME}-etcd:2379"
-  istioVirtualServiceEnabled: false
-  ingressControllerClassName: ""
   namespaceRestriction:
     targetNamespace: ${NAMESPACE}
   controllerManager:
@@ -31,7 +29,14 @@ dynamo-operator:
         tag: ${IMAGE_TAG}
 
   dynamo:
-    dynamoIngressSuffix: ${DYNAMO_INGRESS_SUFFIX}
+    ingress:
+      enabled: false
+      className: nginx
+      tlsSecretName: my-tls-secret
+    istio:
+      enabled: false
+      gateway: istio-system/ingress-alb
+    hostSuffix: ${DYNAMO_INGRESS_SUFFIX}
     dockerRegistry:
       server: ${DOCKER_SERVER}
       username: ${DOCKER_USERNAME}

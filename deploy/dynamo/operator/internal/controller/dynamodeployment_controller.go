@@ -53,9 +53,13 @@ type etcdStorage interface {
 // DynamoDeploymentReconciler reconciles a DynamoDeployment object
 type DynamoDeploymentReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Config   commonController.Config
-	Recorder record.EventRecorder
+	Scheme                     *runtime.Scheme
+	Config                     commonController.Config
+	Recorder                   record.EventRecorder
+	VirtualServiceGateway      string
+	IngressControllerClassName string
+	IngressControllerTLSSecret string
+	IngressHostSuffix          string
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamodeployments,verbs=get;list;watch;create;update;patch;delete
@@ -127,7 +131,7 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	// generate the DynamoNimDeployments from the config
-	dynamoNimDeployments, err := nim.GenerateDynamoNIMDeployments(ctx, dynamoDeployment, dynamoNIMConfig)
+	dynamoNimDeployments, err := nim.GenerateDynamoNIMDeployments(ctx, dynamoDeployment, dynamoNIMConfig, r.generateDefaultIngressSpec(dynamoDeployment))
 	if err != nil {
 		reason = "failed_to_generate_the_DynamoNimDeployments"
 		return ctrl.Result{}, err
@@ -143,7 +147,7 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			}
 		}
 		if deployment.Spec.Ingress.Enabled {
-			dynamoDeployment.SetIngressStatus(getIngressHost(deployment.Spec.Ingress))
+			dynamoDeployment.SetIngressStatus((r.isIngressSecured()), getIngressHost(deployment.Spec.Ingress))
 		}
 	}
 
@@ -204,6 +208,22 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	return ctrl.Result{}, nil
 
+}
+
+func (r *DynamoDeploymentReconciler) generateDefaultIngressSpec(dynamoDeployment *nvidiacomv1alpha1.DynamoDeployment) *nvidiacomv1alpha1.IngressSpec {
+	return &nvidiacomv1alpha1.IngressSpec{
+		Enabled:                    r.VirtualServiceGateway != "" || r.IngressControllerClassName != "",
+		Host:                       dynamoDeployment.Name,
+		UseVirtualService:          r.VirtualServiceGateway != "",
+		VirtualServiceGateway:      &r.VirtualServiceGateway,
+		IngressControllerClassName: &r.IngressControllerClassName,
+		IngressControllerTLSSecret: &r.IngressControllerTLSSecret,
+		HostSuffix:                 &r.IngressHostSuffix,
+	}
+}
+
+func (r *DynamoDeploymentReconciler) isIngressSecured() bool {
+	return r.IngressControllerTLSSecret != ""
 }
 
 func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {

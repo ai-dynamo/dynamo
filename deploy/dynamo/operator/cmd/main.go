@@ -70,8 +70,10 @@ func main() {
 	var leaderElectionID string
 	var natsAddr string
 	var etcdAddr string
-	var istioVirtualServiceEnabled bool
+	var istioVirtualServiceGateway string
 	var ingressControllerClassName string
+	var ingressControllerTLSSecretName string
+	var ingressHostSuffix string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -87,10 +89,14 @@ func main() {
 		"Id to use for the leader election.")
 	flag.StringVar(&natsAddr, "natsAddr", "", "address of the NATS server")
 	flag.StringVar(&etcdAddr, "etcdAddr", "", "address of the etcd server")
-	flag.BoolVar(&istioVirtualServiceEnabled, "istio-virtual-service-enabled", false,
-		"If set, the istio virtual service will be enabled for the ingress")
+	flag.StringVar(&istioVirtualServiceGateway, "istio-virtual-service-gateway", "",
+		"The name of the istio virtual service gateway to use")
 	flag.StringVar(&ingressControllerClassName, "ingress-controller-class-name", "",
 		"The name of the ingress controller class to use")
+	flag.StringVar(&ingressControllerTLSSecretName, "ingress-controller-tls-secret-name", "",
+		"The name of the ingress controller TLS secret to use")
+	flag.StringVar(&ingressHostSuffix, "ingress-host-suffix", "",
+		"The suffix to use for the ingress host")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -171,15 +177,14 @@ func main() {
 		os.Exit(1)
 	}
 	if err = (&controller.DynamoNimDeploymentReconciler{
-		Client:                     mgr.GetClient(),
-		Scheme:                     mgr.GetScheme(),
-		Recorder:                   mgr.GetEventRecorderFor("yatai-deployment"),
-		Config:                     ctrlConfig,
-		NatsAddr:                   natsAddr,
-		EtcdAddr:                   etcdAddr,
-		EtcdStorage:                etcd.NewStorage(cli),
-		IstioVirtualServiceEnabled: istioVirtualServiceEnabled,
-		IngressControllerClassName: ingressControllerClassName,
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Recorder:          mgr.GetEventRecorderFor("yatai-deployment"),
+		Config:            ctrlConfig,
+		NatsAddr:          natsAddr,
+		EtcdAddr:          etcdAddr,
+		EtcdStorage:       etcd.NewStorage(cli),
+		UseVirtualService: istioVirtualServiceGateway != "",
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoNimDeployment")
 		os.Exit(1)
@@ -194,10 +199,14 @@ func main() {
 		os.Exit(1)
 	}
 	if err = (&controller.DynamoDeploymentReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("dynamodeployment"),
-		Config:   ctrlConfig,
+		Client:                     mgr.GetClient(),
+		Scheme:                     mgr.GetScheme(),
+		Recorder:                   mgr.GetEventRecorderFor("dynamodeployment"),
+		Config:                     ctrlConfig,
+		VirtualServiceGateway:      istioVirtualServiceGateway,
+		IngressControllerClassName: ingressControllerClassName,
+		IngressControllerTLSSecret: ingressControllerTLSSecretName,
+		IngressHostSuffix:          ingressHostSuffix,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoDeployment")
 		os.Exit(1)

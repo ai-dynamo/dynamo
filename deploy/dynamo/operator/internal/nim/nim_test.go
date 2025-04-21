@@ -31,6 +31,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 	type args struct {
 		parentDynamoDeployment *v1alpha1.DynamoDeployment
 		config                 *DynamoNIMConfig
+		ingressSpec            *v1alpha1.IngressSpec
 	}
 	tests := []struct {
 		name    string
@@ -85,6 +86,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						},
 					},
 				},
+				ingressSpec: &v1alpha1.IngressSpec{},
 			},
 			want: map[string]*v1alpha1.DynamoNimDeployment{
 				"service1": {
@@ -190,6 +192,10 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						},
 					},
 				},
+				ingressSpec: &v1alpha1.IngressSpec{
+					Enabled: true,
+					Host:    "test-dynamodeployment",
+				},
 			},
 			want: map[string]*v1alpha1.DynamoNimDeployment{
 				"service1": {
@@ -229,6 +235,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 							},
 							Ingress: v1alpha1.IngressSpec{
 								Enabled: true,
+								Host:    "test-dynamodeployment",
 							},
 						},
 					},
@@ -297,6 +304,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						},
 					},
 				},
+				ingressSpec: &v1alpha1.IngressSpec{},
 			},
 			want: map[string]*v1alpha1.DynamoNimDeployment{
 				"service1": {
@@ -334,9 +342,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 									DeploymentSelectorValue: "service2/dynamo-test-dynamodeployment",
 								},
 							},
-							Ingress: v1alpha1.IngressSpec{
-								Enabled: true,
-							},
+							Ingress: v1alpha1.IngressSpec{},
 						},
 					},
 				},
@@ -409,6 +415,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						},
 					},
 				},
+				ingressSpec: &v1alpha1.IngressSpec{},
 			},
 			wantErr: true,
 		},
@@ -416,7 +423,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
-			got, err := GenerateDynamoNIMDeployments(context.Background(), tt.args.parentDynamoDeployment, tt.args.config)
+			got, err := GenerateDynamoNIMDeployments(context.Background(), tt.args.parentDynamoDeployment, tt.args.config, tt.args.ingressSpec)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateDynamoNIMDeployments() error = %v, wantErr %v", err, tt.wantErr)
 				return

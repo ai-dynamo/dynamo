@@ -20,6 +20,8 @@
 package v1alpha1
 
 import (
+	"fmt"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -85,14 +87,18 @@ func (s *DynamoDeployment) SetSpec(spec any) {
 	s.Spec = spec.(DynamoDeploymentSpec)
 }
 
-func (s *DynamoDeployment) SetIngressStatus(ingressHost string) {
+func (s *DynamoDeployment) SetIngressStatus(isSecured bool, ingressHost string) {
 	if s.Status.Conditions == nil {
 		s.Status.Conditions = []metav1.Condition{}
+	}
+	protocol := "http"
+	if isSecured {
+		protocol = "https"
 	}
 	s.Status.Conditions = append(s.Status.Conditions, metav1.Condition{
 		Type:    "IngressHostSet",
 		Status:  metav1.ConditionTrue,
 		Reason:  "IngressEnabled",
-		Message: ingressHost,
+		Message: fmt.Sprintf("%s://%s", protocol, ingressHost),
 	})
 }

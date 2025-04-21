@@ -19,7 +19,6 @@ package controller
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -85,9 +84,9 @@ func getIngressHost(ingressSpec v1alpha1.IngressSpec) string {
 	if ingressSpec.HostPrefix != nil {
 		host = *ingressSpec.HostPrefix + host
 	}
-	ingressSuffix, found := os.LookupEnv("DYNAMO_INGRESS_SUFFIX")
-	if !found || ingressSuffix == "" {
-		ingressSuffix = DefaultIngressSuffix
+	ingressSuffix := DefaultIngressSuffix
+	if ingressSpec.HostSuffix != nil {
+		ingressSuffix = *ingressSpec.HostSuffix
 	}
 	return fmt.Sprintf("%s.%s", host, ingressSuffix)
 }

@@ -237,7 +237,7 @@ func TestDynamoNimDeploymentReconciler_FinalizeResource(t *testing.T) {
 func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
 	type fields struct {
 		IngressControllerClassName string
-		IstioVirtualServiceEnabled bool
+		IstioVirtualServiceGateway string
 	}
 	type args struct {
 		ctx context.Context
@@ -255,7 +255,7 @@ func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
 			name: "generate ingress",
 			fields: fields{
 				IngressControllerClassName: "nginx",
-				IstioVirtualServiceEnabled: false,
+				IstioVirtualServiceGateway: "istio-system/ingress-alb",
 			},
 			args: args{
 				ctx: context.Background(),
@@ -271,6 +271,7 @@ func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
 								DynamoNamespace: &[]string{"default"}[0],
 								Ingress: v1alpha1.IngressSpec{
 									Enabled: true,
+									Host:    "someservice",
 								},
 							},
 						},
@@ -286,7 +287,7 @@ func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
 					IngressClassName: &[]string{"nginx"}[0],
 					Rules: []networkingv1.IngressRule{
 						{
-							Host: "service1.local",
+							Host: "someservice.local",
 							IngressRuleValue: networkingv1.IngressRuleValue{
 								HTTP: &networkingv1.HTTPIngressRuleValue{
 									Paths: []networkingv1.HTTPIngressPath{
@@ -314,7 +315,7 @@ func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
 			name: "generate ingress, disabled",
 			fields: fields{
 				IngressControllerClassName: "nginx",
-				IstioVirtualServiceEnabled: false,
+				IstioVirtualServiceGateway: "",
 			},
 			args: args{
 				ctx: context.Background(),
@@ -351,7 +352,7 @@ func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 			r := &DynamoNimDeploymentReconciler{
 				IngressControllerClassName: tt.fields.IngressControllerClassName,
-				IstioVirtualServiceEnabled: tt.fields.IstioVirtualServiceEnabled,
+				IstioVirtualServiceGateway: tt.fields.IstioVirtualServiceGateway,
 			}
 			got, got1, err := r.generateIngress(tt.args.ctx, tt.args.opt)
 			if (err != nil) != tt.wantErr {
@@ -367,7 +368,7 @@ func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
 func TestDynamoNimDeploymentReconciler_generateVirtualService(t *testing.T) {
 	type fields struct {
 		IngressControllerClassName string
-		IstioVirtualServiceEnabled bool
+		IstioVirtualServiceGateway string
 	}
 	type args struct {
 		ctx context.Context
@@ -385,7 +386,7 @@ func TestDynamoNimDeploymentReconciler_generateVirtualService(t *testing.T) {
 			name: "generate virtual service, disabled in operator config",
 			fields: fields{
 				IngressControllerClassName: "",
-				IstioVirtualServiceEnabled: false,
+				IstioVirtualServiceGateway: "",
 			},
 			args: args{
 				ctx: context.Background(),
@@ -420,7 +421,7 @@ func TestDynamoNimDeploymentReconciler_generateVirtualService(t *testing.T) {
 			name: "generate virtual service, enabled in operator config",
 			fields: fields{
 				IngressControllerClassName: "",
-				IstioVirtualServiceEnabled: true,
+				IstioVirtualServiceGateway: "istio-system/ingress-alb",
 			},
 			args: args{
 				ctx: context.Background(),
@@ -436,6 +437,7 @@ func TestDynamoNimDeploymentReconciler_generateVirtualService(t *testing.T) {
 								DynamoNamespace: &[]string{"default"}[0],
 								Ingress: v1alpha1.IngressSpec{
 									Enabled: true,
+									Host:    "someservice",
 								},
 							},
 						},
@@ -448,7 +450,7 @@ func TestDynamoNimDeploymentReconciler_generateVirtualService(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: istioNetworking.VirtualService{
-					Hosts:    []string{"service1.local"},
+					Hosts:    []string{"someservice.local"},
 					Gateways: []string{"istio-system/ingress-alb"},
 					Http: []*istioNetworking.HTTPRoute{
 						{
@@ -482,7 +484,7 @@ func TestDynamoNimDeploymentReconciler_generateVirtualService(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 			r := &DynamoNimDeploymentReconciler{
 				IngressControllerClassName: tt.fields.IngressControllerClassName,
-				IstioVirtualServiceEnabled: tt.fields.IstioVirtualServiceEnabled,
+				IstioVirtualServiceGateway: tt.fields.IstioVirtualServiceGateway,
 			}
 			got, got1, err := r.generateVirtualService(tt.args.ctx, tt.args.opt)
 			if (err != nil) != tt.wantErr {
