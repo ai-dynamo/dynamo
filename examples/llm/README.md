@@ -210,10 +210,10 @@ export DEPLOYMENT_NAME=llm-agg
 dynamo deployment create $DYNAMO_TAG --no-wait -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
 ```
 
-To delete an existing Dynamo deployment, call `kubectl get dynamodeployments` to get the deployment name (it should be `$DEPLOYMENT_NAME-<suffix>`). You can then delete it by calling:
+To delete an existing Dynamo deployment:
 
 ```bash
-kubectl delete dynamodeployment $DEPLOYMENT_NAME-<suffix>
+kubectl delete dynamodeployment $DEPLOYMENT_NAME
 ```
 
 4. **Test the deployment**
@@ -227,7 +227,7 @@ Find your frontend pod using one of these methods:
 kubectl get pods -n ${KUBE_NS} | grep frontend | cat
 
 # Method 2: Use a label selector to find the frontend pod automatically
-export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-.*-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
+export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
 
 # Forward the pod's port to localhost
 kubectl port-forward pod/$FRONTEND_POD 8000:8000 -n ${KUBE_NS}
