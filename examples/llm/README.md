@@ -184,8 +184,7 @@ You must have first followed the instructions in [deploy/dynamo/helm/README.md](
 ```bash
 export PROJECT_ROOT=$(pwd)
 export KUBE_NS=dynamo-cloud  # Note: This must match the Kubernetes namespace where you installed Dynamo Cloud
-export DYNAMO_INGRESS_SUFFIX=dynamo-cloud.com # Note: this must match the ingress suffix from the cloud platform deploy
-export DYNAMO_CLOUD=https://${KUBE_NS}.${DYNAMO_INGRESS_SUFFIX} # Externally accessible endpoint to the `dynamo-store` service within your Dynamo Cloud installation
+export DYNAMO_CLOUD=https://${KUBE_NS}.dev.aire.nvidia.com # Externally accessible endpoint to the `dynamo-store` service within your Dynamo Cloud installation
 dynamo cloud login --api-token TEST-TOKEN --endpoint $DYNAMO_CLOUD
 ```
 
