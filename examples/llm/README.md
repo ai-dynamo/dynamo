@@ -221,12 +221,19 @@ kubectl delete dynamodeployment $DEPLOYMENT_NAME-<suffix>
 
 Once you create the Dynamo deployment, a pod prefixed with `yatai-dynamonim-image-builder` will begin running. Once it finishes running, pods will be created using the image that was built. Once the pods prefixed with `$DEPLOYMENT_NAME` are up and running, you can test out your example!
 
+Find your frontend service. It should be prefixed with `${DEPLOYMENT_NAME}` and have `frontend` in the name.
+
 ```bash
+kubectl get pods -n ${KUBE_NS}
+
+# Find the pod with format ${DEPLOYMENT_NAME}-...-frontend-...
+export FRONTEND_POD=${DEPLOYMENT_NAME}-...-frontend-... # Copy this from the pod list!
+
 # Forward the service port to localhost
-kubectl port-forward svc/${DEPLOYMENT_NAME}-frontend 3000:3000 -n ${KUBE_NS}
+kubectl port-forward pod/FRONTEND_POD 8000:8000 -n ${KUBE_NS}
 
 # Test the API endpoint
-curl localhost:3000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "messages": [
     {
