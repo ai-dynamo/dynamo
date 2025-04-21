@@ -65,7 +65,7 @@ def test_get_urls():
             "conditions": [
                 {
                     "type": "IngressHostSet",
-                    "message": "example.com"
+                    "message": "https://example.com"
                 }
             ]
         }
