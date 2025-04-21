@@ -28,9 +28,9 @@ from ..models.schemas import (
 )
 from .k8s import (
     create_dynamo_deployment,
+    delete_dynamo_deployment,
     get_dynamo_deployment,
     get_namespace,
-    delete_dynamo_deployment,
 )
 
 router = APIRouter(prefix="/api/v2/deployments", tags=["deployments"])
@@ -165,8 +165,9 @@ def get_urls(resource: Dict[str, Any]) -> List[str]:
     urls = []
     for condition in resource.get("status", {}).get("conditions", []):
         if condition.get("type") == "IngressHostSet":
-            urls.append(condition.get('message'))
+            urls.append(condition.get("message"))
     return urls
+
 
 @router.delete("/{name}")
 def delete_deployment(name: str) -> DeploymentFullSchema:

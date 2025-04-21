@@ -15,6 +15,7 @@
 
 import os
 from typing import Any, Dict, List, Optional
+
 from fastapi import HTTPException
 from kubernetes import client, config
 
@@ -31,8 +32,6 @@ DynamoDeployment = K8sResource(
     version="v1alpha1",
     plural="dynamodeployments",
 )
-
-
 
 
 def create_custom_resource(
