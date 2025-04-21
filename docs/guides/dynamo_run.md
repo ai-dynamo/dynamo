@@ -398,6 +398,13 @@ The `echo_core` engine accepts pre-processed requests and echoes the tokens back
 dynamo-run in=http out=echo_core --model-path <hf-repo-checkout>
 ```
 
+Note that to use it with `in=http` you need to tell the post processor to ignore stop tokens from the template by adding `nvext.ignore_eos` like this:
+```
+curl -N -d '{"nvext": {"ignore_eos": true}, "stream": true, "model": "Qwen2.5-3B-Instruct", "max_completion_tokens": 4096, "messages":[{"role":"user", "content": "Tell me a story" }]}' ...
+```
+
+The default `in=text` sets that for you.
+
 #### echo_full
 
 The `echo_full` engine accepts un-processed requests and echoes the prompt back as the response.
