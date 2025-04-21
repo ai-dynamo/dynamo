@@ -236,8 +236,6 @@ func TestDynamoNimDeploymentReconciler_FinalizeResource(t *testing.T) {
 
 func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
 	type fields struct {
-		IngressControllerClassName string
-		IstioVirtualServiceGateway string
 	}
 	type args struct {
 		ctx context.Context
@@ -252,11 +250,8 @@ func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "generate ingress",
-			fields: fields{
-				IngressControllerClassName: "nginx",
-				IstioVirtualServiceGateway: "istio-system/ingress-alb",
-			},
+			name:   "generate ingress",
+			fields: fields{},
 			args: args{
 				ctx: context.Background(),
 				opt: generateResourceOption{
@@ -270,8 +265,10 @@ func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
 								ServiceName:     "service1",
 								DynamoNamespace: &[]string{"default"}[0],
 								Ingress: v1alpha1.IngressSpec{
-									Enabled: true,
-									Host:    "someservice",
+									Enabled:                    true,
+									Host:                       "someservice",
+									IngressControllerClassName: &[]string{"nginx"}[0],
+									UseVirtualService:          false,
 								},
 							},
 						},
@@ -312,11 +309,8 @@ func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "generate ingress, disabled",
-			fields: fields{
-				IngressControllerClassName: "nginx",
-				IstioVirtualServiceGateway: "",
-			},
+			name:   "generate ingress, disabled",
+			fields: fields{},
 			args: args{
 				ctx: context.Background(),
 				opt: generateResourceOption{
@@ -350,10 +344,7 @@ func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
-			r := &DynamoNimDeploymentReconciler{
-				IngressControllerClassName: tt.fields.IngressControllerClassName,
-				IstioVirtualServiceGateway: tt.fields.IstioVirtualServiceGateway,
-			}
+			r := &DynamoNimDeploymentReconciler{}
 			got, got1, err := r.generateIngress(tt.args.ctx, tt.args.opt)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("DynamoNimDeploymentReconciler.generateIngress() error = %v, wantErr %v", err, tt.wantErr)
@@ -367,8 +358,6 @@ func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
 
 func TestDynamoNimDeploymentReconciler_generateVirtualService(t *testing.T) {
 	type fields struct {
-		IngressControllerClassName string
-		IstioVirtualServiceGateway string
 	}
 	type args struct {
 		ctx context.Context
@@ -383,11 +372,8 @@ func TestDynamoNimDeploymentReconciler_generateVirtualService(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "generate virtual service, disabled in operator config",
-			fields: fields{
-				IngressControllerClassName: "",
-				IstioVirtualServiceGateway: "",
-			},
+			name:   "generate virtual service, disabled in operator config",
+			fields: fields{},
 			args: args{
 				ctx: context.Background(),
 				opt: generateResourceOption{
@@ -418,11 +404,8 @@ func TestDynamoNimDeploymentReconciler_generateVirtualService(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "generate virtual service, enabled in operator config",
-			fields: fields{
-				IngressControllerClassName: "",
-				IstioVirtualServiceGateway: "istio-system/ingress-alb",
-			},
+			name:   "generate virtual service, enabled in operator config",
+			fields: fields{},
 			args: args{
 				ctx: context.Background(),
 				opt: generateResourceOption{
@@ -436,8 +419,10 @@ func TestDynamoNimDeploymentReconciler_generateVirtualService(t *testing.T) {
 								ServiceName:     "service1",
 								DynamoNamespace: &[]string{"default"}[0],
 								Ingress: v1alpha1.IngressSpec{
-									Enabled: true,
-									Host:    "someservice",
+									Enabled:               true,
+									Host:                  "someservice",
+									UseVirtualService:     true,
+									VirtualServiceGateway: &[]string{"istio-system/ingress-alb"}[0],
 								},
 							},
 						},
@@ -482,10 +467,7 @@ func TestDynamoNimDeploymentReconciler_generateVirtualService(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
-			r := &DynamoNimDeploymentReconciler{
-				IngressControllerClassName: tt.fields.IngressControllerClassName,
-				IstioVirtualServiceGateway: tt.fields.IstioVirtualServiceGateway,
-			}
+			r := &DynamoNimDeploymentReconciler{}
 			got, got1, err := r.generateVirtualService(tt.args.ctx, tt.args.opt)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("DynamoNimDeploymentReconciler.generateVirtualService() error = %v, wantErr %v", err, tt.wantErr)
