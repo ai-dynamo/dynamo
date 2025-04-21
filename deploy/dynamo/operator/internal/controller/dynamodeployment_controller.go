@@ -142,6 +142,9 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				return ctrl.Result{}, err
 			}
 		}
+		if deployment.Spec.Ingress.Enabled {
+			dynamoDeployment.SetIngressStatus(getIngressHost(deployment.Spec.Ingress))
+		}
 	}
 
 	// Set common env vars on each of the dynamoNimDeployments

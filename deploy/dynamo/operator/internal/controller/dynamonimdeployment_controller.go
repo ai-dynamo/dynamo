@@ -827,7 +827,7 @@ func (r *DynamoNimDeploymentReconciler) generateIngress(ctx context.Context, opt
 		IngressClassName: &r.IngressControllerClassName,
 		Rules: []networkingv1.IngressRule{
 			{
-				Host: getIngressHost(opt.dynamoNimDeployment),
+				Host: getIngressHost(opt.dynamoNimDeployment.Spec.Ingress),
 				IngressRuleValue: networkingv1.IngressRuleValue{
 					HTTP: &networkingv1.HTTPIngressRuleValue{
 						Paths: []networkingv1.HTTPIngressPath{
@@ -872,7 +872,7 @@ func (r *DynamoNimDeploymentReconciler) generateVirtualService(ctx context.Conte
 
 	vs.Spec = istioNetworking.VirtualService{
 		Hosts: []string{
-			getIngressHost(opt.dynamoNimDeployment),
+			getIngressHost(opt.dynamoNimDeployment.Spec.Ingress),
 		},
 		Gateways: []string{"istio-system/ingress-alb"},
 		Http: []*istioNetworking.HTTPRoute{
@@ -1056,18 +1056,6 @@ type generateResourceOption struct {
 	containsStealingTrafficDebugModeEnabled bool
 	isDebugPodReceiveProductionTraffic      bool
 	isGenericService                        bool
-}
-
-func getIngressHost(dynamoNimDeployment *v1alpha1.DynamoNimDeployment) string {
-	vsName := dynamoNimDeployment.Name
-	if dynamoNimDeployment.Spec.Ingress.HostPrefix != nil {
-		vsName = *dynamoNimDeployment.Spec.Ingress.HostPrefix + vsName
-	}
-	ingressSuffix, found := os.LookupEnv("DYNAMO_INGRESS_SUFFIX")
-	if !found || ingressSuffix == "" {
-		ingressSuffix = DefaultIngressSuffix
-	}
-	return fmt.Sprintf("%s.%s", vsName, ingressSuffix)
 }
 
 func (r *DynamoNimDeploymentReconciler) generateHPA(ctx context.Context, opt generateResourceOption) (*autoscalingv2.HorizontalPodAutoscaler, bool, error) {

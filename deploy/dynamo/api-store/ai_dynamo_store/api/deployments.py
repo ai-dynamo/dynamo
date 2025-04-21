@@ -16,7 +16,7 @@
 import os
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 
@@ -27,7 +27,7 @@ from ..models.schemas import (
     create_default_cluster,
     create_default_user,
 )
-from .k8s import create_dynamo_deployment
+from .k8s import create_dynamo_deployment, get_dynamo_deployment, get_namespace
 
 router = APIRouter(prefix="/api/v2/deployments", tags=["deployments"])
 
@@ -75,7 +75,7 @@ async def create_deployment(deployment: CreateDeploymentSchema):
         ownership = {"organization_id": "default-org", "user_id": "default-user"}
 
         # Get the k8s namespace from environment variable
-        kube_namespace = os.getenv("DEFAULT_KUBE_NAMESPACE", "dynamo")
+        kube_namespace = get_namespace()
 
         # Generate deployment name
         deployment_name = sanitize_deployment_name(deployment.name, deployment.bento)
@@ -114,7 +114,6 @@ async def create_deployment(deployment: CreateDeploymentSchema):
             cluster=cluster,
             latest_revision=None,
             manifest=None,
-            urls=[f"https://{created_crd['metadata']['name']}.dynamo.example.com"],
         )
 
         return deployment_schema
@@ -123,3 +122,43 @@ async def create_deployment(deployment: CreateDeploymentSchema):
         print("Error creating deployment:")
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+@router.get("/{name}")
+def get_deployment(name: str) -> DeploymentFullSchema:
+    try:
+        kube_namespace = get_namespace()
+        cr = get_dynamo_deployment(
+            name=name,
+            namespace=kube_namespace,
+        )
+        deployment_schema = DeploymentFullSchema(
+            **cr,
+            kube_namespace=kube_namespace,
+            status=get_deployment_status(cr),
+            urls=get_urls(cr)
+        )
+        return deployment_schema
+    except Exception as e:
+        print("Error retrieving deployment:")
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
+# function to look for a condition with type "Ready" in the status of the deployment
+# and return the "message" field
+def get_deployment_status(resource: Dict[str, Any]) -> str:
+    # look for a condition with type "Ready" in the status of the deployment
+    for condition in resource.get("status", {}).get("conditions", []):
+        if condition.get("type") == "Ready":
+            return condition.get("message", "unknown")
+    return "unknown"
+
+
+def get_urls(resource: Dict[str, Any]) -> List[str]:
+    urls = []
+    for condition in resource.get("status", {}).get("conditions", []):
+        if condition.get("type") == "IngressHostSet":
+            urls.append(f"https://{condition.get('message')}")
+    return urls

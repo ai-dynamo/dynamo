@@ -84,3 +84,15 @@ func (s *DynamoDeployment) GetSpec() any {
 func (s *DynamoDeployment) SetSpec(spec any) {
 	s.Spec = spec.(DynamoDeploymentSpec)
 }
+
+func (s *DynamoDeployment) SetIngressStatus(ingressHost string) {
+	if s.Status.Conditions == nil {
+		s.Status.Conditions = []metav1.Condition{}
+	}
+	s.Status.Conditions = append(s.Status.Conditions, metav1.Condition{
+		Type:    "IngressHostSet",
+		Status:  metav1.ConditionTrue,
+		Reason:  "IngressEnabled",
+		Message: ingressHost,
+	})
+}

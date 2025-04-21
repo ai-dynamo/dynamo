@@ -97,6 +97,7 @@ type IngressTLSSpec struct {
 
 type IngressSpec struct {
 	Enabled           bool              `json:"enabled,omitempty"`
+	Host              string            `json:"host,omitempty"`
 	UseVirtualService *bool             `json:"useVirtualService,omitempty"`
 	HostPrefix        *string           `json:"hostPrefix,omitempty"`
 	Annotations       map[string]string `json:"annotations,omitempty"`

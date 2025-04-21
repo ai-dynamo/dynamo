@@ -1693,6 +1693,8 @@ spec:
                     type: object
                   enabled:
                     type: boolean
+                  host:
+                    type: string
                   hostPrefix:
                     type: string
                   labels:

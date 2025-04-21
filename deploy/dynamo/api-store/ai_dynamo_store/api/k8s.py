@@ -14,8 +14,22 @@
 #  limitations under the License.
 
 from typing import Any, Dict, List, Optional
-
+import os
 from kubernetes import client, config
+
+class K8sResource:
+    def __init__(self, group: str, version: str, plural: str):
+        self.group = group
+        self.version = version
+        self.plural = plural
+
+DynamoDeployment = K8sResource(
+    group="nvidia.com",
+    version="v1alpha1",
+    plural="dynamodeployments",
+)
+
+
 
 
 def create_custom_resource(
@@ -73,9 +87,41 @@ def create_dynamo_deployment(
     }
 
     return create_custom_resource(
-        group="nvidia.com",
-        version="v1alpha1",
+        group=DynamoDeployment.group,
+        version=DynamoDeployment.version,
         namespace=namespace,
-        plural="dynamodeployments",
+        plural=DynamoDeployment.plural,
         body=body,
     )
+
+
+def get_dynamo_deployment(name: str, namespace: str) -> Dict[str, Any]:
+    """
+    Get a DynamoDeployment custom resource.
+
+    Args:
+        name: Deployment name
+        namespace: Target namespace
+
+    Returns:
+        Deployment  
+    """
+    try:
+        config.load_incluster_config()
+    except config.config_exception.ConfigException:
+        config.load_kube_config()   
+
+    api = client.CustomObjectsApi()
+    return api.get_namespaced_custom_object(
+        group=DynamoDeployment.group,
+        version=DynamoDeployment.version,
+        namespace=namespace,
+        plural=DynamoDeployment.plural,
+        name=name,
+    )
+
+def get_namespace() -> str:
+    """
+    Get the namespace from the environment variable.
+    """
+    return os.getenv("DEFAULT_KUBE_NAMESPACE", "dynamo")

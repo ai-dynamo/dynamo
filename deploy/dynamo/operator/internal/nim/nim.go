@@ -256,6 +256,7 @@ func GenerateDynamoNIMDeployments(ctx context.Context, parentDynamoDeployment *v
 			if config.EntryService == service.Name {
 				// enable virtual service for the entry service
 				deployment.Spec.Ingress.Enabled = true
+				deployment.Spec.Ingress.Host = parentDynamoDeployment.Name
 			}
 		}
 		if service.Config.Resources != nil {
