@@ -1748,7 +1748,13 @@ spec:
                           type: object
                         enabled:
                           type: boolean
+                        host:
+                          type: string
                         hostPrefix:
+                          type: string
+                        hostSuffix:
+                          type: string
+                        ingressControllerClassName:
                           type: string
                         labels:
                           additionalProperties:
@@ -1761,6 +1767,8 @@ spec:
                           type: object
                         useVirtualService:
                           type: boolean
+                        virtualServiceGateway:
+                          type: string
                       type: object
                     labels:
                       additionalProperties:

@@ -233,7 +233,7 @@ func GetDynamoNIMConfig(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDe
 }
 
 // generate DynamoNIMDeployment from config
-func GenerateDynamoNIMDeployments(ctx context.Context, parentDynamoDeployment *v1alpha1.DynamoDeployment, config *DynamoNIMConfig) (map[string]*v1alpha1.DynamoNimDeployment, error) {
+func GenerateDynamoNIMDeployments(ctx context.Context, parentDynamoDeployment *v1alpha1.DynamoDeployment, config *DynamoNIMConfig, ingressSpec *v1alpha1.IngressSpec) (map[string]*v1alpha1.DynamoNimDeployment, error) {
 	dynamoServices := make(map[string]string)
 	deployments := make(map[string]*v1alpha1.DynamoNimDeployment)
 	for _, service := range config.Services {
@@ -255,7 +255,7 @@ func GenerateDynamoNIMDeployments(ctx context.Context, parentDynamoDeployment *v
 			// dynamo is not enabled
 			if config.EntryService == service.Name {
 				// enable virtual service for the entry service
-				deployment.Spec.Ingress.Enabled = true
+				deployment.Spec.Ingress = *ingressSpec
 			}
 		}
 		if service.Config.Resources != nil {

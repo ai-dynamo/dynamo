@@ -86,10 +86,30 @@ export DEPLOYMENT_NAME=hello-world
 dynamo deployment create $DYNAMO_TAG --no-wait -n $DEPLOYMENT_NAME
 ```
 
-To delete an existing deployment:
+#### Managing Deployments
+
+Once you have deployments running, you can manage them using the following commands:
+
+To see a list of all deployments in your namespace:
+
 ```bash
-kubectl delete dynamodeployment $DEPLOYMENT_NAME
+dynamo deployment list
 ```
+This command displays a table of all deployments.
+
+To get detailed information about a specific deployment:
+
+```bash
+dynamo deployment get $DEPLOYMENT_NAME
+```
+
+To remove a deployment and all its associated resources:
+
+```bash
+dynamo deployment delete $DEPLOYMENT_NAME
+```
+> [!WARNING]
+> This command will permanently delete the deployment and all associated resources. Make sure you have any necessary backups before proceeding.
 
 ### 4. Test the Deployment
 

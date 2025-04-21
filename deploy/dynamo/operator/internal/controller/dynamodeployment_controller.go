@@ -53,9 +53,13 @@ type etcdStorage interface {
 // DynamoDeploymentReconciler reconciles a DynamoDeployment object
 type DynamoDeploymentReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Config   commonController.Config
-	Recorder record.EventRecorder
+	Scheme                     *runtime.Scheme
+	Config                     commonController.Config
+	Recorder                   record.EventRecorder
+	VirtualServiceGateway      string
+	IngressControllerClassName string
+	IngressControllerTLSSecret string
+	IngressHostSuffix          string
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamodeployments,verbs=get;list;watch;create;update;patch;delete
@@ -94,15 +98,13 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			message = err.Error()
 		}
 		// update the CRD status condition
-		dynamoDeployment.Status.Conditions = []metav1.Condition{
-			{
-				Type:               "Ready",
-				Status:             readyStatus,
-				Reason:             reason,
-				Message:            message,
-				LastTransitionTime: metav1.Now(),
-			},
-		}
+		dynamoDeployment.AddStatusCondition(metav1.Condition{
+			Type:               "Ready",
+			Status:             readyStatus,
+			Reason:             reason,
+			Message:            message,
+			LastTransitionTime: metav1.Now(),
+		})
 		err = r.Status().Update(ctx, dynamoDeployment)
 		if err != nil {
 			logger.Error(err, "Unable to update the CRD status", "crd", req.NamespacedName)
@@ -127,7 +129,7 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	// generate the DynamoNimDeployments from the config
-	dynamoNimDeployments, err := nim.GenerateDynamoNIMDeployments(ctx, dynamoDeployment, dynamoNIMConfig)
+	dynamoNimDeployments, err := nim.GenerateDynamoNIMDeployments(ctx, dynamoDeployment, dynamoNIMConfig, r.generateDefaultIngressSpec(dynamoDeployment))
 	if err != nil {
 		reason = "failed_to_generate_the_DynamoNimDeployments"
 		return ctrl.Result{}, err
@@ -141,6 +143,9 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				reason = "failed_to_merge_the_DynamoNimDeployments"
 				return ctrl.Result{}, err
 			}
+		}
+		if deployment.Spec.Ingress.Enabled {
+			dynamoDeployment.SetEndpointStatus((r.isEndpointSecured()), getIngressHost(deployment.Spec.Ingress))
 		}
 	}
 
@@ -201,6 +206,33 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	return ctrl.Result{}, nil
 
+}
+
+func (r *DynamoDeploymentReconciler) generateDefaultIngressSpec(dynamoDeployment *nvidiacomv1alpha1.DynamoDeployment) *nvidiacomv1alpha1.IngressSpec {
+	res := &nvidiacomv1alpha1.IngressSpec{
+		Enabled:           r.VirtualServiceGateway != "" || r.IngressControllerClassName != "",
+		Host:              dynamoDeployment.Name,
+		UseVirtualService: r.VirtualServiceGateway != "",
+	}
+	if r.IngressControllerClassName != "" {
+		res.IngressControllerClassName = &r.IngressControllerClassName
+	}
+	if r.IngressControllerTLSSecret != "" {
+		res.TLS = &nvidiacomv1alpha1.IngressTLSSpec{
+			SecretName: r.IngressControllerTLSSecret,
+		}
+	}
+	if r.IngressHostSuffix != "" {
+		res.HostSuffix = &r.IngressHostSuffix
+	}
+	if r.VirtualServiceGateway != "" {
+		res.VirtualServiceGateway = &r.VirtualServiceGateway
+	}
+	return res
+}
+
+func (r *DynamoDeploymentReconciler) isEndpointSecured() bool {
+	return r.IngressControllerTLSSecret != ""
 }
 
 func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {

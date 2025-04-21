@@ -13,9 +13,25 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
+import os
 from typing import Any, Dict, List, Optional
 
+from fastapi import HTTPException
 from kubernetes import client, config
+
+
+class K8sResource:
+    def __init__(self, group: str, version: str, plural: str):
+        self.group = group
+        self.version = version
+        self.plural = plural
+
+
+DynamoDeployment = K8sResource(
+    group="nvidia.com",
+    version="v1alpha1",
+    plural="dynamodeployments",
+)
 
 
 def create_custom_resource(
@@ -73,9 +89,112 @@ def create_dynamo_deployment(
     }
 
     return create_custom_resource(
-        group="nvidia.com",
-        version="v1alpha1",
+        group=DynamoDeployment.group,
+        version=DynamoDeployment.version,
         namespace=namespace,
-        plural="dynamodeployments",
+        plural=DynamoDeployment.plural,
         body=body,
     )
+
+
+def get_dynamo_deployment(name: str, namespace: str) -> Dict[str, Any]:
+    """
+    Get a DynamoDeployment custom resource.
+
+    Args:
+        name: Deployment name
+        namespace: Target namespace
+
+    Returns:
+        Deployment
+
+    Raises:
+        HTTPException: If the deployment is not found or an error occurs
+    """
+    try:
+        config.load_incluster_config()
+    except config.config_exception.ConfigException:
+        config.load_kube_config()
+
+    api = client.CustomObjectsApi()
+    try:
+        return api.get_namespaced_custom_object(
+            group=DynamoDeployment.group,
+            version=DynamoDeployment.version,
+            namespace=namespace,
+            plural=DynamoDeployment.plural,
+            name=name,
+        )
+    except client.rest.ApiException as e:
+        if e.status == 404:
+            raise HTTPException(status_code=404, detail="Deployment not found")
+        else:
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+def get_namespace() -> str:
+    """
+    Get the namespace from the environment variable.
+    """
+    return os.getenv("DEFAULT_KUBE_NAMESPACE", "dynamo")
+
+
+def delete_dynamo_deployment(name: str, namespace: str) -> Dict[str, Any]:
+    """
+    Delete a DynamoDeployment custom resource.
+    """
+    try:
+        config.load_incluster_config()
+    except config.config_exception.ConfigException:
+        config.load_kube_config()
+
+    api = client.CustomObjectsApi()
+    try:
+        return api.delete_namespaced_custom_object(
+            group=DynamoDeployment.group,
+            version=DynamoDeployment.version,
+            namespace=namespace,
+            plural=DynamoDeployment.plural,
+            name=name,
+        )
+    except client.rest.ApiException as e:
+        if e.status == 404:
+            raise HTTPException(status_code=404, detail="Deployment not found")
+        else:
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+def list_dynamo_deployments(
+    namespace: str,
+    label_selector: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    List DynamoDeployment custom resources.
+
+    Args:
+        namespace: Target namespace
+        label_selector: Optional label selector for filtering
+
+    Returns:
+        List of deployments
+
+    Raises:
+        HTTPException: If an error occurs during listing
+    """
+    try:
+        config.load_incluster_config()
+    except config.config_exception.ConfigException:
+        config.load_kube_config()
+
+    api = client.CustomObjectsApi()
+    try:
+        response = api.list_namespaced_custom_object(
+            group=DynamoDeployment.group,
+            version=DynamoDeployment.version,
+            namespace=namespace,
+            plural=DynamoDeployment.plural,
+            label_selector=label_selector,
+        )
+        return response["items"]
+    except client.rest.ApiException as e:
+        raise HTTPException(status_code=500, detail=str(e))

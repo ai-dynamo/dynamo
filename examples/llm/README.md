@@ -210,12 +210,6 @@ export DEPLOYMENT_NAME=llm-agg
 dynamo deployment create $DYNAMO_TAG --no-wait -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
 ```
 
-To delete an existing Dynamo deployment:
-
-```bash
-kubectl delete dynamodeployment $DEPLOYMENT_NAME
-```
-
 4. **Test the deployment**
 
 Once you create the Dynamo deployment, a pod prefixed with `yatai-dynamonim-image-builder` will begin running. Once it finishes running, pods will be created using the image that was built. Once the pods prefixed with `$DEPLOYMENT_NAME` are up and running, you can test out your example!

@@ -20,6 +20,8 @@
 package v1alpha1
 
 import (
+	"fmt"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -83,4 +85,34 @@ func (s *DynamoDeployment) GetSpec() any {
 
 func (s *DynamoDeployment) SetSpec(spec any) {
 	s.Spec = spec.(DynamoDeploymentSpec)
+}
+
+func (s *DynamoDeployment) SetEndpointStatus(isSecured bool, endpointHost string) {
+	protocol := "http"
+	if isSecured {
+		protocol = "https"
+	}
+	s.AddStatusCondition(metav1.Condition{
+		Type:               "EndpointExposed",
+		Status:             metav1.ConditionTrue,
+		Reason:             "EndpointExposed",
+		Message:            fmt.Sprintf("%s://%s", protocol, endpointHost),
+		LastTransitionTime: metav1.Now(),
+	})
+}
+
+func (s *DynamoDeployment) AddStatusCondition(condition metav1.Condition) {
+	if s.Status.Conditions == nil {
+		s.Status.Conditions = []metav1.Condition{}
+	}
+	// Check if condition with same type already exists
+	for i, existingCondition := range s.Status.Conditions {
+		if existingCondition.Type == condition.Type {
+			// Replace the existing condition
+			s.Status.Conditions[i] = condition
+			return
+		}
+	}
+	// If no matching condition found, append the new one
+	s.Status.Conditions = append(s.Status.Conditions, condition)
 }

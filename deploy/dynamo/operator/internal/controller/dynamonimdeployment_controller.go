@@ -93,14 +93,13 @@ var ServicePortHTTPNonProxy = commonconsts.BentoServicePort + 1
 // DynamoNimDeploymentReconciler reconciles a DynamoNimDeployment object
 type DynamoNimDeploymentReconciler struct {
 	client.Client
-	Scheme                     *runtime.Scheme
-	Recorder                   record.EventRecorder
-	Config                     controller_common.Config
-	NatsAddr                   string
-	EtcdAddr                   string
-	EtcdStorage                etcdStorage
-	IngressControllerClassName string
-	IstioVirtualServiceEnabled bool
+	Scheme            *runtime.Scheme
+	Recorder          record.EventRecorder
+	Config            controller_common.Config
+	NatsAddr          string
+	EtcdAddr          string
+	EtcdStorage       etcdStorage
+	UseVirtualService bool
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamonimdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -818,16 +817,17 @@ func (r *DynamoNimDeploymentReconciler) generateIngress(ctx context.Context, opt
 		},
 	}
 
-	if !opt.dynamoNimDeployment.Spec.Ingress.Enabled || r.IngressControllerClassName == "" {
+	if !opt.dynamoNimDeployment.Spec.Ingress.Enabled || opt.dynamoNimDeployment.Spec.Ingress.IngressControllerClassName == nil {
 		log.Info("Ingress is not enabled")
 		return ingress, true, nil
 	}
+	host := getIngressHost(opt.dynamoNimDeployment.Spec.Ingress)
 
 	ingress.Spec = networkingv1.IngressSpec{
-		IngressClassName: &r.IngressControllerClassName,
+		IngressClassName: opt.dynamoNimDeployment.Spec.Ingress.IngressControllerClassName,
 		Rules: []networkingv1.IngressRule{
 			{
-				Host: getIngressHost(opt.dynamoNimDeployment),
+				Host: host,
 				IngressRuleValue: networkingv1.IngressRuleValue{
 					HTTP: &networkingv1.HTTPIngressRuleValue{
 						Paths: []networkingv1.HTTPIngressPath{
@@ -850,6 +850,15 @@ func (r *DynamoNimDeploymentReconciler) generateIngress(ctx context.Context, opt
 		},
 	}
 
+	if opt.dynamoNimDeployment.Spec.Ingress.TLS != nil {
+		ingress.Spec.TLS = []networkingv1.IngressTLS{
+			{
+				Hosts:      []string{host},
+				SecretName: opt.dynamoNimDeployment.Spec.Ingress.TLS.SecretName,
+			},
+		}
+	}
+
 	return ingress, false, nil
 }
 
@@ -864,7 +873,7 @@ func (r *DynamoNimDeploymentReconciler) generateVirtualService(ctx context.Conte
 		},
 	}
 
-	vsEnabled := opt.dynamoNimDeployment.Spec.Ingress.Enabled && r.IstioVirtualServiceEnabled
+	vsEnabled := opt.dynamoNimDeployment.Spec.Ingress.Enabled && opt.dynamoNimDeployment.Spec.Ingress.UseVirtualService && opt.dynamoNimDeployment.Spec.Ingress.VirtualServiceGateway != nil
 	if !vsEnabled {
 		log.Info("VirtualService is not enabled")
 		return vs, true, nil
@@ -872,9 +881,9 @@ func (r *DynamoNimDeploymentReconciler) generateVirtualService(ctx context.Conte
 
 	vs.Spec = istioNetworking.VirtualService{
 		Hosts: []string{
-			getIngressHost(opt.dynamoNimDeployment),
+			getIngressHost(opt.dynamoNimDeployment.Spec.Ingress),
 		},
-		Gateways: []string{"istio-system/ingress-alb"},
+		Gateways: []string{*opt.dynamoNimDeployment.Spec.Ingress.VirtualServiceGateway},
 		Http: []*istioNetworking.HTTPRoute{
 			{
 				Match: []*istioNetworking.HTTPMatchRequest{
@@ -1056,18 +1065,6 @@ type generateResourceOption struct {
 	containsStealingTrafficDebugModeEnabled bool
 	isDebugPodReceiveProductionTraffic      bool
 	isGenericService                        bool
-}
-
-func getIngressHost(dynamoNimDeployment *v1alpha1.DynamoNimDeployment) string {
-	vsName := dynamoNimDeployment.Name
-	if dynamoNimDeployment.Spec.Ingress.HostPrefix != nil {
-		vsName = *dynamoNimDeployment.Spec.Ingress.HostPrefix + vsName
-	}
-	ingressSuffix, found := os.LookupEnv("DYNAMO_INGRESS_SUFFIX")
-	if !found || ingressSuffix == "" {
-		ingressSuffix = DefaultIngressSuffix
-	}
-	return fmt.Sprintf("%s.%s", vsName, ingressSuffix)
 }
 
 func (r *DynamoNimDeploymentReconciler) generateHPA(ctx context.Context, opt generateResourceOption) (*autoscalingv2.HorizontalPodAutoscaler, bool, error) {
@@ -2161,7 +2158,7 @@ func (r *DynamoNimDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error
 			return reqs
 		}))
 
-	if r.IstioVirtualServiceEnabled {
+	if r.UseVirtualService {
 		m.Owns(&networkingv1beta1.VirtualService{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))
 	}
 	m.Owns(&autoscalingv2.HorizontalPodAutoscaler{})
