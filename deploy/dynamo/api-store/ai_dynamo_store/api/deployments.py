@@ -13,7 +13,6 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -49,19 +48,18 @@ def sanitize_deployment_name(name: Optional[str], dynamo_nim: str) -> str:
         A unique deployment name that is at most 63 characters
     """
     if name:
-        # If name is provided, truncate it to 55 chars to leave room for UUID
-        base_name = name[:55]
+        # If name is provided, truncate it to 63
+        base_name = name[:63]
     else:
         # Generate base name from dynamoNim
         dynamo_nim_parts = dynamo_nim.split(":")
         if len(dynamo_nim_parts) != 2:
             raise ValueError("Invalid dynamoNim format, expected 'name:version'")
         base_name = f"dep-{dynamo_nim_parts[0]}-{dynamo_nim_parts[1]}"
-        # Truncate to 55 chars to leave room for UUID
-        base_name = base_name[:55]
+        # Truncate to 63 chars
+        base_name = base_name[:63]
 
-    # Add UUID and ensure total length is <= 63
-    return f"{base_name}-{uuid.uuid4().hex[:7]}"
+    return base_name
 
 
 @router.post("", response_model=DeploymentFullSchema)
