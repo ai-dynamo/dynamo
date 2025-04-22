@@ -28,7 +28,7 @@ Processor:
   router: kv
 
 Router:
-  model-name: nvidia/Llama-3.1-405B-Instruct-FP8
+  model: nvidia/Llama-3.1-405B-Instruct-FP8
   min-workers: 1
 
 VllmWorker:
