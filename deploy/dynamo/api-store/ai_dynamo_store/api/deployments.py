@@ -178,7 +178,7 @@ def get_urls(resource: Dict[str, Any]) -> List[str]:
 
 
 @router.delete("/{name}")
-def delete_deployment(name: str) -> DeploymentFullSchema:
+def delete_deployment(name: str):
     try:
         kube_namespace = get_namespace()
         delete_dynamo_deployment(name, kube_namespace)
