@@ -141,10 +141,18 @@ def get_deployment(name: str) -> DeploymentFullSchema:
         if "status" in cr_data:
             del cr_data["status"]
         deployment_schema = DeploymentFullSchema(
-            **cr_data,
+            name=name,
+            created_at=cr["metadata"]["creationTimestamp"],
+            uid=cr["metadata"]["uid"],
+            resource_type="deployment",
+            labels=[],
             kube_namespace=kube_namespace,
             status=get_deployment_status(cr),
             urls=get_urls(cr),
+            creator=create_default_user(),
+            cluster=create_default_cluster(create_default_user()),
+            latest_revision=None,
+            manifest=None,
         )
         return deployment_schema
     except HTTPException as e:
@@ -173,8 +181,8 @@ def get_urls(resource: Dict[str, Any]) -> List[str]:
     return urls
 
 
-@router.delete("/{name}", response_model=DeploymentFullSchema)
-def delete_deployment(name: str) -> DeploymentFullSchema:
+@router.delete("/{name}")
+def delete_deployment(name: str):
     try:
         kube_namespace = get_namespace()
         delete_dynamo_deployment(name, kube_namespace)
@@ -212,14 +220,19 @@ def list_deployments(
 
         deployments = []
         for cr in crs:
-            cr_data = cr.copy()
-            if "status" in cr_data:
-                del cr_data["status"]
             deployment_schema = DeploymentFullSchema(
-                **cr_data,
+                name=cr["metadata"]["name"],
+                created_at=cr["metadata"]["creationTimestamp"],
+                uid=cr["metadata"]["uid"],
+                resource_type="deployment",
+                labels=[],
                 kube_namespace=kube_namespace,
                 status=get_deployment_status(cr),
                 urls=get_urls(cr),
+                creator=create_default_user(),
+                cluster=create_default_cluster(create_default_user()),
+                latest_revision=None,
+                manifest=None,
             )
 
             # Apply search filter if provided
