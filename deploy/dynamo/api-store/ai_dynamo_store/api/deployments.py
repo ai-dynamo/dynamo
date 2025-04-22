@@ -13,7 +13,6 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-import os
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -27,7 +26,13 @@ from ..models.schemas import (
     create_default_cluster,
     create_default_user,
 )
-from .k8s import create_dynamo_deployment, get_dynamo_deployment, get_namespace, delete_dynamo_deployment
+from .k8s import (
+    create_dynamo_deployment,
+    delete_dynamo_deployment,
+    get_dynamo_deployment,
+    get_namespace,
+    list_dynamo_deployments,
+)
 
 router = APIRouter(prefix="/api/v2/deployments", tags=["deployments"])
 
@@ -124,8 +129,7 @@ async def create_deployment(deployment: CreateDeploymentSchema):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-
-@router.get("/{name}")
+@router.get("/{name}", response_model=DeploymentFullSchema)
 def get_deployment(name: str) -> DeploymentFullSchema:
     try:
         kube_namespace = get_namespace()
@@ -137,7 +141,7 @@ def get_deployment(name: str) -> DeploymentFullSchema:
             **cr,
             kube_namespace=kube_namespace,
             status=get_deployment_status(cr),
-            urls=get_urls(cr)
+            urls=get_urls(cr),
         )
         return deployment_schema
     except HTTPException as e:
@@ -147,7 +151,6 @@ def get_deployment(name: str) -> DeploymentFullSchema:
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
 
-    
 
 # function to look for a condition with type "Ready" in the status of the deployment
 # and return the "message" field
@@ -166,7 +169,8 @@ def get_urls(resource: Dict[str, Any]) -> List[str]:
             urls.append(f"https://{condition.get('message')}")
     return urls
 
-@router.delete("/{name}")
+
+@router.delete("/{name}", response_model=DeploymentFullSchema)
 def delete_deployment(name: str) -> DeploymentFullSchema:
     try:
         kube_namespace = get_namespace()
@@ -175,5 +179,58 @@ def delete_deployment(name: str) -> DeploymentFullSchema:
         raise e
     except Exception as e:
         print("Error deleting deployment:")
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("", response_model=List[DeploymentFullSchema])
+def list_deployments(
+    search: Optional[str] = None,
+    dev: bool = False,
+    q: Optional[str] = None,
+) -> List[DeploymentFullSchema]:
+    """
+    List all deployments with optional filtering.
+
+    Args:
+        search: Simple text search
+        dev: Filter development deployments
+        q: Advanced query string
+
+    Returns:
+        List[DeploymentFullSchema]: List of deployments
+    """
+    try:
+        kube_namespace = get_namespace()
+        crs = list_dynamo_deployments(
+            namespace=kube_namespace,
+            label_selector=q,
+        )
+
+        deployments = []
+        for cr in crs:
+            deployment_schema = DeploymentFullSchema(
+                **cr,
+                kube_namespace=kube_namespace,
+                status=get_deployment_status(cr),
+                urls=get_urls(cr),
+            )
+
+            # Apply search filter if provided
+            if search and search.lower() not in deployment_schema.name.lower():
+                continue
+
+            # Apply dev filter if enabled
+            if dev and not deployment_schema.name.startswith("dev-"):
+                continue
+
+            deployments.append(deployment_schema)
+
+        return deployments
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print("Error listing deployments:")
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
