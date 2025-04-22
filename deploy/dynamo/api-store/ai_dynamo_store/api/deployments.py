@@ -177,11 +177,29 @@ def get_urls(resource: Dict[str, Any]) -> List[str]:
     return urls
 
 
-@router.delete("/{name}")
-def delete_deployment(name: str):
+@router.delete("/{name}", response_model=DeploymentFullSchema)
+def delete_deployment(name: str) -> DeploymentFullSchema:
     try:
         kube_namespace = get_namespace()
+        # Get deployment details before deletion
+        cr = get_dynamo_deployment(name, kube_namespace)
+        deployment_schema = DeploymentFullSchema(
+            name=name,
+            created_at=cr["metadata"]["creationTimestamp"],
+            uid=cr["metadata"]["uid"],
+            resource_type="deployment",
+            labels=[],
+            kube_namespace=kube_namespace,
+            status=get_deployment_status(cr),
+            urls=get_urls(cr),
+            creator=create_default_user(),
+            cluster=create_default_cluster(create_default_user()),
+            latest_revision=None,
+            manifest=None,
+        )
+        # Delete the deployment
         delete_dynamo_deployment(name, kube_namespace)
+        return deployment_schema
     except HTTPException as e:
         raise e
     except Exception as e:
@@ -190,12 +208,13 @@ def delete_deployment(name: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/", response_model=DeploymentListResponse)
 @router.get("", response_model=DeploymentListResponse)
 def list_deployments(
     search: str = Query(default="", description="Search query"),
     dev: bool = Query(default=False, description="Filter development deployments"),
     q: str = Query(default="", description="Advanced query string"),
-    all: bool = Query(default=False, description="Return all deployments"),
+    all: str = Query(default="", description="Return all deployments"),
     count: str = Query(default="", description="Number of items to return"),
     start: str = Query(default="", description="Starting index"),
     cluster: str = Query(default="", description="Filter by cluster name"),
@@ -219,6 +238,8 @@ def list_deployments(
         # Convert count and start to integers if they're not empty
         count_val = int(count) if count else None
         start_val = int(start) if start else None
+        # Convert all to boolean
+        all_val = all.lower() == "true" if all else False
 
         if count_val is not None and count_val <= 0:
             raise HTTPException(status_code=400, detail="Count must be greater than 0")
@@ -257,7 +278,7 @@ def list_deployments(
                 continue
 
             # Apply dev filter if enabled and all is not True
-            if not all and dev and not deployment_schema.name.startswith("dev-"):
+            if not all_val and dev and not deployment_schema.name.startswith("dev-"):
                 continue
 
             deployments.append(deployment_schema)
