@@ -137,8 +137,11 @@ def get_deployment(name: str) -> DeploymentFullSchema:
             name=name,
             namespace=kube_namespace,
         )
+        cr_data = cr.copy()
+        if "status" in cr_data:
+            del cr_data["status"]
         deployment_schema = DeploymentFullSchema(
-            **cr,
+            **cr_data,
             kube_namespace=kube_namespace,
             status=get_deployment_status(cr),
             urls=get_urls(cr),
@@ -209,8 +212,11 @@ def list_deployments(
 
         deployments = []
         for cr in crs:
+            cr_data = cr.copy()
+            if "status" in cr_data:
+                del cr_data["status"]
             deployment_schema = DeploymentFullSchema(
-                **cr,
+                **cr_data,
                 kube_namespace=kube_namespace,
                 status=get_deployment_status(cr),
                 urls=get_urls(cr),
