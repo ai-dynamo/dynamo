@@ -106,7 +106,6 @@ type IngressSpec struct {
 	TLS                        *IngressTLSSpec   `json:"tls,omitempty"`
 	HostSuffix                 *string           `json:"hostSuffix,omitempty"`
 	IngressControllerClassName *string           `json:"ingressControllerClassName,omitempty"`
-	IngressControllerTLSSecret *string           `json:"ingressControllerTLSSecret,omitempty"`
 }
 
 // DynamoNimDeploymentStatus defines the observed state of DynamoNimDeployment

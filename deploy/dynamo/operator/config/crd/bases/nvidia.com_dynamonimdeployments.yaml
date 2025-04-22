@@ -1701,8 +1701,6 @@ spec:
                     type: string
                   ingressControllerClassName:
                     type: string
-                  ingressControllerTLSSecret:
-                    type: string
                   labels:
                     additionalProperties:
                       type: string

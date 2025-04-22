@@ -98,15 +98,13 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			message = err.Error()
 		}
 		// update the CRD status condition
-		dynamoDeployment.Status.Conditions = []metav1.Condition{
-			{
-				Type:               "Ready",
-				Status:             readyStatus,
-				Reason:             reason,
-				Message:            message,
-				LastTransitionTime: metav1.Now(),
-			},
-		}
+		dynamoDeployment.AddStatusCondition(metav1.Condition{
+			Type:               "Ready",
+			Status:             readyStatus,
+			Reason:             reason,
+			Message:            message,
+			LastTransitionTime: metav1.Now(),
+		})
 		err = r.Status().Update(ctx, dynamoDeployment)
 		if err != nil {
 			logger.Error(err, "Unable to update the CRD status", "crd", req.NamespacedName)
@@ -211,19 +209,30 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 }
 
 func (r *DynamoDeploymentReconciler) generateDefaultIngressSpec(dynamoDeployment *nvidiacomv1alpha1.DynamoDeployment) *nvidiacomv1alpha1.IngressSpec {
-	return &nvidiacomv1alpha1.IngressSpec{
-		Enabled:                    r.VirtualServiceGateway != "" || r.IngressControllerClassName != "",
-		Host:                       dynamoDeployment.Name,
-		UseVirtualService:          r.VirtualServiceGateway != "",
-		VirtualServiceGateway:      &r.VirtualServiceGateway,
-		IngressControllerClassName: &r.IngressControllerClassName,
-		IngressControllerTLSSecret: &r.IngressControllerTLSSecret,
-		HostSuffix:                 &r.IngressHostSuffix,
+	res := &nvidiacomv1alpha1.IngressSpec{
+		Enabled:           r.VirtualServiceGateway != "" || r.IngressControllerClassName != "",
+		Host:              dynamoDeployment.Name,
+		UseVirtualService: r.VirtualServiceGateway != "",
 	}
+	if r.IngressControllerClassName != "" {
+		res.IngressControllerClassName = &r.IngressControllerClassName
+	}
+	if r.IngressControllerTLSSecret != "" {
+		res.TLS = &nvidiacomv1alpha1.IngressTLSSpec{
+			SecretName: r.IngressControllerTLSSecret,
+		}
+	}
+	if r.IngressHostSuffix != "" {
+		res.HostSuffix = &r.IngressHostSuffix
+	}
+	if r.VirtualServiceGateway != "" {
+		res.VirtualServiceGateway = &r.VirtualServiceGateway
+	}
+	return res
 }
 
 func (r *DynamoDeploymentReconciler) isIngressSecured() bool {
-	return r.IngressControllerTLSSecret != ""
+	return r.IngressControllerTLSSecret != "" || r.VirtualServiceGateway != ""
 }
 
 func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {

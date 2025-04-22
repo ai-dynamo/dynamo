@@ -36,7 +36,7 @@ dynamo-operator:
     istio:
       enabled: false
       gateway: istio-system/ingress-alb
-    hostSuffix: ${DYNAMO_INGRESS_SUFFIX}
+    ingressHostSuffix: ${DYNAMO_INGRESS_SUFFIX}
     dockerRegistry:
       server: ${DOCKER_SERVER}
       username: ${DOCKER_USERNAME}
@@ -53,6 +53,7 @@ dynamo-api-store:
     tag: ${IMAGE_TAG}
     pullPolicy: IfNotPresent
   imagePullSecrets:
+    - name: docker-imagepullsecret
   ingress:
     hosts:
       - host: ${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}

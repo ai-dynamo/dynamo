@@ -412,46 +412,24 @@ impl Component {
 
 #[pymethods]
 impl Endpoint {
+    #[pyo3(signature = (generator, lease=None))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
         generator: PyObject,
+        lease: Option<&PyLease>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
             self.event_loop.clone(),
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
-        let builder = self.inner.endpoint_builder().handler(ingress);
+        let mut builder = self.inner.endpoint_builder().handler(ingress);
+        if lease.is_some() {
+            builder = builder.lease(lease.map(|l| l.inner.clone()));
+        }
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             builder.start().await.map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    fn serve_endpoint_with_lease<'p>(
-        &self,
-        py: Python<'p>,
-        generator: PyObject,
-        lease: &PyLease,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let engine = Arc::new(engine::PythonAsyncEngine::new(
-            generator,
-            self.event_loop.clone(),
-        )?);
-        let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
-
-        // Create the builder with the ingress
-        let builder = self
-            .inner
-            .endpoint_builder()
-            .handler(ingress)
-            .lease(Some(lease.inner.clone()));
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Start the endpoint
-            builder.start().await.map_err(to_pyerr)?;
-
             Ok(())
         })
     }
@@ -719,6 +697,7 @@ async fn process_stream(
         // Send the PyObject through the channel or log an error
         if let Err(e) = tx.send(annotated).await {
             tracing::error!("Failed to send response: {:?}", e);
+            break;
         }
 
         if is_error {

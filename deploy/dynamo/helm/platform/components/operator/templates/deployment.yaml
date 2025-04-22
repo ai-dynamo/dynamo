@@ -83,8 +83,8 @@ spec:
           - --ingress-controller-tls-secret-name={{ .Values.dynamo.ingress.tlsSecretName }}
         {{- end }}
         {{- end }}
-        {{- if .Values.dynamo.ingress.hostSuffix }}
-          - --ingress-host-suffix={{ .Values.dynamo.ingress.hostSuffix }}
+        {{- if .Values.dynamo.ingressHostSuffix }}
+          - --ingress-host-suffix={{ .Values.dynamo.ingressHostSuffix }}
         {{- end }}
 
         command:

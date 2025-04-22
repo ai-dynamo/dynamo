@@ -136,9 +136,6 @@ def get_deployment(name: str) -> DeploymentFullSchema:
             name=name,
             namespace=kube_namespace,
         )
-        cr_data = cr.copy()
-        if "status" in cr_data:
-            del cr_data["status"]
         deployment_schema = DeploymentFullSchema(
             name=name,
             created_at=cr["metadata"]["creationTimestamp"],

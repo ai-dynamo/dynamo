@@ -854,7 +854,7 @@ func (r *DynamoNimDeploymentReconciler) generateIngress(ctx context.Context, opt
 		ingress.Spec.TLS = []networkingv1.IngressTLS{
 			{
 				Hosts:      []string{host},
-				SecretName: *opt.dynamoNimDeployment.Spec.Ingress.IngressControllerTLSSecret,
+				SecretName: opt.dynamoNimDeployment.Spec.Ingress.TLS.SecretName,
 			},
 		}
 	}

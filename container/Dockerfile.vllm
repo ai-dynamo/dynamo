@@ -276,6 +276,7 @@ RUN apt-get update && apt-get install -y sudo gnupg2 gnupg1 \
 # This is a slow operation (~40s on my cpu)
 # Much better than chown -R $USERNAME:$USERNAME /opt/dynamo/venv (~10min on my cpu)
 COPY --from=base --chown=$USER_UID:$USER_GID /opt/dynamo/venv/ /opt/dynamo/venv/
+RUN chown $USERNAME:$USERNAME /opt/dynamo/venv
 COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
 
 USER $USERNAME
