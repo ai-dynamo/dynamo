@@ -138,9 +138,17 @@ def get_deployment(name: str) -> DeploymentFullSchema:
         )
         deployment_schema = DeploymentFullSchema(
             name=name,
+            created_at=cr["metadata"]["creationTimestamp"],
+            uid=cr["metadata"]["uid"],
+            resource_type="deployment",
+            labels=[],
             kube_namespace=kube_namespace,
             status=get_deployment_status(cr),
             urls=get_urls(cr),
+            creator=create_default_user(),
+            cluster=create_default_cluster(create_default_user()),
+            latest_revision=None,
+            manifest=None,
         )
         return deployment_schema
     except HTTPException as e:
