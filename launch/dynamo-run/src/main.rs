@@ -45,7 +45,11 @@ fn main() -> anyhow::Result<()> {
         },
         Err(_) => "info", 
     };
-    std::env::set_var("DYN_LOG", log_level);
+
+    if log_level != "info" {
+        std::env::set_var("DYN_LOG", log_level);
+    }
+
     logging::init();
 
     // Call sub-processes before starting the Runtime machinery
