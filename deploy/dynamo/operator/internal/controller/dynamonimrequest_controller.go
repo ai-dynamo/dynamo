@@ -37,6 +37,7 @@ import (
 
 	"emperror.dev/errors"
 	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/config"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
 	"github.com/apparentlymart/go-shquot/shquot"
@@ -64,21 +65,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	apiStoreClient "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/api_store_client"
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemas"
-	yataiclient "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/yatai-client"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
-)
-
-const (
-	KubeAnnotationDynamoNimRequestHash            = "yatai.ai/bento-request-hash"
-	KubeAnnotationDynamoNimRequestImageBuiderHash = "yatai.ai/bento-request-image-builder-hash"
-	KubeAnnotationDynamoNimRequestModelSeederHash = "yatai.ai/bento-request-model-seeder-hash"
-	KubeLabelYataiImageBuilderSeparateModels      = "yatai.ai/yatai-image-builder-separate-models"
-	KubeAnnotationDynamoNimStorageNS              = "yatai.ai/bento-storage-namespace"
-	KubeAnnotationModelStorageNS                  = "yatai.ai/model-storage-namespace"
-	StoreSchemaAWS                                = "aws"
-	StoreSchemaGCP                                = "gcp"
 )
 
 // DynamoNimRequestReconciler reconciles a DynamoNimRequest object
@@ -204,12 +194,6 @@ func (r *DynamoNimRequestReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
-	if isSeparateModels(dynamoNimRequest) {
-		err = errors.New("separate models, unsupported feature")
-		logs.Error(err, "unsupported feature")
-		return
-	}
-
 	dynamoNimRequest, imageInfo, imageExists, imageExistsResult, err := r.ensureImageExists(ctx, ensureImageExistsOption{
 		dynamoNimRequest: dynamoNimRequest,
 		req:              req,
@@ -265,14 +249,14 @@ func (r *DynamoNimRequestReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	if dynamoNimRequest.Spec.DownloadURL == "" {
-		var dynamoNim *schemas.DynamoNIM
-		dynamoNim, err = r.getDynamoNim(ctx, dynamoNimRequest)
+		var dynamoComponent *schemas.DynamoComponent
+		dynamoComponent, err = r.getDynamoComponent(ctx, dynamoNimRequest)
 		if err != nil {
-			err = errors.Wrap(err, "get dynamoNim")
+			err = errors.Wrap(err, "get dynamo component")
 			return
 		}
 		dynamoNimCR.Spec.Context = &nvidiacomv1alpha1.BentoContext{
-			BentomlVersion: dynamoNim.Manifest.BentomlVersion,
+			BentomlVersion: dynamoComponent.Manifest.BentomlVersion,
 		}
 	}
 
@@ -425,14 +409,8 @@ func (r *DynamoNimRequestReconciler) ensureImageExists(ctx context.Context, opt 
 	}
 
 	jobLabels := map[string]string{
-		commonconsts.KubeLabelBentoRequest:        dynamoNimRequest.Name,
-		commonconsts.KubeLabelIsBentoImageBuilder: commonconsts.KubeLabelValueTrue,
-	}
-
-	if isSeparateModels(opt.dynamoNimRequest) {
-		jobLabels[KubeLabelYataiImageBuilderSeparateModels] = commonconsts.KubeLabelValueTrue
-	} else {
-		jobLabels[KubeLabelYataiImageBuilderSeparateModels] = commonconsts.KubeLabelValueFalse
+		commonconsts.KubeLabelDynamoRequest:        dynamoNimRequest.Name,
+		commonconsts.KubeLabelIsDynamoImageBuilder: commonconsts.KubeLabelValueTrue,
 	}
 
 	jobs := &batchv1.JobList{}
@@ -446,7 +424,7 @@ func (r *DynamoNimRequestReconciler) ensureImageExists(ctx context.Context, opt 
 	for _, job_ := range jobs.Items {
 		job_ := job_
 
-		oldHash := job_.Annotations[KubeAnnotationDynamoNimRequestHash]
+		oldHash := job_.Annotations[consts.KubeAnnotationDynamoNimRequestHash]
 		if oldHash != dynamoNimRequestHashStr {
 			logs.Info("Because hash changed, delete old job", "job", job_.Name, "oldHash", oldHash, "newHash", dynamoNimRequestHashStr)
 			// --cascade=foreground
@@ -660,11 +638,11 @@ const (
 )
 
 const (
-	EnvDynamoNimImageBuildEngine = "BENTO_IMAGE_BUILD_ENGINE"
+	EnvDynamoImageBuildEngine = "DYNAMO_IMAGE_BUILD_ENGINE"
 )
 
 func getDynamoNimImageBuildEngine() DynamoNimImageBuildEngine {
-	engine := os.Getenv(EnvDynamoNimImageBuildEngine)
+	engine := os.Getenv(EnvDynamoImageBuildEngine)
 	if engine == "" {
 		return DynamoNimImageBuildEngineKaniko
 	}
@@ -750,56 +728,29 @@ func (r *DynamoNimRequestReconciler) makeSureDockerConfigJSONSecret(ctx context.
 }
 
 //nolint:nakedret
-func (r *DynamoNimRequestReconciler) getYataiClient(ctx context.Context) (yataiClient **yataiclient.YataiClient, yataiConf **commonconfig.YataiConfig, err error) {
-	yataiConf_, err := commonconfig.GetYataiConfig(ctx)
+func (r *DynamoNimRequestReconciler) getApiStoreClient(ctx context.Context) (*apiStoreClient.ApiStoreClient, *commonconfig.ApiStoreConfig, error) {
+	apiStoreConf, err := commonconfig.GetApiStoreConfig(ctx)
 	isNotFound := k8serrors.IsNotFound(err)
 	if err != nil && !isNotFound {
-		err = errors.Wrap(err, "get yatai config")
-		return
-	}
-
-	if isNotFound {
-		return
-	}
-
-	if yataiConf_.Endpoint == "" {
-		return
-	}
-
-	if yataiConf_.ClusterName == "" {
-		yataiConf_.ClusterName = "default"
-	}
-
-	yataiClient_ := yataiclient.NewYataiClient(yataiConf_.Endpoint, fmt.Sprintf("%s:%s:%s", commonconsts.YataiImageBuilderComponentName, yataiConf_.ClusterName, yataiConf_.ApiToken))
-
-	yataiClient = &yataiClient_
-	yataiConf = &yataiConf_
-	return
-}
-
-func (r *DynamoNimRequestReconciler) getYataiClientWithAuth(ctx context.Context, dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest) (**yataiclient.YataiClient, **commonconfig.YataiConfig, error) {
-	orgId, ok := dynamoNimRequest.Labels[commonconsts.NgcOrganizationHeaderName]
-	if !ok {
-		orgId = commonconsts.DefaultOrgId
-	}
-
-	userId, ok := dynamoNimRequest.Labels[commonconsts.NgcUserHeaderName]
-	if !ok {
-		userId = commonconsts.DefaultUserId
-	}
-
-	auth := yataiclient.DynamoAuthHeaders{
-		OrgId:  orgId,
-		UserId: userId,
-	}
-
-	client, yataiConf, err := r.getYataiClient(ctx)
-	if err != nil {
+		err = errors.Wrap(err, "get api store config")
 		return nil, nil, err
 	}
 
-	(*client).SetAuth(auth)
-	return client, yataiConf, err
+	if isNotFound {
+		return nil, nil, err
+	}
+
+	if apiStoreConf.Endpoint == "" {
+		return nil, nil, err
+	}
+
+	if apiStoreConf.ClusterName == "" {
+		apiStoreConf.ClusterName = "default"
+	}
+
+	apiStoreClient := apiStoreClient.NewApiStoreClient(apiStoreConf.Endpoint)
+
+	return apiStoreClient, apiStoreConf, nil
 }
 
 //nolint:nakedret
@@ -881,28 +832,19 @@ func (r *DynamoNimRequestReconciler) getDockerRegistry(ctx context.Context, dyna
 		return
 	}
 
-	dynamoNimRepositoryName := "yatai-bentos"
-	modelRepositoryName := "yatai-models"
-	if dockerRegistryConfig.BentoRepositoryName != "" {
-		dynamoNimRepositoryName = dockerRegistryConfig.BentoRepositoryName
+	dynamoRepositoryName := "dynamo-components"
+	if dockerRegistryConfig.DynamoComponentsRepositoryName != "" {
+		dynamoRepositoryName = dockerRegistryConfig.DynamoComponentsRepositoryName
 	}
-	if dockerRegistryConfig.ModelRepositoryName != "" {
-		modelRepositoryName = dockerRegistryConfig.ModelRepositoryName
-	}
-	dynamoNimRepositoryURI := fmt.Sprintf("%s/%s", strings.TrimRight(dockerRegistryConfig.Server, "/"), dynamoNimRepositoryName)
-	modelRepositoryURI := fmt.Sprintf("%s/%s", strings.TrimRight(dockerRegistryConfig.Server, "/"), modelRepositoryName)
+	dynamoRepositoryURI := fmt.Sprintf("%s/%s", strings.TrimRight(dockerRegistryConfig.Server, "/"), dynamoRepositoryName)
 	if strings.Contains(dockerRegistryConfig.Server, "docker.io") {
-		dynamoNimRepositoryURI = fmt.Sprintf("docker.io/%s", dynamoNimRepositoryName)
-		modelRepositoryURI = fmt.Sprintf("docker.io/%s", modelRepositoryName)
+		dynamoRepositoryURI = fmt.Sprintf("docker.io/%s", dynamoRepositoryName)
 	}
-	dynamoNimRepositoryInClusterURI := dynamoNimRepositoryURI
-	modelRepositoryInClusterURI := modelRepositoryURI
+	dynamoRepositoryInClusterURI := dynamoRepositoryURI
 	if dockerRegistryConfig.InClusterServer != "" {
-		dynamoNimRepositoryInClusterURI = fmt.Sprintf("%s/%s", strings.TrimRight(dockerRegistryConfig.InClusterServer, "/"), dynamoNimRepositoryName)
-		modelRepositoryInClusterURI = fmt.Sprintf("%s/%s", strings.TrimRight(dockerRegistryConfig.InClusterServer, "/"), modelRepositoryName)
+		dynamoRepositoryInClusterURI = fmt.Sprintf("%s/%s", strings.TrimRight(dockerRegistryConfig.InClusterServer, "/"), dynamoRepositoryName)
 		if strings.Contains(dockerRegistryConfig.InClusterServer, "docker.io") {
-			dynamoNimRepositoryInClusterURI = fmt.Sprintf("docker.io/%s", dynamoNimRepositoryName)
-			modelRepositoryInClusterURI = fmt.Sprintf("docker.io/%s", modelRepositoryName)
+			dynamoRepositoryInClusterURI = fmt.Sprintf("docker.io/%s", dynamoRepositoryName)
 		}
 	}
 	dockerRegistry = schemas.DockerRegistrySchema{
@@ -910,10 +852,8 @@ func (r *DynamoNimRequestReconciler) getDockerRegistry(ctx context.Context, dyna
 		Username:                     dockerRegistryConfig.Username,
 		Password:                     dockerRegistryConfig.Password,
 		Secure:                       dockerRegistryConfig.Secure,
-		BentosRepositoryURI:          dynamoNimRepositoryURI,
-		BentosRepositoryURIInCluster: dynamoNimRepositoryInClusterURI,
-		ModelsRepositoryURI:          modelRepositoryURI,
-		ModelsRepositoryURIInCluster: modelRepositoryInClusterURI,
+		DynamoRepositoryURI:          dynamoRepositoryURI,
+		DynamoRepositoryURIInCluster: dynamoRepositoryInClusterURI,
 	}
 
 	return
@@ -927,7 +867,7 @@ func getDynamoNimImagePrefix(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimReques
 	if dynamoNimRequest == nil {
 		return ""
 	}
-	prefix, exist := dynamoNimRequest.Annotations[KubeAnnotationDynamoNimStorageNS]
+	prefix, exist := dynamoNimRequest.Annotations[consts.KubeAnnotationDynamoNimStorageNS]
 	if exist && prefix != "" {
 		return fmt.Sprintf("%s.", prefix)
 	}
@@ -943,37 +883,29 @@ func getDynamoNimImageName(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest,
 	}
 	var uri, tag string
 	if inCluster {
-		uri = dockerRegistry.BentosRepositoryURIInCluster
+		uri = dockerRegistry.DynamoRepositoryURIInCluster
 	} else {
-		uri = dockerRegistry.BentosRepositoryURI
+		uri = dockerRegistry.DynamoRepositoryURI
 	}
 	tail := fmt.Sprintf("%s.%s", dynamoNimRepositoryName, dynamoNimVersion)
-	separateModels := isSeparateModels(dynamoNimRequest)
-	if separateModels {
-		tail += ".nomodels"
-	}
 	if isEstargzEnabled() {
 		tail += ".esgz"
 	}
 
-	tag = fmt.Sprintf("yatai.%s%s", getDynamoNimImagePrefix(dynamoNimRequest), tail)
+	tag = fmt.Sprintf("dynamo.%s%s", getDynamoNimImagePrefix(dynamoNimRequest), tail)
 
 	if len(tag) > 128 {
 		hashStr := hash(tail)
-		tag = fmt.Sprintf("yatai.%s%s", getDynamoNimImagePrefix(dynamoNimRequest), hashStr)
+		tag = fmt.Sprintf("dynamo.%s%s", getDynamoNimImagePrefix(dynamoNimRequest), hashStr)
 		if len(tag) > 128 {
-			tag = fmt.Sprintf("yatai.%s", hash(fmt.Sprintf("%s%s", getDynamoNimImagePrefix(dynamoNimRequest), tail)))[:128]
+			tag = fmt.Sprintf("dynamo.%s", hash(fmt.Sprintf("%s%s", getDynamoNimImagePrefix(dynamoNimRequest), tail)))[:128]
 		}
 	}
 	return fmt.Sprintf("%s:%s", uri, tag)
 }
 
-func isSeparateModels(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest) (separateModels bool) {
-	return dynamoNimRequest.Annotations[commonconsts.KubeAnnotationYataiImageBuilderSeparateModels] == commonconsts.KubeLabelValueTrue
-}
-
 func checkImageExists(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest, dockerRegistry schemas.DockerRegistrySchema, imageName string) (bool, error) {
-	if dynamoNimRequest.Annotations["yatai.ai/force-build-image"] == commonconsts.KubeLabelValueTrue {
+	if dynamoNimRequest.Annotations["nvidia.com/force-build-image"] == commonconsts.KubeLabelValueTrue {
 		return false, nil
 	}
 
@@ -1035,7 +967,7 @@ func (r *DynamoNimRequestReconciler) getImageInfo(ctx context.Context, opt GetIm
 
 	imageInfo.DockerConfigJSONSecretName = opt.DynamoNimRequest.Spec.DockerConfigJSONSecretName
 
-	imageInfo.DockerRegistryInsecure = opt.DynamoNimRequest.Annotations[commonconsts.KubeAnnotationDockerRegistryInsecure] == "true"
+	imageInfo.DockerRegistryInsecure = opt.DynamoNimRequest.Annotations[commonconsts.KubeAnnotationDynamoDockerRegistryInsecure] == "true"
 	if opt.DynamoNimRequest.Spec.OCIRegistryInsecure != nil {
 		imageInfo.DockerRegistryInsecure = *opt.DynamoNimRequest.Spec.OCIRegistryInsecure
 	}
@@ -1063,61 +995,54 @@ func (r *DynamoNimRequestReconciler) getImageInfo(ctx context.Context, opt GetIm
 	return
 }
 
-func (r *DynamoNimRequestReconciler) getDynamoNim(ctx context.Context, dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest) (dynamoNim *schemas.DynamoNIM, err error) {
-	dynamoNimRepositoryName, _, dynamoNimVersion := xstrings.Partition(dynamoNimRequest.Spec.BentoTag, ":")
+func (r *DynamoNimRequestReconciler) getDynamoComponent(ctx context.Context, dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest) (dynamoComponent *schemas.DynamoComponent, err error) {
+	dynamoComponentRepositoryName, _, dynamoComponentVersion := xstrings.Partition(dynamoNimRequest.Spec.BentoTag, ":")
 
-	yataiClient_, _, err := r.getYataiClient(ctx)
+	apiStoreClient, _, err := r.getApiStoreClient(ctx)
 	if err != nil {
-		err = errors.Wrap(err, "get yatai client")
+		err = errors.Wrap(err, "get api store client")
 		return
 	}
 
-	if yataiClient_ == nil {
-		err = errors.New("can't get yatai client, please check yatai configuration")
+	if apiStoreClient == nil {
+		err = errors.New("can't get api store client, please check api store configuration")
 		return
 	}
 
-	yataiClient := *yataiClient_
-
-	r.Recorder.Eventf(dynamoNimRequest, corev1.EventTypeNormal, "FetchDynamoNim", "Getting dynamoNim %s from yatai service", dynamoNimRequest.Spec.BentoTag)
-	dynamoNim, err = yataiClient.GetBento(ctx, dynamoNimRepositoryName, dynamoNimVersion)
+	r.Recorder.Eventf(dynamoNimRequest, corev1.EventTypeNormal, "FetchDynamoComponent", "Getting dynamo component %s from api store service", dynamoNimRequest.Spec.BentoTag)
+	dynamoComponent, err = apiStoreClient.GetDynamoComponent(ctx, dynamoComponentRepositoryName, dynamoComponentVersion)
 	if err != nil {
-		err = errors.Wrap(err, "get dynamoNim")
+		err = errors.Wrap(err, "get dynamo component")
 		return
 	}
-	r.Recorder.Eventf(dynamoNimRequest, corev1.EventTypeNormal, "FetchDynamoNim", "Got dynamoNim %s from yatai service", dynamoNimRequest.Spec.BentoTag)
+	r.Recorder.Eventf(dynamoNimRequest, corev1.EventTypeNormal, "FetchDynamoComponent", "Got dynamo component %s from api store service", dynamoNimRequest.Spec.BentoTag)
 	return
 }
 
 func (r *DynamoNimRequestReconciler) getImageBuilderJobName() string {
 	guid := xid.New()
-	return fmt.Sprintf("yatai-dynamonim-image-builder-%s", guid.String())
+	return fmt.Sprintf("dynamo-image-builder-%s", guid.String())
 }
 
 func (r *DynamoNimRequestReconciler) getImageBuilderJobLabels(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest) map[string]string {
 	dynamoNimRepositoryName, _, dynamoNimVersion := xstrings.Partition(dynamoNimRequest.Spec.BentoTag, ":")
 	labels := map[string]string{
-		commonconsts.KubeLabelBentoRequest:         dynamoNimRequest.Name,
-		commonconsts.KubeLabelIsBentoImageBuilder:  "true",
-		commonconsts.KubeLabelYataiBentoRepository: dynamoNimRepositoryName,
-		commonconsts.KubeLabelYataiBento:           dynamoNimVersion,
+		commonconsts.KubeLabelDynamoRequest:        dynamoNimRequest.Name,
+		commonconsts.KubeLabelIsDynamoImageBuilder: "true",
+		commonconsts.KubeLabelDynamoRepository:     dynamoNimRepositoryName,
+		commonconsts.KubeLabelDynamoVersion:        dynamoNimVersion,
 	}
 
-	if isSeparateModels(dynamoNimRequest) {
-		labels[KubeLabelYataiImageBuilderSeparateModels] = commonconsts.KubeLabelValueTrue
-	} else {
-		labels[KubeLabelYataiImageBuilderSeparateModels] = commonconsts.KubeLabelValueFalse
-	}
 	return labels
 }
 
 func (r *DynamoNimRequestReconciler) getImageBuilderPodLabels(dynamoNimRequest *nvidiacomv1alpha1.DynamoNimRequest) map[string]string {
 	dynamoNimRepositoryName, _, dynamoNimVersion := xstrings.Partition(dynamoNimRequest.Spec.BentoTag, ":")
 	return map[string]string{
-		commonconsts.KubeLabelBentoRequest:         dynamoNimRequest.Name,
-		commonconsts.KubeLabelIsBentoImageBuilder:  "true",
-		commonconsts.KubeLabelYataiBentoRepository: dynamoNimRepositoryName,
-		commonconsts.KubeLabelYataiBento:           dynamoNimVersion,
+		commonconsts.KubeLabelDynamoRequest:        dynamoNimRequest.Name,
+		commonconsts.KubeLabelIsDynamoImageBuilder: "true",
+		commonconsts.KubeLabelDynamoRepository:     dynamoNimRepositoryName,
+		commonconsts.KubeLabelDynamoVersion:        dynamoNimVersion,
 	}
 }
 
@@ -1147,7 +1072,7 @@ func (r *DynamoNimRequestReconciler) generateImageBuilderJob(ctx context.Context
 		err = errors.Wrap(err, "failed to get hash string")
 		return
 	}
-	kubeAnnotations[KubeAnnotationDynamoNimRequestHash] = hashStr
+	kubeAnnotations[consts.KubeAnnotationDynamoNimRequestHash] = hashStr
 	job = &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        r.getImageBuilderJobName(),
@@ -1196,7 +1121,7 @@ func injectPodAffinity(podSpec *corev1.PodSpec, dynamoNimRequest *nvidiacomv1alp
 		PodAffinityTerm: corev1.PodAffinityTerm{
 			LabelSelector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
-					commonconsts.KubeLabelBentoRequest: dynamoNimRequest.Name,
+					commonconsts.KubeLabelDynamoRequest: dynamoNimRequest.Name,
 				},
 			},
 			TopologyKey: corev1.LabelHostname,
@@ -1216,7 +1141,7 @@ type GenerateImageBuilderPodTemplateSpecOption struct {
 
 //nolint:gocyclo,nakedret
 func (r *DynamoNimRequestReconciler) generateImageBuilderPodTemplateSpec(ctx context.Context, opt GenerateImageBuilderPodTemplateSpecOption) (pod *corev1.PodTemplateSpec, err error) {
-	dynamoNimRepositoryName, _, dynamoNimVersion := xstrings.Partition(opt.DynamoNimRequest.Spec.BentoTag, ":")
+	dynamoComponentRepositoryName, _, dynamoComponentVersion := xstrings.Partition(opt.DynamoNimRequest.Spec.BentoTag, ":")
 	kubeLabels := r.getImageBuilderPodLabels(opt.DynamoNimRequest)
 
 	inClusterImageName := opt.ImageInfo.InClusterImageName
@@ -1227,7 +1152,7 @@ func (r *DynamoNimRequestReconciler) generateImageBuilderPodTemplateSpec(ctx con
 
 	volumes := []corev1.Volume{
 		{
-			Name: "yatai",
+			Name: "dynamo",
 			VolumeSource: corev1.VolumeSource{
 				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			},
@@ -1242,8 +1167,8 @@ func (r *DynamoNimRequestReconciler) generateImageBuilderPodTemplateSpec(ctx con
 
 	volumeMounts := []corev1.VolumeMount{
 		{
-			Name:      "yatai",
-			MountPath: "/yatai",
+			Name:      "dynamo",
+			MountPath: "/dynamo",
 		},
 		{
 			Name:      "workspace",
@@ -1272,92 +1197,46 @@ func (r *DynamoNimRequestReconciler) generateImageBuilderPodTemplateSpec(ctx con
 		})
 	}
 
-	var dynamoNim *schemas.DynamoNIM
-	yataiAPITokenSecretName := ""
-	dynamoNimDownloadURL := opt.DynamoNimRequest.Spec.DownloadURL
-	dynamoNimDownloadHeader := ""
+	var dynamoComponent *schemas.DynamoComponent
+	dynamoComponentDownloadURL := opt.DynamoNimRequest.Spec.DownloadURL
 
-	if dynamoNimDownloadURL == "" {
-		var yataiClient_ **yataiclient.YataiClient
-		var yataiConf_ **commonconfig.YataiConfig
+	if dynamoComponentDownloadURL == "" {
+		var apiStoreClient *apiStoreClient.ApiStoreClient
+		var apiStoreConf *commonconfig.ApiStoreConfig
 
-		yataiClient_, yataiConf_, err = r.getYataiClientWithAuth(ctx, opt.DynamoNimRequest)
+		apiStoreClient, apiStoreConf, err = r.getApiStoreClient(ctx)
 		if err != nil {
-			err = errors.Wrap(err, "get yatai client")
+			err = errors.Wrap(err, "get api store client")
 			return
 		}
 
-		if yataiClient_ == nil || yataiConf_ == nil {
-			err = errors.New("can't get yatai client, please check yatai configuration")
+		if apiStoreClient == nil || apiStoreConf == nil {
+			err = errors.New("can't get api store client, please check api store configuration")
 			return
 		}
 
-		yataiClient := *yataiClient_
-		yataiConf := *yataiConf_
-
-		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting dynamoNim %s from yatai service", opt.DynamoNimRequest.Spec.BentoTag)
-		dynamoNim, err = yataiClient.GetBento(ctx, dynamoNimRepositoryName, dynamoNimVersion)
+		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting dynamoNim %s from api store service", opt.DynamoNimRequest.Spec.BentoTag)
+		dynamoComponent, err = apiStoreClient.GetDynamoComponent(ctx, dynamoComponentRepositoryName, dynamoComponentVersion)
 		if err != nil {
 			err = errors.Wrap(err, "get dynamoNim")
 			return
 		}
-		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got dynamoNim %s from yatai service", opt.DynamoNimRequest.Spec.BentoTag)
+		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got dynamoNim %s from api store service", opt.DynamoNimRequest.Spec.BentoTag)
 
-		if dynamoNim.TransmissionStrategy != nil && *dynamoNim.TransmissionStrategy == schemas.TransmissionStrategyPresignedURL {
-			var dynamoNim_ *schemas.DynamoNIM
-			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for dynamoNim %s from yatai service", opt.DynamoNimRequest.Spec.BentoTag)
-			dynamoNim_, err = yataiClient.PresignBentoDownloadURL(ctx, dynamoNimRepositoryName, dynamoNimVersion)
+		if dynamoComponent.TransmissionStrategy != nil && *dynamoComponent.TransmissionStrategy == schemas.TransmissionStrategyPresignedURL {
+			var dynamoComponent_ *schemas.DynamoComponent
+			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for dynamoNim %s from api store service", opt.DynamoNimRequest.Spec.BentoTag)
+			dynamoComponent_, err = apiStoreClient.PresignDynamoComponentDownloadURL(ctx, dynamoComponentRepositoryName, dynamoComponentVersion)
 			if err != nil {
 				err = errors.Wrap(err, "presign dynamoNim download url")
 				return
 			}
-			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for dynamoNim %s from yatai service", opt.DynamoNimRequest.Spec.BentoTag)
-			dynamoNimDownloadURL = dynamoNim_.PresignedDownloadUrl
+			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for dynamoNim %s from api store service", opt.DynamoNimRequest.Spec.BentoTag)
+			dynamoComponentDownloadURL = dynamoComponent_.PresignedDownloadUrl
 		} else {
-			dynamoNimDownloadURL = fmt.Sprintf("%s/api/v1/dynamo_nims/%s/versions/%s/download", yataiConf.Endpoint, dynamoNimRepositoryName, dynamoNimVersion)
-			dynamoNimDownloadHeader = fmt.Sprintf("%s: %s:%s:$%s", commonconsts.YataiApiTokenHeaderName, commonconsts.YataiImageBuilderComponentName, yataiConf.ClusterName, commonconsts.EnvYataiApiToken)
+			dynamoComponentDownloadURL = fmt.Sprintf("%s/api/v1/dynamo_nims/%s/versions/%s/download", apiStoreConf.Endpoint, dynamoComponentRepositoryName, dynamoComponentVersion)
 		}
 
-		// nolint: gosec
-		yataiAPITokenSecretName = "yatai-api-token"
-
-		yataiAPITokenSecret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      yataiAPITokenSecretName,
-				Namespace: opt.DynamoNimRequest.Namespace,
-			},
-			StringData: map[string]string{
-				commonconsts.EnvYataiApiToken: yataiConf.ApiToken,
-			},
-		}
-
-		r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting secret %s in namespace %s", yataiAPITokenSecretName, opt.DynamoNimRequest.Namespace)
-		_yataiAPITokenSecret := &corev1.Secret{}
-		err = r.Get(ctx, types.NamespacedName{Namespace: opt.DynamoNimRequest.Namespace, Name: yataiAPITokenSecretName}, _yataiAPITokenSecret)
-		isNotFound := k8serrors.IsNotFound(err)
-		if err != nil && !isNotFound {
-			err = errors.Wrapf(err, "failed to get secret %s", yataiAPITokenSecretName)
-			return
-		}
-
-		if isNotFound {
-			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is not found, so creating it in namespace %s", yataiAPITokenSecretName, opt.DynamoNimRequest.Namespace)
-			err = r.Create(ctx, yataiAPITokenSecret)
-			isExists := k8serrors.IsAlreadyExists(err)
-			if err != nil && !isExists {
-				err = errors.Wrapf(err, "failed to create secret %s", yataiAPITokenSecretName)
-				return
-			}
-			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is created in namespace %s", yataiAPITokenSecretName, opt.DynamoNimRequest.Namespace)
-		} else {
-			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is found in namespace %s, so updating it", yataiAPITokenSecretName, opt.DynamoNimRequest.Namespace)
-			err = r.Update(ctx, yataiAPITokenSecret)
-			if err != nil {
-				err = errors.Wrapf(err, "failed to update secret %s", yataiAPITokenSecretName)
-				return
-			}
-			r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is updated in namespace %s", yataiAPITokenSecretName, opt.DynamoNimRequest.Namespace)
-		}
 	}
 	internalImages := commonconfig.GetInternalImages()
 	logrus.Infof("Image builder is using the images %v", *internalImages)
@@ -1370,8 +1249,8 @@ func (r *DynamoNimRequestReconciler) generateImageBuilderPodTemplateSpec(ctx con
 set -e
 
 mkdir -p /workspace/buildcontext
-url="{{.DynamoNimDownloadURL}}"
-echo "Downloading dynamoNim {{.DynamoNimRepositoryName}}:{{.DynamoNimVersion}} to /tmp/downloaded.tar..."
+url="{{.DynamoComponentDownloadURL}}"
+echo "Downloading dynamoNim {{.DynamoComponentRepositoryName}}:{{.DynamoComponentVersion}} to /tmp/downloaded.tar..."
 if [[ ${url} == s3://* ]]; then
 	echo "Downloading from s3..."
 	aws s3 cp ${url} /tmp/downloaded.tar
@@ -1379,7 +1258,7 @@ elif [[ ${url} == gs://* ]]; then
 	echo "Downloading from GCS..."
 	gsutil cp ${url} /tmp/downloaded.tar
 else
-	curl --fail -L -H "{{.DynamoNimDownloadHeader}}" ${url} --output /tmp/downloaded.tar --progress-bar
+	curl --fail -L ${url} --output /tmp/downloaded.tar --progress-bar
 fi
 cd /workspace/buildcontext
 echo "Extracting dynamoNim tar file..."
@@ -1401,11 +1280,10 @@ echo "Done"
 	var dynamoNimDownloadCommandBuffer bytes.Buffer
 
 	err = dynamoNimDownloadCommandTemplate.Execute(&dynamoNimDownloadCommandBuffer, map[string]interface{}{
-		"DynamoNimDownloadURL":    dynamoNimDownloadURL,
-		"DynamoNimDownloadHeader": dynamoNimDownloadHeader,
-		"DynamoNimRepositoryName": dynamoNimRepositoryName,
-		"DynamoNimVersion":        dynamoNimVersion,
-		"Privileged":              privileged,
+		"DynamoComponentDownloadURL":    dynamoComponentDownloadURL,
+		"DynamoComponentRepositoryName": dynamoComponentRepositoryName,
+		"DynamoComponentVersion":        dynamoComponentVersion,
+		"Privileged":                    privileged,
 	})
 	if err != nil {
 		err = errors.Wrap(err, "failed to execute download command template")
@@ -1427,20 +1305,10 @@ echo "Done"
 
 	downloaderContainerEnvFrom := opt.DynamoNimRequest.Spec.DownloaderContainerEnvFrom
 
-	if yataiAPITokenSecretName != "" {
-		downloaderContainerEnvFrom = append(downloaderContainerEnvFrom, corev1.EnvFromSource{
-			SecretRef: &corev1.SecretEnvSource{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: yataiAPITokenSecretName,
-				},
-			},
-		})
-	}
-
 	initContainers := []corev1.Container{
 		{
 			Name:  "dynamonim-downloader",
-			Image: internalImages.BentoDownloader,
+			Image: internalImages.DynamoComponentsDownloader,
 			Command: []string{
 				"bash",
 				"-c",
@@ -1466,8 +1334,8 @@ echo "Done"
 		modelsSeen[model.Tag] = struct{}{}
 	}
 
-	if dynamoNim != nil {
-		for _, modelTag := range dynamoNim.Manifest.Models {
+	if dynamoComponent != nil {
+		for _, modelTag := range dynamoComponent.Manifest.Models {
 			if _, ok := modelsSeen[modelTag]; !ok {
 				models = append(models, nvidiacomv1alpha1.BentoModel{
 					Tag: modelTag,
@@ -1483,13 +1351,13 @@ echo "Done"
 	var buildArgs []string
 	var builderArgs []string
 
-	configNamespace, err := commonconfig.GetYataiImageBuilderNamespace(ctx)
+	configNamespace, err := commonconfig.GetDynamoImageBuilderNamespace(ctx)
 	if err != nil {
-		err = errors.Wrap(err, "failed to get Yatai image builder namespace")
+		err = errors.Wrap(err, "failed to get dynamo image builder namespace")
 		return
 	}
 
-	configCmName := "yatai-image-builder-config"
+	configCmName := "dynamo-image-builder-config"
 	r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting configmap %s from namespace %s", configCmName, configNamespace)
 	configCm := &corev1.ConfigMap{}
 	err = r.Get(ctx, types.NamespacedName{Name: configCmName, Namespace: configNamespace}, configCm)
@@ -1589,11 +1457,11 @@ echo "Done"
 
 	kanikoCacheRepo := os.Getenv("KANIKO_CACHE_REPO")
 	if kanikoCacheRepo == "" {
-		kanikoCacheRepo = opt.ImageInfo.DockerRegistry.BentosRepositoryURIInCluster
+		kanikoCacheRepo = opt.ImageInfo.DockerRegistry.DynamoRepositoryURIInCluster
 	}
 
 	kubeAnnotations := make(map[string]string)
-	kubeAnnotations[KubeAnnotationDynamoNimRequestImageBuiderHash] = opt.DynamoNimRequest.Annotations[KubeAnnotationDynamoNimRequestImageBuiderHash]
+	kubeAnnotations[consts.KubeAnnotationDynamoNimRequestImageBuiderHash] = opt.DynamoNimRequest.Annotations[consts.KubeAnnotationDynamoNimRequestImageBuiderHash]
 
 	command := []string{
 		"/kaniko/executor",
@@ -1710,10 +1578,10 @@ echo "Done"
 	}
 	// add other arguments to builder
 	args = append(args, builderArgs...)
-	logrus.Info("yatai-image-builder args: ", args)
+	logrus.Info("dynamo-image-builder args: ", args)
 
 	// nolint: gosec
-	buildArgsSecretName := "yatai-image-builder-build-args"
+	buildArgsSecretName := "dynamo-image-builder-build-args"
 	r.Recorder.Eventf(opt.DynamoNimRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting secret %s from namespace %s", buildArgsSecretName, configNamespace)
 	buildArgsSecret := &corev1.Secret{}
 	err = r.Get(ctx, types.NamespacedName{Name: buildArgsSecretName, Namespace: configNamespace}, buildArgsSecret)
@@ -1896,7 +1764,7 @@ echo "Done"
 	if pod.Spec.ServiceAccountName == "" {
 		serviceAccounts := &corev1.ServiceAccountList{}
 		err = r.List(ctx, serviceAccounts, client.InNamespace(opt.DynamoNimRequest.Namespace), client.MatchingLabels{
-			commonconsts.KubeLabelYataiImageBuilderPod: commonconsts.KubeLabelValueTrue,
+			commonconsts.KubeLabelDynamoImageBuilderPod: commonconsts.KubeLabelValueTrue,
 		})
 		if err != nil {
 			err = errors.Wrapf(err, "failed to list service accounts in namespace %s", opt.DynamoNimRequest.Namespace)

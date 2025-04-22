@@ -179,7 +179,7 @@ func main() {
 	if err = (&controller.DynamoNimDeploymentReconciler{
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
-		Recorder:          mgr.GetEventRecorderFor("yatai-deployment"),
+		Recorder:          mgr.GetEventRecorderFor("dynamo-deployment"),
 		Config:            ctrlConfig,
 		NatsAddr:          natsAddr,
 		EtcdAddr:          etcdAddr,
@@ -192,7 +192,7 @@ func main() {
 	if err = (&controller.DynamoNimRequestReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("yatai-image-builder"),
+		Recorder: mgr.GetEventRecorderFor("dynamo-image-builder"),
 		Config:   ctrlConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoNimRequest")

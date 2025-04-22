@@ -73,16 +73,12 @@ controllerManager:
     annotations: {}
 
 dynamo:
-  yatai:
+  apiStore:
     endpoint: http://dynamo-server.dynamo-system.svc.cluster.local
     clusterName: default
 
-  yataiSystem:
-    # If left blank, will default to the installation namespace
-    namespace: ""
-
   internalImages:
-    bentoDownloader: quay.io/bentoml/bento-downloader:0.0.5
+    dynamoComponentsDownloader: quay.io/bentoml/bento-downloader:0.0.5
     kaniko: quay.io/bentoml/kaniko:debug
     buildkit: moby/buildkit:latest
     buildkitRootless: quay.io/bentoml/buildkit:master-rootless
@@ -91,9 +87,7 @@ dynamo:
     monitorExporter: quay.io/bentoml/bentoml-monitor-exporter:0.0.3
     proxy: quay.io/bentoml/bentoml-proxy:0.0.1
 
-  disableAutomateBentoImageBuilder: false
   enableRestrictedSecurityContext: false
-  disableYataiComponentRegistration: false
 
   dockerRegistry:
     server: 'nvcr.io/nvidian/nim-llm-dev'
@@ -103,9 +97,9 @@ dynamo:
     passwordExistingSecretName: ''
     passwordExistingSecretKey: ''
     secure: true
-    bentoRepositoryName: dynamo-pipelines
+    dynamoComponentsRepositoryName: dynamo-pipelines
 
-  bentoImageBuildEngine: buildkit # options: kaniko, buildkit, buildkit-rootless
+  imageBuildEngine: buildkit # options: kaniko, buildkit, buildkit-rootless
   addNamespacePrefixToImageName: false
 
   estargz:

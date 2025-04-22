@@ -26,12 +26,11 @@ import (
 	"strings"
 
 	"emperror.dev/errors"
+	apiStoreClient "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/api_store_client"
 	compounaiCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemas"
-	yataiclient "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/yatai-client"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/config"
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
 	"github.com/huandu/xstrings"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -89,54 +88,49 @@ func GetDefaultDynamoNamespace(ctx context.Context, dynamoDeployment *v1alpha1.D
 	return fmt.Sprintf("dynamo-%s", dynamoDeployment.Name)
 }
 
-func RetrieveDynamoNimDownloadURL(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDeployment, recorder EventRecorder) (*string, *string, error) {
+func RetrieveDynamoNimDownloadURL(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDeployment, recorder EventRecorder) (*string, error) {
 	dynamoNimDownloadURL := ""
-	dynamoNimApiToken := ""
-	var dynamoNim *schemas.DynamoNIM
-	dynamoNimRepositoryName, _, dynamoNimVersion := xstrings.Partition(dynamoDeployment.Spec.DynamoNim, ":")
+	var dynamoComponent *schemas.DynamoComponent
+	dynamoComponentRepositoryName, _, dynamoComponentVersion := xstrings.Partition(dynamoDeployment.Spec.DynamoNim, ":")
 
 	var err error
-	var yataiClient_ **yataiclient.YataiClient
-	var yataiConf_ **commonconfig.YataiConfig
+	var apiStoreClient *apiStoreClient.ApiStoreClient
+	var apiStoreConf *commonconfig.ApiStoreConfig
 
-	yataiClient_, yataiConf_, err = GetYataiClient(ctx)
+	apiStoreClient, apiStoreConf, err = GetApiStoreClient(ctx)
 	if err != nil {
-		err = errors.Wrap(err, "get yatai client")
-		return nil, nil, err
+		err = errors.Wrap(err, "get api store client")
+		return nil, err
 	}
 
-	if yataiClient_ == nil || yataiConf_ == nil {
-		err = errors.New("can't get yatai client, please check yatai configuration")
-		return nil, nil, err
+	if apiStoreClient == nil || apiStoreConf == nil {
+		err = errors.New("can't get api store client, please check api store configuration")
+		return nil, err
 	}
 
-	yataiClient := *yataiClient_
-	yataiConf := *yataiConf_
-
-	recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting dynamoNim %s from yatai service", dynamoDeployment.Spec.DynamoNim)
-	dynamoNim, err = yataiClient.GetBento(ctx, dynamoNimRepositoryName, dynamoNimVersion)
+	recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting dynamoNim %s from api store service", dynamoDeployment.Spec.DynamoNim)
+	dynamoComponent, err = apiStoreClient.GetDynamoComponent(ctx, dynamoComponentRepositoryName, dynamoComponentVersion)
 	if err != nil {
-		err = errors.Wrap(err, "get dynamoNim")
-		return nil, nil, err
+		err = errors.Wrap(err, "get dynamo component")
+		return nil, err
 	}
-	recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got dynamoNim %s from yatai service", dynamoDeployment.Spec.DynamoNim)
+	recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got dynamoNim %s from api store service", dynamoDeployment.Spec.DynamoNim)
 
-	if dynamoNim.TransmissionStrategy != nil && *dynamoNim.TransmissionStrategy == schemas.TransmissionStrategyPresignedURL {
-		var dynamoNim_ *schemas.DynamoNIM
-		recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for dynamoNim %s from yatai service", dynamoDeployment.Spec.DynamoNim)
-		dynamoNim_, err = yataiClient.PresignBentoDownloadURL(ctx, dynamoNimRepositoryName, dynamoNimVersion)
+	if dynamoComponent.TransmissionStrategy != nil && *dynamoComponent.TransmissionStrategy == schemas.TransmissionStrategyPresignedURL {
+		var dynamoComponent_ *schemas.DynamoComponent
+		recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for dynamoNim %s from api store service", dynamoDeployment.Spec.DynamoNim)
+		dynamoComponent_, err = apiStoreClient.PresignDynamoComponentDownloadURL(ctx, dynamoComponentRepositoryName, dynamoComponentVersion)
 		if err != nil {
-			err = errors.Wrap(err, "presign dynamoNim download url")
-			return nil, nil, err
+			err = errors.Wrap(err, "presign dynamo component download url")
+			return nil, err
 		}
-		recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for dynamoNim %s from yatai service", dynamoDeployment.Spec.DynamoNim)
-		dynamoNimDownloadURL = dynamoNim_.PresignedDownloadUrl
+		recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for dynamoNim %s from api store service", dynamoDeployment.Spec.DynamoNim)
+		dynamoNimDownloadURL = dynamoComponent_.PresignedDownloadUrl
 	} else {
-		dynamoNimDownloadURL = fmt.Sprintf("%s/api/v1/dynamo_nims/%s/versions/%s/download", yataiConf.Endpoint, dynamoNimRepositoryName, dynamoNimVersion)
-		dynamoNimApiToken = fmt.Sprintf("%s:%s:$%s", commonconsts.YataiImageBuilderComponentName, yataiConf.ClusterName, commonconsts.EnvYataiApiToken)
+		dynamoNimDownloadURL = fmt.Sprintf("%s/api/v1/dynamo_nims/%s/versions/%s/download", apiStoreConf.Endpoint, dynamoComponentRepositoryName, dynamoComponentVersion)
 	}
 
-	return &dynamoNimDownloadURL, &dynamoNimApiToken, nil
+	return &dynamoNimDownloadURL, nil
 }
 
 // ServicesConfig represents the top-level YAML structure of a dynamoNim yaml file stored in a dynamoNim tar file
@@ -150,12 +144,11 @@ type EventRecorder interface {
 	Eventf(obj runtime.Object, eventtype string, reason string, message string, args ...interface{})
 }
 
-func RetrieveDynamoNIMConfigurationFile(ctx context.Context, url string, yataiApiToken string) (*bytes.Buffer, error) {
+func RetrieveDynamoNIMConfigurationFile(ctx context.Context, url string) (*bytes.Buffer, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set(commonconsts.YataiApiTokenHeaderName, yataiApiToken)
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -185,31 +178,29 @@ func RetrieveDynamoNIMConfigurationFile(ctx context.Context, url string, yataiAp
 	return yamlContent, nil
 }
 
-func GetYataiClient(ctx context.Context) (yataiClient **yataiclient.YataiClient, yataiConf **commonconfig.YataiConfig, err error) {
-	yataiConf_, err := commonconfig.GetYataiConfig(ctx)
+func GetApiStoreClient(ctx context.Context) (*apiStoreClient.ApiStoreClient, *commonconfig.ApiStoreConfig, error) {
+	apiStoreConf, err := commonconfig.GetApiStoreConfig(ctx)
 	isNotFound := k8serrors.IsNotFound(err)
 	if err != nil && !isNotFound {
-		err = errors.Wrap(err, "get yatai config")
-		return
+		err = errors.Wrap(err, "get api store config")
+		return nil, nil, err
 	}
 
 	if isNotFound {
-		return
+		return nil, nil, errors.New("endpoint config not found")
 	}
 
-	if yataiConf_.Endpoint == "" {
-		return
+	if apiStoreConf.Endpoint == "" {
+		return nil, nil, errors.New("endpoint is empty")
 	}
 
-	if yataiConf_.ClusterName == "" {
-		yataiConf_.ClusterName = "default"
+	if apiStoreConf.ClusterName == "" {
+		apiStoreConf.ClusterName = "default"
 	}
 
-	yataiClient_ := yataiclient.NewYataiClient(yataiConf_.Endpoint, fmt.Sprintf("%s:%s:%s", commonconsts.YataiImageBuilderComponentName, yataiConf_.ClusterName, yataiConf_.ApiToken))
+	apiStoreClient := apiStoreClient.NewApiStoreClient(apiStoreConf.Endpoint)
 
-	yataiClient = &yataiClient_
-	yataiConf = &yataiConf_
-	return
+	return apiStoreClient, apiStoreConf, nil
 }
 
 func ParseDynamoNIMConfig(ctx context.Context, yamlContent *bytes.Buffer) (*DynamoNIMConfig, error) {
@@ -221,11 +212,11 @@ func ParseDynamoNIMConfig(ctx context.Context, yamlContent *bytes.Buffer) (*Dyna
 }
 
 func GetDynamoNIMConfig(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDeployment, recorder EventRecorder) (*DynamoNIMConfig, error) {
-	dynamoNimDownloadURL, dynamoNimApiToken, err := RetrieveDynamoNimDownloadURL(ctx, dynamoDeployment, recorder)
+	dynamoNimDownloadURL, err := RetrieveDynamoNimDownloadURL(ctx, dynamoDeployment, recorder)
 	if err != nil {
 		return nil, err
 	}
-	yamlContent, err := RetrieveDynamoNIMConfigurationFile(ctx, *dynamoNimDownloadURL, *dynamoNimApiToken)
+	yamlContent, err := RetrieveDynamoNIMConfigurationFile(ctx, *dynamoNimDownloadURL)
 	if err != nil {
 		return nil, err
 	}

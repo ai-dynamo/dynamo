@@ -69,26 +69,26 @@ import (
 )
 
 const (
-	DefaultClusterName                                        = "default"
-	DefaultServiceAccountName                                 = "default"
-	KubeValueNameSharedMemory                                 = "shared-memory"
-	KubeAnnotationDeploymentStrategy                          = "yatai.ai/deployment-strategy"
-	KubeAnnotationYataiEnableStealingTrafficDebugMode         = "yatai.ai/enable-stealing-traffic-debug-mode"
-	KubeAnnotationYataiEnableDebugMode                        = "yatai.ai/enable-debug-mode"
-	KubeAnnotationYataiEnableDebugPodReceiveProductionTraffic = "yatai.ai/enable-debug-pod-receive-production-traffic"
-	KubeAnnotationYataiProxySidecarResourcesLimitsCPU         = "yatai.ai/proxy-sidecar-resources-limits-cpu"
-	KubeAnnotationYataiProxySidecarResourcesLimitsMemory      = "yatai.ai/proxy-sidecar-resources-limits-memory"
-	KubeAnnotationYataiProxySidecarResourcesRequestsCPU       = "yatai.ai/proxy-sidecar-resources-requests-cpu"
-	KubeAnnotationYataiProxySidecarResourcesRequestsMemory    = "yatai.ai/proxy-sidecar-resources-requests-memory"
-	DeploymentTargetTypeProduction                            = "production"
-	DeploymentTargetTypeDebug                                 = "debug"
-	ContainerPortNameHTTPProxy                                = "http-proxy"
-	ServicePortNameHTTPNonProxy                               = "http-non-proxy"
-	HeaderNameDebug                                           = "X-Yatai-Debug"
-	DefaultIngressSuffix                                      = "local"
+	DefaultClusterName                                   = "default"
+	DefaultServiceAccountName                            = "default"
+	KubeValueNameSharedMemory                            = "shared-memory"
+	KubeAnnotationDeploymentStrategy                     = "nvidia.com/deployment-strategy"
+	KubeAnnotationEnableStealingTrafficDebugMode         = "nvidia.com/enable-stealing-traffic-debug-mode"
+	KubeAnnotationEnableDebugMode                        = "nvidia.com/enable-debug-mode"
+	KubeAnnotationEnableDebugPodReceiveProductionTraffic = "nvidia.com/enable-debug-pod-receive-production-traffic"
+	KubeAnnotationProxySidecarResourcesLimitsCPU         = "nvidia.com/proxy-sidecar-resources-limits-cpu"
+	KubeAnnotationProxySidecarResourcesLimitsMemory      = "nvidia.com/proxy-sidecar-resources-limits-memory"
+	KubeAnnotationProxySidecarResourcesRequestsCPU       = "nvidia.com/proxy-sidecar-resources-requests-cpu"
+	KubeAnnotationProxySidecarResourcesRequestsMemory    = "nvidia.com/proxy-sidecar-resources-requests-memory"
+	DeploymentTargetTypeProduction                       = "production"
+	DeploymentTargetTypeDebug                            = "debug"
+	ContainerPortNameHTTPProxy                           = "http-proxy"
+	ServicePortNameHTTPNonProxy                          = "http-non-proxy"
+	HeaderNameDebug                                      = "X-Nvidia-Debug"
+	DefaultIngressSuffix                                 = "local"
 )
 
-var ServicePortHTTPNonProxy = commonconsts.BentoServicePort + 1
+var ServicePortHTTPNonProxy = commonconsts.DynamoServicePort + 1
 
 // DynamoNimDeploymentReconciler reconciles a DynamoNimDeployment object
 type DynamoNimDeploymentReconciler struct {
@@ -394,7 +394,7 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	if !modified {
-		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateYataiDeployment", "No changes to yatai deployment %s", dynamoNimDeployment.Name)
+		r.Recorder.Eventf(dynamoNimDeployment, corev1.EventTypeNormal, "UpdateDynamoDeployment", "No changes to dynamo deployment %s", dynamoNimDeployment.Name)
 	}
 
 	logs.Info("Finished reconciling.")
@@ -723,7 +723,7 @@ func checkIfIsDebugModeEnabled(annotations map[string]string) bool {
 		return false
 	}
 
-	return annotations[KubeAnnotationYataiEnableDebugMode] == commonconsts.KubeLabelValueTrue
+	return annotations[KubeAnnotationEnableDebugMode] == commonconsts.KubeLabelValueTrue
 }
 
 func checkIfIsStealingTrafficDebugModeEnabled(annotations map[string]string) bool {
@@ -731,7 +731,7 @@ func checkIfIsStealingTrafficDebugModeEnabled(annotations map[string]string) boo
 		return false
 	}
 
-	return annotations[KubeAnnotationYataiEnableStealingTrafficDebugMode] == commonconsts.KubeLabelValueTrue
+	return annotations[KubeAnnotationEnableStealingTrafficDebugMode] == commonconsts.KubeLabelValueTrue
 }
 
 func checkIfIsDebugPodReceiveProductionTrafficEnabled(annotations map[string]string) bool {
@@ -739,7 +739,7 @@ func checkIfIsDebugPodReceiveProductionTrafficEnabled(annotations map[string]str
 		return false
 	}
 
-	return annotations[KubeAnnotationYataiEnableDebugPodReceiveProductionTraffic] == commonconsts.KubeLabelValueTrue
+	return annotations[KubeAnnotationEnableDebugPodReceiveProductionTraffic] == commonconsts.KubeLabelValueTrue
 }
 
 func checkIfContainsStealingTrafficDebugModeEnabled(dynamoNimDeployment *v1alpha1.DynamoNimDeployment) bool {
@@ -933,21 +933,21 @@ func (r *DynamoNimDeploymentReconciler) getGenericServiceName(dynamoNimDeploymen
 func (r *DynamoNimDeploymentReconciler) getKubeLabels(dynamoNimDeployment *v1alpha1.DynamoNimDeployment, dynamoNim *v1alpha1.DynamoNim) map[string]string {
 	dynamoNimRepositoryName, _, dynamoNimVersion := xstrings.Partition(dynamoNim.Spec.Tag, ":")
 	labels := map[string]string{
-		commonconsts.KubeLabelYataiBentoDeployment:           dynamoNimDeployment.Name,
-		commonconsts.KubeLabelBentoRepository:                dynamoNimRepositoryName,
-		commonconsts.KubeLabelBentoVersion:                   dynamoNimVersion,
-		commonconsts.KubeLabelYataiBentoDeploymentTargetType: DeploymentTargetTypeProduction,
-		commonconsts.KubeLabelCreator:                        "yatai-deployment",
+		commonconsts.KubeLabelDynamoDeployment:           dynamoNimDeployment.Name,
+		commonconsts.KubeLabelDynamoRepository:           dynamoNimRepositoryName,
+		commonconsts.KubeLabelDynamoVersion:              dynamoNimVersion,
+		commonconsts.KubeLabelDynamoDeploymentTargetType: DeploymentTargetTypeProduction,
+		commonconsts.KubeLabelDynamoCreator:              "dynamo-deployment",
 	}
-	labels[commonconsts.KubeLabelYataiBentoDeploymentComponentType] = commonconsts.YataiBentoDeploymentComponentApiServer
+	labels[commonconsts.KubeLabelDynamoDeploymentComponentType] = commonconsts.DynamoDeploymentComponentApiServer
 	return labels
 }
 
 func (r *DynamoNimDeploymentReconciler) getKubeAnnotations(dynamoNimDeployment *v1alpha1.DynamoNimDeployment, dynamoNim *v1alpha1.DynamoNim) map[string]string {
 	dynamoNimRepositoryName, dynamoNimVersion := getDynamoNimRepositoryNameAndDynamoNimVersion(dynamoNim)
 	annotations := map[string]string{
-		commonconsts.KubeAnnotationBentoRepository: dynamoNimRepositoryName,
-		commonconsts.KubeAnnotationBentoVersion:    dynamoNimVersion,
+		commonconsts.KubeAnnotationDynamoRepository: dynamoNimRepositoryName,
+		commonconsts.KubeAnnotationDynamoVersion:    dynamoNimVersion,
 	}
 	var extraAnnotations map[string]string
 	if dynamoNimDeployment.Spec.ExtraPodMetadata != nil {
@@ -1048,7 +1048,7 @@ func (r *DynamoNimDeploymentReconciler) generateDeployment(ctx context.Context, 
 		Replicas: replicas,
 		Selector: &metav1.LabelSelector{
 			MatchLabels: map[string]string{
-				commonconsts.KubeLabelYataiSelector: kubeName,
+				commonconsts.KubeLabelDynamoSelector: kubeName,
 			},
 		},
 		Template: *podTemplateSpec,
@@ -1135,21 +1135,17 @@ func (r *DynamoNimDeploymentReconciler) generatePodTemplateSpec(ctx context.Cont
 	dynamoNimRepositoryName, _ := getDynamoNimRepositoryNameAndDynamoNimVersion(opt.dynamoNim)
 	podLabels := r.getKubeLabels(opt.dynamoNimDeployment, opt.dynamoNim)
 	if opt.isStealingTrafficDebugModeEnabled {
-		podLabels[commonconsts.KubeLabelYataiBentoDeploymentTargetType] = DeploymentTargetTypeDebug
+		podLabels[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
 	}
 
 	podAnnotations := r.getKubeAnnotations(opt.dynamoNimDeployment, opt.dynamoNim)
 
 	kubeName := r.getKubeName(opt.dynamoNimDeployment, opt.dynamoNim, opt.isStealingTrafficDebugModeEnabled)
 
-	containerPort := commonconsts.BentoServicePort
+	containerPort := commonconsts.DynamoServicePort
 	lastPort := containerPort + 1
 
-	monitorExporter := opt.dynamoNimDeployment.Spec.MonitorExporter
-	needMonitorContainer := monitorExporter != nil && monitorExporter.Enabled
-
 	lastPort++
-	monitorExporterPort := lastPort
 
 	var envs []corev1.EnvVar
 	envsSeen := make(map[string]struct{})
@@ -1170,7 +1166,7 @@ func (r *DynamoNimDeploymentReconciler) generatePodTemplateSpec(ctx context.Cont
 			if _, ok := envsSeen[env.Name]; ok {
 				continue
 			}
-			if env.Name == commonconsts.EnvBentoServicePort {
+			if env.Name == commonconsts.EnvDynamoServicePort {
 				// nolint: gosec
 				containerPort, err = strconv.Atoi(env.Value)
 				if err != nil {
@@ -1187,19 +1183,19 @@ func (r *DynamoNimDeploymentReconciler) generatePodTemplateSpec(ctx context.Cont
 
 	defaultEnvs := []corev1.EnvVar{
 		{
-			Name:  commonconsts.EnvBentoServicePort,
+			Name:  commonconsts.EnvDynamoServicePort,
 			Value: fmt.Sprintf("%d", containerPort),
 		},
 		{
-			Name:  commonconsts.EnvYataiDeploymentUID,
+			Name:  commonconsts.EnvDynamoDeploymentUID,
 			Value: string(opt.dynamoNimDeployment.UID),
 		},
 		{
-			Name:  commonconsts.EnvYataiBentoDeploymentName,
+			Name:  commonconsts.EnvDynamoDeploymentName,
 			Value: opt.dynamoNimDeployment.Name,
 		},
 		{
-			Name:  commonconsts.EnvYataiBentoDeploymentNamespace,
+			Name:  commonconsts.EnvDynamoDeploymentNamespace,
 			Value: opt.dynamoNimDeployment.Namespace,
 		},
 	}
@@ -1222,44 +1218,6 @@ func (r *DynamoNimDeploymentReconciler) generatePodTemplateSpec(ctx context.Cont
 		if _, ok := envsSeen[env.Name]; !ok {
 			envs = append(envs, env)
 		}
-	}
-
-	if needMonitorContainer {
-		monitoringConfigTemplate := `monitoring.enabled=true
-monitoring.type=otlp
-monitoring.options.endpoint=http://127.0.0.1:%d
-monitoring.options.insecure=true`
-		var bentomlOptions string
-		index := -1
-		for i, env := range envs {
-			if env.Name == "BENTOML_CONFIG_OPTIONS" {
-				bentomlOptions = env.Value
-				index = i
-				break
-			}
-		}
-		if index == -1 {
-			// BENOML_CONFIG_OPTIONS not defined
-			bentomlOptions = fmt.Sprintf(monitoringConfigTemplate, monitorExporterPort)
-			envs = append(envs, corev1.EnvVar{
-				Name:  "BENTOML_CONFIG_OPTIONS",
-				Value: bentomlOptions,
-			})
-		} else if !strings.Contains(bentomlOptions, "monitoring") {
-			// monitoring config not defined
-			envs = append(envs[:index], envs[index+1:]...)
-			bentomlOptions = strings.TrimSpace(bentomlOptions) // ' ' -> ''
-			if bentomlOptions != "" {
-				bentomlOptions += "\n"
-			}
-			bentomlOptions += fmt.Sprintf(monitoringConfigTemplate, monitorExporterPort)
-			envs = append(envs, corev1.EnvVar{
-				Name:  "BENTOML_CONFIG_OPTIONS",
-				Value: bentomlOptions,
-			})
-		}
-		// monitoring config already defined
-		// do nothing
 	}
 
 	var livenessProbe *corev1.Probe
@@ -1322,9 +1280,9 @@ monitoring.options.insecure=true`
 		}
 	}
 
-	yataiResources := opt.dynamoNimDeployment.Spec.Resources
+	dynamoResources := opt.dynamoNimDeployment.Spec.Resources
 
-	resources, err := getResourcesConfig(yataiResources)
+	resources, err := getResourcesConfig(dynamoResources)
 	if err != nil {
 		err = errors.Wrap(err, "failed to get resources config")
 		return nil, err
@@ -1405,7 +1363,7 @@ monitoring.options.insecure=true`
 		Ports: []corev1.ContainerPort{
 			{
 				Protocol:      corev1.ProtocolTCP,
-				Name:          commonconsts.BentoContainerPortName,
+				Name:          commonconsts.DynamoContainerPortName,
 				ContainerPort: int32(containerPort), // nolint: gosec
 			},
 		},
@@ -1424,14 +1382,14 @@ monitoring.options.insecure=true`
 		}
 	}
 
-	if resourceAnnotations["yatai.ai/enable-container-privileged"] == commonconsts.KubeLabelValueTrue {
+	if resourceAnnotations["nvidia.com/enable-container-privileged"] == commonconsts.KubeLabelValueTrue {
 		if container.SecurityContext == nil {
 			container.SecurityContext = &corev1.SecurityContext{}
 		}
 		container.SecurityContext.Privileged = &[]bool{true}[0]
 	}
 
-	if resourceAnnotations["yatai.ai/enable-container-ptrace"] == commonconsts.KubeLabelValueTrue {
+	if resourceAnnotations["nvidia.com/enable-container-ptrace"] == commonconsts.KubeLabelValueTrue {
 		if container.SecurityContext == nil {
 			container.SecurityContext = &corev1.SecurityContext{}
 		}
@@ -1440,7 +1398,7 @@ monitoring.options.insecure=true`
 		}
 	}
 
-	if resourceAnnotations["yatai.ai/run-container-as-root"] == commonconsts.KubeLabelValueTrue {
+	if resourceAnnotations["nvidia.com/run-container-as-root"] == commonconsts.KubeLabelValueTrue {
 		if container.SecurityContext == nil {
 			container.SecurityContext = &corev1.SecurityContext{}
 		}
@@ -1522,7 +1480,7 @@ monitoring.options.insecure=true`
 	lastPort++
 	proxyPort := lastPort
 
-	proxyResourcesRequestsCPUStr := resourceAnnotations[KubeAnnotationYataiProxySidecarResourcesRequestsCPU]
+	proxyResourcesRequestsCPUStr := resourceAnnotations[KubeAnnotationProxySidecarResourcesRequestsCPU]
 	if proxyResourcesRequestsCPUStr == "" {
 		proxyResourcesRequestsCPUStr = "100m"
 	}
@@ -1532,7 +1490,7 @@ monitoring.options.insecure=true`
 		err = errors.Wrapf(err, "failed to parse proxy sidecar resources requests cpu: %s", proxyResourcesRequestsCPUStr)
 		return nil, err
 	}
-	proxyResourcesRequestsMemoryStr := resourceAnnotations[KubeAnnotationYataiProxySidecarResourcesRequestsMemory]
+	proxyResourcesRequestsMemoryStr := resourceAnnotations[KubeAnnotationProxySidecarResourcesRequestsMemory]
 	if proxyResourcesRequestsMemoryStr == "" {
 		proxyResourcesRequestsMemoryStr = "200Mi"
 	}
@@ -1542,7 +1500,7 @@ monitoring.options.insecure=true`
 		err = errors.Wrapf(err, "failed to parse proxy sidecar resources requests memory: %s", proxyResourcesRequestsMemoryStr)
 		return nil, err
 	}
-	proxyResourcesLimitsCPUStr := resourceAnnotations[KubeAnnotationYataiProxySidecarResourcesLimitsCPU]
+	proxyResourcesLimitsCPUStr := resourceAnnotations[KubeAnnotationProxySidecarResourcesLimitsCPU]
 	if proxyResourcesLimitsCPUStr == "" {
 		proxyResourcesLimitsCPUStr = "300m"
 	}
@@ -1552,7 +1510,7 @@ monitoring.options.insecure=true`
 		err = errors.Wrapf(err, "failed to parse proxy sidecar resources limits cpu: %s", proxyResourcesLimitsCPUStr)
 		return nil, err
 	}
-	proxyResourcesLimitsMemoryStr := resourceAnnotations[KubeAnnotationYataiProxySidecarResourcesLimitsMemory]
+	proxyResourcesLimitsMemoryStr := resourceAnnotations[KubeAnnotationProxySidecarResourcesLimitsMemory]
 	if proxyResourcesLimitsMemoryStr == "" {
 		proxyResourcesLimitsMemoryStr = "1000Mi"
 	}
@@ -1690,106 +1648,6 @@ monitoring.options.insecure=true`
 		SecurityContext: securityContext,
 	})
 
-	if needMonitorContainer {
-		lastPort++
-		monitorExporterProbePort := lastPort
-
-		monitorExporterImage := "quay.io/bentoml/bentoml-monitor-exporter:0.0.3"
-		monitorExporterImage_ := os.Getenv("INTERNAL_IMAGES_MONITOR_EXPORTER")
-		if monitorExporterImage_ != "" {
-			monitorExporterImage = monitorExporterImage_
-		}
-
-		monitorOptEnvs := make([]corev1.EnvVar, 0, len(monitorExporter.Options)+len(monitorExporter.StructureOptions))
-		monitorOptEnvsSeen := make(map[string]struct{})
-
-		for _, env := range monitorExporter.StructureOptions {
-			monitorOptEnvsSeen[strings.ToLower(env.Name)] = struct{}{}
-			monitorOptEnvs = append(monitorOptEnvs, corev1.EnvVar{
-				Name:      "FLUENTBIT_OUTPUT_OPTION_" + strings.ToUpper(env.Name),
-				Value:     env.Value,
-				ValueFrom: env.ValueFrom,
-			})
-		}
-
-		for k, v := range monitorExporter.Options {
-			if _, exists := monitorOptEnvsSeen[strings.ToLower(k)]; exists {
-				continue
-			}
-			monitorOptEnvs = append(monitorOptEnvs, corev1.EnvVar{
-				Name:  "FLUENTBIT_OUTPUT_OPTION_" + strings.ToUpper(k),
-				Value: v,
-			})
-		}
-
-		monitorVolumeMounts := make([]corev1.VolumeMount, 0, len(monitorExporter.Mounts))
-		for idx, mount := range monitorExporter.Mounts {
-			volumeName := fmt.Sprintf("monitor-exporter-%d", idx)
-			volumes = append(volumes, corev1.Volume{
-				Name:         volumeName,
-				VolumeSource: mount.VolumeSource,
-			})
-			monitorVolumeMounts = append(monitorVolumeMounts, corev1.VolumeMount{
-				Name:      volumeName,
-				MountPath: mount.Path,
-				ReadOnly:  mount.ReadOnly,
-			})
-		}
-
-		containers = append(containers, corev1.Container{
-			Name:         "monitor-exporter",
-			Image:        monitorExporterImage,
-			VolumeMounts: monitorVolumeMounts,
-			Env: append([]corev1.EnvVar{
-				{
-					Name:  "FLUENTBIT_OTLP_PORT",
-					Value: fmt.Sprint(monitorExporterPort),
-				},
-				{
-					Name:  "FLUENTBIT_HTTP_PORT",
-					Value: fmt.Sprint(monitorExporterProbePort),
-				},
-				{
-					Name:  "FLUENTBIT_OUTPUT",
-					Value: monitorExporter.Output,
-				},
-			}, monitorOptEnvs...),
-			Resources: corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("100m"),
-					corev1.ResourceMemory: resource.MustParse("24Mi"),
-				},
-				Limits: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("1000m"),
-					corev1.ResourceMemory: resource.MustParse("72Mi"),
-				},
-			},
-			ReadinessProbe: &corev1.Probe{
-				InitialDelaySeconds: 5,
-				TimeoutSeconds:      5,
-				FailureThreshold:    10,
-				ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{
-						Path: "/readyz",
-						Port: intstr.FromInt(monitorExporterProbePort),
-					},
-				},
-			},
-			LivenessProbe: &corev1.Probe{
-				InitialDelaySeconds: 5,
-				TimeoutSeconds:      5,
-				FailureThreshold:    10,
-				ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{
-						Path: "/livez",
-						Port: intstr.FromInt(monitorExporterProbePort),
-					},
-				},
-			},
-			SecurityContext: securityContext,
-		})
-	}
-
 	debuggerImage := "quay.io/bentoml/bento-debugger:0.0.8"
 	debuggerImage_ := os.Getenv("INTERNAL_IMAGES_DEBUGGER")
 	if debuggerImage_ != "" {
@@ -1824,7 +1682,7 @@ monitoring.options.insecure=true`
 		})
 	}
 
-	podLabels[commonconsts.KubeLabelYataiSelector] = kubeName
+	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName
 
 	podSpec := corev1.PodSpec{
 		Containers: containers,
@@ -1860,7 +1718,7 @@ monitoring.options.insecure=true`
 	if podSpec.ServiceAccountName == "" {
 		serviceAccounts := &corev1.ServiceAccountList{}
 		err = r.List(ctx, serviceAccounts, client.InNamespace(opt.dynamoNimDeployment.Namespace), client.MatchingLabels{
-			commonconsts.KubeLabelBentoDeploymentPod: commonconsts.KubeLabelValueTrue,
+			commonconsts.KubeLabelDynamoDeploymentPod: commonconsts.KubeLabelValueTrue,
 		})
 		if err != nil {
 			err = errors.Wrapf(err, "failed to list service accounts in namespace %s", opt.dynamoNimDeployment.Namespace)
@@ -1873,15 +1731,15 @@ monitoring.options.insecure=true`
 		}
 	}
 
-	if resourceAnnotations["yatai.ai/enable-host-ipc"] == commonconsts.KubeLabelValueTrue {
+	if resourceAnnotations["nvidia.com/enable-host-ipc"] == commonconsts.KubeLabelValueTrue {
 		podSpec.HostIPC = true
 	}
 
-	if resourceAnnotations["yatai.ai/enable-host-network"] == commonconsts.KubeLabelValueTrue {
+	if resourceAnnotations["nvidia.com/enable-host-network"] == commonconsts.KubeLabelValueTrue {
 		podSpec.HostNetwork = true
 	}
 
-	if resourceAnnotations["yatai.ai/enable-host-pid"] == commonconsts.KubeLabelValueTrue {
+	if resourceAnnotations["nvidia.com/enable-host-pid"] == commonconsts.KubeLabelValueTrue {
 		podSpec.HostPID = true
 	}
 
@@ -2025,12 +1883,12 @@ func (r *DynamoNimDeploymentReconciler) generateService(ctx context.Context, opt
 	}
 
 	if opt.isStealingTrafficDebugModeEnabled {
-		selector[commonconsts.KubeLabelYataiBentoDeploymentTargetType] = DeploymentTargetTypeDebug
+		selector[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
 	}
 
-	targetPort := intstr.FromString(commonconsts.BentoContainerPortName)
+	targetPort := intstr.FromString(commonconsts.DynamoContainerPortName)
 	if opt.isGenericService {
-		delete(selector, commonconsts.KubeLabelYataiBentoDeploymentTargetType)
+		delete(selector, commonconsts.KubeLabelDynamoDeploymentTargetType)
 		if opt.containsStealingTrafficDebugModeEnabled {
 			targetPort = intstr.FromString(ContainerPortNameHTTPProxy)
 		}
@@ -2040,15 +1898,15 @@ func (r *DynamoNimDeploymentReconciler) generateService(ctx context.Context, opt
 		Selector: selector,
 		Ports: []corev1.ServicePort{
 			{
-				Name:       commonconsts.BentoServicePortName,
-				Port:       commonconsts.BentoServicePort,
+				Name:       commonconsts.DynamoServicePortName,
+				Port:       commonconsts.DynamoServicePort,
 				TargetPort: targetPort,
 				Protocol:   corev1.ProtocolTCP,
 			},
 			{
 				Name:       ServicePortNameHTTPNonProxy,
 				Port:       int32(ServicePortHTTPNonProxy),
-				TargetPort: intstr.FromString(commonconsts.BentoContainerPortName),
+				TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
 				Protocol:   corev1.ProtocolTCP,
 			},
 		},

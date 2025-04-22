@@ -37,13 +37,11 @@ dynamo-operator:
         - --health-probe-bind-address=:8081
         - --metrics-bind-address=127.0.0.1:8080
   dynamo:
-    yatai:
+    apiStore:
       endpoint: http://dynamo-store
       clusterName: default
-    yataiSystem:
-      namespace: ""
     internalImages:
-      bentoDownloader: quay.io/bentoml/bento-downloader:0.0.5
+      dynamoComponentsDownloader: quay.io/bentoml/bento-downloader:0.0.5
       kaniko: quay.io/bentoml/kaniko:debug
       buildkit: quay.io/bentoml/buildkit:master
       buildkitRootless: quay.io/bentoml/buildkit:master-rootless
@@ -51,17 +49,15 @@ dynamo-operator:
       debugger: quay.io/bentoml/bento-debugger:0.0.8
       monitorExporter: quay.io/bentoml/bentoml-monitor-exporter:0.0.3
       proxy: quay.io/bentoml/bentoml-proxy:0.0.1
-    disableAutomateBentoImageBuilder: false
     enableRestrictedSecurityContext: false
-    disableYataiComponentRegistration: false
     dockerRegistry:
       server: ""
       inClusterServer: ""
       username: ""
       password: ""
       secure: true
-      bentoRepositoryName: dynamo-pipelines
-    bentoImageBuildEngine: buildkit
+      dynamoComponentsRepositoryName: dynamo-pipelines
+    imageBuildEngine: buildkit
     addNamespacePrefixToImageName: false
     estargz:
       enabled: false
