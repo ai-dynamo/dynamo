@@ -16,11 +16,12 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from ..models.schemas import (
     CreateDeploymentSchema,
     DeploymentFullSchema,
+    DeploymentListResponse,
     ResourceSchema,
     create_default_cluster,
     create_default_user,
@@ -192,12 +193,16 @@ def delete_deployment(name: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("", response_model=List[DeploymentFullSchema])
+@router.get("", response_model=DeploymentListResponse)
 def list_deployments(
-    search: Optional[str] = None,
-    dev: bool = False,
-    q: Optional[str] = None,
-) -> List[DeploymentFullSchema]:
+    search: str = Query(default="", description="Search query"),
+    dev: bool = Query(default=False, description="Filter development deployments"),
+    q: str = Query(default="", description="Advanced query string"),
+    all: bool = Query(default=False, description="Return all deployments"),
+    count: str = Query(default="", description="Number of items to return"),
+    start: str = Query(default="", description="Starting index"),
+    cluster: str = Query(default="", description="Filter by cluster name"),
+) -> Dict[str, Any]:
     """
     List all deployments with optional filtering.
 
@@ -205,11 +210,24 @@ def list_deployments(
         search: Simple text search
         dev: Filter development deployments
         q: Advanced query string
+        all: Whether to return all deployments
+        count: Number of deployments to return
+        start: Starting index for pagination
+        cluster: Filter by cluster name
 
     Returns:
-        List[DeploymentFullSchema]: List of deployments
+        Dict containing paginated deployment list
     """
     try:
+        # Convert count and start to integers if they're not empty
+        count_val = int(count) if count else None
+        start_val = int(start) if start else None
+
+        if count_val is not None and count_val <= 0:
+            raise HTTPException(status_code=400, detail="Count must be greater than 0")
+        if start_val is not None and start_val < 0:
+            raise HTTPException(status_code=400, detail="Start must be non-negative")
+
         kube_namespace = get_namespace()
         crs = list_dynamo_deployments(
             namespace=kube_namespace,
@@ -233,17 +251,34 @@ def list_deployments(
                 manifest=None,
             )
 
+            # Apply cluster filter if provided
+            if cluster and cluster != deployment_schema.cluster.name:
+                continue
+
             # Apply search filter if provided
             if search and search.lower() not in deployment_schema.name.lower():
                 continue
 
-            # Apply dev filter if enabled
-            if dev and not deployment_schema.name.startswith("dev-"):
+            # Apply dev filter if enabled and all is not True
+            if not all and dev and not deployment_schema.name.startswith("dev-"):
                 continue
 
             deployments.append(deployment_schema)
 
-        return deployments
+        # Handle pagination
+        total = len(deployments)
+        start_idx = start_val if start_val is not None else 0
+        if count_val is not None:
+            deployments = deployments[start_idx : start_idx + count_val]
+        else:
+            deployments = deployments[start_idx:]
+
+        return {
+            "start": start_idx,
+            "count": len(deployments),
+            "total": total,
+            "items": deployments,
+        }
 
     except HTTPException as e:
         raise e

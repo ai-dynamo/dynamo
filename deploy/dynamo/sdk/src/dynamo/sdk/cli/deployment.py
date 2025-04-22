@@ -292,7 +292,6 @@ def create_deployment(
         spinner.log(
             f':white_check_mark: Created deployment "{deployment.name}" in cluster "{deployment.cluster}"'
         )
-        spinner.log(f":laptop_computer: View Dashboard: {deployment.admin_console}")
         if wait:
             spinner.update(
                 "[bold blue]Waiting for deployment to be ready, you can use --no-wait to skip this process[/]",
@@ -318,7 +317,6 @@ def get_deployment(
             spinner.log(
                 f':white_check_mark: Found deployment "{deployment.name}" in cluster "{deployment.cluster}"'
             )
-            spinner.log(f":laptop_computer: View Dashboard: {deployment.admin_console}")
             return deployment
         except BentoMLException as e:
             if "No cloud context default found" in str(e):
@@ -382,7 +380,6 @@ def list_deployments(
             spinner.log(":white_check_mark: Found deployments:")
             for deployment in deployments:
                 spinner.log(f"  • {deployment.name} (cluster: {deployment.cluster})")
-                spinner.log(f"    Dashboard: {deployment.admin_console}")
         except BentoMLException as e:
             if "No cloud context default found" in str(e):
                 raise BentoMLException(
