@@ -167,12 +167,6 @@ export HELM_RELEASE=ci-hw
 dynamo deployment create $DYNAMO_TAG --no-wait -n $HELM_RELEASE
 ```
 
-To delete an existing Dynamo deployment:
-
-```bash
-kubectl delete dynamodeployment $HELM_RELEASE
-```
-
 4. **Test the deployment**
 
 Once you create the Dynamo deployment, a pod prefixed with `yatai-dynamonim-image-builder` will begin running. Once it finishes running, it will create the pods necessary. Once the pods prefixed with `$HELM_RELEASE` are up and running, you can test out your example!
