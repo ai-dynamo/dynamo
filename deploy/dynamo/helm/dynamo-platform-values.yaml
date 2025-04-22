@@ -28,7 +28,7 @@ dynamo-operator:
     manager:
       image:
         repository: ${DOCKER_SERVER}/dynamo-operator
-        tag: ${IMAGE_TAG}
+        tag: "${IMAGE_TAG}"
 
   dynamo:
     dynamoIngressSuffix: ${DYNAMO_INGRESS_SUFFIX}
@@ -45,7 +45,7 @@ dynamo-api-store:
     host: ${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
   image:
     repository: ${DOCKER_SERVER}/dynamo-api-store
-    tag: ${IMAGE_TAG}
+    tag: "${IMAGE_TAG}"
     pullPolicy: IfNotPresent
   imagePullSecrets:
     - name: docker-imagepullsecret
