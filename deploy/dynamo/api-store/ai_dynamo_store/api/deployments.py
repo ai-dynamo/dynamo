@@ -166,7 +166,7 @@ def get_urls(resource: Dict[str, Any]) -> List[str]:
     urls = []
     for condition in resource.get("status", {}).get("conditions", []):
         if condition.get("type") == "IngressHostSet":
-            urls.append(f"https://{condition.get('message')}")
+            urls.append(condition.get("message"))
     return urls
 
 
