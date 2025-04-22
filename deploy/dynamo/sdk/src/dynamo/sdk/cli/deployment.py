@@ -50,7 +50,7 @@ else:
 def raise_deployment_config_error(err: BentoMLException, action: str) -> t.NoReturn:
     if err.error_code == HTTPStatus.UNAUTHORIZED:
         raise BentoMLException(
-            f"{err}\n* BentoCloud API token is required for authorization. Run `bentoml cloud login` command to login"
+            f"{err}\n* Dynamo Cloud API token is required for authorization. Run `dynamo cloud login` command to login"
         ) from None
     raise BentoMLException(
         f"Failed to {action} deployment due to invalid configuration: {err}"
@@ -161,7 +161,7 @@ def build_deployment_command() -> click.Group:
         wait: bool,
         timeout: int,
     ) -> None:
-        """Create a deployment on BentoCloud.
+        """Create a deployment on Dynamo Cloud.
 
         \b
         Create a deployment using parameters, or using config yaml file.
@@ -174,6 +174,74 @@ def build_deployment_command() -> click.Group:
             timeout=timeout,
             args=ctx.args,
         )
+
+    @deployment_command.command()
+    @click.argument("name", type=click.STRING)
+    @click.option(
+        "--cluster",
+        type=click.STRING,
+        help="Cluster name",
+        default=None,
+    )
+    def get(name: str, cluster: str | None) -> None:
+        """Get deployment details from Dynamo Cloud.
+
+        \b
+        Get deployment details by name.
+        """
+        get_deployment(name, cluster=cluster)
+
+    @deployment_command.command()
+    @click.option(
+        "--cluster",
+        type=click.STRING,
+        help="Cluster name",
+        default=None,
+    )
+    @click.option(
+        "--search",
+        type=click.STRING,
+        help="Search query",
+        default=None,
+    )
+    @click.option(
+        "--dev",
+        is_flag=True,
+        help="List development deployments",
+        default=False,
+    )
+    @click.option(
+        "-q",
+        "--query",
+        type=click.STRING,
+        help="Advanced query string",
+        default=None,
+    )
+    def list(
+        cluster: str | None, search: str | None, dev: bool, query: str | None
+    ) -> None:
+        """List all deployments from Dynamo Cloud.
+
+        \b
+        List and filter deployments.
+        """
+        list_deployments(cluster=cluster, search=search, dev=dev, q=query)
+
+    @deployment_command.command()
+    @click.argument("name", type=click.STRING)
+    @click.option(
+        "--cluster",
+        type=click.STRING,
+        help="Cluster name",
+        default=None,
+    )
+    def delete(name: str, cluster: str | None) -> None:
+        """Delete a deployment from Dynamo Cloud.
+
+        \b
+        Delete deployment by name.
+        """
+        delete_deployment(name, cluster=cluster)
 
     return deployment_command
 
@@ -217,7 +285,7 @@ def create_deployment(
 
     console = Console(highlight=False)
     with Spinner(console=console) as spinner:
-        spinner.update("Creating deployment on BentoCloud")
+        spinner.update("Creating deployment on Dynamo Cloud")
         deployment = _cloud_client.deployment.create(
             deployment_config_params=config_params
         )
@@ -233,3 +301,91 @@ def create_deployment(
             if retcode != 0:
                 raise SystemExit(retcode)
         return deployment
+
+
+@inject
+def get_deployment(
+    name: str,
+    cluster: str | None = None,
+    _cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
+) -> Deployment:
+    """Get deployment details from Dynamo Cloud."""
+    console = Console(highlight=False)
+    with Spinner(console=console) as spinner:
+        spinner.update(f'Getting deployment "{name}" from Dynamo Cloud')
+        try:
+            deployment = _cloud_client.deployment.get(name=name, cluster=cluster)
+            spinner.log(
+                f':white_check_mark: Found deployment "{deployment.name}" in cluster "{deployment.cluster}"'
+            )
+            spinner.log(f":laptop_computer: View Dashboard: {deployment.admin_console}")
+            return deployment
+        except BentoMLException as e:
+            if "No cloud context default found" in str(e):
+                raise BentoMLException(
+                    "Not logged in to Dynamo Cloud. Please run 'dynamo cloud login' first."
+                ) from None
+            raise_deployment_config_error(e, "get")
+
+
+@inject
+def delete_deployment(
+    name: str,
+    cluster: str | None = None,
+    _cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
+) -> None:
+    """Delete a deployment from Dynamo Cloud."""
+    console = Console(highlight=False)
+    with Spinner(console=console) as spinner:
+        spinner.update(f'Deleting deployment "{name}" from Dynamo Cloud')
+        try:
+            _cloud_client.deployment.delete(name=name, cluster=cluster)
+            spinner.log(f':white_check_mark: Deleted deployment "{name}"')
+        except BentoMLException as e:
+            if "No cloud context default found" in str(e):
+                raise BentoMLException(
+                    "Not logged in to Dynamo Cloud. Please run 'dynamo cloud login' first."
+                ) from None
+            raise_deployment_config_error(e, "delete")
+
+
+@inject
+def list_deployments(
+    cluster: str | None = None,
+    search: str | None = None,
+    dev: bool = False,
+    q: str | None = None,
+    labels: t.List[dict[str, t.Any]] | None = None,
+    _cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
+) -> None:
+    """List all deployments from Dynamo Cloud."""
+    console = Console(highlight=False)
+    with Spinner(console=console) as spinner:
+        spinner.update("Getting all deployments from Dynamo Cloud")
+        try:
+            # Handle label-based filtering
+            if labels is not None:
+                label_query = " ".join(f"label:{d['key']}={d['value']}" for d in labels)
+                if q is not None:
+                    q = f"{q} {label_query}"
+                else:
+                    q = label_query
+
+            deployments = _cloud_client.deployment.list(
+                cluster=cluster, search=search, dev=dev, q=q
+            )
+
+            if not deployments:
+                spinner.log("No deployments found")
+                return
+
+            spinner.log(":white_check_mark: Found deployments:")
+            for deployment in deployments:
+                spinner.log(f"  • {deployment.name} (cluster: {deployment.cluster})")
+                spinner.log(f"    Dashboard: {deployment.admin_console}")
+        except BentoMLException as e:
+            if "No cloud context default found" in str(e):
+                raise BentoMLException(
+                    "Not logged in to Dynamo Cloud. Please run 'dynamo cloud login' first."
+                ) from None
+            raise_deployment_config_error(e, "list")
