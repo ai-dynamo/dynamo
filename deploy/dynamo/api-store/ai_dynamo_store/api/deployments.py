@@ -137,7 +137,7 @@ def get_deployment(name: str) -> DeploymentFullSchema:
             namespace=kube_namespace,
         )
         deployment_schema = DeploymentFullSchema(
-            **cr,
+            name=name,
             kube_namespace=kube_namespace,
             status=get_deployment_status(cr),
             urls=get_urls(cr),
