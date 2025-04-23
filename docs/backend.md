@@ -569,7 +569,7 @@ class DecodeWorker:
                 .endpoint("generate")
                 .client()
 
-    @dynamo_endpoint
+    @dynamo_endpoint()
     async def generate(self, request):
         if self.do_remote_prefill:
             # Forward the request to the prefill worker
@@ -587,7 +587,7 @@ class PrefillWorker:
     def __init__(self):
         # ...
 
-    @dynamo_endpoint
+    @dynamo_endpoint()
     async def generate(self, request):
         # ... framework-specific prefill logic ...
 ```
