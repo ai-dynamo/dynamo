@@ -41,9 +41,13 @@ fn main() -> anyhow::Result<()> {
             0 => "info",
             1 => "debug",
             2 => "trace",
-            _ => return Err(anyhow::anyhow!("Invalid verbosity level. Valid values are v (debug) or vv (trace)")),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Invalid verbosity level. Valid values are v (debug) or vv (trace)"
+                ))
+            }
         },
-        Err(_) => "info", 
+        Err(_) => "info",
     };
 
     if log_level != "info" {
@@ -131,10 +135,10 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
     let mut in_opt = None;
     let mut out_opt = None;
     let args: Vec<String> = env::args().skip(1).collect();
-    if args.is_empty() 
-        || args[0] == "-h" 
+    if args.is_empty()
+        || args[0] == "-h"
         || args[0] == "--help"
-        || (args.iter().all(|arg| arg == "-v" || arg == "-vv")) 
+        || (args.iter().all(|arg| arg == "-v" || arg == "-vv"))
     {
         let engine_list = Output::available_engines().join("|");
         let usage = USAGE.replace("ENGINE_LIST", &engine_list);
