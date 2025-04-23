@@ -299,17 +299,128 @@ accurate to publish metrics at every generation step.
 
 With the worker publishing KV metrics, you should now be able to connect it
 to a KV Router through the `KvMetricsAggregator`.
-```python
-# Initialize a listener/aggregator for collecting KV metrics
-# from the specified component (workers) publishing them
-kv_listener = runtime.namespace("your_namespace").component("YourWorker")
-await kv_listener.create_service()
-metrics_aggregator = KvMetricsAggregator(kv_listener)
 
-# Gather KV Metrics from the worker endpoints publishing them
-for endpoint in metrics_aggregator.get_metrics().endpoints:
-    print(endpoint)
+These metrics can then be inputs to a cost function to determine which
+of the available worker's the request should be routed to.
+
+For a [python-based KV Router](../examples/llm/components/kv_router.py)
+implementation, the router is like any other worker, and it can expose
+an endpoint that can do arbitrary things based on your use case.
+
+For example, you can initialize the `KvMetricsAggregator` and `KvIndexer`
+in your class implementation:
+```python
+@service(
+    dynamo={
+        "enabled": True,
+        "namespace": "your_namespace",
+    },
+)
+class Router:
+    # ...
+
+    @async_on_start
+    async def async_init(self):
+        self.runtime = dynamo_context["runtime"]
+
+        # Initialize a listener/aggregator for collecting KV metrics
+        # from the specified component (workers) publishing them
+        kv_listener = self.runtime.namespace("your_namespace").component("YourWorker")
+        await kv_listener.create_service()
+        self.indexer = KvIndexer(kv_listener, self.args.block_size)
+        self.metrics_aggregator = KvMetricsAggregator(kv_listener)
 ```
+
+With this flexibility, you can also define your own cost function that takes the
+KV metrics from the KvMetricsAggregator above and the set of available workers
+as inputs, and returns which worker ID that the request should be routed to.
+Since the router is like any other worker in this context, you can also track
+your own custom metrics and use them in your cost function:
+
+```python
+@service(
+    dynamo={
+        "enabled": True,
+        "namespace": "your_namespace",
+    },
+)
+class Router:
+    # ...
+
+    def _cost_function(
+        self,
+        scores: OverlapScores | None,
+        metrics: AggregatedMetrics | None,
+        token_length: int,
+        custom_metrics: dict = {},
+    ):
+        """
+        Args:
+            scores (OverlapScores | None): The number of matching blocks between
+                the request and the prefix cache of each worker.
+            metrics (AggregatedMetrics | None): Several worker metrics polled
+                by the `KvMetricsAggregator`, currently including the
+                GPU cache usage, number of waiting requests, and the
+                GPU prefix cache hit rate.
+            token_length (int): The number of tokens in the request.
+            custom_metrics (dict): Arbitrary (optional) data from your implementation.
+
+        Returns:
+            worker_id (str): The best worker ID based on the inputs.
+        """
+
+        # This is a dummy implementation for demonstration purposes, see the
+        # llm/tensorrt_llm/hello_world examples for more realistic implementations.
+        worker_ids = []
+
+        # KV cache block hit scores
+        for worker_id, score in scores.scores.items():
+            print(f"{worker_id} # of matching KV Blocks of size {self.indexer.block_size()}: {score}")
+            worker_ids.append(worker_id)
+
+        # Aggregated KVMetrics published by workers
+        for endpoint_metrics in metrics.endpoints:
+            print(f"Endpoint metrics: {endpoint_metrics}")
+
+        # Replace this random choice with your custom criteria to
+        # select the best worker ID.
+        best_worker_id = random.choice(worker_ids)
+
+        return best_worker_id
+
+
+    @dynamo_endpoint()
+    async def generate(self, request: Tokens) -> AsyncIterator[WorkerId]:
+        try:
+            # lora_id is a placeholder for lora support, but not used in this example
+            lora_id = 0
+            scores = await self.indexer.find_matches_for_request(
+                request.tokens, lora_id
+            )
+        except Exception as e:
+            scores = {}
+            print(f"Error finding matches: {e}")
+
+        # Get published/aggregated KV Metrics
+        metrics = await self.metrics_aggregator.get_metrics()
+
+        # (Optional) Add custom metrics to consider in the cost function
+        # The types and data used here are fully up to your implementation
+        custom_metrics = {"my_custom_metric": 42}
+
+        # Call custom cost function
+        worker_id = self._cost_function(
+            scores, metrics, len(request.tokens), custom_metrics
+        )
+
+        # Return worker ID selected from cost function
+        yield f"{worker_id}"
+```
+
+Similarly, for running a Rust-based Router as a standalone binary
+rather than as a Python Worker, see the
+[WorkerSelector Trait](../lib/llm/src/kv_router.rs) trait, and the
+[Router Component](../components/router/src/main.rs).
 
 For more details on receiving and routing based on the worker's published KV
 metrics, see the [KV Cache Routing Guide](../docs/kv_cache_routing.md).
