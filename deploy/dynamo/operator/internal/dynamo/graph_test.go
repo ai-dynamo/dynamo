@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package nim
+package dynamo
 
 import (
 	"context"
@@ -30,7 +30,7 @@ import (
 func TestGenerateDynamoNIMDeployments(t *testing.T) {
 	type args struct {
 		parentDynamoDeployment *v1alpha1.DynamoDeployment
-		config                 *DynamoNIMConfig
+		config                 *DynamoGraphConfig
 		ingressSpec            *v1alpha1.IngressSpec
 	}
 	tests := []struct {
@@ -51,7 +51,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						DynamoNim: "dynamonim:ac4e234",
 					},
 				},
-				config: &DynamoNIMConfig{
+				config: &DynamoGraphConfig{
 					DynamoTag: "dynamonim:MyService1",
 					Services: []ServiceConfig{
 						{
@@ -159,7 +159,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						DynamoNim: "dynamonim:ac4e234",
 					},
 				},
-				config: &DynamoNIMConfig{
+				config: &DynamoGraphConfig{
 					DynamoTag:    "dynamonim:MyService2",
 					EntryService: "service1",
 					Services: []ServiceConfig{
@@ -272,7 +272,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						DynamoNim: "dynamonim:ac4e234",
 					},
 				},
-				config: &DynamoNIMConfig{
+				config: &DynamoGraphConfig{
 					DynamoTag:    "dynamonim:MyService2",
 					EntryService: "service1",
 					Services: []ServiceConfig{
@@ -378,7 +378,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 						DynamoNim: "dynamonim:ac4e234",
 					},
 				},
-				config: &DynamoNIMConfig{
+				config: &DynamoGraphConfig{
 					DynamoTag: "dynamonim:MyService3",
 					Services: []ServiceConfig{
 						{
@@ -423,9 +423,9 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
-			got, err := GenerateDynamoNIMDeployments(context.Background(), tt.args.parentDynamoDeployment, tt.args.config, tt.args.ingressSpec)
+			got, err := GenerateDynamoComponentsDeployments(context.Background(), tt.args.parentDynamoDeployment, tt.args.config, tt.args.ingressSpec)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("GenerateDynamoNIMDeployments() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("GenerateDynamoComponentsDeployments() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 			g.Expect(got).To(gomega.Equal(tt.want))
