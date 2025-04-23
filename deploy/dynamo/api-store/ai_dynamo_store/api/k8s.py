@@ -85,7 +85,7 @@ def create_dynamo_deployment(
         "apiVersion": "nvidia.com/v1alpha1",
         "kind": "DynamoGraphDeployment",
         "metadata": {"name": name, "namespace": namespace, "labels": labels},
-        "spec": {"dynamoNim": dynamo_nim, "services": {}, "envs": envs if envs else []},
+        "spec": {"dynamoGraph": dynamo_nim, "services": {}, "envs": envs if envs else []},
     }
 
     return create_custom_resource(

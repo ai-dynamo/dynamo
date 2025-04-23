@@ -30,7 +30,7 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dynamodeployments
+  - dynamographdeployments
   verbs:
   - create
   - delete
