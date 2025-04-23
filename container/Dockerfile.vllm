@@ -331,12 +331,11 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_TARGET_DIR=/workspace/target \
     VIRTUAL_ENV=/opt/dynamo/venv
 
-ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
-
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
 COPY --from=base /workspace /workspace
 COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
+ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
 
 # Copy configuration files
 COPY pyproject.toml /workspace/
@@ -357,7 +356,7 @@ COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 RUN cargo build --release --locked --features mistralrs,sglang,vllm,python \
     -p dynamo-run \
     -p llmctl \
-    # Multiple http named crates are present in dependencies, so need to specify the path
+    # Multiple http named crates are present in dependencies, need to specify the path
     -p file://$PWD/components/http \
     -p metrics
 
@@ -379,13 +378,12 @@ ENV DYNAMO_HOME=/workspace
 ENV CARGO_TARGET_DIR=/workspace/target
 
 WORKDIR /workspace
-# Copy built artifacts first to leverage cache
+
 COPY --from=wheel_builder /workspace/dist/ /workspace/dist/
 COPY --from=wheel_builder /workspace/target/ /workspace/target/
 # Copy Cargo cache to avoid re-downloading dependencies
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
-# Now copy source code
 COPY . /workspace
 
 # Build rest of the crates
