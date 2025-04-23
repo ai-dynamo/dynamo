@@ -68,7 +68,6 @@ def main(
 
     from dynamo.sdk.lib.logging import configure_server_logging
 
-    run_id = service_name
     dynamo_context["service_name"] = service_name
     dynamo_context["runner_map"] = runner_map
     dynamo_context["worker_id"] = worker_id
@@ -89,7 +88,7 @@ def main(
     if service_name and service_name != service.name:
         service = service.find_dependent_by_name(service_name)
 
-    configure_server_logging()
+    configure_server_logging(service_name=service_name, worker_id=worker_id)
     if runner_map:
         BentoMLContainer.remote_runner_mapping.set(
             t.cast(t.Dict[str, str], json.loads(runner_map))
@@ -115,32 +114,30 @@ def main(
 
             # Get Dynamo configuration and create component
             namespace, component_name = service.dynamo_address()
-            logger.info(
-                f"[{run_id}] Registering component {namespace}/{component_name}"
-            )
+            logger.info(f"Registering component {namespace}/{component_name}")
             component = runtime.namespace(namespace).component(component_name)
 
             try:
                 # Create service first
                 await component.create_service()
-                logger.info(f"[{run_id}] Created {service.name} component")
+                logger.info(f"Created {service.name} component")
 
                 # Set runtime on all dependencies
                 for dep in service.dependencies.values():
                     dep.set_runtime(runtime)
-                    logger.debug(f"[{run_id}] Set runtime for dependency: {dep}")
+                    logger.debug(f"Set runtime for dependency: {dep}")
 
                 # Then register all Dynamo endpoints
                 dynamo_endpoints = service.get_dynamo_endpoints()
                 if not dynamo_endpoints:
-                    error_msg = f"[{run_id}] FATAL ERROR: No Dynamo endpoints found in service {service.name}!"
+                    error_msg = f"FATAL ERROR: No Dynamo endpoints found in service {service.name}!"
                     logger.error(error_msg)
                     raise ValueError(error_msg)
 
                 endpoints = []
                 for name, endpoint in dynamo_endpoints.items():
                     td_endpoint = component.endpoint(name)
-                    logger.debug(f"[{run_id}] Registering endpoint '{name}'")
+                    logger.debug(f"Registering endpoint '{name}'")
                     endpoints.append(td_endpoint)
                     # Bind an instance of inner to the endpoint
                 dynamo_context["component"] = component
@@ -161,24 +158,22 @@ def main(
                     if callable(member) and getattr(
                         member, "__bentoml_startup_hook__", False
                     ):
-                        logger.debug(f"[{run_id}] Running startup hook: {name}")
+                        logger.debug(f"Running startup hook: {name}")
                         result = getattr(class_instance, name)()
                         if inspect.isawaitable(result):
                             # await on startup hook async_on_start
                             await result
-                            logger.debug(
-                                f"[{run_id}] Completed async startup hook: {name}"
-                            )
+                            logger.debug(f"Completed async startup hook: {name}")
                         else:
-                            logger.info(f"[{run_id}] Completed startup hook: {name}")
+                            logger.info(f"Completed startup hook: {name}")
                 logger.info(
-                    f"[{run_id}] Starting {service.name} instance with all registered endpoints"
+                    f"Starting {service.name} instance with all registered endpoints"
                 )
                 # TODO:bis: convert to list
                 result = await endpoints[0].serve_endpoint(twm[0])
 
             except Exception as e:
-                logger.error(f"[{run_id}] Error in Dynamo component setup: {str(e)}")
+                logger.error(f"Error in Dynamo component setup: {str(e)}")
                 raise
 
         uvloop.install()

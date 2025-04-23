@@ -85,7 +85,7 @@ const (
 	ContainerPortNameHTTPProxy                                = "http-proxy"
 	ServicePortNameHTTPNonProxy                               = "http-non-proxy"
 	HeaderNameDebug                                           = "X-Yatai-Debug"
-	kDefaultIngressSuffix                                     = "local"
+	DefaultIngressSuffix                                      = "local"
 )
 
 var ServicePortHTTPNonProxy = commonconsts.BentoServicePort + 1
@@ -93,12 +93,14 @@ var ServicePortHTTPNonProxy = commonconsts.BentoServicePort + 1
 // DynamoNimDeploymentReconciler reconciles a DynamoNimDeployment object
 type DynamoNimDeploymentReconciler struct {
 	client.Client
-	Scheme      *runtime.Scheme
-	Recorder    record.EventRecorder
-	Config      controller_common.Config
-	NatsAddr    string
-	EtcdAddr    string
-	EtcdStorage etcdStorage
+	Scheme                     *runtime.Scheme
+	Recorder                   record.EventRecorder
+	Config                     controller_common.Config
+	NatsAddr                   string
+	EtcdAddr                   string
+	EtcdStorage                etcdStorage
+	IngressControllerClassName string
+	IstioVirtualServiceEnabled bool
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamonimdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -380,10 +382,10 @@ func (r *DynamoNimDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	// create or update api-server ingresses
-	modified_, _, err = createOrUpdateResource(ctx, r, generateResourceOption{
+	modified_, err = r.createOrUpdateOrDeleteIngress(ctx, generateResourceOption{
 		dynamoNimDeployment: dynamoNimDeployment,
 		dynamoNim:           dynamoNimCR,
-	}, r.generateVirtualService)
+	})
 	if err != nil {
 		return
 	}
@@ -635,6 +637,13 @@ func createOrUpdateResource[T client.Object](ctx context.Context, r *DynamoNimDe
 			return
 		}
 
+		err = ctrl.SetControllerReference(opt.dynamoNimDeployment, resource, r.Scheme)
+		if err != nil {
+			logs.Error(err, "Failed to set controller reference.")
+			r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeWarning, "SetControllerReference", "Failed to set controller reference for %s %s: %s", resourceType, resourceNamespace, err)
+			return
+		}
+
 		r.Recorder.Eventf(opt.dynamoNimDeployment, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Creating a new %s %s", resourceType, resourceNamespace)
 		err = r.Create(ctx, resource)
 		if err != nil {
@@ -785,18 +794,69 @@ func (r *DynamoNimDeploymentReconciler) createOrUpdateOrDeleteServices(ctx conte
 	return
 }
 
+func (r *DynamoNimDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx context.Context, opt generateResourceOption) (modified bool, err error) {
+	modified, _, err = createOrUpdateResource(ctx, r, opt, r.generateIngress)
+	if err != nil {
+		return
+	}
+	modified_, _, err := createOrUpdateResource(ctx, r, opt, r.generateVirtualService)
+	if err != nil {
+		return
+	}
+	modified = modified || modified_
+	return
+}
+
+func (r *DynamoNimDeploymentReconciler) generateIngress(ctx context.Context, opt generateResourceOption) (*networkingv1.Ingress, bool, error) {
+	log := log.FromContext(ctx)
+	log.Info("Starting generateIngress")
+
+	ingress := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      opt.dynamoNimDeployment.Name,
+			Namespace: opt.dynamoNimDeployment.Namespace,
+		},
+	}
+
+	if !opt.dynamoNimDeployment.Spec.Ingress.Enabled || r.IngressControllerClassName == "" {
+		log.Info("Ingress is not enabled")
+		return ingress, true, nil
+	}
+
+	ingress.Spec = networkingv1.IngressSpec{
+		IngressClassName: &r.IngressControllerClassName,
+		Rules: []networkingv1.IngressRule{
+			{
+				Host: getIngressHost(opt.dynamoNimDeployment),
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{
+							{
+								Path:     "/",
+								PathType: &[]networkingv1.PathType{networkingv1.PathTypePrefix}[0],
+								Backend: networkingv1.IngressBackend{
+									Service: &networkingv1.IngressServiceBackend{
+										Name: opt.dynamoNimDeployment.Name,
+										Port: networkingv1.ServiceBackendPort{
+											Number: 3000,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	return ingress, false, nil
+}
+
 func (r *DynamoNimDeploymentReconciler) generateVirtualService(ctx context.Context, opt generateResourceOption) (*networkingv1beta1.VirtualService, bool, error) {
 	log := log.FromContext(ctx)
 	log.Info("Starting generateVirtualService")
 
-	vsName := opt.dynamoNimDeployment.Name
-	if opt.dynamoNimDeployment.Spec.Ingress.HostPrefix != nil {
-		vsName = *opt.dynamoNimDeployment.Spec.Ingress.HostPrefix + vsName
-	}
-	ingressSuffix, found := os.LookupEnv("DYNAMO_INGRESS_SUFFIX")
-	if !found || ingressSuffix == "" {
-		ingressSuffix = kDefaultIngressSuffix
-	}
 	vs := &networkingv1beta1.VirtualService{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      opt.dynamoNimDeployment.Name,
@@ -804,7 +864,7 @@ func (r *DynamoNimDeploymentReconciler) generateVirtualService(ctx context.Conte
 		},
 	}
 
-	vsEnabled := opt.dynamoNimDeployment.Spec.Ingress.Enabled && opt.dynamoNimDeployment.Spec.Ingress.UseVirtualService != nil && *opt.dynamoNimDeployment.Spec.Ingress.UseVirtualService
+	vsEnabled := opt.dynamoNimDeployment.Spec.Ingress.Enabled && r.IstioVirtualServiceEnabled
 	if !vsEnabled {
 		log.Info("VirtualService is not enabled")
 		return vs, true, nil
@@ -812,7 +872,7 @@ func (r *DynamoNimDeploymentReconciler) generateVirtualService(ctx context.Conte
 
 	vs.Spec = istioNetworking.VirtualService{
 		Hosts: []string{
-			fmt.Sprintf("%s.%s", vsName, ingressSuffix),
+			getIngressHost(opt.dynamoNimDeployment),
 		},
 		Gateways: []string{"istio-system/ingress-alb"},
 		Http: []*istioNetworking.HTTPRoute{
@@ -986,11 +1046,6 @@ func (r *DynamoNimDeploymentReconciler) generateDeployment(ctx context.Context, 
 		Strategy: strategy,
 	}
 
-	err = ctrl.SetControllerReference(opt.dynamoNimDeployment, kubeDeployment, r.Scheme)
-	if err != nil {
-		err = errors.Wrapf(err, "set deployment %s controller reference", kubeDeployment.Name)
-	}
-
 	return
 }
 
@@ -1001,6 +1056,18 @@ type generateResourceOption struct {
 	containsStealingTrafficDebugModeEnabled bool
 	isDebugPodReceiveProductionTraffic      bool
 	isGenericService                        bool
+}
+
+func getIngressHost(dynamoNimDeployment *v1alpha1.DynamoNimDeployment) string {
+	vsName := dynamoNimDeployment.Name
+	if dynamoNimDeployment.Spec.Ingress.HostPrefix != nil {
+		vsName = *dynamoNimDeployment.Spec.Ingress.HostPrefix + vsName
+	}
+	ingressSuffix, found := os.LookupEnv("DYNAMO_INGRESS_SUFFIX")
+	if !found || ingressSuffix == "" {
+		ingressSuffix = DefaultIngressSuffix
+	}
+	return fmt.Sprintf("%s.%s", vsName, ingressSuffix)
 }
 
 func (r *DynamoNimDeploymentReconciler) generateHPA(ctx context.Context, opt generateResourceOption) (*autoscalingv2.HorizontalPodAutoscaler, bool, error) {
@@ -1057,12 +1124,7 @@ func (r *DynamoNimDeploymentReconciler) generateHPA(ctx context.Context, opt gen
 		}
 	}
 
-	err := ctrl.SetControllerReference(opt.dynamoNimDeployment, kubeHpa, r.Scheme)
-	if err != nil {
-		return nil, false, errors.Wrapf(err, "set hpa %s controller reference", kubeName)
-	}
-
-	return kubeHpa, false, err
+	return kubeHpa, false, nil
 }
 
 func getDynamoNimRepositoryNameAndDynamoNimVersion(dynamoNim *v1alpha1.DynamoNim) (repositoryName string, version string) {
@@ -2001,12 +2063,6 @@ func (r *DynamoNimDeploymentReconciler) generateService(ctx context.Context, opt
 	kubeService.ObjectMeta.Labels = labels
 	kubeService.Spec = spec
 
-	err = ctrl.SetControllerReference(opt.dynamoNimDeployment, kubeService, r.Scheme)
-	if err != nil {
-		err = errors.Wrapf(err, "set controller reference for service %s", kubeService.Name)
-		return
-	}
-
 	return
 }
 
@@ -2040,7 +2096,6 @@ func (r *DynamoNimDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		Owns(&networkingv1beta1.VirtualService{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&v1alpha1.DynamoNimRequest{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, dynamoNimRequest client.Object) []reconcile.Request {
@@ -2106,6 +2161,9 @@ func (r *DynamoNimDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error
 			return reqs
 		}))
 
+	if r.IstioVirtualServiceEnabled {
+		m.Owns(&networkingv1beta1.VirtualService{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))
+	}
 	m.Owns(&autoscalingv2.HorizontalPodAutoscaler{})
 	return m.Complete(r)
 }

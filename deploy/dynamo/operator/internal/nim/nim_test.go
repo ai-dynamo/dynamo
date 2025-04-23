@@ -228,8 +228,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 								},
 							},
 							Ingress: v1alpha1.IngressSpec{
-								Enabled:           true,
-								UseVirtualService: &[]bool{true}[0],
+								Enabled: true,
 							},
 						},
 					},
@@ -336,8 +335,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 								},
 							},
 							Ingress: v1alpha1.IngressSpec{
-								Enabled:           true,
-								UseVirtualService: &[]bool{true}[0],
+								Enabled: true,
 							},
 						},
 					},

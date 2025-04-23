@@ -45,8 +45,8 @@ COPY ${TENSORRTLLM_PIP_WHEEL_PATH}/*.whl /tmp/
 RUN find /tmp -name "*.whl" -exec pip install {} +
 
 # Install genai-perf for benchmarking
-# TODO: Move to tag when fix for genai-perf will be released
-ARG GENAI_PERF_TAG="25d0188713adc47868d6b3f22426375237a90529"
+# TODO: Move to published pypi tags
+ARG GENAI_PERF_TAG="e67e853413a07a778dd78a55e299be7fba9c9c24"
 RUN pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
 
 # Install test dependencies

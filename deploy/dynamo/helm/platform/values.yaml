@@ -13,32 +13,100 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # Used to generate top-level secrets (overridden by custom-values.yaml)
-existingSecret: ""
-existingImagePullSecret: ""
-ngcAPIKey: YOUR-NGC-API-KEY
+
 imagePullSecrets:
-  - name: nvcrimagepullsecret
-    registry: nvcr.io
-    username: $oauthtoken
-    password: YOUR-NGC-API-KEY
+
 # Subcharts
 dynamo-operator:
-  enabled: false
+  enabled: true
   imagePullSecrets:
     - name: gitlab-imagepull
     - name: nvcrimagepullsecret
     - name: docker-imagepullsecret
+  natsAddr: ""
+  etcdAddr: ""
+  namespaceRestriction:
+    enabled: true
+    targetNamespace: ""
   controllerManager:
     manager:
       image:
-        repository: gitlab-master.nvidia.com:5005/aire/microservices/nmp/dynamo-operator
+        repository: ""
         tag: "latest"
-dynamo-api-server:
-  enabled: false
+      args:
+        - --health-probe-bind-address=:8081
+        - --metrics-bind-address=127.0.0.1:8080
+  dynamo:
+    yatai:
+      endpoint: http://dynamo-store
+      clusterName: default
+    yataiSystem:
+      namespace: ""
+    internalImages:
+      bentoDownloader: quay.io/bentoml/bento-downloader:0.0.5
+      kaniko: quay.io/bentoml/kaniko:debug
+      buildkit: quay.io/bentoml/buildkit:master
+      buildkitRootless: quay.io/bentoml/buildkit:master-rootless
+      metricsTransformer: quay.io/bentoml/yatai-bento-metrics-transformer:0.0.4
+      debugger: quay.io/bentoml/bento-debugger:0.0.8
+      monitorExporter: quay.io/bentoml/bentoml-monitor-exporter:0.0.3
+      proxy: quay.io/bentoml/bentoml-proxy:0.0.1
+    disableAutomateBentoImageBuilder: false
+    enableRestrictedSecurityContext: false
+    disableYataiComponentRegistration: false
+    dockerRegistry:
+      server: ""
+      inClusterServer: ""
+      username: ""
+      password: ""
+      secure: true
+      bentoRepositoryName: yatai-bentos
+    bentoImageBuildEngine: buildkit
+    addNamespacePrefixToImageName: false
+    estargz:
+      enabled: false
+    kaniko:
+      cacheRepo: ""
+      snapshotMode: ""
+
+dynamo-api-store:
+  enabled: true
+  namespaceRestriction:
+    enabled: true
+    targetNamespace: ""
+  istio:
+    host: ""
+  dynamo:
+    env:
+      resource_scope: "user"
+  image:
+    repository: ""
+    tag: "latest"
+    pullPolicy: IfNotPresent
   imagePullSecrets:
-    - name: gitlab-imagepull
-    - name: nvcrimagepullsecret
-    - name: docker-imagepullsecret
+  ingress:
+    enabled: true
+    className: nginx
+    hosts:
+      - host: ""
+        paths:
+          - path: /
+            pathType: Prefix
+  postgresql:
+    primary:
+      persistence:
+        enabled: false
+  minio:
+    persistence:
+      enabled: true
+      size: 5Gi
+      storageClass: ""
+    apiIngress:
+      enabled: false
+      ingressClassName: nginx
+      hostname: minio.example.com
+      pathType: Prefix
+
 etcd:
   enabled: false
   replicaCount: 1
