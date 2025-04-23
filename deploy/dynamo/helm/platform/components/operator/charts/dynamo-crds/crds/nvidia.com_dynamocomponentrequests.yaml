@@ -38,10 +38,6 @@ spec:
       jsonPath: .spec.downloadUrl
       name: Download-Url
       type: string
-    - description: Image
-      jsonPath: .status.conditions[?(@.type=='ImageExists')].message
-      name: Image
-      type: string
     - description: Image Exists
       jsonPath: .status.conditions[?(@.type=='ImageExists')].status
       name: Image-Exists

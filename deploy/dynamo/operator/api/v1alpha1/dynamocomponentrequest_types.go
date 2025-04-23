@@ -87,7 +87,6 @@ type DynamoComponentRequestStatus struct {
 //+kubebuilder:subresource:status
 //+kubebuilder:printcolumn:name="DynamoComponent",type="string",JSONPath=".spec.dynamoComponent",description="Dynamo component"
 //+kubebuilder:printcolumn:name="Download-Url",type="string",JSONPath=".spec.downloadUrl",description="Download URL"
-//+kubebuilder:printcolumn:name="Image",type="string",JSONPath=".status.conditions[?(@.type=='ImageExists')].message",description="Image"
 //+kubebuilder:printcolumn:name="Image-Exists",type="string",JSONPath=".status.conditions[?(@.type=='ImageExists')].status",description="Image Exists"
 //+kubebuilder:printcolumn:name="DynamoComponent-Available",type="string",JSONPath=".status.conditions[?(@.type=='DynamoComponentAvailable')].status",description="Dynamo Component Available"
 //+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"

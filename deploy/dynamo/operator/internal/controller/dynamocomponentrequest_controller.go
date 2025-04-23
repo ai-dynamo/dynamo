@@ -981,30 +981,6 @@ func (r *DynamoComponentRequestReconciler) getImageInfo(ctx context.Context, opt
 	return
 }
 
-func (r *DynamoComponentRequestReconciler) getDynamoComponent(ctx context.Context, dynamoComponentRequest *nvidiacomv1alpha1.DynamoComponentRequest) (dynamoComponent *schemas.DynamoComponent, err error) {
-	dynamoComponentRepositoryName, _, dynamoComponentVersion := xstrings.Partition(dynamoComponentRequest.Spec.DynamoComponent, ":")
-
-	apiStoreClient, _, err := r.getApiStoreClient(ctx)
-	if err != nil {
-		err = errors.Wrap(err, "get api store client")
-		return
-	}
-
-	if apiStoreClient == nil {
-		err = errors.New("can't get api store client, please check api store configuration")
-		return
-	}
-
-	r.Recorder.Eventf(dynamoComponentRequest, corev1.EventTypeNormal, "FetchDynamoComponent", "Getting dynamo component %s from api store service", dynamoComponentRequest.Spec.DynamoComponent)
-	dynamoComponent, err = apiStoreClient.GetDynamoComponent(ctx, dynamoComponentRepositoryName, dynamoComponentVersion)
-	if err != nil {
-		err = errors.Wrap(err, "get dynamo component")
-		return
-	}
-	r.Recorder.Eventf(dynamoComponentRequest, corev1.EventTypeNormal, "FetchDynamoComponent", "Got dynamo component %s from api store service", dynamoComponentRequest.Spec.DynamoComponent)
-	return
-}
-
 func (r *DynamoComponentRequestReconciler) getImageBuilderJobName() string {
 	guid := xid.New()
 	return fmt.Sprintf("dynamo-image-builder-%s", guid.String())
