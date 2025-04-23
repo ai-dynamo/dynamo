@@ -325,7 +325,13 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 
 ENV CARGO_TARGET_DIR=/workspace/target
 
-RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
+RUN cargo install cargo-edit
+
+RUN --mount=type=bind,source=./.git,target=/workspace/.git \
+    VERSION_STRING=$(versioningit) && \
+    cargo set-version --workspace $VERSION_STRING && \
+    cargo set-version --workspace --manifest-path lib/bindings/python/Cargo.toml $VERSION_STRING && \
+    cargo build --release --locked --features mistralrs,sglang,vllm,python && \
     cargo doc --no-deps && \
     cp target/release/dynamo-run /usr/local/bin && \
     cp target/release/http /usr/local/bin && \
