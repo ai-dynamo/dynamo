@@ -15,10 +15,10 @@ const (
 	DynamoDeploymentComponentApiServer = "api-server"
 
 	InternalImagesDynamoComponentsDownloaderDefault = "quay.io/bentoml/bento-downloader:0.0.3"
-	InternalImagesKanikoDefault                     = "quay.io/bentoml/kaniko:1.9.1"
+	InternalImagesKanikoDefault                     = "gcr.io/kaniko-project/executor:latest"
 	InternalImagesMetricsTransformerDefault         = "quay.io/bentoml/yatai-bento-metrics-transformer:0.0.3"
-	InternalImagesBuildkitDefault                   = "quay.io/bentoml/buildkit:master"
-	InternalImagesBuildkitRootlessDefault           = "quay.io/bentoml/buildkit:master-rootless"
+	InternalImagesBuildkitDefault                   = "moby/buildkit:v0.20.2"
+	InternalImagesBuildkitRootlessDefault           = "moby/buildkit:v0.20.2-rootless"
 
 	EnvApiStoreEndpoint    = "API_STORE_ENDPOINT"
 	EnvApiStoreClusterName = "API_STORE_CLUSTER_NAME"
