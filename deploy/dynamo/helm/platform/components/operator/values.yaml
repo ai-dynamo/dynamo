@@ -79,9 +79,9 @@ dynamo:
 
   internalImages:
     dynamoComponentsDownloader: quay.io/bentoml/bento-downloader:0.0.5
-    kaniko: quay.io/bentoml/kaniko:debug
-    buildkit: moby/buildkit:latest
-    buildkitRootless: quay.io/bentoml/buildkit:master-rootless
+    kaniko: gcr.io/kaniko-project/executor:debug
+    buildkit: moby/buildkit:v0.20.2
+    buildkitRootless: moby/buildkit:v0.20.2-rootless
     metricsTransformer: quay.io/bentoml/yatai-bento-metrics-transformer:0.0.4
     debugger: quay.io/bentoml/bento-debugger:0.0.8
     monitorExporter: quay.io/bentoml/bentoml-monitor-exporter:0.0.3
