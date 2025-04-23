@@ -472,7 +472,7 @@ def register_kv_caches(self, kv_cache: torch.Tensor):
     self.local_blocks_descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
 
     # Create transfer handle with block descriptors for future transfers
-    self.local_xfer_side_handle = self.nixl_wrapper.prep_xfer_dlist("", descs)
+    self.local_xfer_side_handle = self.nixl_wrapper.prep_xfer_dlist("", self.local_blocks_descs)
 ```
 
 3. **Remote Agent Communication**
