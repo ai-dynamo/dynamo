@@ -121,18 +121,26 @@ export IMAGE_TAG=<TAG>  # Use the same tag you used when building the images
 export NAMESPACE=dynamo-cloud    # change this to whatever you want!
 ```
 
-2. [One-time Action] Create a new kubernetes namespace and set it as your default. Create image pull secrets if needed.
+> [!NOTE]
+> DOCKER_USERNAME and DOCKER_PASSWORD are optional and only needed if you want to pull docker images from a private registry.
+> A docker image pull secret will be created automatically if these variables are set. Its name will be `docker-imagepullsecret` unless overridden by the `DOCKER_SECRET_NAME` environment variable.
+
+The Dynamo Cloud Platform auto-generates docker images for pipelines and pushes them to a container registry.
+By default, the platform will use the same container registry as the platform components (specified by `DOCKER_SERVER`).
+However, you can specify a different container registry for pipelines by additionally setting the following environment variables:
+
+```bash
+export PIPELINES_DOCKER_SERVER=<your-docker-server>
+export PIPELINES_DOCKER_USERNAME=<your-docker-username>
+export PIPELINES_DOCKER_PASSWORD=<your-docker-password>
+```
+
+2. [One-time Action] Create a new kubernetes namespace and set it as your default.
 
 ```bash
 cd deploy/dynamo/helm
 kubectl create namespace $NAMESPACE
 kubectl config set-context --current --namespace=$NAMESPACE
-
-kubectl create secret docker-registry docker-imagepullsecret \
-  --docker-server=$DOCKER_SERVER \
-  --docker-username=$DOCKER_USERNAME \
-  --docker-password=$DOCKER_PASSWORD \
-  --namespace=$NAMESPACE
 ```
 
 3. Deploy the helm chart using the deploy script:

@@ -88,7 +88,7 @@ fn main() -> anyhow::Result<()> {
                         node_rank: flags.node_rank,
                         leader_addr: flags.leader_addr.unwrap_or_default(),
                     };
-                    return dynamo_engine_vllm::run_subprocess(
+                    return dynamo_engine_vllm0_7::run_subprocess(
                         ZMQ_SOCKET_PREFIX,
                         &model_path,
                         node_config,

@@ -60,7 +60,7 @@ dynamo-operator:
       username: ""
       password: ""
       secure: true
-      bentoRepositoryName: yatai-bentos
+      bentoRepositoryName: dynamo-pipelines
     bentoImageBuildEngine: buildkit
     addNamespacePrefixToImageName: false
     estargz:

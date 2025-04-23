@@ -111,12 +111,16 @@ pub enum Output {
     LlamaCpp,
 
     #[cfg(feature = "vllm")]
-    /// Run inference using vllm's engine
+    /// Alias for vllm0_8
     Vllm,
 
-    #[cfg(feature = "trtllm")]
-    /// Run inference using trtllm
-    TrtLLM,
+    #[cfg(feature = "vllm")]
+    /// Run inference using vllm 0.8.X+
+    Vllm0_8,
+
+    #[cfg(feature = "vllm")]
+    /// Run inference using vllm 0.7.X
+    Vllm0_7,
 
     /// Run inference using a user supplied python file that accepts and returns
     /// strings. It does it's own pre-processing.
@@ -148,9 +152,10 @@ impl TryFrom<&str> for Output {
 
             #[cfg(feature = "vllm")]
             "vllm" => Ok(Output::Vllm),
-
-            #[cfg(feature = "trtllm")]
-            "trtllm" => Ok(Output::TrtLLM),
+            #[cfg(feature = "vllm")]
+            "vllm0_8" => Ok(Output::Vllm0_8),
+            #[cfg(feature = "vllm")]
+            "vllm0_7" => Ok(Output::Vllm0_7),
 
             "echo_full" => Ok(Output::EchoFull),
             "echo_core" => Ok(Output::EchoCore),
@@ -195,9 +200,10 @@ impl fmt::Display for Output {
 
             #[cfg(feature = "vllm")]
             Output::Vllm => "vllm",
-
-            #[cfg(feature = "trtllm")]
-            Output::TrtLLM => "trtllm",
+            #[cfg(feature = "vllm")]
+            Output::Vllm0_8 => "vllm0_8",
+            #[cfg(feature = "vllm")]
+            Output::Vllm0_7 => "vllm0_7",
 
             Output::EchoFull => "echo_full",
             Output::EchoCore => "echo_core",
@@ -269,17 +275,14 @@ impl Output {
         #[cfg(feature = "vllm")]
         {
             out.push(Output::Vllm.to_string());
+            out.push(Output::Vllm0_7.to_string());
+            out.push(Output::Vllm0_8.to_string());
         }
 
         #[cfg(feature = "python")]
         {
             out.push(Output::PythonStr("file.py".to_string()).to_string());
             out.push(Output::PythonTok("file.py".to_string()).to_string());
-        }
-
-        #[cfg(feature = "trtllm")]
-        {
-            out.push(Output::TrtLLM.to_string());
         }
 
         out

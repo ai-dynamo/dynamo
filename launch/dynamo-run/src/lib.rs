@@ -124,10 +124,7 @@ pub async fn run(
     // If it's an HF repo download it
     if let Some(inner_model_path) = model_path.as_ref() {
         if !inner_model_path.exists() {
-            model_name = inner_model_path
-                .iter()
-                .next_back()
-                .map(|s| s.to_string_lossy().to_string());
+            model_name = Some(inner_model_path.display().to_string());
             model_path = Some(hub::from_hf(inner_model_path).await?);
         }
     }
@@ -291,7 +288,7 @@ pub async fn run(
             }
         }
         #[cfg(feature = "vllm")]
-        Output::Vllm => {
+        Output::Vllm0_7 => {
             if flags.base_gpu_id != 0 {
                 anyhow::bail!("vllm does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
             }
@@ -331,14 +328,16 @@ pub async fn run(
                         .component(KV_PUBLISHER_COMPONENT)?;
                     let kvp = Arc::new(KvMetricsPublisher::new()?);
                     let kvp_inner = kvp.clone();
-                    tokio::spawn(async move { kvp_inner.create_endpoint(kvp_component).await });
+                    tokio::spawn(
+                        async move { kvp_inner.create_endpoint(kvp_component, None).await },
+                    );
                     Some(kvp)
                 } else {
                     None
                 };
 
                 // vllm multi-node only the leader runs vllm
-                let (engine, vllm_future) = dynamo_engine_vllm::make_leader_engine(
+                let (engine, vllm_future) = dynamo_engine_vllm0_7::make_leader_engine(
                     cancel_token.clone(),
                     &model_path,
                     &sock_prefix,
@@ -359,11 +358,47 @@ pub async fn run(
             } else {
                 // Nodes rank > 0 only run 'ray'
                 let stop_future =
-                    dynamo_engine_vllm::start_follower(cancel_token.clone(), node_conf).await?;
+                    dynamo_engine_vllm0_7::start_follower(cancel_token.clone(), node_conf).await?;
                 extra = Some(Box::pin(stop_future));
                 EngineConfig::None
             }
         }
+
+        #[cfg(feature = "vllm")]
+        Output::Vllm | Output::Vllm0_8 => {
+            if flags.base_gpu_id != 0 {
+                anyhow::bail!("vllm does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
+            }
+            let Some(model_path) = model_path else {
+                anyhow::bail!(
+                    "out=vllm requires flag --model-path=<full-path-to-hf-repo-or-model-gguf>"
+                );
+            };
+            let Some(card) = maybe_card.clone() else {
+                anyhow::bail!(
+                    "Unable to build tokenizer. out=vllm requires --model-path to be an HF repo with fast tokenizer (tokenizer.json) or a GGUF file"
+                );
+            };
+            let node_conf = dynamo_llm::engines::MultiNodeConfig {
+                num_nodes: flags.num_nodes,
+                node_rank: flags.node_rank,
+                leader_addr: flags.leader_addr.clone().unwrap_or_default(),
+            };
+            let engine = dynamo_engine_vllm0_8::make_engine(
+                cancel_token.clone(),
+                &model_path,
+                node_conf,
+                flags.tensor_parallel_size,
+                flags.extra_engine_args.clone(),
+            )
+            .await?;
+            EngineConfig::StaticCore {
+                service_name: card.service_name.clone(),
+                engine,
+                card: Box::new(card),
+            }
+        }
+
         #[cfg(feature = "llamacpp")]
         Output::LlamaCpp => {
             let Some(model_path) = model_path else {
@@ -379,28 +414,6 @@ pub async fn run(
             };
             let engine =
                 dynamo_engine_llamacpp::make_engine(cancel_token.clone(), &model_path).await?;
-            EngineConfig::StaticCore {
-                service_name: card.service_name.clone(),
-                engine,
-                card: Box::new(card),
-            }
-        }
-        #[cfg(feature = "trtllm")]
-        Output::TrtLLM => {
-            let Some(model_path) = model_path else {
-                anyhow::bail!("out=trtllm requires flag --model-path=<full-path-to-model-dir>");
-            };
-            if !model_path.is_dir() {
-                anyhow::bail!(
-                    "--model-path should point at a directory containing `.engine` files."
-                );
-            }
-            // Safety: Earlier we build maybe_card from model_path, which we checked right above
-            let card = maybe_card.clone().unwrap();
-            let engine = dynamo_engine_trtllm::make_engine(
-                model_path.display(),
-                flags.tensor_parallel_size,
-            )?;
             EngineConfig::StaticCore {
                 service_name: card.service_name.clone(),
                 engine,

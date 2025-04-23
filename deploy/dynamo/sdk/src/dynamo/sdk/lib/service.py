@@ -66,6 +66,14 @@ class DynamoConfig:
     enabled: bool = False
     name: str | None = None
     namespace: str | None = None
+    custom_lease: LeaseConfig | None = None
+
+
+@dataclass
+class LeaseConfig:
+    """Configuration for custom dynamo leases"""
+
+    ttl: int = 1  # seconds
 
 
 class DynamoService(Service[T]):

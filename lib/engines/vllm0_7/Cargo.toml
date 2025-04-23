@@ -14,7 +14,7 @@
 # limitations under the License.
 
 [package]
-name = "dynamo-engine-trtllm"
+name = "dynamo-engine-vllm0_7"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -31,18 +31,18 @@ dynamo-llm = { workspace = true }
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
-derive_builder = {workspace = true }
-futures =  { workspace = true }
-serde = { workspace = true }
+async_zmq = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 async-openai = "0.27.2"
-serde_repr = "0.1"
-
-[build-dependencies]
-bindgen = "0.70"
-cmake = "0.1"
+pyo3 = { version = "0.23.3", default-features = false, features = [
+  "macros",
+  "experimental-async",
+  "experimental-inspect",
+  "py-clone",
+] }
+regex = "1"
+serde-pickle = "1.2.0"

@@ -14,7 +14,7 @@
 # limitations under the License.
 
 [package]
-name = "dynamo-engine-vllm"
+name = "dynamo-engine-vllm0_8"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -31,10 +31,11 @@ dynamo-llm = { workspace = true }
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
-async_zmq = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
 tracing = { workspace = true }
 
 async-openai = "0.27.2"
@@ -44,5 +45,12 @@ pyo3 = { version = "0.23.3", default-features = false, features = [
   "experimental-inspect",
   "py-clone",
 ] }
+pyo3-async-runtimes = { version = "0.23.0", default-features = false, features = [
+  "attributes",
+  "testing",
+  "tokio-runtime",
+  "unstable-streams",
+] }
+pythonize = { version = "0.23" }
 regex = "1"
 serde-pickle = "1.2.0"

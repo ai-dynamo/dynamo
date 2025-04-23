@@ -61,6 +61,7 @@ dynamo cloud login --api-token TEST-TOKEN --endpoint $DYNAMO_CLOUD
 
 > [!NOTE]
 > For instructions on building and pushing the Dynamo base image, see the [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image) section in the main README.
+> The Dynamo base image must be pushed to the same registry as the pipelines images configured in the [Dynamo Cloud](dynamo_cloud.md) deployment.
 
 ```bash
 # Set your runtime image name
@@ -70,7 +71,7 @@ export DYNAMO_IMAGE=<dynamo_docker_image_name>
 cd $PROJECT_ROOT/examples/hello_world
 
 # Build the service and capture the tag
-DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk -F"\"" '{ print $2 }')
+DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk '{ print $3 }' | sed 's/\.$//')
 ```
 
 ### 3. Deploy to Kubernetes

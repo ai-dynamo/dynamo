@@ -28,11 +28,10 @@ class RequestHandler:
     async def generate(self, request):
         print(f"Received request: {request}")
         for char in request:
-            await asyncio.sleep(1)
             yield char
 
 
-@dynamo_worker(static=False)
+@dynamo_worker(static=True)
 async def worker(runtime: DistributedRuntime):
     await init(runtime, "dynamo")
 
@@ -43,16 +42,11 @@ async def init(runtime: DistributedRuntime, ns: str):
     A `Component` can serve multiple endpoints
     """
     component = runtime.namespace(ns).component("backend")
-    lease = await component.create_service_with_custom_lease(ttl=1)
-    lease_id = lease.id()
-    print(f"Created custom lease with ID: {lease_id}/{lease_id:#x}")
+    await component.create_service()
 
     endpoint = component.endpoint("generate")
     print("Started server instance")
-
-    # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
-    # after the lease is revoked
-    await endpoint.serve_endpoint(RequestHandler().generate, lease)
+    await endpoint.serve_endpoint(RequestHandler().generate)
 
 
 if __name__ == "__main__":

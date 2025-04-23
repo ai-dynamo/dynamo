@@ -20,39 +20,30 @@ import uvloop
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 
-class RequestHandler:
-    """
-    Request handler for the generate endpoint
-    """
-
-    async def generate(self, request):
-        print(f"Received request: {request}")
-        for char in request:
-            await asyncio.sleep(1)
-            yield char
-
-
-@dynamo_worker(static=False)
+@dynamo_worker(static=True)
 async def worker(runtime: DistributedRuntime):
     await init(runtime, "dynamo")
 
 
 async def init(runtime: DistributedRuntime, ns: str):
     """
-    Instantiate a `backend` component and serve the `generate` endpoint
-    A `Component` can serve multiple endpoints
+    Instantiate a `backend` client and call the `generate` endpoint
     """
-    component = runtime.namespace(ns).component("backend")
-    lease = await component.create_service_with_custom_lease(ttl=1)
-    lease_id = lease.id()
-    print(f"Created custom lease with ID: {lease_id}/{lease_id:#x}")
+    # get endpoint
+    endpoint = runtime.namespace(ns).component("backend").endpoint("generate")
 
-    endpoint = component.endpoint("generate")
-    print("Started server instance")
+    # create client
+    client = await endpoint.client()
 
-    # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
-    # after the lease is revoked
-    await endpoint.serve_endpoint(RequestHandler().generate, lease)
+    # wait for an endpoint to be ready
+    await client.wait_for_endpoints()
+
+    # issue request
+    stream = await client.generate("hello world")
+
+    # process the stream
+    async for char in stream:
+        print(char)
 
 
 if __name__ == "__main__":

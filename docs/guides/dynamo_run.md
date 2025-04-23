@@ -6,11 +6,11 @@
     * [Multi-node](#multi-node)
 * [Compiling from Source](#compiling-from-source)
     * [Setup](#setup)
-    * [sglang](#sglang)
-    * [llama_cpp](#llama_cpp)
-    * [vllm](#vllm)
+    * [Sglang](#sglang)
+    * [lama.cpp](#llama_cpp)
+    * [Vllm](#vllm)
     * [Python bring-your-own-engine](#python-bring-your-own-engine)
-    * [trtllm](#trtllm)
+    * [TensorRT-LLM](#tensorrt-llm-engine)
     * [Echo Engines](#echo-engines)
 * [Batch mode](#batch-mode)
 * [Defaults](#defaults)
@@ -214,14 +214,14 @@ We use [uv](https://docs.astral.sh/uv/) but any virtualenv manager should work.
 uv venv
 source .venv/bin/activate
 uv pip install pip
-uv pip install vllm==0.7.3 setuptools
+uv pip install vllm==0.8.4 setuptools
 ```
 
 **Note: If you're on Ubuntu 22.04 or earlier, you will need to add `--python=python3.10` to your `uv venv` command**
 
 2. Build:
 ```
-cargo build --features vllm
+cargo build
 cd target/debug
 ```
 
@@ -230,7 +230,7 @@ Inside that virtualenv:
 
 **HF repo:**
 ```
-./dynamo-run in=http out=vllm --model-path ~/llm_models/Llama-3.2-3B-Instruct/
+./dynamo-run in=http out=vllm ~/llm_models/Llama-3.2-3B-Instruct/
 
 ```
 
@@ -325,7 +325,7 @@ MAIN: ['my_engine.py', '--model-path', '/opt/models/Llama-3.2-3B-Instruct/', '--
 
 This allows quick iteration on the engine setup. Note how the `-n` `1` is included. Flags `--leader-addr` and `--model-config` will also be added if provided to `dynamo-run`.
 
-#### TensorRT-LLM `pystr` engine
+#### TensorRT-LLM engine
 
 To run a TRT-LLM model with dynamo-run we have included a python based [async engine] (/examples/tensorrt_llm/engines/agg_engine.py).
 To configure the TensorRT-LLM async engine please see [llm_api_config.yaml](/examples/tensorrt_llm/configs/llm_api_config.yaml). The file defines the options that need to be passed to the LLM engine. Follow the steps below to serve trtllm on dynamo run.
@@ -386,24 +386,6 @@ async def generate(request):
 
 `pytok` supports the same ways of passing command line arguments as `pystr` - `initialize` or `main` with `sys.argv`.
 
-### trtllm
-
-TensorRT-LLM. Requires `clang` and `libclang-dev`.
-
-1. Build:
-```
-cargo build --features trtllm
-```
-
-2. Run:
-```
-dynamo-run in=text out=trtllm --model-path /app/trtllm_engine/ --model-config ~/llm_models/Llama-3.2-3B-Instruct/
-```
-
-Note that TRT-LLM uses it's own `.engine` format for weights.
-
-The `--model-path` you give to `dynamo-run` must contain the `config.json` (TRT-LLM's , not the model's) and `rank0.engine` (plus other ranks if relevant).
-
 ### Echo Engines
 
 Dynamo includes two echo engines for testing and debugging purposes:
@@ -415,6 +397,13 @@ The `echo_core` engine accepts pre-processed requests and echoes the tokens back
 ```
 dynamo-run in=http out=echo_core --model-path <hf-repo-checkout>
 ```
+
+Note that to use it with `in=http` you need to tell the post processor to ignore stop tokens from the template by adding `nvext.ignore_eos` like this:
+```
+curl -N -d '{"nvext": {"ignore_eos": true}, "stream": true, "model": "Qwen2.5-3B-Instruct", "max_completion_tokens": 4096, "messages":[{"role":"user", "content": "Tell me a story" }]}' ...
+```
+
+The default `in=text` sets that for you.
 
 #### echo_full
 

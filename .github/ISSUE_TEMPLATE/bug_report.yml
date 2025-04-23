@@ -48,19 +48,9 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: Please provide details about your environment.
+      description: Please provide details about your environment. You can run the command `dynamo env` and copy-paste the output below.
       placeholder: |
-        Operating System (Required): e.g. Ubuntu 24.04
-        ai-dynamo Version (Required): e.g. 0.1.0 or git commit SHA if you cloned the repo
-        ai-dynamo-runtime Version (Required): e.g. 0.1.0
-        ai-dynamo-vllm Version (Required): e.g. 0.7.2
-        nixl Version (Required): e.g. 0.1.0 or git commit SHA if you cloned the repo
-        CPU Architecture (Required): e.g. x86_64 (run `uname -m`)
-        CUDA Version (Required): e.g. 12.8 (run `nvidia-smi`)
-        GPU Architecture (Required): e.g. A100 (run `nvidia-smi -L`)
-        Python Version (Required): e.g. 3.12.3 (run `python --version`)
-        glibc Version (Optional): e.g. 2.39 (run `ldd --version`)
-        Docker Version (Optional): e.g. 28.0.2 (run `docker --version`)
+        Operating System, ai-dynamo Version, CPU Architecture, CUDA Version, GPU Architecture, Python Version...
     validations:
       required: true
 
