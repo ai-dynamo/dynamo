@@ -24,9 +24,8 @@ import (
 )
 
 type DynamoComponent struct {
-	PresignedDownloadUrl string                   `json:"presigned_download_url"`
-	TransmissionStrategy *TransmissionStrategy    `json:"transmission_strategy"`
-	Manifest             *DynamoComponentManifest `json:"manifest"`
+	PresignedDownloadUrl string                `json:"presigned_download_url"`
+	TransmissionStrategy *TransmissionStrategy `json:"transmission_strategy"`
 }
 
 type TransmissionStrategy string
@@ -35,11 +34,6 @@ const (
 	TransmissionStrategyPresignedURL TransmissionStrategy = "presigned_url"
 	TransmissionStrategyProxy        TransmissionStrategy = "proxy"
 )
-
-type DynamoComponentManifest struct {
-	BentomlVersion string   `json:"bentoml_version"`
-	Models         []string `json:"models"`
-}
 
 type Duration time.Duration
 

@@ -26,28 +26,28 @@ import (
 )
 
 const (
-	DynamoDeploymentConditionTypeAvailable             = "Available"
-	DynamoDeploymentConditionTypeDynamoNimFound        = "DynamoNimFound"
-	DynamoDeploymentConditionTypeDynamoNimRequestFound = "DynamoNimRequestFound"
+	DynamoGraphDeploymentConditionTypeAvailable                   = "Available"
+	DynamoGraphDeploymentConditionTypeDynamoComponentFound        = "DynamoComponentFound"
+	DynamoGraphDeploymentConditionTypeDynamoComponentRequestFound = "DynamoComponentRequestFound"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
-// DynamoNimDeploymentSpec defines the desired state of DynamoNimDeployment
-type DynamoNimDeploymentSpec struct {
-	DynamoNim string `json:"dynamoNim"`
-	// contains the tag of the DynamoNim: for example, "my_package:MyService"
+// DynamoComponentDeploymentSpec defines the desired state of DynamoComponentDeployment
+type DynamoComponentDeploymentSpec struct {
+	DynamoComponent string `json:"dynamoComponent"`
+	// contains the tag of the DynamoComponent: for example, "my_package:MyService"
 	DynamoTag string `json:"dynamoTag"`
 
-	DynamoNimDeploymentSharedSpec `json:",inline"`
+	DynamoComponentDeploymentSharedSpec `json:",inline"`
 }
 
-type DynamoNimDeploymentOverridesSpec struct {
-	DynamoNimDeploymentSharedSpec `json:",inline"`
+type DynamoComponentDeploymentOverridesSpec struct {
+	DynamoComponentDeploymentSharedSpec `json:",inline"`
 }
 
-type DynamoNimDeploymentSharedSpec struct {
+type DynamoComponentDeploymentSharedSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
@@ -108,8 +108,8 @@ type IngressSpec struct {
 	IngressControllerClassName *string           `json:"ingressControllerClassName,omitempty"`
 }
 
-// DynamoNimDeploymentStatus defines the observed state of DynamoNimDeployment
-type DynamoNimDeploymentStatus struct {
+// DynamoComponentDeploymentStatus defines the observed state of DynamoComponentDeployment
+type DynamoComponentDeploymentStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 	Conditions []metav1.Condition `json:"conditions"`
@@ -121,45 +121,45 @@ type DynamoNimDeploymentStatus struct {
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
 //+kubebuilder:storageversion
-//+kubebuilder:printcolumn:name="Bento",type="string",JSONPath=".spec.bento",description="Bento"
+//+kubebuilder:printcolumn:name="DynamoComponent",type="string",JSONPath=".spec.dynamoComponent",description="Dynamo component"
 //+kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Available"
 //+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
-// DynamoNimDeployment is the Schema for the dynamonimdeployments API
-type DynamoNimDeployment struct {
+// DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API
+type DynamoComponentDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DynamoNimDeploymentSpec   `json:"spec,omitempty"`
-	Status DynamoNimDeploymentStatus `json:"status,omitempty"`
+	Spec   DynamoComponentDeploymentSpec   `json:"spec,omitempty"`
+	Status DynamoComponentDeploymentStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// DynamoNimDeploymentList contains a list of DynamoNimDeployment
-type DynamoNimDeploymentList struct {
+// DynamoComponentDeploymentList contains a list of DynamoComponentDeployment
+type DynamoComponentDeploymentList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []DynamoNimDeployment `json:"items"`
+	Items           []DynamoComponentDeployment `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&DynamoNimDeployment{}, &DynamoNimDeploymentList{})
+	SchemeBuilder.Register(&DynamoComponentDeployment{}, &DynamoComponentDeploymentList{})
 }
 
-func (s *DynamoNimDeploymentStatus) IsReady() bool {
+func (s *DynamoComponentDeploymentStatus) IsReady() bool {
 	for _, condition := range s.Conditions {
-		if condition.Type == DynamoDeploymentConditionTypeAvailable && condition.Status == metav1.ConditionTrue {
+		if condition.Type == DynamoGraphDeploymentConditionTypeAvailable && condition.Status == metav1.ConditionTrue {
 			return true
 		}
 	}
 	return false
 }
 
-func (s *DynamoNimDeployment) GetSpec() any {
+func (s *DynamoComponentDeployment) GetSpec() any {
 	return s.Spec
 }
 
-func (s *DynamoNimDeployment) SetSpec(spec any) {
-	s.Spec = spec.(DynamoNimDeploymentSpec)
+func (s *DynamoComponentDeployment) SetSpec(spec any) {
+	s.Spec = spec.(DynamoComponentDeploymentSpec)
 }

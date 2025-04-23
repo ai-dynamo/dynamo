@@ -160,13 +160,13 @@ func (m *mockEtcdStorage) DeleteKeys(ctx context.Context, prefix string) error {
 	return m.deleteKeysFunc(ctx, prefix)
 }
 
-func TestDynamoNimDeploymentReconciler_FinalizeResource(t *testing.T) {
+func TestDynamoComponentDeploymentReconciler_FinalizeResource(t *testing.T) {
 	type fields struct {
 		EtcdStorage etcdStorage
 	}
 	type args struct {
-		ctx                 context.Context
-		dynamoNimDeployment *v1alpha1.DynamoNimDeployment
+		ctx                       context.Context
+		dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment
 	}
 	tests := []struct {
 		name    string
@@ -188,9 +188,9 @@ func TestDynamoNimDeploymentReconciler_FinalizeResource(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				dynamoNimDeployment: &v1alpha1.DynamoNimDeployment{
-					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+				dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName:     "service1",
 							DynamoNamespace: &[]string{"default"}[0],
 						},
@@ -210,9 +210,9 @@ func TestDynamoNimDeploymentReconciler_FinalizeResource(t *testing.T) {
 			},
 			args: args{
 				ctx: context.Background(),
-				dynamoNimDeployment: &v1alpha1.DynamoNimDeployment{
-					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+				dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName:     "service1",
 							DynamoNamespace: &[]string{"default"}[0],
 						},
@@ -224,17 +224,17 @@ func TestDynamoNimDeploymentReconciler_FinalizeResource(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &DynamoNimDeploymentReconciler{
+			r := &DynamoComponentDeploymentReconciler{
 				EtcdStorage: tt.fields.EtcdStorage,
 			}
-			if err := r.FinalizeResource(tt.args.ctx, tt.args.dynamoNimDeployment); (err != nil) != tt.wantErr {
-				t.Errorf("DynamoNimDeploymentReconciler.FinalizeResource() error = %v, wantErr %v", err, tt.wantErr)
+			if err := r.FinalizeResource(tt.args.ctx, tt.args.dynamoComponentDeployment); (err != nil) != tt.wantErr {
+				t.Errorf("DynamoComponentDeploymentReconciler.FinalizeResource() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
-func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
+func TestDynamoComponentDeploymentReconciler_generateIngress(t *testing.T) {
 	type fields struct {
 	}
 	type args struct {
@@ -255,13 +255,13 @@ func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
 			args: args{
 				ctx: context.Background(),
 				opt: generateResourceOption{
-					dynamoNimDeployment: &v1alpha1.DynamoNimDeployment{
+					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "service1",
 							Namespace: "default",
 						},
-						Spec: v1alpha1.DynamoNimDeploymentSpec{
-							DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+						Spec: v1alpha1.DynamoComponentDeploymentSpec{
+							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								ServiceName:     "service1",
 								DynamoNamespace: &[]string{"default"}[0],
 								Ingress: v1alpha1.IngressSpec{
@@ -314,13 +314,13 @@ func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
 			args: args{
 				ctx: context.Background(),
 				opt: generateResourceOption{
-					dynamoNimDeployment: &v1alpha1.DynamoNimDeployment{
+					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "service1",
 							Namespace: "default",
 						},
-						Spec: v1alpha1.DynamoNimDeploymentSpec{
-							DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+						Spec: v1alpha1.DynamoComponentDeploymentSpec{
+							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								ServiceName:     "service1",
 								DynamoNamespace: &[]string{"default"}[0],
 								Ingress: v1alpha1.IngressSpec{
@@ -344,10 +344,10 @@ func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
-			r := &DynamoNimDeploymentReconciler{}
+			r := &DynamoComponentDeploymentReconciler{}
 			got, got1, err := r.generateIngress(tt.args.ctx, tt.args.opt)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("DynamoNimDeploymentReconciler.generateIngress() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("DynamoComponentDeploymentReconciler.generateIngress() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 			g.Expect(got).To(gomega.Equal(tt.want))
@@ -356,7 +356,7 @@ func TestDynamoNimDeploymentReconciler_generateIngress(t *testing.T) {
 	}
 }
 
-func TestDynamoNimDeploymentReconciler_generateVirtualService(t *testing.T) {
+func TestDynamoComponentDeploymentReconciler_generateVirtualService(t *testing.T) {
 	type fields struct {
 	}
 	type args struct {
@@ -377,13 +377,13 @@ func TestDynamoNimDeploymentReconciler_generateVirtualService(t *testing.T) {
 			args: args{
 				ctx: context.Background(),
 				opt: generateResourceOption{
-					dynamoNimDeployment: &v1alpha1.DynamoNimDeployment{
+					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "service1",
 							Namespace: "default",
 						},
-						Spec: v1alpha1.DynamoNimDeploymentSpec{
-							DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+						Spec: v1alpha1.DynamoComponentDeploymentSpec{
+							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								ServiceName:     "service1",
 								DynamoNamespace: &[]string{"default"}[0],
 								Ingress: v1alpha1.IngressSpec{
@@ -409,13 +409,13 @@ func TestDynamoNimDeploymentReconciler_generateVirtualService(t *testing.T) {
 			args: args{
 				ctx: context.Background(),
 				opt: generateResourceOption{
-					dynamoNimDeployment: &v1alpha1.DynamoNimDeployment{
+					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "service1",
 							Namespace: "default",
 						},
-						Spec: v1alpha1.DynamoNimDeploymentSpec{
-							DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+						Spec: v1alpha1.DynamoComponentDeploymentSpec{
+							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								ServiceName:     "service1",
 								DynamoNamespace: &[]string{"default"}[0],
 								Ingress: v1alpha1.IngressSpec{
@@ -467,10 +467,10 @@ func TestDynamoNimDeploymentReconciler_generateVirtualService(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
-			r := &DynamoNimDeploymentReconciler{}
+			r := &DynamoComponentDeploymentReconciler{}
 			got, got1, err := r.generateVirtualService(tt.args.ctx, tt.args.opt)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("DynamoNimDeploymentReconciler.generateVirtualService() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("DynamoComponentDeploymentReconciler.generateVirtualService() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 			g.Expect(got).To(gomega.Equal(tt.want))

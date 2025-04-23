@@ -14,12 +14,11 @@
 # limitations under the License.
 
 apiVersion: nvidia.com/v1alpha1
-kind: DynamoDeployment
+kind: DynamoComponent
 metadata:
   labels:
     app.kubernetes.io/name: dynamo-kubernetes-operator
     app.kubernetes.io/managed-by: kustomize
-  name: dynamodeployment-sample
+  name: dynamocomponent-sample
 spec:
   # TODO(user): Add fields here
-  # EXAMPLE: dynamoNim: basic:dev

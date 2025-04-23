@@ -29,23 +29,23 @@ import (
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
-// DynamoDeploymentSpec defines the desired state of DynamoDeployment.
-type DynamoDeploymentSpec struct {
+// DynamoGraphDeploymentSpec defines the desired state of DynamoGraphDeployment.
+type DynamoGraphDeploymentSpec struct {
 	// required
-	DynamoNim string `json:"dynamoNim"`
+	DynamoGraph string `json:"dynamoGraph"`
 	// optional
-	// key is the name of the service defined in DynamoNim
-	// value is the DynamoNimDeployment override for that service
-	// if not set, the DynamoNimDeployment will be used as is
+	// key is the name of the service defined in DynamoComponent
+	// value is the DynamoComponentDeployment override for that service
+	// if not set, the DynamoComponentDeployment will be used as is
 	// +kubebuilder:validation:Optional
-	Services map[string]*DynamoNimDeploymentOverridesSpec `json:"services,omitempty"`
+	Services map[string]*DynamoComponentDeploymentOverridesSpec `json:"services,omitempty"`
 	// Environment variables to be set in the deployment
 	// +kubebuilder:validation:Optional
 	Envs []corev1.EnvVar `json:"envs,omitempty"`
 }
 
-// DynamoDeploymentStatus defines the observed state of DynamoDeployment.
-type DynamoDeploymentStatus struct {
+// DynamoGraphDeploymentStatus defines the observed state of DynamoGraphDeployment.
+type DynamoGraphDeploymentStatus struct {
 	State      string             `json:"state,omitempty"`
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
@@ -53,41 +53,41 @@ type DynamoDeploymentStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 
-// DynamoDeployment is the Schema for the dynamodeployments API.
-type DynamoDeployment struct {
+// DynamoGraphDeployment is the Schema for the dynamographdeployments API.
+type DynamoGraphDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DynamoDeploymentSpec   `json:"spec,omitempty"`
-	Status DynamoDeploymentStatus `json:"status,omitempty"`
+	Spec   DynamoGraphDeploymentSpec   `json:"spec,omitempty"`
+	Status DynamoGraphDeploymentStatus `json:"status,omitempty"`
 }
 
-func (s *DynamoDeployment) SetState(state string) {
+func (s *DynamoGraphDeployment) SetState(state string) {
 	s.Status.State = state
 }
 
 // +kubebuilder:object:root=true
 
-// DynamoDeploymentList contains a list of DynamoDeployment.
-type DynamoDeploymentList struct {
+// DynamoGraphDeploymentList contains a list of DynamoGraphDeployment.
+type DynamoGraphDeploymentList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []DynamoDeployment `json:"items"`
+	Items           []DynamoGraphDeployment `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&DynamoDeployment{}, &DynamoDeploymentList{})
+	SchemeBuilder.Register(&DynamoGraphDeployment{}, &DynamoGraphDeploymentList{})
 }
 
-func (s *DynamoDeployment) GetSpec() any {
+func (s *DynamoGraphDeployment) GetSpec() any {
 	return s.Spec
 }
 
-func (s *DynamoDeployment) SetSpec(spec any) {
-	s.Spec = spec.(DynamoDeploymentSpec)
+func (s *DynamoGraphDeployment) SetSpec(spec any) {
+	s.Spec = spec.(DynamoGraphDeploymentSpec)
 }
 
-func (s *DynamoDeployment) SetEndpointStatus(isSecured bool, endpointHost string) {
+func (s *DynamoGraphDeployment) SetEndpointStatus(isSecured bool, endpointHost string) {
 	protocol := "http"
 	if isSecured {
 		protocol = "https"
@@ -101,7 +101,7 @@ func (s *DynamoDeployment) SetEndpointStatus(isSecured bool, endpointHost string
 	})
 }
 
-func (s *DynamoDeployment) AddStatusCondition(condition metav1.Condition) {
+func (s *DynamoGraphDeployment) AddStatusCondition(condition metav1.Condition) {
 	if s.Status.Conditions == nil {
 		s.Status.Conditions = []metav1.Condition{}
 	}

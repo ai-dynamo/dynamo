@@ -12,7 +12,7 @@ const (
 
 	DynamoImageBuilderComponentName = "dynamo-image-builder"
 
-	DynamoDeploymentComponentApiServer = "api-server"
+	DynamoApiServerComponentName = "api-server"
 
 	InternalImagesDynamoComponentsDownloaderDefault = "quay.io/bentoml/bento-downloader:0.0.3"
 	InternalImagesKanikoDefault                     = "gcr.io/kaniko-project/executor:debug"
@@ -26,12 +26,6 @@ const (
 	EnvApiStoreApiToken = "API_STORE_API_TOKEN"
 
 	EnvDynamoServicePort = "PORT"
-
-	// tracking envars
-	EnvDynamoDeploymentUID = "DYNAMO_DEPLOYMENT_UID"
-
-	EnvDynamoDeploymentName      = "DYNAMO_DEPLOYMENT_NAME"
-	EnvDynamoDeploymentNamespace = "DYNAMO_DEPLOYMENT_NAMESPACE"
 
 	EnvDockerRegistryServer          = "DOCKER_REGISTRY_SERVER"
 	EnvDockerRegistryInClusterServer = "DOCKER_REGISTRY_IN_CLUSTER_SERVER"
@@ -50,17 +44,15 @@ const (
 	EnvDynamoSystemNamespace       = "DYNAMO_SYSTEM_NAMESPACE"
 	EnvDynamoImageBuilderNamespace = "DYNAMO_IMAGE_BUILDER_NAMESPACE"
 
-	KubeLabelDynamoSelector   = "nvidia.com/selector"
-	KubeLabelDynamoRepository = "nvidia.com/dynamo-repository"
-	KubeLabelDynamoVersion    = "nvidia.com/dynamo-version"
+	KubeLabelDynamoSelector = "nvidia.com/selector"
 
-	KubeLabelDynamoDeployment              = "nvidia.com/dynamo-deployment"
-	KubeLabelDynamoDeploymentComponentType = "nvidia.com/dynamo-deployment-component-type"
-	KubeLabelDynamoDeploymentTargetType    = "nvidia.com/dynamo-deployment-target-type"
-	KubeLabelDynamoCreator                 = "nvidia.com/dynamo-creator"
+	KubeLabelDynamoComponent            = "nvidia.com/dynamo-component"
+	KubeLabelDynamoDeploymentTargetType = "nvidia.com/dynamo-deployment-target-type"
 
-	KubeLabelIsDynamoImageBuilder = "nvidia.com/is-dynamo-image-builder"
-	KubeLabelDynamoRequest        = "nvidia.com/dynamo-request"
+	KubeLabelDynamoComponentType = "nvidia.com/dynamo-component-type"
+
+	KubeLabelIsDynamoImageBuilder   = "nvidia.com/is-dynamo-image-builder"
+	KubeLabelDynamoComponentRequest = "nvidia.com/dynamo-component-request"
 
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
@@ -77,7 +69,7 @@ const (
 	// nolint: gosec
 	KubeSecretNameRegcred = "dynamo-regcred"
 
-	KubeAnnotationDynamoNimRequestHash            = "nvidia.com/dynamo-request-hash"
-	KubeAnnotationDynamoNimRequestImageBuiderHash = "nvidia.com/dynamo-request-image-builder-hash"
-	KubeAnnotationDynamoNimStorageNS              = "nvidia.com/dynamo-storage-namespace"
+	KubeAnnotationDynamoComponentRequestHash            = "nvidia.com/dynamo-request-hash"
+	KubeAnnotationDynamoComponentRequestImageBuiderHash = "nvidia.com/dynamo-request-image-builder-hash"
+	KubeAnnotationDynamoComponentStorageNS              = "nvidia.com/dynamo-storage-namespace"
 )

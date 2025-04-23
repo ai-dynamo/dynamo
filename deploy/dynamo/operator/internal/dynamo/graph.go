@@ -84,14 +84,14 @@ func (s ServiceConfig) GetNamespace() *string {
 	return &s.Config.Dynamo.Namespace
 }
 
-func GetDefaultDynamoNamespace(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDeployment) string {
+func GetDefaultDynamoNamespace(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment) string {
 	return fmt.Sprintf("dynamo-%s", dynamoDeployment.Name)
 }
 
-func RetrieveDynamoGraphDownloadURL(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDeployment, recorder EventRecorder) (*string, error) {
+func RetrieveDynamoGraphDownloadURL(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, recorder EventRecorder) (*string, error) {
 	dynamoGraphDownloadURL := ""
 	var dynamoComponent *schemas.DynamoComponent
-	dynamoComponentRepositoryName, _, dynamoComponentVersion := xstrings.Partition(dynamoDeployment.Spec.DynamoNim, ":")
+	dynamoComponentRepositoryName, _, dynamoComponentVersion := xstrings.Partition(dynamoDeployment.Spec.DynamoGraph, ":")
 
 	var err error
 	var apiStoreClient *apiStoreClient.ApiStoreClient
@@ -108,23 +108,23 @@ func RetrieveDynamoGraphDownloadURL(ctx context.Context, dynamoDeployment *v1alp
 		return nil, err
 	}
 
-	recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting dynamo graph %s from api store service", dynamoDeployment.Spec.DynamoNim)
+	recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting dynamo graph %s from api store service", dynamoDeployment.Spec.DynamoGraph)
 	dynamoComponent, err = apiStoreClient.GetDynamoComponent(ctx, dynamoComponentRepositoryName, dynamoComponentVersion)
 	if err != nil {
 		err = errors.Wrap(err, "get dynamo component")
 		return nil, err
 	}
-	recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got dynamo graph %s from api store service", dynamoDeployment.Spec.DynamoNim)
+	recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got dynamo graph %s from api store service", dynamoDeployment.Spec.DynamoGraph)
 
 	if dynamoComponent.TransmissionStrategy != nil && *dynamoComponent.TransmissionStrategy == schemas.TransmissionStrategyPresignedURL {
 		var dynamoComponent_ *schemas.DynamoComponent
-		recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for dynamo graph %s from api store service", dynamoDeployment.Spec.DynamoNim)
+		recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for dynamo graph %s from api store service", dynamoDeployment.Spec.DynamoGraph)
 		dynamoComponent_, err = apiStoreClient.PresignDynamoComponentDownloadURL(ctx, dynamoComponentRepositoryName, dynamoComponentVersion)
 		if err != nil {
 			err = errors.Wrap(err, "presign dynamo component download url")
 			return nil, err
 		}
-		recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for dynamo graph %s from api store service", dynamoDeployment.Spec.DynamoNim)
+		recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for dynamo graph %s from api store service", dynamoDeployment.Spec.DynamoGraph)
 		dynamoGraphDownloadURL = dynamoComponent_.PresignedDownloadUrl
 	} else {
 		dynamoGraphDownloadURL = fmt.Sprintf("%s/api/v1/dynamo_nims/%s/versions/%s/download", apiStoreConf.Endpoint, dynamoComponentRepositoryName, dynamoComponentVersion)
@@ -133,7 +133,7 @@ func RetrieveDynamoGraphDownloadURL(ctx context.Context, dynamoDeployment *v1alp
 	return &dynamoGraphDownloadURL, nil
 }
 
-// ServicesConfig represents the top-level YAML structure of a dynamoNim yaml file stored in a dynamoNim tar file
+// ServicesConfig represents the top-level YAML structure of a dynamoComponent yaml file stored in a dynamoComponent tar file
 type DynamoGraphConfig struct {
 	DynamoTag    string          `yaml:"service"`
 	Services     []ServiceConfig `yaml:"services"`
@@ -211,7 +211,7 @@ func ParseDynamoGraphConfig(ctx context.Context, yamlContent *bytes.Buffer) (*Dy
 	return &config, err
 }
 
-func GetDynamoGraphConfig(ctx context.Context, dynamoDeployment *v1alpha1.DynamoDeployment, recorder EventRecorder) (*DynamoGraphConfig, error) {
+func GetDynamoGraphConfig(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, recorder EventRecorder) (*DynamoGraphConfig, error) {
 	dynamoGraphDownloadURL, err := RetrieveDynamoGraphDownloadURL(ctx, dynamoDeployment, recorder)
 	if err != nil {
 		return nil, err
@@ -224,21 +224,21 @@ func GetDynamoGraphConfig(ctx context.Context, dynamoDeployment *v1alpha1.Dynamo
 }
 
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig
-func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoDeployment *v1alpha1.DynamoDeployment, config *DynamoGraphConfig, ingressSpec *v1alpha1.IngressSpec) (map[string]*v1alpha1.DynamoNimDeployment, error) {
+func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, config *DynamoGraphConfig, ingressSpec *v1alpha1.IngressSpec) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	dynamoServices := make(map[string]string)
-	deployments := make(map[string]*v1alpha1.DynamoNimDeployment)
+	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
 	for _, service := range config.Services {
-		deployment := &v1alpha1.DynamoNimDeployment{}
-		deployment.Name = fmt.Sprintf("%s-%s", parentDynamoDeployment.Name, strings.ToLower(service.Name))
-		deployment.Namespace = parentDynamoDeployment.Namespace
+		deployment := &v1alpha1.DynamoComponentDeployment{}
+		deployment.Name = fmt.Sprintf("%s-%s", parentDynamoGraphDeployment.Name, strings.ToLower(service.Name))
+		deployment.Namespace = parentDynamoGraphDeployment.Namespace
 		deployment.Spec.DynamoTag = config.DynamoTag
-		deployment.Spec.DynamoNim = strings.ReplaceAll(parentDynamoDeployment.Spec.DynamoNim, ":", "--")
+		deployment.Spec.DynamoComponent = parentDynamoGraphDeployment.Spec.DynamoGraph
 		deployment.Spec.ServiceName = service.Name
 		if service.Config.Dynamo != nil && service.Config.Dynamo.Enabled {
 			dynamoNamespace := service.Config.Dynamo.Namespace
 			if dynamoNamespace == "" {
 				// if no namespace is specified, use the default namespace
-				dynamoNamespace = GetDefaultDynamoNamespace(ctx, parentDynamoDeployment)
+				dynamoNamespace = GetDefaultDynamoNamespace(ctx, parentDynamoGraphDeployment)
 			}
 			deployment.Spec.DynamoNamespace = &dynamoNamespace
 			dynamoServices[service.Name] = fmt.Sprintf("%s/%s", service.Config.Dynamo.Name, dynamoNamespace)

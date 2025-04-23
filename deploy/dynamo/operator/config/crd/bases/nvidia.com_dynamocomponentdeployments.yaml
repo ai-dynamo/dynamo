@@ -19,20 +19,20 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.4
-  name: dynamonimdeployments.nvidia.com
+  name: dynamocomponentdeployments.nvidia.com
 spec:
   group: nvidia.com
   names:
-    kind: DynamoNimDeployment
-    listKind: DynamoNimDeploymentList
-    plural: dynamonimdeployments
-    singular: dynamonimdeployment
+    kind: DynamoComponentDeployment
+    listKind: DynamoComponentDeploymentList
+    plural: dynamocomponentdeployments
+    singular: dynamocomponentdeployment
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - description: Bento
-      jsonPath: .spec.bento
-      name: Bento
+    - description: Dynamo component
+      jsonPath: .spec.dynamoComponent
+      name: DynamoComponent
       type: string
     - description: Available
       jsonPath: .status.conditions[?(@.type=='Available')].status
@@ -389,9 +389,9 @@ spec:
                   minReplicas:
                     type: integer
                 type: object
-              dynamoNamespace:
+              dynamoComponent:
                 type: string
-              dynamoNim:
+              dynamoNamespace:
                 type: string
               dynamoTag:
                 type: string
@@ -2798,7 +2798,7 @@ spec:
               serviceName:
                 type: string
             required:
-            - dynamoNim
+            - dynamoComponent
             - dynamoTag
             type: object
           status:

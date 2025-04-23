@@ -19,14 +19,14 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.4
-  name: dynamonims.nvidia.com
+  name: dynamocomponents.nvidia.com
 spec:
   group: nvidia.com
   names:
-    kind: DynamoNim
-    listKind: DynamoNimList
-    plural: dynamonims
-    singular: dynamonim
+    kind: DynamoComponent
+    listKind: DynamoComponentList
+    plural: dynamocomponents
+    singular: dynamocomponent
   scope: Namespaced
   versions:
   - name: v1alpha1
@@ -41,11 +41,8 @@ spec:
             type: object
           spec:
             properties:
-              context:
-                properties:
-                  bentomlVersion:
-                    type: string
-                type: object
+              dynamoComponent:
+                type: string
               image:
                 type: string
               imagePullSecrets:
@@ -57,30 +54,11 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
-              models:
-                items:
-                  properties:
-                    downloadUrl:
-                      type: string
-                    size:
-                      anyOf:
-                      - type: integer
-                      - type: string
-                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                      x-kubernetes-int-or-string: true
-                    tag:
-                      type: string
-                  required:
-                  - tag
-                  type: object
-                type: array
               serviceName:
                 type: string
-              tag:
-                type: string
             required:
+            - dynamoComponent
             - image
-            - tag
             type: object
           status:
             properties:
