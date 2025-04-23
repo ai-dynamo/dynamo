@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
     workers=1,
 )
 class VllmWorker:
+    # Comment out below to spawn separate decode worker
     prefill_worker = depends(PrefillWorker)
 
     def __init__(self):
