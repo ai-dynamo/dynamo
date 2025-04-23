@@ -47,7 +47,7 @@ source venv/bin/activate
 pip install ai-dynamo[all]
 ```
 > [!NOTE]
-> To ensure compatibility, please refer to the examples in the release branch or tag that matches the version you installed. 
+> To ensure compatibility, please refer to the examples in the release branch or tag that matches the version you installed.
 
 ### Building the Dynamo Base Image
 
