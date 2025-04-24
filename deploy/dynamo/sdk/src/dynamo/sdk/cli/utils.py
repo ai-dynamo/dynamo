@@ -29,9 +29,9 @@ import typing as t
 
 import click
 import psutil
+import yaml
 from click import Command, Context
 
-import yaml
 from dynamo.sdk.lib.logging import configure_server_logging
 
 configure_server_logging()
@@ -312,7 +312,7 @@ def resolve_service_config(
     else:
         if config_file:
             with open(config_file) if isinstance(
-                config_file, str
+                config_file, (str, pathlib.Path)
             ) else contextlib.nullcontext(config_file) as f:
                 yaml_configs = yaml.safe_load(f)
                 logger.debug(f"Loaded config from file: {yaml_configs}")
