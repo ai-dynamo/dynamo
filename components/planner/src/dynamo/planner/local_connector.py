@@ -25,8 +25,10 @@ import filelock
 from dynamo.planner.circusd import CircusController
 from dynamo.planner.planner_connector import PlannerConnector
 from dynamo.runtime import DistributedRuntime
+from dynamo.runtime.logging import configure_logger
 
 logger = logging.getLogger(__name__)
+configure_logger(None, None)
 
 
 class LocalConnector(PlannerConnector):
