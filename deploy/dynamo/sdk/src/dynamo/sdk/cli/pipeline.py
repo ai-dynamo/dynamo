@@ -54,44 +54,6 @@ DYNAMO_FIGLET = """
 ╚═════╝    ╚═╝   ╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝     ╚═╝ ╚═════╝
 """
 
-ALLOWED_PLATFORMS = [
-    "windows",
-    "linux",
-    "macos",
-    "x86_64-pc-windows-msvc",
-    "i686-pc-windows-msvc",
-    "x86_64-unknown-linux-gnu",
-    "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
-    "aarch64-unknown-linux-gnu",
-    "aarch64-unknown-linux-musl",
-    "x86_64-unknown-linux-musl",
-    "x86_64-manylinux_2_17",
-    "x86_64-manylinux_2_28",
-    "x86_64-manylinux_2_31",
-    "x86_64-manylinux_2_32",
-    "x86_64-manylinux_2_33",
-    "x86_64-manylinux_2_34",
-    "x86_64-manylinux_2_35",
-    "x86_64-manylinux_2_36",
-    "x86_64-manylinux_2_37",
-    "x86_64-manylinux_2_38",
-    "x86_64-manylinux_2_39",
-    "x86_64-manylinux_2_40",
-    "aarch64-manylinux_2_17",
-    "aarch64-manylinux_2_28",
-    "aarch64-manylinux_2_31",
-    "aarch64-manylinux_2_32",
-    "aarch64-manylinux_2_33",
-    "aarch64-manylinux_2_34",
-    "aarch64-manylinux_2_35",
-    "aarch64-manylinux_2_36",
-    "aarch64-manylinux_2_37",
-    "aarch64-manylinux_2_38",
-    "aarch64-manylinux_2_39",
-    "aarch64-manylinux_2_40",
-]
-
 
 @inject
 def build_bentofile(
@@ -221,11 +183,6 @@ def build(
     valid_outputs = ["tag", "default"]
     if output not in valid_outputs:
         console.print(f"[red]Error: Output format must be one of {valid_outputs}[/red]")
-        raise typer.Exit(code=1)
-
-    # Validate platform if provided
-    if platform is not None and platform not in ALLOWED_PLATFORMS:
-        console.print("[red]Error: Platform must be one of the allowed platforms[/red]")
         raise typer.Exit(code=1)
 
     if output == "tag":

@@ -54,7 +54,7 @@ export KUBE_NS=hello-world
 export DYNAMO_CLOUD=https://${KUBE_NS}.dev.aire.nvidia.com
 
 # Login to the Dynamo cloud
-dynamo cloud login --api-token TEST-TOKEN --endpoint $DYNAMO_CLOUD
+dynamo cloud login $DYNAMO_CLOUD
 ```
 
 ### 2. Build the Dynamo Base Image

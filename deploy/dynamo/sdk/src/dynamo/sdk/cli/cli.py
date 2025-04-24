@@ -33,6 +33,7 @@ from dynamo.sdk.cli.serve import serve
 console = Console()
 
 cli = typer.Typer(
+    context_settings={"help_option_names": ["-h", "--help"]},
     name="dynamo",
     no_args_is_help=True,
     pretty_exceptions_enable=False,

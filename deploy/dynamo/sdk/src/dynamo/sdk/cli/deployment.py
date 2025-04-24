@@ -29,7 +29,6 @@ import typer
 from bentoml._internal.cloud.base import Spinner
 from bentoml._internal.cloud.deployment import Deployment, DeploymentConfigParameters
 from bentoml._internal.configuration.containers import BentoMLContainer
-from bentoml._internal.utils import add_experimental_docstring
 from bentoml.exceptions import BentoMLException
 from rich.console import Console
 from simple_di import Provide, inject
@@ -278,7 +277,6 @@ def list_deployments(
 
 
 @app.command()
-@add_experimental_docstring
 def create(
     ctx: typer.Context,
     bento: Optional[str] = typer.Argument(None, help="Bento to deploy"),
@@ -347,7 +345,6 @@ def delete(
     delete_deployment(name, cluster=cluster)
 
 
-@add_experimental_docstring
 def deploy(
     ctx: typer.Context,
     bento: Optional[str] = typer.Argument(None, help="Bento to deploy"),
