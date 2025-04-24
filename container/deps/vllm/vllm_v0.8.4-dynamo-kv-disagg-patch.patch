@@ -1042,7 +1042,7 @@ new file mode 100644
 index 000000000..bd4ac984e
 --- /dev/null
 +++ b/vllm/distributed/device_communicators/nixl.py
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,451 @@
 +# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 +# SPDX-License-Identifier: Apache-2.0
 +#
