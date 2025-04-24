@@ -18,7 +18,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import filelock
 
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 class LocalConnector(PlannerConnector):
-    def __init__(self, namespace: str, runtime: Optional[DistributedRuntime] = None):
+    def __init__(self, namespace: str, runtime: DistributedRuntime):
         """
         Initialize LocalConnector and connect to CircusController.
 
@@ -44,9 +44,9 @@ class LocalConnector(PlannerConnector):
         self.circus = CircusController.from_state_file(namespace)
         self._lockfile = self.state_file.with_suffix(".lock")
         self._file_lock = filelock.FileLock(self._lockfile)
-        self.worker_client = None
-        self.prefill_client = None
-        self.etcd_client = None
+        self.worker_client: Any | None = None
+        self.prefill_client: Any | None = None
+        self.etcd_client: Any | None = None
 
     async def _load_state(self) -> Dict[str, Any]:
         """Load state from state file.
@@ -89,7 +89,7 @@ class LocalConnector(PlannerConnector):
         system_resources = state.get("environment", {}).get("SYSTEM_RESOURCES", {})
         all_gpus = set(str(gpu) for gpu in system_resources.get("gpu_info", []))
 
-        allocated_gpus = set()
+        allocated_gpus: set[str] = set()
         for component_info in state.get("components", {}).values():
             resources = component_info.get("resources", {})
             gpu_list = resources.get("allocated_gpus", [])
@@ -308,7 +308,7 @@ class LocalConnector(PlannerConnector):
             True if successful
         """
         if self.etcd_client is None:
-            self.etcd_client = self.runtime.etcd_client()
+            self.etcd_client = self.runtime.etcd_client()  # type: ignore
         try:
             await self.etcd_client.revoke_lease(lease_id)
             logger.info(f"Revoked lease {lease_id}")

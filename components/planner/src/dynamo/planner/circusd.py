@@ -94,7 +94,7 @@ class CircusController:
         Returns:
             True if successful, False otherwise
         """
-        watcher_options = {
+        watcher_options: dict[str, Any] = {
             "copy_env": True,
             "stop_children": True,
             "graceful_timeout": 86400,

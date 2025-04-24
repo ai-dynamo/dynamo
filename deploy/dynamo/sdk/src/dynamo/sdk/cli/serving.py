@@ -480,10 +480,10 @@ def serve_http(
                 logger.info(f"Processing watcher: {component_name}")
 
                 # Extract worker info including GPU allocation
-                worker_gpu_info = {}
+                worker_gpu_info: dict[str, Any] = {}
 
                 # Extract service name from watcher name
-                service_name = None
+                service_name = ""
                 if component_name.startswith(f"{namespace}"):
                     service_name = component_name.replace(f"{namespace}_", "", 1)
 

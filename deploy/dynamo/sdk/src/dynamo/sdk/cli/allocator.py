@@ -48,7 +48,7 @@ class ResourceAllocator:
             f"ResourceAllocator initialized with {self.remaining_gpus} GPUs available"
         )
 
-    def assign_gpus(self, count: float, service_name: str = None) -> list[int]:
+    def assign_gpus(self, count: float, service_name: str) -> list[int]:
         if count > self.remaining_gpus:
             warnings.warn(
                 f"Requested {count} GPUs, but only {self.remaining_gpus} are remaining. "
