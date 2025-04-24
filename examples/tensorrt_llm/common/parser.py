@@ -19,10 +19,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
+import yaml
 from tensorrt_llm._torch.pyexecutor.config import PyTorchConfig
 from tensorrt_llm.llmapi import KvCacheConfig
-
-import yaml
 
 
 @dataclass

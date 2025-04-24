@@ -34,6 +34,7 @@ console = Console()
 
 cli = typer.Typer(
     name="dynamo",
+    help="The Dynamo CLI is a CLI for serving, containerizing, and deploying Dynamo applications.",
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
@@ -64,8 +65,8 @@ def main(
     It takes inspiration from and leverages core pieces of the BentoML deployment stack.
 
     At a high level, you use `serve` to run a set of dynamo services locally,
-    `build` and `containerize` to package them up for deployment, and then `cloud`
-    and `deploy` to deploy them to a K8s cluster running the Dynamo Cloud.
+    `build` and `containerize` to package them up for deployment, and then `server`
+    and `deploy` to deploy them to a K8s cluster running the Dynamo Server
     """
 
 
