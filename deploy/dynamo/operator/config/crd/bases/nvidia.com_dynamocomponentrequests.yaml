@@ -19,36 +19,32 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.4
-  name: dynamonimrequests.nvidia.com
+  name: dynamocomponentrequests.nvidia.com
 spec:
   group: nvidia.com
   names:
-    kind: DynamoNimRequest
-    listKind: DynamoNimRequestList
-    plural: dynamonimrequests
-    singular: dynamonimrequest
+    kind: DynamoComponentRequest
+    listKind: DynamoComponentRequestList
+    plural: dynamocomponentrequests
+    singular: dynamocomponentrequest
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - description: Bento Tag
-      jsonPath: .spec.bentoTag
-      name: Bento-Tag
+    - description: Dynamo component
+      jsonPath: .spec.dynamoComponent
+      name: DynamoComponent
       type: string
     - description: Download URL
       jsonPath: .spec.downloadUrl
       name: Download-Url
       type: string
-    - description: Image
-      jsonPath: .spec.image
-      name: Image
-      type: string
     - description: Image Exists
       jsonPath: .status.conditions[?(@.type=='ImageExists')].status
       name: Image-Exists
       type: string
-    - description: Bento Available
-      jsonPath: .status.conditions[?(@.type=='BentoAvailable')].status
-      name: Bento-Available
+    - description: Dynamo Component Available
+      jsonPath: .status.conditions[?(@.type=='DynamoComponentAvailable')].status
+      name: DynamoComponent-Available
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -65,17 +61,10 @@ spec:
             type: object
           spec:
             properties:
-              bentoTag:
-                type: string
               buildArgs:
                 items:
                   type: string
                 type: array
-              context:
-                properties:
-                  bentomlVersion:
-                    type: string
-                type: object
               dockerConfigJsonSecretName:
                 type: string
               downloadUrl:
@@ -105,6 +94,8 @@ spec:
                       x-kubernetes-map-type: atomic
                   type: object
                 type: array
+              dynamoComponent:
+                type: string
               image:
                 type: string
               imageBuildTimeout:
@@ -1422,29 +1413,12 @@ spec:
                       type: object
                     type: array
                 type: object
-              models:
-                items:
-                  properties:
-                    downloadUrl:
-                      type: string
-                    size:
-                      anyOf:
-                      - type: integer
-                      - type: string
-                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                      x-kubernetes-int-or-string: true
-                    tag:
-                      type: string
-                  required:
-                  - tag
-                  type: object
-                type: array
               ociRegistryInsecure:
                 type: boolean
               serviceName:
                 type: string
             required:
-            - bentoTag
+            - dynamoComponent
             type: object
           status:
             properties:

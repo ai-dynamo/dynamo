@@ -97,7 +97,7 @@ class Router:
                 f" Current: {len(self.workers_client.endpoint_ids())},"
                 f" Required: {self.args.min_workers}"
             )
-            await asyncio.sleep(2)
+            await asyncio.sleep(30)
 
         kv_listener = self.runtime.namespace("dynamo").component("TensorRTLLMWorker")
         await kv_listener.create_service()

@@ -31,7 +31,5 @@ go.work
 *.swo
 *~
 
-# Nemo K8s Operator specific
-config/crd/bases/nvidia.com_nimcaches.yaml
-config/crd/bases/nvidia.com_trainingworkloads.yaml
+
 !env*

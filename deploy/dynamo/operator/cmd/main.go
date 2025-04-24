@@ -176,39 +176,39 @@ func main() {
 		setupLog.Error(err, "unable to create etcd client")
 		os.Exit(1)
 	}
-	if err = (&controller.DynamoNimDeploymentReconciler{
+	if err = (&controller.DynamoComponentDeploymentReconciler{
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
-		Recorder:          mgr.GetEventRecorderFor("yatai-deployment"),
+		Recorder:          mgr.GetEventRecorderFor("dynamocomponentdeployment"),
 		Config:            ctrlConfig,
 		NatsAddr:          natsAddr,
 		EtcdAddr:          etcdAddr,
 		EtcdStorage:       etcd.NewStorage(cli),
 		UseVirtualService: istioVirtualServiceGateway != "",
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "DynamoNimDeployment")
+		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponentDeployment")
 		os.Exit(1)
 	}
-	if err = (&controller.DynamoNimRequestReconciler{
+	if err = (&controller.DynamoComponentRequestReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("yatai-image-builder"),
+		Recorder: mgr.GetEventRecorderFor("dynamo-image-builder"),
 		Config:   ctrlConfig,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "DynamoNimRequest")
+		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponentRequest")
 		os.Exit(1)
 	}
-	if err = (&controller.DynamoDeploymentReconciler{
+	if err = (&controller.DynamoGraphDeploymentReconciler{
 		Client:                     mgr.GetClient(),
 		Scheme:                     mgr.GetScheme(),
-		Recorder:                   mgr.GetEventRecorderFor("dynamodeployment"),
+		Recorder:                   mgr.GetEventRecorderFor("dynamographdeployment"),
 		Config:                     ctrlConfig,
 		VirtualServiceGateway:      istioVirtualServiceGateway,
 		IngressControllerClassName: ingressControllerClassName,
 		IngressControllerTLSSecret: ingressControllerTLSSecretName,
 		IngressHostSuffix:          ingressHostSuffix,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "DynamoDeployment")
+		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeployment")
 		os.Exit(1)
 	}
 	//+kubebuilder:scaffold:builder

@@ -19,6 +19,7 @@ package controller
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -89,4 +90,8 @@ func getIngressHost(ingressSpec v1alpha1.IngressSpec) string {
 		ingressSuffix = *ingressSpec.HostSuffix
 	}
 	return fmt.Sprintf("%s.%s", host, ingressSuffix)
+}
+
+func getK8sName(value string) string {
+	return strings.ReplaceAll(value, ":", "--")
 }

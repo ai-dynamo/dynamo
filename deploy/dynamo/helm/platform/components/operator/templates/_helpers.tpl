@@ -48,14 +48,6 @@ Create chart name and version as used by the chart label.
 {{ include "dynamo-operator.fullname" . }}-dynamo-env
 {{- end }}
 
-{{/*
-Generate k8s robot token
-*/}}
-{{- define "dynamo-operator.yataiApiToken" -}}
-    {{- $secretObj := (lookup "v1" "Secret" .Release.Namespace (include "dynamo-operator.dynamo.envname" .)) | default dict }}
-    {{- $secretData := (get $secretObj "data") | default dict }}
-    {{- (get $secretData "YATAI_API_TOKEN") | default (randAlphaNum 16 | nospace | b64enc) | b64dec }}
-{{- end -}}
 
 {{/*
 Common labels

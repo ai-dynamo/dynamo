@@ -17,7 +17,7 @@
 # Build the TRT-LLM base image.
 
 # This script builds the TRT-LLM base image for Dynamo with TensorRT-LLM.
-TRTLLM_COMMIT=0d4d50a745
+TRTLLM_COMMIT=dfbcb543
 
 while getopts "c:" opt; do
   case ${opt} in
@@ -25,6 +25,11 @@ while getopts "c:" opt; do
     *) echo "Invalid option" ;;
   esac
 done
+
+python3 -m venv /tmp/squash-env
+
+source /tmp/squash-env/bin/activate
+pip3 install docker-squash
 
 (cd /tmp && \
 # Clone the TensorRT-LLM repository.
@@ -46,3 +51,8 @@ git lfs pull
 
 # Build the TRT-LLM base image.
 make -C docker release_build)
+
+pip3 install docker-squash
+docker-squash -t tensorrt_llm/release:latest_squashed tensorrt_llm/release:latest
+
+deactivate

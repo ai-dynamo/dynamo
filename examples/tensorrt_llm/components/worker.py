@@ -78,7 +78,7 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
                     f" Current: {len(self._prefill_client.endpoint_ids())},"
                     f" Required: {self._min_prefill_workers}"
                 )
-                await asyncio.sleep(2)
+                await asyncio.sleep(30)
 
         if self._kv_metrics_publisher is not None:
             task = asyncio.create_task(self.create_metrics_publisher_endpoint())

@@ -37,7 +37,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 	commonController "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/nim"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/dynamo"
 )
 
 const (
@@ -50,8 +50,8 @@ type etcdStorage interface {
 	DeleteKeys(ctx context.Context, prefix string) error
 }
 
-// DynamoDeploymentReconciler reconciles a DynamoDeployment object
-type DynamoDeploymentReconciler struct {
+// DynamoGraphDeploymentReconciler reconciles a DynamoGraphDeployment object
+type DynamoGraphDeploymentReconciler struct {
 	client.Client
 	Scheme                     *runtime.Scheme
 	Config                     commonController.Config
@@ -62,20 +62,20 @@ type DynamoDeploymentReconciler struct {
 	IngressHostSuffix          string
 }
 
-// +kubebuilder:rbac:groups=nvidia.com,resources=dynamodeployments,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=nvidia.com,resources=dynamodeployments/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=nvidia.com,resources=dynamodeployments/finalizers,verbs=update
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/finalizers,verbs=update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 // TODO(user): Modify the Reconcile function to compare the state specified by
-// the DynamoDeployment object against the actual cluster state, and then
+// the DynamoGraphDeployment object against the actual cluster state, and then
 // perform operations to make the cluster state reflect the state specified by
 // the user.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.1/pkg/reconcile
-func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	var err error
@@ -83,7 +83,7 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	message := ""
 	readyStatus := metav1.ConditionFalse
 	// retrieve the CRD
-	dynamoDeployment := &nvidiacomv1alpha1.DynamoDeployment{}
+	dynamoDeployment := &nvidiacomv1alpha1.DynamoGraphDeployment{}
 	if err = r.Get(ctx, req.NamespacedName, dynamoDeployment); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -121,26 +121,26 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, nil
 	}
 
-	// fetch the DynamoNIMConfig
-	dynamoNIMConfig, err := nim.GetDynamoNIMConfig(ctx, dynamoDeployment, r.Recorder)
+	// fetch the dynamoGraphConfig
+	dynamoGraphConfig, err := dynamo.GetDynamoGraphConfig(ctx, dynamoDeployment, r.Recorder)
 	if err != nil {
-		reason = "failed_to_get_the_DynamoNIMConfig"
+		reason = "failed_to_get_the_DynamoGraphConfig"
 		return ctrl.Result{}, err
 	}
 
-	// generate the DynamoNimDeployments from the config
-	dynamoNimDeployments, err := nim.GenerateDynamoNIMDeployments(ctx, dynamoDeployment, dynamoNIMConfig, r.generateDefaultIngressSpec(dynamoDeployment))
+	// generate the dynamoComponentsDeployments from the config
+	dynamoComponentsDeployments, err := dynamo.GenerateDynamoComponentsDeployments(ctx, dynamoDeployment, dynamoGraphConfig, r.generateDefaultIngressSpec(dynamoDeployment))
 	if err != nil {
-		reason = "failed_to_generate_the_DynamoNimDeployments"
+		reason = "failed_to_generate_the_DynamoComponentsDeployments"
 		return ctrl.Result{}, err
 	}
 
-	// merge the DynamoNimDeployments with the DynamoNimDeployments from the CRD
-	for serviceName, deployment := range dynamoNimDeployments {
+	// merge the dynamoComponentsDeployments with the dynamoComponentsDeployments from the CRD
+	for serviceName, deployment := range dynamoComponentsDeployments {
 		if _, ok := dynamoDeployment.Spec.Services[serviceName]; ok {
-			err := mergo.Merge(&deployment.Spec.DynamoNimDeploymentSharedSpec, dynamoDeployment.Spec.Services[serviceName].DynamoNimDeploymentSharedSpec, mergo.WithOverride)
+			err := mergo.Merge(&deployment.Spec.DynamoComponentDeploymentSharedSpec, dynamoDeployment.Spec.Services[serviceName].DynamoComponentDeploymentSharedSpec, mergo.WithOverride)
 			if err != nil {
-				reason = "failed_to_merge_the_DynamoNimDeployments"
+				reason = "failed_to_merge_the_DynamoComponentsDeployments"
 				return ctrl.Result{}, err
 			}
 		}
@@ -149,48 +149,49 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
-	// Set common env vars on each of the dynamoNimDeployments
-	for _, deployment := range dynamoNimDeployments {
+	// Set common env vars on each of the dynamoComponentsDeployments
+	for _, deployment := range dynamoComponentsDeployments {
 		if len(dynamoDeployment.Spec.Envs) > 0 {
 			deployment.Spec.Envs = mergeEnvs(dynamoDeployment.Spec.Envs, deployment.Spec.Envs)
 		}
 	}
 
-	// reconcile the dynamoNimRequest
-	dynamoNimRequest := &nvidiacomv1alpha1.DynamoNimRequest{
+	// reconcile the dynamoComponentRequest
+	// for now we use the same component for all the services and we differentiate them by the service name when launching the component
+	dynamoComponentRequest := &nvidiacomv1alpha1.DynamoComponentRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      strings.ReplaceAll(dynamoDeployment.Spec.DynamoNim, ":", "--"),
+			Name:      strings.ReplaceAll(dynamoDeployment.Spec.DynamoGraph, ":", "--"),
 			Namespace: dynamoDeployment.Namespace,
 		},
-		Spec: nvidiacomv1alpha1.DynamoNimRequestSpec{
-			BentoTag: dynamoDeployment.Spec.DynamoNim,
+		Spec: nvidiacomv1alpha1.DynamoComponentRequestSpec{
+			DynamoComponent: dynamoDeployment.Spec.DynamoGraph,
 		},
 	}
-	if err := ctrl.SetControllerReference(dynamoDeployment, dynamoNimRequest, r.Scheme); err != nil {
-		reason = "failed_to_set_the_controller_reference_for_the_DynamoNimRequest"
+	if err := ctrl.SetControllerReference(dynamoDeployment, dynamoComponentRequest, r.Scheme); err != nil {
+		reason = "failed_to_set_the_controller_reference_for_the_DynamoComponentRequest"
 		return ctrl.Result{}, err
 	}
-	_, err = commonController.SyncResource(ctx, r.Client, dynamoNimRequest, types.NamespacedName{Name: dynamoNimRequest.Name, Namespace: dynamoNimRequest.Namespace}, false)
+	_, err = commonController.SyncResource(ctx, r.Client, dynamoComponentRequest, types.NamespacedName{Name: dynamoComponentRequest.Name, Namespace: dynamoComponentRequest.Namespace}, false)
 	if err != nil {
-		reason = "failed_to_sync_the_DynamoNimRequest"
+		reason = "failed_to_sync_the_DynamoComponentRequest"
 		return ctrl.Result{}, err
 	}
 
 	notReadyDeployments := []string{}
-	// reconcile the DynamoNimDeployments
-	for serviceName, dynamoNimDeployment := range dynamoNimDeployments {
-		logger.Info("Reconciling the DynamoNimDeployment", "serviceName", serviceName, "dynamoNimDeployment", dynamoNimDeployment)
-		if err := ctrl.SetControllerReference(dynamoDeployment, dynamoNimDeployment, r.Scheme); err != nil {
-			reason = "failed_to_set_the_controller_reference_for_the_DynamoNimDeployment"
+	// reconcile the dynamoComponentsDeployments
+	for serviceName, dynamoComponentDeployment := range dynamoComponentsDeployments {
+		logger.Info("Reconciling the DynamoComponentDeployment", "serviceName", serviceName, "dynamoComponentDeployment", dynamoComponentDeployment)
+		if err := ctrl.SetControllerReference(dynamoDeployment, dynamoComponentDeployment, r.Scheme); err != nil {
+			reason = "failed_to_set_the_controller_reference_for_the_DynamoComponentDeployment"
 			return ctrl.Result{}, err
 		}
-		dynamoNimDeployment, err = commonController.SyncResource(ctx, r.Client, dynamoNimDeployment, types.NamespacedName{Name: dynamoNimDeployment.Name, Namespace: dynamoNimDeployment.Namespace}, false)
+		dynamoComponentDeployment, err = commonController.SyncResource(ctx, r.Client, dynamoComponentDeployment, types.NamespacedName{Name: dynamoComponentDeployment.Name, Namespace: dynamoComponentDeployment.Namespace}, false)
 		if err != nil {
-			reason = "failed_to_sync_the_DynamoNimDeployment"
+			reason = "failed_to_sync_the_DynamoComponentDeployment"
 			return ctrl.Result{}, err
 		}
-		if !dynamoNimDeployment.Status.IsReady() {
-			notReadyDeployments = append(notReadyDeployments, dynamoNimDeployment.Name)
+		if !dynamoComponentDeployment.Status.IsReady() {
+			notReadyDeployments = append(notReadyDeployments, dynamoComponentDeployment.Name)
 		}
 	}
 	if len(notReadyDeployments) == 0 {
@@ -208,7 +209,7 @@ func (r *DynamoDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 }
 
-func (r *DynamoDeploymentReconciler) generateDefaultIngressSpec(dynamoDeployment *nvidiacomv1alpha1.DynamoDeployment) *nvidiacomv1alpha1.IngressSpec {
+func (r *DynamoGraphDeploymentReconciler) generateDefaultIngressSpec(dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) *nvidiacomv1alpha1.IngressSpec {
 	res := &nvidiacomv1alpha1.IngressSpec{
 		Enabled:           r.VirtualServiceGateway != "" || r.IngressControllerClassName != "",
 		Host:              dynamoDeployment.Name,
@@ -231,7 +232,7 @@ func (r *DynamoDeploymentReconciler) generateDefaultIngressSpec(dynamoDeployment
 	return res
 }
 
-func (r *DynamoDeploymentReconciler) isEndpointSecured() bool {
+func (r *DynamoGraphDeploymentReconciler) isEndpointSecured() bool {
 	return r.IngressControllerTLSSecret != ""
 }
 
@@ -256,19 +257,19 @@ func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 	return merged
 }
 
-func (r *DynamoDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoDeployment) error {
+func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {
 	// for now doing nothing
 	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *DynamoDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&nvidiacomv1alpha1.DynamoDeployment{}, builder.WithPredicates(
+		For(&nvidiacomv1alpha1.DynamoGraphDeployment{}, builder.WithPredicates(
 			predicate.GenerationChangedPredicate{},
 		)).
-		Named("dynamodeployment").
-		Owns(&nvidiacomv1alpha1.DynamoNimDeployment{}, builder.WithPredicates(predicate.Funcs{
+		Named("dynamographdeployment").
+		Owns(&nvidiacomv1alpha1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
