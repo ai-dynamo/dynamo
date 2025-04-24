@@ -75,7 +75,8 @@ cli.command(
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
 )(serve)
 cli.command(
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    add_help_option=False,
 )(run)
 cli.add_typer(cloud_app, name="cloud")
 cli.add_typer(deployment_app, name="deployment")
