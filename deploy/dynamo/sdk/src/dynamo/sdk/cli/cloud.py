@@ -74,11 +74,9 @@ def login(
     except CloudRESTApiClientError as e:
         if e.error_code == 401:
             console.print(
-                f":police_car_light: Error validating token: HTTP 401: Bad credentials ({endpoint}/api-token)",
-                file=sys.stderr,
+                f":police_car_light: Error validating token: HTTP 401: Bad credentials ({endpoint}/api-token)"
             )
         else:
             console.print(
-                f":police_car_light: Error validating token: HTTP {e.error_code}",
-                file=sys.stderr,
+                f":police_car_light: Error validating token: HTTP {e.error_code}"
             )

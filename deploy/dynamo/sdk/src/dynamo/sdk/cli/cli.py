@@ -122,7 +122,6 @@ def main(
         callback=version_callback,
         is_eager=True,
     ),
-    ctx: typer.Context = None,
 ):
     """
     The Dynamo CLI is a CLI for serving, containerizing, and deploying Dynamo applications.

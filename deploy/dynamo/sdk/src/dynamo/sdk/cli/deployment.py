@@ -229,7 +229,7 @@ def create(
     timeout: int = typer.Option(
         3600, "--timeout", help="Timeout for deployment to be ready in seconds"
     ),
-    ctx: typer.Context = typer.Context,
+    ctx = typer.Context,
 ) -> None:
     """Create a deployment on Dynamo Cloud.
 
@@ -298,7 +298,7 @@ def deploy(
     timeout: int = typer.Option(
         3600, "--timeout", help="Timeout for deployment to be ready in seconds"
     ),
-    ctx: typer.Context = typer.Context,
+    ctx = typer.Context,
 ) -> None:
     """Create a deployment on Dynamo Cloud.
 

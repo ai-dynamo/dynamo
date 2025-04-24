@@ -84,7 +84,7 @@ def serve(
         False,
         help="Save a snapshot of your service state to a file that allows planner to edit your deployment configuration",
     ),
-    ctx: typer.Context = typer.Context,
+    ctx = typer.Context,
 ):
     """Locally serve a Dynamo pipeline.
 
@@ -128,13 +128,20 @@ def serve(
 
     if working_dir is None:
         if os.path.isdir(os.path.expanduser(dynamo_pipeline)):
-            working_dir = os.path.expanduser(dynamo_pipeline)
+            working_dir = Path(os.path.expanduser(dynamo_pipeline))
         else:
-            working_dir = "."
-    if sys.path[0] != working_dir:
-        sys.path.insert(0, working_dir)
+            working_dir = Path(".")
+    
+    # Convert Path objects to strings where string is required
+    working_dir_str = str(working_dir)
+    config_file_str = str(config_file) if config_file is not None else None
 
-    svc = load(bento_identifier=dynamo_pipeline, working_dir=working_dir)
+    # Use string paths for APIs that expect strings
+    script_args = [sys.executable]
+    if sys.path[0] != working_dir_str:
+        sys.path.insert(0, working_dir_str)
+
+    svc = load(bento_identifier=dynamo_pipeline, working_dir=working_dir_str)
 
     LinkedServices.remove_unused_edges()
 
@@ -153,7 +160,7 @@ def serve(
 
     serve_http(
         dynamo_pipeline,
-        working_dir=working_dir,
+        working_dir=working_dir_str,
         host=host,
         port=port,
         dependency_map=runner_map_dict,
