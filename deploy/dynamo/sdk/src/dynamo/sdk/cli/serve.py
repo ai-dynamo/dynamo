@@ -134,10 +134,7 @@ def serve(
 
     # Convert Path objects to strings where string is required
     working_dir_str = str(working_dir)
-    config_file_str = str(config_file) if config_file is not None else None
 
-    # Use string paths for APIs that expect strings
-    script_args = [sys.executable]
     if sys.path[0] != working_dir_str:
         sys.path.insert(0, working_dir_str)
 
