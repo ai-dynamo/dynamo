@@ -39,7 +39,6 @@ import (
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemas"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
-	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/config"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
 	commonController "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
@@ -1127,7 +1126,6 @@ func getDynamoComponentRepositoryNameAndDynamoComponentVersion(dynamoComponent *
 
 //nolint:gocyclo,nakedret
 func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption) (podTemplateSpec *corev1.PodTemplateSpec, err error) {
-	dynamoComponentRepositoryName, _ := getDynamoComponentRepositoryNameAndDynamoComponentVersion(opt.dynamoComponent)
 	podLabels := r.getKubeLabels(opt.dynamoComponentDeployment, opt.dynamoComponent)
 	if opt.isStealingTrafficDebugModeEnabled {
 		podLabels[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
@@ -1391,76 +1389,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	containers = append(containers, container)
 
 	lastPort++
-	metricsPort := lastPort
 
-	containers = append(containers, corev1.Container{
-		Name:  "metrics-transformer",
-		Image: commonconfig.GetInternalImages().MetricsTransformer,
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("10m"),
-				corev1.ResourceMemory: resource.MustParse("10Mi"),
-			},
-			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("100m"),
-				corev1.ResourceMemory: resource.MustParse("100Mi"),
-			},
-		},
-		ReadinessProbe: &corev1.Probe{
-			InitialDelaySeconds: 5,
-			TimeoutSeconds:      5,
-			FailureThreshold:    10,
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/healthz",
-					Port: intstr.FromString("metrics"),
-				},
-			},
-		},
-		LivenessProbe: &corev1.Probe{
-			InitialDelaySeconds: 5,
-			TimeoutSeconds:      5,
-			FailureThreshold:    10,
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/healthz",
-					Port: intstr.FromString("metrics"),
-				},
-			},
-		},
-		Env: []corev1.EnvVar{
-			{
-				Name:  "BENTOML_SERVER_HOST",
-				Value: "localhost",
-			},
-			{
-				Name:  "BENTOML_SERVER_PORT",
-				Value: fmt.Sprintf("%d", containerPort),
-			},
-			{
-				Name:  "PORT",
-				Value: fmt.Sprintf("%d", metricsPort),
-			},
-			{
-				Name:  "OLD_METRICS_PREFIX",
-				Value: fmt.Sprintf("BENTOML_%s_", strings.ReplaceAll(dynamoComponentRepositoryName, "-", ":")),
-			},
-			{
-				Name:  "NEW_METRICS_PREFIX",
-				Value: "BENTOML_",
-			},
-		},
-		Ports: []corev1.ContainerPort{
-			{
-				Protocol:      corev1.ProtocolTCP,
-				Name:          "metrics",
-				ContainerPort: int32(metricsPort),
-			},
-		},
-		SecurityContext: securityContext,
-	})
-
-	lastPort++
 	proxyPort := lastPort
 
 	proxyResourcesRequestsCPUStr := resourceAnnotations[KubeAnnotationProxySidecarResourcesRequestsCPU]
@@ -1564,7 +1493,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			},
 		},
 	})
-	proxyImage := "quay.io/bentoml/bentoml-proxy:0.0.1"
+	proxyImage := "envoyproxy/envoy:v1.33-latest"
 	proxyImage_ := os.Getenv("INTERNAL_IMAGES_PROXY")
 	if proxyImage_ != "" {
 		proxyImage = proxyImage_
@@ -1589,18 +1518,18 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 				ContainerPort: int32(proxyPort),
 				Protocol:      corev1.ProtocolTCP,
 			},
+			{
+				ContainerPort: int32(9901),
+			},
 		},
 		ReadinessProbe: &corev1.Probe{
 			InitialDelaySeconds: 5,
 			TimeoutSeconds:      5,
 			FailureThreshold:    10,
 			ProbeHandler: corev1.ProbeHandler{
-				Exec: &corev1.ExecAction{
-					Command: []string{
-						"sh",
-						"-c",
-						"curl -s localhost:9901/server_info | grep state | grep -q LIVE",
-					},
+				HTTPGet: &corev1.HTTPGetAction{
+					Path: "/ready",
+					Port: intstr.FromInt(9901),
 				},
 			},
 		},
@@ -1609,12 +1538,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			TimeoutSeconds:      5,
 			FailureThreshold:    10,
 			ProbeHandler: corev1.ProbeHandler{
-				Exec: &corev1.ExecAction{
-					Command: []string{
-						"sh",
-						"-c",
-						"curl -s localhost:9901/server_info | grep state | grep -q LIVE",
-					},
+				HTTPGet: &corev1.HTTPGetAction{
+					Path: "/server_info",
+					Port: intstr.FromInt(9901),
 				},
 			},
 		},
@@ -1631,7 +1557,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		SecurityContext: securityContext,
 	})
 
-	debuggerImage := "quay.io/bentoml/bento-debugger:0.0.8"
+	debuggerImage := "python:3.12-slim"
 	debuggerImage_ := os.Getenv("INTERNAL_IMAGES_DEBUGGER")
 	if debuggerImage_ != "" {
 		debuggerImage = debuggerImage_

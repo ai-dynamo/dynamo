@@ -48,20 +48,6 @@ type LabelItemSchema struct {
 	Value string `json:"value"`
 }
 
-type MonitorExporterMountSpec struct {
-	Path                string `json:"path,omitempty"`
-	ReadOnly            bool   `json:"readOnly,omitempty"`
-	corev1.VolumeSource `json:",inline"`
-}
-
-type MonitorExporterSpec struct {
-	Enabled          bool                       `json:"enabled,omitempty"`
-	Output           string                     `json:"output,omitempty"`
-	Options          map[string]string          `json:"options,omitempty"`
-	StructureOptions []corev1.EnvVar            `json:"structureOptions,omitempty"`
-	Mounts           []MonitorExporterMountSpec `json:"mounts,omitempty"`
-}
-
 type ExtraPodMetadata struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`

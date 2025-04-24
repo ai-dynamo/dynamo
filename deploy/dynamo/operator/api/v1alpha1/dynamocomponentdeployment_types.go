@@ -70,8 +70,6 @@ type DynamoComponentDeploymentSharedSpec struct {
 
 	Ingress IngressSpec `json:"ingress,omitempty"`
 
-	MonitorExporter *dynamoCommon.MonitorExporterSpec `json:"monitorExporter,omitempty"`
-
 	// +optional
 	ExtraPodMetadata *dynamoCommon.ExtraPodMetadata `json:"extraPodMetadata,omitempty"`
 	// +optional

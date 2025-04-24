@@ -72,7 +72,6 @@ func getEnv(key, fallback string) string {
 type InternalImages struct {
 	DynamoComponentsDownloader string
 	Kaniko                     string
-	MetricsTransformer         string
 	Buildkit                   string
 	BuildkitRootless           string
 }
@@ -81,7 +80,6 @@ func GetInternalImages() (conf *InternalImages) {
 	conf = &InternalImages{}
 	conf.DynamoComponentsDownloader = getEnv(consts.EnvInternalImagesDynamoComponentsDownloader, consts.InternalImagesDynamoComponentsDownloaderDefault)
 	conf.Kaniko = getEnv(consts.EnvInternalImagesKaniko, consts.InternalImagesKanikoDefault)
-	conf.MetricsTransformer = getEnv(consts.EnvInternalImagesMetricsTransformer, consts.InternalImagesMetricsTransformerDefault)
 	conf.Buildkit = getEnv(consts.EnvInternalImagesBuildkit, consts.InternalImagesBuildkitDefault)
 	conf.BuildkitRootless = getEnv(consts.EnvInternalImagesBuildkitRootless, consts.InternalImagesBuildkitRootlessDefault)
 	return
