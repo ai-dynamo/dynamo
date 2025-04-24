@@ -30,10 +30,9 @@ from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRe
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
+from dynamo.llm import KvMetricsAggregator
 from dynamo.runtime import EtcdKvCache
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
-from dynamo.llm import KvMetricsAggregator
-
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +105,7 @@ class Processor(ProcessMixIn):
             )
 
         await check_required_workers(self.worker_client, self.min_workers)
-        
+
         kv_listener = runtime.namespace("dynamo").component("VllmWorker")
         await kv_listener.create_service()
         self.metrics_aggregator = KvMetricsAggregator(kv_listener)
@@ -124,7 +123,7 @@ class Processor(ProcessMixIn):
             worker_id = endpoint.worker_id
             kv_load[worker_id] = getattr(endpoint, "gpu_cache_usage_perc", 0.0)
         return kv_load
-    
+
     async def _get_pending_requests(self):
         metrics = await self.metrics_aggregator.get_metrics()
         pending_requests = {}
@@ -207,10 +206,12 @@ class Processor(ProcessMixIn):
                         sampling_params=sampling_params,
                         request_id=request_id,
                     ).model_dump_json(),
-                    int(best_worker_id)
+                    int(best_worker_id),
                 )
             except Exception as e:
-                logger.info(f"Error finding worker with least kv load: {e}, fallback to random")
+                logger.info(
+                    f"Error finding worker with least kv load: {e}, fallback to random"
+                )
                 engine_generator = await self.worker_client.generate(
                     vLLMGenerateRequest(
                         engine_prompt=engine_prompt,

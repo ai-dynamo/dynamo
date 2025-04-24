@@ -121,7 +121,9 @@ class VllmWorker:
             0.0,  # gpu_prefix_cache_hit_rate
         )
         task = asyncio.create_task(self.create_metrics_publisher_endpoint())
-        task.add_done_callback(lambda _: logger.info("metrics publisher endpoint created"))
+        task.add_done_callback(
+            lambda _: logger.info("metrics publisher endpoint created")
+        )
 
         runtime = dynamo_context["runtime"]
 

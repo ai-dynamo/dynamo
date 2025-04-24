@@ -32,11 +32,12 @@ from dynamo.llm import KvMetricsAggregator
 from dynamo.planner import LocalConnector
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
-logger = logging.getLogger('planner')
+logger = logging.getLogger("planner")
 
-# will not decrease decode worker number within 3 adjustment interval after a new decode worker 
+# will not decrease decode worker number within 3 adjustment interval after a new decode worker
 # is added. this is to leave time for the new decode worker to populate its kv cache.
-NEW_DECODE_WORKER_GRACE_PERIOD = 3 
+NEW_DECODE_WORKER_GRACE_PERIOD = 3
+
 
 class Planner:
     def __init__(self, runtime: DistributedRuntime, args: argparse.Namespace):
@@ -59,7 +60,7 @@ class Planner:
         if args.log_dir is None:
             args.log_dir = f"logs/{datetime.now().strftime('%m%d_%H%M%S')}"
         self.writer = SummaryWriter(args.log_dir)
-        
+
         print(f"Components present in namespace: {args.namespace}")
 
         self.init_time = time.time()
@@ -153,7 +154,7 @@ class Planner:
                 request_active_slots = getattr(endpoint, "request_active_slots", None)
                 if request_active_slots:
                     total_active_requests += request_active_slots
-                    if num_requests_waiting > 0:   
+                    if num_requests_waiting > 0:
                         # estimate kv load after waiting requests are scheduled based on current isl/osl
                         # TODO: use actual isl/osl estimation after the request_active_slot bug in disaggg is fixed
                         # Currently, we assume each request uses 0.02 kv cache
@@ -198,9 +199,7 @@ class Planner:
         if len(new_p_endpoints) != len(self.p_endpoints) or len(new_d_endpoints) != len(
             self.d_endpoints
         ):
-            print(
-                "Decode/prefill workers changed, no adjustments will be made"
-            )
+            print("Decode/prefill workers changed, no adjustments will be made")
             return
 
         # compute current gpu usage
@@ -209,7 +208,6 @@ class Planner:
             + len(self.d_endpoints) * self.args.decode_engine_num_gpu
         )
         print(f"Current engines use {curr_gpu_usage} GPUs")
-
 
         avg_prefill_queue_load = np.mean(self.prefill_queue_load)
         avg_kv_load = np.mean(self.kv_load)
@@ -243,7 +241,7 @@ class Planner:
                     curr_gpu_usage -= self.args.decode_engine_num_gpu
                 else:
                     print("Failed to scale down decode worker")
-        
+
         # check if we need to scale up workers
         # we first check for prefill worker because prefill queueing can also lead
         # to high kv load on decode workers
@@ -271,22 +269,30 @@ class Planner:
             success = await self.connector.add_component("VllmWorker")
             if success:
                 curr_gpu_usage += self.args.decode_engine_num_gpu
-                self.decode_worker_remaining_grace_period = NEW_DECODE_WORKER_GRACE_PERIOD
+                self.decode_worker_remaining_grace_period = (
+                    NEW_DECODE_WORKER_GRACE_PERIOD
+                )
             else:
                 print("Failed to scale up decode worker")
-            
+
         # no adjustment needed, just log the current metrics
-        if avg_prefill_queue_load > self.args.prefill_queue_scale_down_threshold and avg_prefill_queue_load < self.args.prefill_queue_scale_up_threshold:
+        if (
+            avg_prefill_queue_load > self.args.prefill_queue_scale_down_threshold
+            and avg_prefill_queue_load < self.args.prefill_queue_scale_up_threshold
+        ):
             print(
                 f"Average prefill queue load ({avg_prefill_queue_load:.2f}) is within threshold, no prefill worker scaling needed"
             )
-        if avg_kv_load > self.args.decode_kv_scale_down_threshold and avg_kv_load < self.args.decode_kv_scale_up_threshold:
+        if (
+            avg_kv_load > self.args.decode_kv_scale_down_threshold
+            and avg_kv_load < self.args.decode_kv_scale_up_threshold
+        ):
             print(
                 f"Average kv load ({avg_kv_load:.2f}) is within threshold, no decode worker scaling needed"
             )
 
         print(f"Engines after adjustment use {curr_gpu_usage} GPUs")
-        
+
         if self.decode_worker_remaining_grace_period > 0:
             self.decode_worker_remaining_grace_period -= 1
 

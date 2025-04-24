@@ -205,7 +205,9 @@ def main(
                     else:
                         watcher_name = f"{namespace}_{component_name}"
                     append_dynamo_state(namespace, watcher_name, {"lease": lease.id()})
-                    logger.info(f"Appended lease {lease.id()}/{lease.id():x} to {watcher_name}")
+                    logger.info(
+                        f"Appended lease {lease.id()}/{lease.id():x} to {watcher_name}"
+                    )
                 result = await endpoints[0].serve_endpoint(twm[0], lease)
                 if class_instance.__class__.__name__ == "PrefillWorker":
                     await asyncio.wait_for(class_instance.task, timeout=None)

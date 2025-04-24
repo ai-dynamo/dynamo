@@ -17,7 +17,6 @@
 import asyncio
 import logging
 import os
-import signal
 import sys
 
 from pydantic import BaseModel
@@ -76,7 +75,6 @@ class PrefillWorker:
                 "Prefix caching is not supported yet in prefill worker, setting to False"
             )
             self.engine_args.enable_prefix_caching = False
-        
 
     @async_on_start
     async def async_init(self):
@@ -104,10 +102,10 @@ class PrefillWorker:
         self.task.add_done_callback(prefill_queue_handler_cb)
         self.lease = dynamo_context["lease"]
         logger.info("PrefillWorker initialized")
-        
+
     def shutdown_vllm_engine(self):
         """Shutdown the background loop"""
-        logger.info(f"Shutting down vllm engine")
+        logger.info("Shutting down vllm engine")
         loop = asyncio.get_event_loop()
         try:
             self.engine_client.close()
@@ -147,11 +145,15 @@ class PrefillWorker:
                         pass
                 is_valid = await self.lease.is_valid()
                 if not is_valid:
-                    logger.info("Shutdown requested, checking if engine has any pending prefill sending requests")
+                    logger.info(
+                        "Shutdown requested, checking if engine has any pending prefill sending requests"
+                    )
                     while True:
                         if not await self.engine_client.has_unfinished_requests():
                             break
-                        logger.info(f"Engine has pending prefill sending requests, rechecking in 1 second...")
+                        logger.info(
+                            "Engine has pending prefill sending requests, rechecking in 1 second..."
+                        )
                         await asyncio.sleep(1)
                     self.shutdown_vllm_engine()
                     break

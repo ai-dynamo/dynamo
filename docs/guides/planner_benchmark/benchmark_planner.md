@@ -17,7 +17,7 @@ limitations under the License.
 
 # Planner Benchmark Example
 
-This guide will show an example of benchmarking planner performance with synthetic data. In this example, we focus on 8x H100 SXM GPU and `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` model with TP1 prefill and decode engine.
+This guide shows an example of benchmarking `LocalPlanner` performance with synthetic data. In this example, we focus on 8x H100 SXM GPU and `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` model with TP1 prefill and decode engine.
 
 ## Synthetic Data Generation
 
@@ -47,11 +47,10 @@ For other models and GPU SKUs, adjust the request rate ranges accordingly to mat
 To measure the performance of dynamo with planner, we start from a 1p1d deployment and set planner to make adjustments every 15 seconds:
 
 ```bash
-# in terminal 1
-dynamo serve --enable-local-planner graphs.disagg:Frontend -f disagg_1p1d.yml
+cd examples/llm
+dynamo serve graphs.disagg:Frontend -f <path to disagg_1p1d.yml in this folder> --enable-local-planner
 
 # in terminal 2
-<!!!!example only, subject to change!!!!!>
 python components/planner.py \
     --adjustment-interval 15 \
     --prefill-queue-scale-down-threshold 0.2 \
@@ -77,25 +76,25 @@ To view the performance metrics and planner decisions, launch tensorboard with
 tensorboard --logdir log
 ```
 
-and open the web page in your browser. The following metrics are available in the tensorboard:
+and open `http://localhost:6006` in your browser. The following metrics are available:
 
 * `average_kv_load`: the average KV load in decode workers
 * `prefill_queue_size`: the size of the prefill queue
-* `num_queued_request`: the number of requests queued in decode workers 
+* `num_queued_request`: the number of requests queued in decode workers
 * `num_prefill_workers`: the number of prefill workers
 * `num_decode_workers`: the number of decode workers
 * `num_gpu`: the total number of GPUs used
 
-The benchmark results will be printed out in terminal 3 that runs the `genai-perf`.
+The benchmark results will be printed out in terminal 3 that runs the `genai-perf` command.
 
 In this example, we use three baselines: 1p3d, 2p2d, and 3p1d. Their dynamo configuration is also provided in this folder. To run the benchmark for these baselines, planner provides a `--no-operation` flag to just watch and log the metrics without making any adjustments:
 
 ```bash
 # in terminal 1
-dynamo serve --enable-local-planner graphs.disagg:Frontend -f disagg_<x>p<y>d.yml 
+dynamo serve --enable-local-planner graphs.disagg:Frontend -f disagg_<x>p<y>d.yml
 
 # in terminal 2 (optional)
-python components/planner.py --no-operation --log-dir log/<x>p<y>d 
+python components/planner.py --no-operation --log-dir log/<x>p<y>d
 
 # in terminal 3
 genai-perf profile --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B -m deepseek-ai/DeepSeek-R1-Distill-Llama-8B --service-kind openai --endpoint-type chat --url http://localhost:8000 --streaming --input-file payload:sin_b512_t600_rr3.0-12.0-150.0_io3000150-3000150-0.2-0.8-10.jsonl

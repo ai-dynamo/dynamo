@@ -18,9 +18,10 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from circus.client import CircusClient
-from circus.exc import CallError
+from circus.exc import CallError, ConflictError
 
 logger = logging.getLogger(__name__)
 
@@ -71,16 +72,16 @@ class CircusController:
         return cls(endpoint)
 
     async def add_watcher(
-        self, 
-        name: str, 
-        cmd: str, 
-        env: dict = None, 
+        self,
+        name: str,
+        cmd: str,
+        env: Optional[Dict[str, str]] = None,
         max_retries: int = 3,
         base_delay: float = 2.0,
-        **options
+        **options: Any,
     ) -> bool:
         """
-        Add a new watcher to circus with retry logic.
+        Add a new watcher to circus
 
         Args:
             name: Name of the watcher
@@ -89,12 +90,15 @@ class CircusController:
             max_retries: Maximum number of retry attempts
             base_delay: Base delay for exponential backoff
             **options: Additional watcher options
+
+        Returns:
+            True if successful, False otherwise
         """
         watcher_options = {
             "copy_env": True,
             "stop_children": True,
             "graceful_timeout": 86400,
-            "respawn": False
+            "respawn": False,
         }
         if env:
             watcher_options["env"] = env
@@ -102,9 +106,11 @@ class CircusController:
 
         for attempt in range(max_retries):
             try:
-                delay = base_delay * (2 ** attempt)  # Exponential backoff
                 if attempt > 0:
-                    logger.info(f"Retrying add_watcher for {name} (attempt {attempt + 1}/{max_retries})")
+                    delay = base_delay * (2**attempt)
+                    logger.info(
+                        f"Retrying add_watcher for {name} (attempt {attempt + 1}/{max_retries})"
+                    )
                     await asyncio.sleep(delay)
 
                 response = self.client.send_message(
@@ -117,20 +123,27 @@ class CircusController:
                 )
 
                 if response.get("status") == "ok":
-                    logger.info(f"Successfully added watcher {name} on attempt {attempt + 1}")
+                    logger.info(
+                        f"Successfully added watcher {name} on attempt {attempt + 1}"
+                    )
                     return True
 
-                error = response.get('reason', 'unknown error')
-                if "arbiter is already running" in str(error):
-                    logger.warning(f"Arbiter busy, will retry: {error}")
-                    continue
-
-                logger.error(f"Failed to add watcher {name}: {error}")
+                logger.error(
+                    f"Failed to add watcher {name}: {response.get('reason', 'unknown error')}"
+                )
                 return False
-
+            except ConflictError as e:
+                if attempt == max_retries - 1:
+                    logger.error(
+                        f"Failed to add watcher {name} after {max_retries} attempts: {e}"
+                    )
+                    return False
+                logger.warning(f"Arbiter busy, will retry adding watcher {name}: {e}")
             except (CallError, Exception) as e:
                 if attempt == max_retries - 1:
-                    logger.error(f"Failed to add watcher {name} after {max_retries} attempts: {e}")
+                    logger.error(
+                        f"Failed to add watcher {name} after {max_retries} attempts: {e}"
+                    )
                     return False
                 logger.warning(f"Error adding watcher {name}: {e}")
 
@@ -143,11 +156,10 @@ class CircusController:
         waiting: bool = True,
         max_retries: int = 3,
         retry_delay: float = 2.0,
-        timeout: int = 600, # 10 minutes
+        timeout: int = 600,  # 10 minutes
     ) -> bool:
         """
-        Remove a watcher. We add retry logic here to ensure that a worker
-        is properly removed after its process has been killed.
+        Terminate processes and remove a watcher
 
         Args:
             name: The name of the watcher to remove
@@ -157,86 +169,168 @@ class CircusController:
             retry_delay: Delay between retries in seconds
 
         Returns:
-            True if successful
+            True if successful, False otherwise
         """
-        try:
-            start_time = asyncio.get_event_loop().time()
-            while True:
-                # Check if we've exceeded the timeout
-                elapsed_time = asyncio.get_event_loop().time() - start_time
-                if elapsed_time > timeout:
-                    logger.warning(
-                        f"Timeout ({timeout}s) reached waiting for {name} to exit gracefully. "
-                        f"Proceeding with forced removal."
-                    )
-                    break
-                
-                # wait until the process exit gracefully by itself
-                num_processes = await self._get_watcher_processes(name)
-                logger.warning(f"num_processes: {num_processes}")
-                if num_processes == 0:
-                    break
-                else:
-                    logger.info(
-                        f"Worker process still alive, waiting for it to exit gracefully "
-                        f"({int(elapsed_time)}s/{timeout}s elapsed)"
-                    )
-                await asyncio.sleep(1)
-
-            logger.info(f"Removing watcher {name}")
-            response = self.client.send_message(
-                "rm",
-                name=name,
-                nostop=nostop,
-                waiting=waiting,
+        exited = await self._wait_for_process_graceful_exit(name, timeout)
+        if not exited:
+            logger.error(
+                f"Process for {name} did not exit gracefully. Proceeding with forced removal."
             )
 
-            print(response)
+        logger.info(f"Removing watcher {name}")
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    delay = retry_delay * (2**attempt)
+                    logger.info(
+                        f"Retrying remove_watcher for {name} (attempt {attempt + 1}/{max_retries})"
+                    )
+                    await asyncio.sleep(delay)
 
-            if response.get("status") != "ok":
-                error_msg = f"Failed to remove watcher {name}: {response.get('reason', 'unknown error')}"
-                logger.error(error_msg)
+                response = self.client.send_message(
+                    "rm",
+                    name=name,
+                    nostop=nostop,
+                    waiting=waiting,
+                )
+
+                if response.get("status") == "ok":
+                    logger.info(
+                        f"Successfully removed watcher {name} on attempt {attempt + 1}"
+                    )
+                    break
+
+                logger.error(
+                    f"Failed to remove watcher {name}: {response.get('reason', 'unknown error')}"
+                )
+                return False
+            except ConflictError as e:
+                if attempt == max_retries - 1:
+                    logger.error(
+                        f"Failed to remove watcher {name} after {max_retries} attempts: {e}"
+                    )
+                    return False
+                logger.warning(f"Arbiter busy, will retry removing watcher {name}: {e}")
+            except (CallError, Exception) as e:
+                if attempt == max_retries - 1:
+                    logger.error(
+                        f"Failed to remove watcher {name} after {max_retries} attempts: {e}"
+                    )
+                    return False
+
+        # Verify the watcher is actually gone
+        removed = await self._verify_watcher_removal(name)
+        if not removed:
+            logger.error(f"Watcher {name} still exists after {max_retries} attempts")
+            return False
+
+        return True
+
+    async def _wait_for_process_graceful_exit(
+        self, name: str, timeout: int = 600
+    ) -> bool:
+        """
+        Wait for a watcher's process to exit gracefully. This is usually called after
+        we've revoked the lease which triggers a graceful exit.
+
+        Args:
+            name: The name of the watcher
+            timeout: The timeout for the wait
+
+        Returns:
+            True if the process exited gracefully, False otherwise
+        """
+        start_time = asyncio.get_event_loop().time()
+
+        while True:
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed > timeout:
+                logger.warning(
+                    f"Timeout ({timeout}s) reached waiting for {name} to exit gracefully. "
+                    f"Proceeding with forced removal."
+                )
                 return False
 
-            # Wait and verify the watcher is actually gone
-            max_verify_attempts = 10
-            verify_delay = 1.0
-            
-            for attempt in range(max_verify_attempts):
-                watchers = await self._list_watchers()
-                if name not in watchers:
-                    logger.info(f"Verified watcher {name} has been removed")
-                    return True
-                
-                logger.info(f"Waiting for watcher {name} to be fully removed (attempt {attempt + 1}/{max_verify_attempts})")
-                await asyncio.sleep(verify_delay)
+            num_processes = await self._get_watcher_processes(name)
+            if num_processes is None:
+                logger.error(f"Failed to get process count for {name}")
+                return False
+            if num_processes == 0:
+                logger.info(f"Processes for {name} have exited gracefully")
+                return True
 
-            logger.error(f"Watcher {name} still exists after {max_verify_attempts} verification attempts")
-            return False
+            logger.info(
+                f"Currently {num_processes} alive, waiting for it to exit gracefully "
+                f"({int(elapsed)}s/{timeout}s elapsed)"
+            )
+            await asyncio.sleep(1)
 
-        except Exception as e:
-            logger.error(f"Failed to remove watcher {name}: {e}")
-            return False
+    async def _verify_watcher_removal(
+        self, name: str, max_attempts: int = 10, delay: float = 1.0
+    ) -> bool:
+        """
+        Verify that a watcher has been removed. This is usually called after a forced removal.
 
-    async def _get_watcher_processes(self, name: str) -> int:
-        """Get number of processes for a watcher."""
+        Args:
+            name: The name of the watcher
+            max_attempts: The maximum number of attempts to verify the watcher removal
+            delay: The delay between attempts in seconds
+
+        Returns:
+            True if the watcher has been removed, False otherwise
+        """
+        for attempt in range(max_attempts):
+            watchers = await self._list_watchers()
+            if watchers is None:
+                logger.error("Failed to list watchers")
+                return False
+
+            if name not in watchers:
+                logger.info(f"Verified watcher {name} has been removed")
+                return True
+
+            logger.info(
+                f"Waiting for watcher {name} to be fully removed (attempt {attempt + 1}/{max_attempts})"
+            )
+            await asyncio.sleep(delay)
+
+        logger.error(
+            f"Watcher {name} still exists after {max_attempts} verification attempts"
+        )
+        return False
+
+    async def _get_watcher_processes(self, name: str) -> Optional[int]:
+        """
+        Get number of processes for a watcher.
+
+        Args:
+            name: The name of the watcher
+
+        Returns:
+            Number of processes for the watcher. Returns None operation fails.
+        """
         try:
             response = self.client.send_message("numprocesses", name=name)
             return int(response.get("numprocesses", 0))
         except (CallError, Exception) as e:
             logger.error(f"Failed to get process count for {name}: {e}")
-            return 0
+            return None
 
-    async def _list_watchers(self) -> list[str]:
-        """List all watchers managed by circus."""
+    async def _list_watchers(self) -> Optional[List[str]]:
+        """
+        List all watchers managed by circus.
+
+        Returns:
+            List of watcher names. Returns None if the list operation fails.
+        """
         try:
             response = self.client.send_message("list")
             return response.get("watchers", [])
         except (CallError, Exception) as e:
             logger.error(f"Failed to list watchers: {e}")
-            return []
+            return None
 
-    def close(self):
+    def close(self) -> None:
         """Close the connection to the arbiter."""
         if hasattr(self, "client"):
             self.client.stop()

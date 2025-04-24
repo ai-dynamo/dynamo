@@ -13,10 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import argparse
 import asyncio
 import sys
-from pathlib import Path
 from typing import Literal
 
 from dynamo.planner import LocalConnector
@@ -140,43 +138,10 @@ async def test_remove_component(
 
 @dynamo_worker()
 async def main(runtime: DistributedRuntime):
-    parser = argparse.ArgumentParser(description="Test the LocalConnector")
-    parser.add_argument("namespace", help="Dynamo namespace to use")
-    parser.add_argument(
-        "--test",
-        choices=["state", "add", "remove"],
-        required=True,
-        help="Specific test to run",
-    )
-    parser.add_argument(
-        "--component",
-        choices=VALID_COMPONENTS,
-        help="Component type (required for add/remove operations)",
-    )
+    connector = LocalConnector("dynamo", runtime)
 
-    args = parser.parse_args()
-
-    # Validate component argument for add/remove operations
-    if args.test in ["add", "remove"]:
-        if not args.component:
-            parser.error(f"--component is required for {args.test} operation")
-
-    # Check if namespace state file exists
-    state_file = Path.home() / ".dynamo" / "state" / f"{args.namespace}.json"
-    if not state_file.exists():
-        print(f"Error: State file not found: {state_file}")
-        return 1
-
-    connector = LocalConnector(args.namespace, runtime)
-
-    tests = {
-        "state": lambda: test_state_management(connector),
-        "add": lambda: test_add_component(connector, args.component),
-        "remove": lambda: test_remove_component(connector, args.component),
-    }
-
-    success = await tests[args.test]()
-    return 0 if success else 1
+    await connector.add_component("PrefillWorker")
+    await connector.remove_component("PrefillWorker")
 
 
 if __name__ == "__main__":

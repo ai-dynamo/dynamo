@@ -17,17 +17,16 @@ import asyncio
 import json
 import logging
 import os
-import filelock
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import filelock
 
 from dynamo.planner.circusd import CircusController
 from dynamo.planner.planner_connector import PlannerConnector
 from dynamo.runtime import DistributedRuntime
-from dynamo.runtime.logging import configure_logger
 
 logger = logging.getLogger(__name__)
-configure_logger(None, None)
 
 
 class LocalConnector(PlannerConnector):
@@ -103,7 +102,12 @@ class LocalConnector(PlannerConnector):
 
     async def add_component(self, component_name: str, blocking: bool = True) -> bool:
         """
-        Add a component
+        Add a component. The steps are as follows:
+
+        1. Load state
+        2. Find max suffix to create unique watcher name
+        3. Built environment and command for watcher
+        4. Block until component is running
 
         Args:
             component_name: Name of the component
@@ -175,7 +179,6 @@ class LocalConnector(PlannerConnector):
                 f"Succesfully created {watcher_name}. Waiting for worker to start..."
             )
 
-        # Prefill pulls from queue so does not need to block
         if blocking:
             required_endpoint_ids = pre_add_endpoint_ids + 1
             while True:
@@ -226,7 +229,6 @@ class LocalConnector(PlannerConnector):
         target_watcher = matching_components[highest_suffix]
         logger.info(f"Removing watcher {target_watcher}")
 
-        # If VllmWorker, we need to revoke the lease before we remove the watcher in order to ensure graceful shutdown
         pre_remove_endpoint_ids = await self._get_endpoint_ids(component_name)
 
         if component_name == "VllmWorker" or component_name == "PrefillWorker":
@@ -264,8 +266,7 @@ class LocalConnector(PlannerConnector):
 
     async def _get_endpoint_ids(self, component_name: str) -> int:
         """
-        Get the endpoint IDs for a component. We use this to block and ensure that a component is running
-        before we complete the add_component call.
+        Get the endpoint IDs for a component.
 
         Args:
             component_name: Name of the component
@@ -299,6 +300,12 @@ class LocalConnector(PlannerConnector):
     async def _revoke_lease(self, lease_id: int) -> bool:
         """
         Wrapper function around the etcd client to revoke a lease
+
+        Args:
+            lease_id: Lease ID to revoke
+
+        Returns:
+            True if successful
         """
         if self.etcd_client is None:
             self.etcd_client = self.runtime.etcd_client()

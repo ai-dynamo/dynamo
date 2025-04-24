@@ -17,7 +17,7 @@ limitations under the License.
 
 # Planner
 
-The planner is a component that monitors the state of the system and makes adjustments to the number of workers to ensure that the system is running efficiently. It can dynamically scale prefill/decode workers up and down based on a variety of KV metrics.
+The planner is a component that monitors the state of the system and makes adjustments to the number of workers to ensure that the system is running efficiently. It can dynamically scale prefill/decode workers up and down based on a variety of KV metrics. You can find documentation and benchmarking examples in the [planner docs](../../docs/planner.md).
 
 ## Usage
 
@@ -29,16 +29,21 @@ python components/planner.py --namespace <namespace>
 
 ## Backends
 
-We currently support two backends:
-
 1. `local` - uses circus to start/stop worker subprocesses
-2. `kubernetes` - uses the kubernetes API to adjust replicas of each component's resource definition
+2. `kubernetes` - uses the kubernetes API to adjust replicas of each component's resource definition. This is a work in progress and not currently available
 
 ## Local Backend (LocalPlanner)
 
-The LocalPlanner is built on top of circus, which is what we use to manage each component subprocess when running dynamo serve. LocalPlanner allows the planner component to scale workers up and down based on system metrics.
+The LocalPlanner is built on top of circus, which is what we use to manage component subprocesses when running dynamo serve. LocalPlanner allows the planner component to scale workers up and down based on system metrics.
 
-### Architecture
+**Current limitations**
+1. Single node only
+2. Workers must be using only a single GPU
+3. Your initial deployment must be replicas=1 for both prefill and decode
+
+We are working on addressing these as fast as possible.
+
+### Under the Hood
 
 Circus has a concept of an arbiter and a watcher:
 - **Arbiter**: The supervisor process that manages all watchers
@@ -73,9 +78,7 @@ The planner architecture is designed to be simple and extensible:
 
 ### Statefile
 
-The statefile maintains the current state of all running workers and is used by the LocalPlanner to track and modify the deployment. It's stored at `~/.dynamo/state/{namespace}.json` (or in the directory specified by `DYN_LOCAL_STATE_DIR`).
-
-The statefile is automatically created when you run dynamo serve and is cleaned up when the arbiter terminates. Each worker is identified as `{namespace}_{component_name}` with an optional numeric suffix for additional instances.
+The statefile maintains the current state of all running workers and is used by the LocalPlanner to track and modify the deployment. It's stored at `~/.dynamo/state/{namespace}.json` (or in the directory specified by `DYN_LOCAL_STATE_DIR`). The statefile is automatically created when you run dynamo serve and is cleaned up when the arbiter terminates. Each worker is identified as `{namespace}_{component_name}` with an optional numeric suffix for additional instances.
 
 #### Example: Adding and Removing Workers
 
@@ -108,11 +111,10 @@ If scaled to zero, the initial entry is kept without resources to maintain confi
 }
 ```
 
-### Limitations and Notes
+### Looking forward
 
-- The planner works best when the initial replicas per worker is set to 1. With replicas > 1, the current implementation in serving.py starts each process in the same watcher.
-- Future work includes storing the statefile (and initial configurations) in ETCD using the EtcdKvCache.
-- First-class support requires owning the serving implementation completely.
+- Support for a multinode LocalPlanner
+- Storing the statefile (and initial configurations) in ETCD using the the new `EtcdKvCache`.
 
 ### Testing
 
