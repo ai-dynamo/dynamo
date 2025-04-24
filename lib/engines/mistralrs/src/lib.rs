@@ -165,8 +165,48 @@ impl MistralRsEngine {
         let engine = MistralRsEngine {
             mistralrs: builder.build(),
         };
+
         // skip the id used for dummy run https://github.com/EricLBuehler/mistral.rs/issues/1218
         let _ = engine.mistralrs.next_request_id();
+
+        // Perform warmup request
+        let (tx, mut rx) = channel(1);
+        let request_id = engine.mistralrs.next_request_id();
+        let warmup_request = Request::Normal(NormalRequest {
+            id: request_id,
+            messages: RequestMessage::Chat(vec![IndexMap::from([
+                ("role".to_string(), Either::Left("user".to_string())),
+                ("content".to_string(), Either::Left("test".to_string())),
+            ])]),
+            sampling_params: SamplingParams::deterministic(),
+            response: tx,
+            return_logprobs: false,
+            is_streaming: false,
+            constraint: Constraint::None,
+            suffix: None,
+            adapters: None,
+            tools: None,
+            tool_choice: None,
+            logits_processors: None,
+            return_raw_logits: false,
+        });
+
+        // Send warmup request and consume response
+        if let Ok(sender) = engine.mistralrs.get_sender() {
+            if let Ok(()) = sender.send(warmup_request).await {
+                if let Some(response) = rx.recv().await {
+                    match response.as_result() {
+                        Ok(r) => {
+                            tracing::debug!(request_id, "Warmup response: {r:?}");
+                        }
+                        Err(err) => {
+                            tracing::error!(request_id, %err, "Failed converting response to result.");
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(engine)
     }
 }

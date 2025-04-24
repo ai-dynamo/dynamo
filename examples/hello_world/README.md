@@ -164,7 +164,7 @@ DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk
 ```bash
 echo $DYNAMO_TAG
 export HELM_RELEASE=ci-hw
-dynamo deployment create $DYNAMO_TAG --no-wait -n $HELM_RELEASE
+dynamo deployment create $DYNAMO_TAG -n $HELM_RELEASE
 ```
 
 4. **Test the deployment**

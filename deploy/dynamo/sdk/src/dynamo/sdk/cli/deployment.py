@@ -38,6 +38,9 @@ from dynamo.sdk.lib.logging import configure_server_logging
 
 from .utils import resolve_service_config
 
+# Configure logging to suppress INFO HTTP logs
+logging.getLogger("httpx").setLevel(logging.WARNING)  # HTTP client library logs
+logging.getLogger("httpcore").setLevel(logging.WARNING)  # HTTP core library logs
 configure_server_logging()
 
 logger = logging.getLogger(__name__)
@@ -76,7 +79,6 @@ def create_deployment(
 ) -> Deployment:
     # Load config from file and serialize to env
     service_configs = resolve_service_config(config_file=config_file, args=args)
-    print(f"service_configs: {service_configs}")
     env_dicts = []
     if service_configs:
         config_json = json.dumps(service_configs)
@@ -99,37 +101,78 @@ def create_deployment(
         sys.exit(1)
 
     with Spinner(console=console) as spinner:
-        spinner.update("Creating deployment on Dynamo Cloud")
         try:
+            # Create deployment with initial status message
+            spinner.update("Creating deployment on Dynamo Cloud...")
             deployment = _cloud_client.deployment.create(
                 deployment_config_params=config_params
             )
+            deployment.admin_console = _get_urls(deployment)  # remove dashboard url
             spinner.log(
                 f':white_check_mark: Created deployment "{deployment.name}" in cluster "{deployment.cluster}"'
             )
+
             if wait:
-                spinner.update(
-                    "[bold blue]Waiting for deployment to be ready, you can use --no-wait to skip this process[/]",
+                # Update spinner text for waiting phase
+                spinner.log(
+                    "[bold blue]Waiting for deployment to be ready, you can use --no-wait to skip this process[/]"
                 )
                 retcode = deployment.wait_until_ready(timeout=timeout, spinner=spinner)
                 if retcode != 0:
                     sys.exit(retcode)
+
+            _display_deployment_info(spinner, deployment)
             return deployment
+
         except BentoMLException as e:
             error_msg = str(e)
             if "already exists" in error_msg:
                 # Extract deployment name from error message and clean it
                 match = re.search(r'"([^"]+?)(?:\\+)?" already exists', error_msg)
                 dep_name = match.group(1).rstrip("\\") if match else name
-                error_msg = (
-                    f'Error: Deployment "{dep_name}" already exists. To create a new deployment:\n'
-                    f"1. Use a different name with the --name flag\n"
-                    f"2. Or delete the existing deployment with: dynamo deployment delete {dep_name}"
+                spinner.log(
+                    "[red]:x: Error:[/] "
+                    f'Deployment "{dep_name}" already exists. To create a new deployment:\n'
+                    "  1. Use a different name with the --name flag\n"
+                    f"  2. Or delete the existing deployment with: dynamo deployment delete {dep_name}"
                 )
-                print(error_msg)
                 sys.exit(1)
-            print(f"Error: {str(e)}")
+            spinner.log(f"[red]:x: Error:[/] {str(e)}")
             sys.exit(1)
+
+
+def _get_urls(deployment: Deployment) -> list[str]:
+    """Get URLs from deployment."""
+    latest = deployment._client.v2.get_deployment(deployment.name, deployment.cluster)
+    urls = latest.urls if hasattr(latest, "urls") else None
+    return urls if urls is not None else []
+
+
+def _display_deployment_info(spinner: Spinner, deployment: Deployment) -> None:
+    """Helper function to display deployment status and URLs consistently."""
+    # Get status directly from schema and escape any Rich markup
+    status = deployment._schema.status if deployment._schema.status else "unknown"
+    # Escape any characters that are interpreted as markup
+    reformatted_status = status.replace("[", "\\[")
+    spinner.log(f"[bold]Status:[/] {reformatted_status}")
+
+    # Get URLs directly from schema
+    spinner.log("[bold]Ingress URLs:[/]")
+    try:
+        # Get latest deployment info for URLs
+        urls = _get_urls(deployment)
+        if urls:
+            for url in urls:
+                spinner.log(f"  - {url}")
+        else:
+            spinner.log("    No URLs available")
+    except Exception:
+        # If refresh fails, fall back to existing URLs
+        if deployment._urls:
+            for url in deployment._urls:
+                spinner.log(f"  - {url}")
+        else:
+            spinner.log("    No URLs available")
 
 
 @inject
@@ -140,19 +183,27 @@ def get_deployment(
 ) -> Deployment:
     """Get deployment details from Dynamo Cloud."""
     with Spinner(console=console) as spinner:
-        spinner.update(f'Getting deployment "{name}" from Dynamo Cloud')
         try:
+            spinner.update(f'Getting deployment "{name}" from Dynamo Cloud...')
             deployment = _cloud_client.deployment.get(name=name, cluster=cluster)
             spinner.log(
                 f':white_check_mark: Found deployment "{deployment.name}" in cluster "{deployment.cluster}"'
             )
+            _display_deployment_info(spinner, deployment)
             return deployment
         except BentoMLException as e:
-            if "No cloud context default found" in str(e):
-                raise BentoMLException(
-                    "Not logged in to Dynamo Cloud. Please run 'dynamo cloud login' first."
-                ) from None
-            raise_deployment_config_error(e, "get")
+            error_msg = str(e)
+            if "No cloud context default found" in error_msg:
+                spinner.log(
+                    "[red]:x: Error:[/] Not logged in to Dynamo Cloud. Please run 'dynamo cloud login' first."
+                )
+                sys.exit(1)
+            if "404 Not Found" in error_msg or "Deployment not found" in error_msg:
+                cluster_msg = f" in cluster {cluster}" if cluster else ""
+                spinner.log(f"[red]:x: Deployment '{name}' not found{cluster_msg}")
+                sys.exit(1)
+            spinner.log(f"[red]:x: Error:[/] Failed to get deployment: {error_msg}")
+            sys.exit(1)
 
 
 @inject
@@ -163,16 +214,23 @@ def delete_deployment(
 ) -> None:
     """Delete a deployment from Dynamo Cloud."""
     with Spinner(console=console) as spinner:
-        spinner.update(f'Deleting deployment "{name}" from Dynamo Cloud')
         try:
+            spinner.update(f'Deleting deployment "{name}" from Dynamo Cloud...')
             _cloud_client.deployment.delete(name=name, cluster=cluster)
-            spinner.log(f':white_check_mark: Deleted deployment "{name}"')
+            spinner.log(f':white_check_mark: Successfully deleted deployment "{name}"')
         except BentoMLException as e:
-            if "No cloud context default found" in str(e):
-                raise BentoMLException(
-                    "Not logged in to Dynamo Cloud. Please run 'dynamo cloud login' first."
-                ) from None
-            raise_deployment_config_error(e, "delete")
+            error_msg = str(e)
+            if "No cloud context default found" in error_msg:
+                spinner.log(
+                    "[red]:x: Error:[/] Not logged in to Dynamo Cloud. Please run 'dynamo cloud login' first."
+                )
+                sys.exit(1)
+            if "404 Not Found" in error_msg or "Deployment not found" in error_msg:
+                cluster_msg = f" in cluster {cluster}" if cluster else ""
+                spinner.log(f"[red]:x: Deployment '{name}' not found{cluster_msg}")
+                sys.exit(1)
+            spinner.log(f"[red]:x: Error:[/] {error_msg}")
+            sys.exit(1)
 
 
 @inject
@@ -186,7 +244,6 @@ def list_deployments(
 ) -> None:
     """List all deployments from Dynamo Cloud."""
     with Spinner(console=console) as spinner:
-        spinner.update("Getting all deployments from Dynamo Cloud")
         try:
             # Handle label-based filtering
             if labels is not None:
@@ -196,6 +253,8 @@ def list_deployments(
                 else:
                     q = label_query
 
+            spinner.update("Getting deployments from Dynamo Cloud...")
+            # Get all deployments in a single call by setting count=1000
             deployments = _cloud_client.deployment.list(
                 cluster=cluster, search=search, dev=dev, q=q
             )
@@ -206,14 +265,16 @@ def list_deployments(
 
             spinner.log(":white_check_mark: Found deployments:")
             for deployment in deployments:
-                spinner.log(f"  • {deployment.name} (cluster: {deployment.cluster})")
+                spinner.log(f"\n• {deployment.name} (cluster: {deployment.cluster})")
+                _display_deployment_info(spinner, deployment)
         except BentoMLException as e:
             if "No cloud context default found" in str(e):
-                raise BentoMLException(
-                    "Not logged in to Dynamo Cloud. Please run 'dynamo cloud login' first."
-                ) from None
-            raise_deployment_config_error(e, "list")
-
+                spinner.log(
+                    "[red]:x: Error:[/] Not logged in to Dynamo Cloud. Please run 'dynamo cloud login' first."
+                )
+                sys.exit(1)
+            spinner.log(f"[red]:x: Error:[/] Failed to list deployments: {str(e)}")
+            sys.exit(1)
 
 @app.command()
 @add_experimental_docstring
