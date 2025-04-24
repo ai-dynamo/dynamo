@@ -102,7 +102,7 @@ ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
 
 # Install Rust using RUSTARCH derived from ARCH_ALT
 RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
-    # FIXME: Add SHA check back based on RUSTARCH
+    # TODO: Add SHA check back based on RUSTARCH
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
     rm rustup-init && \
@@ -180,7 +180,7 @@ RUN cargo build --release --locked --features mistralrs,sglang,vllm,python \
     -p file://$PWD/components/http \
     -p metrics
 
-# Build dynamo wheel - Wildcards should handle arch-specific platform tags in filenames
+# Build dynamo wheels
 RUN uv build --wheel --out-dir /workspace/dist && \
     cd /workspace/lib/bindings/python && \
     uv build --wheel --out-dir /workspace/dist --python 3.12 && \
@@ -223,13 +223,12 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
     cp target/release/metrics /usr/local/bin && \
     cp target/release/mock_worker /usr/local/bin
 
-# Install wheels - Wildcards should handle arch-specific platform tags
+# Install wheels
 RUN . /opt/dynamo/venv/bin/activate && \
     uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/dist/ai_dynamo*any.whl
 
 # Install dynamo.runtime and dynamo.llm wheels globally in container for tests
-# Wildcards should handle arch-specific platform tags
 # TODO: In future, we may use a virtualenv for everything and remove this.
 RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
     pip install dist/ai_dynamo*any.whl
