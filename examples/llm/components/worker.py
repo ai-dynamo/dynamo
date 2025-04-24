@@ -101,6 +101,7 @@ class VllmWorker:
 
     @async_on_start
     async def async_init(self):
+        self.lease = dynamo_context.get("lease")
         self._engine_context = build_async_engine_client_from_engine_args(
             self.engine_args
         )
@@ -145,7 +146,6 @@ class VllmWorker:
         else:
             self.disaggregated_router = None
 
-        self.lease = dynamo_context.get("lease")
         logger.info("VllmWorker has been initialized")
 
     def shutdown_vllm_engine(self, signum, frame):
