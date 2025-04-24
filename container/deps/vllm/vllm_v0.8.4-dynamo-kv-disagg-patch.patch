@@ -1303,7 +1303,7 @@ index 000000000..bd4ac984e
 +            return
 +
 +        start_time = time.perf_counter()
-++
++
 +        tp_multiplier = self._tp_size[dst_engine_id] // self._tp_size[self.engine_id]
 +        remote_block_descs_ids = self._get_block_descs_ids(dst_engine_id, "all", remote_block_ids)
 +        local_xfer_side_handle = self.src_xfer_side_handles[tp_multiplier]
