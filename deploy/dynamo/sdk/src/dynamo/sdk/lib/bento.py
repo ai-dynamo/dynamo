@@ -52,8 +52,8 @@ from bentoml.exceptions import BentoMLException, InvalidArgument
 from fs.copy import copy_file
 from fs.tempfs import TempFS
 from simple_di import Provide, inject
-import yaml
 
+import yaml
 from dynamo.sdk.lib.service import LinkedServices
 
 logger = logging.getLogger(__name__)

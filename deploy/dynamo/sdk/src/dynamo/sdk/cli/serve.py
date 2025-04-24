@@ -84,7 +84,7 @@ def serve(
         False,
         help="Save a snapshot of your service state to a file that allows planner to edit your deployment configuration",
     ),
-    ctx = typer.Context,
+    ctx=typer.Context,
 ):
     """Locally serve a Dynamo pipeline.
 
@@ -131,7 +131,7 @@ def serve(
             working_dir = Path(os.path.expanduser(dynamo_pipeline))
         else:
             working_dir = Path(".")
-    
+
     # Convert Path objects to strings where string is required
     working_dir_str = str(working_dir)
     config_file_str = str(config_file) if config_file is not None else None
