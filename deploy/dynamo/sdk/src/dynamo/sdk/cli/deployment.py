@@ -218,6 +218,7 @@ def list_deployments(
 @app.command()
 @add_experimental_docstring
 def create(
+    ctx: typer.Context,
     bento: Optional[str] = typer.Argument(None, help="Bento to deploy"),
     name: Optional[str] = typer.Option(None, "--name", "-n", help="Deployment name"),
     config_file: Optional[typer.FileText] = typer.Option(
@@ -229,7 +230,6 @@ def create(
     timeout: int = typer.Option(
         3600, "--timeout", help="Timeout for deployment to be ready in seconds"
     ),
-    ctx=typer.Context,
 ) -> None:
     """Create a deployment on Dynamo Cloud.
 
@@ -287,6 +287,7 @@ def delete(
 
 @add_experimental_docstring
 def deploy(
+    ctx: typer.Context,
     bento: Optional[str] = typer.Argument(None, help="Bento to deploy"),
     name: Optional[str] = typer.Option(None, "--name", "-n", help="Deployment name"),
     config_file: Optional[typer.FileText] = typer.Option(
@@ -298,7 +299,6 @@ def deploy(
     timeout: int = typer.Option(
         3600, "--timeout", help="Timeout for deployment to be ready in seconds"
     ),
-    ctx=typer.Context,
 ) -> None:
     """Create a deployment on Dynamo Cloud.
 

@@ -40,6 +40,7 @@ console = Console()
 
 
 def serve(
+    ctx: typer.Context,
     dynamo_pipeline: str = typer.Argument(
         ..., help="The path to the Dynamo pipeline to serve"
     ),
@@ -84,7 +85,6 @@ def serve(
         False,
         help="Save a snapshot of your service state to a file that allows planner to edit your deployment configuration",
     ),
-    ctx=typer.Context,
 ):
     """Locally serve a Dynamo pipeline.
 
