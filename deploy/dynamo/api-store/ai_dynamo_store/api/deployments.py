@@ -39,7 +39,7 @@ router = APIRouter(prefix="/api/v2/deployments", tags=["deployments"])
 
 def sanitize_deployment_name(name: Optional[str], dynamo_nim: str) -> str:
     """
-    Resolve a name for the DynamoDeployment that will work safely in k8s
+    Resolve a name for the DynamoGraphDeployment that will work safely in k8s
 
     Args:
         name: Optional custom name

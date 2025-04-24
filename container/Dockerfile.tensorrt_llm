@@ -14,7 +14,7 @@
 # limitations under the License.
 
 ARG BASE_IMAGE="tensorrt_llm/release"
-ARG BASE_IMAGE_TAG="latest"
+ARG BASE_IMAGE_TAG="latest_squashed"
 ARG MANYLINUX_IMAGE="quay.io/pypa/manylinux_2_28_x86_64"
 ARG RELEASE_BUILD
 
@@ -85,18 +85,6 @@ RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.
     rm rustup-init && \
     chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
-# Working directory
-WORKDIR /workspace
-
-# Copy Python wheel configuration files
-COPY pyproject.toml /workspace/
-COPY README.md /workspace/
-COPY LICENSE /workspace/
-COPY Cargo.toml /workspace/
-COPY Cargo.lock /workspace/
-COPY rust-toolchain.toml /workspace/
-COPY hatch_build.py /workspace/
-
 ARG CARGO_BUILD_JOBS
 # Set CARGO_BUILD_JOBS to 16 if not provided
 # This is to prevent cargo from building $(nproc) jobs in parallel,
@@ -104,21 +92,6 @@ ARG CARGO_BUILD_JOBS
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 
 ENV CARGO_TARGET_DIR=/workspace/target
-
-# Build Rust
-COPY lib/ /workspace/lib/
-COPY components /workspace/components
-COPY launch /workspace/launch
-
-RUN cargo build --release --locked --features mistralrs,sglang,python && \
-    cargo doc --no-deps && \
-    cp target/release/dynamo-run /usr/local/bin && \
-    cp target/release/http /usr/local/bin && \
-    cp target/release/llmctl /usr/local/bin && \
-    cp target/release/metrics /usr/local/bin && \
-    cp target/release/mock_worker /usr/local/bin
-
-COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
 
 # Install uv, create virtualenv for general use, and build dynamo wheel
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
@@ -143,34 +116,55 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 WORKDIR /workspace
 
 RUN yum update -y \
+    && yum install -y python3.12-devel \
     && yum install -y protobuf-compiler \
     || yum install -y https://raw.repo.almalinux.org/almalinux/8.10/AppStream/x86_64/os/Packages/protobuf-3.5.0-15.el8.x86_64.rpm \
     https://raw.repo.almalinux.org/almalinux/8.10/AppStream/x86_64/os/Packages/protobuf-compiler-3.5.0-15.el8.x86_64.rpm \
     && yum clean all \
     && rm -rf /var/cache/yum
 
-COPY --from=build /workspace /workspace
-
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH \
-    CARGO_TARGET_DIR=/workspace/target
+    CARGO_TARGET_DIR=/workspace/target \
+    VIRTUAL_ENV=/opt/dynamo/venv
 
 COPY --from=build $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=build $CARGO_HOME $CARGO_HOME
+COPY --from=build /workspace /workspace
+COPY --from=build $VIRTUAL_ENV $VIRTUAL_ENV
+ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
 
-# Create virtualenv and build dynamo wheel
-RUN mkdir /opt/dynamo && \
-    uv venv /opt/dynamo/venv --python 3.12 && \
-    source /opt/dynamo/venv/bin/activate && \
+# Copy configuration files
+COPY pyproject.toml /workspace/
+COPY README.md /workspace/
+COPY LICENSE /workspace/
+COPY Cargo.toml /workspace/
+COPY Cargo.lock /workspace/
+COPY rust-toolchain.toml /workspace/
+COPY hatch_build.py /workspace/
+
+# Copy source code
+COPY lib/ /workspace/lib/
+COPY components /workspace/components
+COPY launch /workspace/launch
+COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
+
+# Build Rust crate binaries packaged with the wheel
+RUN cargo build --release --locked --features mistralrs,sglang,vllm,python \
+    -p dynamo-run \
+    -p llmctl \
+    # Multiple http named crates are present in dependencies, need to specify the path
+    -p file://$PWD/components/http \
+    -p metrics
+
+# Build dynamo wheel
+RUN uv build --wheel --out-dir /workspace/dist && \
     cd /workspace/lib/bindings/python && \
     uv build --wheel --out-dir /workspace/dist --python 3.12 && \
     if [ "$RELEASE_BUILD" = "true" ]; then \
         uv build --wheel --out-dir /workspace/dist --python 3.11 && \
         uv build --wheel --out-dir /workspace/dist --python 3.10; \
-    fi && \
-    cd /workspace && \
-    uv build --wheel --out-dir /workspace/dist
+    fi
 
 ########################################
 ########## Development Image ###########
@@ -180,13 +174,31 @@ FROM build AS dev
 
 WORKDIR /workspace
 COPY --from=wheel_builder /workspace/dist/ /workspace/dist/
+COPY --from=wheel_builder /workspace/target/ /workspace/target/
+# Copy Cargo cache to avoid re-downloading dependencies
+COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
+
+COPY . /workspace
+
+# Build rest of the crates
+# Need to figure out rust caching to avoid rebuilding and remove exclude flags
+RUN cargo build --release --locked --workspace \
+    --exclude dynamo-run \
+    --exclude llmctl \
+    --exclude file://$PWD/components/http \
+    --exclude metrics
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
     mkdir /opt/dynamo/bindings/lib && \
-    cp dist/ai_dynamo_runtime*cp312*.whl /opt/dynamo/bindings/wheels/. && \
+    cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
     cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
-    cp -r lib/bindings/c/include /opt/dynamo/bindings/.
+    cp -r lib/bindings/c/include /opt/dynamo/bindings/.  && \
+    cp target/release/dynamo-run /usr/local/bin && \
+    cp target/release/http /usr/local/bin && \
+    cp target/release/llmctl /usr/local/bin && \
+    cp target/release/metrics /usr/local/bin && \
+    cp target/release/mock_worker /usr/local/bin
 
 RUN . /opt/dynamo/venv/bin/activate && \
     uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
@@ -202,6 +214,8 @@ RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
 ENV DYNAMO_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
 ENV DYNAMO_HOME=/workspace
 
+# Use UCX for TRTLLM KV Cache Transfer
+ENV TRTLLM_USE_UCX_KVCACHE=1
 # Needed to use NVLink for TRTLLM KV Cache Transfer
 # https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/advanced/disaggregated-service.md
 ENV UCX_CUDA_COPY_ASYNC_MEM_TYPE=cuda
@@ -214,8 +228,6 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
-# FIXME: Copy more specific folders in for dev/debug after directory restructure
-COPY . /workspace
 
 # FIXME: May want a modification with dynamo banner on entry
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]

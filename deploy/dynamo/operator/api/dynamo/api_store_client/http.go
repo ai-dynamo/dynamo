@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package yataiclient
+package api_store_client
 
 import (
 	"context"

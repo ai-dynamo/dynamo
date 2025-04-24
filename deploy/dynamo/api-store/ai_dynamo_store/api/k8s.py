@@ -27,10 +27,10 @@ class K8sResource:
         self.plural = plural
 
 
-DynamoDeployment = K8sResource(
+DynamoGraphDeployment = K8sResource(
     group="nvidia.com",
     version="v1alpha1",
-    plural="dynamodeployments",
+    plural="dynamographdeployments",
 )
 
 
@@ -69,7 +69,7 @@ def create_dynamo_deployment(
     envs: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """
-    Create a DynamoDeployment custom resource.
+    Create a DynamoGraphDeployment custom resource.
 
     Args:
         name: Deployment name
@@ -83,23 +83,27 @@ def create_dynamo_deployment(
     """
     body = {
         "apiVersion": "nvidia.com/v1alpha1",
-        "kind": "DynamoDeployment",
+        "kind": "DynamoGraphDeployment",
         "metadata": {"name": name, "namespace": namespace, "labels": labels},
-        "spec": {"dynamoNim": dynamo_nim, "services": {}, "envs": envs if envs else []},
+        "spec": {
+            "dynamoGraph": dynamo_nim,
+            "services": {},
+            "envs": envs if envs else [],
+        },
     }
 
     return create_custom_resource(
-        group=DynamoDeployment.group,
-        version=DynamoDeployment.version,
+        group=DynamoGraphDeployment.group,
+        version=DynamoGraphDeployment.version,
         namespace=namespace,
-        plural=DynamoDeployment.plural,
+        plural=DynamoGraphDeployment.plural,
         body=body,
     )
 
 
 def get_dynamo_deployment(name: str, namespace: str) -> Dict[str, Any]:
     """
-    Get a DynamoDeployment custom resource.
+    Get a DynamoGraphDeployment custom resource.
 
     Args:
         name: Deployment name
@@ -119,10 +123,10 @@ def get_dynamo_deployment(name: str, namespace: str) -> Dict[str, Any]:
     api = client.CustomObjectsApi()
     try:
         return api.get_namespaced_custom_object(
-            group=DynamoDeployment.group,
-            version=DynamoDeployment.version,
+            group=DynamoGraphDeployment.group,
+            version=DynamoGraphDeployment.version,
             namespace=namespace,
-            plural=DynamoDeployment.plural,
+            plural=DynamoGraphDeployment.plural,
             name=name,
         )
     except client.rest.ApiException as e:
@@ -141,7 +145,7 @@ def get_namespace() -> str:
 
 def delete_dynamo_deployment(name: str, namespace: str) -> Dict[str, Any]:
     """
-    Delete a DynamoDeployment custom resource.
+    Delete a DynamoGraphDeployment custom resource.
     """
     try:
         config.load_incluster_config()
@@ -151,10 +155,10 @@ def delete_dynamo_deployment(name: str, namespace: str) -> Dict[str, Any]:
     api = client.CustomObjectsApi()
     try:
         return api.delete_namespaced_custom_object(
-            group=DynamoDeployment.group,
-            version=DynamoDeployment.version,
+            group=DynamoGraphDeployment.group,
+            version=DynamoGraphDeployment.version,
             namespace=namespace,
-            plural=DynamoDeployment.plural,
+            plural=DynamoGraphDeployment.plural,
             name=name,
         )
     except client.rest.ApiException as e:
@@ -169,7 +173,7 @@ def list_dynamo_deployments(
     label_selector: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    List DynamoDeployment custom resources.
+    List DynamoGraphDeployment custom resources.
 
     Args:
         namespace: Target namespace
@@ -189,10 +193,10 @@ def list_dynamo_deployments(
     api = client.CustomObjectsApi()
     try:
         response = api.list_namespaced_custom_object(
-            group=DynamoDeployment.group,
-            version=DynamoDeployment.version,
+            group=DynamoGraphDeployment.group,
+            version=DynamoGraphDeployment.version,
             namespace=namespace,
-            plural=DynamoDeployment.plural,
+            plural=DynamoGraphDeployment.plural,
             label_selector=label_selector,
         )
         return response["items"]

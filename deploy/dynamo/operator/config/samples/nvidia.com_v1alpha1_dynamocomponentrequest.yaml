@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,15 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-apiVersion: v1
-kind: Secret
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoComponentRequest
 metadata:
-  name: dynamo-deployment-shared-env
-  namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "dynamo-operator.labels" . | nindent 4 }}
-type: Opaque
-stringData:
-  BENTO_DEPLOYMENT_ALL_NAMESPACES: "false"
-  BENTO_DEPLOYMENT_NAMESPACES: {{ default .Release.Namespace .Values.dynamo.yataiSystem.namespace }}
-  YATAI_DEPLOYMENT_NAMESPACE: {{ default .Release.Namespace .Values.dynamo.yataiSystem.namespace }}
+    app.kubernetes.io/name: dynamo-kubernetes-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: dynamocomponentrequest-sample
+spec:
+  # TODO(user): Add fields here

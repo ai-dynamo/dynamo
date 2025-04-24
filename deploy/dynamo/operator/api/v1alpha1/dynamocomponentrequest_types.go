@@ -27,28 +27,26 @@ import (
 )
 
 const (
-	DynamoNimRequestConditionTypeModelsSeeding      = "ModelsSeeding"
-	DynamoNimRequestConditionTypeImageBuilding      = "ImageBuilding"
-	DynamoNimRequestConditionTypeImageExists        = "ImageExists"
-	DynamoNimRequestConditionTypeImageExistsChecked = "ImageExistsChecked"
-	DynamoNimRequestConditionTypeModelsExists       = "ModelsExists"
-	DynamoNimRequestConditionTypeDynamoNimAvailable = "DynamoNimAvailable"
+	DynamoComponentRequestConditionTypeModelsSeeding            = "ModelsSeeding"
+	DynamoComponentRequestConditionTypeImageBuilding            = "ImageBuilding"
+	DynamoComponentRequestConditionTypeImageExists              = "ImageExists"
+	DynamoComponentRequestConditionTypeImageExistsChecked       = "ImageExistsChecked"
+	DynamoComponentRequestConditionTypeModelsExists             = "ModelsExists"
+	DynamoComponentRequestConditionTypeDynamoComponentAvailable = "DynamoComponentAvailable"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
-// DynamoNimRequestSpec defines the desired state of DynamoNimRequest
-type DynamoNimRequestSpec struct {
+// DynamoComponentRequestSpec defines the desired state of DynamoComponentRequest
+type DynamoComponentRequestSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
 	// +kubebuilder:validation:Required
-	BentoTag    string        `json:"bentoTag"`
-	DownloadURL string        `json:"downloadUrl,omitempty"`
-	ServiceName string        `json:"serviceName,omitempty"`
-	Context     *BentoContext `json:"context,omitempty"`
-	Models      []BentoModel  `json:"models,omitempty"`
+	DynamoComponent string `json:"dynamoComponent"`
+	DownloadURL     string `json:"downloadUrl,omitempty"`
+	ServiceName     string `json:"serviceName,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	Image string `json:"image,omitempty"`
@@ -77,8 +75,8 @@ type DynamoNimRequestSpec struct {
 	DownloaderContainerEnvFrom []corev1.EnvFromSource `json:"downloaderContainerEnvFrom,omitempty"`
 }
 
-// DynamoNimRequestStatus defines the observed state of DynamoNimRequest
-type DynamoNimRequestStatus struct {
+// DynamoComponentRequestStatus defines the observed state of DynamoComponentRequest
+type DynamoComponentRequestStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 	Conditions []metav1.Condition `json:"conditions"`
@@ -87,39 +85,38 @@ type DynamoNimRequestStatus struct {
 //+genclient
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
-//+kubebuilder:printcolumn:name="Bento-Tag",type="string",JSONPath=".spec.bentoTag",description="Bento Tag"
+//+kubebuilder:printcolumn:name="DynamoComponent",type="string",JSONPath=".spec.dynamoComponent",description="Dynamo component"
 //+kubebuilder:printcolumn:name="Download-Url",type="string",JSONPath=".spec.downloadUrl",description="Download URL"
-//+kubebuilder:printcolumn:name="Image",type="string",JSONPath=".spec.image",description="Image"
 //+kubebuilder:printcolumn:name="Image-Exists",type="string",JSONPath=".status.conditions[?(@.type=='ImageExists')].status",description="Image Exists"
-//+kubebuilder:printcolumn:name="Bento-Available",type="string",JSONPath=".status.conditions[?(@.type=='BentoAvailable')].status",description="Bento Available"
+//+kubebuilder:printcolumn:name="DynamoComponent-Available",type="string",JSONPath=".status.conditions[?(@.type=='DynamoComponentAvailable')].status",description="Dynamo Component Available"
 //+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
-// DynamoNimRequest is the Schema for the dynamonimrequests API
-type DynamoNimRequest struct {
+// DynamoComponentRequest is the Schema for the dynamocomponentrequests API
+type DynamoComponentRequest struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DynamoNimRequestSpec   `json:"spec,omitempty"`
-	Status DynamoNimRequestStatus `json:"status,omitempty"`
+	Spec   DynamoComponentRequestSpec   `json:"spec,omitempty"`
+	Status DynamoComponentRequestStatus `json:"status,omitempty"`
 }
 
 //+kubebuilder:object:root=true
 
-// DynamoNimRequestList contains a list of DynamoNimRequest
-type DynamoNimRequestList struct {
+// DynamoComponentRequestList contains a list of DynamoComponentRequest
+type DynamoComponentRequestList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []DynamoNimRequest `json:"items"`
+	Items           []DynamoComponentRequest `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&DynamoNimRequest{}, &DynamoNimRequestList{})
+	SchemeBuilder.Register(&DynamoComponentRequest{}, &DynamoComponentRequestList{})
 }
 
-func (s *DynamoNimRequest) GetSpec() any {
+func (s *DynamoComponentRequest) GetSpec() any {
 	return s.Spec
 }
 
-func (s *DynamoNimRequest) SetSpec(spec any) {
-	s.Spec = spec.(DynamoNimRequestSpec)
+func (s *DynamoComponentRequest) SetSpec(spec any) {
+	s.Spec = spec.(DynamoComponentRequestSpec)
 }

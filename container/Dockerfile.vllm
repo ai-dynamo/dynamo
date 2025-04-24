@@ -250,6 +250,12 @@ RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.
     rm rustup-init && \
     chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
+ARG CARGO_BUILD_JOBS
+# Set CARGO_BUILD_JOBS to 16 if not provided
+# This is to prevent cargo from building $(nproc) jobs in parallel,
+# which might exceed the number of opened files limit.
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
+
 #######################################
 ########## Local Development ##########
 #######################################
@@ -296,62 +302,12 @@ ENV VLLM_KV_CAPI_PATH=$HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
 ##################################
-########## Build Image ###########
+##### Wheel Build Image ##########
 ##################################
-
-FROM base AS build
-
-# Working directory
-WORKDIR /workspace
-
-# Copy Python wheel configuration files
-COPY pyproject.toml /workspace/
-COPY README.md /workspace/
-COPY LICENSE /workspace/
-COPY Cargo.toml /workspace/
-COPY Cargo.lock /workspace/
-COPY rust-toolchain.toml /workspace/
-COPY hatch_build.py /workspace/
-
-COPY lib/ /workspace/lib/
-COPY components /workspace/components
-COPY launch /workspace/launch
-
-ARG CARGO_BUILD_JOBS
-# Set CARGO_BUILD_JOBS to 16 if not provided
-# This is to prevent cargo from building $(nproc) jobs in parallel,
-# which might exceed the number of opened files limit.
-ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
-
-ENV CARGO_TARGET_DIR=/workspace/target
-
-RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
-    cargo doc --no-deps && \
-    cp target/release/dynamo-run /usr/local/bin && \
-    cp target/release/http /usr/local/bin && \
-    cp target/release/llmctl /usr/local/bin && \
-    cp target/release/metrics /usr/local/bin && \
-    cp target/release/mock_worker /usr/local/bin
-
-COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
-COPY deploy/dynamo/api-store /workspace/deploy/dynamo/api-store
-
-# Tell vllm to use the Dynamo LLM C API for KV Cache Routing
-ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
-
-# Copy launch banner
-RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
-    sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
-    echo "cat ~/.launch_screen" >> ~/.bashrc
-
-CMD []
-
-###################################
-####### WHEEL BUILD STAGE #########
-###################################
 
 # Build the wheel in the manylinux environment
 FROM ${MANYLINUX_IMAGE} AS wheel_builder
+
 ARG CARGO_BUILD_JOBS
 # Set CARGO_BUILD_JOBS to 16 if not provided
 # This is to prevent cargo from building $(nproc) jobs in parallel,
@@ -359,9 +315,11 @@ ARG CARGO_BUILD_JOBS
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 # Use build arg RELEASE_BUILD = true to generate wheels for Python 3.10, 3.11 and 3.12.
 ARG RELEASE_BUILD
+
 WORKDIR /workspace
 
 RUN yum update -y \
+    && yum install -y python3.12-devel \
     && yum install -y protobuf-compiler \
     || yum install -y https://raw.repo.almalinux.org/almalinux/8.10/AppStream/x86_64/os/Packages/protobuf-3.5.0-15.el8.x86_64.rpm \
     https://raw.repo.almalinux.org/almalinux/8.10/AppStream/x86_64/os/Packages/protobuf-compiler-3.5.0-15.el8.x86_64.rpm \
@@ -370,52 +328,92 @@ RUN yum update -y \
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH \
-    CARGO_TARGET_DIR=/workspace/target
+    CARGO_TARGET_DIR=/workspace/target \
+    VIRTUAL_ENV=/opt/dynamo/venv
 
-COPY --from=build /workspace /workspace
-COPY --from=build $RUSTUP_HOME $RUSTUP_HOME
-COPY --from=build $CARGO_HOME $CARGO_HOME
+COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
+COPY --from=base $CARGO_HOME $CARGO_HOME
+COPY --from=base /workspace /workspace
+COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
+ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
 
-# Copy uv from build and build wheel in virtualenv
-RUN mkdir /opt/dynamo && \
-    uv venv /opt/dynamo/venv --python 3.12
+# Copy configuration files
+COPY pyproject.toml /workspace/
+COPY README.md /workspace/
+COPY LICENSE /workspace/
+COPY Cargo.toml /workspace/
+COPY Cargo.lock /workspace/
+COPY rust-toolchain.toml /workspace/
+COPY hatch_build.py /workspace/
 
-# Activate virtual environment
-ENV VIRTUAL_ENV=/opt/dynamo/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
-ENV PATH="$PATH:/usr/local/bin"
+# Copy source code
+COPY lib/ /workspace/lib/
+COPY components /workspace/components
+COPY launch /workspace/launch
+COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
+
+# Build Rust crate binaries packaged with the wheel
+RUN cargo build --release --locked --features mistralrs,sglang,vllm,python \
+    -p dynamo-run \
+    -p llmctl \
+    # Multiple http named crates are present in dependencies, need to specify the path
+    -p file://$PWD/components/http \
+    -p metrics
 
 # Build dynamo wheel
-RUN source /opt/dynamo/venv/bin/activate && \
+RUN uv build --wheel --out-dir /workspace/dist && \
     cd /workspace/lib/bindings/python && \
     uv build --wheel --out-dir /workspace/dist --python 3.12 && \
     if [ "$RELEASE_BUILD" = "true" ]; then \
         uv build --wheel --out-dir /workspace/dist --python 3.11 && \
         uv build --wheel --out-dir /workspace/dist --python 3.10; \
-    fi && \
-    cd /workspace && \
-    uv build --wheel --out-dir /workspace/dist
+    fi
 
 #######################################
 ########## CI Minimum Image ###########
 #######################################
-FROM build AS ci_minimum
+FROM base AS ci_minimum
 
 ENV DYNAMO_HOME=/workspace
+ENV CARGO_TARGET_DIR=/workspace/target
+
+WORKDIR /workspace
+
+COPY --from=wheel_builder /workspace/dist/ /workspace/dist/
+COPY --from=wheel_builder /workspace/target/ /workspace/target/
+# Copy Cargo cache to avoid re-downloading dependencies
+COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
 COPY . /workspace
-COPY --from=wheel_builder /workspace/dist/ /workspace/dist/
+
+# Build rest of the crates
+# Need to figure out rust caching to avoid rebuilding and remove exclude flags
+RUN cargo build --release --locked --workspace \
+    --exclude dynamo-run \
+    --exclude llmctl \
+    --exclude file://$PWD/components/http \
+    --exclude metrics
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
     mkdir /opt/dynamo/bindings/lib && \
     cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
     cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
-    cp -r lib/bindings/c/include /opt/dynamo/bindings/.
+    cp -r lib/bindings/c/include /opt/dynamo/bindings/.  && \
+    cp target/release/dynamo-run /usr/local/bin && \
+    cp target/release/http /usr/local/bin && \
+    cp target/release/llmctl /usr/local/bin && \
+    cp target/release/metrics /usr/local/bin && \
+    cp target/release/mock_worker /usr/local/bin
 
 RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/dist/ai_dynamo*any.whl
+
+# Copy launch banner
+RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
+    sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
+    echo "cat ~/.launch_screen" >> ~/.bashrc
+
 
 ##########################################
 ########## Perf Analyzer Image ###########

@@ -19,14 +19,14 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.4
-  name: dynamodeployments.nvidia.com
+  name: dynamographdeployments.nvidia.com
 spec:
   group: nvidia.com
   names:
-    kind: DynamoDeployment
-    listKind: DynamoDeploymentList
-    plural: dynamodeployments
-    singular: dynamodeployment
+    kind: DynamoGraphDeployment
+    listKind: DynamoGraphDeploymentList
+    plural: dynamographdeployments
+    singular: dynamographdeployment
   scope: Namespaced
   versions:
   - name: v1alpha1
@@ -41,7 +41,7 @@ spec:
             type: object
           spec:
             properties:
-              dynamoNim:
+              dynamoGraph:
                 type: string
               envs:
                 items:
@@ -2855,7 +2855,7 @@ spec:
                   type: object
                 type: object
             required:
-            - dynamoNim
+            - dynamoGraph
             type: object
           status:
             properties:

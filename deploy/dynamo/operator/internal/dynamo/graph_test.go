@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package nim
+package dynamo
 
 import (
 	"context"
@@ -27,32 +27,32 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestGenerateDynamoNIMDeployments(t *testing.T) {
+func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 	type args struct {
-		parentDynamoDeployment *v1alpha1.DynamoDeployment
-		config                 *DynamoNIMConfig
-		ingressSpec            *v1alpha1.IngressSpec
+		parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment
+		config                      *DynamoGraphConfig
+		ingressSpec                 *v1alpha1.IngressSpec
 	}
 	tests := []struct {
 		name    string
 		args    args
-		want    map[string]*v1alpha1.DynamoNimDeployment
+		want    map[string]*v1alpha1.DynamoComponentDeployment
 		wantErr bool
 	}{
 		{
-			name: "Test GenerateDynamoNIMDeployments http dependency",
+			name: "Test GenerateDynamoComponentsDeployments http dependency",
 			args: args{
-				parentDynamoDeployment: &v1alpha1.DynamoDeployment{
+				parentDynamoGraphDeployment: &v1alpha1.DynamoGraphDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamodeployment",
+						Name:      "test-dynamographdeployment",
 						Namespace: "default",
 					},
-					Spec: v1alpha1.DynamoDeploymentSpec{
-						DynamoNim: "dynamonim:ac4e234",
+					Spec: v1alpha1.DynamoGraphDeploymentSpec{
+						DynamoGraph: "dynamocomponent:ac4e234",
 					},
 				},
-				config: &DynamoNIMConfig{
-					DynamoTag: "dynamonim:MyService1",
+				config: &DynamoGraphConfig{
+					DynamoTag: "dynamocomponent:MyService1",
 					Services: []ServiceConfig{
 						{
 							Name:         "service1",
@@ -88,16 +88,16 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 				},
 				ingressSpec: &v1alpha1.IngressSpec{},
 			},
-			want: map[string]*v1alpha1.DynamoNimDeployment{
+			want: map[string]*v1alpha1.DynamoComponentDeployment{
 				"service1": {
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamodeployment-service1",
+						Name:      "test-dynamographdeployment-service1",
 						Namespace: "default",
 					},
-					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						DynamoNim: "dynamonim--ac4e234",
-						DynamoTag: "dynamonim:MyService1",
-						DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponent: "dynamocomponent:ac4e234",
+						DynamoTag:       "dynamocomponent:MyService1",
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName:     "service1",
 							DynamoNamespace: &[]string{"default"}[0],
 							Resources: &compounaiCommon.Resources{
@@ -130,13 +130,13 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 				},
 				"service2": {
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamodeployment-service2",
+						Name:      "test-dynamographdeployment-service2",
 						Namespace: "default",
 					},
-					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						DynamoNim: "dynamonim--ac4e234",
-						DynamoTag: "dynamonim:MyService1",
-						DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponent: "dynamocomponent:ac4e234",
+						DynamoTag:       "dynamocomponent:MyService1",
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName: "service2",
 							Autoscaling: &v1alpha1.Autoscaling{
 								Enabled: false,
@@ -148,19 +148,19 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "Test GenerateDynamoNIMDeployments dynamo dependency",
+			name: "Test GenerateDynamoComponentsDeployments dynamo dependency",
 			args: args{
-				parentDynamoDeployment: &v1alpha1.DynamoDeployment{
+				parentDynamoGraphDeployment: &v1alpha1.DynamoGraphDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamodeployment",
+						Name:      "test-dynamographdeployment",
 						Namespace: "default",
 					},
-					Spec: v1alpha1.DynamoDeploymentSpec{
-						DynamoNim: "dynamonim:ac4e234",
+					Spec: v1alpha1.DynamoGraphDeploymentSpec{
+						DynamoGraph: "dynamocomponent:ac4e234",
 					},
 				},
-				config: &DynamoNIMConfig{
-					DynamoTag:    "dynamonim:MyService2",
+				config: &DynamoGraphConfig{
+					DynamoTag:    "dynamocomponent:MyService2",
 					EntryService: "service1",
 					Services: []ServiceConfig{
 						{
@@ -194,19 +194,19 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 				},
 				ingressSpec: &v1alpha1.IngressSpec{
 					Enabled: true,
-					Host:    "test-dynamodeployment",
+					Host:    "test-dynamographdeployment",
 				},
 			},
-			want: map[string]*v1alpha1.DynamoNimDeployment{
+			want: map[string]*v1alpha1.DynamoComponentDeployment{
 				"service1": {
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamodeployment-service1",
+						Name:      "test-dynamographdeployment-service1",
 						Namespace: "default",
 					},
-					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						DynamoNim: "dynamonim--ac4e234",
-						DynamoTag: "dynamonim:MyService2",
-						DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponent: "dynamocomponent:ac4e234",
+						DynamoTag:       "dynamocomponent:MyService2",
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName: "service1",
 							Resources: &compounaiCommon.Resources{
 								Requests: &compounaiCommon.ResourceItem{
@@ -235,20 +235,20 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 							},
 							Ingress: v1alpha1.IngressSpec{
 								Enabled: true,
-								Host:    "test-dynamodeployment",
+								Host:    "test-dynamographdeployment",
 							},
 						},
 					},
 				},
 				"service2": {
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamodeployment-service2",
+						Name:      "test-dynamographdeployment-service2",
 						Namespace: "default",
 					},
-					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						DynamoNim: "dynamonim--ac4e234",
-						DynamoTag: "dynamonim:MyService2",
-						DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponent: "dynamocomponent:ac4e234",
+						DynamoTag:       "dynamocomponent:MyService2",
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName:     "service2",
 							DynamoNamespace: &[]string{"default"}[0],
 							Autoscaling: &v1alpha1.Autoscaling{
@@ -261,19 +261,19 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "Test GenerateDynamoNIMDeployments dynamo dependency, default namespace",
+			name: "Test GenerateDynamoComponentsDeployments dynamo dependency, default namespace",
 			args: args{
-				parentDynamoDeployment: &v1alpha1.DynamoDeployment{
+				parentDynamoGraphDeployment: &v1alpha1.DynamoGraphDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamodeployment",
+						Name:      "test-dynamographdeployment",
 						Namespace: "default",
 					},
-					Spec: v1alpha1.DynamoDeploymentSpec{
-						DynamoNim: "dynamonim:ac4e234",
+					Spec: v1alpha1.DynamoGraphDeploymentSpec{
+						DynamoGraph: "dynamocomponent:ac4e234",
 					},
 				},
-				config: &DynamoNIMConfig{
-					DynamoTag:    "dynamonim:MyService2",
+				config: &DynamoGraphConfig{
+					DynamoTag:    "dynamocomponent:MyService2",
 					EntryService: "service1",
 					Services: []ServiceConfig{
 						{
@@ -306,16 +306,16 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 				},
 				ingressSpec: &v1alpha1.IngressSpec{},
 			},
-			want: map[string]*v1alpha1.DynamoNimDeployment{
+			want: map[string]*v1alpha1.DynamoComponentDeployment{
 				"service1": {
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamodeployment-service1",
+						Name:      "test-dynamographdeployment-service1",
 						Namespace: "default",
 					},
-					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						DynamoNim: "dynamonim--ac4e234",
-						DynamoTag: "dynamonim:MyService2",
-						DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponent: "dynamocomponent:ac4e234",
+						DynamoTag:       "dynamocomponent:MyService2",
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName: "service1",
 							Resources: &compounaiCommon.Resources{
 								Requests: &compounaiCommon.ResourceItem{
@@ -339,7 +339,7 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 							ExternalServices: map[string]v1alpha1.ExternalService{
 								"service2": {
 									DeploymentSelectorKey:   "dynamo",
-									DeploymentSelectorValue: "service2/dynamo-test-dynamodeployment",
+									DeploymentSelectorValue: "service2/dynamo-test-dynamographdeployment",
 								},
 							},
 							Ingress: v1alpha1.IngressSpec{},
@@ -348,18 +348,18 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 				},
 				"service2": {
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamodeployment-service2",
+						Name:      "test-dynamographdeployment-service2",
 						Namespace: "default",
 					},
-					Spec: v1alpha1.DynamoNimDeploymentSpec{
-						DynamoNim: "dynamonim--ac4e234",
-						DynamoTag: "dynamonim:MyService2",
-						DynamoNimDeploymentSharedSpec: v1alpha1.DynamoNimDeploymentSharedSpec{
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponent: "dynamocomponent:ac4e234",
+						DynamoTag:       "dynamocomponent:MyService2",
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName: "service2",
 							Autoscaling: &v1alpha1.Autoscaling{
 								Enabled: false,
 							},
-							DynamoNamespace: &[]string{"dynamo-test-dynamodeployment"}[0],
+							DynamoNamespace: &[]string{"dynamo-test-dynamographdeployment"}[0],
 						},
 					},
 				},
@@ -367,19 +367,19 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "Test GenerateDynamoNIMDeployments dependency not found",
+			name: "Test GenerateDynamoComponentsDeployments dependency not found",
 			args: args{
-				parentDynamoDeployment: &v1alpha1.DynamoDeployment{
+				parentDynamoGraphDeployment: &v1alpha1.DynamoGraphDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamodeployment",
+						Name:      "test-dynamographdeployment",
 						Namespace: "default",
 					},
-					Spec: v1alpha1.DynamoDeploymentSpec{
-						DynamoNim: "dynamonim:ac4e234",
+					Spec: v1alpha1.DynamoGraphDeploymentSpec{
+						DynamoGraph: "dynamocomponent:ac4e234",
 					},
 				},
-				config: &DynamoNIMConfig{
-					DynamoTag: "dynamonim:MyService3",
+				config: &DynamoGraphConfig{
+					DynamoTag: "dynamocomponent:MyService3",
 					Services: []ServiceConfig{
 						{
 							Name:         "service1",
@@ -423,9 +423,9 @@ func TestGenerateDynamoNIMDeployments(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
-			got, err := GenerateDynamoNIMDeployments(context.Background(), tt.args.parentDynamoDeployment, tt.args.config, tt.args.ingressSpec)
+			got, err := GenerateDynamoComponentsDeployments(context.Background(), tt.args.parentDynamoGraphDeployment, tt.args.config, tt.args.ingressSpec)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("GenerateDynamoNIMDeployments() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("GenerateDynamoComponentsDeployments() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 			g.Expect(got).To(gomega.Equal(tt.want))

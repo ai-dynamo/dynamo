@@ -13,26 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# permissions for end users to view dynamonimdeployments.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
 metadata:
   labels:
     app.kubernetes.io/name: dynamo-kubernetes-operator
     app.kubernetes.io/managed-by: kustomize
-  name: dynamonimdeployment-viewer-role
-rules:
-- apiGroups:
-  - nvidia.com
-  resources:
-  - dynamonimdeployments
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - nvidia.com
-  resources:
-  - dynamonimdeployments/status
-  verbs:
-  - get
+  name: dynamographdeployment-sample
+spec:
+  # TODO(user): Add fields here
+  # EXAMPLE: dynamoComponent: basic:dev
