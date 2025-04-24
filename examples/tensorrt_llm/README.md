@@ -52,7 +52,10 @@ Use the helper script to build a TensorRT-LLM container base image. The script u
 ```bash
 # TensorRT-LLM uses git-lfs, which needs to be installed in advance.
 apt-get update && apt-get -y install git git-lfs
-git lfs install
+
+# The script uses python packages like docker-squash to squash image
+# layers within trtllm base image
+DEBIAN_FRONTEND=noninteractive TZ=America/Los_Angeles apt-get -y install python3 python3-pip python3-venv
 
 ./container/build_trtllm_base_image.sh
 ```
@@ -67,6 +70,7 @@ If you already have a TensorRT-LLM container image, you can skip this step.
 ```
 
 This build script internally points to the base container image built with step 1. If you skipped previous step because you already have the container image available, you can run the build script with that image as a base.
+
 
 ```bash
 # Build dynamo image with other TRTLLM base image.
@@ -120,7 +124,7 @@ dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
 #### Disaggregated serving
 ```bash
 cd /workspace/examples/tensorrt_llm
-TRTLLM_USE_UCX_KVCACHE=1 dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
+dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
 ```
 
 We are defining TRTLLM_USE_UCX_KVCACHE so that TRTLLM uses UCX for transfering the KV
@@ -129,7 +133,7 @@ cache between the context and generation workers.
 #### Disaggregated serving with KV Routing
 ```bash
 cd /workspace/examples/tensorrt_llm
-TRTLLM_USE_UCX_KVCACHE=1 dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
+dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
 ```
 
 We are defining TRTLLM_USE_UCX_KVCACHE so that TRTLLM uses UCX for transfering the KV

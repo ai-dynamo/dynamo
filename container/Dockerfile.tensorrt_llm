@@ -14,7 +14,7 @@
 # limitations under the License.
 
 ARG BASE_IMAGE="tensorrt_llm/release"
-ARG BASE_IMAGE_TAG="latest"
+ARG BASE_IMAGE_TAG="latest_squashed"
 ARG RELEASE_BUILD
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -238,6 +238,8 @@ RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
 ENV DYNAMO_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
 ENV DYNAMO_HOME=/workspace
 
+# Use UCX for TRTLLM KV Cache Transfer
+ENV TRTLLM_USE_UCX_KVCACHE=1
 # Needed to use NVLink for TRTLLM KV Cache Transfer
 # https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/advanced/disaggregated-service.md
 ENV UCX_CUDA_COPY_ASYNC_MEM_TYPE=cuda
