@@ -29,7 +29,6 @@ import typing as t
 import fs
 import fs.errors
 import fs.mirror
-import yaml
 from bentoml._internal.bento.bento import BENTO_PROJECT_DIR_NAME, BENTO_README_FILENAME
 from bentoml._internal.bento.bento import Bento as BaseBento
 from bentoml._internal.bento.bento import (
@@ -54,6 +53,7 @@ from fs.copy import copy_file
 from fs.tempfs import TempFS
 from simple_di import Provide, inject
 
+import yaml
 from dynamo.sdk.lib.service import LinkedServices
 
 logger = logging.getLogger(__name__)

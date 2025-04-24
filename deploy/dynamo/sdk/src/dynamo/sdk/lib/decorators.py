@@ -19,8 +19,9 @@ import typing as t
 from functools import wraps
 from typing import Any, get_type_hints
 
-import bentoml
 from pydantic import BaseModel
+
+import bentoml
 
 
 class DynamoEndpoint:

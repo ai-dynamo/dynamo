@@ -25,7 +25,6 @@ import typing as t
 
 import attr
 import typer
-import yaml
 from bentoml._internal.bento.bento import DEFAULT_BENTO_BUILD_FILES
 from bentoml._internal.bento.build_config import BentoBuildConfig
 from bentoml._internal.configuration.containers import BentoMLContainer
@@ -36,6 +35,7 @@ from rich.console import Console
 from rich.syntax import Syntax
 from simple_di import Provide, inject
 
+import yaml
 from dynamo.sdk.lib.bento import Bento
 
 if t.TYPE_CHECKING:
