@@ -38,6 +38,10 @@ ARG ARCH_ALT=x86_64
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS build
 
+# Redeclare ARCH and ARCH_ALT so they're available in this build stage
+ARG ARCH
+ARG ARCH_ALT
+
 USER root
 
 # Install utilities
