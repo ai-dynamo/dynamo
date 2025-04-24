@@ -138,6 +138,11 @@ impl ModelDeploymentCard {
         ModelDeploymentCardBuilder::default()
     }
 
+    /// Create a ModelDeploymentCard where only the name is filled in.
+    ///
+    /// Single-process setups don't need an MDC to communicate model details, but it
+    /// simplifies the code to assume we always have one. This is how you get one in those
+    /// cases. A quasi-null object: <https://en.wikipedia.org/wiki/Null_object_pattern>
     pub fn with_name_only(name: &str) -> ModelDeploymentCard {
         ModelDeploymentCard {
             display_name: name.to_string(),

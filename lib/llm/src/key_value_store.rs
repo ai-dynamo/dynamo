@@ -79,10 +79,7 @@ impl KeyValueStoreManager {
 
     /// Returns a receiver that will receive all the existing keys, and
     /// then block and receive new keys as they are created.
-    /// Starts a task that runs forever, watches the LiveStore.
-    ///
-    /// To get a KeyValueStore impl use either [`MemoryStorage`] for testing, or
-    /// nim_llm_pipeline::network::nats::kvstore::NATSStorage for production.
+    /// Starts a task that runs forever, watches the store.
     pub fn watch<T: for<'a> Deserialize<'a> + Send + 'static>(
         self: Arc<Self>,
         bucket_name: &str,
@@ -257,7 +254,7 @@ pub enum StorageError {
     #[error("Internal etcd error: {0}")]
     EtcdError(String),
 
-    #[error("NATS KV Err: {0} for bucket '{1}")]
+    #[error("Key Value Error: {0} for bucket '{1}")]
     KeyValueError(String, String),
 
     #[error("Error decoding bytes: {0}")]
