@@ -17,8 +17,12 @@ import asyncio
 import sys
 from typing import Literal
 
+import pytest
+
 from dynamo.planner import LocalConnector
 from dynamo.runtime import DistributedRuntime, dynamo_worker
+
+pytestmark = pytest.mark.skip("This is not a test file")
 
 ComponentType = Literal["VllmWorker", "PrefillWorker"]
 VALID_COMPONENTS = ["VllmWorker", "PrefillWorker"]
