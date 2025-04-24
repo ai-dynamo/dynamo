@@ -21,7 +21,7 @@ import sys
 
 import distro
 import pkg_resources
-import typer
+
 
 def get_os_version() -> str:
     """Get OS version."""

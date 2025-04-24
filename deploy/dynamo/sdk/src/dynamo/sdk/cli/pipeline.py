@@ -22,11 +22,9 @@ import logging
 import os
 import subprocess
 import typing as t
-from pathlib import Path
 
 import attr
 import typer
-import yaml
 from bentoml._internal.bento.bento import DEFAULT_BENTO_BUILD_FILES
 from bentoml._internal.bento.build_config import BentoBuildConfig
 from bentoml._internal.configuration.containers import BentoMLContainer
@@ -37,6 +35,7 @@ from rich.console import Console
 from rich.syntax import Syntax
 from simple_di import Provide, inject
 
+import yaml
 from dynamo.sdk.lib.bento import Bento
 
 if t.TYPE_CHECKING:
@@ -92,6 +91,7 @@ ALLOWED_PLATFORMS = [
     "aarch64-manylinux_2_39",
     "aarch64-manylinux_2_40",
 ]
+
 
 @inject
 def build_bentofile(
@@ -157,23 +157,28 @@ def build_bentofile(
 
 
 def get(
-    pipeline_tag: str = typer.Argument(..., help="The tag of the Dynamo pipeline to display"),
+    pipeline_tag: str = typer.Argument(
+        ..., help="The tag of the Dynamo pipeline to display"
+    ),
     output: str = typer.Option(
-        "yaml", "--output", "-o", help="Output format (json, yaml, or path)", 
-        show_default=True
+        "yaml",
+        "--output",
+        "-o",
+        help="Output format (json, yaml, or path)",
+        show_default=True,
     ),
 ) -> None:
     """Display Dynamo pipeline details.
-    
+
     Prints information about a Dynamo pipeline by its tag.
     """
-    
+
     # Validate output format
     valid_outputs = ["json", "yaml", "path"]
     if output not in valid_outputs:
         console.print(f"[red]Error: Output format must be one of {valid_outputs}[/red]")
         raise typer.Exit(code=1)
-    
+
     bento_store = BentoMLContainer.bento_store.get()
     bento = bento_store.get(pipeline_tag)
 
@@ -188,27 +193,28 @@ def get(
 
 
 def build(
-    dynamo_pipeline: str = typer.Argument(..., help="Path to the Dynamo pipeline to build"),
+    dynamo_pipeline: str = typer.Argument(
+        ..., help="Path to the Dynamo pipeline to build"
+    ),
     output: str = typer.Option(
-        "default", "--output", "-o", 
-        help="Output log format. Use 'tag' to display only pipeline tag.", 
-        show_default=True
+        "default",
+        "--output",
+        "-o",
+        help="Output log format. Use 'tag' to display only pipeline tag.",
+        show_default=True,
     ),
     containerize: bool = typer.Option(
-        False, "--containerize", 
-        help="Containerize the Dynamo pipeline after building. Shortcut for 'dynamo build && dynamo containerize'."
+        False,
+        "--containerize",
+        help="Containerize the Dynamo pipeline after building. Shortcut for 'dynamo build && dynamo containerize'.",
     ),
-    platform: str = typer.Option(
-        None, "--platform", 
-        help="Platform to build for"
-    ),
+    platform: str = typer.Option(None, "--platform", help="Platform to build for"),
 ) -> None:
     """Build a new Dynamo pipeline from the specified path.
-    
+
     Creates a packaged Dynamo pipeline ready for deployment. Optionally builds a docker container.
     """
-    from bentoml._internal.configuration import set_quiet_mode
-    from bentoml._internal.configuration import get_quiet_mode
+    from bentoml._internal.configuration import get_quiet_mode, set_quiet_mode
     from bentoml._internal.log import configure_logging
 
     # Validate output format
@@ -216,10 +222,10 @@ def build(
     if output not in valid_outputs:
         console.print(f"[red]Error: Output format must be one of {valid_outputs}[/red]")
         raise typer.Exit(code=1)
-    
+
     # Validate platform if provided
     if platform is not None and platform not in ALLOWED_PLATFORMS:
-        console.print(f"[red]Error: Platform must be one of the allowed platforms[/red]")
+        console.print("[red]Error: Platform must be one of the allowed platforms[/red]")
         raise typer.Exit(code=1)
 
     if output == "tag":
@@ -256,17 +262,17 @@ def build(
 
             if next_steps:
                 console.print(f"\n[blue]Next steps: {''.join(next_steps)}[/]")
-    
+
     if containerize:
         backend: DefaultBuilder = t.cast(
             "DefaultBuilder", os.getenv("BENTOML_CONTAINERIZE_BACKEND", "docker")
         )
         try:
             import bentoml
+
             bentoml.container.health(backend)
         except subprocess.CalledProcessError:
             from bentoml.exceptions import BentoMLException
-            raise BentoMLException(
-                f"Backend {backend} is not healthy"
-            )
-        bentoml.container.build(bento.tag, backend=backend) 
+
+            raise BentoMLException(f"Backend {backend} is not healthy")
+        bentoml.container.build(bento.tag, backend=backend)

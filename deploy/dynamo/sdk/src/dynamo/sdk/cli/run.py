@@ -18,13 +18,12 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
-from typing import List
 
 import typer
 from rich.console import Console
-from rich.panel import Panel
 
 console = Console()
+
 
 def run(ctx: typer.Context):
     """Execute dynamo-run with any additional arguments."""
@@ -33,15 +32,15 @@ def run(ctx: typer.Context):
         console.print(
             "[bold red]Error:[/bold red] 'dynamo-run' is needed but not found.\n"
             "Please install it using: [bold cyan]cargo install dynamo-run[/bold cyan]",
-            style="red"
+            style="red",
         )
         raise typer.Exit(code=1)
 
     # Extract all arguments after 'run'
-    args = sys.argv[sys.argv.index("run") + 1:] if "run" in sys.argv else []
-    
+    args = sys.argv[sys.argv.index("run") + 1 :] if "run" in sys.argv else []
+
     command = ["dynamo-run"] + args
-    
+
     try:
         subprocess.run(command)
     except Exception as e:

@@ -17,16 +17,19 @@
 
 from __future__ import annotations
 
-import typer
 import importlib.metadata
+
+import typer
 from rich.console import Console
 
-from dynamo.sdk.cli.env import env
-from dynamo.sdk.cli.serve import serve
-from dynamo.sdk.cli.run import run
 from dynamo.sdk.cli.cloud import app as cloud_app
-from dynamo.sdk.cli.deployment import app as deployment_app, deploy
+from dynamo.sdk.cli.deployment import app as deployment_app
+from dynamo.sdk.cli.deployment import deploy
+from dynamo.sdk.cli.env import env
 from dynamo.sdk.cli.pipeline import build, get
+from dynamo.sdk.cli.run import run
+from dynamo.sdk.cli.serve import serve
+
 console = Console()
 
 cli = typer.Typer(
@@ -44,6 +47,8 @@ def version_callback(value: bool):
             f"[bold green]Dynamo CLI[/bold green] version: [cyan]{version}[/cyan]"
         )
         raise typer.Exit()
+
+
 # import importlib.metadata
 
 # import click
@@ -128,9 +133,14 @@ def main(
     and `deploy` to deploy them to a K8s cluster running the Dynamo Server
     """
 
+
 cli.command()(env)
-cli.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})(serve)
-cli.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})(run)
+cli.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
+)(serve)
+cli.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
+)(run)
 cli.add_typer(cloud_app, name="cloud")
 cli.add_typer(deployment_app, name="deployment")
 cli.command()(deploy)

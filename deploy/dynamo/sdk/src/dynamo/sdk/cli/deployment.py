@@ -23,7 +23,7 @@ import re
 import sys
 import typing as t
 from http import HTTPStatus
-from typing import List, Optional, TextIO, Dict, Any
+from typing import Any, Dict, List, Optional, TextIO
 
 import typer
 from bentoml._internal.cloud.base import Spinner
@@ -42,7 +42,11 @@ configure_server_logging()
 
 logger = logging.getLogger(__name__)
 
-app = typer.Typer(help="Deploy Dynamo applications to Kubernetes cluster", add_completion=True, no_args_is_help=True)
+app = typer.Typer(
+    help="Deploy Dynamo applications to Kubernetes cluster",
+    add_completion=True,
+    no_args_is_help=True,
+)
 console = Console(highlight=False)
 
 if t.TYPE_CHECKING:
@@ -216,9 +220,15 @@ def list_deployments(
 def create(
     bento: Optional[str] = typer.Argument(None, help="Bento to deploy"),
     name: Optional[str] = typer.Option(None, "--name", "-n", help="Deployment name"),
-    config_file: Optional[typer.FileText] = typer.Option(None, "--config-file", "-f", help="Configuration file path"),
-    wait: bool = typer.Option(True, "--wait/--no-wait", help="Do not wait for deployment to be ready"),
-    timeout: int = typer.Option(3600, "--timeout", help="Timeout for deployment to be ready in seconds"),
+    config_file: Optional[typer.FileText] = typer.Option(
+        None, "--config-file", "-f", help="Configuration file path"
+    ),
+    wait: bool = typer.Option(
+        True, "--wait/--no-wait", help="Do not wait for deployment to be ready"
+    ),
+    timeout: int = typer.Option(
+        3600, "--timeout", help="Timeout for deployment to be ready in seconds"
+    ),
     ctx: typer.Context = typer.Context,
 ) -> None:
     """Create a deployment on Dynamo Cloud.
@@ -252,7 +262,9 @@ def list(
     cluster: Optional[str] = typer.Option(None, "--cluster", help="Cluster name"),
     search: Optional[str] = typer.Option(None, "--search", help="Search query"),
     dev: bool = typer.Option(False, "--dev", help="List development deployments"),
-    query: Optional[str] = typer.Option(None, "--query", "-q", help="Advanced query string"),
+    query: Optional[str] = typer.Option(
+        None, "--query", "-q", help="Advanced query string"
+    ),
 ) -> None:
     """List all deployments from Dynamo Cloud.
 
@@ -277,9 +289,15 @@ def delete(
 def deploy(
     bento: Optional[str] = typer.Argument(None, help="Bento to deploy"),
     name: Optional[str] = typer.Option(None, "--name", "-n", help="Deployment name"),
-    config_file: Optional[typer.FileText] = typer.Option(None, "--config-file", "-f", help="Configuration file path"),
-    wait: bool = typer.Option(True, "--wait/--no-wait", help="Do not wait for deployment to be ready"),
-    timeout: int = typer.Option(3600, "--timeout", help="Timeout for deployment to be ready in seconds"),
+    config_file: Optional[typer.FileText] = typer.Option(
+        None, "--config-file", "-f", help="Configuration file path"
+    ),
+    wait: bool = typer.Option(
+        True, "--wait/--no-wait", help="Do not wait for deployment to be ready"
+    ),
+    timeout: int = typer.Option(
+        3600, "--timeout", help="Timeout for deployment to be ready in seconds"
+    ),
     ctx: typer.Context = typer.Context,
 ) -> None:
     """Create a deployment on Dynamo Cloud.

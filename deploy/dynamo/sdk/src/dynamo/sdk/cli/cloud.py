@@ -18,26 +18,28 @@
 from __future__ import annotations
 
 import sys
-from typing import Optional
 
-import typer
 import rich
+import typer
 from bentoml._internal.cloud.client import RestApiClient
-from bentoml._internal.cloud.config import (
-    DEFAULT_ENDPOINT,
-    CloudClientConfig,
-    CloudClientContext,
-)
+from bentoml._internal.cloud.config import CloudClientConfig, CloudClientContext
 from bentoml._internal.configuration.containers import BentoMLContainer
-from bentoml._internal.utils import add_experimental_docstring
-from bentoml._internal.utils.cattr import bentoml_cattr
 from bentoml.exceptions import CLIException, CloudRESTApiClientError
 
-app = typer.Typer(help="Interact with your Dynamo Cloud Server", add_completion=True, no_args_is_help=True)
+app = typer.Typer(
+    help="Interact with your Dynamo Cloud Server",
+    add_completion=True,
+    no_args_is_help=True,
+)
 console = rich.console.Console()
 
+
 @app.command()
-def login(endpoint: str = typer.Argument(..., help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD_API_ENDPOINT")) -> None:
+def login(
+    endpoint: str = typer.Argument(
+        ..., help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD_API_ENDPOINT"
+    )
+) -> None:
     """Connect to your Dynamo Cloud. You can find deployment instructions for this in our docs"""
     try:
         api_token = ""  # Using empty string for now as it's not used
@@ -56,9 +58,7 @@ def login(endpoint: str = typer.Argument(..., help="Dynamo Cloud endpoint", envv
         cloud_context = BentoMLContainer.cloud_context.get()
 
         ctx = CloudClientContext(
-            name=cloud_context
-            if cloud_context is not None
-            else current_context_name,
+            name=cloud_context if cloud_context is not None else current_context_name,
             endpoint=endpoint,
             api_token=api_token,
             email=user.email,

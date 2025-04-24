@@ -40,7 +40,9 @@ console = Console()
 
 
 def serve(
-    dynamo_pipeline: str = typer.Argument(..., help="The path to the Dynamo pipeline to serve"),
+    dynamo_pipeline: str = typer.Argument(
+        ..., help="The path to the Dynamo pipeline to serve"
+    ),
     service_name: str = typer.Option(
         "",
         help="Only serve the specified service. Don't serve any dependencies of this service.",
