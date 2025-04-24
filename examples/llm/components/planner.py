@@ -21,6 +21,7 @@ import logging
 import os
 import time
 from datetime import datetime
+from typing import Any, List
 
 import numpy as np
 from rich.console import Console
@@ -51,10 +52,10 @@ class Planner:
         )
         self._prefill_queue_stream_name = self.args.served_model_name
 
-        self.prefill_client = None
-        self.workers_client = None
-        self.p_endpoints = None
-        self.d_endpoints = None
+        self.prefill_client: Any | None = None
+        self.workers_client: Any | None = None
+        self.p_endpoints: List[int] = []
+        self.d_endpoints: List[int] = []
         self.decode_worker_remaining_grace_period = 0
 
         if args.log_dir is None:
@@ -142,14 +143,14 @@ class Planner:
             print(f"Failed to collect prefill queue size metrics: {e}")
 
         # collect kv load
-        total_active_requests = 0
-        total_queued_requests = 0
+        total_active_requests: int = 0
+        total_queued_requests: int = 0
         metrics = await self.metrics_aggregator.get_metrics()
         try:
             prev_kv_load_len = len(self.kv_load)
             for endpoint in metrics.endpoints:
                 kv_load = getattr(endpoint, "gpu_cache_usage_perc", 0.0)
-                num_requests_waiting = getattr(endpoint, "num_requests_waiting", 0.0)
+                num_requests_waiting = getattr(endpoint, "num_requests_waiting", 0)
                 total_queued_requests += num_requests_waiting
                 request_active_slots = getattr(endpoint, "request_active_slots", None)
                 if request_active_slots:
