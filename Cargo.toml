@@ -37,9 +37,9 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime" }
-dynamo-llm = { path = "lib/llm" }
-dynamo-tokens = { path = "lib/tokens" }
+dynamo-runtime = { path = "lib/runtime", version = "0.1.1" }
+dynamo-llm = { path = "lib/llm", version = "0.1.1" }
+dynamo-tokens = { path = "lib/tokens", version = "0.1.1" }
 
 # External dependencies
 anyhow = { version = "1" }
