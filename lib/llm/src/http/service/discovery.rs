@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::Receiver;
 
 use dynamo_runtime::{
+    pipeline::network::egress::push_router::PushRouter,
     protocols::{self, annotated::Annotated},
     raise,
     transports::etcd::{KeyValue, WatchEvent},
@@ -147,11 +148,22 @@ async fn handle_put(
                 .namespace(model_entry.endpoint.namespace)?
                 .component(model_entry.endpoint.component)?
                 .endpoint(model_entry.endpoint.name)
-                .client::<NvCreateChatCompletionRequest, Annotated<NvCreateChatCompletionStreamResponse>>()
+                .client()
                 .await?;
+
+            // TODO get the ModelDepoymentCard (passed into handle_put ideally)
+            // check it's requires_preprocessing field
+            // Build either same as now, if worker does pre-processing or
+            // wrap with pre-processor if we do it
+
+            let push_router = PushRouter::<
+                NvCreateChatCompletionRequest,
+                Annotated<NvCreateChatCompletionStreamResponse>,
+            >::from_client(client, Default::default())
+            .await?;
             state
                 .manager
-                .add_chat_completions_model(&model_entry.name, Arc::new(client))?;
+                .add_chat_completions_model(&model_entry.name, Arc::new(push_router))?;
         }
         ModelType::Completion => {
             let client = state
@@ -159,11 +171,17 @@ async fn handle_put(
                 .namespace(model_entry.endpoint.namespace)?
                 .component(model_entry.endpoint.component)?
                 .endpoint(model_entry.endpoint.name)
-                .client::<CompletionRequest, Annotated<CompletionResponse>>()
+                .client()
+                .await?;
+            let push_router =
+                PushRouter::<CompletionRequest, Annotated<CompletionResponse>>::from_client(
+                    client,
+                    Default::default(),
+                )
                 .await?;
             state
                 .manager
-                .add_completions_model(&model_entry.name, Arc::new(client))?;
+                .add_completions_model(&model_entry.name, Arc::new(push_router))?;
         }
     }
 

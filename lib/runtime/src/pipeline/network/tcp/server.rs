@@ -147,7 +147,7 @@ impl TcpStreamServer {
                 PipelineError::Generic(format!("Failed to start TcpStreamServer: {}", e))
             })?;
 
-        tracing::info!("tcp transport service on {}:{}", local_ip, local_port);
+        tracing::debug!("tcp transport service on {local_ip}:{local_port}");
 
         Ok(Arc::new(Self {
             local_ip,

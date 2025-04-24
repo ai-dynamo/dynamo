@@ -41,9 +41,6 @@ struct RequestControlMessage {
     connection_info: ConnectionInfo,
 }
 
-pub type PushRouter<In, Out> =
-    Arc<dyn AsyncEngine<SingleIn<AddressedRequest<In>>, ManyOut<Out>, Error>>;
-
 pub struct AddressedRequest<T> {
     request: T,
     address: String,
@@ -111,7 +108,7 @@ where
             }
         };
 
-        // separate out the the connection info and the stream provider from the registered stream
+        // separate out the connection info and the stream provider from the registered stream
         let (connection_info, response_stream_provider) = pending_response_stream.into_parts();
 
         // package up the connection info as part of the "header" component of the two part message

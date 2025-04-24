@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod push;
+pub mod addressed_router;
+pub mod push_router;
 
 use super::*;

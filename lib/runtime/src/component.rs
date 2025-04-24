@@ -68,7 +68,7 @@ mod namespace;
 mod registry;
 pub mod service;
 
-pub use client::{Client, RouterMode};
+pub use client::{Client, EndpointSource};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -272,11 +272,7 @@ impl Endpoint {
         )
     }
 
-    pub async fn client<Req, Resp>(&self) -> Result<client::Client<Req, Resp>>
-    where
-        Req: Serialize + Send + Sync + 'static,
-        Resp: for<'de> Deserialize<'de> + Send + Sync + 'static,
-    {
+    pub async fn client(&self) -> Result<client::Client> {
         if self.is_static {
             client::Client::new_static(self.clone()).await
         } else {

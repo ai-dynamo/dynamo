@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use clap::ValueEnum;
-use dynamo_runtime::component::RouterMode as RuntimeRouterMode;
+use dynamo_runtime::pipeline::RouterMode as RuntimeRouterMode;
 
 /// Required options depend on the in and out choices
 #[derive(clap::Parser, Debug, Clone)]

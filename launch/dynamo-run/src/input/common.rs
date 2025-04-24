@@ -33,7 +33,9 @@ use dynamo_llm::{
 };
 use dynamo_runtime::{
     engine::{AsyncEngineStream, Data},
-    pipeline::{Context, ManyOut, Operator, ServiceBackend, ServiceFrontend, SingleIn, Source},
+    pipeline::{
+        Context, ManyOut, Operator, PushRouter, ServiceBackend, ServiceFrontend, SingleIn, Source,
+    },
     DistributedRuntime, Runtime,
 };
 use std::sync::Arc;
@@ -53,22 +55,29 @@ pub async fn prepare_engine(
                 .component(endpoint_id.component.clone())?
                 .endpoint(endpoint_id.name.clone());
 
-            let mut client = endpoint.client::<NvCreateChatCompletionRequest, Annotated<NvCreateChatCompletionStreamResponse>>().await?;
-
-            match &flags.router_mode {
+            let client = endpoint.client().await?;
+            let router = match &flags.router_mode {
                 RouterMode::Random | RouterMode::RoundRobin => {
-                    client.set_router_mode(flags.router_mode.into());
                     tracing::info!("Waiting for remote model..");
+
+                    // TODO wait_for_endpoints should return the ModelDepoymentCard
+                    // We then use it's `requires_preprocessing` field to decide what kind of
+                    // PushRouter to make
                     client.wait_for_endpoints().await?;
                     tracing::info!("Model discovered");
+                    PushRouter::<
+                        NvCreateChatCompletionRequest,
+                        Annotated<NvCreateChatCompletionStreamResponse>,
+                    >::from_client(client, flags.router_mode.into())
+                    .await?
                 }
                 RouterMode::KV => todo!(),
-            }
+            };
 
             // The service_name isn't used for text chat outside of logs,
             // so use the path. That avoids having to listen on etcd for model registration.
             let service_name = endpoint.subject();
-            Ok((service_name, Arc::new(client), false))
+            Ok((service_name, Arc::new(router), false))
         }
         EngineConfig::StaticFull {
             service_name,
