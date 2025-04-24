@@ -82,7 +82,7 @@ class Processor(ChatProcessorMixin):
                 f" Current: {len(self.worker_client.endpoint_ids())},"
                 f" Required: {self.min_workers}"
             )
-            await asyncio.sleep(2)
+            await asyncio.sleep(30)
 
     async def _generate(self, raw_request, request_type: RequestType):
         raw_request.skip_special_tokens = False
