@@ -23,6 +23,7 @@ limitations under the License.
 - [Docker](https://docs.docker.com/get-started/get-docker/) installed and configured on your host system
 - Visual Studio Code with the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) installed
 - Appropriate NVIDIA drivers (compatible with CUDA 12.8)
+- If you want to run the examples, set your Hugging Face token env var `HF_TOKEN` in your local startup (.bashrc, .zshrc or .profile file)
 
 ## Quick Start
 1. Build the container image
