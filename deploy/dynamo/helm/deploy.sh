@@ -32,6 +32,42 @@ export PIPELINES_DOCKER_PASSWORD="${PIPELINES_DOCKER_PASSWORD:=${DOCKER_PASSWORD
 export IMAGE_TAG="${IMAGE_TAG:=latest}"  # Default image tag
 export DYNAMO_INGRESS_SUFFIX="${DYNAMO_INGRESS_SUFFIX:=dynamo-cloud.com}"
 export DOCKER_SECRET_NAME="${DOCKER_SECRET_NAME:=docker-imagepullsecret}"
+export INGRESS_ENABLED="${INGRESS_ENABLED:=false}"
+export ISTIO_ENABLED="${ISTIO_ENABLED:=false}"
+export ISTIO_GATEWAY="${ISTIO_GATEWAY:=istio-system/istio-ingressgateway}"
+export INGRESS_CLASS="${INGRESS_CLASS:=nginx}"
+
+# Add command line options
+INTERACTIVE=false
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+  key="$1"
+  case $key in
+    --interactive)
+      INTERACTIVE=true
+      shift
+      ;;
+    --help)
+      echo "Usage: $0 [options]"
+      echo "Options:"
+      echo "  --interactive       Run in interactive mode"
+      echo "  --help              Show this help message"
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1"
+      echo "Use --help for usage information."
+      exit 1
+      ;;
+  esac
+done
+
+if [ "$INTERACTIVE" = true ]; then
+  source network-config-wizard.sh
+fi
+
+
 # Check if required variables are set
 if [ "$DOCKER_SERVER" = "<your-docker-server>" ]; then
     echo "Error: Please set your DOCKER_SERVER in the script or via environment variable"
@@ -99,8 +135,13 @@ echo "PIPELINES_DOCKER_SERVER: $PIPELINES_DOCKER_SERVER"
 echo "PIPELINES_DOCKER_USERNAME: $PIPELINES_DOCKER_USERNAME"
 echo "PIPELINES_DOCKER_PASSWORD: [HIDDEN]"
 echo "DOCKER_SECRET_NAME: $DOCKER_SECRET_NAME"
+echo "INGRESS_ENABLED: $INGRESS_ENABLED"
+echo "ISTIO_ENABLED: $ISTIO_ENABLED"
+echo "INGRESS_CLASS: $INGRESS_CLASS"
+echo "ISTIO_GATEWAY: $ISTIO_GATEWAY"
+echo "DYNAMO_INGRESS_SUFFIX: $DYNAMO_INGRESS_SUFFIX"
 
-envsubst '${NAMESPACE} ${RELEASE_NAME} ${DOCKER_USERNAME} ${DOCKER_PASSWORD} ${DOCKER_SERVER} ${IMAGE_TAG} ${DYNAMO_INGRESS_SUFFIX} ${PIPELINES_DOCKER_SERVER} ${PIPELINES_DOCKER_USERNAME} ${PIPELINES_DOCKER_PASSWORD} ${DOCKER_SECRET_NAME}' < dynamo-platform-values.yaml > generated-values.yaml
+envsubst '${NAMESPACE} ${RELEASE_NAME} ${DOCKER_USERNAME} ${DOCKER_PASSWORD} ${DOCKER_SERVER} ${IMAGE_TAG} ${DYNAMO_INGRESS_SUFFIX} ${PIPELINES_DOCKER_SERVER} ${PIPELINES_DOCKER_USERNAME} ${PIPELINES_DOCKER_PASSWORD} ${DOCKER_SECRET_NAME} ${INGRESS_ENABLED} ${ISTIO_ENABLED} ${INGRESS_CLASS} ${ISTIO_GATEWAY}' < dynamo-platform-values.yaml > generated-values.yaml
 echo "generated file contents:"
 cat generated-values.yaml
 

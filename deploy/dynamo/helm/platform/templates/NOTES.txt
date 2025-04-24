@@ -13,23 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{- if .Values.istio.enabled }}
-apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
-metadata:
-  name: dynamo-ingress
-spec:
-  gateways:
-  - {{ .Values.istio.gateway }}
-  hosts:
-  - "{{ .Values.istio.host }}"
-  http:
-  - match:
-    - uri:
-        prefix: /
-    route:
-    - destination:
-        host: dynamo-store.{{ .Release.Namespace }}.svc.cluster.local
-        port:
-          number: 80
+{{- if (index .Values "dynamo-api-store").enabled }}
+  {{- if (index .Values "dynamo-api-store").ingress.enabled }}
+Your service is available at:
+
+  http{{ if .Values.ingress.tls }}s{{ end }}://{{ (index .Values.ingress.hosts 0).host }}
+
+  {{- else if (index .Values "dynamo-api-store").istio.enabled }}
+Your service is available at:
+
+  http://{{ (index .Values "dynamo-api-store").istio.host }}
+
+  {{- else }}
+No ingress configured.
+  {{- end }}
+
+To access your service via port-forwarding, run:
+
+  kubectl port-forward svc/dynamo-store <local-port>:{{ (index .Values "dynamo-api-store").service.port }}
+
+Then access it locally at:
+
+  http://localhost:<local-port>
 {{- end }}
