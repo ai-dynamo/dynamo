@@ -15,10 +15,10 @@
 
 from typing import Any
 
-from bentoml._internal.context import server_context  # type: ignore
-
 from bentoml import api  # type: ignore
 from bentoml import on_shutdown as async_on_shutdown
+from bentoml._internal.context import server_context  # type: ignore
+
 from dynamo.sdk.lib.decorators import async_on_start, dynamo_api, dynamo_endpoint
 from dynamo.sdk.lib.dependency import depends
 from dynamo.sdk.lib.image import DYNAMO_IMAGE

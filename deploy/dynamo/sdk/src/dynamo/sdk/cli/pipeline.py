@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import typing as t
 
 import attr
