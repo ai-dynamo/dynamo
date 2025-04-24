@@ -1127,9 +1127,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	kubeName := r.getKubeName(opt.dynamoComponentDeployment, opt.dynamoComponent, opt.isStealingTrafficDebugModeEnabled)
 
 	containerPort := commonconsts.DynamoServicePort
-	lastPort := containerPort + 1
-
-	lastPort++
 
 	var envs []corev1.EnvVar
 	envsSeen := make(map[string]struct{})
@@ -1378,8 +1375,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	}
 
 	containers = append(containers, container)
-
-	lastPort++
 
 	debuggerImage := "python:3.12-slim"
 	debuggerImage_ := os.Getenv("INTERNAL_IMAGES_DEBUGGER")
