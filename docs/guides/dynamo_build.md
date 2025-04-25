@@ -95,11 +95,21 @@ Starting your container with host networking and required environment variables:
 ```bash
 # Host networking is required for NATS and etcd to be accessible from the container
 docker run --network host \
-  --entrypoint sh \
-  -w /src \
+  --entrypoint bash \
   --ipc host \
-  frontend-hello-world:latest \
-  -c "uv run dynamo serve hello_world:Frontend"
+  frontend:<generated_tag> \
+  -c "cd src && uv run dynamo serve hello_world:Frontend"
+```
+
+Test your containerized Dynamo services:
+```bash
+curl -X 'POST' \
+  'http://localhost:8000/generate' \
+  -H 'accept: text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "text": "test"
+}'
 ```
 
 ## Guided Example for containerizing LLM pipeline
@@ -148,10 +158,9 @@ docker run --network host \
   --entrypoint sh \
   --gpus all \
   --shm-size 10G \
-  -w /src \
   --ipc host \
-  frontend-llm-agg:latest \
-  -c "uv run dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml"
+  frontend:<generated_tag> \
+  -c "cd src && uv run dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml"
 ```
 
 ### 5. Test your containerized LLM service
@@ -159,7 +168,7 @@ docker run --network host \
 Once the container is running, you can test it by making a request to the service:
 
 ```bash
-curl localhost:3000/v1/chat/completions \
+curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
