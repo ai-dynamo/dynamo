@@ -60,11 +60,15 @@ pub async fn prepare_engine(
                 RouterMode::Random | RouterMode::RoundRobin => {
                     tracing::info!("Waiting for remote model..");
 
-                    // TODO wait_for_endpoints should return the ModelDepoymentCard
-                    // We then use it's `requires_preprocessing` field to decide what kind of
-                    // PushRouter to make
-                    client.wait_for_endpoints().await?;
-                    tracing::info!("Model discovered");
+                    // We then use the ModelDeploymentCard's `requires_preprocessing`
+                    // field to decide what kind of PushRouter to make.
+                    let remote_endpoints = client.wait_for_endpoints().await?;
+                    debug_assert!(!remote_endpoints.is_empty());
+                    tracing::info!(count = remote_endpoints.len(), "Model(s) discovered");
+
+                    // TODO: Fetch the MDC. Examine requires_preprocessing. Make the correct
+                    // router, potentially wrapped with a pre-processor.
+
                     PushRouter::<
                         NvCreateChatCompletionRequest,
                         Annotated<NvCreateChatCompletionStreamResponse>,

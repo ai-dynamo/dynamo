@@ -13,8 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Arc<dyn AsyncEngine<SingleIn<AddressedRequest<In>>, ManyOut<Out>, Error>>;
-
 use async_trait::async_trait;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -40,10 +38,22 @@ where
     U: Data + for<'de> Deserialize<'de>,
 {
     // TODO: This shouldn't be pub, but lib/bindings/python/rust/lib.rs exposes it.
+    /// The Client is how we gather remote endpoint information from etcd.
     pub client: Client,
+
+    /// How we choose which endpoint to send traffic to.
     router_mode: RouterMode,
-    counter: Arc<AtomicU64>,
+
+    /// Number of round robin requests handled. Used to decide which server is next.
+    round_robin_counter: Arc<AtomicU64>,
+
+    /// The next step in the chain. PushRouter (this object) picks an endpoint,
+    /// addresses it, then passes it to AddressedPushRouter which does the network traffic.
     addressed: Arc<AddressedPushRouter>,
+
+    /// An internal Rust type. This says that PushRouter is generic over the T and U types,
+    /// which are the input and output types of it's `generate` function. It allows the
+    /// compiler to specialize us at compile time.
     _phantom: PhantomData<(T, U)>,
 }
 
@@ -54,8 +64,7 @@ pub enum RouterMode {
     RoundRobin,
     //KV,
     //
-    // Always and only go to the given endpoint ID.
-    // TODO: Is this useful?
+    // Always and only go to the given endpoint ID. Used by Python bindings.
     Direct(i64),
 }
 
@@ -77,17 +86,17 @@ where
             client,
             addressed,
             router_mode,
-            counter: Arc::new(AtomicU64::new(0)),
+            round_robin_counter: Arc::new(AtomicU64::new(0)),
             _phantom: PhantomData,
         })
     }
 
     /// Issue a request to the next available endpoint in a round-robin fashion
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let counter = self.counter.fetch_add(1, Ordering::Relaxed);
+        let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
 
         let endpoint_id = {
-            let endpoints = self.client.endpoint_ids();
+            let endpoints = self.client.endpoints();
             let count = endpoints.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
@@ -96,7 +105,7 @@ where
                 ));
             }
             let offset = counter % count as u64;
-            endpoints[offset as usize]
+            endpoints[offset as usize].id()
         };
         tracing::trace!("round robin router selected {endpoint_id}");
 
@@ -109,7 +118,7 @@ where
     /// Issue a request to a random endpoint
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let endpoint_id = {
-            let endpoints = self.client.endpoint_ids();
+            let endpoints = self.client.endpoints();
             let count = endpoints.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
@@ -119,7 +128,7 @@ where
             }
             let counter = rand::rng().random::<u64>();
             let offset = counter % count as u64;
-            endpoints[offset as usize]
+            endpoints[offset as usize].id()
         };
         tracing::trace!("random router selected {endpoint_id}");
 
@@ -136,8 +145,8 @@ where
         endpoint_id: i64,
     ) -> anyhow::Result<ManyOut<U>> {
         let found = {
-            let endpoints = self.client.endpoint_ids();
-            endpoints.contains(&endpoint_id)
+            let endpoints = self.client.endpoints();
+            endpoints.iter().any(|ep| ep.id() == endpoint_id)
         };
 
         if !found {

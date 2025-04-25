@@ -332,9 +332,7 @@ pub async fn run(
                         .component(KV_PUBLISHER_COMPONENT)?;
                     let kvp = Arc::new(KvMetricsPublisher::new()?);
                     let kvp_inner = kvp.clone();
-                    tokio::spawn(
-                        async move { kvp_inner.create_endpoint(kvp_component, None).await },
-                    );
+                    tokio::spawn(async move { kvp_inner.create_endpoint(kvp_component).await });
                     Some(kvp)
                 } else {
                     None

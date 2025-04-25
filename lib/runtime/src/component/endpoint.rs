@@ -26,12 +26,6 @@ pub struct EndpointConfig {
     #[builder(private)]
     endpoint: Endpoint,
 
-    // todo: move lease to component/service
-    /// Lease
-    #[educe(Debug(ignore))]
-    #[builder(default)]
-    lease: Option<Lease>,
-
     /// Endpoint handler
     #[educe(Debug(ignore))]
     handler: Arc<dyn PushWorkHandler>,
@@ -55,8 +49,8 @@ impl EndpointConfigBuilder {
     }
 
     pub async fn start(self) -> Result<()> {
-        let (endpoint, lease, handler, stats_handler) = self.build_internal()?.dissolve();
-        let lease = lease.or(endpoint.drt().primary_lease());
+        let (endpoint, handler, stats_handler) = self.build_internal()?.dissolve();
+        let lease = endpoint.drt().primary_lease();
         let lease_id = lease.as_ref().map(|l| l.id()).unwrap_or(0);
 
         tracing::debug!(
@@ -99,9 +93,7 @@ impl EndpointConfigBuilder {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to start endpoint: {e}"))?;
 
-        let cancel_token = lease
-            .map(|l| l.child_token())
-            .unwrap_or_else(|| endpoint.drt().child_token());
+        let cancel_token = endpoint.drt().child_token();
 
         let push_endpoint = PushEndpoint::builder()
             .service_handler(handler)
@@ -127,7 +119,7 @@ impl EndpointConfigBuilder {
 
         if let Some(etcd_client) = &endpoint.component.drt.etcd_client {
             if let Err(e) = etcd_client
-                .kv_create(endpoint.etcd_path_with_id(lease_id), info, Some(lease_id))
+                .kv_create(endpoint.etcd_path_with_id(lease_id), info)
                 .await
             {
                 tracing::error!("Failed to register discoverable service: {:?}", e);

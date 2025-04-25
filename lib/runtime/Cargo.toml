@@ -41,6 +41,7 @@ chrono = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
 either = { workspace = true }
+etcd-client = { workspace = true }
 futures = { workspace = true }
 humantime = { workspace = true }
 prometheus = { workspace = true }
@@ -60,7 +61,6 @@ xxhash-rust = { workspace = true }
 
 async-once-cell = { version = "0.5.4" }
 educe = { version = "0.6.0" }
-etcd-client = { version = "0.14" }
 figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
 local-ip-address = { version = "0.6.3" }
 log = { version = "0.4" }

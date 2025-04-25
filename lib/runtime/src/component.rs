@@ -96,6 +96,12 @@ pub struct ComponentEndpointInfo {
     pub transport: TransportType,
 }
 
+impl ComponentEndpointInfo {
+    pub fn id(&self) -> i64 {
+        self.lease_id
+    }
+}
+
 /// A [Component] a discoverable entity in the distributed runtime.
 /// You can host [Endpoint] on a [Component] by first creating
 /// a [Service] then adding one or more [Endpoint] to the [Service].

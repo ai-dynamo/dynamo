@@ -59,7 +59,7 @@ pub struct Client {
 #[derive(Clone, Debug)]
 pub enum EndpointSource {
     Static,
-    Dynamic(tokio::sync::watch::Receiver<Vec<i64>>),
+    Dynamic(tokio::sync::watch::Receiver<Vec<ComponentEndpointInfo>>),
 }
 
 impl Client {
@@ -116,7 +116,7 @@ impl Client {
                         let key = String::from_utf8(kv.key().to_vec());
                         let val = serde_json::from_slice::<ComponentEndpointInfo>(kv.value());
                         if let (Ok(key), Ok(val)) = (key, val) {
-                            map.insert(key.clone(), val.lease_id);
+                            map.insert(key.clone(), val);
                         } else {
                             tracing::error!("Unable to parse put endpoint event; shutting down endpoint watcher for prefix: {}", prefix);
                             break;
@@ -133,9 +133,9 @@ impl Client {
                     }
                 }
 
-                let endpoint_ids: Vec<i64> = map.values().cloned().collect();
+                let endpoints: Vec<ComponentEndpointInfo> = map.values().cloned().collect();
 
-                if watch_tx.send(endpoint_ids).is_err() {
+                if watch_tx.send(endpoints).is_err() {
                     tracing::debug!("Unable to send watch updates; shutting down endpoint watcher for prefix: {}", prefix);
                     break;
                 }
@@ -162,26 +162,32 @@ impl Client {
         self.endpoint.etcd_path()
     }
 
-    pub fn endpoint_ids(&self) -> Vec<i64> {
+    pub fn endpoints(&self) -> Vec<ComponentEndpointInfo> {
         match &self.endpoints {
-            EndpointSource::Static => vec![0],
+            EndpointSource::Static => vec![],
             EndpointSource::Dynamic(watch_rx) => watch_rx.borrow().clone(),
         }
     }
 
+    pub fn endpoint_ids(&self) -> Vec<i64> {
+        self.endpoints().into_iter().map(|ep| ep.id()).collect()
+    }
+
     /// Wait for at least one [`Endpoint`] to be available
-    pub async fn wait_for_endpoints(&self) -> Result<()> {
+    pub async fn wait_for_endpoints(&self) -> Result<Vec<ComponentEndpointInfo>> {
+        let mut endpoints: Vec<ComponentEndpointInfo> = vec![];
         if let EndpointSource::Dynamic(mut rx) = self.endpoints.clone() {
             // wait for there to be 1 or more endpoints
             loop {
-                if rx.borrow_and_update().is_empty() {
+                endpoints = rx.borrow_and_update().to_vec();
+                if endpoints.is_empty() {
                     rx.changed().await?;
                 } else {
                     break;
                 }
             }
         }
-        Ok(())
+        Ok(endpoints)
     }
 
     /// Is this component know at startup and not discovered via etcd?
