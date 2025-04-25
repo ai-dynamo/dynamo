@@ -149,9 +149,23 @@ kubectl config set-context --current --namespace=$NAMESPACE
 ./deploy.sh
 ```
 
+if you wish to be guided through the deployment process, you can run the deploy script with the `--interactive` flag:
+
+```bash
+./deploy.sh --interactive
+```
+
 4. 🌐 **Expose Dynamo Cloud Externally**
 
-You must also expose the `dynamo-store` service within the namespace externally. This will be the endpoint the CLI uses to interface with Dynamo Cloud. You might setup an Ingress, use an `ExternalService` with Istio, or simply port-forward. In our docs, we refer to this externally available endpoint as `DYNAMO_CLOUD`.
+> [!NOTE]
+> The script will automatically display information about the endpoint you can use to access Dynamo Cloud. In our docs, we refer to this externally available endpoint as `DYNAMO_CLOUD`.
+
+The simplest way to expose the `dynamo-store` service within the namespace externally is to use a port-forward:
+
+```bash
+kubectl port-forward svc/dynamo-store <local-port>:80 -n $NAMESPACE
+export DYNAMO_CLOUD=http://localhost:<local-port>
+```
 
 ## 🎯 Next Steps
 

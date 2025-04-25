@@ -28,12 +28,12 @@ dynamo-operator:
 
   dynamo:
     ingress:
-      enabled: false
-      className: nginx
+      enabled: ${INGRESS_ENABLED}
+      className: ${INGRESS_CLASS}
       tlsSecretName: my-tls-secret
     istio:
-      enabled: false
-      gateway: istio-system/ingress-alb
+      enabled: ${ISTIO_ENABLED}
+      gateway: ${ISTIO_GATEWAY}
     ingressHostSuffix: ${DYNAMO_INGRESS_SUFFIX}
     dockerRegistry:
       server: ${PIPELINES_DOCKER_SERVER}
@@ -46,6 +46,8 @@ dynamo-api-store:
     enabled: true
     targetNamespace: ${NAMESPACE}
   istio:
+    enabled: ${ISTIO_ENABLED}
+    gateway: ${ISTIO_GATEWAY}
     host: ${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
   image:
     repository: ${DOCKER_SERVER}/dynamo-api-store
@@ -54,6 +56,8 @@ dynamo-api-store:
   imagePullSecrets:
     - name: ${DOCKER_SECRET_NAME}
   ingress:
+    enabled: ${INGRESS_ENABLED}
+    className: ${INGRESS_CLASS}
     hosts:
       - host: ${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
         paths:
