@@ -1,0 +1,16 @@
+[package]
+name = "dynamo-ctl"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0"
+crossterm = "0.27"
+glob = "0.3"
+ratatui = { version = "0.26", features = ["all-widgets"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+figlet-rs = "0.1"
