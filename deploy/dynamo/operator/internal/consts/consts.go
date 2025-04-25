@@ -49,8 +49,7 @@ const (
 
 	KubeLabelDynamoComponentType = "nvidia.com/dynamo-component-type"
 
-	KubeLabelIsDynamoImageBuilder   = "nvidia.com/is-dynamo-image-builder"
-	KubeLabelDynamoComponentRequest = "nvidia.com/dynamo-component-request"
+	KubeLabelIsDynamoImageBuilder = "nvidia.com/is-dynamo-image-builder"
 
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
@@ -67,7 +66,7 @@ const (
 	// nolint: gosec
 	KubeSecretNameRegcred = "dynamo-regcred"
 
-	KubeAnnotationDynamoComponentRequestHash            = "nvidia.com/dynamo-request-hash"
-	KubeAnnotationDynamoComponentRequestImageBuiderHash = "nvidia.com/dynamo-request-image-builder-hash"
-	KubeAnnotationDynamoComponentStorageNS              = "nvidia.com/dynamo-storage-namespace"
+	KubeAnnotationDynamoComponentHash            = "nvidia.com/dynamo-request-hash"
+	KubeAnnotationDynamoComponentImageBuiderHash = "nvidia.com/dynamo-request-image-builder-hash"
+	KubeAnnotationDynamoComponentStorageNS       = "nvidia.com/dynamo-storage-namespace"
 )

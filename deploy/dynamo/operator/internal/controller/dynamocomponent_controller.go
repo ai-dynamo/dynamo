@@ -29,7 +29,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"text/template"
@@ -70,17 +69,17 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 )
 
-// DynamoComponentRequestReconciler reconciles a DynamoComponentRequest object
-type DynamoComponentRequestReconciler struct {
+// DynamoComponentReconciler reconciles a DynamoComponent object
+type DynamoComponentReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 	Config   controller_common.Config
 }
 
-// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentrequests,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentrequests/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentrequests/finalizers,verbs=update
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponents,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponents/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponents/finalizers,verbs=update
 //+kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponents,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponents/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list;watch;create;update;patch;delete
@@ -94,7 +93,7 @@ type DynamoComponentRequestReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 // TODO(user): Modify the Reconcile function to compare the state specified by
-// the DynamoComponentRequest object against the actual cluster state, and then
+// the DynamoComponent object against the actual cluster state, and then
 // perform operations to make the cluster state reflect the state specified by
 // the user.
 //
@@ -102,87 +101,47 @@ type DynamoComponentRequestReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.18.2/pkg/reconcile
 //
 //nolint:gocyclo,nakedret
-func (r *DynamoComponentRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
+func (r *DynamoComponentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	logs := log.FromContext(ctx)
 
-	dynamoComponentRequest := &nvidiacomv1alpha1.DynamoComponentRequest{}
+	DynamoComponent := &nvidiacomv1alpha1.DynamoComponent{}
 
-	err = r.Get(ctx, req.NamespacedName, dynamoComponentRequest)
+	err = r.Get(ctx, req.NamespacedName, DynamoComponent)
 
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
 			// Object not found, return.  Created objects are automatically garbage collected.
 			// For additional cleanup logic use finalizers.
-			logs.Info("dynamoComponentRequest resource not found. Ignoring since object must be deleted")
+			logs.Info("DynamoComponent resource not found. Ignoring since object must be deleted")
 			err = nil
 			return
 		}
 		// Error reading the object - requeue the request.
-		logs.Error(err, "Failed to get dynamoComponentRequest")
+		logs.Error(err, "Failed to get DynamoComponent")
 		return
 	}
 
-	for _, condition := range dynamoComponentRequest.Status.Conditions {
-		if condition.Type == nvidiacomv1alpha1.DynamoGraphDeploymentConditionTypeAvailable && condition.Status == metav1.ConditionTrue {
-			logs.Info("Skip available dynamoComponentRequest")
-			return
-		}
+	if DynamoComponent.IsReady() {
+		logs.Info("Skip available DynamoComponent")
+		return
 	}
 
-	if len(dynamoComponentRequest.Status.Conditions) == 0 {
-		dynamoComponentRequest, err = r.setStatusConditions(ctx, req,
+	if len(DynamoComponent.Status.Conditions) == 0 {
+		DynamoComponent, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeModelsSeeding,
+				Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeImageBuilding,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
-				Message: "Starting to reconcile dynamoComponentRequest",
+				Message: "Starting to reconcile DynamoComponent",
 			},
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeImageBuilding,
+				Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeImageExists,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
-				Message: "Starting to reconcile dynamoComponentRequest",
+				Message: "Starting to reconcile DynamoComponent",
 			},
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeImageExists,
-				Status:  metav1.ConditionUnknown,
-				Reason:  "Reconciling",
-				Message: "Starting to reconcile dynamoComponentRequest",
-			},
-		)
-		if err != nil {
-			return
-		}
-	}
-
-	logs = logs.WithValues("dynamoComponentRequest", dynamoComponentRequest.Name, "dynamoComponentRequestNamespace", dynamoComponentRequest.Namespace)
-
-	defer func() {
-		if err == nil {
-			logs.Info("Reconcile success")
-			return
-		}
-		logs.Error(err, "Failed to reconcile dynamoComponentRequest.")
-		r.Recorder.Eventf(dynamoComponentRequest, corev1.EventTypeWarning, "ReconcileError", "Failed to reconcile dynamoComponentRequest: %v", err)
-		_, err_ := r.setStatusConditions(ctx, req,
-			metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeDynamoComponentAvailable,
-				Status:  metav1.ConditionFalse,
-				Reason:  "Reconciling",
-				Message: err.Error(),
-			},
-		)
-		if err_ != nil {
-			logs.Error(err_, "Failed to update dynamoComponentRequest status")
-			return
-		}
-	}()
-
-	dynamoComponentAvailableCondition := meta.FindStatusCondition(dynamoComponentRequest.Status.Conditions, nvidiacomv1alpha1.DynamoComponentRequestConditionTypeDynamoComponentAvailable)
-	if dynamoComponentAvailableCondition == nil || dynamoComponentAvailableCondition.Status != metav1.ConditionUnknown {
-		dynamoComponentRequest, err = r.setStatusConditions(ctx, req,
-			metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeDynamoComponentAvailable,
+				Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeDynamoComponentAvailable,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
 				Message: "Reconciling",
@@ -193,9 +152,32 @@ func (r *DynamoComponentRequestReconciler) Reconcile(ctx context.Context, req ct
 		}
 	}
 
-	dynamoComponentRequest, imageInfo, imageExists, imageExistsResult, err := r.ensureImageExists(ctx, ensureImageExistsOption{
-		dynamoComponentRequest: dynamoComponentRequest,
-		req:                    req,
+	logs = logs.WithValues("DynamoComponent", DynamoComponent.Name, "DynamoComponentNamespace", DynamoComponent.Namespace)
+
+	defer func() {
+		if err == nil {
+			logs.Info("Reconcile success")
+			return
+		}
+		logs.Error(err, "Failed to reconcile DynamoComponent.")
+		r.Recorder.Eventf(DynamoComponent, corev1.EventTypeWarning, "ReconcileError", "Failed to reconcile DynamoComponent: %v", err)
+		_, err_ := r.setStatusConditions(ctx, req,
+			metav1.Condition{
+				Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeDynamoComponentAvailable,
+				Status:  metav1.ConditionFalse,
+				Reason:  "Reconciling",
+				Message: err.Error(),
+			},
+		)
+		if err_ != nil {
+			logs.Error(err_, "Failed to update DynamoComponent status")
+			return
+		}
+	}()
+
+	DynamoComponent, _, imageExists, imageExistsResult, err := r.ensureImageExists(ctx, ensureImageExistsOption{
+		DynamoComponent: DynamoComponent,
+		req:             req,
 	})
 
 	if err != nil {
@@ -205,9 +187,9 @@ func (r *DynamoComponentRequestReconciler) Reconcile(ctx context.Context, req ct
 
 	if !imageExists {
 		result = imageExistsResult
-		dynamoComponentRequest, err = r.setStatusConditions(ctx, req,
+		DynamoComponent, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeDynamoComponentAvailable,
+				Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeDynamoComponentAvailable,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
 				Message: "DynamoComponent image is building",
@@ -219,64 +201,12 @@ func (r *DynamoComponentRequestReconciler) Reconcile(ctx context.Context, req ct
 		return
 	}
 
-	dynamoComponentCR := &nvidiacomv1alpha1.DynamoComponent{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      dynamoComponentRequest.Name,
-			Namespace: dynamoComponentRequest.Namespace,
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentSpec{
-			DynamoComponent: dynamoComponentRequest.Spec.DynamoComponent,
-			Image:           imageInfo.ImageName,
-			ServiceName:     dynamoComponentRequest.Spec.ServiceName,
-		},
-	}
-
-	err = ctrl.SetControllerReference(dynamoComponentRequest, dynamoComponentCR, r.Scheme)
-	if err != nil {
-		err = errors.Wrap(err, "set controller reference")
-		return
-	}
-
-	if imageInfo.DockerConfigJSONSecretName != "" {
-		dynamoComponentCR.Spec.ImagePullSecrets = []corev1.LocalObjectReference{
-			{
-				Name: imageInfo.DockerConfigJSONSecretName,
-			},
-		}
-	}
-
-	r.Recorder.Eventf(dynamoComponentRequest, corev1.EventTypeNormal, "DynamoComponentImageBuilder", "Creating DynamoComponent CR %s in namespace %s", dynamoComponentCR.Name, dynamoComponentCR.Namespace)
-	err = r.Create(ctx, dynamoComponentCR)
-	isAlreadyExists := k8serrors.IsAlreadyExists(err)
-	if err != nil && !isAlreadyExists {
-		err = errors.Wrap(err, "create DynamoComponent resource")
-		return
-	}
-	if isAlreadyExists {
-		oldDynamoComponentCR := &nvidiacomv1alpha1.DynamoComponent{}
-		r.Recorder.Eventf(dynamoComponentRequest, corev1.EventTypeNormal, "DynamoComponentImageBuilder", "Updating DynamoComponent CR %s in namespace %s", dynamoComponentCR.Name, dynamoComponentCR.Namespace)
-		err = r.Get(ctx, types.NamespacedName{Name: dynamoComponentCR.Name, Namespace: dynamoComponentCR.Namespace}, oldDynamoComponentCR)
-		if err != nil {
-			err = errors.Wrap(err, "get DynamoComponent resource")
-			return
-		}
-		if !reflect.DeepEqual(oldDynamoComponentCR.Spec, dynamoComponentCR.Spec) {
-			oldDynamoComponentCR.OwnerReferences = dynamoComponentCR.OwnerReferences
-			oldDynamoComponentCR.Spec = dynamoComponentCR.Spec
-			err = r.Update(ctx, oldDynamoComponentCR)
-			if err != nil {
-				err = errors.Wrap(err, "update DynamoComponent resource")
-				return
-			}
-		}
-	}
-
-	dynamoComponentRequest, err = r.setStatusConditions(ctx, req,
+	DynamoComponent, err = r.setStatusConditions(ctx, req,
 		metav1.Condition{
-			Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeDynamoComponentAvailable,
+			Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeDynamoComponentAvailable,
 			Status:  metav1.ConditionTrue,
 			Reason:  "Reconciling",
-			Message: "DynamoComponent is generated",
+			Message: "DynamoComponent image is generated",
 		},
 	)
 	if err != nil {
@@ -291,100 +221,100 @@ func isEstargzEnabled() bool {
 }
 
 type ensureImageExistsOption struct {
-	dynamoComponentRequest *nvidiacomv1alpha1.DynamoComponentRequest
-	req                    ctrl.Request
+	DynamoComponent *nvidiacomv1alpha1.DynamoComponent
+	req             ctrl.Request
 }
 
 //nolint:gocyclo,nakedret
-func (r *DynamoComponentRequestReconciler) ensureImageExists(ctx context.Context, opt ensureImageExistsOption) (dynamoComponentRequest *nvidiacomv1alpha1.DynamoComponentRequest, imageInfo ImageInfo, imageExists bool, result ctrl.Result, err error) { // nolint: unparam
+func (r *DynamoComponentReconciler) ensureImageExists(ctx context.Context, opt ensureImageExistsOption) (DynamoComponent *nvidiacomv1alpha1.DynamoComponent, imageInfo ImageInfo, imageExists bool, result ctrl.Result, err error) { // nolint: unparam
 	logs := log.FromContext(ctx)
 
-	dynamoComponentRequest = opt.dynamoComponentRequest
+	DynamoComponent = opt.DynamoComponent
 	req := opt.req
 
 	imageInfo, err = r.getImageInfo(ctx, GetImageInfoOption{
-		DynamoComponentRequest: dynamoComponentRequest,
+		DynamoComponent: DynamoComponent,
 	})
 	if err != nil {
 		err = errors.Wrap(err, "get image info")
 		return
 	}
 
-	imageExistsCheckedCondition := meta.FindStatusCondition(dynamoComponentRequest.Status.Conditions, nvidiacomv1alpha1.DynamoComponentRequestConditionTypeImageExistsChecked)
-	imageExistsCondition := meta.FindStatusCondition(dynamoComponentRequest.Status.Conditions, nvidiacomv1alpha1.DynamoComponentRequestConditionTypeImageExists)
+	imageExistsCheckedCondition := meta.FindStatusCondition(DynamoComponent.Status.Conditions, nvidiacomv1alpha1.DynamoComponentConditionTypeImageExistsChecked)
+	imageExistsCondition := meta.FindStatusCondition(DynamoComponent.Status.Conditions, nvidiacomv1alpha1.DynamoComponentConditionTypeImageExists)
 	if imageExistsCheckedCondition == nil || imageExistsCheckedCondition.Status != metav1.ConditionTrue || imageExistsCheckedCondition.Message != imageInfo.ImageName {
 		imageExistsCheckedCondition = &metav1.Condition{
-			Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeImageExistsChecked,
+			Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeImageExistsChecked,
 			Status:  metav1.ConditionUnknown,
 			Reason:  "Reconciling",
 			Message: imageInfo.ImageName,
 		}
 		dynamoComponentAvailableCondition := &metav1.Condition{
-			Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeDynamoComponentAvailable,
+			Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeDynamoComponentAvailable,
 			Status:  metav1.ConditionUnknown,
 			Reason:  "Reconciling",
 			Message: "Checking image exists",
 		}
-		dynamoComponentRequest, err = r.setStatusConditions(ctx, req, *imageExistsCheckedCondition, *dynamoComponentAvailableCondition)
+		DynamoComponent, err = r.setStatusConditions(ctx, req, *imageExistsCheckedCondition, *dynamoComponentAvailableCondition)
 		if err != nil {
 			return
 		}
-		r.Recorder.Eventf(dynamoComponentRequest, corev1.EventTypeNormal, "CheckingImage", "Checking image exists: %s", imageInfo.ImageName)
-		imageExists, err = checkImageExists(dynamoComponentRequest, imageInfo.DockerRegistry, imageInfo.InClusterImageName)
+		r.Recorder.Eventf(DynamoComponent, corev1.EventTypeNormal, "CheckingImage", "Checking image exists: %s", imageInfo.ImageName)
+		imageExists, err = checkImageExists(DynamoComponent, imageInfo.DockerRegistry, imageInfo.InClusterImageName)
 		if err != nil {
 			err = errors.Wrapf(err, "check image %s exists", imageInfo.ImageName)
 			return
 		}
 
-		err = r.Get(ctx, req.NamespacedName, dynamoComponentRequest)
+		err = r.Get(ctx, req.NamespacedName, DynamoComponent)
 		if err != nil {
-			logs.Error(err, "Failed to re-fetch dynamoComponentRequest")
+			logs.Error(err, "Failed to re-fetch DynamoComponent")
 			return
 		}
 
 		if imageExists {
-			r.Recorder.Eventf(dynamoComponentRequest, corev1.EventTypeNormal, "CheckingImage", "Image exists: %s", imageInfo.ImageName)
+			r.Recorder.Eventf(DynamoComponent, corev1.EventTypeNormal, "CheckingImage", "Image exists: %s", imageInfo.ImageName)
 			imageExistsCheckedCondition = &metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeImageExistsChecked,
+				Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeImageExistsChecked,
 				Status:  metav1.ConditionTrue,
 				Reason:  "Reconciling",
 				Message: imageInfo.ImageName,
 			}
 			imageExistsCondition = &metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeImageExists,
+				Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeImageExists,
 				Status:  metav1.ConditionTrue,
 				Reason:  "Reconciling",
 				Message: imageInfo.ImageName,
 			}
-			dynamoComponentRequest, err = r.setStatusConditions(ctx, req, *imageExistsCondition, *imageExistsCheckedCondition)
+			DynamoComponent, err = r.setStatusConditions(ctx, req, *imageExistsCondition, *imageExistsCheckedCondition)
 			if err != nil {
 				return
 			}
 		} else {
-			r.Recorder.Eventf(dynamoComponentRequest, corev1.EventTypeNormal, "CheckingImage", "Image not exists: %s", imageInfo.ImageName)
+			r.Recorder.Eventf(DynamoComponent, corev1.EventTypeNormal, "CheckingImage", "Image not exists: %s", imageInfo.ImageName)
 			imageExistsCheckedCondition = &metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeImageExistsChecked,
+				Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeImageExistsChecked,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
 				Message: fmt.Sprintf("Image not exists: %s", imageInfo.ImageName),
 			}
 			imageExistsCondition = &metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeImageExists,
+				Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeImageExists,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
 				Message: fmt.Sprintf("Image %s is not exists", imageInfo.ImageName),
 			}
-			dynamoComponentRequest, err = r.setStatusConditions(ctx, req, *imageExistsCondition, *imageExistsCheckedCondition)
+			DynamoComponent, err = r.setStatusConditions(ctx, req, *imageExistsCondition, *imageExistsCheckedCondition)
 			if err != nil {
 				return
 			}
 		}
 	}
 
-	var dynamoComponentRequestHashStr string
-	dynamoComponentRequestHashStr, err = r.getHashStr(dynamoComponentRequest)
+	var DynamoComponentHashStr string
+	DynamoComponentHashStr, err = r.getHashStr(DynamoComponent)
 	if err != nil {
-		err = errors.Wrapf(err, "get dynamoComponentRequest %s/%s hash string", dynamoComponentRequest.Namespace, dynamoComponentRequest.Name)
+		err = errors.Wrapf(err, "get DynamoComponent %s/%s hash string", DynamoComponent.Namespace, DynamoComponent.Name)
 		return
 	}
 
@@ -394,8 +324,8 @@ func (r *DynamoComponentRequestReconciler) ensureImageExists(ctx context.Context
 	}
 
 	jobLabels := map[string]string{
-		commonconsts.KubeLabelDynamoComponentRequest: dynamoComponentRequest.Name,
-		commonconsts.KubeLabelIsDynamoImageBuilder:   commonconsts.KubeLabelValueTrue,
+		commonconsts.KubeLabelDynamoComponent:      DynamoComponent.Name,
+		commonconsts.KubeLabelIsDynamoImageBuilder: commonconsts.KubeLabelValueTrue,
 	}
 
 	jobs := &batchv1.JobList{}
@@ -409,9 +339,9 @@ func (r *DynamoComponentRequestReconciler) ensureImageExists(ctx context.Context
 	for _, job_ := range jobs.Items {
 		job_ := job_
 
-		oldHash := job_.Annotations[consts.KubeAnnotationDynamoComponentRequestHash]
-		if oldHash != dynamoComponentRequestHashStr {
-			logs.Info("Because hash changed, delete old job", "job", job_.Name, "oldHash", oldHash, "newHash", dynamoComponentRequestHashStr)
+		oldHash := job_.Annotations[consts.KubeAnnotationDynamoComponentHash]
+		if oldHash != DynamoComponentHashStr {
+			logs.Info("Because hash changed, delete old job", "job", job_.Name, "oldHash", oldHash, "newHash", DynamoComponentHashStr)
 			// --cascade=foreground
 			err = r.Delete(ctx, &job_, &client.DeleteOptions{
 				PropagationPolicy: &[]metav1.DeletionPropagation{metav1.DeletePropagationForeground}[0],
@@ -447,31 +377,31 @@ func (r *DynamoComponentRequestReconciler) ensureImageExists(ctx context.Context
 
 	if job == nil {
 		job, err = r.generateImageBuilderJob(ctx, GenerateImageBuilderJobOption{
-			ImageInfo:              imageInfo,
-			DynamoComponentRequest: dynamoComponentRequest,
+			ImageInfo:       imageInfo,
+			DynamoComponent: DynamoComponent,
 		})
 		if err != nil {
 			err = errors.Wrap(err, "generate image builder job")
 			return
 		}
-		r.Recorder.Eventf(dynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderJob", "Creating image builder job: %s", job.Name)
+		r.Recorder.Eventf(DynamoComponent, corev1.EventTypeNormal, "GenerateImageBuilderJob", "Creating image builder job: %s", job.Name)
 		err = r.Create(ctx, job)
 		if err != nil {
 			err = errors.Wrapf(err, "create image builder job %s", job.Name)
 			return
 		}
-		r.Recorder.Eventf(dynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderJob", "Created image builder job: %s", job.Name)
+		r.Recorder.Eventf(DynamoComponent, corev1.EventTypeNormal, "GenerateImageBuilderJob", "Created image builder job: %s", job.Name)
 		return
 	}
 
-	r.Recorder.Eventf(dynamoComponentRequest, corev1.EventTypeNormal, "CheckingImageBuilderJob", "Found image builder job: %s", job.Name)
+	r.Recorder.Eventf(DynamoComponent, corev1.EventTypeNormal, "CheckingImageBuilderJob", "Found image builder job: %s", job.Name)
 
-	err = r.Get(ctx, req.NamespacedName, dynamoComponentRequest)
+	err = r.Get(ctx, req.NamespacedName, DynamoComponent)
 	if err != nil {
-		logs.Error(err, "Failed to re-fetch dynamoComponentRequest")
+		logs.Error(err, "Failed to re-fetch DynamoComponent")
 		return
 	}
-	imageBuildingCondition := meta.FindStatusCondition(dynamoComponentRequest.Status.Conditions, nvidiacomv1alpha1.DynamoComponentRequestConditionTypeImageBuilding)
+	imageBuildingCondition := meta.FindStatusCondition(DynamoComponent.Status.Conditions, nvidiacomv1alpha1.DynamoComponentConditionTypeImageBuilding)
 
 	isJobFailed := false
 	isJobRunning := true
@@ -496,23 +426,23 @@ func (r *DynamoComponentRequestReconciler) ensureImageExists(ctx context.Context
 		conditions := make([]metav1.Condition, 0)
 		if job.Status.Active > 0 {
 			conditions = append(conditions, metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeImageBuilding,
+				Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeImageBuilding,
 				Status:  metav1.ConditionTrue,
 				Reason:  "Reconciling",
 				Message: fmt.Sprintf("Image building job %s is running", job.Name),
 			})
 		} else {
 			conditions = append(conditions, metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeImageBuilding,
+				Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeImageBuilding,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
 				Message: fmt.Sprintf("Image building job %s is waiting", job.Name),
 			})
 		}
-		if dynamoComponentRequest.Spec.ImageBuildTimeout != nil {
-			if imageBuildingCondition != nil && imageBuildingCondition.LastTransitionTime.Add(time.Duration(*dynamoComponentRequest.Spec.ImageBuildTimeout)).Before(time.Now()) {
+		if DynamoComponent.Spec.ImageBuildTimeout != nil {
+			if imageBuildingCondition != nil && imageBuildingCondition.LastTransitionTime.Add(time.Duration(*DynamoComponent.Spec.ImageBuildTimeout)).Before(time.Now()) {
 				conditions = append(conditions, metav1.Condition{
-					Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeImageBuilding,
+					Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeImageBuilding,
 					Status:  metav1.ConditionFalse,
 					Reason:  "Timeout",
 					Message: fmt.Sprintf("Image building job %s is timeout", job.Name),
@@ -525,27 +455,27 @@ func (r *DynamoComponentRequestReconciler) ensureImageExists(ctx context.Context
 			}
 		}
 
-		if dynamoComponentRequest, err = r.setStatusConditions(ctx, req, conditions...); err != nil {
+		if DynamoComponent, err = r.setStatusConditions(ctx, req, conditions...); err != nil {
 			return
 		}
 
 		if imageBuildingCondition != nil && imageBuildingCondition.Status != metav1.ConditionTrue && isJobRunning {
-			r.Recorder.Eventf(dynamoComponentRequest, corev1.EventTypeNormal, "DynamoComponentImageBuilder", "Image is building now")
+			r.Recorder.Eventf(DynamoComponent, corev1.EventTypeNormal, "DynamoComponentImageBuilder", "Image is building now")
 		}
 
 		return
 	}
 
 	if isJobFailed {
-		dynamoComponentRequest, err = r.setStatusConditions(ctx, req,
+		DynamoComponent, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeImageBuilding,
+				Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeImageBuilding,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
 				Message: fmt.Sprintf("Image building job %s is failed.", job.Name),
 			},
 			metav1.Condition{
-				Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeDynamoComponentAvailable,
+				Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeDynamoComponentAvailable,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
 				Message: fmt.Sprintf("Image building job %s is failed.", job.Name),
@@ -557,15 +487,15 @@ func (r *DynamoComponentRequestReconciler) ensureImageExists(ctx context.Context
 		return
 	}
 
-	dynamoComponentRequest, err = r.setStatusConditions(ctx, req,
+	DynamoComponent, err = r.setStatusConditions(ctx, req,
 		metav1.Condition{
-			Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeImageBuilding,
+			Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeImageBuilding,
 			Status:  metav1.ConditionFalse,
 			Reason:  "Reconciling",
 			Message: fmt.Sprintf("Image building job %s is succeeded.", job.Name),
 		},
 		metav1.Condition{
-			Type:    nvidiacomv1alpha1.DynamoComponentRequestConditionTypeImageExists,
+			Type:    nvidiacomv1alpha1.DynamoComponentConditionTypeImageExists,
 			Status:  metav1.ConditionTrue,
 			Reason:  "Reconciling",
 			Message: imageInfo.ImageName,
@@ -575,40 +505,40 @@ func (r *DynamoComponentRequestReconciler) ensureImageExists(ctx context.Context
 		return
 	}
 
-	r.Recorder.Eventf(dynamoComponentRequest, corev1.EventTypeNormal, "DynamoComponentImageBuilder", "Image has been built successfully")
+	r.Recorder.Eventf(DynamoComponent, corev1.EventTypeNormal, "DynamoComponentImageBuilder", "Image has been built successfully")
 
 	imageExists = true
 
 	return
 }
 
-func (r *DynamoComponentRequestReconciler) setStatusConditions(ctx context.Context, req ctrl.Request, conditions ...metav1.Condition) (dynamoComponentRequest *nvidiacomv1alpha1.DynamoComponentRequest, err error) {
-	dynamoComponentRequest = &nvidiacomv1alpha1.DynamoComponentRequest{}
+func (r *DynamoComponentReconciler) setStatusConditions(ctx context.Context, req ctrl.Request, conditions ...metav1.Condition) (DynamoComponent *nvidiacomv1alpha1.DynamoComponent, err error) {
+	DynamoComponent = &nvidiacomv1alpha1.DynamoComponent{}
 	/*
 		Please don't blame me when you see this kind of code,
 		this is to avoid "the object has been modified; please apply your changes to the latest version and try again" when updating CR status,
 		don't doubt that almost all CRD operators (e.g. cert-manager) can't avoid this stupid error and can only try to avoid this by this stupid way.
 	*/
 	for i := 0; i < 3; i++ {
-		if err = r.Get(ctx, req.NamespacedName, dynamoComponentRequest); err != nil {
-			err = errors.Wrap(err, "Failed to re-fetch dynamoComponentRequest")
+		if err = r.Get(ctx, req.NamespacedName, DynamoComponent); err != nil {
+			err = errors.Wrap(err, "Failed to re-fetch DynamoComponent")
 			return
 		}
 		for _, condition := range conditions {
-			meta.SetStatusCondition(&dynamoComponentRequest.Status.Conditions, condition)
+			meta.SetStatusCondition(&DynamoComponent.Status.Conditions, condition)
 		}
-		if err = r.Status().Update(ctx, dynamoComponentRequest); err != nil {
+		if err = r.Status().Update(ctx, DynamoComponent); err != nil {
 			time.Sleep(100 * time.Millisecond)
 		} else {
 			break
 		}
 	}
 	if err != nil {
-		err = errors.Wrap(err, "Failed to update dynamoComponentRequest status")
+		err = errors.Wrap(err, "Failed to update DynamoComponent status")
 		return
 	}
-	if err = r.Get(ctx, req.NamespacedName, dynamoComponentRequest); err != nil {
-		err = errors.Wrap(err, "Failed to re-fetch dynamoComponentRequest")
+	if err = r.Get(ctx, req.NamespacedName, DynamoComponent); err != nil {
+		err = errors.Wrap(err, "Failed to re-fetch DynamoComponent")
 		return
 	}
 	return
@@ -635,7 +565,7 @@ func getDynamoComponentImageBuildEngine() DynamoComponentImageBuildEngine {
 }
 
 //nolint:nakedret
-func (r *DynamoComponentRequestReconciler) makeSureDockerConfigJSONSecret(ctx context.Context, namespace string, dockerRegistryConf *commonconfig.DockerRegistryConfig) (dockerConfigJSONSecret *corev1.Secret, err error) {
+func (r *DynamoComponentReconciler) makeSureDockerConfigJSONSecret(ctx context.Context, namespace string, dockerRegistryConf *commonconfig.DockerRegistryConfig) (dockerConfigJSONSecret *corev1.Secret, err error) {
 	if dockerRegistryConf.Username == "" {
 		return
 	}
@@ -713,7 +643,7 @@ func (r *DynamoComponentRequestReconciler) makeSureDockerConfigJSONSecret(ctx co
 }
 
 //nolint:nakedret
-func (r *DynamoComponentRequestReconciler) getApiStoreClient(ctx context.Context) (*apiStoreClient.ApiStoreClient, *commonconfig.ApiStoreConfig, error) {
+func (r *DynamoComponentReconciler) getApiStoreClient(ctx context.Context) (*apiStoreClient.ApiStoreClient, *commonconfig.ApiStoreConfig, error) {
 	apiStoreConf, err := commonconfig.GetApiStoreConfig(ctx)
 	isNotFound := k8serrors.IsNotFound(err)
 	if err != nil && !isNotFound {
@@ -739,20 +669,20 @@ func (r *DynamoComponentRequestReconciler) getApiStoreClient(ctx context.Context
 }
 
 //nolint:nakedret
-func (r *DynamoComponentRequestReconciler) getDockerRegistry(ctx context.Context, dynamoComponentRequest *nvidiacomv1alpha1.DynamoComponentRequest) (dockerRegistry schemas.DockerRegistrySchema, err error) {
-	if dynamoComponentRequest != nil && dynamoComponentRequest.Spec.DockerConfigJSONSecretName != "" {
+func (r *DynamoComponentReconciler) getDockerRegistry(ctx context.Context, DynamoComponent *nvidiacomv1alpha1.DynamoComponent) (dockerRegistry schemas.DockerRegistrySchema, err error) {
+	if DynamoComponent != nil && DynamoComponent.Spec.DockerConfigJSONSecretName != "" {
 		secret := &corev1.Secret{}
 		err = r.Get(ctx, types.NamespacedName{
-			Namespace: dynamoComponentRequest.Namespace,
-			Name:      dynamoComponentRequest.Spec.DockerConfigJSONSecretName,
+			Namespace: DynamoComponent.Namespace,
+			Name:      DynamoComponent.Spec.DockerConfigJSONSecretName,
 		}, secret)
 		if err != nil {
-			err = errors.Wrapf(err, "get docker config json secret %s", dynamoComponentRequest.Spec.DockerConfigJSONSecretName)
+			err = errors.Wrapf(err, "get docker config json secret %s", DynamoComponent.Spec.DockerConfigJSONSecretName)
 			return
 		}
 		configJSON, ok := secret.Data[".dockerconfigjson"]
 		if !ok {
-			err = errors.Errorf("docker config json secret %s does not have .dockerconfigjson key", dynamoComponentRequest.Spec.DockerConfigJSONSecretName)
+			err = errors.Errorf("docker config json secret %s does not have .dockerconfigjson key", DynamoComponent.Spec.DockerConfigJSONSecretName)
 			return
 		}
 		var configObj struct {
@@ -762,10 +692,10 @@ func (r *DynamoComponentRequestReconciler) getDockerRegistry(ctx context.Context
 		}
 		err = json.Unmarshal(configJSON, &configObj)
 		if err != nil {
-			err = errors.Wrapf(err, "unmarshal docker config json secret %s", dynamoComponentRequest.Spec.DockerConfigJSONSecretName)
+			err = errors.Wrapf(err, "unmarshal docker config json secret %s", DynamoComponent.Spec.DockerConfigJSONSecretName)
 			return
 		}
-		imageRegistryURI, _, _ := xstrings.Partition(dynamoComponentRequest.Spec.Image, "/")
+		imageRegistryURI, _, _ := xstrings.Partition(DynamoComponent.Spec.Image, "/")
 		var server string
 		var auth string
 		if imageRegistryURI != "" {
@@ -794,19 +724,19 @@ func (r *DynamoComponentRequestReconciler) getDockerRegistry(ctx context.Context
 			}
 		}
 		if server == "" {
-			err = errors.Errorf("no auth in docker config json secret %s", dynamoComponentRequest.Spec.DockerConfigJSONSecretName)
+			err = errors.Errorf("no auth in docker config json secret %s", DynamoComponent.Spec.DockerConfigJSONSecretName)
 			return
 		}
 		dockerRegistry.Server = server
 		var credentials []byte
 		credentials, err = base64.StdEncoding.DecodeString(auth)
 		if err != nil {
-			err = errors.Wrapf(err, "cannot base64 decode auth in docker config json secret %s", dynamoComponentRequest.Spec.DockerConfigJSONSecretName)
+			err = errors.Wrapf(err, "cannot base64 decode auth in docker config json secret %s", DynamoComponent.Spec.DockerConfigJSONSecretName)
 			return
 		}
 		dockerRegistry.Username, _, dockerRegistry.Password = xstrings.Partition(string(credentials), ":")
-		if dynamoComponentRequest.Spec.OCIRegistryInsecure != nil {
-			dockerRegistry.Secure = !*dynamoComponentRequest.Spec.OCIRegistryInsecure
+		if DynamoComponent.Spec.OCIRegistryInsecure != nil {
+			dockerRegistry.Secure = !*DynamoComponent.Spec.OCIRegistryInsecure
 		}
 		return
 	}
@@ -848,23 +778,23 @@ func isAddNamespacePrefix() bool {
 	return os.Getenv("ADD_NAMESPACE_PREFIX_TO_IMAGE_NAME") == trueStr
 }
 
-func getDynamoComponentImagePrefix(dynamoComponentRequest *nvidiacomv1alpha1.DynamoComponentRequest) string {
-	if dynamoComponentRequest == nil {
+func getDynamoComponentImagePrefix(DynamoComponent *nvidiacomv1alpha1.DynamoComponent) string {
+	if DynamoComponent == nil {
 		return ""
 	}
-	prefix, exist := dynamoComponentRequest.Annotations[consts.KubeAnnotationDynamoComponentStorageNS]
+	prefix, exist := DynamoComponent.Annotations[consts.KubeAnnotationDynamoComponentStorageNS]
 	if exist && prefix != "" {
 		return fmt.Sprintf("%s.", prefix)
 	}
 	if isAddNamespacePrefix() {
-		return fmt.Sprintf("%s.", dynamoComponentRequest.Namespace)
+		return fmt.Sprintf("%s.", DynamoComponent.Namespace)
 	}
 	return ""
 }
 
-func getDynamoComponentImageName(dynamoComponentRequest *nvidiacomv1alpha1.DynamoComponentRequest, dockerRegistry schemas.DockerRegistrySchema, dynamoComponentRepositoryName, dynamoComponentVersion string, inCluster bool) string {
-	if dynamoComponentRequest != nil && dynamoComponentRequest.Spec.Image != "" {
-		return dynamoComponentRequest.Spec.Image
+func getDynamoComponentImageName(DynamoComponent *nvidiacomv1alpha1.DynamoComponent, dockerRegistry schemas.DockerRegistrySchema, dynamoComponentRepositoryName, dynamoComponentVersion string, inCluster bool) string {
+	if DynamoComponent != nil && DynamoComponent.Spec.Image != "" {
+		return DynamoComponent.Spec.Image
 	}
 	var uri, tag string
 	if inCluster {
@@ -877,20 +807,20 @@ func getDynamoComponentImageName(dynamoComponentRequest *nvidiacomv1alpha1.Dynam
 		tail += ".esgz"
 	}
 
-	tag = fmt.Sprintf("dynamo.%s%s", getDynamoComponentImagePrefix(dynamoComponentRequest), tail)
+	tag = fmt.Sprintf("dynamo.%s%s", getDynamoComponentImagePrefix(DynamoComponent), tail)
 
 	if len(tag) > 128 {
 		hashStr := hash(tail)
-		tag = fmt.Sprintf("dynamo.%s%s", getDynamoComponentImagePrefix(dynamoComponentRequest), hashStr)
+		tag = fmt.Sprintf("dynamo.%s%s", getDynamoComponentImagePrefix(DynamoComponent), hashStr)
 		if len(tag) > 128 {
-			tag = fmt.Sprintf("dynamo.%s", hash(fmt.Sprintf("%s%s", getDynamoComponentImagePrefix(dynamoComponentRequest), tail)))[:128]
+			tag = fmt.Sprintf("dynamo.%s", hash(fmt.Sprintf("%s%s", getDynamoComponentImagePrefix(DynamoComponent), tail)))[:128]
 		}
 	}
 	return fmt.Sprintf("%s:%s", uri, tag)
 }
 
-func checkImageExists(dynamoComponentRequest *nvidiacomv1alpha1.DynamoComponentRequest, dockerRegistry schemas.DockerRegistrySchema, imageName string) (bool, error) {
-	if dynamoComponentRequest.Annotations["nvidia.com/force-build-image"] == commonconsts.KubeLabelValueTrue {
+func checkImageExists(DynamoComponent *nvidiacomv1alpha1.DynamoComponent, dockerRegistry schemas.DockerRegistrySchema, imageName string) (bool, error) {
+	if DynamoComponent.Annotations["nvidia.com/force-build-image"] == commonconsts.KubeLabelValueTrue {
 		return false, nil
 	}
 
@@ -935,26 +865,26 @@ type ImageInfo struct {
 }
 
 type GetImageInfoOption struct {
-	DynamoComponentRequest *nvidiacomv1alpha1.DynamoComponentRequest
+	DynamoComponent *nvidiacomv1alpha1.DynamoComponent
 }
 
 //nolint:nakedret
-func (r *DynamoComponentRequestReconciler) getImageInfo(ctx context.Context, opt GetImageInfoOption) (imageInfo ImageInfo, err error) {
-	dynamoComponentRepositoryName, _, dynamoComponentVersion := xstrings.Partition(opt.DynamoComponentRequest.Spec.DynamoComponent, ":")
-	dockerRegistry, err := r.getDockerRegistry(ctx, opt.DynamoComponentRequest)
+func (r *DynamoComponentReconciler) getImageInfo(ctx context.Context, opt GetImageInfoOption) (imageInfo ImageInfo, err error) {
+	dynamoComponentRepositoryName, _, dynamoComponentVersion := xstrings.Partition(opt.DynamoComponent.Spec.DynamoComponent, ":")
+	dockerRegistry, err := r.getDockerRegistry(ctx, opt.DynamoComponent)
 	if err != nil {
 		err = errors.Wrap(err, "get docker registry")
 		return
 	}
 	imageInfo.DockerRegistry = dockerRegistry
-	imageInfo.ImageName = getDynamoComponentImageName(opt.DynamoComponentRequest, dockerRegistry, dynamoComponentRepositoryName, dynamoComponentVersion, false)
-	imageInfo.InClusterImageName = getDynamoComponentImageName(opt.DynamoComponentRequest, dockerRegistry, dynamoComponentRepositoryName, dynamoComponentVersion, true)
+	imageInfo.ImageName = getDynamoComponentImageName(opt.DynamoComponent, dockerRegistry, dynamoComponentRepositoryName, dynamoComponentVersion, false)
+	imageInfo.InClusterImageName = getDynamoComponentImageName(opt.DynamoComponent, dockerRegistry, dynamoComponentRepositoryName, dynamoComponentVersion, true)
 
-	imageInfo.DockerConfigJSONSecretName = opt.DynamoComponentRequest.Spec.DockerConfigJSONSecretName
+	imageInfo.DockerConfigJSONSecretName = opt.DynamoComponent.Spec.DockerConfigJSONSecretName
 
-	imageInfo.DockerRegistryInsecure = opt.DynamoComponentRequest.Annotations[commonconsts.KubeAnnotationDynamoDockerRegistryInsecure] == "true"
-	if opt.DynamoComponentRequest.Spec.OCIRegistryInsecure != nil {
-		imageInfo.DockerRegistryInsecure = *opt.DynamoComponentRequest.Spec.OCIRegistryInsecure
+	imageInfo.DockerRegistryInsecure = opt.DynamoComponent.Annotations[commonconsts.KubeAnnotationDynamoDockerRegistryInsecure] == "true"
+	if opt.DynamoComponent.Spec.OCIRegistryInsecure != nil {
+		imageInfo.DockerRegistryInsecure = *opt.DynamoComponent.Spec.OCIRegistryInsecure
 	}
 
 	if imageInfo.DockerConfigJSONSecretName == "" {
@@ -966,13 +896,13 @@ func (r *DynamoComponentRequestReconciler) getImageInfo(ctx context.Context, opt
 		}
 		imageInfo.DockerRegistryInsecure = !dockerRegistryConf.Secure
 		var dockerConfigSecret *corev1.Secret
-		r.Recorder.Eventf(opt.DynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Making sure docker config secret %s in namespace %s", commonconsts.KubeSecretNameRegcred, opt.DynamoComponentRequest.Namespace)
-		dockerConfigSecret, err = r.makeSureDockerConfigJSONSecret(ctx, opt.DynamoComponentRequest.Namespace, dockerRegistryConf)
+		r.Recorder.Eventf(opt.DynamoComponent, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Making sure docker config secret %s in namespace %s", commonconsts.KubeSecretNameRegcred, opt.DynamoComponent.Namespace)
+		dockerConfigSecret, err = r.makeSureDockerConfigJSONSecret(ctx, opt.DynamoComponent.Namespace, dockerRegistryConf)
 		if err != nil {
 			err = errors.Wrap(err, "make sure docker config secret")
 			return
 		}
-		r.Recorder.Eventf(opt.DynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Docker config secret %s in namespace %s is ready", commonconsts.KubeSecretNameRegcred, opt.DynamoComponentRequest.Namespace)
+		r.Recorder.Eventf(opt.DynamoComponent, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Docker config secret %s in namespace %s is ready", commonconsts.KubeSecretNameRegcred, opt.DynamoComponent.Namespace)
 		if dockerConfigSecret != nil {
 			imageInfo.DockerConfigJSONSecretName = dockerConfigSecret.Name
 		}
@@ -980,22 +910,22 @@ func (r *DynamoComponentRequestReconciler) getImageInfo(ctx context.Context, opt
 	return
 }
 
-func (r *DynamoComponentRequestReconciler) getImageBuilderJobName() string {
+func (r *DynamoComponentReconciler) getImageBuilderJobName() string {
 	guid := xid.New()
 	return fmt.Sprintf("dynamo-image-builder-%s", guid.String())
 }
 
-func (r *DynamoComponentRequestReconciler) getImageBuilderJobLabels(dynamoComponentRequest *nvidiacomv1alpha1.DynamoComponentRequest) map[string]string {
+func (r *DynamoComponentReconciler) getImageBuilderJobLabels(DynamoComponent *nvidiacomv1alpha1.DynamoComponent) map[string]string {
 	return map[string]string{
-		commonconsts.KubeLabelDynamoComponentRequest: dynamoComponentRequest.Name,
-		commonconsts.KubeLabelIsDynamoImageBuilder:   "true",
+		commonconsts.KubeLabelDynamoComponent:      DynamoComponent.Name,
+		commonconsts.KubeLabelIsDynamoImageBuilder: "true",
 	}
 }
 
-func (r *DynamoComponentRequestReconciler) getImageBuilderPodLabels(dynamoComponentRequest *nvidiacomv1alpha1.DynamoComponentRequest) map[string]string {
+func (r *DynamoComponentReconciler) getImageBuilderPodLabels(DynamoComponent *nvidiacomv1alpha1.DynamoComponent) map[string]string {
 	return map[string]string{
-		commonconsts.KubeLabelDynamoComponentRequest: dynamoComponentRequest.Name,
-		commonconsts.KubeLabelIsDynamoImageBuilder:   "true",
+		commonconsts.KubeLabelDynamoComponent:      DynamoComponent.Name,
+		commonconsts.KubeLabelIsDynamoImageBuilder: "true",
 	}
 }
 
@@ -1007,12 +937,12 @@ func hash(text string) string {
 }
 
 type GenerateImageBuilderJobOption struct {
-	ImageInfo              ImageInfo
-	DynamoComponentRequest *nvidiacomv1alpha1.DynamoComponentRequest
+	ImageInfo       ImageInfo
+	DynamoComponent *nvidiacomv1alpha1.DynamoComponent
 }
 
 //nolint:nakedret
-func (r *DynamoComponentRequestReconciler) generateImageBuilderJob(ctx context.Context, opt GenerateImageBuilderJobOption) (job *batchv1.Job, err error) {
+func (r *DynamoComponentReconciler) generateImageBuilderJob(ctx context.Context, opt GenerateImageBuilderJobOption) (job *batchv1.Job, err error) {
 	// nolint: gosimple
 	podTemplateSpec, err := r.generateImageBuilderPodTemplateSpec(ctx, GenerateImageBuilderPodTemplateSpecOption(opt))
 	if err != nil {
@@ -1020,17 +950,17 @@ func (r *DynamoComponentRequestReconciler) generateImageBuilderJob(ctx context.C
 		return
 	}
 	kubeAnnotations := make(map[string]string)
-	hashStr, err := r.getHashStr(opt.DynamoComponentRequest)
+	hashStr, err := r.getHashStr(opt.DynamoComponent)
 	if err != nil {
 		err = errors.Wrap(err, "failed to get hash string")
 		return
 	}
-	kubeAnnotations[consts.KubeAnnotationDynamoComponentRequestHash] = hashStr
+	kubeAnnotations[consts.KubeAnnotationDynamoComponentHash] = hashStr
 	job = &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        r.getImageBuilderJobName(),
-			Namespace:   opt.DynamoComponentRequest.Namespace,
-			Labels:      r.getImageBuilderJobLabels(opt.DynamoComponentRequest),
+			Namespace:   opt.DynamoComponent.Namespace,
+			Labels:      r.getImageBuilderJobLabels(opt.DynamoComponent),
 			Annotations: kubeAnnotations,
 		},
 		Spec: batchv1.JobSpec{
@@ -1052,7 +982,7 @@ func (r *DynamoComponentRequestReconciler) generateImageBuilderJob(ctx context.C
 			Template: *podTemplateSpec,
 		},
 	}
-	err = ctrl.SetControllerReference(opt.DynamoComponentRequest, job, r.Scheme)
+	err = ctrl.SetControllerReference(opt.DynamoComponent, job, r.Scheme)
 	if err != nil {
 		err = errors.Wrapf(err, "set controller reference for job %s", job.Name)
 		return
@@ -1060,7 +990,7 @@ func (r *DynamoComponentRequestReconciler) generateImageBuilderJob(ctx context.C
 	return
 }
 
-func injectPodAffinity(podSpec *corev1.PodSpec, dynamoComponentRequest *nvidiacomv1alpha1.DynamoComponentRequest) {
+func injectPodAffinity(podSpec *corev1.PodSpec, DynamoComponent *nvidiacomv1alpha1.DynamoComponent) {
 	if podSpec.Affinity == nil {
 		podSpec.Affinity = &corev1.Affinity{}
 	}
@@ -1074,7 +1004,7 @@ func injectPodAffinity(podSpec *corev1.PodSpec, dynamoComponentRequest *nvidiaco
 		PodAffinityTerm: corev1.PodAffinityTerm{
 			LabelSelector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
-					commonconsts.KubeLabelDynamoComponentRequest: dynamoComponentRequest.Name,
+					commonconsts.KubeLabelDynamoComponent: DynamoComponent.Name,
 				},
 			},
 			TopologyKey: corev1.LabelHostname,
@@ -1088,14 +1018,14 @@ const ModelSeederContainerName = "seeder"
 const ModelSeederJobFailedExitCode = 42
 
 type GenerateImageBuilderPodTemplateSpecOption struct {
-	ImageInfo              ImageInfo
-	DynamoComponentRequest *nvidiacomv1alpha1.DynamoComponentRequest
+	ImageInfo       ImageInfo
+	DynamoComponent *nvidiacomv1alpha1.DynamoComponent
 }
 
 //nolint:gocyclo,nakedret
-func (r *DynamoComponentRequestReconciler) generateImageBuilderPodTemplateSpec(ctx context.Context, opt GenerateImageBuilderPodTemplateSpecOption) (pod *corev1.PodTemplateSpec, err error) {
-	dynamoComponentRepositoryName, _, dynamoComponentVersion := xstrings.Partition(opt.DynamoComponentRequest.Spec.DynamoComponent, ":")
-	kubeLabels := r.getImageBuilderPodLabels(opt.DynamoComponentRequest)
+func (r *DynamoComponentReconciler) generateImageBuilderPodTemplateSpec(ctx context.Context, opt GenerateImageBuilderPodTemplateSpecOption) (pod *corev1.PodTemplateSpec, err error) {
+	dynamoComponentRepositoryName, _, dynamoComponentVersion := xstrings.Partition(opt.DynamoComponent.Spec.DynamoComponent, ":")
+	kubeLabels := r.getImageBuilderPodLabels(opt.DynamoComponent)
 
 	inClusterImageName := opt.ImageInfo.InClusterImageName
 
@@ -1151,7 +1081,7 @@ func (r *DynamoComponentRequestReconciler) generateImageBuilderPodTemplateSpec(c
 	}
 
 	var dynamoComponent *schemas.DynamoComponent
-	dynamoComponentDownloadURL := opt.DynamoComponentRequest.Spec.DownloadURL
+	dynamoComponentDownloadURL := opt.DynamoComponent.Spec.DownloadURL
 
 	if dynamoComponentDownloadURL == "" {
 		var apiStoreClient *apiStoreClient.ApiStoreClient
@@ -1168,23 +1098,23 @@ func (r *DynamoComponentRequestReconciler) generateImageBuilderPodTemplateSpec(c
 			return
 		}
 
-		r.Recorder.Eventf(opt.DynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting dynamoComponent %s from api store service", opt.DynamoComponentRequest.Spec.DynamoComponent)
+		r.Recorder.Eventf(opt.DynamoComponent, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting dynamoComponent %s from api store service", opt.DynamoComponent.Spec.DynamoComponent)
 		dynamoComponent, err = apiStoreClient.GetDynamoComponent(ctx, dynamoComponentRepositoryName, dynamoComponentVersion)
 		if err != nil {
 			err = errors.Wrap(err, "get dynamoComponent")
 			return
 		}
-		r.Recorder.Eventf(opt.DynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got dynamoComponent %s from api store service", opt.DynamoComponentRequest.Spec.DynamoComponent)
+		r.Recorder.Eventf(opt.DynamoComponent, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got dynamoComponent %s from api store service", opt.DynamoComponent.Spec.DynamoComponent)
 
 		if dynamoComponent.TransmissionStrategy != nil && *dynamoComponent.TransmissionStrategy == schemas.TransmissionStrategyPresignedURL {
 			var dynamoComponent_ *schemas.DynamoComponent
-			r.Recorder.Eventf(opt.DynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for dynamoComponent %s from api store service", opt.DynamoComponentRequest.Spec.DynamoComponent)
+			r.Recorder.Eventf(opt.DynamoComponent, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting presigned url for dynamoComponent %s from api store service", opt.DynamoComponent.Spec.DynamoComponent)
 			dynamoComponent_, err = apiStoreClient.PresignDynamoComponentDownloadURL(ctx, dynamoComponentRepositoryName, dynamoComponentVersion)
 			if err != nil {
 				err = errors.Wrap(err, "presign dynamoComponent download url")
 				return
 			}
-			r.Recorder.Eventf(opt.DynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for dynamoComponent %s from api store service", opt.DynamoComponentRequest.Spec.DynamoComponent)
+			r.Recorder.Eventf(opt.DynamoComponent, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for dynamoComponent %s from api store service", opt.DynamoComponent.Spec.DynamoComponent)
 			dynamoComponentDownloadURL = dynamoComponent_.PresignedDownloadUrl
 		} else {
 			dynamoComponentDownloadURL = fmt.Sprintf("%s/api/v1/dynamo_nims/%s/versions/%s/download", apiStoreConf.Endpoint, dynamoComponentRepositoryName, dynamoComponentVersion)
@@ -1256,7 +1186,7 @@ echo "Done"
 		},
 	}
 
-	downloaderContainerEnvFrom := opt.DynamoComponentRequest.Spec.DownloaderContainerEnvFrom
+	downloaderContainerEnvFrom := opt.DynamoComponent.Spec.DownloaderContainerEnvFrom
 
 	initContainers := []corev1.Container{
 		{
@@ -1295,7 +1225,7 @@ echo "Done"
 	}
 
 	configCmName := "dynamo-image-builder-config"
-	r.Recorder.Eventf(opt.DynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting configmap %s from namespace %s", configCmName, configNamespace)
+	r.Recorder.Eventf(opt.DynamoComponent, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting configmap %s from namespace %s", configCmName, configNamespace)
 	configCm := &corev1.ConfigMap{}
 	err = r.Get(ctx, types.NamespacedName{Name: configCmName, Namespace: configNamespace}, configCm)
 	configCmIsNotFound := k8serrors.IsNotFound(err)
@@ -1306,7 +1236,7 @@ echo "Done"
 	err = nil // nolint: ineffassign
 
 	if !configCmIsNotFound {
-		r.Recorder.Eventf(opt.DynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Configmap %s is got from namespace %s", configCmName, configNamespace)
+		r.Recorder.Eventf(opt.DynamoComponent, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Configmap %s is got from namespace %s", configCmName, configNamespace)
 
 		globalExtraPodMetadata = &dynamoCommon.ExtraPodMetadata{}
 
@@ -1367,15 +1297,15 @@ echo "Done"
 		}
 		logrus.Info("passed in builder args: ", builderArgs)
 	} else {
-		r.Recorder.Eventf(opt.DynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Configmap %s is not found in namespace %s", configCmName, configNamespace)
+		r.Recorder.Eventf(opt.DynamoComponent, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Configmap %s is not found in namespace %s", configCmName, configNamespace)
 	}
 
 	if buildArgs == nil {
 		buildArgs = make([]string, 0)
 	}
 
-	if opt.DynamoComponentRequest.Spec.BuildArgs != nil {
-		buildArgs = append(buildArgs, opt.DynamoComponentRequest.Spec.BuildArgs...)
+	if opt.DynamoComponent.Spec.BuildArgs != nil {
+		buildArgs = append(buildArgs, opt.DynamoComponent.Spec.BuildArgs...)
 	}
 
 	dockerFilePath := "/workspace/buildcontext/env/docker/Dockerfile"
@@ -1398,7 +1328,7 @@ echo "Done"
 	}
 
 	kubeAnnotations := make(map[string]string)
-	kubeAnnotations[consts.KubeAnnotationDynamoComponentRequestImageBuiderHash] = opt.DynamoComponentRequest.Annotations[consts.KubeAnnotationDynamoComponentRequestImageBuiderHash]
+	kubeAnnotations[consts.KubeAnnotationDynamoComponentImageBuiderHash] = opt.DynamoComponent.Annotations[consts.KubeAnnotationDynamoComponentImageBuiderHash]
 
 	command := []string{
 		"/kaniko/executor",
@@ -1540,8 +1470,8 @@ echo "Done"
 		container.Resources = *globalDefaultImageBuilderContainerResources
 	}
 
-	if opt.DynamoComponentRequest.Spec.ImageBuilderContainerResources != nil {
-		container.Resources = *opt.DynamoComponentRequest.Spec.ImageBuilderContainerResources
+	if opt.DynamoComponent.Spec.ImageBuilderContainerResources != nil {
+		container.Resources = *opt.DynamoComponent.Spec.ImageBuilderContainerResources
 	}
 
 	containers = append(containers, container)
@@ -1569,12 +1499,12 @@ echo "Done"
 		}
 	}
 
-	if opt.DynamoComponentRequest.Spec.ImageBuilderExtraPodMetadata != nil {
-		for k, v := range opt.DynamoComponentRequest.Spec.ImageBuilderExtraPodMetadata.Annotations {
+	if opt.DynamoComponent.Spec.ImageBuilderExtraPodMetadata != nil {
+		for k, v := range opt.DynamoComponent.Spec.ImageBuilderExtraPodMetadata.Annotations {
 			pod.Annotations[k] = v
 		}
 
-		for k, v := range opt.DynamoComponentRequest.Spec.ImageBuilderExtraPodMetadata.Labels {
+		for k, v := range opt.DynamoComponent.Spec.ImageBuilderExtraPodMetadata.Labels {
 			pod.Labels[k] = v
 		}
 	}
@@ -1589,45 +1519,45 @@ echo "Done"
 		pod.Spec.ServiceAccountName = globalExtraPodSpec.ServiceAccountName
 	}
 
-	if opt.DynamoComponentRequest.Spec.ImageBuilderExtraPodSpec != nil {
-		if opt.DynamoComponentRequest.Spec.ImageBuilderExtraPodSpec.PriorityClassName != "" {
-			pod.Spec.PriorityClassName = opt.DynamoComponentRequest.Spec.ImageBuilderExtraPodSpec.PriorityClassName
+	if opt.DynamoComponent.Spec.ImageBuilderExtraPodSpec != nil {
+		if opt.DynamoComponent.Spec.ImageBuilderExtraPodSpec.PriorityClassName != "" {
+			pod.Spec.PriorityClassName = opt.DynamoComponent.Spec.ImageBuilderExtraPodSpec.PriorityClassName
 		}
 
-		if opt.DynamoComponentRequest.Spec.ImageBuilderExtraPodSpec.SchedulerName != "" {
-			pod.Spec.SchedulerName = opt.DynamoComponentRequest.Spec.ImageBuilderExtraPodSpec.SchedulerName
+		if opt.DynamoComponent.Spec.ImageBuilderExtraPodSpec.SchedulerName != "" {
+			pod.Spec.SchedulerName = opt.DynamoComponent.Spec.ImageBuilderExtraPodSpec.SchedulerName
 		}
 
-		if opt.DynamoComponentRequest.Spec.ImageBuilderExtraPodSpec.NodeSelector != nil {
-			pod.Spec.NodeSelector = opt.DynamoComponentRequest.Spec.ImageBuilderExtraPodSpec.NodeSelector
+		if opt.DynamoComponent.Spec.ImageBuilderExtraPodSpec.NodeSelector != nil {
+			pod.Spec.NodeSelector = opt.DynamoComponent.Spec.ImageBuilderExtraPodSpec.NodeSelector
 		}
 
-		if opt.DynamoComponentRequest.Spec.ImageBuilderExtraPodSpec.Affinity != nil {
-			pod.Spec.Affinity = opt.DynamoComponentRequest.Spec.ImageBuilderExtraPodSpec.Affinity
+		if opt.DynamoComponent.Spec.ImageBuilderExtraPodSpec.Affinity != nil {
+			pod.Spec.Affinity = opt.DynamoComponent.Spec.ImageBuilderExtraPodSpec.Affinity
 		}
 
-		if opt.DynamoComponentRequest.Spec.ImageBuilderExtraPodSpec.Tolerations != nil {
-			pod.Spec.Tolerations = opt.DynamoComponentRequest.Spec.ImageBuilderExtraPodSpec.Tolerations
+		if opt.DynamoComponent.Spec.ImageBuilderExtraPodSpec.Tolerations != nil {
+			pod.Spec.Tolerations = opt.DynamoComponent.Spec.ImageBuilderExtraPodSpec.Tolerations
 		}
 
-		if opt.DynamoComponentRequest.Spec.ImageBuilderExtraPodSpec.TopologySpreadConstraints != nil {
-			pod.Spec.TopologySpreadConstraints = opt.DynamoComponentRequest.Spec.ImageBuilderExtraPodSpec.TopologySpreadConstraints
+		if opt.DynamoComponent.Spec.ImageBuilderExtraPodSpec.TopologySpreadConstraints != nil {
+			pod.Spec.TopologySpreadConstraints = opt.DynamoComponent.Spec.ImageBuilderExtraPodSpec.TopologySpreadConstraints
 		}
 
-		if opt.DynamoComponentRequest.Spec.ImageBuilderExtraPodSpec.ServiceAccountName != "" {
-			pod.Spec.ServiceAccountName = opt.DynamoComponentRequest.Spec.ImageBuilderExtraPodSpec.ServiceAccountName
+		if opt.DynamoComponent.Spec.ImageBuilderExtraPodSpec.ServiceAccountName != "" {
+			pod.Spec.ServiceAccountName = opt.DynamoComponent.Spec.ImageBuilderExtraPodSpec.ServiceAccountName
 		}
 	}
 
-	injectPodAffinity(&pod.Spec, opt.DynamoComponentRequest)
+	injectPodAffinity(&pod.Spec, opt.DynamoComponent)
 
 	if pod.Spec.ServiceAccountName == "" {
 		serviceAccounts := &corev1.ServiceAccountList{}
-		err = r.List(ctx, serviceAccounts, client.InNamespace(opt.DynamoComponentRequest.Namespace), client.MatchingLabels{
+		err = r.List(ctx, serviceAccounts, client.InNamespace(opt.DynamoComponent.Namespace), client.MatchingLabels{
 			commonconsts.KubeLabelDynamoImageBuilderPod: commonconsts.KubeLabelValueTrue,
 		})
 		if err != nil {
-			err = errors.Wrapf(err, "failed to list service accounts in namespace %s", opt.DynamoComponentRequest.Namespace)
+			err = errors.Wrapf(err, "failed to list service accounts in namespace %s", opt.DynamoComponent.Namespace)
 			return
 		}
 		if len(serviceAccounts.Items) > 0 {
@@ -1642,7 +1572,7 @@ echo "Done"
 		if globalExtraContainerEnv != nil {
 			env = append(env, globalExtraContainerEnv...)
 		}
-		env = append(env, opt.DynamoComponentRequest.Spec.ImageBuilderExtraContainerEnv...)
+		env = append(env, opt.DynamoComponent.Spec.ImageBuilderExtraContainerEnv...)
 		pod.Spec.InitContainers[i].Env = env
 	}
 	for i, c := range pod.Spec.Containers {
@@ -1650,26 +1580,26 @@ echo "Done"
 		if globalExtraContainerEnv != nil {
 			env = append(env, globalExtraContainerEnv...)
 		}
-		env = append(env, opt.DynamoComponentRequest.Spec.ImageBuilderExtraContainerEnv...)
+		env = append(env, opt.DynamoComponent.Spec.ImageBuilderExtraContainerEnv...)
 		pod.Spec.Containers[i].Env = env
 	}
 
 	return
 }
 
-func (r *DynamoComponentRequestReconciler) getHashStr(dynamoComponentRequest *nvidiacomv1alpha1.DynamoComponentRequest) (string, error) {
+func (r *DynamoComponentReconciler) getHashStr(DynamoComponent *nvidiacomv1alpha1.DynamoComponent) (string, error) {
 	var hash uint64
 	hash, err := hashstructure.Hash(struct {
-		Spec        nvidiacomv1alpha1.DynamoComponentRequestSpec
+		Spec        nvidiacomv1alpha1.DynamoComponentSpec
 		Labels      map[string]string
 		Annotations map[string]string
 	}{
-		Spec:        dynamoComponentRequest.Spec,
-		Labels:      dynamoComponentRequest.Labels,
-		Annotations: dynamoComponentRequest.Annotations,
+		Spec:        DynamoComponent.Spec,
+		Labels:      DynamoComponent.Labels,
+		Annotations: DynamoComponent.Annotations,
 	}, hashstructure.FormatV2, nil)
 	if err != nil {
-		err = errors.Wrap(err, "get dynamoComponentRequest CR spec hash")
+		err = errors.Wrap(err, "get DynamoComponent CR spec hash")
 		return "", err
 	}
 	hashStr := strconv.FormatUint(hash, 10)
@@ -1681,13 +1611,13 @@ const (
 )
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *DynamoComponentRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *DynamoComponentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	err := ctrl.NewControllerManagedBy(mgr).
-		For(&nvidiacomv1alpha1.DynamoComponentRequest{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		For(&nvidiacomv1alpha1.DynamoComponent{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&nvidiacomv1alpha1.DynamoComponent{}).
 		Owns(&batchv1.Job{}).
 		WithEventFilter(controller_common.EphemeralDeploymentEventFilter(r.Config)).
 		Complete(r)
-	return errors.Wrap(err, "failed to setup DynamoComponentRequest controller")
+	return errors.Wrap(err, "failed to setup DynamoComponent controller")
 }

@@ -19,14 +19,6 @@ resources:
 - api:
     crdVersion: v1
     namespaced: true
-  controller: true
-  domain: nvidia.com
-  kind: DynamoComponentRequest
-  path: github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1
-  version: v1alpha1
-- api:
-    crdVersion: v1
-    namespaced: true
   domain: nvidia.com
   kind: DynamoComponent
   path: github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1
