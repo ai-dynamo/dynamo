@@ -29,13 +29,16 @@ import typer
 from bentoml._internal.cloud.base import Spinner
 from bentoml._internal.cloud.deployment import Deployment, DeploymentConfigParameters
 from bentoml._internal.configuration.containers import BentoMLContainer
-from bentoml.exceptions import BentoMLException
+from bentoml.exceptions import BentoMLException, CLIException, CloudRESTApiClientError
 from rich.console import Console
 from simple_di import Provide, inject
 
 from dynamo.sdk.lib.logging import configure_server_logging
 
 from .utils import resolve_service_config
+
+from bentoml._internal.cloud.client import RestApiClient
+from bentoml._internal.cloud.config import CloudClientConfig, CloudClientContext
 
 # Configure logging to suppress INFO HTTP logs
 logging.getLogger("httpx").setLevel(logging.WARNING)  # HTTP client library logs
@@ -45,10 +48,11 @@ configure_server_logging()
 logger = logging.getLogger(__name__)
 
 app = typer.Typer(
-    help="Deploy Dynamo applications to Kubernetes cluster",
+    help="Deploy Dynamo applications to Dynamo Cloud Kubernetes Platform",
     add_completion=True,
     no_args_is_help=True,
 )
+
 console = Console(highlight=False)
 
 if t.TYPE_CHECKING:
@@ -58,7 +62,7 @@ if t.TYPE_CHECKING:
 def raise_deployment_config_error(err: BentoMLException, action: str) -> t.NoReturn:
     if err.error_code == HTTPStatus.UNAUTHORIZED:
         raise BentoMLException(
-            f"{err}\n* Dynamo Cloud API token is required for authorization. Run `dynamo cloud login` command to login"
+            f"{err}\n* Dynamo Cloud API token is required for authorization. Please provide a valid endpoint with --endpoint option."
         ) from None
     raise BentoMLException(
         f"Failed to {action} deployment due to invalid configuration: {err}"
@@ -67,7 +71,7 @@ def raise_deployment_config_error(err: BentoMLException, action: str) -> t.NoRet
 
 @inject
 def create_deployment(
-    bento: Optional[str] = None,
+    pipeline: Optional[str] = None,
     name: Optional[str] = None,
     config_file: Optional[TextIO] = None,
     wait: bool = True,
@@ -86,7 +90,7 @@ def create_deployment(
 
     config_params = DeploymentConfigParameters(
         name=name,
-        bento=bento,
+        bento=pipeline,
         envs=env_dicts,
         secrets=None,
         cli=True,
@@ -194,7 +198,7 @@ def get_deployment(
             error_msg = str(e)
             if "No cloud context default found" in error_msg:
                 spinner.log(
-                    "[red]:x: Error:[/] Not logged in to Dynamo Cloud. Please run 'dynamo cloud login' first."
+                    "[red]:x: Error:[/] Not logged in to Dynamo Cloud. Please provide a valid endpoint with --endpoint option."
                 )
                 sys.exit(1)
             if "404 Not Found" in error_msg or "Deployment not found" in error_msg:
@@ -221,7 +225,7 @@ def delete_deployment(
             error_msg = str(e)
             if "No cloud context default found" in error_msg:
                 spinner.log(
-                    "[red]:x: Error:[/] Not logged in to Dynamo Cloud. Please run 'dynamo cloud login' first."
+                    "[red]:x: Error:[/] Not logged in to Dynamo Cloud. Please provide a valid endpoint with --endpoint option."
                 )
                 sys.exit(1)
             if "404 Not Found" in error_msg or "Deployment not found" in error_msg:
@@ -269,7 +273,7 @@ def list_deployments(
         except BentoMLException as e:
             if "No cloud context default found" in str(e):
                 spinner.log(
-                    "[red]:x: Error:[/] Not logged in to Dynamo Cloud. Please run 'dynamo cloud login' first."
+                    "[red]:x: Error:[/] Not logged in to Dynamo Cloud. Please provide a valid endpoint with --endpoint option."
                 )
                 sys.exit(1)
             spinner.log(f"[red]:x: Error:[/] Failed to list deployments: {str(e)}")
@@ -279,7 +283,7 @@ def list_deployments(
 @app.command()
 def create(
     ctx: typer.Context,
-    bento: Optional[str] = typer.Argument(None, help="Bento to deploy"),
+    pipeline: Optional[str] = typer.Argument(None, help="Dynamo pipeline to deploy"),
     name: Optional[str] = typer.Option(None, "--name", "-n", help="Deployment name"),
     config_file: Optional[typer.FileText] = typer.Option(
         None, "--config-file", "-f", help="Configuration file path"
@@ -290,13 +294,17 @@ def create(
     timeout: int = typer.Option(
         3600, "--timeout", help="Timeout for deployment to be ready in seconds"
     ),
+    endpoint: str = typer.Option(
+        ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD_ENDPOINT"
+    ),
 ) -> None:
     """Create a deployment on Dynamo Cloud.
 
     Create a deployment using parameters, or using config yaml file.
     """
+    login_to_cloud(endpoint)
     create_deployment(
-        bento=bento,
+        pipeline=pipeline,
         name=name,
         config_file=config_file,
         wait=wait,
@@ -309,11 +317,15 @@ def create(
 def get(
     name: str = typer.Argument(..., help="Deployment name"),
     cluster: Optional[str] = typer.Option(None, "--cluster", help="Cluster name"),
+    endpoint: str = typer.Option(
+        ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD_ENDPOINT"
+    ),
 ) -> None:
     """Get deployment details from Dynamo Cloud.
 
     Get deployment details by name.
     """
+    login_to_cloud(endpoint)
     get_deployment(name, cluster=cluster)
 
 
@@ -325,11 +337,15 @@ def list(
     query: Optional[str] = typer.Option(
         None, "--query", "-q", help="Advanced query string"
     ),
+    endpoint: str = typer.Option(
+        ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD_ENDPOINT"
+    ),
 ) -> None:
     """List all deployments from Dynamo Cloud.
 
     List and filter deployments.
     """
+    login_to_cloud(endpoint)
     list_deployments(cluster=cluster, search=search, dev=dev, q=query)
 
 
@@ -337,17 +353,21 @@ def list(
 def delete(
     name: str = typer.Argument(..., help="Deployment name"),
     cluster: Optional[str] = typer.Option(None, "--cluster", help="Cluster name"),
+    endpoint: str = typer.Option(
+        ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD_ENDPOINT"
+    ),
 ) -> None:
     """Delete a deployment from Dynamo Cloud.
 
     Delete deployment by name.
     """
+    login_to_cloud(endpoint)
     delete_deployment(name, cluster=cluster)
 
 
 def deploy(
     ctx: typer.Context,
-    bento: Optional[str] = typer.Argument(None, help="Bento to deploy"),
+    pipeline: Optional[str] = typer.Argument(None, help="Dynamo pipeline to deploy"),
     name: Optional[str] = typer.Option(None, "--name", "-n", help="Deployment name"),
     config_file: Optional[typer.FileText] = typer.Option(
         None, "--config-file", "-f", help="Configuration file path"
@@ -358,16 +378,68 @@ def deploy(
     timeout: int = typer.Option(
         3600, "--timeout", help="Timeout for deployment to be ready in seconds"
     ),
+    endpoint: str = typer.Option(
+        ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD_ENDPOINT"
+    ),
 ) -> None:
     """Create a deployment on Dynamo Cloud.
 
     Create a deployment using parameters, or using config yaml file.
     """
+    login_to_cloud(endpoint)
     create_deployment(
-        bento=bento,
+        pipeline=pipeline,
         name=name,
         config_file=config_file,
         wait=wait,
         timeout=timeout,
         args=ctx.args if hasattr(ctx, "args") else None,
     )
+
+
+def login_to_cloud(endpoint: str) -> None:
+    """Connect to Dynamo Cloud silently using logging for success and console for errors."""
+    try:
+        logger.info(f"Running against Dynamo Cloud at {endpoint}")
+        api_token = ""  # Using empty string for now as it's not used
+        cloud_rest_client = RestApiClient(endpoint, api_token)
+        user = cloud_rest_client.v1.get_current_user()
+
+        if user is None:
+            raise CLIException("current user is not found")
+
+        org = cloud_rest_client.v1.get_current_organization()
+
+        if org is None:
+            raise CLIException("current organization is not found")
+
+        current_context_name = CloudClientConfig.get_config().current_context_name
+        cloud_context = BentoMLContainer.cloud_context.get()
+
+        ctx = CloudClientContext(
+            name=cloud_context if cloud_context is not None else current_context_name,
+            endpoint=endpoint,
+            api_token=api_token,
+            email=user.email,
+        )
+
+        ctx.save()
+        logger.debug(
+            f"Configured Dynamo Cloud credentials (current-context: {ctx.name})"
+        )
+        logger.debug(
+            f"Logged in as {user.email} at {org.name} organization"
+        )
+    except CloudRESTApiClientError as e:
+        if e.error_code == 401:
+            console.print(
+                f":police_car_light: Error validating token: HTTP 401: Bad credentials ({endpoint}/api-token)"
+            )
+        else:
+            console.print(
+                f":police_car_light: Error validating token: HTTP {e.error_code}"
+            )
+        raise BentoMLException(f"Failed to login to Dynamo Cloud: {str(e)}") from e
+    except Exception as e:
+        console.print(f":police_car_light: Error connecting to Dynamo Cloud: {str(e)}")
+        raise BentoMLException(f"Failed to login to Dynamo Cloud: {str(e)}") from e
