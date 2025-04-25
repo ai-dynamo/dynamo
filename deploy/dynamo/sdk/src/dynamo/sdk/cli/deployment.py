@@ -282,8 +282,8 @@ def list_deployments(
 @app.command()
 def create(
     ctx: typer.Context,
-    pipeline: Optional[str] = typer.Argument(None, help="Dynamo pipeline to deploy"),
-    name: Optional[str] = typer.Option(None, "--name", "-n", help="Deployment name"),
+    pipeline: Optional[str] = typer.Argument(..., help="Dynamo pipeline to deploy"),
+    name: Optional[str] = typer.Option(..., "--name", "-n", help="Deployment name"),
     config_file: Optional[typer.FileText] = typer.Option(
         None, "--config-file", "-f", help="Configuration file path"
     ),
@@ -374,8 +374,8 @@ def delete(
 
 def deploy(
     ctx: typer.Context,
-    pipeline: Optional[str] = typer.Argument(None, help="Dynamo pipeline to deploy"),
-    name: Optional[str] = typer.Option(None, "--name", "-n", help="Deployment name"),
+    pipeline: Optional[str] = typer.Argument(..., help="Dynamo pipeline to deploy"),
+    name: Optional[str] = typer.Option(..., "--name", "-n", help="Deployment name"),
     config_file: Optional[typer.FileText] = typer.Option(
         None, "--config-file", "-f", help="Configuration file path"
     ),
