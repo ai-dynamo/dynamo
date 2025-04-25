@@ -208,7 +208,7 @@ DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk
 ```bash
 echo $DYNAMO_TAG
 export DEPLOYMENT_NAME=llm-agg
-dynamo deployment create $DYNAMO_TAG --no-wait -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
+dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
 ```
 
 4. **Test the deployment**

@@ -464,9 +464,10 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 WORKDIR /workspace
 ENV DYNAMO_HOME=/workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 # Copy NIXL
-COPY --from=build /usr/local/nixl /usr/local/nixl
+COPY --from=base /usr/local/nixl /usr/local/nixl
 ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
 ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/:$PYTHONPATH
 
@@ -478,9 +479,10 @@ RUN apt-get update && \
     uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
-# Install the wheels
+# Install the wheels and copy executables to /usr/local/bin
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
-RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse  && \
+RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
+    cp $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
     rm -r wheelhouse
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
