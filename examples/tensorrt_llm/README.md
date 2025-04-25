@@ -27,6 +27,14 @@ Note that this TensorRT-LLM version does not support all the options yet.
 
 Note: TensorRT-LLM disaggregation does not support conditional disaggregation yet. You can only configure the deployment to always use aggregate or disaggregated serving.
 
+> [!IMPORTANT]
+> Deploying TRTLLM workers involves the use of [MPI_Comm_spawn](https://www.mpich.org/static/docs/v3.3/www3/MPI_Comm_spawn.html),
+> which requires that internally these workers are deployed via [mpirun](https://www.open-mpi.org/doc/v4.1/man1/mpirun.1.php).
+>
+> To support running `mpirun` in container environments that often default to a root user, we supply the
+> `mpirun --allow-run-as-root` argument. Removing the need for this, or making it more transparent
+> to the user at deployment time is a work in progress.
+
 ## Getting Started
 
 1. Choose a deployment architecture based on your requirements
