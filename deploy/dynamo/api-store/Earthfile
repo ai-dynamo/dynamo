@@ -30,12 +30,12 @@ uv-base:
     RUN uv sync --frozen --no-install-project --no-dev --no-install-workspace --no-editable
 
 docker:
-    ARG CI_REGISTRY_IMAGE=my-registry
-    ARG CI_COMMIT_SHA=latest
+    ARG DOCKER_SERVER=my-registry
+    ARG IMAGE_TAG=latest
     ARG IMAGE=dynamo-api-store
     FROM +uv-base
     # Copy project files
     COPY ai_dynamo_store ai_dynamo_store
     RUN uv pip install .
     ENTRYPOINT ["ai-dynamo-store"]
-    SAVE IMAGE --push $CI_REGISTRY_IMAGE/$IMAGE:$CI_COMMIT_SHA
+    SAVE IMAGE --push $DOCKER_SERVER/$IMAGE:$IMAGE_TAG

@@ -23,9 +23,11 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
+	clientv3 "go.etcd.io/etcd/client/v3"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 
@@ -41,6 +43,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/etcd"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
 	//+kubebuilder:scaffold:imports
 )
@@ -67,6 +70,10 @@ func main() {
 	var leaderElectionID string
 	var natsAddr string
 	var etcdAddr string
+	var istioVirtualServiceGateway string
+	var ingressControllerClassName string
+	var ingressControllerTLSSecretName string
+	var ingressHostSuffix string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -82,6 +89,14 @@ func main() {
 		"Id to use for the leader election.")
 	flag.StringVar(&natsAddr, "natsAddr", "", "address of the NATS server")
 	flag.StringVar(&etcdAddr, "etcdAddr", "", "address of the etcd server")
+	flag.StringVar(&istioVirtualServiceGateway, "istio-virtual-service-gateway", "",
+		"The name of the istio virtual service gateway to use")
+	flag.StringVar(&ingressControllerClassName, "ingress-controller-class-name", "",
+		"The name of the ingress controller class to use")
+	flag.StringVar(&ingressControllerTLSSecretName, "ingress-controller-tls-secret-name", "",
+		"The name of the ingress controller TLS secret to use")
+	flag.StringVar(&ingressHostSuffix, "ingress-host-suffix", "",
+		"The suffix to use for the ingress host")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -150,33 +165,50 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controller.DynamoNimDeploymentReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("yatai-deployment"),
-		Config:   ctrlConfig,
-		NatsAddr: natsAddr,
-		EtcdAddr: etcdAddr,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "DynamoNimDeployment")
+	// Create etcd client
+	cli, err := clientv3.New(clientv3.Config{
+		Endpoints:            []string{etcdAddr},
+		DialTimeout:          5 * time.Second,
+		DialKeepAliveTime:    10 * time.Second,
+		DialKeepAliveTimeout: 3 * time.Second,
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to create etcd client")
 		os.Exit(1)
 	}
-	if err = (&controller.DynamoNimRequestReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("yatai-image-builder"),
-		Config:   ctrlConfig,
+	if err = (&controller.DynamoComponentDeploymentReconciler{
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Recorder:          mgr.GetEventRecorderFor("dynamocomponentdeployment"),
+		Config:            ctrlConfig,
+		NatsAddr:          natsAddr,
+		EtcdAddr:          etcdAddr,
+		EtcdStorage:       etcd.NewStorage(cli),
+		UseVirtualService: istioVirtualServiceGateway != "",
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "DynamoNimRequest")
+		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponentDeployment")
 		os.Exit(1)
 	}
-	if err = (&controller.DynamoDeploymentReconciler{
+	if err = (&controller.DynamoComponentRequestReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("dynamodeployment"),
+		Recorder: mgr.GetEventRecorderFor("dynamo-image-builder"),
 		Config:   ctrlConfig,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "DynamoDeployment")
+		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponentRequest")
+		os.Exit(1)
+	}
+	if err = (&controller.DynamoGraphDeploymentReconciler{
+		Client:                     mgr.GetClient(),
+		Scheme:                     mgr.GetScheme(),
+		Recorder:                   mgr.GetEventRecorderFor("dynamographdeployment"),
+		Config:                     ctrlConfig,
+		VirtualServiceGateway:      istioVirtualServiceGateway,
+		IngressControllerClassName: ingressControllerClassName,
+		IngressControllerTLSSecret: ingressControllerTLSSecretName,
+		IngressHostSuffix:          ingressHostSuffix,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeployment")
 		os.Exit(1)
 	}
 	//+kubebuilder:scaffold:builder

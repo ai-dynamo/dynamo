@@ -13,15 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-Frontend:
-  served_model_name: neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
-  endpoint: dynamo.Processor.chat/completions
-  port: 8000
-
-Processor:
+Common:
   model: neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
-  block-size: 128
-  max-model-len: 3500
+  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
   # Routing policy determines how remote workers are selected for processing
   # prefill requests
   # 1. random: randomly select workers for prefill requests
@@ -31,39 +25,43 @@ Processor:
   # 3. kv: finding prefill workers by KV cache is not beneficial when caching is
   #        disabled on this setup
   router: round-robin
+  # Number of tokens in a batch for more efficient chunked transfers to GPUs.
+  block-size: 128
+  max-model-len: 3500
+  max-num-batched-tokens: 3500
+  disable-log-requests: true
+
+Frontend:
+  served_model_name: neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
+  endpoint: dynamo.Processor.chat/completions
+  port: 8000
+
+Processor:
+  common-configs: [model, block-size, max-model-len, router]
 
 Router:
-  model-name: neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
+  common-configs: [model]
   min-workers: 1
 
 VllmWorker:
-  model: neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
-  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-  block-size: 128
-  max-model-len: 3500
+  common-configs: [model, kv-transfer-config, router, block-size, max-model-len, disable-log-requests]
   # Enable prefill at different workers.
   remote-prefill: true
   # Disable local prefill so only disaggregated prefill is used.
   conditional-disagg: false
+  # The GPU memory utilization do not have to match between VllmWorker and PrefillWorker.
+  gpu-memory-utilization: 0.95
   # TP size is doubled from single node setup
   tensor-parallel-size: 8
-  gpu-memory-utilization: 0.95
-  disable-log-requests: true
-  router: round-robin
   ServiceArgs:
     workers: 1
     resources:
       gpu: 8
 
 PrefillWorker:
-  model: neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
-  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-  block-size: 128
-  max-model-len: 3500
-  max-num-batched-tokens: 3500
-  tensor-parallel-size: 1
+  common-configs: [model, kv-transfer-config, block-size, max-model-len, max-num-batched-tokens, disable-log-requests]
   gpu-memory-utilization: 0.95
-  disable-log-requests: true
+  tensor-parallel-size: 1
   ServiceArgs:
     # DP size is doubled from single node setup
     workers: 8

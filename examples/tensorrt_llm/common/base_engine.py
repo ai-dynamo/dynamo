@@ -102,7 +102,7 @@ class BaseTensorrtLLMEngine:
         self._error_queue: Queue = Queue()
         self._kv_metrics_publisher = None
 
-        if self._remote_prefill:
+        if self._remote_prefill or self._server_type == ServerType.CTX:
             self._min_workers = min_workers
             if disagg_config_file is None or not os.path.exists(disagg_config_file):
                 raise ValueError(
@@ -315,6 +315,7 @@ class BaseTensorrtLLMEngine:
                             tokens,
                             lora_id,
                         )
+                        parent_hash = block["block_hash"]
                 elif data["type"] == "removed":
                     for block_hash in data["block_hashes"]:
                         self._kv_cache_events_publisher.removed_event(block_hash)

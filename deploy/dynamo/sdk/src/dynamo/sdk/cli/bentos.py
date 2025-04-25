@@ -18,18 +18,28 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import typing as t
 
+import attr
 import click
 import click_option_group as cog
 import rich
 import yaml
+from bentoml._internal.bento.bento import DEFAULT_BENTO_BUILD_FILES
+from bentoml._internal.bento.build_config import BentoBuildConfig
+from bentoml._internal.configuration.containers import BentoMLContainer
+from bentoml._internal.utils.args import set_arguments
+from bentoml._internal.utils.filesystem import resolve_user_filepath
+from bentoml.exceptions import InvalidArgument
 from bentoml_cli.utils import is_valid_bento_name, is_valid_bento_tag
 from rich.syntax import Syntax
 from rich.table import Table
 from simple_di import Provide, inject
+
+from .bento_util import Bento
 
 if t.TYPE_CHECKING:
     from bentoml._internal.bento import BentoStore
@@ -37,6 +47,7 @@ if t.TYPE_CHECKING:
     from bentoml._internal.container import DefaultBuilder
     from click import Context, Parameter
 
+logger = logging.getLogger(__name__)
 
 DYNAMO_FIGLET = """
 ██████╗ ██╗   ██╗███╗   ██╗ █████╗ ███╗   ███╗ ██████╗
@@ -109,13 +120,169 @@ def parse_delete_targets_argument_callback(
     return delete_targets
 
 
+@inject
+def import_bento(
+    path: str,
+    input_format: str | None = None,
+    *,
+    protocol: str | None = None,
+    user: str | None = None,
+    passwd: str | None = None,
+    params: t.Optional[t.Dict[str, str]] = None,
+    subpath: str | None = None,
+    _bento_store: "BentoStore" = Provide[BentoMLContainer.bento_store],
+) -> Bento:
+    """
+    Import a bento.
+
+    Examples:
+
+    .. code-block:: python
+
+        # imports 'my_bento' from '/path/to/folder/my_bento.bento'
+        bentoml.import_bento('/path/to/folder/my_bento.bento')
+
+        # imports 'my_bento' from '/path/to/folder/my_bento.tar.gz'
+        # currently supported formats are tar.gz ('gz'),
+        # tar.xz ('xz'), tar.bz2 ('bz2'), and zip
+        bentoml.import_bento('/path/to/folder/my_bento.tar.gz')
+        # treats 'my_bento.ext' as a gzipped tarfile
+        bentoml.import_bento('/path/to/folder/my_bento.ext', 'gz')
+
+        # imports 'my_bento', which is stored as an
+        # uncompressed folder, from '/path/to/folder/my_bento/'
+        bentoml.import_bento('/path/to/folder/my_bento', 'folder')
+
+        # imports 'my_bento' from the S3 bucket 'my_bucket',
+        # path 'folder/my_bento.bento'
+        # requires `fs-s3fs <https://pypi.org/project/fs-s3fs/>`_
+        bentoml.import_bento('s3://my_bucket/folder/my_bento.bento')
+        bentoml.import_bento('my_bucket/folder/my_bento.bento', protocol='s3')
+        bentoml.import_bento('my_bucket', protocol='s3',
+                             subpath='folder/my_bento.bento')
+        bentoml.import_bento('my_bucket', protocol='s3',
+                             subpath='folder/my_bento.bento',
+                             user='<AWS access key>', passwd='<AWS secret key>',
+                             params={'acl': 'public-read',
+                                     'cache-control': 'max-age=2592000,public'})
+
+    For a more comprehensive description of what each of the keyword arguments
+    (:code:`protocol`, :code:`user`, :code:`passwd`,
+     :code:`params`, and :code:`subpath`) mean, see the
+    `FS URL documentation <https://docs.pyfilesystem.org/en/latest/openers.html>`_.
+
+    Args:
+        tag: the tag of the bento to export
+        path: can be one of two things:
+              * a folder on the local filesystem
+              * an `FS URL <https://docs.pyfilesystem.org/en/latest/openers.html>`_,
+                for example :code:`'s3://my_bucket/folder/my_bento.bento'`
+        protocol: (expert) The FS protocol to use when exporting. Some example protocols
+                  are :code:`'ftp'`, :code:`'s3'`, and :code:`'userdata'`
+        user: (expert) the username used for authentication if required, e.g. for FTP
+        passwd: (expert) the username used for authentication if required, e.g. for FTP
+        params: (expert) a map of parameters to be passed to the FS used for
+                export, e.g. :code:`{'proxy': 'myproxy.net'}` for setting a
+                proxy for FTP
+        subpath: (expert) the path inside the FS that the bento should be exported to
+        _bento_store: the bento store to save the bento to
+
+    Returns:
+        Bento: the imported bento
+    """
+    return Bento.import_from(
+        path,
+        input_format,
+        protocol=protocol,
+        user=user,
+        passwd=passwd,
+        params=params,
+        subpath=subpath,
+    ).save(_bento_store)
+
+
+@inject
+def build_bentofile(
+    bentofile: str | None = None,
+    *,
+    service: str | None = None,
+    name: str | None = None,
+    version: str | None = None,
+    labels: dict[str, str] | None = None,
+    build_ctx: str | None = None,
+    platform: str | None = None,
+    bare: bool = False,
+    reload: bool = False,
+    args: dict[str, t.Any] | None = None,
+    _bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
+) -> Bento:
+    """
+    Build a Bento base on options specified in a bentofile.yaml file.
+
+    By default, this function will look for a `bentofile.yaml` file in current working
+    directory.
+
+    Args:
+        bentofile: The file path to build config yaml file
+        version: Override the default auto generated version str
+        build_ctx: Build context directory, when used as
+        bare: whether to build a bento without copying files
+        reload: whether to reload the service
+
+    Returns:
+        Bento: a Bento instance representing the materialized Bento saved in BentoStore
+    """
+    if args is not None:
+        set_arguments(**args)
+    if bentofile:
+        try:
+            bentofile = resolve_user_filepath(bentofile, None)
+        except FileNotFoundError:
+            raise InvalidArgument(f'bentofile "{bentofile}" not found')
+        else:
+            build_config = BentoBuildConfig.from_file(bentofile)
+    else:
+        for filename in DEFAULT_BENTO_BUILD_FILES:
+            try:
+                bentofile = resolve_user_filepath(filename, build_ctx)
+            except FileNotFoundError:
+                pass
+            else:
+                build_config = BentoBuildConfig.from_file(bentofile)
+                break
+        else:
+            build_config = BentoBuildConfig(service=service or "")
+
+    new_attrs: dict[str, t.Any] = {}
+    if name is not None:
+        new_attrs["name"] = name
+    if labels:
+        # Ensure both dictionaries are of type dict[str, str]
+        existing_labels: dict[str, str] = build_config.labels or {}
+        new_attrs["labels"] = {**existing_labels, **labels}
+
+    if new_attrs:
+        build_config = attr.evolve(build_config, **new_attrs)
+
+    bento = Bento.create(
+        build_config=build_config,
+        version=version,
+        build_ctx=build_ctx,
+        platform=platform,
+        bare=bare,
+        reload=reload,
+    )
+    if not bare:
+        return bento.save(_bento_store)
+    return bento
+
+
 def bento_management_commands() -> click.Group:
     import bentoml
     from bentoml import Tag
     from bentoml._internal.configuration import get_quiet_mode
     from bentoml._internal.configuration.containers import BentoMLContainer
     from bentoml._internal.utils import human_readable_size
-    from bentoml.bentos import build_bentofile, import_bento
     from bentoml_cli.utils import BentoMLCommandGroup
 
     @click.group(cls=BentoMLCommandGroup)

@@ -23,7 +23,7 @@ async fn test_model_info_from_hf_like_local_repo() {
     let mdc = ModelDeploymentCard::from_local_path(HF_PATH, None)
         .await
         .unwrap();
-    let info = mdc.model_info.get_model_info().await.unwrap();
+    let info = mdc.model_info.unwrap().get_model_info().await.unwrap();
     assert_eq!(info.model_type(), "llama");
     assert_eq!(info.bos_token_id(), 1);
     assert_eq!(info.eos_token_ids(), vec![2]);
@@ -44,7 +44,7 @@ async fn test_tokenizer_from_hf_like_local_repo() {
         .await
         .unwrap();
     // Verify tokenizer file was found
-    match mdc.tokenizer {
+    match mdc.tokenizer.unwrap() {
         TokenizerKind::HfTokenizerJson(_) => (),
         TokenizerKind::GGUF(_) => (),
     }

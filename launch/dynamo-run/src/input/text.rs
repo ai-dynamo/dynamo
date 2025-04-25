@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use dynamo_llm::protocols::openai::nvext::NvExt;
 use dynamo_llm::types::openai::chat_completions::{
     NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
 };
@@ -110,6 +111,10 @@ async fn main_loop(
             .temperature(0.7)
             .n(1) // only generate one response
             .build()?;
+        let nvext = NvExt {
+            ignore_eos: Some(true),
+            ..Default::default()
+        };
 
         // TODO We cannot set min_tokens with async-openai
         // if inspect_template {
@@ -117,7 +122,10 @@ async fn main_loop(
         //     req_builder.min_tokens(8192);
         // }
 
-        let req = NvCreateChatCompletionRequest { inner, nvext: None };
+        let req = NvCreateChatCompletionRequest {
+            inner,
+            nvext: Some(nvext),
+        };
 
         // Call the model
         let mut stream = engine.generate(Context::new(req)).await?;

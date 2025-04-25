@@ -18,14 +18,14 @@
 
 set -euo pipefail
 
-export DYNAMO_SERVER="${DYNAMO_SERVER:-http://dynamo-server}"
+export DYNAMO_CLOUD="${DYNAMO_CLOUD:-http://dynamo-cloud}"
 export DYNAMO_IMAGE="${DYNAMO_IMAGE:-dynamo-base:latest}"
 export DEPLOYMENT_NAME="${DEPLOYMENT_NAME:-ci-hw}"
 
 cd /workspace/examples/hello_world
 
-# Step.1: Login to  dynamo server
-dynamo server login --api-token TEST-TOKEN --endpoint $DYNAMO_SERVER
+# Step.1: Login to  dynamo cloud
+dynamo cloud login $DYNAMO_CLOUD
 
 # Step.2:  build a dynamo nim with framework-less base
 DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk -F"\"" '{ print $2 }')

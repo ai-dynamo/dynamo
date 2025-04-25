@@ -32,9 +32,28 @@ Example:
 
 const ZMQ_SOCKET_PREFIX: &str = "dyn";
 
-const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>|none] out=[See available engines below] [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin]";
+const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>|none] out=ENGINE_LIST [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin]";
 
 fn main() -> anyhow::Result<()> {
+    // Set log level based on verbosity flag
+    let log_level = match dynamo_run::Flags::try_parse() {
+        Ok(flags) => match flags.verbosity {
+            0 => "info",
+            1 => "debug",
+            2 => "trace",
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Invalid verbosity level. Valid values are v (debug) or vv (trace)"
+                ))
+            }
+        },
+        Err(_) => "info",
+    };
+
+    if log_level != "info" {
+        std::env::set_var("DYN_LOG", log_level);
+    }
+
     logging::init();
 
     // Call sub-processes before starting the Runtime machinery
@@ -88,7 +107,7 @@ fn main() -> anyhow::Result<()> {
                         node_rank: flags.node_rank,
                         leader_addr: flags.leader_addr.unwrap_or_default(),
                     };
-                    return dynamo_engine_vllm::run_subprocess(
+                    return dynamo_engine_vllm0_7::run_subprocess(
                         ZMQ_SOCKET_PREFIX,
                         &model_path,
                         node_config,
@@ -116,14 +135,15 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
     let mut in_opt = None;
     let mut out_opt = None;
     let args: Vec<String> = env::args().skip(1).collect();
-    if args.is_empty() || args[0] == "-h" || args[0] == "--help" {
-        println!("{USAGE}");
+    if args.is_empty()
+        || args[0] == "-h"
+        || args[0] == "--help"
+        || (args.iter().all(|arg| arg == "-v" || arg == "-vv"))
+    {
+        let engine_list = Output::available_engines().join("|");
+        let usage = USAGE.replace("ENGINE_LIST", &engine_list);
+        println!("{usage}");
         println!("{HELP}");
-        println!(
-            "Available engines: {}",
-            Output::available_engines().join(", ")
-        );
-
         return Ok(());
     }
     for arg in env::args().skip(1).take(2) {

@@ -31,7 +31,7 @@ DOCKER_REGISTRY=$1
 NAMESPACE=$2
 DYNAMO_DIRECTORY=$3
 DYNAMO_IDENTIFIER=$4
-DYNAMO_CONFIG_FILE=$5
+DYNAMO_CONFIG_FILE=${5:-""}  # Set to empty string if not provided
 
 # Check if any of the inputs are empty
 if [[ -z "$DOCKER_REGISTRY" || -z "$NAMESPACE" || -z "$DYNAMO_IDENTIFIER" || -z "$DYNAMO_DIRECTORY" ]]; then

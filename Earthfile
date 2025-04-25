@@ -72,6 +72,22 @@ rust-base:
         libclang-dev \
         git
 
+    RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb && \
+        apt install -y ./cuda-keyring_1.1-1_all.deb && \
+        apt update && \
+        apt install -y cuda-toolkit nvidia-utils-535 nvidia-driver-535 && \
+        rm cuda-keyring_1.1-1_all.deb
+
+    # Set CUDA compute capability explicitly
+    ENV CUDA_COMPUTE_CAP=80
+
+    ENV CUDA_HOME=/usr/local/cuda
+    ENV CUDA_ROOT=/usr/local/cuda
+    ENV CUDA_PATH=/usr/local/cuda
+    ENV CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda
+    ENV PATH=$CUDA_HOME/bin:$PATH
+    ENV LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+
     ENV RUSTUP_HOME=/usr/local/rustup
     ENV CARGO_HOME=/usr/local/cargo
     ENV PATH=/usr/local/cargo/bin:$PATH
@@ -85,61 +101,86 @@ rust-base:
         rm rustup-init && \
         chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
-dynamo-builder:
+dynamo-build:
     FROM +rust-base
     WORKDIR /workspace
-    COPY . /workspace/
+    COPY Cargo.toml Cargo.lock ./
+    COPY pyproject.toml README.md hatch_build.py ./
+    COPY components/ components/
+    COPY lib/ lib/
+    COPY launch/ launch/
+    COPY deploy/ deploy/
+
     ENV CARGO_TARGET_DIR=/workspace/target
+    RUN cargo build --release --locked --features llamacpp,python,cuda && \
+        cargo doc --no-deps
 
-    RUN cargo build --release --locked --features mistralrs,sglang,vllm,python && \
-        strip target/release/dynamo-run && \
-        strip target/release/http && \
-        strip target/release/llmctl && \
-        strip target/release/metrics && \
-        strip target/release/mock_worker
+    # Create symlinks for wheel building
+    RUN mkdir -p /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/ && \
+        # Remove existing symlinks
+        rm -f /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/* && \
+        # Create new symlinks pointing to the correct location
+        ln -sf /workspace/target/release/dynamo-run /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/dynamo-run && \
+        ln -sf /workspace/target/release/http /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/http && \
+        ln -sf /workspace/target/release/llmctl /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/llmctl
 
-    SAVE ARTIFACT target/release/dynamo-run /dynamo-run
-    SAVE ARTIFACT target/release/http /http
-    SAVE ARTIFACT target/release/llmctl /llmctl
-    SAVE ARTIFACT target/release/metrics /metrics
-    SAVE ARTIFACT target/release/mock_worker /mock_worker
+
+    RUN cd /workspace/lib/bindings/python && \
+        uv build --wheel --out-dir /workspace/dist --python 3.12
+    RUN cd /workspace && \
+        uv build --wheel --out-dir /workspace/dist
+
+    # Save wheels
+    SAVE ARTIFACT /workspace/dist/ai_dynamo_runtime*.whl
+    SAVE ARTIFACT /workspace/dist/ai_dynamo*.whl
 
 dynamo-base-docker:
     ARG IMAGE=dynamo-base-docker
-    ARG CI_REGISTRY_IMAGE=my-registry
-    ARG CI_COMMIT_SHA=latest
-    FROM +dynamo-base
+    ARG DOCKER_SERVER=my-registry
+    ARG IMAGE_TAG=latest
+
+    FROM ubuntu:24.04
     WORKDIR /workspace
-    COPY . /workspace/
+    COPY container/deps/requirements.txt /tmp/requirements.txt
 
-    # Copy built binaries from builder target
-    COPY +dynamo-builder/dynamo-run /usr/local/bin/dynamo-run
-    COPY +dynamo-builder/http /usr/local/bin/http
-    COPY +dynamo-builder/llmctl /usr/local/bin/llmctl
-    COPY +dynamo-builder/metrics /usr/local/bin/metrics
-    COPY +dynamo-builder/mock_worker /usr/local/bin/mock_worker
+    # Install Python and other dependencies
+    RUN apt-get update && \
+        apt-get install -y --no-install-recommends \
+        python3.12 \
+        curl && \
+        rm -rf /var/lib/apt/lists/*
 
-    COPY +dynamo-builder/dynamo-run /workspace/target/release/dynamo-run
-    COPY +dynamo-builder/http /workspace/target/release/http
-    COPY +dynamo-builder/llmctl /workspace/target/release/llmctl
-    COPY +dynamo-builder/metrics /workspace/target/release/metrics
-    COPY +dynamo-builder/mock_worker /workspace/target/release/mock_worker
+    COPY +uv-source/uv /bin/uv
 
-    RUN uv build --wheel --out-dir /workspace/dist && \
-        uv pip install /workspace/dist/ai_dynamo*any.whl
-    SAVE IMAGE --push $CI_REGISTRY_IMAGE/$IMAGE:$CI_COMMIT_SHA
+    # Create and activate virtual environment
+    RUN mkdir -p /opt/dynamo && \
+        uv venv /opt/dynamo/venv --python 3.12 && \
+        . /opt/dynamo/venv/bin/activate && \
+        uv pip install pip
 
+    ENV VIRTUAL_ENV=/opt/dynamo/venv
+    ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
+    RUN uv pip install -r /tmp/requirements.txt
+
+    # Copy and install wheels -- ai-dynamo-runtime first, then ai-dynamo
+    COPY +dynamo-build/ai_dynamo_runtime*.whl /tmp/wheels/
+    COPY +dynamo-build/ai_dynamo*.whl /tmp/wheels/
+    RUN . /opt/dynamo/venv/bin/activate && \
+        uv pip install /tmp/wheels/*.whl && \
+        rm -rf /tmp/wheels
+
+    SAVE IMAGE --push $DOCKER_SERVER/$IMAGE:$IMAGE_TAG
 
 ############### ALL TARGETS ##############################
 all-test:
     BUILD ./deploy/dynamo/operator+test
 
 all-docker:
-    ARG CI_REGISTRY_IMAGE=my-registry
-    ARG CI_COMMIT_SHA=latest
-    BUILD ./deploy/dynamo/operator+docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
-    BUILD ./deploy/dynamo/api-store+docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
+    ARG DOCKER_SERVER=my-registry
+    ARG IMAGE_TAG=latest
+    BUILD ./deploy/dynamo/operator+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+    BUILD ./deploy/dynamo/api-store+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 
 all-lint:
     BUILD ./deploy/dynamo/operator+lint
@@ -151,6 +192,6 @@ all:
 
 # For testing
 custom:
-    ARG CI_REGISTRY_IMAGE=my-registry
-    ARG CI_COMMIT_SHA=latest
+    ARG DOCKER_SERVER=my-registry
+    ARG IMAGE_TAG=latest
     BUILD +all-test

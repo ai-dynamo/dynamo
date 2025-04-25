@@ -54,7 +54,6 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y libxml2-utils
           SUMMARY_FILE="${GITHUB_WORKSPACE}/summary.md"
-          echo "## Test Results Summary" > $SUMMARY_FILE
           echo "### This test report is a summary of the test run in workflow run: [${{ steps.set_test_run_url.outputs.test_run_url }}](${{ steps.set_test_run_url.outputs.test_run_url }})" >> $SUMMARY_FILE
           echo "| Test Suite | Tests | Passed | Failed | Skipped | Duration |" >> $SUMMARY_FILE
           echo "|------------|-------|--------|--------|---------|----------|" >> $SUMMARY_FILE
@@ -109,7 +108,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               name: "Summarize test report",
-              head_sha: "${{ github.event.workflow_run.head_commit.id }}",
+              head_sha: "${{ github.event.workflow_run.head_sha }}",
               status: "completed",
               conclusion: "${{ job.status }}",
               output: {

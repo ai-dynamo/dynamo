@@ -76,6 +76,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpError>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
+    m.add_class::<EtcdKvCache>()?;
 
     engine::add_to_module(m)?;
 
@@ -94,6 +95,12 @@ where
 #[pyo3(text_signature = "(level, message, module, file, line)")]
 fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) {
     logging::log_message(level, message, module, file, line);
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct EtcdKvCache {
+    inner: Arc<rs::transports::etcd::KvCache>,
 }
 
 #[pyclass]
@@ -140,6 +147,23 @@ struct Endpoint {
 #[derive(Clone)]
 struct Client {
     inner: rs::component::Client<serde_json::Value, serde_json::Value>,
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct PyLease {
+    inner: rs::transports::etcd::Lease,
+}
+
+#[pymethods]
+impl PyLease {
+    fn id(&self) -> i64 {
+        self.inner.id()
+    }
+
+    fn revoke(&self) {
+        self.inner.revoke();
+    }
 }
 
 #[pymethods]
@@ -206,6 +230,118 @@ impl DistributedRuntime {
 }
 
 #[pymethods]
+impl EtcdKvCache {
+    #[new]
+    fn py_new(
+        _etcd_client: &EtcdClient,
+        _prefix: String,
+        _initial_values: &Bound<'_, PyDict>,
+    ) -> PyResult<Self> {
+        // We can't create the KvCache here because it's async, so we'll return an error
+        Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "EtcdKvCache must be created using the 'new' class method",
+        ))
+    }
+
+    #[staticmethod]
+    #[allow(clippy::new_ret_no_self)]
+    fn create<'p>(
+        py: Python<'p>,
+        etcd_client: &EtcdClient,
+        prefix: String,
+        initial_values: &Bound<'p, PyDict>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let client = etcd_client.inner.clone();
+
+        // Convert Python dict to Rust HashMap
+        let mut rust_initial_values = std::collections::HashMap::new();
+        for (key, value) in initial_values.iter() {
+            let key_str = key.extract::<String>()?;
+
+            // Handle both string and bytes values
+            let value_bytes = if let Ok(bytes) = value.extract::<Vec<u8>>() {
+                bytes
+            } else if let Ok(string) = value.extract::<String>() {
+                string.into_bytes()
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Values must be either strings or bytes",
+                ));
+            };
+
+            rust_initial_values.insert(key_str, value_bytes);
+        }
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let kv_cache = rs::transports::etcd::KvCache::new(client, prefix, rust_initial_values)
+                .await
+                .map_err(to_pyerr)?;
+
+            Ok(EtcdKvCache {
+                inner: Arc::new(kv_cache),
+            })
+        })
+    }
+
+    fn get<'p>(&self, py: Python<'p>, key: String) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            if let Some(value) = inner.get(&key).await {
+                match Python::with_gil(|py| {
+                    let py_obj = PyBytes::new(py, &value).into_pyobject(py)?;
+                    Ok(py_obj.unbind().into_any())
+                }) {
+                    Ok(result) => Ok(result),
+                    Err(e) => Err(e),
+                }
+            } else {
+                Ok(Python::with_gil(|py| py.None()))
+            }
+        })
+    }
+
+    fn get_all<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let all_values = inner.get_all().await;
+
+            Python::with_gil(|py| {
+                let dict = PyDict::new(py);
+                for (key, value) in all_values {
+                    // Strip the prefix from the key
+                    let stripped_key = if let Some(stripped) = key.strip_prefix(&inner.prefix) {
+                        stripped.to_string()
+                    } else {
+                        key
+                    };
+                    dict.set_item(stripped_key, PyBytes::new(py, &value))?;
+                }
+                let py_obj = dict.into_pyobject(py)?;
+                Ok(py_obj.unbind().into_any())
+            })
+        })
+    }
+
+    #[pyo3(signature = (key, value, lease_id=None))]
+    fn put<'p>(
+        &self,
+        py: Python<'p>,
+        key: String,
+        value: Vec<u8>,
+        lease_id: Option<i64>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner.put(&key, value, lease_id).await.map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+}
+
+#[pymethods]
 impl CancellationToken {
     fn cancel(&self) {
         self.inner.cancel();
@@ -237,21 +373,61 @@ impl Component {
             Ok(())
         })
     }
+
+    #[pyo3(signature = (ttl=1))]
+    fn create_service_with_custom_lease<'p>(
+        &self,
+        py: Python<'p>,
+        ttl: i64,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let component = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            // Get the etcd client from the runtime
+            let etcd_client = component
+                .drt()
+                .etcd_client()
+                .ok_or_else(|| to_pyerr("etcd client not found"))?;
+
+            // Create a custom lease with the specified TTL
+            let custom_lease = etcd_client.create_lease(ttl).await.map_err(to_pyerr)?;
+
+            tracing::info!("created custom lease: {:?}", custom_lease);
+
+            // Create a service
+            // TODO: tie the lease to service instead of endpoint
+            let _service = component
+                .service_builder()
+                .create()
+                .await
+                .map_err(to_pyerr)?;
+
+            // Return the lease
+            Ok(PyLease {
+                inner: custom_lease,
+            })
+        })
+    }
 }
 
 #[pymethods]
 impl Endpoint {
+    #[pyo3(signature = (generator, lease=None))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
         generator: PyObject,
+        lease: Option<&PyLease>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
             self.event_loop.clone(),
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
-        let builder = self.inner.endpoint_builder().handler(ingress);
+        let mut builder = self.inner.endpoint_builder().handler(ingress);
+        if lease.is_some() {
+            builder = builder.lease(lease.map(|l| l.inner.clone()));
+        }
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             builder.start().await.map_err(to_pyerr)?;
             Ok(())
@@ -521,6 +697,7 @@ async fn process_stream(
         // Send the PyObject through the channel or log an error
         if let Err(e) = tx.send(annotated).await {
             tracing::error!("Failed to send response: {:?}", e);
+            break;
         }
 
         if is_error {

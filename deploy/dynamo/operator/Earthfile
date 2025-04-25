@@ -37,12 +37,12 @@ test:
     SAVE ARTIFACT cover.out
 
 docker:
-    ARG CI_REGISTRY_IMAGE=my-registry
-    ARG CI_COMMIT_SHA=latest
+    ARG DOCKER_SERVER=my-registry
+    ARG IMAGE_TAG=latest
     ARG IMAGE_SUFFIX=dynamo-operator
     FROM gcr.io/distroless/static-debian11
     WORKDIR /
     COPY +build/manager .
     USER 65532:65532
     CMD ["./manager"]
-    SAVE IMAGE --push $CI_REGISTRY_IMAGE/$IMAGE_SUFFIX:$CI_COMMIT_SHA
+    SAVE IMAGE --push $DOCKER_SERVER/$IMAGE_SUFFIX:$IMAGE_TAG

@@ -19,6 +19,7 @@ members = [
     "launch/*",
     "lib/llm",
     "lib/runtime",
+    "lib/tokens",
     "lib/bindings/c",
     "lib/engines/*",
 ]
@@ -36,8 +37,9 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime" }
-dynamo-llm = { path = "lib/llm" }
+dynamo-runtime = { path = "lib/runtime", version = "0.1.1" }
+dynamo-llm = { path = "lib/llm", version = "0.1.1" }
+dynamo-tokens = { path = "lib/tokens", version = "0.1.1" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -58,6 +60,7 @@ prometheus = { version = "0.14" }
 rand = { version = "0.9.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
+strum = { version = "0.27", features = ["derive"] }
 thiserror = { version = "2.0.11" }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1" }
@@ -66,8 +69,8 @@ tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+url = {version = "2.5", features = ["serde"]}
 xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
-strum = { version = "0.27", features = ["derive"] }
 
 [profile.dev.package]
 insta.opt-level = 3

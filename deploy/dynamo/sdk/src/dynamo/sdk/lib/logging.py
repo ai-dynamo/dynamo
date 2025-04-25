@@ -13,14 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
 import logging.config
 import os
+import tempfile
 
 from dynamo.runtime.logging import configure_logger as configure_dynamo_logger
 
 
-def configure_server_logging():
+def configure_server_logging(
+    service_name: str | None = None, worker_id: int | None = None
+):
     """
     A single place to configure logging for Dynamo.
     """
@@ -30,18 +34,13 @@ def configure_server_logging():
         root_logger.removeHandler(handler)
 
     # Configure the logger with Dynamo's handler
-    configure_dynamo_logger()
+    configure_dynamo_logger(service_name, worker_id)
 
-    # Disable VLLM's default configuration
-    os.environ["VLLM_CONFIGURE_LOGGING"] = "0"
+    # map the DYN_LOG variable to a logging level
+    dyn_var = os.environ.get("DYN_LOG", "info")
+    dyn_level = log_level_mapping(dyn_var)
 
-    # loggers that should be configured to INFO
-    info_loggers = ["vllm", "nixl", "__init__"]
-    for logger_name in info_loggers:
-        logger = logging.getLogger(logger_name)
-        logger.handlers = []
-        logger.setLevel(logging.INFO)
-        logger.propagate = True
+    configure_vllm_logging(dyn_level)
 
     # loggers that should be configured to ERROR
     error_loggers = ["bentoml", "tag"]
@@ -50,3 +49,57 @@ def configure_server_logging():
         logger.handlers = []
         logger.setLevel(logging.ERROR)
         logger.propagate = True
+
+
+def log_level_mapping(level: str) -> int:
+    """
+    The DYN_LOG variable is set using "debug" or "trace" or "info.
+    This function maps those to the appropriate logging level and defaults to INFO
+    if the variable is not set or a bad value.
+    """
+    if level == "debug":
+        return logging.DEBUG
+    elif level == "info":
+        return logging.INFO
+    elif level == "warn" or level == "warning":
+        return logging.WARNING
+    elif level == "error":
+        return logging.ERROR
+    elif level == "critical":
+        return logging.CRITICAL
+    elif level == "trace":
+        return logging.INFO
+    else:
+        return logging.INFO
+
+
+def configure_vllm_logging(dyn_level: int):
+    """
+    vLLM requires a logging config file to be set in the environment.
+    This function creates a temporary file with the VLLM logging config and sets the
+    VLLM_LOGGING_CONFIG_PATH environment variable to the path of the file.
+    """
+
+    os.environ["VLLM_CONFIGURE_LOGGING"] = "1"
+    vllm_level = logging.getLevelName(dyn_level)
+
+    # Create a temporary config file for VLLM
+    vllm_config = {
+        "formatters": {"simple": {"format": "%(message)s"}},
+        "handlers": {
+            "dynamo": {
+                "class": "dynamo.runtime.logging.LogHandler",
+                "formatter": "simple",
+                "level": vllm_level,
+            }
+        },
+        "loggers": {
+            "vllm": {"handlers": ["dynamo"], "level": vllm_level, "propagate": False}
+        },
+        "version": 1,
+        "disable_existing_loggers": False,
+    }
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(vllm_config, f)
+        os.environ["VLLM_LOGGING_CONFIG_PATH"] = f.name

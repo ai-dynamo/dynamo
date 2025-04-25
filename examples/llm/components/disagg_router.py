@@ -15,6 +15,9 @@
 
 import logging
 
+from dynamo.runtime import EtcdKvCache
+from dynamo.sdk import dynamo_context
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,16 +34,33 @@ class PyDisaggregatedRouter:
         self.max_local_prefill_length = max_local_prefill_length
         self.max_prefill_queue_size = max_prefill_queue_size
 
-    def prefill_remote(
+    async def async_init(self):
+        runtime = dynamo_context["runtime"]
+        self.etcd_kv_cache = await EtcdKvCache.create(
+            runtime.etcd_client(),
+            "/dynamo/disagg_router/",
+            {
+                "max_local_prefill_length": str(self.max_local_prefill_length),
+                "max_prefill_queue_size": str(self.max_prefill_queue_size),
+            },
+        )
+
+    async def prefill_remote(
         self, prompt_length: int, prefix_hit_rate: float, queue_size: int
     ):
+        max_local_prefill_length = int(
+            await self.etcd_kv_cache.get("max_local_prefill_length")
+        )
+        max_prefill_queue_size = int(
+            await self.etcd_kv_cache.get("max_prefill_queue_size")
+        )
         absolute_prefill_length = int(prompt_length * (1 - prefix_hit_rate))
         # TODO: consider size of each request in the queue when making the decision
         decision = (
-            absolute_prefill_length > self.max_local_prefill_length
-            and queue_size < self.max_prefill_queue_size
+            absolute_prefill_length > max_local_prefill_length
+            and queue_size < max_prefill_queue_size
         )
         logger.info(
-            f"Remote prefill: {decision} (prefill length: {absolute_prefill_length}/{prompt_length}, prefill queue size: {queue_size}/{self.max_prefill_queue_size})"
+            f"Remote prefill: {decision} (prefill length: {absolute_prefill_length}/{max_local_prefill_length}, prefill queue size: {queue_size}/{max_prefill_queue_size})"
         )
         return decision

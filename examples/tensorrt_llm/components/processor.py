@@ -52,6 +52,7 @@ class Processor(ChatProcessorMixin):
         self.remote_prefill = args.remote_prefill
         self.router_mode = args.router
         self.min_workers = 1
+        self.args = args
 
         super().__init__(engine_config)
 
@@ -65,13 +66,23 @@ class Processor(ChatProcessorMixin):
             .endpoint("generate")
             .client()
         )
+
+        if self.args.router == "kv":
+            router_ns, router_name = Router.dynamo_address()  # type: ignore
+            self.router_client = (
+                await runtime.namespace(router_ns)
+                .component(router_name)
+                .endpoint("generate")
+                .client()
+            )
+
         while len(self.worker_client.endpoint_ids()) < self.min_workers:
             logger.info(
                 f"Waiting for workers to be ready.\n"
                 f" Current: {len(self.worker_client.endpoint_ids())},"
                 f" Required: {self.min_workers}"
             )
-            await asyncio.sleep(2)
+            await asyncio.sleep(30)
 
     async def _generate(self, raw_request, request_type: RequestType):
         raw_request.skip_special_tokens = False
@@ -88,15 +99,16 @@ class Processor(ChatProcessorMixin):
 
         worker_id = ""
         if self.router_mode == "kv":
-            async for route_response in self.router.generate(
+            router_generator = await self.router_client.generate(
                 preprocessed_request.tokens.model_dump_json()
-            ):
-                worker_id, prefix_hit_rate = route_response.split("_")
-                prefix_hit_rate = float(prefix_hit_rate)
-                logger.info(
-                    f"Worker ID: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
-                )
-                break
+            )
+            decision = await router_generator.__anext__()
+            decision = decision.data()
+            worker_id, prefix_hit_rate = decision.split("_")
+            prefix_hit_rate = float(prefix_hit_rate)
+            logger.info(
+                f"Worker ID: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
+            )
 
         if worker_id == "":
             if self.router_mode == "round-robin":

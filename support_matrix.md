@@ -29,30 +29,32 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 | **Operating System** | **Version** | **Architecture** | **Status**   |
 |----------------------|-------------|------------------|--------------|
+| **Ubuntu**           | 22.04       | x86_64           | Supported    |
 | **Ubuntu**           | 24.04       | x86_64           | Supported    |
 | **Ubuntu**           | 24.04       | ARM64            | Experimental |
+| **CentOS Stream**    | 9           | x86_64           | Experimental |
 
-> **Note**: For **Linux**, the **ARM64** support is experimental and may have limitations.
+> **Note**: For **Linux**, the **ARM64** support is experimental and may have limitations. Wheels are built using a manylinux_2_28-compatible environment and they have been validated on CentOS 9 and Ubuntu (22.04, 24.04). Compatibility with other Linux distributions is expected but has not been officially verified yet.
 
 ## Software Compatibility
 ### Runtime Dependency
-| **Python Package** | **Version** | glibc version |
-|--------------------|-------------|---------------|
-| ai-dynamo          |    0.1.0    | 2.39          |
-| ai-dynamo-runtime  |    0.1.0    | 2.39          |
-| ai-dynamo-vllm     |    0.7.2*   | 2.39          |
-| NIXL               |    0.1.0    | 2.39          |
+| **Python Package** | **Version**   | glibc version        |
+|--------------------|---------------|----------------------|
+| ai-dynamo          |    0.1.1      |     >=2.28           |
+| ai-dynamo-runtime  |    0.1.1      |     >=2.28           |
+| ai-dynamo-vllm     |  0.7.2.post1* | >=2.28 (recommended) |
+| NIXL               |    0.1.1      |     >=2.27           |
 
 ### Build Dependency
 | **Build Dependency** | **Version** |
 |----------------------|-------------|
 | **Base Container**   |    [25.01](https://hub.docker.com/layers/nvidia/cuda/12.8.1-runtime-ubuntu24.04/images/sha256-828c4d878adcaa4265d80c95d8ec877149b49bb2419a4cf3bb6aa889bbb7ca2e)    |
-| **ai-dynamo-vllm**   |    0.7.2*   |
+| **ai-dynamo-vllm**   |0.7.2.post1* |
 | **TensorRT-LLM**     |    0.19.0** |
-| **NIXL**             |    0.1.0    |
+| **NIXL**             |    0.1.1    |
 
 > **Note**:
-> - *ai-dynamo-vllm v0.7.2 is a customized patch of v0.7.2 from vLLM.
+> - *ai-dynamo-vllm v0.7.2.post1* is a customized patch of v0.7.2 from vLLM.
 > - **The specific version of TensorRT-LLM (planned v0.19.0) that will be supported by Dynamo is subject to change.
 
 

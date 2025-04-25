@@ -26,6 +26,15 @@ This guide provides detailed steps on benchmarking Large Language Models (LLMs) 
 
 H100 80GB x8 node(s) are required for benchmarking.
 
+> [!NOTE]
+> This guide was tested on node(s) with the following hardware configuration:
+> * **GPUs**: 8xH100 80GB HBM3 (GPU Memory Bandwidth 3.2 TBs)
+> * **CPU**: 2x Intel Saphire Rapids, Intel(R) Xeon(R) Platinum 8480CL E5, 112 cores (56 cores per CPU), 2.00 GHz (Base), 3.8 Ghz (Max boost), PCIe Gen5
+> * **NVLink**: NVLink 4th Generation, 900 GB/s (GPU to GPU NVLink bidirectional bandwidth), 18 Links per GPU
+> * **InfiniBand**: 8X400Gbit/s (Compute Links), 2X400Gbit/s (Storage Links)
+>
+> Benchmarking with a different hardware configuration may yield suboptimal results.
+
 1\. Build benchmarking image
 ```bash
 ./container/build.sh
@@ -43,7 +52,7 @@ docker compose -f deploy/docker_compose.yml up -d
 
 ## Disaggregated Single Node Benchmarking
 
-*One H100 80GB x8 node is required for this setup.*
+One H100 80GB x8 node is required for this setup.
 
 In the following setup we compare Dynamo disaggregated vLLM performance to
 [native vLLM Aggregated Baseline](#vllm-aggregated-baseline-benchmarking) on a single node. These were chosen to optimize
@@ -72,12 +81,7 @@ Collect the performance numbers as shown on the [Collecting Performance Numbers]
 
 ## Disaggregated Multi Node Benchmarking
 
-*Two H100 80GB x8 nodes are required for this setup.*
-
-> [!Note]
-> Nodes used for benchmarking were part of a cluster connected via InfiniBand
-> NDR with 8 connections for compute and 2 for storage. Both fabrics were on
-> their own fat tree non-blocking topology.
+Two H100 80GB x8 nodes are required for this setup.
 
 In the following steps we compare Dynamo disaggregated vLLM performance to
 [native vLLM Aggregated Baseline](#vllm-aggregated-baseline-benchmarking) on two nodes. These were chosen to optimize

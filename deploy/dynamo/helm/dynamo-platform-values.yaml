@@ -12,115 +12,63 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-existingImagePullSecret: nvcrimagepullsecret
-
-# Global values used across charts
-global:
-  NGC_API_KEY: ${NGC_TOKEN}
 
 dynamo-operator:
-  enabled: true
   natsAddr: "nats://${RELEASE_NAME}-nats:4222"
   etcdAddr: "${RELEASE_NAME}-etcd:2379"
   namespaceRestriction:
-    enabled: true
     targetNamespace: ${NAMESPACE}
   controllerManager:
     manager:
       image:
-        repository: ${CI_REGISTRY_IMAGE}/dynamo-operator
-        tag: ${CI_COMMIT_SHA}
-      args:
-        - --health-probe-bind-address=:8081
-        - --metrics-bind-address=127.0.0.1:8080
+        repository: ${DOCKER_SERVER}/dynamo-operator
+        tag: ${IMAGE_TAG}
+  imagePullSecrets:
+    - name: ${DOCKER_SECRET_NAME}
 
   dynamo:
-    dynamoIngressSuffix: ${DYNAMO_INGRESS_SUFFIX}
-    yatai:
-      endpoint: http://dynamo-store
-      clusterName: default
-
-    yataiSystem:
-      namespace: ""
-
-    internalImages:
-      bentoDownloader: quay.io/bentoml/bento-downloader:0.0.5
-      kaniko: quay.io/bentoml/kaniko:debug
-      buildkit: quay.io/bentoml/buildkit:master
-      buildkitRootless: quay.io/bentoml/buildkit:master-rootless
-      metricsTransformer: quay.io/bentoml/yatai-bento-metrics-transformer:0.0.4
-      debugger: quay.io/bentoml/bento-debugger:0.0.8
-      monitorExporter: quay.io/bentoml/bentoml-monitor-exporter:0.0.3
-      proxy: quay.io/bentoml/bentoml-proxy:0.0.1
-
-    disableAutomateBentoImageBuilder: false
-    enableRestrictedSecurityContext: false
-    disableYataiComponentRegistration: false
-
+    ingress:
+      enabled: ${INGRESS_ENABLED}
+      className: ${INGRESS_CLASS}
+      tlsSecretName: my-tls-secret
+    istio:
+      enabled: ${ISTIO_ENABLED}
+      gateway: ${ISTIO_GATEWAY}
+    ingressHostSuffix: ${DYNAMO_INGRESS_SUFFIX}
     dockerRegistry:
-      server: 'nvcr.io/nvidian/nim-llm-dev'
-      inClusterServer: ''
-      username: '$oauthtoken'
-      passwordExistingSecretName: 'nvcrimagepullsecret'
-      secure: true
-      bentoRepositoryName: yatai-bentos
-
-    bentoImageBuildEngine: buildkit
-    addNamespacePrefixToImageName: false
-
-    estargz:
-      enabled: false
-
-    kaniko:
-      cacheRepo: ''
-      snapshotMode: ''
+      server: ${PIPELINES_DOCKER_SERVER}
+      username: ${PIPELINES_DOCKER_USERNAME}
+      password: ${PIPELINES_DOCKER_PASSWORD}
+    imageBuildEngine: buildkit
 
 dynamo-api-store:
-  enabled: true
   namespaceRestriction:
     enabled: true
     targetNamespace: ${NAMESPACE}
   istio:
-    host: ${NAMESPACE}.dev.aire.nvidia.com
-  dynamo:
-    env:
-      resource_scope: "user"
+    enabled: ${ISTIO_ENABLED}
+    gateway: ${ISTIO_GATEWAY}
+    host: ${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
   image:
-    repository: ${CI_REGISTRY_IMAGE}/dynamo-api-store
-    tag: ${CI_COMMIT_SHA}
+    repository: ${DOCKER_SERVER}/dynamo-api-store
+    tag: ${IMAGE_TAG}
     pullPolicy: IfNotPresent
   imagePullSecrets:
-    - name: nvcrimagepullsecret
-    - name: docker-imagepullsecret
-    - name: gitlab-imagepull
+    - name: ${DOCKER_SECRET_NAME}
   ingress:
-    enabled: true
-    className: nginx
+    enabled: ${INGRESS_ENABLED}
+    className: ${INGRESS_CLASS}
     hosts:
-      - host: ${NAMESPACE}.dev.aire.nvidia.com
+      - host: ${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
         paths:
           - path: /
             pathType: Prefix
-  postgresql:
-    primary:
-      persistence:
-        enabled: false
-  minio:
-    persistence:
-      enabled: true
-      size: 5Gi
-      storageClass: "local-path"
-    apiIngress:
-      enabled: false
-      ingressClassName: nginx
-      hostname: minio.example.com
-      pathType: Prefix
 
 etcd:
   enabled: true
   persistence:
     enabled: true
-    storageClass: "local-path"
+    storageClass: ""
     size: 1Gi
   preUpgrade:
     enabled: false
@@ -133,4 +81,4 @@ nats:
       fileStore:
         pvc:
           size: 1Gi
-          storageClassName: "local-path"
+          storageClassName: ""

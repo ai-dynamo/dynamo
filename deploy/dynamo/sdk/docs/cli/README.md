@@ -65,6 +65,6 @@ dynamo build [SERVICE]
 
 **Example**
 ```bash
-cd examples
+cd examples/hello_world
 dynamo build hello_world:Frontend
 ```

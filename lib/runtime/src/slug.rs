@@ -36,8 +36,6 @@ impl Slug {
         Slug::slugify_unique(s.as_ref())
     }
 
-    /* Not currently used but leave it for now
-     *
     /// Turn the string into a valid slug, replacing any not-web-or-nats-safe characters with '-'
     pub fn slugify(s: &str) -> Slug {
         let out = s
@@ -54,7 +52,6 @@ impl Slug {
             .collect::<String>();
         Slug::new(out)
     }
-    */
 
     /// Like slugify but also add a four byte hash on the end, in case two different strings slug
     /// to the same thing.

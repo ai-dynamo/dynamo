@@ -277,6 +277,7 @@ rules:
   - patch
   - update
   - watch
+{{- if .Values.istioVirtualServiceEnabled }}
 - apiGroups:
   - networking.istio.io
   resources:
@@ -289,6 +290,7 @@ rules:
   - patch
   - update
   - watch
+{{- end }}
 - apiGroups:
   - networking.k8s.io
   resources:
@@ -328,8 +330,10 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dynamonimdeployments
-  - dynamodeployments
+  - dynamocomponentdeployments
+  - dynamocomponentrequests
+  - dynamocomponents
+  - dynamographdeployments
   verbs:
   - create
   - delete
@@ -341,61 +345,18 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dynamonimdeployments/finalizers
-  - dynamodeployments/finalizers
+  - dynamocomponentdeployments/finalizers
+  - dynamocomponentrequests/finalizers
+  - dynamographdeployments/finalizers
   verbs:
   - update
 - apiGroups:
   - nvidia.com
   resources:
-  - dynamonimdeployments/status
-  - dynamodeployments/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - nvidia.com
-  resources:
-  - dynamonimrequests
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - nvidia.com
-  resources:
-  - dynamonimrequests/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - nvidia.com
-  resources:
-  - dynamonimrequests/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - nvidia.com
-  resources:
-  - dynamonims
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - nvidia.com
-  resources:
-  - dynamonims/status
+  - dynamocomponentdeployments/status
+  - dynamocomponentrequests/status
+  - dynamocomponents/status
+  - dynamographdeployments/status
   verbs:
   - get
   - patch

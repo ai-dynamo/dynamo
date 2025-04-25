@@ -18,6 +18,9 @@
 package controller
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -75,4 +78,20 @@ func getPvcName(crd metav1.Object, defaultName *string) string {
 		return *defaultName
 	}
 	return crd.GetName()
+}
+
+func getIngressHost(ingressSpec v1alpha1.IngressSpec) string {
+	host := ingressSpec.Host
+	if ingressSpec.HostPrefix != nil {
+		host = *ingressSpec.HostPrefix + host
+	}
+	ingressSuffix := DefaultIngressSuffix
+	if ingressSpec.HostSuffix != nil {
+		ingressSuffix = *ingressSpec.HostSuffix
+	}
+	return fmt.Sprintf("%s.%s", host, ingressSuffix)
+}
+
+func getK8sName(value string) string {
+	return strings.ReplaceAll(value, ":", "--")
 }

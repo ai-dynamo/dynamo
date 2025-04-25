@@ -66,6 +66,7 @@ pub async fn prepare_engine(
         EngineConfig::StaticFull {
             service_name,
             engine,
+            card: _card,
         } => {
             tracing::debug!("Model: {service_name}");
             Ok((service_name, engine, false))

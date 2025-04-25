@@ -22,17 +22,85 @@ import inspect
 import json
 import logging
 import os
+import signal
+import sys
+import time
 import typing as t
 from typing import Any
 
 import click
+import uvicorn
 import uvloop
+from fastapi.responses import StreamingResponse
 
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 from dynamo.sdk import dynamo_context
 from dynamo.sdk.lib.service import LinkedServices
 
 logger = logging.getLogger(__name__)
+
+
+def add_fastapi_routes(app, service, class_instance):
+    """
+    Add FastAPI routes for Dynamo endpoints marked with is_api=True.
+
+    Args:
+        app: FastAPI app instance
+        service: Dynamo service instance
+        class_instance: Instance of the service class
+    """
+
+    added_routes = []
+    for name, endpoint in service.get_dynamo_endpoints().items():
+        if endpoint.is_api:
+            path = name if name.startswith("/") else f"/{name}"
+            # Bind the method to the class instance
+            bound_method = endpoint.func.__get__(class_instance)
+
+            # Check if the method is a generator or async generator
+            is_streaming = inspect.isasyncgenfunction(
+                bound_method
+            ) or inspect.isgeneratorfunction(bound_method)
+
+            # Set up appropriate response model and response class
+            if is_streaming:
+                logger.info(f"Registering streaming endpoint {path}")
+                app.add_api_route(
+                    path,
+                    bound_method,
+                    methods=["POST"],
+                    response_class=StreamingResponse,
+                )
+            else:
+                logger.info(f"Registering regular endpoint {path}")
+                app.add_api_route(
+                    path,
+                    bound_method,
+                    methods=["POST"],
+                )
+
+            added_routes.append(path)
+            logger.info(f"Added API route {path} to FastAPI app")
+    return added_routes
+
+
+class GracefulExit(SystemExit):
+    """Exception to signal a graceful exit."""
+
+    pass
+
+
+def setup_signal_handlers():
+    """Setup signal handlers for graceful shutdown."""
+
+    def signal_handler(sig, frame):
+        logger.info(f"Received signal {sig}, initiating graceful shutdown")
+        raise GracefulExit(0)
+
+    # Register SIGINT and SIGTERM handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGQUIT, signal_handler)
 
 
 @click.command()
@@ -68,6 +136,9 @@ def main(
 
     from dynamo.sdk.lib.logging import configure_server_logging
 
+    # Setup signal handlers for graceful shutdown
+    setup_signal_handlers()
+
     run_id = service_name
     dynamo_context["service_name"] = service_name
     dynamo_context["runner_map"] = runner_map
@@ -89,7 +160,7 @@ def main(
     if service_name and service_name != service.name:
         service = service.find_dependent_by_name(service_name)
 
-    configure_server_logging()
+    configure_server_logging(service_name=service_name, worker_id=worker_id)
     if runner_map:
         BentoMLContainer.remote_runner_mapping.set(
             t.cast(t.Dict[str, str], json.loads(runner_map))
@@ -115,32 +186,42 @@ def main(
 
             # Get Dynamo configuration and create component
             namespace, component_name = service.dynamo_address()
-            logger.info(
-                f"[{run_id}] Registering component {namespace}/{component_name}"
-            )
+            logger.info(f"Registering component {namespace}/{component_name}")
             component = runtime.namespace(namespace).component(component_name)
 
             try:
-                # Create service first
-                await component.create_service()
-                logger.info(f"[{run_id}] Created {service.name} component")
+                # if a custom lease is specified we need to create the service with that lease
+                lease = None
+                if service._dynamo_config.custom_lease:
+                    lease = await component.create_service_with_custom_lease(
+                        ttl=service._dynamo_config.custom_lease.ttl
+                    )
+                    lease_id = lease.id()
+                    dynamo_context["lease"] = lease
+                    logger.info(
+                        f"Created {service.name} component with custom lease id {lease_id}"
+                    )
+                else:
+                    # Create service first
+                    await component.create_service()
+                    logger.info(f"Created {service.name} component")
 
                 # Set runtime on all dependencies
                 for dep in service.dependencies.values():
                     dep.set_runtime(runtime)
-                    logger.debug(f"[{run_id}] Set runtime for dependency: {dep}")
+                    logger.debug(f"Set runtime for dependency: {dep}")
 
                 # Then register all Dynamo endpoints
                 dynamo_endpoints = service.get_dynamo_endpoints()
                 if not dynamo_endpoints:
-                    error_msg = f"[{run_id}] FATAL ERROR: No Dynamo endpoints found in service {service.name}!"
+                    error_msg = f"FATAL ERROR: No Dynamo endpoints found in service {service.name}!"
                     logger.error(error_msg)
                     raise ValueError(error_msg)
 
                 endpoints = []
                 for name, endpoint in dynamo_endpoints.items():
                     td_endpoint = component.endpoint(name)
-                    logger.debug(f"[{run_id}] Registering endpoint '{name}'")
+                    logger.debug(f"Registering endpoint '{name}'")
                     endpoints.append(td_endpoint)
                     # Bind an instance of inner to the endpoint
                 dynamo_context["component"] = component
@@ -159,31 +240,95 @@ def main(
                 # Run startup hooks before setting up endpoints
                 for name, member in vars(class_instance.__class__).items():
                     if callable(member) and getattr(
-                        member, "__bentoml_startup_hook__", False
+                        member, "__dynamo_startup_hook__", False
                     ):
-                        logger.debug(f"[{run_id}] Running startup hook: {name}")
+                        logger.debug(f"Running startup hook: {name}")
                         result = getattr(class_instance, name)()
                         if inspect.isawaitable(result):
                             # await on startup hook async_on_start
                             await result
-                            logger.debug(
-                                f"[{run_id}] Completed async startup hook: {name}"
-                            )
+                            logger.debug(f"Completed async startup hook: {name}")
                         else:
-                            logger.info(f"[{run_id}] Completed startup hook: {name}")
+                            logger.info(f"Completed startup hook: {name}")
                 logger.info(
-                    f"[{run_id}] Starting {service.name} instance with all registered endpoints"
+                    f"Starting {service.name} instance with all registered endpoints"
                 )
                 # TODO:bis: convert to list
-                result = await endpoints[0].serve_endpoint(twm[0])
+                if lease is None:
+                    logger.info(f"Serving {service.name} with primary lease")
+                else:
+                    logger.info(f"Serving {service.name} with lease: {lease.id()}")
+                result = await endpoints[0].serve_endpoint(twm[0], lease)
 
+            except GracefulExit:
+                logger.info(f"[{run_id}] Gracefully shutting down {service.name}")
+                # Add any specific cleanup needed
+                return None
             except Exception as e:
-                logger.error(f"[{run_id}] Error in Dynamo component setup: {str(e)}")
+                logger.error(f"Error in Dynamo component setup: {str(e)}")
                 raise
 
-        uvloop.install()
-        asyncio.run(worker())
+        # if the service has a FastAPI app, add the worker as an event handler
+        def web_worker():
+            try:
+                if not service.app:
+                    return
+
+                # Create the class instance
+                class_instance = service.inner()
+                # TODO: init hooks
+                # Add API routes to the FastAPI app
+                added_routes = add_fastapi_routes(service.app, service, class_instance)
+
+                if added_routes:
+                    # Configure uvicorn with graceful shutdown
+                    config = uvicorn.Config(
+                        service.app, host="0.0.0.0", port=8000, log_level="info"
+                    )
+                    server = uvicorn.Server(config)
+
+                    # Start the server with graceful shutdown handling
+                    logger.info(
+                        f"Starting FastAPI server on 0.0.0.0:8000 with routes: {added_routes}"
+                    )
+                    server.run()
+                else:
+                    logger.warning("No API routes found, not starting FastAPI server")
+                    # Keep the process running until interrupted
+                    logger.info("Service is running, press Ctrl+C to stop")
+                    while True:
+                        try:
+                            # Sleep in small increments to respond to signals quickly
+                            time.sleep(0.1)
+                        except (KeyboardInterrupt, GracefulExit):
+                            logger.info("Gracefully shutting down FastAPI process")
+                            break
+            except GracefulExit:
+                logger.info("Gracefully shutting down FastAPI service")
+            except Exception as e:
+                logger.error(f"Error in web worker: {str(e)}")
+                raise
+
+        try:
+            uvloop.install()
+            if service.app:
+                web_worker()
+            else:
+                asyncio.run(worker())
+        except GracefulExit:
+            logger.info("Exiting gracefully")
+            sys.exit(0)
+        except KeyboardInterrupt:
+            logger.info("Interrupted, shutting down gracefully")
+            sys.exit(0)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (GracefulExit, KeyboardInterrupt):
+        logger.info("Exiting gracefully")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"Error in main: {str(e)}")
+        sys.exit(1)

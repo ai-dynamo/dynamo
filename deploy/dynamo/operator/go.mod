@@ -8,10 +8,9 @@ require (
 	dario.cat/mergo v1.0.1
 	emperror.dev/errors v0.8.1
 	github.com/apparentlymart/go-shquot v0.0.1
+	github.com/bsm/gomega v1.27.10
 	github.com/cisco-open/k8s-objectmatcher v1.9.0
-	github.com/ettle/strcase v0.2.0
 	github.com/huandu/xstrings v1.4.0
-	github.com/jinzhu/copier v0.4.0
 	github.com/mitchellh/hashstructure/v2 v2.0.2
 	github.com/onsi/ginkgo/v2 v2.19.0
 	github.com/onsi/gomega v1.33.1
@@ -20,6 +19,7 @@ require (
 	github.com/rs/xid v1.4.0
 	github.com/sergeymakinen/go-quote v1.1.0
 	github.com/sirupsen/logrus v1.9.3
+	go.etcd.io/etcd/client/v3 v3.5.14
 	gopkg.in/yaml.v2 v2.4.0
 	istio.io/api v1.23.1
 	istio.io/client-go v1.23.1
@@ -36,6 +36,8 @@ require (
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/coreos/go-semver v0.3.1 // indirect
+	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/distribution v2.8.3+incompatible // indirect
@@ -76,6 +78,8 @@ require (
 	github.com/prometheus/procfs v0.15.1 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
+	go.etcd.io/etcd/api/v3 v3.5.14 // indirect
+	go.etcd.io/etcd/client/pkg/v3 v3.5.14 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.26.0 // indirect
 	golang.org/x/exp v0.0.0-20230515195305-f3d0a9c9a5cc // indirect
@@ -88,6 +92,8 @@ require (
 	golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20240528184218-531527333157 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20240701130421-f6361c86f094 // indirect
+	google.golang.org/grpc v1.65.0 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.12.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect

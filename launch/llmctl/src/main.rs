@@ -98,7 +98,7 @@ define_type_subcommands!(
 #[command(
     author="NVIDIA",
     version="0.2.1",
-    about="LLMCTL - Control and manage TRD Components",
+    about="LLMCTL - Control and manage Dynamo Components",
     long_about = None,
     disable_help_subcommand = true,
 )]

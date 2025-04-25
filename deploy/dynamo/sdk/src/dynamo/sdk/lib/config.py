@@ -84,14 +84,20 @@ class ServiceConfig(dict):
             else:
                 args.extend([f"--{arg_key}", str(value)])
 
+        # Get service config excluding ServiceArgs if it exists
+        # We never want args to be generated from the ServiceArgs
+        service_config = self[service_name].copy()
+        if "ServiceArgs" in service_config:
+            del service_config["ServiceArgs"]
+
         if (common := self.get(COMMON_CONFIG_SERVICE)) is not None and (
-            common_config_keys := self[service_name].get(COMMON_CONFIG_KEY)
+            common_config_keys := service_config.get(COMMON_CONFIG_KEY)
         ) is not None:
             for key in common_config_keys:
-                if key in common and key not in self[service_name]:
+                if key in common and key not in service_config:
                     add_to_args(args, key, common[key])
 
-        for key, value in self[service_name].items():
+        for key, value in service_config.items():
             add_to_args(args, key, value)
 
         logger.info(f"Running {service_name} with {args=}")

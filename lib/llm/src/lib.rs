@@ -24,6 +24,7 @@ pub mod disagg_router;
 pub mod engines;
 pub mod gguf;
 pub mod http;
+pub mod key_value_store;
 pub mod kv_router;
 pub mod model_card;
 pub mod model_type;

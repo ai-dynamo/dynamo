@@ -14,17 +14,16 @@
 # limitations under the License.
 
 import logging
-import signal
 import subprocess
-import sys
 from pathlib import Path
 
 from components.processor import Processor
 from components.worker import VllmWorker
+from fastapi import FastAPI
 from pydantic import BaseModel
 
 from dynamo import sdk
-from dynamo.sdk import depends, service
+from dynamo.sdk import async_on_shutdown, depends, service
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
 
@@ -32,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_http_binary_path():
+    """Find the HTTP binary path in SDK or fallback to 'http' command."""
     sdk_path = Path(sdk.__file__)
     binary_path = sdk_path.parent / "cli/bin/http"
     if not binary_path.exists():
@@ -41,6 +41,8 @@ def get_http_binary_path():
 
 
 class FrontendConfig(BaseModel):
+    """Configuration for the Frontend service including model and HTTP server settings."""
+
     served_model_name: str
     endpoint: str
     port: int = 8080
@@ -48,34 +50,31 @@ class FrontendConfig(BaseModel):
 
 # todo this should be called ApiServer
 @service(
+    dynamo={
+        "enabled": True,
+        "namespace": "dynamo",
+    },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
     image=DYNAMO_IMAGE,
+    app=FastAPI(title="LLM Example"),
 )
 class Frontend:
     worker = depends(VllmWorker)
     processor = depends(Processor)
 
     def __init__(self):
+        """Initialize Frontend service with HTTP server and model configuration."""
         config = ServiceConfig.get_instance()
         frontend_config = FrontendConfig(**config.get("Frontend", {}))
         self.frontend_config = frontend_config
         self.process = None
 
-        signal.signal(signal.SIGTERM, self.handle_exit)
-        signal.signal(signal.SIGINT, self.handle_exit)
-
-        # Initial setup
         self.setup_model()
         self.start_http_server()
 
-        try:
-            if self.process:
-                self.process.wait()
-        except KeyboardInterrupt:
-            self.cleanup()
-
     def setup_model(self):
+        """Configure the model for HTTP service using llmctl."""
         subprocess.run(
             [
                 "llmctl",
@@ -83,9 +82,9 @@ class Frontend:
                 "remove",
                 "chat-models",
                 self.frontend_config.served_model_name,
-            ]
+            ],
+            check=False,
         )
-        # Add the model
         subprocess.run(
             [
                 "llmctl",
@@ -94,20 +93,26 @@ class Frontend:
                 "chat-models",
                 self.frontend_config.served_model_name,
                 self.frontend_config.endpoint,
-            ]
+            ],
+            check=False,
         )
 
     def start_http_server(self):
+        """Start the HTTP server on the configured port."""
         logger.info("Starting HTTP server")
         http_binary = get_http_binary_path()
+
         self.process = subprocess.Popen(
             [http_binary, "-p", str(self.frontend_config.port)],
             stdout=None,
             stderr=None,
         )
 
+    @async_on_shutdown
     def cleanup(self):
-        logger.info("Cleaning up before shutdown...")
+        """Clean up resources before shutdown."""
+
+        # circusd manages shutdown of http server process, we just need to remove the model using the on_shutdown hook
         subprocess.run(
             [
                 "llmctl",
@@ -115,14 +120,6 @@ class Frontend:
                 "remove",
                 "chat-models",
                 self.frontend_config.served_model_name,
-            ]
+            ],
+            check=False,
         )
-        if self.process:
-            logger.info("Terminating HTTP process")
-            self.process.terminate()
-            self.process.wait(timeout=10)
-
-    def handle_exit(self, signum, frame):
-        logger.debug(f"Received signal {signum}, shutting down...")
-        self.cleanup()
-        sys.exit(0)

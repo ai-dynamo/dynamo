@@ -30,6 +30,7 @@ from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRe
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
+from dynamo.runtime import EtcdKvCache
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
 logger = logging.getLogger(__name__)
@@ -65,8 +66,8 @@ class Processor(ProcessMixIn):
         self.completions_processor = CompletionsProcessor(
             self.tokenizer, self.model_config
         )
-        self.router_mode = self.engine_args.router
         self.min_workers = 1
+        print(f"Processor init: {self.engine_args.router}")
 
     def _create_tokenizer(self, engine_args: AsyncEngineArgs) -> AnyTokenizer:
         """Create a TokenizerGroup using engine arguments similar to VLLM's approach"""
@@ -93,7 +94,22 @@ class Processor(ProcessMixIn):
             .client()
         )
 
+        if self.engine_args.router == "kv":
+            router_ns, router_name = Router.dynamo_address()  # type: ignore
+            self.router_client = (
+                await runtime.namespace(router_ns)
+                .component(router_name)
+                .endpoint("generate")
+                .client()
+            )
+
         await check_required_workers(self.worker_client, self.min_workers)
+
+        self.etcd_kv_cache = await EtcdKvCache.create(
+            runtime.etcd_client(),
+            "/dynamo/processor/",
+            {"router": self.engine_args.router},
+        )
 
     async def _generate(
         self,
@@ -109,16 +125,18 @@ class Processor(ProcessMixIn):
             engine_prompt,
             sampling_params,
         ) = await self._parse_raw_request(raw_request)
-        if self.router_mode == "kv":
-            async for route_response in self.router.generate(
+        router_mode = (await self.etcd_kv_cache.get("router")).decode()
+        if router_mode == "kv":
+            router_generator = await self.router_client.generate(
                 Tokens(tokens=engine_prompt["prompt_token_ids"]).model_dump_json()
-            ):
-                worker_id, prefix_hit_rate = route_response.split("_")
-                prefix_hit_rate = float(prefix_hit_rate)
-                logger.info(
-                    f"Worker ID: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
-                )
-                break
+            )
+            decision = await router_generator.__anext__()
+            decision = decision.data()
+            worker_id, prefix_hit_rate = decision.split("_")
+            prefix_hit_rate = float(prefix_hit_rate)
+            logger.info(
+                f"Worker ID: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
+            )
 
             if worker_id == "":
                 engine_generator = await self.worker_client.generate(
@@ -139,7 +157,7 @@ class Processor(ProcessMixIn):
                     ).model_dump_json(),
                     int(worker_id),
                 )
-        elif self.router_mode == "random":
+        elif router_mode == "random":
             engine_generator = await self.worker_client.generate(
                 vLLMGenerateRequest(
                     engine_prompt=engine_prompt,
@@ -147,7 +165,7 @@ class Processor(ProcessMixIn):
                     request_id=request_id,
                 ).model_dump_json()
             )
-        elif self.router_mode == "round-robin":
+        elif router_mode == "round-robin":
             engine_generator = await self.worker_client.round_robin(
                 vLLMGenerateRequest(
                     engine_prompt=engine_prompt,

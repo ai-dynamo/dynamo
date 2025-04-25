@@ -5,7 +5,7 @@ A Kubernetes Operator to manage all Dynamo pipelines using custom resources.
 
 ## Overview
 
-This operator automates the deployment and lifecycle management of `DynamoDeployment` resources in Kubernetes clusters.
+This operator automates the deployment and lifecycle management of `DynamoGraphDeployment` resources in Kubernetes clusters.
 
 Built with [Kubebuilder](https://book.kubebuilder.io/), it follows Kubernetes best practices and supports declarative configuration through CustomResourceDefinitions (CRDs).
 

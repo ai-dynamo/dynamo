@@ -51,7 +51,7 @@ def parse_args(service_name, prefix) -> Namespace:
     parser.add_argument(
         "--block-size",
         type=int,
-        default=64,
+        default=32,
         help="KV block size",
     )
     parser.add_argument(
@@ -97,7 +97,7 @@ class Router:
                 f" Current: {len(self.workers_client.endpoint_ids())},"
                 f" Required: {self.args.min_workers}"
             )
-            await asyncio.sleep(2)
+            await asyncio.sleep(30)
 
         kv_listener = self.runtime.namespace("dynamo").component("TensorRTLLMWorker")
         await kv_listener.create_service()

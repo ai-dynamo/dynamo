@@ -13,12 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 import subprocess
 import time
 
 import pytest
+from typer.testing import CliRunner
+
+from dynamo.sdk.cli.cli import cli
 
 pytestmark = pytest.mark.pre_merge
+runner = CliRunner()
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -28,6 +33,21 @@ def setup_and_teardown():
     etcd = subprocess.Popen(["etcd"])
     print("Setting up resources")
 
+    # Run the serve command in dry-run mode with CLI runner to check it's working
+    result = runner.invoke(
+        cli,
+        [
+            "serve",
+            "pipeline:Frontend",
+            "--working-dir",
+            "deploy/dynamo/sdk/src/dynamo/sdk/tests",
+            "--Frontend.model=qwentastic",
+            "--Middle.bias=0.5",
+            "--dry-run",
+        ],
+    )
+
+    # Now start the actual server using subprocess for the real integration test
     server = subprocess.Popen(
         [
             "dynamo",
@@ -42,7 +62,7 @@ def setup_and_teardown():
 
     time.sleep(5)
 
-    yield
+    yield result
 
     # Teardown code
     print("Tearing down resources")
@@ -54,7 +74,17 @@ def setup_and_teardown():
     etcd.wait()
 
 
-async def test_pipeline():
+async def test_pipeline(setup_and_teardown):
+    # Check the CLI command ran successfully
+    result = setup_and_teardown
+    assert result.exit_code == 0
+
+    # Clean the output to check for expected content
+    clean_output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "Service Configuration:" in clean_output
+    assert '"Frontend": {' in clean_output
+    assert '"model": "qwentastic"' in clean_output
+
     import asyncio
 
     import aiohttp
@@ -64,7 +94,7 @@ async def test_pipeline():
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    "http://localhost:3000/generate",
+                    "http://localhost:8000/generate",
                     json={"text": "federer-is-the-greatest-tennis-player-of-all-time"},
                     headers={"accept": "text/event-stream"},
                 ) as resp:

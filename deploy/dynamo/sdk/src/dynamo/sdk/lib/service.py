@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, TypeVar, Union
 from _bentoml_sdk import Service, ServiceConfig
 from _bentoml_sdk.images import Image
 from _bentoml_sdk.service.config import validate
+from fastapi import FastAPI
 
 from dynamo.sdk.lib.decorators import DynamoEndpoint
 
@@ -66,6 +67,14 @@ class DynamoConfig:
     enabled: bool = False
     name: str | None = None
     namespace: str | None = None
+    custom_lease: LeaseConfig | None = None
+
+
+@dataclass
+class LeaseConfig:
+    """Configuration for custom dynamo leases"""
+
+    ttl: int = 1  # seconds
 
 
 class DynamoService(Service[T]):
@@ -78,9 +87,11 @@ class DynamoService(Service[T]):
         image: Optional[Image] = None,
         envs: Optional[list[dict[str, Any]]] = None,
         dynamo_config: Optional[DynamoConfig] = None,
+        app: Optional[FastAPI] = None,
     ):
         service_name = inner.__name__
         service_args = self._get_service_args(service_name)
+        self.app = app
 
         if service_args:
             # Validate and merge service args with existing config
@@ -90,14 +101,31 @@ class DynamoService(Service[T]):
 
         super().__init__(config=config, inner=inner, image=image, envs=envs or [])
 
-        # Initialize Dynamo configuration
-        self._dynamo_config = (
+        # Get any dynamo overrides from service_args
+        dynamo_overrides = {}
+        if service_args and "dynamo" in service_args:
+            dynamo_overrides = service_args["dynamo"]
+            logger.debug(f"Found dynamo overrides in service_args: {dynamo_overrides}")
+
+        # Initialize Dynamo configuration with overrides
+        base_config = (
             dynamo_config
             if dynamo_config
             else DynamoConfig(name=inner.__name__, namespace="default")
         )
+        logger.debug(f"Initial base DynamoConfig: {asdict(base_config)}")
+
+        # Apply overrides from service_args to base config
+        for key, value in dynamo_overrides.items():
+            if hasattr(base_config, key):
+                logger.debug(f"Applying override: {key}={value}")
+                setattr(base_config, key, value)
+
+        self._dynamo_config = base_config
         if self._dynamo_config.name is None:
             self._dynamo_config.name = inner.__name__
+
+        logger.debug(f"Final DynamoConfig: {asdict(self._dynamo_config)}")
 
         # Add dynamo configuration to the service config
         # this allows for the config to be part of the service in bento.yaml
@@ -182,6 +210,7 @@ class DynamoService(Service[T]):
 
     def _remove_service_args(self, service_name: str):
         """Remove ServiceArgs from the environment config after using them, preserving envs"""
+        logger.debug(f"Removing service args for {service_name}")
         config_str = os.environ.get("DYNAMO_SERVICE_CONFIG")
         if config_str:
             config = json.loads(config_str)
@@ -198,18 +227,91 @@ class DynamoService(Service[T]):
                     }
                     os.environ["DYNAMO_SERVICE_ENVS"] = json.dumps(envs_config)
 
-                # Remove ServiceArgs from main config
-                del config[service_name]["ServiceArgs"]
-                os.environ["DYNAMO_SERVICE_CONFIG"] = json.dumps(config)
+    def inject_config(self) -> None:
+        """Inject configuration from environment into service configs.
+
+        This reads from DYNAMO_SERVICE_CONFIG environment variable and merges
+        the configuration with any existing service config.
+        """
+        # Get service configs from environment
+        service_config_str = os.environ.get("DYNAMO_SERVICE_CONFIG")
+        if not service_config_str:
+            logger.debug("No DYNAMO_SERVICE_CONFIG found in environment")
+            return
+
+        try:
+            service_configs = json.loads(service_config_str)
+            logger.debug(f"Loaded service configs: {service_configs}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse DYNAMO_SERVICE_CONFIG: {e}")
+            return
+
+        # Store the entire config at class level
+        if not hasattr(DynamoService, "_global_service_configs"):
+            setattr(DynamoService, "_global_service_configs", {})
+        DynamoService._global_service_configs = service_configs
+
+        # Process ServiceArgs for all services
+        all_services = self.all_services()
+        logger.debug(f"Processing configs for services: {list(all_services.keys())}")
+
+        for name, svc in all_services.items():
+            if name in service_configs:
+                svc_config = service_configs[name]
+                # Extract ServiceArgs if present
+                if "ServiceArgs" in svc_config:
+                    logger.debug(
+                        f"Found ServiceArgs for {name}: {svc_config['ServiceArgs']}"
+                    )
+                    if not hasattr(svc, "_service_args"):
+                        object.__setattr__(svc, "_service_args", {})
+                    svc._service_args = svc_config["ServiceArgs"]
+                else:
+                    logger.debug(f"No ServiceArgs found for {name}")
+                    # Set default config
+                    if not hasattr(svc, "_service_args"):
+                        object.__setattr__(svc, "_service_args", {"workers": 1})
+
+    def get_service_configs(self) -> Dict[str, Dict[str, Any]]:
+        """Get the service configurations for resource allocation.
+
+        Returns:
+            Dict mapping service names to their configs
+        """
+        # Get all services in the dependency chain
+        all_services = self.all_services()
+        result = {}
+
+        # If we have global configs, use them to build service configs
+        if hasattr(DynamoService, "_global_service_configs"):
+            for name, svc in all_services.items():
+                # Start with default config
+                config = {"workers": 1}
+
+                # If service has specific args, use them
+                if hasattr(svc, "_service_args"):
+                    config.update(svc._service_args)
+
+                # If there are global configs for this service, get ServiceArgs
+                if name in DynamoService._global_service_configs:
+                    svc_config = DynamoService._global_service_configs[name]
+                    if "ServiceArgs" in svc_config:
+                        config.update(svc_config["ServiceArgs"])
+
+                result[name] = config
+                logger.debug(f"Built config for {name}: {config}")
+
+        return result
 
 
 def service(
     inner: Optional[type[T]] = None,
     /,
     *,
-    image: Optional[Image] = None,
+    image: Optional[str] = None,
     envs: Optional[list[dict[str, Any]]] = None,
     dynamo: Optional[Union[Dict[str, Any], DynamoConfig]] = None,
+    app: Optional[FastAPI] = None,
     **kwargs: Any,
 ) -> Any:
     """Enhanced service decorator that supports Dynamo configuration
@@ -240,6 +342,7 @@ def service(
             image=image,
             envs=envs or [],
             dynamo_config=dynamo_config,
+            app=app,
         )
 
     return decorator(inner) if inner is not None else decorator

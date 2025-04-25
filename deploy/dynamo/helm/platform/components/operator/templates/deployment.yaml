@@ -72,6 +72,21 @@ spec:
         {{- if .Values.etcdAddr }}
           - --etcdAddr={{ .Values.etcdAddr }}
         {{- end }}
+        {{- if and .Values.dynamo.istio.enabled .Values.dynamo.istio.gateway }}
+          - --istio-virtual-service-gateway={{ .Values.dynamo.istio.gateway }}
+        {{- end }}
+        {{- if .Values.dynamo.ingress.enabled }}
+        {{- if  .Values.dynamo.ingress.className }}
+          - --ingress-controller-class-name={{ .Values.dynamo.ingress.className }}
+        {{- end }}
+        {{- if  .Values.dynamo.ingress.tlsSecretName }}
+          - --ingress-controller-tls-secret-name={{ .Values.dynamo.ingress.tlsSecretName }}
+        {{- end }}
+        {{- end }}
+        {{- if .Values.dynamo.ingressHostSuffix }}
+          - --ingress-host-suffix={{ .Values.dynamo.ingressHostSuffix }}
+        {{- end }}
+
         command:
         - /manager
         env:

@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-{{- if .Values.dynamo.bentoImageBuildEngine | eq "buildkit" }}
+{{- if .Values.dynamo.imageBuildEngine | eq "buildkit" }}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -101,7 +101,6 @@ spec:
       spec:
         accessModes:
           - ReadWriteOnce
-        storageClassName: local-path
         resources:
           requests:
             storage: 1000Gi
