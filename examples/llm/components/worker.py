@@ -89,11 +89,10 @@ class VllmWorker:
                 )
                 self.engine_args.enable_prefix_caching = True
 
-            VLLM_WORKER_ID = dynamo_context["endpoints"][0].lease_id()
-            os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
+            os.environ["VLLM_WORKER_ID"] = str(dynamo_context.get("lease").id())
             os.environ["VLLM_KV_NAMESPACE"] = "dynamo"
             os.environ["VLLM_KV_COMPONENT"] = class_name
-            logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
+
         self.metrics_publisher = KvMetricsPublisher()
 
         signal.signal(signal.SIGTERM, self.shutdown_vllm_engine)
