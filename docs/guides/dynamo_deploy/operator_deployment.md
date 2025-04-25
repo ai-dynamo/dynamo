@@ -50,12 +50,11 @@ export PROJECT_ROOT=$(pwd)
 # Set your Kubernetes namespace (must match the namespace where Dynamo cloud is installed)
 export KUBE_NS=hello-world
 
-# Externally accessible endpoint to the `dynamo-store` service within your Dynamo Cloud installation
+# Set the externally accessible endpoint to the `dynamo-store` service within your Dynamo Cloud installation
 export DYNAMO_CLOUD=https://${KUBE_NS}.dev.aire.nvidia.com
-
-# Login to the Dynamo cloud
-dynamo cloud login $DYNAMO_CLOUD
 ```
+
+The `DYNAMO_CLOUD` environment variable is required for all Dynamo deployment commands. Make sure it's set before running any deployment operations.
 
 ### 2. Build the Dynamo Base Image
 

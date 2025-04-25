@@ -295,7 +295,7 @@ def create(
         3600, "--timeout", help="Timeout for deployment to be ready in seconds"
     ),
     endpoint: str = typer.Option(
-        ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD_ENDPOINT"
+        ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD"
     ),
 ) -> None:
     """Create a deployment on Dynamo Cloud.
@@ -318,7 +318,7 @@ def get(
     name: str = typer.Argument(..., help="Deployment name"),
     cluster: Optional[str] = typer.Option(None, "--cluster", help="Cluster name"),
     endpoint: str = typer.Option(
-        ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD_ENDPOINT"
+        ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD"
     ),
 ) -> None:
     """Get deployment details from Dynamo Cloud.

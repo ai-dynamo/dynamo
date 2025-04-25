@@ -142,8 +142,9 @@ The deployment process involves two distinct build steps:
 export PROJECT_ROOT=$(pwd)
 export KUBE_NS=hello-world  # Must match your Kubernetes namespace
 export DYNAMO_CLOUD=https://${KUBE_NS}.dev.aire.nvidia.com
-dynamo cloud login $DYNAMO_CLOUD
 ```
+
+The `DYNAMO_CLOUD` environment variable is required for all Dynamo deployment commands. Make sure it's set before running any deployment operations.
 
 2. **Build the Dynamo Base Image**
 
