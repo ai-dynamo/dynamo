@@ -27,6 +27,8 @@ from typing import Any, Dict, List, Optional, TextIO
 
 import typer
 from bentoml._internal.cloud.base import Spinner
+from bentoml._internal.cloud.client import RestApiClient
+from bentoml._internal.cloud.config import CloudClientConfig, CloudClientContext
 from bentoml._internal.cloud.deployment import Deployment, DeploymentConfigParameters
 from bentoml._internal.configuration.containers import BentoMLContainer
 from bentoml.exceptions import BentoMLException, CLIException, CloudRESTApiClientError
@@ -36,9 +38,6 @@ from simple_di import Provide, inject
 from dynamo.sdk.lib.logging import configure_server_logging
 
 from .utils import resolve_service_config
-
-from bentoml._internal.cloud.client import RestApiClient
-from bentoml._internal.cloud.config import CloudClientConfig, CloudClientContext
 
 # Configure logging to suppress INFO HTTP logs
 logging.getLogger("httpx").setLevel(logging.WARNING)  # HTTP client library logs
@@ -338,7 +337,11 @@ def list(
         None, "--query", "-q", help="Advanced query string"
     ),
     endpoint: str = typer.Option(
-        ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD_ENDPOINT"
+        ...,
+        "--endpoint",
+        "-e",
+        help="Dynamo Cloud endpoint",
+        envvar="DYNAMO_CLOUD",
     ),
 ) -> None:
     """List all deployments from Dynamo Cloud.
@@ -354,7 +357,11 @@ def delete(
     name: str = typer.Argument(..., help="Deployment name"),
     cluster: Optional[str] = typer.Option(None, "--cluster", help="Cluster name"),
     endpoint: str = typer.Option(
-        ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD_ENDPOINT"
+        ...,
+        "--endpoint",
+        "-e",
+        help="Dynamo Cloud endpoint",
+        envvar="DYNAMO_CLOUD",
     ),
 ) -> None:
     """Delete a deployment from Dynamo Cloud.
@@ -379,7 +386,11 @@ def deploy(
         3600, "--timeout", help="Timeout for deployment to be ready in seconds"
     ),
     endpoint: str = typer.Option(
-        ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD_ENDPOINT"
+        ...,
+        "--endpoint",
+        "-e",
+        help="Dynamo Cloud endpoint",
+        envvar="DYNAMO_CLOUD",
     ),
 ) -> None:
     """Create a deployment on Dynamo Cloud.
@@ -427,9 +438,7 @@ def login_to_cloud(endpoint: str) -> None:
         logger.debug(
             f"Configured Dynamo Cloud credentials (current-context: {ctx.name})"
         )
-        logger.debug(
-            f"Logged in as {user.email} at {org.name} organization"
-        )
+        logger.debug(f"Logged in as {user.email} at {org.name} organization")
     except CloudRESTApiClientError as e:
         if e.error_code == 401:
             console.print(
