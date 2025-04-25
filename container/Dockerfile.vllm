@@ -479,10 +479,11 @@ RUN apt-get update && \
     uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
-# Install the wheels and copy executables to /usr/local/bin
+# Install the wheels and symlink executables to /usr/local/bin so dynamo components can use them
+# Dynamo components currently do not have the VIRTUAL_ENV in their PATH, so we need to symlink the executables
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
-    cp $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
+    ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
     rm -r wheelhouse
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
