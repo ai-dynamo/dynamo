@@ -39,11 +39,9 @@ import (
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemas"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
-	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/config"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
 	commonController "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/envoy"
 	"github.com/cisco-open/k8s-objectmatcher/patch"
 	"github.com/huandu/xstrings"
 	istioNetworking "istio.io/api/networking/v1beta1"
@@ -76,19 +74,11 @@ const (
 	KubeAnnotationEnableStealingTrafficDebugMode         = "nvidia.com/enable-stealing-traffic-debug-mode"
 	KubeAnnotationEnableDebugMode                        = "nvidia.com/enable-debug-mode"
 	KubeAnnotationEnableDebugPodReceiveProductionTraffic = "nvidia.com/enable-debug-pod-receive-production-traffic"
-	KubeAnnotationProxySidecarResourcesLimitsCPU         = "nvidia.com/proxy-sidecar-resources-limits-cpu"
-	KubeAnnotationProxySidecarResourcesLimitsMemory      = "nvidia.com/proxy-sidecar-resources-limits-memory"
-	KubeAnnotationProxySidecarResourcesRequestsCPU       = "nvidia.com/proxy-sidecar-resources-requests-cpu"
-	KubeAnnotationProxySidecarResourcesRequestsMemory    = "nvidia.com/proxy-sidecar-resources-requests-memory"
 	DeploymentTargetTypeProduction                       = "production"
 	DeploymentTargetTypeDebug                            = "debug"
-	ContainerPortNameHTTPProxy                           = "http-proxy"
-	ServicePortNameHTTPNonProxy                          = "http-non-proxy"
 	HeaderNameDebug                                      = "X-Nvidia-Debug"
 	DefaultIngressSuffix                                 = "local"
 )
-
-var ServicePortHTTPNonProxy = commonconsts.DynamoServicePort + 1
 
 // DynamoComponentDeploymentReconciler reconciles a DynamoComponentDeployment object
 type DynamoComponentDeploymentReconciler struct {
@@ -1127,7 +1117,6 @@ func getDynamoComponentRepositoryNameAndDynamoComponentVersion(dynamoComponent *
 
 //nolint:gocyclo,nakedret
 func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption) (podTemplateSpec *corev1.PodTemplateSpec, err error) {
-	dynamoComponentRepositoryName, _ := getDynamoComponentRepositoryNameAndDynamoComponentVersion(opt.dynamoComponent)
 	podLabels := r.getKubeLabels(opt.dynamoComponentDeployment, opt.dynamoComponent)
 	if opt.isStealingTrafficDebugModeEnabled {
 		podLabels[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
@@ -1138,9 +1127,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	kubeName := r.getKubeName(opt.dynamoComponentDeployment, opt.dynamoComponent, opt.isStealingTrafficDebugModeEnabled)
 
 	containerPort := commonconsts.DynamoServicePort
-	lastPort := containerPort + 1
-
-	lastPort++
 
 	var envs []corev1.EnvVar
 	envsSeen := make(map[string]struct{})
@@ -1390,248 +1376,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	containers = append(containers, container)
 
-	lastPort++
-	metricsPort := lastPort
-
-	containers = append(containers, corev1.Container{
-		Name:  "metrics-transformer",
-		Image: commonconfig.GetInternalImages().MetricsTransformer,
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("10m"),
-				corev1.ResourceMemory: resource.MustParse("10Mi"),
-			},
-			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("100m"),
-				corev1.ResourceMemory: resource.MustParse("100Mi"),
-			},
-		},
-		ReadinessProbe: &corev1.Probe{
-			InitialDelaySeconds: 5,
-			TimeoutSeconds:      5,
-			FailureThreshold:    10,
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/healthz",
-					Port: intstr.FromString("metrics"),
-				},
-			},
-		},
-		LivenessProbe: &corev1.Probe{
-			InitialDelaySeconds: 5,
-			TimeoutSeconds:      5,
-			FailureThreshold:    10,
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/healthz",
-					Port: intstr.FromString("metrics"),
-				},
-			},
-		},
-		Env: []corev1.EnvVar{
-			{
-				Name:  "BENTOML_SERVER_HOST",
-				Value: "localhost",
-			},
-			{
-				Name:  "BENTOML_SERVER_PORT",
-				Value: fmt.Sprintf("%d", containerPort),
-			},
-			{
-				Name:  "PORT",
-				Value: fmt.Sprintf("%d", metricsPort),
-			},
-			{
-				Name:  "OLD_METRICS_PREFIX",
-				Value: fmt.Sprintf("BENTOML_%s_", strings.ReplaceAll(dynamoComponentRepositoryName, "-", ":")),
-			},
-			{
-				Name:  "NEW_METRICS_PREFIX",
-				Value: "BENTOML_",
-			},
-		},
-		Ports: []corev1.ContainerPort{
-			{
-				Protocol:      corev1.ProtocolTCP,
-				Name:          "metrics",
-				ContainerPort: int32(metricsPort),
-			},
-		},
-		SecurityContext: securityContext,
-	})
-
-	lastPort++
-	proxyPort := lastPort
-
-	proxyResourcesRequestsCPUStr := resourceAnnotations[KubeAnnotationProxySidecarResourcesRequestsCPU]
-	if proxyResourcesRequestsCPUStr == "" {
-		proxyResourcesRequestsCPUStr = "100m"
-	}
-	var proxyResourcesRequestsCPU resource.Quantity
-	proxyResourcesRequestsCPU, err = resource.ParseQuantity(proxyResourcesRequestsCPUStr)
-	if err != nil {
-		err = errors.Wrapf(err, "failed to parse proxy sidecar resources requests cpu: %s", proxyResourcesRequestsCPUStr)
-		return nil, err
-	}
-	proxyResourcesRequestsMemoryStr := resourceAnnotations[KubeAnnotationProxySidecarResourcesRequestsMemory]
-	if proxyResourcesRequestsMemoryStr == "" {
-		proxyResourcesRequestsMemoryStr = "200Mi"
-	}
-	var proxyResourcesRequestsMemory resource.Quantity
-	proxyResourcesRequestsMemory, err = resource.ParseQuantity(proxyResourcesRequestsMemoryStr)
-	if err != nil {
-		err = errors.Wrapf(err, "failed to parse proxy sidecar resources requests memory: %s", proxyResourcesRequestsMemoryStr)
-		return nil, err
-	}
-	proxyResourcesLimitsCPUStr := resourceAnnotations[KubeAnnotationProxySidecarResourcesLimitsCPU]
-	if proxyResourcesLimitsCPUStr == "" {
-		proxyResourcesLimitsCPUStr = "300m"
-	}
-	var proxyResourcesLimitsCPU resource.Quantity
-	proxyResourcesLimitsCPU, err = resource.ParseQuantity(proxyResourcesLimitsCPUStr)
-	if err != nil {
-		err = errors.Wrapf(err, "failed to parse proxy sidecar resources limits cpu: %s", proxyResourcesLimitsCPUStr)
-		return nil, err
-	}
-	proxyResourcesLimitsMemoryStr := resourceAnnotations[KubeAnnotationProxySidecarResourcesLimitsMemory]
-	if proxyResourcesLimitsMemoryStr == "" {
-		proxyResourcesLimitsMemoryStr = "1000Mi"
-	}
-	var proxyResourcesLimitsMemory resource.Quantity
-	proxyResourcesLimitsMemory, err = resource.ParseQuantity(proxyResourcesLimitsMemoryStr)
-	if err != nil {
-		err = errors.Wrapf(err, "failed to parse proxy sidecar resources limits memory: %s", proxyResourcesLimitsMemoryStr)
-		return nil, err
-	}
-	var envoyConfigContent string
-	if opt.isStealingTrafficDebugModeEnabled {
-		productionServiceName := r.getServiceName(opt.dynamoComponentDeployment, opt.dynamoComponent, false)
-		envoyConfigContent, err = envoy.GenerateEnvoyConfigurationContent(envoy.CreateEnvoyConfig{
-			ListenPort:              proxyPort,
-			DebugHeaderName:         HeaderNameDebug,
-			DebugHeaderValue:        commonconsts.KubeLabelValueTrue,
-			DebugServerAddress:      "localhost",
-			DebugServerPort:         containerPort,
-			ProductionServerAddress: fmt.Sprintf("%s.%s.svc.cluster.local", productionServiceName, opt.dynamoComponentDeployment.Namespace),
-			ProductionServerPort:    ServicePortHTTPNonProxy,
-		})
-	} else {
-		debugServiceName := r.getServiceName(opt.dynamoComponentDeployment, opt.dynamoComponent, true)
-		envoyConfigContent, err = envoy.GenerateEnvoyConfigurationContent(envoy.CreateEnvoyConfig{
-			ListenPort:              proxyPort,
-			DebugHeaderName:         HeaderNameDebug,
-			DebugHeaderValue:        commonconsts.KubeLabelValueTrue,
-			DebugServerAddress:      fmt.Sprintf("%s.%s.svc.cluster.local", debugServiceName, opt.dynamoComponentDeployment.Namespace),
-			DebugServerPort:         ServicePortHTTPNonProxy,
-			ProductionServerAddress: "localhost",
-			ProductionServerPort:    containerPort,
-		})
-	}
-	if err != nil {
-		err = errors.Wrapf(err, "failed to generate envoy configuration content")
-		return nil, err
-	}
-	envoyConfigConfigMapName := fmt.Sprintf("%s-envoy-config", kubeName)
-	envoyConfigConfigMap := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      envoyConfigConfigMapName,
-			Namespace: opt.dynamoComponentDeployment.Namespace,
-		},
-		Data: map[string]string{
-			"envoy.yaml": envoyConfigContent,
-		},
-	}
-	err = ctrl.SetControllerReference(opt.dynamoComponentDeployment, envoyConfigConfigMap, r.Scheme)
-	if err != nil {
-		err = errors.Wrapf(err, "failed to set controller reference for envoy config config map")
-		return nil, err
-	}
-	_, err = ctrl.CreateOrUpdate(ctx, r.Client, envoyConfigConfigMap, func() error {
-		envoyConfigConfigMap.Data["envoy.yaml"] = envoyConfigContent
-		return nil
-	})
-	if err != nil {
-		err = errors.Wrapf(err, "failed to create or update envoy config configmap")
-		return nil, err
-	}
-	volumes = append(volumes, corev1.Volume{
-		Name: "envoy-config",
-		VolumeSource: corev1.VolumeSource{
-			ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: envoyConfigConfigMapName,
-				},
-			},
-		},
-	})
-	proxyImage := "quay.io/bentoml/bentoml-proxy:0.0.1"
-	proxyImage_ := os.Getenv("INTERNAL_IMAGES_PROXY")
-	if proxyImage_ != "" {
-		proxyImage = proxyImage_
-	}
-	containers = append(containers, corev1.Container{
-		Name:  "proxy",
-		Image: proxyImage,
-		Command: []string{
-			"envoy",
-			"--config-path",
-			"/etc/envoy/envoy.yaml",
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "envoy-config",
-				MountPath: "/etc/envoy",
-			},
-		},
-		Ports: []corev1.ContainerPort{
-			{
-				Name:          ContainerPortNameHTTPProxy,
-				ContainerPort: int32(proxyPort),
-				Protocol:      corev1.ProtocolTCP,
-			},
-		},
-		ReadinessProbe: &corev1.Probe{
-			InitialDelaySeconds: 5,
-			TimeoutSeconds:      5,
-			FailureThreshold:    10,
-			ProbeHandler: corev1.ProbeHandler{
-				Exec: &corev1.ExecAction{
-					Command: []string{
-						"sh",
-						"-c",
-						"curl -s localhost:9901/server_info | grep state | grep -q LIVE",
-					},
-				},
-			},
-		},
-		LivenessProbe: &corev1.Probe{
-			InitialDelaySeconds: 5,
-			TimeoutSeconds:      5,
-			FailureThreshold:    10,
-			ProbeHandler: corev1.ProbeHandler{
-				Exec: &corev1.ExecAction{
-					Command: []string{
-						"sh",
-						"-c",
-						"curl -s localhost:9901/server_info | grep state | grep -q LIVE",
-					},
-				},
-			},
-		},
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    proxyResourcesRequestsCPU,
-				corev1.ResourceMemory: proxyResourcesRequestsMemory,
-			},
-			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    proxyResourcesLimitsCPU,
-				corev1.ResourceMemory: proxyResourcesLimitsMemory,
-			},
-		},
-		SecurityContext: securityContext,
-	})
-
-	debuggerImage := "quay.io/bentoml/bento-debugger:0.0.8"
+	debuggerImage := "python:3.12-slim"
 	debuggerImage_ := os.Getenv("INTERNAL_IMAGES_DEBUGGER")
 	if debuggerImage_ != "" {
 		debuggerImage = debuggerImage_
@@ -1870,12 +1615,6 @@ func (r *DynamoComponentDeploymentReconciler) generateService(ctx context.Contex
 	}
 
 	targetPort := intstr.FromString(commonconsts.DynamoContainerPortName)
-	if opt.isGenericService {
-		delete(selector, commonconsts.KubeLabelDynamoDeploymentTargetType)
-		if opt.containsStealingTrafficDebugModeEnabled {
-			targetPort = intstr.FromString(ContainerPortNameHTTPProxy)
-		}
-	}
 
 	spec := corev1.ServiceSpec{
 		Selector: selector,
@@ -1884,12 +1623,6 @@ func (r *DynamoComponentDeploymentReconciler) generateService(ctx context.Contex
 				Name:       commonconsts.DynamoServicePortName,
 				Port:       commonconsts.DynamoServicePort,
 				TargetPort: targetPort,
-				Protocol:   corev1.ProtocolTCP,
-			},
-			{
-				Name:       ServicePortNameHTTPNonProxy,
-				Port:       int32(ServicePortHTTPNonProxy),
-				TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
 				Protocol:   corev1.ProtocolTCP,
 			},
 		},

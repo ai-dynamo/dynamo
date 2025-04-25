@@ -14,9 +14,8 @@ const (
 
 	DynamoApiServerComponentName = "api-server"
 
-	InternalImagesDynamoComponentsDownloaderDefault = "quay.io/bentoml/bento-downloader:0.0.3"
+	InternalImagesDynamoComponentsDownloaderDefault = "rapidfort/curl:latest"
 	InternalImagesKanikoDefault                     = "gcr.io/kaniko-project/executor:debug"
-	InternalImagesMetricsTransformerDefault         = "quay.io/bentoml/yatai-bento-metrics-transformer:0.0.3"
 	InternalImagesBuildkitDefault                   = "moby/buildkit:v0.20.2"
 	InternalImagesBuildkitRootlessDefault           = "moby/buildkit:v0.20.2-rootless"
 
@@ -37,7 +36,6 @@ const (
 
 	EnvInternalImagesDynamoComponentsDownloader = "INTERNAL_IMAGES_DYNAMO_COMPONENTS_DOWNLOADER"
 	EnvInternalImagesKaniko                     = "INTERNAL_IMAGES_KANIKO"
-	EnvInternalImagesMetricsTransformer         = "INTERNAL_IMAGES_METRICS_TRANSFORMER"
 	EnvInternalImagesBuildkit                   = "INTERNAL_IMAGES_BUILDKIT"
 	EnvInternalImagesBuildkitRootless           = "INTERNAL_IMAGES_BUILDKIT_ROOTLESS"
 

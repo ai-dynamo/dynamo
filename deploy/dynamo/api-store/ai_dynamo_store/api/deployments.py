@@ -112,7 +112,7 @@ async def create_deployment(deployment: CreateDeploymentSchema):
 
         deployment_schema = DeploymentFullSchema(
             **resource.dict(),
-            status="running",
+            status="deploying",
             kube_namespace=kube_namespace,
             creator=creator,
             cluster=cluster,
@@ -159,21 +159,53 @@ def get_deployment(name: str) -> DeploymentFullSchema:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# function to look for a condition with type "Ready" in the status of the deployment
-# and return the "message" field
 def get_deployment_status(resource: Dict[str, Any]) -> str:
-    # look for a condition with type "Ready" in the status of the deployment
-    for condition in resource.get("status", {}).get("conditions", []):
+    """
+    Get the current status of a deployment.
+    Maps operator status to BentoML status values.
+    Returns lowercase status values matching BentoML's DeploymentStatus enum.
+    """
+    status = resource.get("status", {})
+    conditions = status.get("conditions", [])
+    state = status.get("state", "")
+
+    # First check Ready condition
+    for condition in conditions:
         if condition.get("type") == "Ready":
-            return condition.get("message", "unknown")
+            if condition.get("status") == "True":
+                # If state is "successful", map to "running"
+                if state == "successful":
+                    return "running"
+                return condition.get("message", "running").lower()
+            elif condition.get("message"):
+                return condition.get("message").lower()
+
+    # If no Ready condition or not True, check state
+    if state == "failed":
+        return "failed"
+    elif state == "pending":
+        return "deploying"  # map pending to deploying to match BentoML states
+
+    # Default fallback
     return "unknown"
 
 
 def get_urls(resource: Dict[str, Any]) -> List[str]:
+    """
+    Get the URLs for a deployment.
+    Returns URLs as soon as they are available from EndpointExposed condition.
+    """
     urls = []
-    for condition in resource.get("status", {}).get("conditions", []):
-        if condition.get("type") == "EndpointExposed":
-            urls.append(condition.get("message"))
+    conditions = resource.get("status", {}).get("conditions", [])
+
+    # Check for EndpointExposed condition
+    for condition in conditions:
+        if (
+            condition.get("type") == "EndpointExposed"
+            and condition.get("status") == "True"
+        ):
+            if message := condition.get("message"):
+                urls.append(message)
     return urls
 
 

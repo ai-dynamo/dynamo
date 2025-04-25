@@ -41,7 +41,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
 	"github.com/apparentlymart/go-shquot/shquot"
-	"github.com/ettle/strcase"
 	"github.com/huandu/xstrings"
 	"github.com/mitchellh/hashstructure/v2"
 	"github.com/prune998/docker-registry-client/registry"
@@ -1264,7 +1263,7 @@ echo "Done"
 			Name:  "dynamocomponent-downloader",
 			Image: internalImages.DynamoComponentsDownloader,
 			Command: []string{
-				"bash",
+				"sh",
 				"-c",
 				dynamoComponentDownloadCommand,
 			},
@@ -1517,83 +1516,6 @@ echo "Done"
 	// add other arguments to builder
 	args = append(args, builderArgs...)
 	logrus.Info("dynamo-image-builder args: ", args)
-
-	// nolint: gosec
-	buildArgsSecretName := "dynamo-image-builder-build-args"
-	r.Recorder.Eventf(opt.DynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting secret %s from namespace %s", buildArgsSecretName, configNamespace)
-	buildArgsSecret := &corev1.Secret{}
-	err = r.Get(ctx, types.NamespacedName{Name: buildArgsSecretName, Namespace: configNamespace}, buildArgsSecret)
-	buildArgsSecretIsNotFound := k8serrors.IsNotFound(err)
-	if err != nil && !buildArgsSecretIsNotFound {
-		err = errors.Wrap(err, "failed to get secret")
-		return
-	}
-
-	if !buildArgsSecretIsNotFound {
-		r.Recorder.Eventf(opt.DynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is got from namespace %s", buildArgsSecretName, configNamespace)
-		if configNamespace != opt.DynamoComponentRequest.Namespace {
-			r.Recorder.Eventf(opt.DynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is in namespace %s, but DynamoComponentRequest is in namespace %s, so we need to copy the secret to DynamoComponentRequest namespace", buildArgsSecretName, configNamespace, opt.DynamoComponentRequest.Namespace)
-			r.Recorder.Eventf(opt.DynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Getting secret %s in namespace %s", buildArgsSecretName, opt.DynamoComponentRequest.Namespace)
-			_buildArgsSecret := &corev1.Secret{}
-			err = r.Get(ctx, types.NamespacedName{Namespace: opt.DynamoComponentRequest.Namespace, Name: buildArgsSecretName}, _buildArgsSecret)
-			localBuildArgsSecretIsNotFound := k8serrors.IsNotFound(err)
-			if err != nil && !localBuildArgsSecretIsNotFound {
-				err = errors.Wrapf(err, "failed to get secret %s from namespace %s", buildArgsSecretName, opt.DynamoComponentRequest.Namespace)
-				return
-			}
-			if localBuildArgsSecretIsNotFound {
-				r.Recorder.Eventf(opt.DynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Copying secret %s from namespace %s to namespace %s", buildArgsSecretName, configNamespace, opt.DynamoComponentRequest.Namespace)
-				err = r.Create(ctx, &corev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      buildArgsSecretName,
-						Namespace: opt.DynamoComponentRequest.Namespace,
-					},
-					Data: buildArgsSecret.Data,
-				})
-				if err != nil {
-					err = errors.Wrapf(err, "failed to create secret %s in namespace %s", buildArgsSecretName, opt.DynamoComponentRequest.Namespace)
-					return
-				}
-			} else {
-				r.Recorder.Eventf(opt.DynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is already in namespace %s", buildArgsSecretName, opt.DynamoComponentRequest.Namespace)
-				r.Recorder.Eventf(opt.DynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Updating secret %s in namespace %s", buildArgsSecretName, opt.DynamoComponentRequest.Namespace)
-				err = r.Update(ctx, &corev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      buildArgsSecretName,
-						Namespace: opt.DynamoComponentRequest.Namespace,
-					},
-					Data: buildArgsSecret.Data,
-				})
-				if err != nil {
-					err = errors.Wrapf(err, "failed to update secret %s in namespace %s", buildArgsSecretName, opt.DynamoComponentRequest.Namespace)
-					return
-				}
-			}
-		}
-
-		for key := range buildArgsSecret.Data {
-			envName := fmt.Sprintf("BENTOML_BUILD_ARG_%s", strings.ReplaceAll(strings.ToUpper(strcase.ToKebab(key)), "-", "_"))
-			builderContainerEnvs = append(builderContainerEnvs, corev1.EnvVar{
-				Name: envName,
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: buildArgsSecretName,
-						},
-						Key: key,
-					},
-				},
-			})
-
-			if isBuildkit {
-				args = append(args, "--opt", fmt.Sprintf("build-arg:%s=$(%s)", key, envName))
-			} else {
-				args = append(args, fmt.Sprintf("--build-arg=%s=$(%s)", key, envName))
-			}
-		}
-	} else {
-		r.Recorder.Eventf(opt.DynamoComponentRequest, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Secret %s is not found in namespace %s", buildArgsSecretName, configNamespace)
-	}
 
 	builderContainerArgs := []string{
 		"-c",

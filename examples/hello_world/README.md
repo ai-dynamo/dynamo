@@ -142,7 +142,7 @@ The deployment process involves two distinct build steps:
 export PROJECT_ROOT=$(pwd)
 export KUBE_NS=hello-world  # Must match your Kubernetes namespace
 export DYNAMO_CLOUD=https://${KUBE_NS}.dev.aire.nvidia.com
-dynamo cloud login --api-token TEST-TOKEN --endpoint $DYNAMO_CLOUD
+dynamo cloud login $DYNAMO_CLOUD
 ```
 
 2. **Build the Dynamo Base Image**
@@ -164,7 +164,7 @@ DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk
 ```bash
 echo $DYNAMO_TAG
 export HELM_RELEASE=ci-hw
-dynamo deployment create $DYNAMO_TAG --no-wait -n $HELM_RELEASE
+dynamo deployment create $DYNAMO_TAG -n $HELM_RELEASE
 ```
 
 4. **Test the deployment**

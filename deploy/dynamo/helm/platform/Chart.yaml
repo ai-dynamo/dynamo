@@ -23,7 +23,7 @@ version: 25.2.0-rc3
 home: https://nvidia.com
 dependencies:
   - name: dynamo-operator
-    version: 0.1.5
+    version: 0.1.6
     repository: file://components/operator
     condition: dynamo-operator.enabled
   - name: dynamo-api-store

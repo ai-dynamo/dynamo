@@ -78,14 +78,11 @@ dynamo:
     clusterName: default
 
   internalImages:
-    dynamoComponentsDownloader: quay.io/bentoml/bento-downloader:0.0.5
+    dynamoComponentsDownloader: rapidfort/curl:latest
     kaniko: gcr.io/kaniko-project/executor:debug
     buildkit: moby/buildkit:v0.20.2
     buildkitRootless: moby/buildkit:v0.20.2-rootless
-    metricsTransformer: quay.io/bentoml/yatai-bento-metrics-transformer:0.0.4
-    debugger: quay.io/bentoml/bento-debugger:0.0.8
-    monitorExporter: quay.io/bentoml/bentoml-monitor-exporter:0.0.3
-    proxy: quay.io/bentoml/bentoml-proxy:0.0.1
+    debugger: python:3.12-slim
 
   enableRestrictedSecurityContext: false
 

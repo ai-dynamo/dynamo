@@ -279,11 +279,6 @@ func (in *DynamoComponentDeploymentSharedSpec) DeepCopyInto(out *DynamoComponent
 		}
 	}
 	in.Ingress.DeepCopyInto(&out.Ingress)
-	if in.MonitorExporter != nil {
-		in, out := &in.MonitorExporter, &out.MonitorExporter
-		*out = new(common.MonitorExporterSpec)
-		(*in).DeepCopyInto(*out)
-	}
 	if in.ExtraPodMetadata != nil {
 		in, out := &in.ExtraPodMetadata, &out.ExtraPodMetadata
 		*out = new(common.ExtraPodMetadata)

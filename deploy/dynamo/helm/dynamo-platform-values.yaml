@@ -39,6 +39,7 @@ dynamo-operator:
       server: ${PIPELINES_DOCKER_SERVER}
       username: ${PIPELINES_DOCKER_USERNAME}
       password: ${PIPELINES_DOCKER_PASSWORD}
+    imageBuildEngine: buildkit
 
 dynamo-api-store:
   namespaceRestriction:

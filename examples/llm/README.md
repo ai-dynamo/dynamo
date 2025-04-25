@@ -185,7 +185,7 @@ You must have first followed the instructions in [deploy/dynamo/helm/README.md](
 export PROJECT_ROOT=$(pwd)
 export KUBE_NS=dynamo-cloud  # Note: This must match the Kubernetes namespace where you installed Dynamo Cloud
 export DYNAMO_CLOUD=https://${KUBE_NS}.dev.aire.nvidia.com # Externally accessible endpoint to the `dynamo-store` service within your Dynamo Cloud installation
-dynamo cloud login --api-token TEST-TOKEN --endpoint $DYNAMO_CLOUD
+dynamo cloud login $DYNAMO_CLOUD
 ```
 
 2. **Build the Dynamo Base Image**

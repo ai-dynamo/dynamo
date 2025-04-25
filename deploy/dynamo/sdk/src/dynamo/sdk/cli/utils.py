@@ -15,6 +15,8 @@
 #  limitations under the License.
 #  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
 
+from __future__ import annotations
+
 import collections
 import contextlib
 import json
@@ -281,7 +283,7 @@ def _parse_service_args(args: list[str]) -> t.Dict[str, t.Any]:
 
 
 def resolve_service_config(
-    config_file: str | t.TextIO | None = None,
+    config_file: pathlib.Path | t.TextIO | None = None,
     args: list[str] | None = None,
 ) -> dict[str, dict[str, t.Any]]:
     """Resolve service configuration from file and command line arguments.
@@ -308,10 +310,9 @@ def resolve_service_config(
         except Exception as e:
             logger.warning(f"Failed to parse DYN_DEPLOYMENT_CONFIG: {e}")
     else:
-        # Load file if provided
         if config_file:
             with open(config_file) if isinstance(
-                config_file, str
+                config_file, (str, pathlib.Path)
             ) else contextlib.nullcontext(config_file) as f:
                 yaml_configs = yaml.safe_load(f)
                 logger.debug(f"Loaded config from file: {yaml_configs}")
