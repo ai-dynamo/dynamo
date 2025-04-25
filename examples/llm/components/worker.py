@@ -33,6 +33,7 @@ from vllm.sampling_params import RequestOutputKind
 
 from dynamo.llm import KvMetricsPublisher
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk.lib.service import LeaseConfig
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ logger = logging.getLogger(__name__)
     dynamo={
         "enabled": True,
         "namespace": "dynamo",
+        "custom_lease": LeaseConfig(ttl=1),  # 1 second
     },
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -87,11 +89,10 @@ class VllmWorker:
                 )
                 self.engine_args.enable_prefix_caching = True
 
-            VLLM_WORKER_ID = dynamo_context["endpoints"][0].lease_id()
-            os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
+            os.environ["VLLM_WORKER_ID"] = str(dynamo_context.get("lease").id())
             os.environ["VLLM_KV_NAMESPACE"] = "dynamo"
             os.environ["VLLM_KV_COMPONENT"] = class_name
-            logger.info(f"Generate endpoint ID: {VLLM_WORKER_ID}")
+
         self.metrics_publisher = KvMetricsPublisher()
 
         signal.signal(signal.SIGTERM, self.shutdown_vllm_engine)
@@ -142,6 +143,8 @@ class VllmWorker:
             await self.disaggregated_router.async_init()
         else:
             self.disaggregated_router = None
+
+        self.lease = dynamo_context.get("lease")
         logger.info("VllmWorker has been initialized")
 
     def shutdown_vllm_engine(self, signum, frame):
@@ -158,7 +161,13 @@ class VllmWorker:
 
     async def create_metrics_publisher_endpoint(self):
         component = dynamo_context["component"]
-        await self.metrics_publisher.create_endpoint(component)
+        if self.lease is None:
+            logger.info("Creating metrics publisher endpoint with primary lease")
+        else:
+            logger.info(
+                f"Creating metrics publisher endpoint with lease: {self.lease.id()}"
+            )
+        await self.metrics_publisher.create_endpoint(component, self.lease)
 
     def get_remote_prefill_request_callback(self):
         # TODO: integrate prefill_queue to dynamo endpoint
@@ -171,6 +180,7 @@ class VllmWorker:
 
         return callback
 
+    # TODO: use the same child lease for metrics publisher endpoint and generate endpoint
     @dynamo_endpoint()
     async def generate(self, request: vLLMGenerateRequest):
         # TODO: consider prefix hit when deciding prefill locally or remotely

@@ -205,8 +205,9 @@ impl DeviceStorageOwned {
     }
 
     pub fn device_ptr(&self) -> *const c_void {
-        let ptr = self.cuda_slice.device_ptr();
-        (*ptr) as *const c_void
+        let stream = self.cuda_device.default_stream();
+        let (ptr, _) = self.cuda_slice.device_ptr(&stream);
+        ptr as *const c_void
     }
 
     pub fn context(&self) -> Arc<CudaContext> {

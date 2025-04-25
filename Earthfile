@@ -136,11 +136,12 @@ dynamo-build:
 
 dynamo-base-docker:
     ARG IMAGE=dynamo-base-docker
-    ARG CI_REGISTRY_IMAGE=my-registry
-    ARG CI_COMMIT_SHA=latest
+    ARG DOCKER_SERVER=my-registry
+    ARG IMAGE_TAG=latest
 
     FROM ubuntu:24.04
     WORKDIR /workspace
+    COPY container/deps/requirements.txt /tmp/requirements.txt
 
     # Install Python and other dependencies
     RUN apt-get update && \
@@ -160,6 +161,8 @@ dynamo-base-docker:
     ENV VIRTUAL_ENV=/opt/dynamo/venv
     ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
+    RUN uv pip install -r /tmp/requirements.txt
+
     # Copy and install wheels -- ai-dynamo-runtime first, then ai-dynamo
     COPY +dynamo-build/ai_dynamo_runtime*.whl /tmp/wheels/
     COPY +dynamo-build/ai_dynamo*.whl /tmp/wheels/
@@ -167,17 +170,17 @@ dynamo-base-docker:
         uv pip install /tmp/wheels/*.whl && \
         rm -rf /tmp/wheels
 
-    SAVE IMAGE --push $CI_REGISTRY_IMAGE/$IMAGE:$CI_COMMIT_SHA
+    SAVE IMAGE --push $DOCKER_SERVER/$IMAGE:$IMAGE_TAG
 
 ############### ALL TARGETS ##############################
 all-test:
     BUILD ./deploy/dynamo/operator+test
 
 all-docker:
-    ARG CI_REGISTRY_IMAGE=my-registry
-    ARG CI_COMMIT_SHA=latest
-    BUILD ./deploy/dynamo/operator+docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
-    BUILD ./deploy/dynamo/api-store+docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
+    ARG DOCKER_SERVER=my-registry
+    ARG IMAGE_TAG=latest
+    BUILD ./deploy/dynamo/operator+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+    BUILD ./deploy/dynamo/api-store+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 
 all-lint:
     BUILD ./deploy/dynamo/operator+lint
@@ -189,6 +192,6 @@ all:
 
 # For testing
 custom:
-    ARG CI_REGISTRY_IMAGE=my-registry
-    ARG CI_COMMIT_SHA=latest
+    ARG DOCKER_SERVER=my-registry
+    ARG IMAGE_TAG=latest
     BUILD +all-test

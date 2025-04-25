@@ -56,7 +56,6 @@ See [README.md](../../runtime/README.md#️-prerequisites).
 
 1. Start 3 separate shells, and activate the virtual environment in each
 ```
-cd python-wheels/dynamo
 source .venv/bin/activate
 ```
 

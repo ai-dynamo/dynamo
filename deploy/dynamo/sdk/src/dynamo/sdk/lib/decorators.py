@@ -19,18 +19,17 @@ import typing as t
 from functools import wraps
 from typing import Any, get_type_hints
 
-import bentoml
 from pydantic import BaseModel
 
 
 class DynamoEndpoint:
     """Decorator class for Dynamo endpoints"""
 
-    def __init__(self, func: t.Callable, name: str | None = None):
+    def __init__(self, func: t.Callable, name: str | None = None, is_api: bool = False):
         self.func = func
         self.name = name or func.__name__
         self.is_dynamo_endpoint = True
-
+        self.is_api = is_api
         # Extract request type from hints
         hints = get_type_hints(func)
         args = list(hints.items())
@@ -60,11 +59,13 @@ class DynamoEndpoint:
 
 def dynamo_endpoint(
     name: str | None = None,
+    is_api: bool = False,
 ) -> t.Callable[[t.Callable], DynamoEndpoint]:
     """Decorator for Dynamo endpoints.
 
     Args:
         name: Optional name for the endpoint. Defaults to function name.
+        is_api: Whether to expose the endpoint as an API. Defaults to False.
 
     Example:
         @dynamo_endpoint()
@@ -77,25 +78,13 @@ def dynamo_endpoint(
     """
 
     def decorator(func: t.Callable) -> DynamoEndpoint:
-        return DynamoEndpoint(func, name)
+        return DynamoEndpoint(func, name, is_api)
 
     return decorator
-
-
-def dynamo_api(func: t.Callable) -> t.Callable:
-    """Decorator for BentoML API endpoints.
-
-    Args:
-        func: The function to be decorated.
-
-    Returns:
-        The decorated function.
-    """
-    return bentoml.api(func)
 
 
 def async_on_start(func: t.Callable) -> t.Callable:
     """Decorator for async onstart functions."""
     # Mark the function as a startup hook
-    setattr(func, "__bentoml_startup_hook__", True)
-    return bentoml.on_startup(func)
+    setattr(func, "__dynamo_startup_hook__", True)
+    return func

@@ -8,8 +8,8 @@ require (
 	dario.cat/mergo v1.0.1
 	emperror.dev/errors v0.8.1
 	github.com/apparentlymart/go-shquot v0.0.1
+	github.com/bsm/gomega v1.27.10
 	github.com/cisco-open/k8s-objectmatcher v1.9.0
-	github.com/ettle/strcase v0.2.0
 	github.com/huandu/xstrings v1.4.0
 	github.com/mitchellh/hashstructure/v2 v2.0.2
 	github.com/onsi/ginkgo/v2 v2.19.0

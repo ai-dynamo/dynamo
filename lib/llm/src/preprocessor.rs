@@ -69,20 +69,29 @@ pub struct OpenAIPreprocessor {
 
 impl OpenAIPreprocessor {
     pub async fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
+        let mdcsum = mdc.mdcsum();
         let formatter = PromptFormatter::from_mdc(mdc.clone()).await?;
         let PromptFormatter::OAI(formatter) = formatter;
 
         let tokenizer = match &mdc.tokenizer {
-            TokenizerKind::HfTokenizerJson(file) => HuggingFaceTokenizer::from_file(file)?,
-            TokenizerKind::GGUF(tokenizer) => {
+            Some(TokenizerKind::HfTokenizerJson(file)) => HuggingFaceTokenizer::from_file(file)?,
+            Some(TokenizerKind::GGUF(tokenizer)) => {
                 HuggingFaceTokenizer::from_tokenizer(*tokenizer.clone())
+            }
+            None => {
+                anyhow::bail!(
+                    "Blank ModelDeploymentCard cannot be used for pre-processing, no tokenizer"
+                );
             }
         };
         let tokenizer = Arc::new(tokenizer);
 
-        let model_info = mdc.model_info.get_model_info().await?;
-
-        let mdcsum = mdc.mdcsum();
+        let Some(model_info) = mdc.model_info else {
+            anyhow::bail!(
+                "Blank ModelDeploymentCard cannot be used for pre-processing, no model_info"
+            );
+        };
+        let model_info = model_info.get_model_info().await?;
 
         Ok(Arc::new(Self {
             formatter,

@@ -77,6 +77,13 @@ class DeploymentFullSchema(DeploymentSchema):
     urls: List[str] = Field(default_factory=list)
 
 
+class DeploymentListResponse(BaseModel):
+    start: int
+    count: int
+    total: int
+    items: List[DeploymentFullSchema]
+
+
 def create_default_user() -> UserSchema:
     """Create a default user schema for testing/demo purposes."""
     return UserSchema(

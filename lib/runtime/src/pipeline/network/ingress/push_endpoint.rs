@@ -13,10 +13,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::*;
 use anyhow::Result;
 use async_nats::service::endpoint::Endpoint;
 use derive_builder::Builder;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Builder)]
@@ -36,6 +39,9 @@ impl PushEndpoint {
     pub async fn start(self, endpoint: Endpoint) -> Result<()> {
         let mut endpoint = endpoint;
 
+        let inflight = Arc::new(AtomicU64::new(0));
+        let notify = Arc::new(Notify::new());
+
         loop {
             let req = tokio::select! {
                 biased;
@@ -47,7 +53,7 @@ impl PushEndpoint {
 
                 // process shutdown
                 _ = self.cancellation_token.cancelled() => {
-                    // tracing::trace!(worker_id, "Shutting down service {}", self.endpoint.name);
+                    tracing::info!("Shutting down service");
                     if let Err(e) = endpoint.stop().await {
                         tracing::warn!("Failed to stop NATS service: {:?}", e);
                     }
@@ -63,6 +69,12 @@ impl PushEndpoint {
 
                 let ingress = self.service_handler.clone();
                 let worker_id = "".to_string();
+
+                // increment the inflight counter
+                inflight.fetch_add(1, Ordering::SeqCst);
+                let inflight_clone = inflight.clone();
+                let notify_clone = notify.clone();
+
                 tokio::spawn(async move {
                     tracing::trace!(worker_id, "handling new request");
                     let result = ingress.handle_payload(req.message.payload).await;
@@ -74,11 +86,25 @@ impl PushEndpoint {
                             tracing::warn!("Failed to handle request: {:?}", e);
                         }
                     }
+
+                    // decrease the inflight counter
+                    inflight_clone.fetch_sub(1, Ordering::SeqCst);
+                    notify_clone.notify_one();
                 });
             } else {
                 break;
             }
         }
+
+        // await for all inflight requests to complete
+        tracing::info!(
+            "Waiting for {} inflight requests to complete",
+            inflight.load(Ordering::SeqCst)
+        );
+        while inflight.load(Ordering::SeqCst) > 0 {
+            notify.notified().await;
+        }
+        tracing::info!("All inflight requests completed");
 
         Ok(())
     }

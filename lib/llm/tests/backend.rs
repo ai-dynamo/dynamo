@@ -24,11 +24,11 @@ async fn test_sequence_factory() {
 
     let operator = Backend::from_mdc(mdc).await.unwrap();
 
-    let mut decode_stream = operator.tokenizer.decode_stream(false);
+    let mut decode_stream = operator.tokenizer.as_ref().unwrap().decode_stream(false);
     let output = decode_stream.step(1).unwrap();
     assert_eq!(output, Some("<s>".to_string()));
 
-    let mut decode_stream = operator.tokenizer.decode_stream(true);
+    let mut decode_stream = operator.tokenizer.as_ref().unwrap().decode_stream(true);
     let output = decode_stream.step(1).unwrap();
     assert_eq!(output, None);
 }

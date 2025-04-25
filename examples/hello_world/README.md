@@ -79,7 +79,7 @@ The `dynamo serve` command deploys the entire service graph, automatically handl
 
 ```bash
 curl -X 'POST' \
-  'http://localhost:3000/generate' \
+  'http://localhost:8000/generate' \
   -H 'accept: text/event-stream' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -142,8 +142,9 @@ The deployment process involves two distinct build steps:
 export PROJECT_ROOT=$(pwd)
 export KUBE_NS=hello-world  # Must match your Kubernetes namespace
 export DYNAMO_CLOUD=https://${KUBE_NS}.dev.aire.nvidia.com
-dynamo cloud login --api-token TEST-TOKEN --endpoint $DYNAMO_CLOUD
 ```
+
+The `DYNAMO_CLOUD` environment variable is required for all Dynamo deployment commands. Make sure it's set before running any deployment operations.
 
 2. **Build the Dynamo Base Image**
 
@@ -156,33 +157,37 @@ export DYNAMO_IMAGE=<dynamo_docker_image_name>
 
 # Prepare your project for deployment.
 cd $PROJECT_ROOT/examples/hello_world
-DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk -F"\"" '{ print $2 }')
+DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk '{ print $3 }' | sed 's/\.$//')
 ```
 
 3. **Deploy to Kubernetes**
 
 ```bash
 echo $DYNAMO_TAG
-export HELM_RELEASE=ci-hw
-dynamo deployment create $DYNAMO_TAG --no-wait -n $HELM_RELEASE
-```
-
-To delete an existing Dynamo deployment:
-
-```bash
-kubectl delete dynamodeployment $HELM_RELEASE
+export DEPLOYMENT_NAME=ci-hw
+dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME
 ```
 
 4. **Test the deployment**
 
 Once you create the Dynamo deployment, a pod prefixed with `yatai-dynamonim-image-builder` will begin running. Once it finishes running, it will create the pods necessary. Once the pods prefixed with `$HELM_RELEASE` are up and running, you can test out your example!
 
+Find your frontend pod using one of these methods:
+
 ```bash
-# Forward the service port to localhost
-kubectl -n ${KUBE_NS} port-forward svc/${HELM_RELEASE}-frontend 3000:3000
+# Method 1: List all pods and find the frontend pod manually
+kubectl get pods -n ${KUBE_NS} | grep frontend | cat
+
+# Method 2: Use a label selector to find the frontend pod automatically
+export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
+
+# Forward the pod's port to localhost
+kubectl port-forward pod/$FRONTEND_POD 8000:8000 -n ${KUBE_NS}
+
+# Note: We forward directly to the pod's port 8000 rather than the service port because the frontend component listens on port 8000 internally.
 
 # Test the API endpoint
-curl -X 'POST' 'http://localhost:3000/generate' \
+curl -X 'POST' 'http://localhost:8000/generate' \
     -H 'accept: text/event-stream' \
     -H 'Content-Type: application/json' \
     -d '{"text": "test"}'

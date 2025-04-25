@@ -49,6 +49,25 @@ class DistributedRuntime:
         """
         ...
 
+class PyLease:
+    """
+    A lease object
+    """
+
+    def id(self) -> int:
+        """
+        Return the id of the lease
+        Refer to https://etcd.io/docs/v3.4/learning/api/ for examples on how to use the lease id
+        """
+        ...
+
+    def revoke(self) -> None:
+        """
+        Revoke the lease by triggering the cancellation token
+        This will invalidate the kv pairs associated with this lease
+        """
+        ...
+
 class EtcdClient:
     """
     Etcd is used for discovery in the DistributedRuntime
@@ -73,6 +92,12 @@ class EtcdClient:
     async def kv_get_prefix(self, prefix: str) -> List[Dict[str, JsonLike]]:
         """
         Get all keys with a given prefix
+        """
+        ...
+
+    async def revoke_lease(self, lease_id: int) -> None:
+        """
+        Revoke a lease
         """
         ...
 
@@ -172,6 +197,14 @@ class Component:
     def endpoint(self, name: str) -> Endpoint:
         """
         Create an endpoint
+        """
+        ...
+
+    def create_service_with_custom_lease(self, ttl: int) -> PyLease:
+        """
+        Create a service with a custom lease
+        The lease needs to be tied to the endpoint of this services when creating the endpoints later
+        TODO: tie the lease to the service instead of the endpoint
         """
         ...
 

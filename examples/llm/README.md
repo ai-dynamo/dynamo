@@ -185,8 +185,9 @@ You must have first followed the instructions in [deploy/dynamo/helm/README.md](
 export PROJECT_ROOT=$(pwd)
 export KUBE_NS=dynamo-cloud  # Note: This must match the Kubernetes namespace where you installed Dynamo Cloud
 export DYNAMO_CLOUD=https://${KUBE_NS}.dev.aire.nvidia.com # Externally accessible endpoint to the `dynamo-store` service within your Dynamo Cloud installation
-dynamo cloud login --api-token TEST-TOKEN --endpoint $DYNAMO_CLOUD
 ```
+
+The `DYNAMO_CLOUD` environment variable is required for all Dynamo deployment commands. Make sure it's set before running any deployment operations.
 
 2. **Build the Dynamo Base Image**
 
@@ -207,25 +208,31 @@ DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk
 ```bash
 echo $DYNAMO_TAG
 export DEPLOYMENT_NAME=llm-agg
-dynamo deployment create $DYNAMO_TAG --no-wait -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
-```
-
-To delete an existing Dynamo deployment:
-
-```bash
-kubectl delete dynamodeployment $DEPLOYMENT_NAME
+dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
 ```
 
 4. **Test the deployment**
 
 Once you create the Dynamo deployment, a pod prefixed with `yatai-dynamonim-image-builder` will begin running. Once it finishes running, pods will be created using the image that was built. Once the pods prefixed with `$DEPLOYMENT_NAME` are up and running, you can test out your example!
 
+Find your frontend pod using one of these methods:
+
 ```bash
-# Forward the service port to localhost
-kubectl -n ${KUBE_NS} port-forward svc/${DEPLOYMENT_NAME}-frontend 3000:3000
+# Method 1: List all pods and find the frontend pod manually
+kubectl get pods -n ${KUBE_NS} | grep frontend | cat
+
+# Method 2: Use a label selector to find the frontend pod automatically
+export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
+
+# Forward the pod's port to localhost
+kubectl port-forward pod/$FRONTEND_POD 8000:8000 -n ${KUBE_NS}
+
+# Note: We forward directly to the pod's port 8000 rather than the service port because the frontend component listens on port 8000 internally.
 
 # Test the API endpoint
-curl localhost:3000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+curl localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "messages": [
     {

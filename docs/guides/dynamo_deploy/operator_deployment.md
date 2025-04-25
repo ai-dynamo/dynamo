@@ -50,17 +50,17 @@ export PROJECT_ROOT=$(pwd)
 # Set your Kubernetes namespace (must match the namespace where Dynamo cloud is installed)
 export KUBE_NS=hello-world
 
-# Externally accessible endpoint to the `dynamo-store` service within your Dynamo Cloud installation
+# Set the externally accessible endpoint to the `dynamo-store` service within your Dynamo Cloud installation
 export DYNAMO_CLOUD=https://${KUBE_NS}.dev.aire.nvidia.com
-
-# Login to the Dynamo cloud
-dynamo cloud login --api-token TEST-TOKEN --endpoint $DYNAMO_CLOUD
 ```
+
+The `DYNAMO_CLOUD` environment variable is required for all Dynamo deployment commands. Make sure it's set before running any deployment operations.
 
 ### 2. Build the Dynamo Base Image
 
 > [!NOTE]
 > For instructions on building and pushing the Dynamo base image, see the [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image) section in the main README.
+> The Dynamo base image must be pushed to the same registry as the pipelines images configured in the [Dynamo Cloud](dynamo_cloud.md) deployment.
 
 ```bash
 # Set your runtime image name
@@ -70,7 +70,7 @@ export DYNAMO_IMAGE=<dynamo_docker_image_name>
 cd $PROJECT_ROOT/examples/hello_world
 
 # Build the service and capture the tag
-DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk -F"\"" '{ print $2 }')
+DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk '{ print $3 }' | sed 's/\.$//')
 ```
 
 ### 3. Deploy to Kubernetes
@@ -85,10 +85,30 @@ export DEPLOYMENT_NAME=hello-world
 dynamo deployment create $DYNAMO_TAG --no-wait -n $DEPLOYMENT_NAME
 ```
 
-To delete an existing deployment:
+#### Managing Deployments
+
+Once you have deployments running, you can manage them using the following commands:
+
+To see a list of all deployments in your namespace:
+
 ```bash
-kubectl delete dynamodeployment $DEPLOYMENT_NAME
+dynamo deployment list
 ```
+This command displays a table of all deployments.
+
+To get detailed information about a specific deployment:
+
+```bash
+dynamo deployment get $DEPLOYMENT_NAME
+```
+
+To remove a deployment and all its associated resources:
+
+```bash
+dynamo deployment delete $DEPLOYMENT_NAME
+```
+> [!WARNING]
+> This command will permanently delete the deployment and all associated resources. Make sure you have any necessary backups before proceeding.
 
 ### 4. Test the Deployment
 

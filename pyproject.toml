@@ -31,6 +31,7 @@ dependencies = [
     "kubernetes==32.0.1",
     "ai-dynamo-runtime==0.1.1",
     "distro",
+    "typer",
 ]
 
 classifiers = [
@@ -54,12 +55,12 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 
 [project.optional-dependencies]
 all = [
-    "ai-dynamo-vllm~=0.7.2",
+    "ai-dynamo-vllm~=0.8.4",
     "nixl",
 ]
 
 vllm = [
-    "ai-dynamo-vllm~=0.7.2"
+    "ai-dynamo-vllm~=0.8.4"
 ]
 
 [project.scripts]

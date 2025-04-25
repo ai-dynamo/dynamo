@@ -53,7 +53,7 @@ BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
 TENSORRTLLM_BASE_IMAGE=tensorrt_llm/release
-TENSORRTLLM_BASE_IMAGE_TAG=latest
+TENSORRTLLM_BASE_IMAGE_TAG=latest_squashed
 TENSORRTLLM_PIP_WHEEL_PATH=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
@@ -282,6 +282,11 @@ error() {
 }
 
 get_options "$@"
+
+# Automatically set ARCH and ARCH_ALT if PLATFORM is linux/arm64
+if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
+    BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
+fi
 
 # Update DOCKERFILE if framework is VLLM
 if [[ $FRAMEWORK == "VLLM" ]]; then
