@@ -157,7 +157,9 @@ if you wish to be guided through the deployment process, you can run the deploy 
 
 4. 🌐 **Expose Dynamo Cloud Externally**
 
-The script will automatically display information about the endpoint you can use to access Dynamo Cloud. In our docs, we refer to this externally available endpoint as `DYNAMO_CLOUD`.
+> [!NOTE]
+> The script will automatically display information about the endpoint you can use to access Dynamo Cloud. In our docs, we refer to this externally available endpoint as `DYNAMO_CLOUD`.
+
 The simplest way to expose the `dynamo-store` service within the namespace externally is to use a port-forward:
 
 ```bash
