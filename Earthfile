@@ -58,6 +58,31 @@ dynamo-base:
     ENV VIRTUAL_ENV=/opt/dynamo/venv
     ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
+SETUP_CUDA:
+    FUNCTION
+    RUN apt-get update && \
+        apt-get install -y --no-install-recommends wget ca-certificates && \
+        rm -rf /var/lib/apt/lists/*
+
+    # Install CUDA
+    RUN wget --tries=3 --waitretry=5 https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb && \
+        dpkg -i cuda-keyring_1.1-1_all.deb && \
+        apt-get update && \
+        apt-get install -y --no-install-recommends \
+        cuda-toolkit-12-8 \
+        nvidia-driver-535 \
+        && rm -rf /var/lib/apt/lists/* \
+        && rm cuda-keyring_1.1-1_all.deb
+
+    # Set CUDA environment variables
+    ENV CUDA_HOME=/usr/local/cuda-12.8
+    ENV CUDA_ROOT=/usr/local/cuda-12.8
+    ENV CUDA_PATH=/usr/local/cuda-12.8
+    ENV CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda-12.8
+    ENV PATH=$CUDA_HOME/bin:$PATH
+    ENV LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+    ENV CUDA_COMPUTE_CAP=80
+
 rust-base:
     FROM +dynamo-base
     # Rust build/dev dependencies
@@ -72,21 +97,7 @@ rust-base:
         libclang-dev \
         git
 
-    RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb && \
-        apt install -y ./cuda-keyring_1.1-1_all.deb && \
-        apt update && \
-        apt install -y cuda-toolkit nvidia-utils-535 nvidia-driver-535 && \
-        rm cuda-keyring_1.1-1_all.deb
-
-    # Set CUDA compute capability explicitly
-    ENV CUDA_COMPUTE_CAP=80
-
-    ENV CUDA_HOME=/usr/local/cuda
-    ENV CUDA_ROOT=/usr/local/cuda
-    ENV CUDA_PATH=/usr/local/cuda
-    ENV CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda
-    ENV PATH=$CUDA_HOME/bin:$PATH
-    ENV LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+    DO +SETUP_CUDA
 
     ENV RUSTUP_HOME=/usr/local/rustup
     ENV CARGO_HOME=/usr/local/cargo
@@ -94,10 +105,10 @@ rust-base:
     ENV RUST_VERSION=1.86.0
     ENV RUSTARCH=x86_64-unknown-linux-gnu
 
-    RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/x86_64-unknown-linux-gnu/rustup-init" && \
+    RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
         echo "a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f *rustup-init" | sha256sum -c - && \
         chmod +x rustup-init && \
-        ./rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.86.0 --default-host x86_64-unknown-linux-gnu && \
+        ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
         rm rustup-init && \
         chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
@@ -136,8 +147,8 @@ dynamo-build:
 
 dynamo-base-docker:
     ARG IMAGE=dynamo-base-docker
-    ARG CI_REGISTRY_IMAGE=my-registry
-    ARG CI_COMMIT_SHA=latest
+    ARG DOCKER_SERVER=my-registry
+    ARG IMAGE_TAG=latest
 
     FROM ubuntu:24.04
     WORKDIR /workspace
@@ -167,17 +178,66 @@ dynamo-base-docker:
         uv pip install /tmp/wheels/*.whl && \
         rm -rf /tmp/wheels
 
-    SAVE IMAGE --push $CI_REGISTRY_IMAGE/$IMAGE:$CI_COMMIT_SHA
+    SAVE IMAGE --push $DOCKER_SERVER/$IMAGE:$IMAGE_TAG
+
+dynamo-base-docker-llm:
+    ARG IMAGE=dynamo-base-docker-llm
+    ARG DOCKER_SERVER=my-registry
+    ARG IMAGE_TAG=latest
+
+    FROM +dynamo-base-docker
+
+    # Install minimal NIXL dependencies
+    RUN apt-get update && \
+        apt-get install -y --no-install-recommends \
+        libnuma1 \
+        libibverbs1 \
+        librdmacm1 \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Copy NIXL setup from artifacts
+    COPY ./container+nixl-base/nixl /usr/local/nixl
+    COPY ./container+nixl-base/nixl_src /opt/nixl
+    COPY ./container+nixl-base/pkgconfig /usr/lib/pkgconfig
+
+    # Set NIXL environment variables
+    ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:${LD_LIBRARY_PATH}
+    ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/:${PYTHONPATH}
+    ENV UCX_TLS=^cuda_ipc
+    ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/x86_64-linux-gnu/plugins
+
+    # Copy and install the pre-built vllm wheel
+    COPY ./container+vllm-build/ai_dynamo_vllm-*.whl /workspace
+    RUN . /opt/dynamo/venv/bin/activate && \
+        pip install /workspace/ai_dynamo_vllm-*.whl && \
+        rm -rf /workspace/ai_dynamo_vllm-*.whl
+
+    # Verify both Dynamo and vllm are properly installed
+    RUN python3 -c "import dynamo; import vllm" || (echo "Failed to import Dynamo or vllm" && exit 1)
+
+    SAVE IMAGE --push $DOCKER_SERVER/$IMAGE:$IMAGE_TAG
 
 ############### ALL TARGETS ##############################
 all-test:
     BUILD ./deploy/dynamo/operator+test
 
-all-docker:
+cloud-components:
     ARG DOCKER_SERVER=my-registry
     ARG IMAGE_TAG=latest
     BUILD ./deploy/dynamo/operator+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
     BUILD ./deploy/dynamo/api-store+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+
+base-images:
+    ARG DOCKER_SERVER=my-registry
+    ARG IMAGE_TAG=latest
+    BUILD +dynamo-base-docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+    BUILD +dynamo-base-docker-llm --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+
+all-docker:
+    ARG DOCKER_SERVER=my-registry
+    ARG IMAGE_TAG=latest
+    BUILD +cloud-components --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+    BUILD +base-images --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 
 all-lint:
     BUILD ./deploy/dynamo/operator+lint

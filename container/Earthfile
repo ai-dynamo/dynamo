@@ -1,0 +1,166 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+VERSION 0.8
+
+vllm-build:
+    ARG VLLM_REF="0.7.2"
+    ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
+    ARG VLLM_PATCHED_PACKAGE_NAME="ai_dynamo_vllm"
+    ARG VLLM_PATCHED_PACKAGE_VERSION="${VLLM_REF}.post1"
+
+    FROM nvcr.io/nvidia/cuda:12.8.1-runtime-ubuntu24.04
+    WORKDIR /workspace
+
+    # Install minimal required packages
+    RUN apt-get update && \
+        apt-get install -y --no-install-recommends \
+        python3.12 \
+        python3.12-venv \
+        python3-pip \
+        patch \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Create and activate virtual environment
+    RUN python3.12 -m venv /opt/venv
+    ENV VIRTUAL_ENV=/opt/venv
+    ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+    # Copy the vllm subdirectory and requirements
+    COPY deps/vllm/ vllm/
+    COPY deps/requirements.txt /tmp/requirements.txt
+
+    # Install minimal requirements
+    RUN pip install --no-cache-dir pip wheel
+
+    RUN mkdir -p /workspace/dist
+    RUN mkdir /tmp/vllm && \
+        pip download --only-binary=:all: --no-deps --dest /tmp/vllm vllm==v${VLLM_REF} && \
+        cd /tmp/vllm && \
+        wheel unpack *.whl && \
+        cd vllm-${VLLM_REF}/ && \
+        patch -p1 < /workspace/vllm/${VLLM_PATCH} && \
+        # Rename the package
+        mv vllm-${VLLM_REF}.dist-info ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info && \
+        sed -i "s/^Name: vllm/Name: ${VLLM_PATCHED_PACKAGE_NAME}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/METADATA && \
+        sed -i "s/^Version: ${VLLM_REF}/Version: ${VLLM_PATCHED_PACKAGE_VERSION}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/METADATA && \
+        # Update wheel tag
+        sed -i 's/Tag: cp38-abi3-linux_x86_64/Tag: cp38-abi3-manylinux1_x86_64/g' ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/WHEEL && \
+        sed -i "s/-cp38-abi3-linux_x86_64.whl/-cp38-abi3-manylinux1_x86_64.whl/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/RECORD && \
+        wheel pack . --dest-dir /workspace/dist
+
+    # Save the built wheel as an artifact using a wildcard pattern
+    SAVE ARTIFACT /workspace/dist/ai_dynamo_vllm-*.whl
+
+uv-source:
+    FROM ghcr.io/astral-sh/uv:latest
+    SAVE ARTIFACT /uv
+
+nixl-source:
+    FROM ubuntu:24.04
+    WORKDIR /workspace
+
+    # Install git and ca-certificates for SSL verification
+    RUN apt-get update && \
+        apt-get install -y --no-install-recommends \
+        git \
+        ca-certificates \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Clone NIXL
+    ARG NIXL_COMMIT
+    RUN git clone https://github.com/ai-dynamo/nixl.git && \
+        cd nixl && \
+        git checkout ${NIXL_COMMIT}
+
+    # Save NIXL source as artifact
+    SAVE ARTIFACT /workspace/nixl /nixl
+
+nixl-base:
+    FROM nvcr.io/nvidia/cuda-dl-base:25.01-cuda12.8-devel-ubuntu24.04
+    WORKDIR /opt/nixl
+    ARG NIXL_COMMIT
+
+    # Install build dependencies
+    RUN apt-get update && \
+        apt-get install -y --no-install-recommends \
+        git \
+        ca-certificates \
+        cmake \
+        ninja-build \
+        python3 \
+        python3.12 \
+        python3.12-dev \
+        python3.12-venv \
+        autoconf \
+        automake \
+        libtool \
+        pkg-config \
+        libnuma1 \
+        libibverbs1 \
+        librdmacm1 \
+        curl \
+        meson \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Copy uv from artifact
+    COPY +uv-source/uv /bin/uv
+
+    # Create and activate virtual environment
+    RUN mkdir /opt/dynamo && \
+        uv venv /opt/dynamo/venv --python 3.12 && \
+        . /opt/dynamo/venv/bin/activate && \
+        uv pip install pip
+
+    ENV VIRTUAL_ENV=/opt/dynamo/venv
+    ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+    RUN uv pip install pybind11
+
+    # Build UCX
+    ARG UCX_VERSION=v1.18.0
+    RUN cd /usr/local/src && \
+        curl -fSsL "https://github.com/openucx/ucx/tarball/${UCX_VERSION}" | tar xz && \
+        cd openucx-ucx* && \
+        ./autogen.sh && \
+        ./configure --prefix=/usr/local \
+                   --enable-shared \
+                   --disable-static \
+                   --disable-doxygen-doc \
+                   --enable-optimizations \
+                   --enable-cma \
+                   --enable-devel-headers \
+                   --with-cuda=/usr/local/cuda-12.8 \
+                   --with-verbs \
+                   --with-dm \
+                   --enable-mt \
+                   --with-mlx5-dv && \
+        make -j$(nproc) && \
+        make install && \
+        ldconfig
+
+    # Copy NIXL source from artifact
+    COPY +nixl-source/nixl ./
+
+    # Build NIXL
+    RUN mkdir build && \
+        meson setup build/ --prefix=/usr/local/nixl && \
+        cd build/ && \
+        ninja && \
+        ninja install
+
+    # Save artifacts
+    SAVE ARTIFACT /usr/local/nixl /nixl
+    SAVE ARTIFACT /opt/nixl /nixl_src
+    SAVE ARTIFACT /usr/lib/pkgconfig /pkgconfig

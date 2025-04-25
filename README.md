@@ -59,15 +59,15 @@ Although not needed for local development, deploying your Dynamo pipelines to Ku
 Here's how to build it:
 
 ```bash
-./container/build.sh
-docker tag dynamo:latest-vllm <your-registry>/dynamo-base:latest-vllm
-docker login <your-registry>
-docker push <your-registry>/dynamo-base:latest-vllm
+export DOCKER_SERVER=<your-registry>
+export IMAGE_TAG=<your-tag>
+
+earthly --push +dynamo-base-docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 ```
 
 After building, you can use this image by setting the `DYNAMO_IMAGE` environment variable to point to your built image:
 ```bash
-export DYNAMO_IMAGE=<your-registry>/dynamo-base:latest-vllm
+export DYNAMO_IMAGE=$DOCKER_SERVER/dynamo-base-docker-llm:$IMAGE_TAG
 ```
 
 > [!NOTE]
