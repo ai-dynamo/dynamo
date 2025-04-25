@@ -414,6 +414,8 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
+# Tell vllm to use the Dynamo LLM C API for KV Cache Routing
+ENV VLLM_KV_CAPI_PATH=$CARGO_TARGET_DIR/release/libdynamo_llm_capi.so
 
 ##########################################
 ########## Perf Analyzer Image ###########
