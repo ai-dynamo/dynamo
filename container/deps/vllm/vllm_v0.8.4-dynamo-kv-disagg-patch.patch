@@ -710,11 +710,13 @@ index cf85a2135..f9087b5c3 100644
  
          leftover_waiting_sequences: Deque[SequenceGroup] = deque()
          while self._passed_delay(time.time()) and waiting_queue:
-@@ -1121,8 +1187,10 @@ class Scheduler:
+@@ -1121,8 +1187,12 @@ class Scheduler:
                      True, enable_chunking)
  
              # If the sequence group cannot be allocated, stop.
-+            is_remote_decode = seq_group.remote_prefill_params is not None and seq_group.remote_prefill_params.is_remote_decode
++            is_remote_decode = seq_group.remote_prefill_params is not None \
++                and seq_group.remote_prefill_params.is_remote_decode \
++                and seq_group.remote_prefill_params.diff_tp
              can_allocate = self.block_manager.can_allocate(
 -                seq_group, num_lookahead_slots=num_lookahead_slots)
 +                seq_group, num_lookahead_slots=num_lookahead_slots,
@@ -847,7 +849,7 @@ index cf85a2135..f9087b5c3 100644
  
              do_sample = True
              is_prompt = seq_group.is_prefill()
-@@ -1568,9 +1665,30 @@ class Scheduler:
+@@ -1568,9 +1665,31 @@ class Scheduler:
                          < seqs[0].data.get_len()):
                      do_sample = False
  
@@ -856,7 +858,8 @@ index cf85a2135..f9087b5c3 100644
 +                is_remote_prefill = True
 +                logger.debug("Remote prefill, computed block nums: %s", common_computed_block_nums)
 +            if is_first_prefill and seq_group.remote_prefill_params is not None and seq_group.remote_prefill_params.is_remote_decode:
-+                block_tables[seq_group.seqs[0].seq_id + 1] = self.block_manager.block_tables[seq.seq_id + 1].physical_block_ids
++                if seq_group.remote_prefill_params.diff_tp:
++                    block_tables[seq_group.seqs[0].seq_id + 1] = self.block_manager.block_tables[seq.seq_id + 1].physical_block_ids
 +
 +                # Since we know that prefill is scheduled we can
 +                # assume that the blocks computed on decode
@@ -3139,7 +3142,7 @@ index 54f7b8fb6..0559f9db2 100644
  
          # Skip the scheduler if there are any remaining steps in the seq groups.
          # This ensures that the scheduler is only called again when the current
-@@ -1372,7 +1452,41 @@ class LLMEngine:
+@@ -1372,7 +1452,42 @@ class LLMEngine:
              # Schedule iteration
              (seq_group_metadata_list, scheduler_outputs,
               allow_async_output_proc
@@ -3177,12 +3180,13 @@ index 54f7b8fb6..0559f9db2 100644
 +                    block_ids=block_table,
 +                    engine_id=self.engine_id,
 +                    computed_block_ids=seq_group_metadata.computed_block_nums,
++                    engine_tp=self.vllm_config.parallel_config.tensor_parallel_size
 +                )
 +                scheduled_seq_group.seq_group.remote_prefill_params.remote_prefill_request_callback(remote_prefill_request)
  
              ctx.seq_group_metadata_list = seq_group_metadata_list
              ctx.scheduler_outputs = scheduler_outputs
-@@ -1427,8 +1541,46 @@ class LLMEngine:
+@@ -1427,8 +1541,47 @@ class LLMEngine:
                  execute_model_req.async_callback = self.async_callbacks[
                      virtual_engine]
  
@@ -3195,7 +3199,8 @@ index 54f7b8fb6..0559f9db2 100644
 +                    req_id = scheduled_seq_group.seq_group.request_id
 +                    seq_id = scheduled_seq_group.seq_group.seqs[0].seq_id
 +                    block_table = seq_group_metadata.block_tables[seq_id]
-+                    staging_block_ids = seq_group_metadata.block_tables[seq_id + 1]
++                    staging_seq_id = seq_id + 1 if scheduled_seq_group.seq_group.remote_prefill_params.diff_tp else seq_id
++                    staging_block_ids = seq_group_metadata.block_tables[staging_seq_id] 
 +
 +                    num_computed_blocks = len(seq_group_metadata.computed_block_nums)
 +                    computed_decode_block_ids = remote_prefill_params.decode_block_ids[:num_computed_blocks]
@@ -4097,7 +4102,7 @@ new file mode 100644
 index 000000000..83f6cd575
 --- /dev/null
 +++ b/vllm/remote_prefill.py
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,84 @@
 +# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 +# SPDX-License-Identifier: Apache-2.0
 +#
@@ -4143,6 +4148,7 @@ index 000000000..83f6cd575
 +    sampling_params: SamplingParams
 +    block_ids: List[int]
 +    computed_block_ids: List[int]
++    engine_tp: int
 +
 +
 +class MemoryOpType(str, Enum):
@@ -4180,6 +4186,7 @@ index 000000000..83f6cd575
 +    decode_computed_block_ids: Optional[List[int]] = None
 +    decode_engine_id: Optional[str] = None
 +    remote_prefill_request_callback: Optional[RemotePrefillRequestCallback] = None
++    diff_tp: bool = True
 \ No newline at end of file
 diff --git a/vllm/sampling_params.py b/vllm/sampling_params.py
 index 68ed99664..5b0b7e6dc 100644
