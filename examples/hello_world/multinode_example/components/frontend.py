@@ -17,25 +17,34 @@ import logging
 
 from components.processor import Processor
 from components.utils import GeneralRequest
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 
-from dynamo.sdk import api, depends, service
-from dynamo.sdk.lib.image import DYNAMO_IMAGE
+from dynamo.sdk import DYNAMO_IMAGE, depends, dynamo_endpoint, service
 
 logger = logging.getLogger(__name__)
 
+app = FastAPI(title="Hello World!")
+
 
 @service(
+    dynamo={
+        "enabled": True,
+        "namespace": "dynamo-demo",
+    },
     image=DYNAMO_IMAGE,
+    app=app,
 )
 class Frontend:
     processor = depends(Processor)
 
-    @api
-    async def generate(self, prompt, request_id):  # from request body keys
+    @dynamo_endpoint(is_api=True)
+    async def generate(self, request: GeneralRequest):  # from request body keys
         """Stream results from the pipeline."""
-        logger.info(f"-Frontend layer received: {prompt=},{request_id=}")
-        frontend_request = GeneralRequest(
-            prompt=prompt, request_id=request_id
-        ).model_dump_json()
-        async for response in self.processor.generate(frontend_request):
-            yield f"Response: {response}\n"
+        logger.info(f"-Frontend layer received: {request=}")
+
+        async def content_generator():
+            async for response in self.processor.generate(request.model_dump_json()):
+                yield f"Frontend: {response}"
+
+        return StreamingResponse(content_generator())

@@ -101,7 +101,7 @@ You should see the worker is ready from node 1's terminal.
 4. Go back to node 1 and send request to frontend using curl:
 ```bash
 curl -X 'POST' \
-  'http://localhost:3000/generate' \
+  'http://localhost:8000/generate' \
   -H 'accept: text/event-stream' \
   -H 'Content-Type: application/json' \
   -d '{

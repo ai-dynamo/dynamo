@@ -21,7 +21,14 @@ from components.utils import GeneralRequest, GeneralResponse, check_required_wor
 from components.worker import DummyWorker
 
 from dynamo._core import Client
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import (
+    DYNAMO_IMAGE,
+    async_on_start,
+    depends,
+    dynamo_context,
+    dynamo_endpoint,
+    service,
+)
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk.lib.dependency import DynamoClient
 
@@ -33,6 +40,7 @@ logger = logging.getLogger(__name__)
         "enabled": True,
         "namespace": "dynamo-demo",
     },
+    image=DYNAMO_IMAGE,
 )
 class Processor(Protocol):
     """

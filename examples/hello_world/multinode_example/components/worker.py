@@ -18,7 +18,7 @@ import socket
 
 from components.utils import GeneralRequest, GeneralResponse
 
-from dynamo.sdk import dynamo_endpoint, service
+from dynamo.sdk import DYNAMO_IMAGE, dynamo_endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
         "enabled": True,
         "namespace": "dynamo-demo",
     },
+    image=DYNAMO_IMAGE,
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
 )
