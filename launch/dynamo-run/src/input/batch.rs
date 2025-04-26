@@ -17,6 +17,7 @@ use anyhow::Context as _;
 use async_openai::types::FinishReason;
 use dynamo_llm::model_card::model::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
+use dynamo_llm::request_template::RequestTemplate;
 use dynamo_llm::types::openai::chat_completions::{
     NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
 };
@@ -68,6 +69,7 @@ pub async fn run(
     maybe_card: Option<ModelDeploymentCard>,
     input_jsonl: PathBuf,
     engine_config: EngineConfig,
+    template: Option<RequestTemplate>,
 ) -> anyhow::Result<()> {
     let cancel_token = runtime.primary_token();
     // Check if the path exists and is a directory
@@ -109,6 +111,11 @@ pub async fn run(
     tracing::info!("Timer start.");
     let start = Instant::now();
     let mut lines = buffered_input.lines();
+    let template: Option<&'static RequestTemplate> = template.map(|t| {
+        let boxed = Box::new(t);
+        let leaked = Box::leak(boxed) as &'static RequestTemplate;
+        leaked
+    });
     while let Ok(Some(line)) = lines.next_line().await {
         if cancel_token.is_cancelled() {
             break;
@@ -135,7 +142,7 @@ pub async fn run(
         let handle = tokio::spawn(async move {
             let local_start = Instant::now();
             let response =
-                match evaluate(request_id, service_name_ref.as_str(), engine, &mut entry).await {
+                match evaluate(request_id, service_name_ref.as_str(), engine, &mut entry, template).await {
                     Ok(r) => r,
                     Err(err) => {
                         tracing::error!(%err, entry.text, "Failed evaluating prompt");
@@ -202,6 +209,7 @@ async fn evaluate(
     service_name: &str,
     engine: OpenAIChatCompletionsStreamingEngine,
     entry: &mut Entry,
+    template: Option<&'static RequestTemplate>,
 ) -> anyhow::Result<String> {
     let user_message = async_openai::types::ChatCompletionRequestMessage::User(
         async_openai::types::ChatCompletionRequestUserMessage {
@@ -213,9 +221,10 @@ async fn evaluate(
     );
     let inner = async_openai::types::CreateChatCompletionRequestArgs::default()
         .messages(vec![user_message])
-        .model(service_name)
+        .model(template.map_or_else(|| service_name.to_string(), |t| t.model.clone()))
         .stream(true)
-        .max_completion_tokens(MAX_TOKENS)
+        .max_completion_tokens(template.map_or(MAX_TOKENS, |t| t.max_completion_tokens))
+        .temperature(template.map_or(0.7, |t| t.temperature))
         .build()?;
     let req = NvCreateChatCompletionRequest { inner, nvext: None };
     let mut stream = engine.generate(Context::new(req)).await?;

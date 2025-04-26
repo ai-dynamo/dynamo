@@ -482,7 +482,7 @@ pub async fn run(
             crate::input::text::run(runtime.clone(), flags, Some(prompt), engine_config, template).await?;
         }
         Input::Batch(path) => {
-            crate::input::batch::run(runtime.clone(), flags, maybe_card, path, engine_config)
+            crate::input::batch::run(runtime.clone(), flags, maybe_card, path, engine_config, template)
                 .await?;
         }
         Input::Endpoint(path) => {
