@@ -47,7 +47,7 @@ def serve(
     service_name: str = typer.Option(
         "",
         help="Only serve the specified service. Don't serve any dependencies of this service.",
-        envvar="DYNAMO_SERVE_SERVICE_NAME",
+        envvar="DYNAMO_SERVICE_NAME",
     ),
     depends: List[str] = typer.Option(
         [],
@@ -81,7 +81,7 @@ def serve(
         False,
         help="Print the final service configuration and exit without starting the server",
     ),
-    enable_planner: bool = typer.Option(
+    enable_local_planner: bool = typer.Option(
         False,
         help="Save a snapshot of your service state to a file that allows planner to edit your deployment configuration",
     ),
@@ -92,8 +92,7 @@ def serve(
     """
 
     # Warning: internal
-    from bentoml._internal.service.loader import load
-
+    from dynamo.sdk.lib.loader import find_and_load_service
     from dynamo.sdk.lib.logging import configure_server_logging
     from dynamo.sdk.lib.service import LinkedServices
 
@@ -138,11 +137,12 @@ def serve(
     if sys.path[0] != working_dir_str:
         sys.path.insert(0, working_dir_str)
 
-    svc = load(bento_identifier=dynamo_pipeline, working_dir=working_dir_str)
-
+    svc = find_and_load_service(dynamo_pipeline, working_dir=working_dir)
+    logger.info(f"Loaded service: {svc.name}")
+    logger.info("Dependencies: %s", [dep.on.name for dep in svc.dependencies.values()])
     LinkedServices.remove_unused_edges()
 
-    from dynamo.sdk.cli.serving import serve_http  # type: ignore
+    from dynamo.sdk.cli.serving import serve_dynamo_graph  # type: ignore
 
     svc.inject_config()
 
@@ -155,12 +155,12 @@ def serve(
         )
     )
 
-    serve_http(
+    serve_dynamo_graph(
         dynamo_pipeline,
         working_dir=working_dir_str,
-        host=host,
-        port=port,
+        # host=host,
+        # port=port,
         dependency_map=runner_map_dict,
         service_name=service_name,
-        enable_planner=enable_planner,
+        enable_local_planner=enable_local_planner,
     )

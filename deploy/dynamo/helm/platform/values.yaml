@@ -68,7 +68,9 @@ dynamo-api-store:
     enabled: true
     targetNamespace: ""
   istio:
+    enabled: false
     host: ""
+    gateway: ""
   dynamo:
     env:
       resource_scope: "user"
@@ -78,7 +80,7 @@ dynamo-api-store:
     pullPolicy: IfNotPresent
   imagePullSecrets:
   ingress:
-    enabled: true
+    enabled: false
     className: nginx
     hosts:
       - host: ""

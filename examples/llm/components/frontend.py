@@ -19,6 +19,7 @@ from pathlib import Path
 
 from components.processor import Processor
 from components.worker import VllmWorker
+from fastapi import FastAPI
 from pydantic import BaseModel
 
 from dynamo import sdk
@@ -49,9 +50,14 @@ class FrontendConfig(BaseModel):
 
 # todo this should be called ApiServer
 @service(
+    dynamo={
+        "enabled": True,
+        "namespace": "dynamo",
+    },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
     image=DYNAMO_IMAGE,
+    app=FastAPI(title="LLM Example"),
 )
 class Frontend:
     worker = depends(VllmWorker)

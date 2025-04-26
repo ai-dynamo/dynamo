@@ -185,8 +185,9 @@ You must have first followed the instructions in [deploy/dynamo/helm/README.md](
 export PROJECT_ROOT=$(pwd)
 export KUBE_NS=dynamo-cloud  # Note: This must match the Kubernetes namespace where you installed Dynamo Cloud
 export DYNAMO_CLOUD=https://${KUBE_NS}.dev.aire.nvidia.com # Externally accessible endpoint to the `dynamo-store` service within your Dynamo Cloud installation
-dynamo cloud login $DYNAMO_CLOUD
 ```
+
+The `DYNAMO_CLOUD` environment variable is required for all Dynamo deployment commands. Make sure it's set before running any deployment operations.
 
 2. **Build the Dynamo Base Image**
 
@@ -207,7 +208,7 @@ DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk
 ```bash
 echo $DYNAMO_TAG
 export DEPLOYMENT_NAME=llm-agg
-dynamo deployment create $DYNAMO_TAG --no-wait -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
+dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
 ```
 
 4. **Test the deployment**

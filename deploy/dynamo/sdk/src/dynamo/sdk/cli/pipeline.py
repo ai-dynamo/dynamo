@@ -36,7 +36,7 @@ from rich.console import Console
 from rich.syntax import Syntax
 from simple_di import Provide, inject
 
-from dynamo.sdk.lib.bento import Bento
+from dynamo.sdk.cli.bento_util import Bento
 
 if t.TYPE_CHECKING:
     from bentoml._internal.bento import BentoStore

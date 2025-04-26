@@ -61,6 +61,7 @@ pub enum EngineConfig {
     StaticFull {
         service_name: String,
         engine: OpenAIChatCompletionsStreamingEngine,
+        card: Box<ModelDeploymentCard>,
     },
 
     /// A core engine expects to be wrapped with pre/post processors that handle tokenization.
@@ -173,7 +174,9 @@ pub async fn run(
         }
         // Otherwise we don't have one, but we only need it if we're tokenizing
         _ => {
-            tracing::debug!("No model card path provided (neither --model-config nor a directory in --model-path)");
+            tracing::debug!(
+                "No model card path provided (neither --model-config nor --model-path)"
+            );
             None
         }
     };
@@ -203,6 +206,7 @@ pub async fn run(
                 );
             };
             EngineConfig::StaticFull {
+                card: Box::new(ModelDeploymentCard::with_name_only(&model_name)),
                 service_name: model_name,
                 engine: dynamo_llm::engines::make_engine_full(),
             }
@@ -233,6 +237,7 @@ pub async fn run(
                 unreachable!("We checked model_path earlier, and set model_name from model_path");
             };
             EngineConfig::StaticFull {
+                card: Box::new(ModelDeploymentCard::with_name_only(&model_name)),
                 service_name: model_name,
                 engine: dynamo_engine_mistralrs::make_engine(&model_path).await?,
             }
@@ -422,16 +427,17 @@ pub async fn run(
         }
         #[cfg(feature = "python")]
         Output::PythonStr(path_str) => {
-            let Some(model_name) = model_name else {
+            let Some(model_name) = &model_name else {
                 anyhow::bail!("Provide model service name as `--model-name <this>`");
             };
-            let py_args = flags.as_vec(&path_str, &model_name);
+            let py_args = flags.as_vec(&path_str, model_name);
             let p = std::path::PathBuf::from(path_str);
             let engine =
                 dynamo_engine_python::make_string_engine(cancel_token.clone(), &p, py_args).await?;
             EngineConfig::StaticFull {
-                service_name: model_name,
+                service_name: model_name.to_string(),
                 engine,
+                card: Box::new(ModelDeploymentCard::with_name_only(model_name)),
             }
         }
         #[cfg(feature = "python")]

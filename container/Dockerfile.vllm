@@ -414,6 +414,8 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
+# Tell vllm to use the Dynamo LLM C API for KV Cache Routing
+ENV VLLM_KV_CAPI_PATH=$CARGO_TARGET_DIR/release/libdynamo_llm_capi.so
 
 ##########################################
 ########## Perf Analyzer Image ###########
@@ -464,9 +466,10 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 WORKDIR /workspace
 ENV DYNAMO_HOME=/workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 # Copy NIXL
-COPY --from=build /usr/local/nixl /usr/local/nixl
+COPY --from=base /usr/local/nixl /usr/local/nixl
 ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
 ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/:$PYTHONPATH
 
@@ -478,9 +481,11 @@ RUN apt-get update && \
     uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
-# Install the wheels
+# Install the wheels and symlink executables to /usr/local/bin so dynamo components can use them
+# Dynamo components currently do not have the VIRTUAL_ENV in their PATH, so we need to symlink the executables
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
-RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse  && \
+RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
+    ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
     rm -r wheelhouse
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing

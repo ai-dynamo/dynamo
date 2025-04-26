@@ -13,9 +13,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use dynamo_llm::{
     backend::Backend,
     http::service::discovery::ModelEntry,
+    key_value_store::{KeyValueStore, KeyValueStoreManager, NATSStorage},
+    model_card::{BUCKET_NAME, BUCKET_TTL},
     model_type::ModelType,
     preprocessor::OpenAIPreprocessor,
     types::{
@@ -44,11 +48,12 @@ pub async fn run(
 
     let etcd_client = distributed_runtime.etcd_client();
 
-    let (ingress, service_name) = match engine_config {
+    let (ingress, service_name, mut card) = match engine_config {
         EngineConfig::StaticFull {
             service_name,
             engine,
-        } => (Ingress::for_engine(engine)?, service_name),
+            card,
+        } => (Ingress::for_engine(engine)?, service_name, card),
         EngineConfig::StaticCore {
             service_name,
             engine: inner_engine,
@@ -72,7 +77,7 @@ pub async fn run(
                 .link(preprocessor.backward_edge())?
                 .link(frontend)?;
 
-            (Ingress::for_pipeline(pipeline)?, service_name)
+            (Ingress::for_pipeline(pipeline)?, service_name, card)
         }
         EngineConfig::Dynamic(_) => {
             anyhow::bail!("Cannot use endpoint for both in and out");
@@ -87,13 +92,29 @@ pub async fn run(
     };
 
     let component = distributed_runtime
-        .namespace(endpoint_id.namespace)?
-        .component(endpoint_id.component)?;
+        .namespace(&endpoint_id.namespace)?
+        .component(&endpoint_id.component)?;
     let endpoint = component
         .service_builder()
         .create()
         .await?
-        .endpoint(endpoint_id.name);
+        .endpoint(&endpoint_id.name);
+
+    let nats_client = distributed_runtime.nats_client();
+    card.move_to_nats(nats_client.clone()).await?;
+
+    let kvstore: Box<dyn KeyValueStore> =
+        Box::new(NATSStorage::new(nats_client.clone(), endpoint_id));
+    let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
+    card.requires_preprocessing = false;
+    card_store.publish_until_cancelled(
+        cancel_token.clone(),
+        BUCKET_NAME.to_string(),
+        Some(BUCKET_TTL),
+        BUCKET_TTL / 2,
+        card.slug().to_string(),
+        *card.clone(),
+    );
 
     if let Some(etcd_client) = etcd_client {
         let network_name = endpoint.subject_to(etcd_client.lease_id());
@@ -114,6 +135,10 @@ pub async fn run(
         }
         _ = cancel_token.cancelled() => {
         }
+    }
+    // Cleanup on shutdown
+    if let Err(err) = card.delete_from_nats(nats_client).await {
+        tracing::error!(%err, "delete_from_nats error on shutdown");
     }
     Ok(())
 }

@@ -87,7 +87,9 @@ ingress:
 
 # Istio settings
 istio:
+  enabled: false
   host: ""
+  gateway: ""
 
 ## In-cluster minio deployment configuration
 ## ref: https://github.com/bitnami/charts/blob/minio/13.3.1/bitnami/minio/values.yaml

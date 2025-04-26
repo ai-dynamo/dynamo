@@ -102,8 +102,8 @@ pub struct Flags {
     /// If using `out=dyn://..` with multiple backends, this says how to route the requests.
     ///
     /// Mostly interesting for KV-aware routing.
-    /// Defaults to RouterMode::Random
-    #[arg(long, default_value = "random")]
+    /// Defaults to RouterMode::RoundRobin
+    #[arg(long, default_value = "round-robin")]
     pub router_mode: RouterMode,
 
     /// Internal use only.
