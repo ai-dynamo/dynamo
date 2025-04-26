@@ -15,7 +15,9 @@
 
 [workspace]
 members = [
-    "components/*",
+    "components/http",
+    "components/metrics",
+    "components/router",
     "launch/*",
     "lib/llm",
     "lib/runtime",

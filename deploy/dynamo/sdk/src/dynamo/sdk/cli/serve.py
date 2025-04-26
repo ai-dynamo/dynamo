@@ -81,7 +81,7 @@ def serve(
         False,
         help="Print the final service configuration and exit without starting the server",
     ),
-    enable_planner: bool = typer.Option(
+    enable_local_planner: bool = typer.Option(
         False,
         help="Save a snapshot of your service state to a file that allows planner to edit your deployment configuration",
     ),
@@ -162,5 +162,5 @@ def serve(
         # port=port,
         dependency_map=runner_map_dict,
         service_name=service_name,
-        enable_planner=enable_planner,
+        enable_local_planner=enable_local_planner,
     )
