@@ -13,10 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This will overwrite the llm_api_config.yaml
-
 # TODO: Specifying the context and generation servers in the config file is
 # bit confusing. Investigate if we can clean this up.
+
+# NOTE: The fields 'hostname', 'port', and 'urls' are not used by Dynamo,
+# but are left in for easy comparison with standalone TRT-LLM solutions.
 
 hostname: localhost
 port: 8080
@@ -25,27 +26,29 @@ backend: pytorch
 
 context_servers:
   num_instances: 1
-  tensor_parallel_size: 1
-  max_num_tokens: 10240
+  tensor_parallel_size: 4
+  max_num_tokens: 8196
   max_batch_size: 16
   enable_chunked_prefill: false
   kv_cache_config:
-    free_gpu_memory_fraction: 0.40
+    free_gpu_memory_fraction: 0.80
   pytorch_backend_config:
+    # must be false for prefill/context
     enable_overlap_scheduler: false
-    use_cuda_graph: false
+    use_cuda_graph: true
   urls:
       - "localhost:8001"
 
 generation_servers:
   num_instances: 1
-  tensor_parallel_size: 1
-  max_num_tokens: 256
-  max_batch_size: 256
+  tensor_parallel_size: 4
+  max_num_tokens: 8196
+  max_batch_size: 16
   kv_cache_config:
-    free_gpu_memory_fraction: 0.40
+    free_gpu_memory_fraction: 0.80
   pytorch_backend_config:
+    # can be true for decode/generation
     enable_overlap_scheduler: true
-    use_cuda_graph: false
+    use_cuda_graph: true
   urls:
       - "localhost:8002"

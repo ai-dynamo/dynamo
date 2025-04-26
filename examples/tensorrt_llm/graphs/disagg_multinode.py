@@ -13,19 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  endpoint: dynamo.Processor.chat/completions
-  port: 8000
+from components.frontend import Frontend
+from components.processor import Processor
+from components.worker import TensorRTLLMWorker
 
-Processor:
-  engine_args: "configs/engine_args/llm_api_config.yaml"
-  router: round-robin
-
-TensorRTLLMWorker:
-  engine_args: "configs/engine_args/llm_api_config.yaml"
-  router: round-robin
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: 1
+# Don't link PrefillWorker here because it will be remote on a
+# separate node, and called from the DecodeWorker (TensorRTLLMWorker)
+# by setting `remote_prefill: true` in the `dynamo serve` config file.
+Frontend.link(Processor).link(TensorRTLLMWorker)

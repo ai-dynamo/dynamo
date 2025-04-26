@@ -14,18 +14,18 @@
 # limitations under the License.
 
 Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  served_model_name: deepseek-ai/DeepSeek-R1
   endpoint: dynamo.Processor.chat/completions
   port: 8000
 
 Processor:
-  engine_args: "configs/engine_args/llm_api_config.yaml"
+  engine_args: "configs/engine_args/deepseek_r1_4xB200.yaml"
   router: round-robin
 
 TensorRTLLMWorker:
-  engine_args: "configs/engine_args/llm_api_config.yaml"
+  engine_args: "configs/engine_args/deepseek_r1_4xB200.yaml"
   router: round-robin
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 1
+      gpu: 4
