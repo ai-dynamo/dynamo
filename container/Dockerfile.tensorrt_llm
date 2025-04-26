@@ -233,8 +233,6 @@ RUN . /opt/dynamo/venv/bin/activate && \
 RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
     pip install dist/ai_dynamo*any.whl
 
-# Tell TRTLLM worker to use the Dynamo LLM C API for KV Cache Routing
-ENV DYNAMO_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
 ENV DYNAMO_HOME=/workspace
 
 # Use UCX for TRTLLM KV Cache Transfer
