@@ -31,6 +31,7 @@ mod input;
 mod net;
 mod opt;
 pub use opt::{Input, Output};
+pub use dynamo_llm::request_template::RequestTemplate;
 
 /// How we identify a namespace/component/endpoint URL.
 /// Technically the '://' is not part of the scheme but it eliminates several string
@@ -195,6 +196,15 @@ pub async fn run(
 
     #[cfg(any(feature = "vllm", feature = "sglang"))]
     let mut extra: Option<Pin<Box<dyn Future<Output = ()> + Send>>> = None; // vllm and sglang sub-process
+
+    let template = if let Some(path) = flags.request_template.as_ref() {
+        Some(RequestTemplate::load(path)?)
+    } else {
+        None
+    };
+    if let Some(template) = template.as_ref() {
+        tracing::info!("Using request template: {template:?}");
+    }
 
     // Create the engine matching `out`
     let engine_config = match out_opt {
@@ -461,15 +471,15 @@ pub async fn run(
 
     match in_opt {
         Input::Http => {
-            crate::input::http::run(runtime.clone(), flags, engine_config).await?;
+            crate::input::http::run(runtime.clone(), flags, engine_config, template).await?;
         }
         Input::Text => {
-            crate::input::text::run(runtime.clone(), flags, None, engine_config).await?;
+            crate::input::text::run(runtime.clone(), flags, None, engine_config, template).await?;
         }
         Input::Stdin => {
             let mut prompt = String::new();
             std::io::stdin().read_to_string(&mut prompt).unwrap();
-            crate::input::text::run(runtime.clone(), flags, Some(prompt), engine_config).await?;
+            crate::input::text::run(runtime.clone(), flags, Some(prompt), engine_config, template).await?;
         }
         Input::Batch(path) => {
             crate::input::batch::run(runtime.clone(), flags, maybe_card, path, engine_config)

@@ -34,6 +34,7 @@ pub mod recorder;
 pub mod tokenizers;
 pub mod tokens;
 pub mod types;
+pub mod request_template;
 
 #[cfg(feature = "cuda_kv")]
 pub mod kv;
