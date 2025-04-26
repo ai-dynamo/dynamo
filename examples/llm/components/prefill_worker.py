@@ -155,7 +155,7 @@ class PrefillWorker:
             decode_block_ids=request.block_ids,
             decode_engine_id=request.engine_id,
             decode_computed_block_ids=request.computed_block_ids,
-            diff_tp=request.engine_tp!=self.engine_args.tensor_parallel_size,
+            diff_tp=request.engine_tp != self.engine_args.tensor_parallel_size,
         )
 
         # TODO check if metadata has changed
