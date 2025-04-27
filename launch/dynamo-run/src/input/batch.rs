@@ -141,14 +141,21 @@ pub async fn run(
         let service_name_ref = service_name_ref.clone();
         let handle = tokio::spawn(async move {
             let local_start = Instant::now();
-            let response =
-                match evaluate(request_id, service_name_ref.as_str(), engine, &mut entry, template).await {
-                    Ok(r) => r,
-                    Err(err) => {
-                        tracing::error!(%err, entry.text, "Failed evaluating prompt");
-                        return;
-                    }
-                };
+            let response = match evaluate(
+                request_id,
+                service_name_ref.as_str(),
+                engine,
+                &mut entry,
+                template,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(err) => {
+                    tracing::error!(%err, entry.text, "Failed evaluating prompt");
+                    return;
+                }
+            };
             let local_elapsed = Instant::now() - local_start;
             entry.elapsed_ms = local_elapsed.as_millis() as usize;
 

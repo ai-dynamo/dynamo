@@ -15,5 +15,4 @@ impl RequestTemplate {
         let template: Self = serde_json::from_str(&template)?;
         Ok(template)
     }
-
 }

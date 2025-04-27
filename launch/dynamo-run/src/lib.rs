@@ -30,8 +30,8 @@ mod input;
 #[cfg(any(feature = "vllm", feature = "sglang"))]
 mod net;
 mod opt;
-pub use opt::{Input, Output};
 pub use dynamo_llm::request_template::RequestTemplate;
+pub use opt::{Input, Output};
 
 /// How we identify a namespace/component/endpoint URL.
 /// Technically the '://' is not part of the scheme but it eliminates several string
@@ -479,11 +479,25 @@ pub async fn run(
         Input::Stdin => {
             let mut prompt = String::new();
             std::io::stdin().read_to_string(&mut prompt).unwrap();
-            crate::input::text::run(runtime.clone(), flags, Some(prompt), engine_config, template).await?;
+            crate::input::text::run(
+                runtime.clone(),
+                flags,
+                Some(prompt),
+                engine_config,
+                template,
+            )
+            .await?;
         }
         Input::Batch(path) => {
-            crate::input::batch::run(runtime.clone(), flags, maybe_card, path, engine_config, template)
-                .await?;
+            crate::input::batch::run(
+                runtime.clone(),
+                flags,
+                maybe_card,
+                path,
+                engine_config,
+                template,
+            )
+            .await?;
         }
         Input::Endpoint(path) => {
             let Some(dyn_input) = dyn_input else {

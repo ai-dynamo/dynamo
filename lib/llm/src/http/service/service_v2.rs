@@ -15,11 +15,11 @@
 
 use super::metrics;
 use super::ModelManager;
+use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use crate::request_template::RequestTemplate;
 
 #[derive(Clone)]
 pub struct HttpService {
