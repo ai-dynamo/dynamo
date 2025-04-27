@@ -14,7 +14,6 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RequestTemplate {
     pub model: String,
