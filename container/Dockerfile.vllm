@@ -6,6 +6,8 @@ ARG BASE_IMAGE_TAG="25.03-cuda12.8-devel-ubuntu24.04"
 ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
+# TODO: Move to published pypi tags
+ARG GENAI_PERF_TAG="e67e853413a07a778dd78a55e299be7fba9c9c24"
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -108,7 +110,7 @@ ARG VLLM_REF="0.8.4"
 ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
 ARG VLLM_PATCHED_PACKAGE_NAME="ai_dynamo_vllm"
 ARG VLLM_PATCHED_PACKAGE_VERSION="0.8.4"
-ARG VLLM_MAX_JOBS=16
+ARG VLLM_MAX_JOBS=4
 # NOTE: vLLM build from source can be a very long step, so split it out
 #       from patching step to cache the build. However, use of uv cache mount
 #       may make splitting the steps redundant.
@@ -129,16 +131,17 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
         python use_existing_torch.py && \
         # Build/install vllm from source
         uv pip install -r requirements/build.txt && \
-        # MAX_JOBS set to avoid running OOM on vllm-flash-attn build
-        # Each job can take between 2-8GB each, so tune according to available system memory.
+        # MAX_JOBS set to avoid running OOM on vllm-flash-attn build, this can 
+        # significantly impact the overall build time. Each job can take up
+        # to -16GB RAM each, so tune according to available system memory.
         MAX_JOBS=${VLLM_MAX_JOBS} uv pip install -e . --no-build-isolation ; \
     # Handle x86_64: Download wheel, unpack, setup for later steps
     else \
         python -m pip download --only-binary=:all: --no-deps --dest /tmp/vllm vllm==v${VLLM_REF} && \
         # Patch vLLM pre-built download with dynamo additions
         cd /tmp/vllm && \
-        wheel unpack *.whl ; \
-        cd /tmp/vllm/vllm-${VLLM_REF}/ && \
+        wheel unpack *.whl && \
+        cd vllm-${VLLM_REF}/ && \
         patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
         # Rename the package from vllm to ai_dynamo_vllm
         mv vllm-${VLLM_REF}.dist-info ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info && \
@@ -155,12 +158,10 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
 
 # Common dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=cache,target=/root/.cache/uv \
     uv pip install --requirement /tmp/requirements.txt
 
 # Install test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
-    --mount=type=cache,target=/root/.cache/uv \
     uv pip install --requirement /tmp/requirements.txt
 
 # ### MISC UTILITY SETUP ###
@@ -367,15 +368,39 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH=$CARGO_TARGET_DIR/release/libdynamo_llm_capi.so
 
+##########################################
+########## Perf Analyzer Image ###########
+##########################################
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS perf_analyzer
+
+ARG GENAI_PERF_TAG
+
+WORKDIR /workspace
+
+# Build and install Perf Analyzer for benchmarking
+RUN apt-get update -y && apt-get -y install cmake g++ libssl-dev python3 rapidjson-dev zlib1g-dev
+RUN git clone https://github.com/triton-inference-server/perf_analyzer.git
+RUN git -C perf_analyzer checkout ${GENAI_PERF_TAG}
+RUN mkdir perf_analyzer/build
+RUN cmake -B perf_analyzer/build -S perf_analyzer -D TRITON_ENABLE_PERF_ANALYZER_OPENAI=ON
+RUN cmake --build perf_analyzer/build -- -j8
+RUN mkdir bin &&  \
+    cp -r perf_analyzer/build/perf_analyzer/src/perf-analyzer-build /workspace/bin/
+
 ########################################
 ########## Development Image ###########
 ########################################
 FROM ci_minimum AS dev
 
+ARG GENAI_PERF_TAG
+
+COPY --from=perf_analyzer /workspace/bin/perf-analyzer-build/ /perf/bin
+COPY --from=perf_analyzer /workspace/perf_analyzer /perf_analyzer
+ENV PATH="/perf/bin:${PATH}"
+
 # Install genai-perf for benchmarking
-ARG GENAI_PERF_TAG="0.0.11"
-#RUN uv pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
-RUN uv pip install "genai-perf==${GENAI_PERF_TAG}"
+RUN uv pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
+RUN uv pip uninstall tritonclient
 
 COPY . /workspace
 
