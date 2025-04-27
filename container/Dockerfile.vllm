@@ -111,14 +111,11 @@ ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
 ARG VLLM_PATCHED_PACKAGE_NAME="ai_dynamo_vllm"
 ARG VLLM_PATCHED_PACKAGE_VERSION="0.8.4"
 ARG VLLM_MAX_JOBS=4
-# NOTE: vLLM build from source can be a very long step, so split it out
-#       from patching step to cache the build. However, use of uv cache mount
-#       may make splitting the steps redundant.
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
     mkdir /tmp/vllm && \
     uv pip install pip wheel && \
-    # TODO: Handle arm64: Build wheel from source
+    # NOTE: vLLM build from source on ARM can take several hours, see VLLM_MAX_JOBS details.
     if [ "$ARCH" = "arm64" ]; then \
         # PyTorch 2.7 supports CUDA 12.8 and aarch64 installs
         uv pip install torch==2.7.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 && \
