@@ -124,10 +124,6 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
         cd /tmp/vllm/vllm-${VLLM_REF}/ && \
         # Patch vLLM source with dynamo additions
         patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
-        # WAR: Set package version check to 'vllm' instead of 'ai_dynamo_vllm'
-        # to avoid platform detection issues. There is probably a better solution to
-        # make the installed package name 'ai_dynamo_vllm' instead.
-        sed -i 's/version("ai_dynamo_vllm")/version("vllm")/g' vllm/platforms/__init__.py
         # Remove pytorch from vllm install dependencies
         python use_existing_torch.py && \
         # Build/install vllm from source
@@ -155,6 +151,14 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
         mkdir -p /workspace/dist && \
         wheel pack . --dest-dir /workspace/dist && \
         uv pip install /workspace/dist/${VLLM_PATCHED_PACKAGE_NAME}-*.whl ; \
+    fi
+
+# WAR: Set package version check to 'vllm' instead of 'ai_dynamo_vllm' to avoid
+# platform detection issues on ARM install. There is probably a better solution
+# to make the installed package name for ARM build 'ai_dynamo_vllm' instead.
+RUN if [ "$ARCH" = "arm64" ]; then \
+        cd /tmp/vllm/vllm-${VLLM_REF}/ && \
+        sed -i 's/version("ai_dynamo_vllm")/version("vllm")/g' vllm/platforms/__init__.py ; \
     fi
 
 # Common dependencies
