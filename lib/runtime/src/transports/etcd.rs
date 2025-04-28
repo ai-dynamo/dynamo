@@ -74,6 +74,13 @@ impl Lease {
     pub fn revoke(&self) {
         self.cancel_token.cancel();
     }
+
+    /// Check if the lease is still valid (not revoked)
+    pub async fn is_valid(&self) -> Result<bool> {
+        // A lease is valid if its cancellation token has not been triggered
+        // We can use try_cancelled which returns immediately with a boolean
+        Ok(!self.cancel_token.is_cancelled())
+    }
 }
 
 impl Client {
@@ -147,6 +154,15 @@ impl Client {
         self.runtime
             .secondary()
             .spawn(create_lease(lease_client, ttl, token))
+            .await?
+    }
+
+    // Revoke an etcd lease given its lease id. A wrapper over etcd_client::LeaseClient::revoke
+    pub async fn revoke_lease(&self, lease_id: i64) -> Result<()> {
+        let lease_client = self.client.lease_client();
+        self.runtime
+            .secondary()
+            .spawn(revoke_lease(lease_client, lease_id))
             .await?
     }
 

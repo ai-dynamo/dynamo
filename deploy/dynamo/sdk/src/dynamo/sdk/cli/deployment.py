@@ -35,14 +35,14 @@ from bentoml.exceptions import BentoMLException, CLIException, CloudRESTApiClien
 from rich.console import Console
 from simple_di import Provide, inject
 
-from dynamo.sdk.lib.logging import configure_server_logging
+from dynamo.runtime.logging import configure_dynamo_logging
 
 from .utils import resolve_service_config
 
 # Configure logging to suppress INFO HTTP logs
 logging.getLogger("httpx").setLevel(logging.WARNING)  # HTTP client library logs
 logging.getLogger("httpcore").setLevel(logging.WARNING)  # HTTP core library logs
-configure_server_logging()
+configure_dynamo_logging()
 
 logger = logging.getLogger(__name__)
 

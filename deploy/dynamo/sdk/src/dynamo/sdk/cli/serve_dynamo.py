@@ -35,6 +35,7 @@ from fastapi.responses import StreamingResponse
 
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 from dynamo.sdk import dynamo_context
+from dynamo.sdk.cli.utils import append_dynamo_state
 from dynamo.sdk.lib.service import LinkedServices
 
 logger = logging.getLogger(__name__)
@@ -122,19 +123,30 @@ def setup_signal_handlers():
     default=None,
     help="If set, start the server as a bare worker with the given worker ID. Otherwise start a standalone server with a supervisor process.",
 )
+@click.option(
+    "--custom-component-name",
+    required=False,
+    type=click.STRING,
+    default=None,
+    help="If set, use this custom component name instead of the default service name",
+)
 def main(
     bento_identifier: str,
     service_name: str,
     runner_map: str | None,
     worker_env: str | None,
     worker_id: int | None,
+    custom_component_name: str | None,
 ) -> None:
+    # hack to avoid bentoml from respawning the workers after their leases are revoked
+    os.environ["BENTOML_CONTAINERIZED"] = "true"
+
     """Start a worker for the given service - either Dynamo or regular service"""
     from _bentoml_impl.loader import import_service
     from bentoml._internal.container import BentoMLContainer
     from bentoml._internal.context import server_context
 
-    from dynamo.sdk.lib.logging import configure_server_logging
+    from dynamo.runtime.logging import configure_dynamo_logging
 
     # Setup signal handlers for graceful shutdown
     setup_signal_handlers()
@@ -160,7 +172,7 @@ def main(
     if service_name and service_name != service.name:
         service = service.find_dependent_by_name(service_name)
 
-    configure_server_logging(service_name=service_name, worker_id=worker_id)
+    configure_dynamo_logging(service_name=service_name, worker_id=worker_id)
     if runner_map:
         BentoMLContainer.remote_runner_mapping.set(
             t.cast(t.Dict[str, str], json.loads(runner_map))
@@ -227,7 +239,7 @@ def main(
                 dynamo_context["component"] = component
                 dynamo_context["endpoints"] = endpoints
                 class_instance = service.inner()
-                twm = []
+                dynamo_handlers = []
                 for name, endpoint in dynamo_endpoints.items():
                     bound_method = endpoint.func.__get__(class_instance)
                     # Only pass request type for now, use Any for response
@@ -236,7 +248,7 @@ def main(
                     dynamo_wrapped_method = dynamo_endpoint(endpoint.request_type, Any)(
                         bound_method
                     )
-                    twm.append(dynamo_wrapped_method)
+                    dynamo_handlers.append(dynamo_wrapped_method)
                 # Run startup hooks before setting up endpoints
                 for name, member in vars(class_instance.__class__).items():
                     if callable(member) and getattr(
@@ -258,7 +270,26 @@ def main(
                     logger.info(f"Serving {service.name} with primary lease")
                 else:
                     logger.info(f"Serving {service.name} with lease: {lease.id()}")
-                result = await endpoints[0].serve_endpoint(twm[0], lease)
+                    # Map custom lease to component
+                    watcher_name = None
+                    if custom_component_name:
+                        watcher_name = custom_component_name
+                    else:
+                        watcher_name = f"{namespace}_{component_name}"
+                    append_dynamo_state(namespace, watcher_name, {"lease": lease.id()})
+                    logger.info(
+                        f"Appended lease {lease.id()}/{lease.id():x} to {watcher_name}"
+                    )
+                # Launch serve_endpoint for all endpoints concurrently
+                tasks = [
+                    endpoint.serve_endpoint(handler, lease)
+                    for endpoint, handler in zip(endpoints, dynamo_handlers)
+                ]
+                # Wait for all tasks to complete
+                await asyncio.gather(*tasks)
+
+                if class_instance.__class__.__name__ == "PrefillWorker":
+                    await asyncio.wait_for(class_instance.task, timeout=None)
 
             except GracefulExit:
                 logger.info(f"[{run_id}] Gracefully shutting down {service.name}")

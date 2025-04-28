@@ -13,10 +13,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::pin::Pin;
+
 use crate::{flags::RouterMode, EngineConfig, Flags};
 use dynamo_llm::{
     backend::Backend,
+    backend::ExecutionContext,
+    engines::StreamingEngineAdapter,
+    model_card::model::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
+    protocols::common::llm_backend::{BackendInput, BackendOutput},
     types::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -26,12 +32,13 @@ use dynamo_llm::{
     },
 };
 use dynamo_runtime::{
-    pipeline::{ManyOut, Operator, ServiceBackend, ServiceFrontend, SingleIn, Source},
+    engine::{AsyncEngineStream, Data},
+    pipeline::{Context, ManyOut, Operator, ServiceBackend, ServiceFrontend, SingleIn, Source},
     DistributedRuntime, Runtime,
 };
 use std::sync::Arc;
 
-/// Turns an EngineConfig into an OpenAIChatCompletionsStreamingEngine.
+/// Turns an EngineConfig into an OpenAI chat-completions and completions supported StreamingEngine.
 pub async fn prepare_engine(
     runtime: Runtime,
     flags: Flags,
@@ -69,6 +76,7 @@ pub async fn prepare_engine(
             card: _card,
         } => {
             tracing::debug!("Model: {service_name}");
+            let engine = Arc::new(StreamingEngineAdapter::new(engine));
             Ok((service_name, engine, false))
         }
         EngineConfig::StaticCore {
@@ -76,29 +84,94 @@ pub async fn prepare_engine(
             engine: inner_engine,
             card,
         } => {
-            let frontend = ServiceFrontend::<
-                SingleIn<NvCreateChatCompletionRequest>,
-                ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-            >::new();
-            let preprocessor = OpenAIPreprocessor::new(*card.clone())
-                .await?
-                .into_operator();
-            let backend = Backend::from_tokenizer(card.tokenizer_hf()?)
-                .await?
-                .into_operator();
-            let engine = ServiceBackend::from_engine(inner_engine);
-
-            let pipeline = frontend
-                .link(preprocessor.forward_edge())?
-                .link(backend.forward_edge())?
-                .link(engine)?
-                .link(backend.backward_edge())?
-                .link(preprocessor.backward_edge())?
-                .link(frontend)?;
+            let pipeline = build_pipeline::<
+                NvCreateChatCompletionRequest,
+                NvCreateChatCompletionStreamResponse,
+            >(&card, inner_engine)
+            .await?;
 
             tracing::debug!("Model: {service_name} with pre-processing");
             Ok((service_name, pipeline, true))
         }
         EngineConfig::None => unreachable!(),
+    }
+}
+
+pub async fn build_pipeline<Req, Resp>(
+    card: &ModelDeploymentCard,
+    engine: ExecutionContext,
+) -> anyhow::Result<Arc<ServiceFrontend<SingleIn<Req>, ManyOut<Annotated<Resp>>>>>
+where
+    Req: Data,
+    Resp: Data,
+    OpenAIPreprocessor: Operator<
+        Context<Req>,
+        Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
+        Context<BackendInput>,
+        Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
+    >,
+{
+    let frontend = ServiceFrontend::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
+    let preprocessor = OpenAIPreprocessor::new((*card).clone())
+        .await?
+        .into_operator();
+    let backend = Backend::from_mdc((*card).clone()).await?.into_operator();
+    let engine = ServiceBackend::from_engine(engine);
+
+    Ok(frontend
+        .link(preprocessor.forward_edge())?
+        .link(backend.forward_edge())?
+        .link(engine)?
+        .link(backend.backward_edge())?
+        .link(preprocessor.backward_edge())?
+        .link(frontend)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_llm::types::openai::{
+        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
+        completions::{CompletionRequest, CompletionResponse},
+    };
+
+    const HF_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../lib/llm/tests/data/sample-models/mock-llama-3.1-8b-instruct"
+    );
+
+    #[tokio::test]
+    async fn test_build_chat_completions_pipeline_core_engine_succeeds() -> anyhow::Result<()> {
+        // Create test model card
+        let card = ModelDeploymentCard::from_local_path(HF_PATH, None).await?;
+        let engine = dynamo_llm::engines::make_engine_core();
+
+        // Build pipeline for chat completions
+        let pipeline = build_pipeline::<
+            NvCreateChatCompletionRequest,
+            NvCreateChatCompletionStreamResponse,
+        >(&card, engine)
+        .await?;
+
+        // Verify pipeline was created
+        assert!(Arc::strong_count(&pipeline) >= 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_build_completions_pipeline_core_engine_succeeds() -> anyhow::Result<()> {
+        // Create test model card
+        let card = ModelDeploymentCard::from_local_path(HF_PATH, None).await?;
+        let engine = dynamo_llm::engines::make_engine_core();
+
+        // Build pipeline for completions
+        let pipeline =
+            build_pipeline::<CompletionRequest, CompletionResponse>(&card, engine).await?;
+
+        // Verify pipeline was created
+        assert!(Arc::strong_count(&pipeline) >= 1);
+
+        Ok(())
     }
 }

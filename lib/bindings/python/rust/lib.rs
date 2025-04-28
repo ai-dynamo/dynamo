@@ -164,6 +164,14 @@ impl PyLease {
     fn revoke(&self) {
         self.inner.revoke();
     }
+
+    fn is_valid<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let lease = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let is_valid = lease.is_valid().await.map_err(to_pyerr)?;
+            Ok(is_valid)
+        })
+    }
 }
 
 #[pymethods]
@@ -528,6 +536,14 @@ impl EtcdClient {
             })?;
 
             Ok(py_list)
+        })
+    }
+
+    fn revoke_lease<'p>(&self, py: Python<'p>, lease_id: i64) -> PyResult<Bound<'p, PyAny>> {
+        let client = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            client.revoke_lease(lease_id).await.map_err(to_pyerr)?;
+            Ok(())
         })
     }
 }

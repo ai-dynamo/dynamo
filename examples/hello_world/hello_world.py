@@ -19,9 +19,9 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sdk import DYNAMO_IMAGE, depends, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
-from dynamo.sdk.lib.logging import configure_server_logging
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +119,7 @@ class Frontend:
 
     def __init__(self) -> None:
         # Configure logging
-        configure_server_logging(service_name="Frontend")
+        configure_dynamo_logging(service_name="Frontend")
 
         logger.info("Starting frontend")
         config = ServiceConfig.get_instance()

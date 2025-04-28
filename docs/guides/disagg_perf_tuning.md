@@ -95,4 +95,4 @@ At high load where KV cache capacity is the bottleneck, disaggregation has the f
 * Decrease the total amount of KV cache:
   * Some GPUs are configured as prefill engines whose KV cache is not used in the decode phase.
 
-Since Dynamo current allocates the KV blocks immediately when the decode engine get the requests, it is advisable to use as few decode engines as possible (even no prefill engine) to maximize the KV cache utilization. To prevent queueing at prefill engines, users can set a large `max-local-prefill-length` and piggyback more prefill requests at decode engines.
+Since Dynamo currently allocates the KV blocks immediately when the decode engine get the requests, it is advisable to use as few prefill engines as possible (even no prefill engine) to maximize the available KV cache in decode engines. To prevent queueing at prefill engines, users can set a large `max-local-prefill-length` and piggyback more prefill requests at decode engines.

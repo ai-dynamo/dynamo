@@ -81,6 +81,15 @@ class Backend:
         for token in text.split():
             yield f"Backend: {token}"
 
+    @dynamo_endpoint()
+    async def generate_v2(self, req: RequestType):
+        """Generate tokens."""
+        req_text = req.text
+        print(f"Backend received: {req_text}")
+        text = f"{req_text}-back"
+        for token in text.split():
+            yield f"Backend generate_v2: {token}"
+
 
 @service(
     resources={"cpu": "2"},
@@ -127,6 +136,9 @@ class Middle:
 
         if self.backend:
             async for back_resp in self.backend.generate(txt.model_dump_json()):
+                print(f"Frontend received back_resp: {back_resp}")
+                yield f"Frontend: {back_resp}"
+            async for back_resp in self.backend.generate_v2(txt.model_dump_json()):
                 print(f"Frontend received back_resp: {back_resp}")
                 yield f"Frontend: {back_resp}"
         else:
