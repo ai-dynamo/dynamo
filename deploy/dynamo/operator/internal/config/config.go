@@ -31,21 +31,17 @@ func GetDynamoImageBuilderNamespace(ctx context.Context) (namespace string, err 
 type DockerRegistryConfig struct {
 	DynamoComponentsRepositoryName string `yaml:"dynamo_components_repository_name"`
 	Server                         string `yaml:"server"`
-	InClusterServer                string `yaml:"in_cluster_server"`
-	Username                       string `yaml:"username"`
-	Password                       string `yaml:"password"`
+	SecretName                     string `yaml:"secret_name"`
 	Secure                         bool   `yaml:"secure"`
 }
 
-func GetDockerRegistryConfig() (conf *DockerRegistryConfig, err error) {
+func GetDockerRegistryConfig() *DockerRegistryConfig {
 	return &DockerRegistryConfig{
 		DynamoComponentsRepositoryName: os.Getenv(consts.EnvDockerRegistryDynamoComponentsRepositoryName),
 		Server:                         os.Getenv(consts.EnvDockerRegistryServer),
-		InClusterServer:                os.Getenv(consts.EnvDockerRegistryInClusterServer),
-		Username:                       os.Getenv(consts.EnvDockerRegistryUsername),
-		Password:                       os.Getenv(consts.EnvDockerRegistryPassword),
+		SecretName:                     os.Getenv(consts.EnvDockerRegistrySecret),
 		Secure:                         os.Getenv(consts.EnvDockerRegistrySecure) == "true",
-	}, nil
+	}
 }
 
 type ApiStoreConfig struct {

@@ -26,11 +26,8 @@ const (
 
 	EnvDynamoServicePort = "PORT"
 
-	EnvDockerRegistryServer          = "DOCKER_REGISTRY_SERVER"
-	EnvDockerRegistryInClusterServer = "DOCKER_REGISTRY_IN_CLUSTER_SERVER"
-	EnvDockerRegistryUsername        = "DOCKER_REGISTRY_USERNAME"
-	// nolint:gosec
-	EnvDockerRegistryPassword                       = "DOCKER_REGISTRY_PASSWORD"
+	EnvDockerRegistryServer                         = "DOCKER_REGISTRY_SERVER"
+	EnvDockerRegistrySecret                         = "DOCKER_REGISTRY_SECRET"
 	EnvDockerRegistrySecure                         = "DOCKER_REGISTRY_SECURE"
 	EnvDockerRegistryDynamoComponentsRepositoryName = "DOCKER_REGISTRY_DYNAMO_COMPONENTS_REPOSITORY_NAME"
 
@@ -62,9 +59,6 @@ const (
 	KubeAnnotationDynamoDockerRegistryInsecure = "nvidia.com/docker-registry-insecure"
 
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
-
-	// nolint: gosec
-	KubeSecretNameRegcred = "dynamo-regcred"
 
 	KubeAnnotationDynamoComponentHash            = "nvidia.com/dynamo-request-hash"
 	KubeAnnotationDynamoComponentImageBuiderHash = "nvidia.com/dynamo-request-image-builder-hash"

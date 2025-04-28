@@ -39,6 +39,7 @@ import (
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemas"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/config"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
 	commonController "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
@@ -1328,7 +1329,17 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		Volumes:    volumes,
 	}
 
-	podSpec.ImagePullSecrets = opt.dynamoComponent.Spec.ImagePullSecrets
+	podSpec.ImagePullSecrets = []corev1.LocalObjectReference{
+		{
+			Name: config.GetDockerRegistryConfig().SecretName,
+		},
+	}
+	if opt.dynamoComponent.Spec.DockerConfigJSONSecretName != "" {
+		podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, corev1.LocalObjectReference{
+			Name: opt.dynamoComponent.Spec.DockerConfigJSONSecretName,
+		})
+	}
+	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, opt.dynamoComponent.Spec.ImagePullSecrets...)
 
 	extraPodMetadata := opt.dynamoComponentDeployment.Spec.ExtraPodMetadata
 

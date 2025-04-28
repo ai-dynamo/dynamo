@@ -260,7 +260,7 @@ func (r *DynamoComponentReconciler) ensureImageExists(ctx context.Context, opt e
 			return
 		}
 		r.Recorder.Eventf(DynamoComponent, corev1.EventTypeNormal, "CheckingImage", "Checking image exists: %s", imageInfo.ImageName)
-		imageExists, err = checkImageExists(DynamoComponent, imageInfo.DockerRegistry, imageInfo.InClusterImageName)
+		imageExists, err = checkImageExists(DynamoComponent, imageInfo.DockerRegistry, imageInfo.ImageName)
 		if err != nil {
 			err = errors.Wrapf(err, "check image %s exists", imageInfo.ImageName)
 			return
@@ -565,84 +565,6 @@ func getDynamoComponentImageBuildEngine() DynamoComponentImageBuildEngine {
 }
 
 //nolint:nakedret
-func (r *DynamoComponentReconciler) makeSureDockerConfigJSONSecret(ctx context.Context, namespace string, dockerRegistryConf *commonconfig.DockerRegistryConfig) (dockerConfigJSONSecret *corev1.Secret, err error) {
-	if dockerRegistryConf.Username == "" {
-		return
-	}
-
-	// nolint: gosec
-	dockerConfigSecretName := commonconsts.KubeSecretNameRegcred
-	dockerConfigObj := struct {
-		Auths map[string]struct {
-			Auth string `json:"auth"`
-		} `json:"auths"`
-	}{
-		Auths: map[string]struct {
-			Auth string `json:"auth"`
-		}{
-			dockerRegistryConf.Server: {
-				Auth: base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", dockerRegistryConf.Username, dockerRegistryConf.Password))),
-			},
-		},
-	}
-
-	dockerConfigContent, err := json.Marshal(dockerConfigObj)
-	if err != nil {
-		err = errors.Wrap(err, "marshal docker config")
-		return nil, err
-	}
-
-	dockerConfigJSONSecret = &corev1.Secret{}
-
-	err = r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: dockerConfigSecretName}, dockerConfigJSONSecret)
-	dockerConfigIsNotFound := k8serrors.IsNotFound(err)
-	// nolint: gocritic
-	if err != nil && !dockerConfigIsNotFound {
-		err = errors.Wrap(err, "get docker config secret")
-		return nil, err
-	}
-	err = nil
-	if dockerConfigIsNotFound {
-		dockerConfigJSONSecret = &corev1.Secret{
-			Type: corev1.SecretTypeDockerConfigJson,
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      dockerConfigSecretName,
-				Namespace: namespace,
-			},
-			Data: map[string][]byte{
-				".dockerconfigjson": dockerConfigContent,
-			},
-		}
-		err_ := r.Create(ctx, dockerConfigJSONSecret)
-		if err_ != nil {
-			dockerConfigJSONSecret = &corev1.Secret{}
-			err = r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: dockerConfigSecretName}, dockerConfigJSONSecret)
-			dockerConfigIsNotFound = k8serrors.IsNotFound(err)
-			if err != nil && !dockerConfigIsNotFound {
-				err = errors.Wrap(err, "get docker config secret")
-				return nil, err
-			}
-			if dockerConfigIsNotFound {
-				err_ = errors.Wrap(err_, "create docker config secret")
-				return nil, err_
-			}
-			if err != nil {
-				err = nil
-			}
-		}
-	} else {
-		dockerConfigJSONSecret.Data[".dockerconfigjson"] = dockerConfigContent
-		err = r.Update(ctx, dockerConfigJSONSecret)
-		if err != nil {
-			err = errors.Wrap(err, "update docker config secret")
-			return nil, err
-		}
-	}
-
-	return
-}
-
-//nolint:nakedret
 func (r *DynamoComponentReconciler) getApiStoreClient(ctx context.Context) (*apiStoreClient.ApiStoreClient, *commonconfig.ApiStoreConfig, error) {
 	apiStoreConf, err := commonconfig.GetApiStoreConfig(ctx)
 	isNotFound := k8serrors.IsNotFound(err)
@@ -668,84 +590,69 @@ func (r *DynamoComponentReconciler) getApiStoreClient(ctx context.Context) (*api
 	return apiStoreClient, apiStoreConf, nil
 }
 
-//nolint:nakedret
-func (r *DynamoComponentReconciler) getDockerRegistry(ctx context.Context, DynamoComponent *nvidiacomv1alpha1.DynamoComponent) (dockerRegistry schemas.DockerRegistrySchema, err error) {
-	if DynamoComponent != nil && DynamoComponent.Spec.DockerConfigJSONSecretName != "" {
-		secret := &corev1.Secret{}
-		err = r.Get(ctx, types.NamespacedName{
-			Namespace: DynamoComponent.Namespace,
-			Name:      DynamoComponent.Spec.DockerConfigJSONSecretName,
-		}, secret)
-		if err != nil {
-			err = errors.Wrapf(err, "get docker config json secret %s", DynamoComponent.Spec.DockerConfigJSONSecretName)
-			return
-		}
-		configJSON, ok := secret.Data[".dockerconfigjson"]
-		if !ok {
-			err = errors.Errorf("docker config json secret %s does not have .dockerconfigjson key", DynamoComponent.Spec.DockerConfigJSONSecretName)
-			return
-		}
-		var configObj struct {
-			Auths map[string]struct {
-				Auth string `json:"auth"`
-			} `json:"auths"`
-		}
-		err = json.Unmarshal(configJSON, &configObj)
-		if err != nil {
-			err = errors.Wrapf(err, "unmarshal docker config json secret %s", DynamoComponent.Spec.DockerConfigJSONSecretName)
-			return
-		}
-		imageRegistryURI, _, _ := xstrings.Partition(DynamoComponent.Spec.Image, "/")
-		var server string
-		var auth string
-		if imageRegistryURI != "" {
-			for k, v := range configObj.Auths {
-				if k == imageRegistryURI {
-					server = k
-					auth = v.Auth
-					break
-				}
-			}
-			if server == "" {
-				for k, v := range configObj.Auths {
-					if strings.Contains(k, imageRegistryURI) {
-						server = k
-						auth = v.Auth
-						break
-					}
-				}
-			}
-		}
-		if server == "" {
-			for k, v := range configObj.Auths {
+func (r *DynamoComponentReconciler) RetrieveDockerRegistrySecret(ctx context.Context, secretName string, namespace string, dockerRegistry *schemas.DockerRegistrySchema) error {
+	secret := &corev1.Secret{}
+	err := r.Get(ctx, types.NamespacedName{
+		Namespace: namespace,
+		Name:      secretName,
+	}, secret)
+	if err != nil {
+		err = errors.Wrapf(err, "get docker config json secret %s", secretName)
+		return err
+	}
+	configJSON, ok := secret.Data[".dockerconfigjson"]
+	if !ok {
+		err = errors.Errorf("docker config json secret %s does not have .dockerconfigjson key", secretName)
+		return err
+	}
+	var configObj struct {
+		Auths map[string]struct {
+			Auth string `json:"auth"`
+		} `json:"auths"`
+	}
+	err = json.Unmarshal(configJSON, &configObj)
+	if err != nil {
+		err = errors.Wrapf(err, "unmarshal docker config json secret %s", secretName)
+		return err
+	}
+	var server string
+	var auth string
+	if dockerRegistry.Server != "" {
+		for k, v := range configObj.Auths {
+			if k == dockerRegistry.Server {
 				server = k
 				auth = v.Auth
 				break
 			}
 		}
 		if server == "" {
-			err = errors.Errorf("no auth in docker config json secret %s", DynamoComponent.Spec.DockerConfigJSONSecretName)
-			return
+			for k, v := range configObj.Auths {
+				if strings.Contains(k, dockerRegistry.Server) {
+					server = k
+					auth = v.Auth
+					break
+				}
+			}
 		}
-		dockerRegistry.Server = server
-		var credentials []byte
-		credentials, err = base64.StdEncoding.DecodeString(auth)
-		if err != nil {
-			err = errors.Wrapf(err, "cannot base64 decode auth in docker config json secret %s", DynamoComponent.Spec.DockerConfigJSONSecretName)
-			return
-		}
-		dockerRegistry.Username, _, dockerRegistry.Password = xstrings.Partition(string(credentials), ":")
-		if DynamoComponent.Spec.OCIRegistryInsecure != nil {
-			dockerRegistry.Secure = !*DynamoComponent.Spec.OCIRegistryInsecure
-		}
-		return
 	}
-
-	dockerRegistryConfig, err := commonconfig.GetDockerRegistryConfig()
+	if server == "" {
+		err = errors.Errorf("no auth in docker config json secret %s for server %s", secretName, dockerRegistry.Server)
+		return err
+	}
+	var credentials []byte
+	credentials, err = base64.StdEncoding.DecodeString(auth)
 	if err != nil {
-		err = errors.Wrap(err, "get docker registry")
-		return
+		err = errors.Wrapf(err, "cannot base64 decode auth in docker config json secret %s", secretName)
+		return err
 	}
+	dockerRegistry.Username, _, dockerRegistry.Password = xstrings.Partition(string(credentials), ":")
+	return nil
+}
+
+//nolint:nakedret
+func (r *DynamoComponentReconciler) getDockerRegistry(ctx context.Context, DynamoComponent *nvidiacomv1alpha1.DynamoComponent) (dockerRegistry *schemas.DockerRegistrySchema, err error) {
+
+	dockerRegistryConfig := commonconfig.GetDockerRegistryConfig()
 
 	dynamoRepositoryName := "dynamo-components"
 	if dockerRegistryConfig.DynamoComponentsRepositoryName != "" {
@@ -755,20 +662,22 @@ func (r *DynamoComponentReconciler) getDockerRegistry(ctx context.Context, Dynam
 	if strings.Contains(dockerRegistryConfig.Server, "docker.io") {
 		dynamoRepositoryURI = fmt.Sprintf("docker.io/%s", dynamoRepositoryName)
 	}
-	dynamoRepositoryInClusterURI := dynamoRepositoryURI
-	if dockerRegistryConfig.InClusterServer != "" {
-		dynamoRepositoryInClusterURI = fmt.Sprintf("%s/%s", strings.TrimRight(dockerRegistryConfig.InClusterServer, "/"), dynamoRepositoryName)
-		if strings.Contains(dockerRegistryConfig.InClusterServer, "docker.io") {
-			dynamoRepositoryInClusterURI = fmt.Sprintf("docker.io/%s", dynamoRepositoryName)
-		}
+
+	if DynamoComponent != nil && DynamoComponent.Spec.DockerConfigJSONSecretName != "" {
+		dockerRegistryConfig.SecretName = DynamoComponent.Spec.DockerConfigJSONSecretName
 	}
-	dockerRegistry = schemas.DockerRegistrySchema{
-		Server:                       dockerRegistryConfig.Server,
-		Username:                     dockerRegistryConfig.Username,
-		Password:                     dockerRegistryConfig.Password,
-		Secure:                       dockerRegistryConfig.Secure,
-		DynamoRepositoryURI:          dynamoRepositoryURI,
-		DynamoRepositoryURIInCluster: dynamoRepositoryInClusterURI,
+
+	dockerRegistry = &schemas.DockerRegistrySchema{
+		Server:              dockerRegistryConfig.Server,
+		Secure:              dockerRegistryConfig.Secure,
+		DynamoRepositoryURI: dynamoRepositoryURI,
+		SecretName:          dockerRegistryConfig.SecretName,
+	}
+
+	err = r.RetrieveDockerRegistrySecret(ctx, dockerRegistryConfig.SecretName, DynamoComponent.Namespace, dockerRegistry)
+	if err != nil {
+		err = errors.Wrap(err, "retrieve docker registry secret")
+		return
 	}
 
 	return
@@ -792,16 +701,12 @@ func getDynamoComponentImagePrefix(DynamoComponent *nvidiacomv1alpha1.DynamoComp
 	return ""
 }
 
-func getDynamoComponentImageName(DynamoComponent *nvidiacomv1alpha1.DynamoComponent, dockerRegistry schemas.DockerRegistrySchema, dynamoComponentRepositoryName, dynamoComponentVersion string, inCluster bool) string {
+func getDynamoComponentImageName(DynamoComponent *nvidiacomv1alpha1.DynamoComponent, dockerRegistry schemas.DockerRegistrySchema, dynamoComponentRepositoryName, dynamoComponentVersion string) string {
 	if DynamoComponent != nil && DynamoComponent.Spec.Image != "" {
 		return DynamoComponent.Spec.Image
 	}
 	var uri, tag string
-	if inCluster {
-		uri = dockerRegistry.DynamoRepositoryURIInCluster
-	} else {
-		uri = dockerRegistry.DynamoRepositoryURI
-	}
+	uri = dockerRegistry.DynamoRepositoryURI
 	tail := fmt.Sprintf("%s.%s", dynamoComponentRepositoryName, dynamoComponentVersion)
 	if isEstargzEnabled() {
 		tail += ".esgz"
@@ -860,7 +765,6 @@ type ImageInfo struct {
 	DockerRegistry             schemas.DockerRegistrySchema
 	DockerConfigJSONSecretName string
 	ImageName                  string
-	InClusterImageName         string
 	DockerRegistryInsecure     bool
 }
 
@@ -876,37 +780,12 @@ func (r *DynamoComponentReconciler) getImageInfo(ctx context.Context, opt GetIma
 		err = errors.Wrap(err, "get docker registry")
 		return
 	}
-	imageInfo.DockerRegistry = dockerRegistry
-	imageInfo.ImageName = getDynamoComponentImageName(opt.DynamoComponent, dockerRegistry, dynamoComponentRepositoryName, dynamoComponentVersion, false)
-	imageInfo.InClusterImageName = getDynamoComponentImageName(opt.DynamoComponent, dockerRegistry, dynamoComponentRepositoryName, dynamoComponentVersion, true)
+	imageInfo.DockerRegistry = *dockerRegistry
+	imageInfo.ImageName = getDynamoComponentImageName(opt.DynamoComponent, *dockerRegistry, dynamoComponentRepositoryName, dynamoComponentVersion)
 
-	imageInfo.DockerConfigJSONSecretName = opt.DynamoComponent.Spec.DockerConfigJSONSecretName
+	imageInfo.DockerConfigJSONSecretName = dockerRegistry.SecretName
 
 	imageInfo.DockerRegistryInsecure = opt.DynamoComponent.Annotations[commonconsts.KubeAnnotationDynamoDockerRegistryInsecure] == "true"
-	if opt.DynamoComponent.Spec.OCIRegistryInsecure != nil {
-		imageInfo.DockerRegistryInsecure = *opt.DynamoComponent.Spec.OCIRegistryInsecure
-	}
-
-	if imageInfo.DockerConfigJSONSecretName == "" {
-		var dockerRegistryConf *commonconfig.DockerRegistryConfig
-		dockerRegistryConf, err = commonconfig.GetDockerRegistryConfig()
-		if err != nil {
-			err = errors.Wrap(err, "get docker registry")
-			return
-		}
-		imageInfo.DockerRegistryInsecure = !dockerRegistryConf.Secure
-		var dockerConfigSecret *corev1.Secret
-		r.Recorder.Eventf(opt.DynamoComponent, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Making sure docker config secret %s in namespace %s", commonconsts.KubeSecretNameRegcred, opt.DynamoComponent.Namespace)
-		dockerConfigSecret, err = r.makeSureDockerConfigJSONSecret(ctx, opt.DynamoComponent.Namespace, dockerRegistryConf)
-		if err != nil {
-			err = errors.Wrap(err, "make sure docker config secret")
-			return
-		}
-		r.Recorder.Eventf(opt.DynamoComponent, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Docker config secret %s in namespace %s is ready", commonconsts.KubeSecretNameRegcred, opt.DynamoComponent.Namespace)
-		if dockerConfigSecret != nil {
-			imageInfo.DockerConfigJSONSecretName = dockerConfigSecret.Name
-		}
-	}
 	return
 }
 
@@ -1027,7 +906,7 @@ func (r *DynamoComponentReconciler) generateImageBuilderPodTemplateSpec(ctx cont
 	dynamoComponentRepositoryName, _, dynamoComponentVersion := xstrings.Partition(opt.DynamoComponent.Spec.DynamoComponent, ":")
 	kubeLabels := r.getImageBuilderPodLabels(opt.DynamoComponent)
 
-	inClusterImageName := opt.ImageInfo.InClusterImageName
+	imageName := opt.ImageInfo.ImageName
 
 	dockerConfigJSONSecretName := opt.ImageInfo.DockerConfigJSONSecretName
 
@@ -1324,7 +1203,7 @@ echo "Done"
 
 	kanikoCacheRepo := os.Getenv("KANIKO_CACHE_REPO")
 	if kanikoCacheRepo == "" {
-		kanikoCacheRepo = opt.ImageInfo.DockerRegistry.DynamoRepositoryURIInCluster
+		kanikoCacheRepo = opt.ImageInfo.DockerRegistry.DynamoRepositoryURI
 	}
 
 	kubeAnnotations := make(map[string]string)
@@ -1344,7 +1223,7 @@ echo "Done"
 		"--compression-level=-7",
 		fmt.Sprintf("--dockerfile=%s", dockerFilePath),
 		fmt.Sprintf("--insecure=%v", dockerRegistryInsecure),
-		fmt.Sprintf("--destination=%s", inClusterImageName),
+		fmt.Sprintf("--destination=%s", imageName),
 	}
 
 	kanikoSnapshotMode := os.Getenv("KANIKO_SNAPSHOT_MODE")
@@ -1374,7 +1253,7 @@ echo "Done"
 	isBuildkit := buildEngine == DynamoComponentImageBuildEngineBuildkit || buildEngine == DynamoComponentImageBuildEngineBuildkitRootless
 
 	if isBuildkit {
-		output := fmt.Sprintf("type=image,name=%s,push=true,registry.insecure=%v", inClusterImageName, dockerRegistryInsecure)
+		output := fmt.Sprintf("type=image,name=%s,push=true,registry.insecure=%v", imageName, dockerRegistryInsecure)
 		buildkitdFlags := []string{}
 		if !privileged {
 			buildkitdFlags = append(buildkitdFlags, "--oci-worker-no-process-sandbox")

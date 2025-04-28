@@ -71,10 +71,10 @@ const (
 )
 
 type DockerRegistrySchema struct {
-	DynamoRepositoryURI          string `json:"dynamoRepositoryURI"`
-	DynamoRepositoryURIInCluster string `json:"dynamoRepositoryURIInCluster"`
-	Server                       string `json:"server"`
-	Username                     string `json:"username"`
-	Password                     string `json:"password"`
-	Secure                       bool   `json:"secure"`
+	DynamoRepositoryURI string `json:"dynamoRepositoryURI"`
+	Server              string `json:"server"`
+	Username            string `json:"username"`
+	Password            string `json:"password"`
+	SecretName          string `json:"secretName"`
+	Secure              bool   `json:"secure"`
 }

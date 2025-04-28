@@ -72,9 +72,6 @@ type DynamoComponentSpec struct {
 	DockerConfigJSONSecretName string `json:"dockerConfigJsonSecretName,omitempty"`
 
 	// +kubebuilder:validation:Optional
-	OCIRegistryInsecure *bool `json:"ociRegistryInsecure,omitempty"`
-
-	// +kubebuilder:validation:Optional
 	DownloaderContainerEnvFrom []corev1.EnvFromSource `json:"downloaderContainerEnvFrom,omitempty"`
 }
 

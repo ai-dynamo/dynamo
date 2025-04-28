@@ -1416,8 +1416,6 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
-              ociRegistryInsecure:
-                type: boolean
               serviceName:
                 type: string
             required:

@@ -433,11 +433,6 @@ func (in *DynamoComponentSpec) DeepCopyInto(out *DynamoComponentSpec) {
 		*out = make([]v1.LocalObjectReference, len(*in))
 		copy(*out, *in)
 	}
-	if in.OCIRegistryInsecure != nil {
-		in, out := &in.OCIRegistryInsecure, &out.OCIRegistryInsecure
-		*out = new(bool)
-		**out = **in
-	}
 	if in.DownloaderContainerEnvFrom != nil {
 		in, out := &in.DownloaderContainerEnvFrom, &out.DownloaderContainerEnvFrom
 		*out = make([]v1.EnvFromSource, len(*in))
