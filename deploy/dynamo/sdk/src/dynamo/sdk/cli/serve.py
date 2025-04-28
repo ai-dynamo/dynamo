@@ -91,9 +91,8 @@ def serve(
     Starts a local server for the specified Dynamo pipeline.
     """
 
-    # Warning: internal
+    from dynamo.runtime.logging import configure_dynamo_logging
     from dynamo.sdk.lib.loader import find_and_load_service
-    from dynamo.sdk.lib.logging import configure_dynamo_logging
     from dynamo.sdk.lib.service import LinkedServices
 
     # Extract extra arguments not captured by typer

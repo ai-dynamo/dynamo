@@ -35,7 +35,7 @@ from bentoml.exceptions import BentoMLException, CLIException, CloudRESTApiClien
 from rich.console import Console
 from simple_di import Provide, inject
 
-from dynamo.sdk.lib.logging import configure_dynamo_logging
+from dynamo.runtime.logging import configure_dynamo_logging
 
 from .utils import resolve_service_config
 

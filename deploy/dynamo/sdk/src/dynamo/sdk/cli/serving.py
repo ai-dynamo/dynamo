@@ -131,9 +131,9 @@ def serve_dynamo_graph(
     service_name: str = "",
     enable_local_planner: bool = False,
 ) -> CircusRunner:
+    from dynamo.runtime.logging import configure_dynamo_logging
     from dynamo.sdk.cli.circus import create_arbiter, create_circus_watcher
     from dynamo.sdk.lib.loader import find_and_load_service
-    from dynamo.sdk.lib.logging import configure_dynamo_logging
 
     from .allocator import ResourceAllocator
 
