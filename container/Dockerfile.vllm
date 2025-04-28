@@ -2,15 +2,34 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+ARG BASE_IMAGE_TAG="25.03-cuda12.8-devel-ubuntu24.04"
 ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
-ARG MANYLINUX_IMAGE="quay.io/pypa/manylinux_2_28_x86_64"
 # TODO: Move to published pypi tags
 ARG GENAI_PERF_TAG="e67e853413a07a778dd78a55e299be7fba9c9c24"
 
+# Define general architecture ARGs for supporting both x86 and aarch64 builds.
+#   ARCH: Used for package suffixes (e.g., amd64, arm64)
+#   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
+#
+# Default values are for x86/amd64:
+#   --build-arg ARCH=amd64 --build-arg ARCH_ALT=x86_64
+#
+# For arm64/aarch64, build with:
+#   --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64
+#
+# NOTE: There isn't an easy way to define one of these values based on the other value
+# without adding if statements everywhere, so just define both as ARGs for now.
+ARG ARCH=amd64
+ARG ARCH_ALT=x86_64
+
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS nixl_base
+
+# Redeclare ARCH and ARCH_ALT so they're available in this stage
+ARG ARCH
+ARG ARCH_ALT
+
 WORKDIR /opt/nixl
 # Add a cache hint that only changes when the nixl commit changes
 ARG NIXL_COMMIT
@@ -25,146 +44,41 @@ COPY --from=nixl . .
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
+# Redeclare ARCH and ARCH_ALT so they're available in this stage
+ARG ARCH
+ARG ARCH_ALT
+
 USER root
+ARG PYTHON_VERSION=3.12
+
+RUN apt-get update -y && \
+    apt-get install -y \
+    # NIXL build dependencies
+    cmake \
+    meson \
+    ninja-build \
+    pybind11-dev \
+    # Rust build dependencies
+    libclang-dev \
+    # Install utilities
+    nvtop \
+    tmux \
+    vim
+
+WORKDIR /workspace
 
 ### NIXL SETUP ###
-
-ARG MOFED_VERSION=24.10-1.1.4.0
-ARG PYTHON_VERSION=3.12
-ARG NSYS_URL=https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_1/
-ARG NSYS_PKG=NsightSystems-linux-cli-public-2025.1.1.131-3554042.deb
-
-RUN apt-get update -y && apt-get -y install curl \
-    git \
-    libnuma-dev \
-    numactl \
-    wget \
-    autotools-dev \
-    automake \
-    libtool \
-    libz-dev \
-    libiberty-dev \
-    flex \
-    build-essential \
-    cmake \
-    libibverbs-dev \
-    libgoogle-glog-dev \
-    libgtest-dev \
-    libjsoncpp-dev \
-    libpython3-dev \
-    libboost-all-dev \
-    libssl-dev \
-    libgrpc-dev \
-    libgrpc++-dev \
-    libprotobuf-dev \
-    libclang-dev \
-    protobuf-compiler-grpc \
-    pybind11-dev \
-    python3-full \
-    python3-pip \
-    python3-numpy \
-    etcd-server \
-    net-tools \
-    pciutils \
-    libpci-dev \
-    vim \
-    tmux \
-    screen \
-    ibverbs-utils \
-    libibmad-dev
-
-RUN apt-get install -y linux-tools-common linux-tools-generic ethtool iproute2
-RUN apt-get install -y dkms linux-headers-generic
-RUN apt-get install -y meson ninja-build uuid-dev gdb
-
-RUN apt install -y libglib2.0-0
-RUN wget ${NSYS_URL}${NSYS_PKG} &&\
-    apt install -y ./${NSYS_PKG} &&\
-    rm ${NSYS_PKG}
-
-RUN cd /usr/local/src && \
-    curl -fSsL "https://content.mellanox.com/ofed/MLNX_OFED-${MOFED_VERSION}/MLNX_OFED_LINUX-${MOFED_VERSION}-ubuntu24.04-x86_64.tgz" -o mofed.tgz && \
-    tar -xf /usr/local/src/mofed.tgz && \
-    cd MLNX_OFED_LINUX-* && \
-    apt-get update && apt-get install -y --no-install-recommends \
-    ./DEBS/libibverbs* ./DEBS/ibverbs-providers* ./DEBS/librdmacm* ./DEBS/libibumad* && \
-    rm -rf /var/lib/apt/lists/* /usr/local/src/* mofed.tgz
-
-ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/cuda/lib64 \
-    LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
-
-ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/lib \
-    LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-
-WORKDIR /workspace
-RUN git clone https://github.com/NVIDIA/gdrcopy.git
-RUN PREFIX=/usr/local DESTLIB=/usr/local/lib make -C /workspace/gdrcopy lib_install
-RUN cp gdrcopy/src/libgdrapi.so.2.* /usr/lib/x86_64-linux-gnu/
-RUN ldconfig
-
-ARG UCX_VERSION=v1.18.0
-
-RUN cd /usr/local/src && \
-    curl -fSsL "https://github.com/openucx/ucx/tarball/${UCX_VERSION}" | tar xz && \
-    cd openucx-ucx* && \
-    ./autogen.sh && ./configure     \
-    --enable-shared             \
-    --disable-static            \
-    --disable-doxygen-doc       \
-    --enable-optimizations      \
-    --enable-cma                \
-    --enable-devel-headers      \
-    --with-cuda=/usr/local/cuda \
-    --with-verbs                \
-    --with-dm                   \
-    --with-gdrcopy=/usr/local   \
-    --enable-mt                 \
-    --with-mlx5-dv &&           \
-    make -j &&                      \
-    make -j install-strip &&        \
-    ldconfig
-
-ENV LD_LIBRARY_PATH=/usr/lib:$LD_LIBRARY_PATH
-ENV CPATH=/usr/include:$CPATH
-ENV PATH=/usr/bin:$PATH
-ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
-SHELL ["/bin/bash", "-c"]
-
-WORKDIR /workspace
-
-ENV LD_LIBRARY_PATH=/usr/local/ompi/lib:$LD_LIBRARY_PATH
-ENV CPATH=/usr/local/ompi/include:$CPATH
-ENV PATH=/usr/local/ompi/bin:$PATH
-ENV PKG_CONFIG_PATH=/usr/local/ompi/lib/pkgconfig:$PKG_CONFIG_PATH
-
 # Copy nixl source, and use commit hash as cache hint
 COPY --from=nixl_base /opt/nixl /opt/nixl
 COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
-RUN cd /opt/nixl && \
-    mkdir build && \
-    meson setup build/ --prefix=/usr/local/nixl && \
-    cd build/ && \
-    ninja && \
-    ninja install
 
-ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
-ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/:$PYTHONPATH
-ENV UCX_TLS=^cuda_ipc
-ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/x86_64-linux-gnu/plugins
-
-RUN ls -l /usr/local/nixl/
-RUN ls -l /usr/local/nixl/include/
-
-RUN ls /opt/nixl
-
-# Install utilities
-RUN apt update -y && apt install -y git wget curl nvtop tmux vim
+### NATS & ETCD SETUP ###
 # nats
-RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-amd64.deb && \
-    dpkg -i nats-server-v2.10.24-amd64.deb && rm nats-server-v2.10.24-amd64.deb
+RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-${ARCH}.deb && \
+    dpkg -i nats-server-v2.10.24-${ARCH}.deb && rm nats-server-v2.10.24-${ARCH}.deb
 # etcd
 ENV ETCD_VERSION="v3.5.18"
-RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-amd64.tar.gz -O /tmp/etcd.tar.gz && \
+RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
     mkdir -p /usr/local/bin/etcd && \
     tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
     rm /tmp/etcd.tar.gz
@@ -182,31 +96,66 @@ RUN mkdir /opt/dynamo && \
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
+# Install NIXL Python module
+# TODO: Move gds_path selection based on arch into NIXL build
+RUN if [ "$ARCH" = "arm64" ]; then \
+        cd /opt/nixl && uv pip install . --config-settings=setup-args="-Dgds_path=/usr/local/cuda/targets/sbsa-linux/"; \
+    else \
+        cd /opt/nixl && uv pip install . ; \
+    fi
+
 # Install patched vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
 ARG VLLM_REF="0.8.4"
 ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
 ARG VLLM_PATCHED_PACKAGE_NAME="ai_dynamo_vllm"
 ARG VLLM_PATCHED_PACKAGE_VERSION="0.8.4"
+ARG VLLM_MAX_JOBS=4
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
+    --mount=type=cache,target=/root/.cache/uv \
     mkdir /tmp/vllm && \
     uv pip install pip wheel && \
-    python -m pip download --only-binary=:all: --no-deps --dest /tmp/vllm vllm==v${VLLM_REF} && \
-    cd /tmp/vllm && \
-    wheel unpack *.whl && \
-    cd vllm-${VLLM_REF}/ && \
-    patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
-    # Rename the package from vllm to ai_dynamo_vllm
-    mv vllm-${VLLM_REF}.dist-info ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info && \
-    sed -i "s/^Name: vllm/Name: ${VLLM_PATCHED_PACKAGE_NAME}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/METADATA && \
-    sed -i "s/^Version: ${VLLM_REF}/Version: ${VLLM_PATCHED_PACKAGE_VERSION}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/METADATA && \
-    # Update wheel tag from linux_x86_64 to manylinux1_x86_64 in WHEEL file
-    sed -i 's/Tag: cp38-abi3-linux_x86_64/Tag: cp38-abi3-manylinux1_x86_64/g' ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/WHEEL && \
-    # Also update the tag in RECORD file to match
-    sed -i "s/-cp38-abi3-linux_x86_64.whl/-cp38-abi3-manylinux1_x86_64.whl/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/RECORD && \
-    mkdir -p /workspace/dist && \
-    wheel pack . --dest-dir /workspace/dist && \
-    uv pip install /workspace/dist/${VLLM_PATCHED_PACKAGE_NAME}-*.whl
+    # NOTE: vLLM build from source on ARM can take several hours, see VLLM_MAX_JOBS details.
+    if [ "$ARCH" = "arm64" ]; then \
+        # PyTorch 2.7 supports CUDA 12.8 and aarch64 installs
+        uv pip install torch==2.7.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 && \
+        # Download vLLM source with version matching patch
+        git clone --branch v${VLLM_REF} --depth 1 https://github.com/vllm-project/vllm.git /tmp/vllm/vllm-${VLLM_REF} && \
+        cd /tmp/vllm/vllm-${VLLM_REF}/ && \
+        # Patch vLLM source with dynamo additions
+        patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
+        # WAR: Set package version check to 'vllm' instead of 'ai_dynamo_vllm' to avoid
+        # platform detection issues on ARM install.
+        # TODO: Rename package from vllm to ai_dynamo_vllm like x86 path below to remove this WAR.
+        sed -i 's/version("ai_dynamo_vllm")/version("vllm")/g' vllm/platforms/__init__.py && \
+        # Remove pytorch from vllm install dependencies
+        python use_existing_torch.py && \
+        # Build/install vllm from source
+        uv pip install -r requirements/build.txt && \
+        # MAX_JOBS set to avoid running OOM on vllm-flash-attn build, this can
+        # significantly impact the overall build time. Each job can take up
+        # to -16GB RAM each, so tune according to available system memory.
+        MAX_JOBS=${VLLM_MAX_JOBS} uv pip install . --no-build-isolation ; \
+    # Handle x86_64: Download wheel, unpack, setup for later steps
+    else \
+        python -m pip download --only-binary=:all: --no-deps --dest /tmp/vllm vllm==v${VLLM_REF} && \
+        # Patch vLLM pre-built download with dynamo additions
+        cd /tmp/vllm && \
+        wheel unpack *.whl && \
+        cd vllm-${VLLM_REF}/ && \
+        patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
+        # Rename the package from vllm to ai_dynamo_vllm
+        mv vllm-${VLLM_REF}.dist-info ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info && \
+        sed -i "s/^Name: vllm/Name: ${VLLM_PATCHED_PACKAGE_NAME}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/METADATA && \
+        sed -i "s/^Version: ${VLLM_REF}/Version: ${VLLM_PATCHED_PACKAGE_VERSION}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/METADATA && \
+        # Update wheel tag from linux_${ARCH_ALT} to manylinux1_${ARCH_ALT} in WHEEL file
+        sed -i 's/Tag: cp38-abi3-linux_${ARCH_ALT}/Tag: cp38-abi3-manylinux1_${ARCH_ALT}/g' ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/WHEEL && \
+        # Also update the tag in RECORD file to match
+        sed -i "s/-cp38-abi3-linux_${ARCH_ALT}.whl/-cp38-abi3-manylinux1_${ARCH_ALT}.whl/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/RECORD && \
+        mkdir -p /workspace/dist && \
+        wheel pack . --dest-dir /workspace/dist && \
+        uv pip install /workspace/dist/${VLLM_PATCHED_PACKAGE_NAME}-*.whl ; \
+    fi
 
 # Common dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
@@ -240,11 +189,14 @@ RUN apt update -y && \
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.86.0 \
-    RUSTARCH=x86_64-unknown-linux-gnu
+    RUST_VERSION=1.86.0
 
+# Define Rust target based on ARCH_ALT ARG
+ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
+
+# Install Rust using RUSTARCH derived from ARCH_ALT
 RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
-    echo "a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f *rustup-init" | sha256sum -c - && \
+    # TODO: Add SHA check back based on RUSTARCH
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
     rm rustup-init && \
@@ -305,8 +257,10 @@ ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 ##### Wheel Build Image ##########
 ##################################
 
-# Build the wheel in the manylinux environment
-FROM ${MANYLINUX_IMAGE} AS wheel_builder
+# Redeclare ARCH_ALT ARG so it's available for interpolation in the FROM instruction
+ARG ARCH_ALT
+
+FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
 
 ARG CARGO_BUILD_JOBS
 # Set CARGO_BUILD_JOBS to 16 if not provided
@@ -321,8 +275,6 @@ WORKDIR /workspace
 RUN yum update -y \
     && yum install -y python3.12-devel \
     && yum install -y protobuf-compiler \
-    || yum install -y https://raw.repo.almalinux.org/almalinux/8.10/AppStream/x86_64/os/Packages/protobuf-3.5.0-15.el8.x86_64.rpm \
-    https://raw.repo.almalinux.org/almalinux/8.10/AppStream/x86_64/os/Packages/protobuf-compiler-3.5.0-15.el8.x86_64.rpm \
     && yum clean all \
     && rm -rf /var/cache/yum
 
@@ -467,11 +419,6 @@ WORKDIR /workspace
 ENV DYNAMO_HOME=/workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
-
-# Copy NIXL
-COPY --from=base /usr/local/nixl /usr/local/nixl
-ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
-ENV PYTHONPATH=/usr/local/nixl/lib/python3/dist-packages/:/opt/nixl/test/python/:$PYTHONPATH
 
 # Setup the python environment
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/

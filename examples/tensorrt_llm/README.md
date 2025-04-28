@@ -66,7 +66,11 @@ If you already have a TensorRT-LLM container image, you can skip this step.
 #### Step 2: Build the Dynamo container
 
 ```
+# On an x86 machine:
 ./container/build.sh --framework tensorrtllm
+
+# On an ARM machine:
+./container/build.sh --framework tensorrtllm --platform linux/arm64
 ```
 
 This build script internally points to the base container image built with step 1. If you skipped previous step because you already have the container image available, you can run the build script with that image as a base.

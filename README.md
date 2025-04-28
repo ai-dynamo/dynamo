@@ -65,6 +65,10 @@ docker login <your-registry>
 docker push <your-registry>/dynamo-base:latest-vllm
 ```
 
+Notes about builds for specific frameworks:
+- For specific details on the `--framework vllm` build, see [here](examples/llm/README.md).
+- For specific details on the `--framework tensorrtllm` build, see [here](examples/tensorrt_llm/README.md).
+
 After building, you can use this image by setting the `DYNAMO_IMAGE` environment variable to point to your built image:
 ```bash
 export DYNAMO_IMAGE=<your-registry>/dynamo-base:latest-vllm
