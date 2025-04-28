@@ -146,7 +146,7 @@ def main(
     from bentoml._internal.container import BentoMLContainer
     from bentoml._internal.context import server_context
 
-    from dynamo.sdk.lib.logging import configure_server_logging
+    from dynamo.runtime.logging import configure_dynamo_logging
 
     # Setup signal handlers for graceful shutdown
     setup_signal_handlers()
@@ -172,7 +172,7 @@ def main(
     if service_name and service_name != service.name:
         service = service.find_dependent_by_name(service_name)
 
-    configure_server_logging(service_name=service_name, worker_id=worker_id)
+    configure_dynamo_logging(service_name=service_name, worker_id=worker_id)
     if runner_map:
         BentoMLContainer.remote_runner_mapping.set(
             t.cast(t.Dict[str, str], json.loads(runner_map))
