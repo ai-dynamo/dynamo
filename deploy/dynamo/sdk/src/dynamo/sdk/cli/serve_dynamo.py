@@ -288,6 +288,9 @@ def main(
                 # Wait for all tasks to complete
                 await asyncio.gather(*tasks)
 
+                if class_instance.__class__.__name__ == "PrefillWorker":
+                    await asyncio.wait_for(class_instance.task, timeout=None)
+
             except GracefulExit:
                 logger.info(f"[{run_id}] Gracefully shutting down {service.name}")
                 # Add any specific cleanup needed
