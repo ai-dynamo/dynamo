@@ -18,9 +18,8 @@ use std::{future::Future, pin::Pin};
 use std::{io::Read, sync::Arc};
 
 use dynamo_llm::{
-    backend::ExecutionContext, kv_router::publisher::KvMetricsPublisher,
+    backend::ExecutionContext, engines::StreamingEngine, kv_router::publisher::KvMetricsPublisher,
     model_card::model::ModelDeploymentCard,
-    types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
 use dynamo_runtime::{protocols::Endpoint, DistributedRuntime};
 
@@ -60,7 +59,7 @@ pub enum EngineConfig {
     /// A Full service engine does it's own tokenization and prompt formatting.
     StaticFull {
         service_name: String,
-        engine: OpenAIChatCompletionsStreamingEngine,
+        engine: Arc<dyn StreamingEngine>,
         card: Box<ModelDeploymentCard>,
     },
 

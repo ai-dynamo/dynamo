@@ -99,3 +99,78 @@ The prefill queue and NIXL-based KV transfer design in Dynamo naturally allows r
 - Add prefill worker: no explicit action needed.
 - Delete prefill worker: flush engine.
 
+### How this works under the hood
+
+#### Auto-Discovery for new workers
+
+In Dynamo, we use etcd (a distributed key-value pair store) as a way to register and discover new components. When a new decode/aggregated worker starts, it will add it's endpoint information to etcd allowing the router to discover it and route requests to it. For the KV-cache transfer process, newly added decode workers will put memory descriptors of their kv cache (used in NIXL transfer) in etcd. Newly added prefill workers also register with etcd for discovery and simply start pulling prefill requests from the global prefill queue after they spin up. Prefill workers will lazy-pull the descriptors when they start serving a remote prefill request for the first time.
+
+You can watch this happen live by running the following:
+
+```bash
+# in terminal 1 - run the disaggregated serving example
+dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
+```
+
+```bash
+# in terminal 2 - watch the namespace in etcd
+watch -cd etcdctl get --prefix <namespace>
+```
+
+You should see something like this show up as the disaggregated serving example starts up:
+
+```bash
+# worker information
+dynamo/components/PrefillWorker/mock:694d967da694ea1e
+{
+  "component": "PrefillWorker",
+  "endpoint": "mock",
+  "namespace": "dynamo",
+  "lease_id": 7587886413599009310,
+  "transport": {
+    "nats_tcp": "dynamo_prefillworker_0d6df828.mock-694d967da694ea1e"
+  }
+}
+dynamo/components/Processor/chat/completions:694d967da694ea16
+{
+  "component": "Processor",
+  "endpoint": "chat/completions",
+  "namespace": "dynamo",
+  "lease_id": 7587886413599009302,
+  "transport": {
+    "nats_tcp": "dynamo_processor_3816642d.chat/completions-694d967da694ea16"
+  }
+}
+dynamo/components/VllmWorker/generate:694d967da694ea1a
+{
+  "component": "VllmWorker",
+  "endpoint": "generate",
+  "namespace": "dynamo",
+  "lease_id": 7587886413599009306,
+  "transport": {
+    "nats_tcp": "dynamo_vllmworker_3f6fafd3.generate-694d967da694ea1a"
+  }
+}
+dynamo/components/VllmWorker/load_metrics:694d967da694ea1a
+{
+  "component": "VllmWorker",
+  "endpoint": "load_metrics",
+  "namespace": "dynamo",
+  "lease_id": 7587886413599009306,
+  "transport": {
+    "nats_tcp": "dynamo_vllmworker_3f6fafd3.load_metrics-694d967da694ea1a"
+  }
+}
+
+# nixl metadata
+dynamo/nixl_metadata/e318db87-be55-4c18-9829-8036e1e603e2
+```
+
+#### Graceful worker shutdown
+
+Since worker information is stored in etcd, we can shutdown workers by simply revoking their etcd leases. After a lease is revoked:
+
+- Decode/aggregated worker endpoints are immediately removed from etcd so that they would not accept new requests. They finish any in-flight requests, shut down their engine, and exit gracefully
+- Prefill workers stop pulling from the prefill queue and exit gracefully after all pending remote kv cache writes finish
+
+You can also visualize this by revoking a workers etcd lease while it has ongoing requests. We have an example script in the repo that does this [here](../lib/bindings/python/examples/hello_world/revoke_lease.py)
