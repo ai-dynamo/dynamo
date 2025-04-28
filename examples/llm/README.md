@@ -71,7 +71,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ### Build docker
 
-```
+```bash
 # On an x86 machine
 ./container/build.sh --framework vllm
 
@@ -87,7 +87,7 @@ docker compose -f deploy/docker-compose.yml up -d
 > You can tune the number of parallel build jobs for building VLLM from source
 > on ARM based on your available cores and system RAM with `VLLM_MAX_JOBS`.
 >
-> For example, on a machine with low resources:
+> For example, on an ARM machine with low system resources:
 > `./container/build.sh --framework vllm --platform linux/arm64 --build-arg VLLM_MAX_JOBS=2`
 >
 > For example, on a GB200 which has very high CPU cores and memory resource:
@@ -98,8 +98,9 @@ docker compose -f deploy/docker-compose.yml up -d
 ### Run container
 
 ```
-./container/run.sh -it
+./container/run.sh -it --framework vllm
 ```
+
 ## Run Deployment
 
 This figure shows an overview of the major components to deploy:
