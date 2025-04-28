@@ -191,7 +191,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 
 	// retrieve the dynamo component
 	dynamoComponentCR := &v1alpha1.DynamoComponent{}
-	err = r.Get(ctx, types.NamespacedName{Name: dynamoComponentDeployment.Spec.DynamoComponent, Namespace: dynamoComponentDeployment.Namespace}, dynamoComponentCR)
+	err = r.Get(ctx, types.NamespacedName{Name: getK8sName(dynamoComponentDeployment.Spec.DynamoComponent), Namespace: dynamoComponentDeployment.Namespace}, dynamoComponentCR)
 	if err != nil {
 		logs.Error(err, "Failed to get DynamoComponent")
 		return
@@ -316,18 +316,6 @@ func (r *DynamoComponentDeploymentReconciler) FinalizeResource(ctx context.Conte
 		}
 	}
 	return nil
-}
-
-func (r *DynamoComponentDeploymentReconciler) generateComponent(ctx context.Context, opt generateResourceOption) (*v1alpha1.DynamoComponent, bool, error) {
-	return &v1alpha1.DynamoComponent{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      strings.ReplaceAll(opt.dynamoComponentDeployment.Spec.DynamoComponent, ":", "--"),
-			Namespace: opt.dynamoComponentDeployment.Namespace,
-		},
-		Spec: v1alpha1.DynamoComponentSpec{
-			DynamoComponent: opt.dynamoComponentDeployment.Spec.DynamoComponent,
-		},
-	}, false, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) computeAvailableStatusCondition(ctx context.Context, req ctrl.Request, deployment *appsv1.Deployment) error {
