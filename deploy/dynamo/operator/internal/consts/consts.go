@@ -27,7 +27,7 @@ const (
 	EnvDynamoServicePort = "PORT"
 
 	EnvDockerRegistryServer                         = "DOCKER_REGISTRY_SERVER"
-	EnvDockerRegistrySecret                         = "DOCKER_REGISTRY_SECRET"
+	EnvDockerRegistrySecret                         = "DOCKER_REGISTRY_SECRET_NAME"
 	EnvDockerRegistrySecure                         = "DOCKER_REGISTRY_SECURE"
 	EnvDockerRegistryDynamoComponentsRepositoryName = "DOCKER_REGISTRY_DYNAMO_COMPONENTS_REPOSITORY_NAME"
 
