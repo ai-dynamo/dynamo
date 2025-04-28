@@ -15,24 +15,20 @@
 
 use std::sync::Arc;
 
+use crate::input::common;
+use crate::{EngineConfig, Flags};
 use dynamo_llm::{
-    backend::Backend,
+    engines::StreamingEngineAdapter,
     http::service::{discovery, service_v2},
     model_type::ModelType,
-    preprocessor::OpenAIPreprocessor,
     types::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
         },
-        Annotated,
+        openai::completions::{CompletionRequest, CompletionResponse},
     },
 };
-use dynamo_runtime::{
-    pipeline::{ManyOut, Operator, ServiceBackend, ServiceFrontend, SingleIn, Source},
-    DistributedRuntime, Runtime,
-};
-
-use crate::{EngineConfig, Flags};
+use dynamo_runtime::{DistributedRuntime, Runtime};
 
 /// Build and run an HTTP service
 pub async fn run(
@@ -80,35 +76,31 @@ pub async fn run(
             engine,
             ..
         } => {
-            http_service
-                .model_manager()
-                .add_chat_completions_model(&service_name, engine)?;
+            let engine = Arc::new(StreamingEngineAdapter::new(engine));
+            let manager = http_service.model_manager();
+            manager.add_completions_model(&service_name, engine.clone())?;
+            manager.add_chat_completions_model(&service_name, engine)?;
         }
         EngineConfig::StaticCore {
             service_name,
             engine: inner_engine,
             card,
         } => {
-            let frontend = ServiceFrontend::<
-                SingleIn<NvCreateChatCompletionRequest>,
-                ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-            >::new();
-            let preprocessor = OpenAIPreprocessor::new(*card.clone())
-                .await?
-                .into_operator();
-            let backend = Backend::from_mdc(*card.clone()).await?.into_operator();
-            let engine = ServiceBackend::from_engine(inner_engine);
+            let manager = http_service.model_manager();
 
-            let pipeline = frontend
-                .link(preprocessor.forward_edge())?
-                .link(backend.forward_edge())?
-                .link(engine)?
-                .link(backend.backward_edge())?
-                .link(preprocessor.backward_edge())?
-                .link(frontend)?;
-            http_service
-                .model_manager()
-                .add_chat_completions_model(&service_name, pipeline)?;
+            let chat_pipeline = common::build_pipeline::<
+                NvCreateChatCompletionRequest,
+                NvCreateChatCompletionStreamResponse,
+            >(&card, inner_engine.clone())
+            .await?;
+            manager.add_chat_completions_model(&service_name, chat_pipeline)?;
+
+            let cmpl_pipeline = common::build_pipeline::<CompletionRequest, CompletionResponse>(
+                &card,
+                inner_engine,
+            )
+            .await?;
+            manager.add_completions_model(&service_name, cmpl_pipeline)?;
         }
         EngineConfig::None => unreachable!(),
     }
