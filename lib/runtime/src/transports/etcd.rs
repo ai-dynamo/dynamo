@@ -197,15 +197,21 @@ impl Client {
     }
 
     /// Atomically create a key if it does not exist, or validate the values are identical if the key exists.
-    pub async fn kv_create_or_validate(&self, key: String, value: Vec<u8>) -> Result<()> {
-        let put_options = Some(PutOptions::new().with_lease(self.lease_id()));
+    pub async fn kv_create_or_validate(
+        &self,
+        key: String,
+        value: Vec<u8>,
+        lease_id: Option<i64>,
+    ) -> Result<()> {
+        let id = lease_id.unwrap_or(self.lease_id());
+        let put_options = PutOptions::new().with_lease(id);
 
         // Build the transaction that either creates the key if it doesn't exist,
         // or validates the existing value matches what we expect
         let txn = Txn::new()
             .when(vec![Compare::version(key.as_str(), CompareOp::Equal, 0)]) // Key doesn't exist
             .and_then(vec![
-                TxnOp::put(key.as_str(), value.clone(), put_options), // Create it
+                TxnOp::put(key.as_str(), value.clone(), Some(put_options)), // Create it
             ])
             .or_else(vec![
                 // If key exists but values don't match, this will fail the transaction
@@ -237,6 +243,22 @@ impl Client {
     }
 
     pub async fn kv_put(
+        &self,
+        key: impl AsRef<str>,
+        value: impl AsRef<[u8]>,
+        lease_id: Option<i64>,
+    ) -> Result<()> {
+        let id = lease_id.unwrap_or(self.lease_id());
+        let put_options = PutOptions::new().with_lease(id);
+        let _ = self
+            .client
+            .kv_client()
+            .put(key.as_ref(), value.as_ref(), Some(put_options))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn kv_put_with_options(
         &self,
         key: impl AsRef<str>,
         value: impl AsRef<[u8]>,
@@ -514,11 +536,13 @@ impl KvCache {
     }
 
     /// Update a value in both the cache and etcd
-    pub async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+    pub async fn put(&self, key: &str, value: Vec<u8>, lease_id: Option<i64>) -> Result<()> {
         let full_key = format!("{}{}", self.prefix, key);
 
         // Update etcd first
-        self.client.kv_put(&full_key, value.clone(), None).await?;
+        self.client
+            .kv_put(&full_key, value.clone(), lease_id)
+            .await?;
 
         // Then update local cache
         let mut cache_write = self.cache.write().await;

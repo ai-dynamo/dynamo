@@ -23,6 +23,7 @@ use dynamo_runtime::{
         SingleIn,
     },
     protocols::annotated::Annotated,
+    transports::etcd::Lease,
     Error, Result,
 };
 use futures::stream;
@@ -92,7 +93,7 @@ impl KvMetricsPublisher {
         self.tx.send(metrics)
     }
 
-    pub async fn create_endpoint(&self, component: Component) -> Result<()> {
+    pub async fn create_endpoint(&self, component: Component, lease: Option<Lease>) -> Result<()> {
         let mut metrics_rx = self.rx.clone();
         let handler = Arc::new(KvLoadEndpoingHander::new(metrics_rx.clone()));
         let handler = Ingress::for_engine(handler)?;
@@ -104,7 +105,8 @@ impl KvMetricsPublisher {
                 let metrics = metrics_rx.borrow_and_update().clone();
                 serde_json::to_value(&*metrics).unwrap()
             })
-            .handler(handler);
+            .handler(handler)
+            .lease(lease);
 
         builder.start().await
     }

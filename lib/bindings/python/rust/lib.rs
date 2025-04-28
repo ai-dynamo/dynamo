@@ -332,12 +332,18 @@ impl EtcdKvCache {
         })
     }
 
-    #[pyo3(signature = (key, value))]
-    fn put<'p>(&self, py: Python<'p>, key: String, value: Vec<u8>) -> PyResult<Bound<'p, PyAny>> {
+    #[pyo3(signature = (key, value, lease_id=None))]
+    fn put<'p>(
+        &self,
+        py: Python<'p>,
+        key: String,
+        value: Vec<u8>,
+        lease_id: Option<i64>,
+    ) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.put(&key, value).await.map_err(to_pyerr)?;
+            inner.put(&key, value, lease_id).await.map_err(to_pyerr)?;
             Ok(())
         })
     }
@@ -414,18 +420,22 @@ impl Component {
 
 #[pymethods]
 impl Endpoint {
-    #[pyo3(signature = (generator))]
+    #[pyo3(signature = (generator, lease=None))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
         generator: PyObject,
+        lease: Option<&PyLease>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
             self.event_loop.clone(),
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
-        let builder = self.inner.endpoint_builder().handler(ingress);
+        let mut builder = self.inner.endpoint_builder().handler(ingress);
+        if lease.is_some() {
+            builder = builder.lease(lease.map(|l| l.inner.clone()));
+        }
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             builder.start().await.map_err(to_pyerr)?;
             Ok(())
@@ -471,33 +481,38 @@ impl Namespace {
 
 #[pymethods]
 impl EtcdClient {
-    #[pyo3(signature = (key, value))]
+    #[pyo3(signature = (key, value, lease_id=None))]
     fn kv_create_or_validate<'p>(
         &self,
         py: Python<'p>,
         key: String,
         value: Vec<u8>,
+        lease_id: Option<i64>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             client
-                .kv_create_or_validate(key, value)
+                .kv_create_or_validate(key, value, lease_id)
                 .await
                 .map_err(to_pyerr)?;
             Ok(())
         })
     }
 
-    #[pyo3(signature = (key, value))]
+    #[pyo3(signature = (key, value, lease_id=None))]
     fn kv_put<'p>(
         &self,
         py: Python<'p>,
         key: String,
         value: Vec<u8>,
+        lease_id: Option<i64>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            client.kv_put(key, value, None).await.map_err(to_pyerr)?;
+            client
+                .kv_put(key, value, lease_id)
+                .await
+                .map_err(to_pyerr)?;
             Ok(())
         })
     }

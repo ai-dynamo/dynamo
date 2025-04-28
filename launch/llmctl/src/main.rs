@@ -285,7 +285,7 @@ async fn add_model(
         list_single_model(distributed, namespace, model_type, model_name).await?;
     } else {
         etcd_client
-            .kv_create(path, serde_json::to_vec_pretty(&model)?)
+            .kv_create(path, serde_json::to_vec_pretty(&model)?, None)
             .await?;
         println!("Added new {} model {}", model_type.as_str(), model_name,);
         list_single_model(distributed, namespace, model_type, model_name).await?;

@@ -126,6 +126,7 @@ pub async fn run(
             .kv_create(
                 network_name.clone(),
                 serde_json::to_vec_pretty(&model_registration)?,
+                None, // use primary lease
             )
             .await?;
     }

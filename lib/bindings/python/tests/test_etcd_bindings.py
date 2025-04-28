@@ -38,7 +38,7 @@ async def test_simple_put_get():
     # Write each key-value pair
     for key, value in test_keys.items():
         print(f"Writing {key} = {value!r}")
-        await etcd.kv_create_or_validate(key, value)
+        await etcd.kv_create_or_validate(key, value, None)
 
     print("Successfully wrote all keys to etcd")
 
@@ -47,7 +47,7 @@ async def test_simple_put_get():
     put_value = b"put_value"
     test_keys[put_key] = put_value
     print(f"Using kv_put to write {put_key} = {put_value!r}")
-    await etcd.kv_put(put_key, put_value)
+    await etcd.kv_put(put_key, put_value, None)
 
     # Test kv_get_prefix to read all keys
     print("\nReading all keys with prefix 'test/':")
