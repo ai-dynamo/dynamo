@@ -51,8 +51,10 @@ class DynamoClient:
             # Create async generator function that directly yields from the stream
             async def get_stream(*args, **kwargs):
                 if self._runtime is not None:
+                    # Use existing runtime if available
                     runtime = self._runtime
                 else:
+                    # Create new runtime and store it
                     loop = asyncio.get_running_loop()
                     runtime = DistributedRuntime(loop, False)
                     self._runtime = runtime
