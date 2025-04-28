@@ -237,6 +237,10 @@ class BaseTensorrtLLMEngine:
             logger.error("KV event publisher not initialized!")
             return
 
+        # A set to store the block hash of partial block (i.e. block containing less than kv_block_size tokens) hashes.
+        # It is used to prevent sending remove event to kv router since partial blocks are not stored.
+        self._partial_block_hashes = set()
+
         # Prepare threads for publishing kv cache events but don't start them yet.
         # TRTLLM needs to start generating tokens first before kv cache events
         # can be retrieved.
@@ -309,8 +313,16 @@ class BaseTensorrtLLMEngine:
                 num_block_tokens = []
                 block_hashes = []
                 for block in data["blocks"]:
-                    block_hashes.append(block["block_hash"])
-                    num_block_tokens.append(len(block["tokens"]))
+                    token_num_in_block = len(block["tokens"])
+                    block_hash = block["block_hash"]
+                    if token_num_in_block != self._kv_block_size:
+                        logger.debug(
+                            f"Early stop when block {block_hash} containing {token_num_in_block} tokens not equal to kv_block_size {self._kv_block_size}"
+                        )
+                        self._partial_block_hashes.add(block_hash)
+                        break
+                    num_block_tokens.append(token_num_in_block)
+                    block_hashes.append(block_hash)
                     for token in block["tokens"]:
                         token_ids.append(int(token["token_id"]))
 
@@ -328,8 +340,17 @@ class BaseTensorrtLLMEngine:
                 )
                 self._event_counter += 1
             elif data["type"] == "removed":
+                block_hashes = []
+                for block_hash in data["block_hashes"]:
+                    if block_hash in self._partial_block_hashes:
+                        logger.debug(
+                            f"Skipping removing block hash {block_hash} since it is a partial block"
+                        )
+                        self._partial_block_hashes.remove(block_hash)
+                        continue
+                    block_hashes.append(block_hash)
                 self._kv_event_publisher.publish_removed(
-                    self._event_counter, data["block_hashes"]
+                    self._event_counter, block_hashes
                 )
                 self._event_counter += 1
         return True
