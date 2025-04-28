@@ -21,6 +21,8 @@ Frontend:
 Processor:
   engine_args: "configs/llm_api_config.yaml"
   router: round-robin
+  ServiceArgs:
+    workers: 5 # to reduce the tokenization bottleneck at a high concurrency
 
 TensorRTLLMWorker:
   engine_args: "configs/llm_api_config.yaml"
