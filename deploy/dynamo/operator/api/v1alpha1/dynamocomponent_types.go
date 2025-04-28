@@ -125,3 +125,13 @@ func (s *DynamoComponent) SetSpec(spec any) {
 func (s *DynamoComponent) IsReady() bool {
 	return meta.IsStatusConditionTrue(s.Status.Conditions, DynamoComponentConditionTypeDynamoComponentAvailable)
 }
+
+func (s *DynamoComponent) GetImage() string {
+	if s.Spec.Image != "" {
+		return s.Spec.Image
+	}
+	if meta.FindStatusCondition(s.Status.Conditions, DynamoComponentConditionTypeImageExists) != nil {
+		return meta.FindStatusCondition(s.Status.Conditions, DynamoComponentConditionTypeImageExists).Message
+	}
+	return ""
+}

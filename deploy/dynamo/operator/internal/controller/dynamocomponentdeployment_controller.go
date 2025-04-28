@@ -1202,7 +1202,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		})
 	}
 
-	imageName := opt.dynamoComponent.Spec.Image
+	imageName := opt.dynamoComponent.GetImage()
 
 	var securityContext *corev1.SecurityContext
 	var mainContainerSecurityContext *corev1.SecurityContext
