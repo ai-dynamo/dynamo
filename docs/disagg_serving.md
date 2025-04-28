@@ -99,3 +99,37 @@ The prefill queue and NIXL-based KV transfer design in Dynamo naturally allows r
 - Add prefill worker: no explicit action needed.
 - Delete prefill worker: flush engine.
 
+### How this works under the hood
+
+In Dynamo, we use ETCD (a distributed key-value pair store) as a way to register and discover new components. When a new decode/aggregated worker starts, it will add it's endpoint information to etcd allowing the router to discover it and route requests to it. For the KV-cache transfer process, newly added decode workers will put memory descriptors of their kv cache (used in NIXL transfer) in etcd. The prefill worker will lazy-pull the descriptors when it serves the remote prefill requests for the first time from a decode worker. Newly added prefill workers simply start pulling prefill requests from the global prefill queue after they spin up.
+
+You can watch this happen live by running the following:
+
+```bash
+# in terminal 1 - run the disaggregated serving example
+dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
+```
+
+```bash
+# in terminal 2 - watch the namespace in etcd
+watch -cd etcdctl get --prefix <namespace>
+```
+
+You should see something like this show up as the disaggregated serving example starts up:
+
+```bash
+# worker information
+dynamo/components/PrefillWorker/mock:694d967da694ea1e
+{
+  "component": "PrefillWorker",
+  "endpoint": "mock",
+  "namespace": "dynamo",
+  "lease_id": 7587886413599009310,
+  "transport": {
+    "nats_tcp": "dynamo_prefillworker_0d6df828.mock-694d967da694ea1e"
+  }
+},
+
+# nixl metadata
+dynamo/nixl_metadata/e318db87-be55-4c18-9829-8036e1e603e2
+```
