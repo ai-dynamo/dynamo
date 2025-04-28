@@ -133,11 +133,11 @@ def serve_dynamo_graph(
 ) -> CircusRunner:
     from dynamo.sdk.cli.circus import create_arbiter, create_circus_watcher
     from dynamo.sdk.lib.loader import find_and_load_service
-    from dynamo.sdk.lib.logging import configure_server_logging
+    from dynamo.sdk.lib.logging import configure_dynamo_logging
 
     from .allocator import ResourceAllocator
 
-    configure_server_logging(service_name=service_name)
+    configure_dynamo_logging(service_name=service_name)
 
     bento_id: str = ""
     namespace: str = ""

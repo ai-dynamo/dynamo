@@ -32,9 +32,9 @@ from utils.prefill_queue import PrefillQueue
 from dynamo.llm import KvMetricsAggregator
 from dynamo.planner import LocalConnector
 from dynamo.runtime import DistributedRuntime, dynamo_worker
-from dynamo.sdk.lib.logging import configure_server_logging
+from dynamo.runtime.logging import configure_dynamo_logging
 
-configure_server_logging()
+configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 # will not decrease decode worker number within 3 adjustment interval after a new decode worker

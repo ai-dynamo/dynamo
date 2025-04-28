@@ -23,9 +23,9 @@ from typing import Any, Dict, List, Optional
 from circus.client import CircusClient
 from circus.exc import CallError
 
-from dynamo.sdk.lib.logging import configure_server_logging
+from dynamo.runtime.logging import configure_dynamo_logging
 
-configure_server_logging()
+configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 

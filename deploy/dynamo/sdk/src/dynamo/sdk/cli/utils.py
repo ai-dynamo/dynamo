@@ -31,9 +31,9 @@ import click
 import yaml
 from click import Command, Context
 
-from dynamo.sdk.lib.logging import configure_server_logging
+from dynamo.sdk.lib.logging import configure_dynamo_logging
 
-configure_server_logging()
+configure_dynamo_logging()
 
 logger = logging.getLogger(__name__)
 

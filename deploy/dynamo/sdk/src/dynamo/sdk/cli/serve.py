@@ -93,7 +93,7 @@ def serve(
 
     # Warning: internal
     from dynamo.sdk.lib.loader import find_and_load_service
-    from dynamo.sdk.lib.logging import configure_server_logging
+    from dynamo.sdk.lib.logging import configure_dynamo_logging
     from dynamo.sdk.lib.service import LinkedServices
 
     # Extract extra arguments not captured by typer
@@ -119,7 +119,7 @@ def serve(
         console.print(f"DYNAMO_SERVICE_CONFIG={json.dumps(service_configs)}")
         raise typer.Exit()
 
-    configure_server_logging()
+    configure_dynamo_logging()
 
     if service_configs:
         logger.info(f"Running dynamo serve with service configs {service_configs}")
