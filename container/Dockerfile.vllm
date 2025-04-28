@@ -99,9 +99,9 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # Install NIXL Python module
 # TODO: Move gds_path selection based on arch into NIXL build
 RUN if [ "$ARCH" = "arm64" ]; then \
-    cd /opt/nixl && uv pip install . --config-settings=setup-args="-Dgds_path=/usr/local/cuda/targets/sbsa-linux/"; \
+        cd /opt/nixl && uv pip install . --config-settings=setup-args="-Dgds_path=/usr/local/cuda/targets/sbsa-linux/"; \
     else \
-    cd /opt/nixl && uv pip install . ; \
+        cd /opt/nixl && uv pip install . ; \
     fi
 
 # Install patched vllm - keep this early in Dockerfile to avoid
@@ -110,16 +110,36 @@ ARG VLLM_REF="0.8.4"
 ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
 ARG VLLM_PATCHED_PACKAGE_NAME="ai_dynamo_vllm"
 ARG VLLM_PATCHED_PACKAGE_VERSION="0.8.4"
+ARG VLLM_MAX_JOBS=4
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
+    --mount=type=cache,target=/root/.cache/uv \
     mkdir /tmp/vllm && \
     uv pip install pip wheel && \
-    # TODO: Handle arm64: Build wheel from source
+    # NOTE: vLLM build from source on ARM can take several hours, see VLLM_MAX_JOBS details.
     if [ "$ARCH" = "arm64" ]; then \
+        # PyTorch 2.7 supports CUDA 12.8 and aarch64 installs
+        uv pip install torch==2.7.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 && \
+        # Download vLLM source with version matching patch
         git clone --branch v${VLLM_REF} --depth 1 https://github.com/vllm-project/vllm.git /tmp/vllm/vllm-${VLLM_REF} && \
-        echo "WARNING: VLLM installation is not supported on arm64 yet, skipping it." ; \
+        cd /tmp/vllm/vllm-${VLLM_REF}/ && \
+        # Patch vLLM source with dynamo additions
+        patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
+        # WAR: Set package version check to 'vllm' instead of 'ai_dynamo_vllm' to avoid
+        # platform detection issues on ARM install.
+        # TODO: Rename package from vllm to ai_dynamo_vllm like x86 path below to remove this WAR.
+        sed -i 's/version("ai_dynamo_vllm")/version("vllm")/g' vllm/platforms/__init__.py && \
+        # Remove pytorch from vllm install dependencies
+        python use_existing_torch.py && \
+        # Build/install vllm from source
+        uv pip install -r requirements/build.txt && \
+        # MAX_JOBS set to avoid running OOM on vllm-flash-attn build, this can
+        # significantly impact the overall build time. Each job can take up
+        # to -16GB RAM each, so tune according to available system memory.
+        MAX_JOBS=${VLLM_MAX_JOBS} uv pip install . --no-build-isolation ; \
     # Handle x86_64: Download wheel, unpack, setup for later steps
     else \
         python -m pip download --only-binary=:all: --no-deps --dest /tmp/vllm vllm==v${VLLM_REF} && \
+        # Patch vLLM pre-built download with dynamo additions
         cd /tmp/vllm && \
         wheel unpack *.whl && \
         cd vllm-${VLLM_REF}/ && \
@@ -128,10 +148,10 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
         mv vllm-${VLLM_REF}.dist-info ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info && \
         sed -i "s/^Name: vllm/Name: ${VLLM_PATCHED_PACKAGE_NAME}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/METADATA && \
         sed -i "s/^Version: ${VLLM_REF}/Version: ${VLLM_PATCHED_PACKAGE_VERSION}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/METADATA && \
-        # Update wheel tag from linux_x86_64 to manylinux1_x86_64 in WHEEL file
-        sed -i 's/Tag: cp38-abi3-linux_x86_64/Tag: cp38-abi3-manylinux1_x86_64/g' ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/WHEEL && \
+        # Update wheel tag from linux_${ARCH_ALT} to manylinux1_${ARCH_ALT} in WHEEL file
+        sed -i 's/Tag: cp38-abi3-linux_${ARCH_ALT}/Tag: cp38-abi3-manylinux1_${ARCH_ALT}/g' ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/WHEEL && \
         # Also update the tag in RECORD file to match
-        sed -i "s/-cp38-abi3-linux_x86_64.whl/-cp38-abi3-manylinux1_x86_64.whl/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/RECORD && \
+        sed -i "s/-cp38-abi3-linux_${ARCH_ALT}.whl/-cp38-abi3-manylinux1_${ARCH_ALT}.whl/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/RECORD && \
         mkdir -p /workspace/dist && \
         wheel pack . --dest-dir /workspace/dist && \
         uv pip install /workspace/dist/${VLLM_PATCHED_PACKAGE_NAME}-*.whl ; \
