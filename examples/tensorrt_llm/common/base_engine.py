@@ -147,7 +147,6 @@ class BaseTensorrtLLMEngine:
             self._kv_event_publisher = KvEventPublisher(
                 kv_listener, int(self._worker_id), self._kv_block_size
             )
-            self._event_counter = 0
             logger.info("KvEventPublisher is initialized")
 
         self._engine_config = engine_config
@@ -306,6 +305,7 @@ class BaseTensorrtLLMEngine:
 
         events = self._llm_engine.get_kv_cache_events_async(timeout=5)
         async for event in events:
+            event_id = event["event_id"]
             data = event["data"]
             if data["type"] == "stored":
                 parent_hash = data["parent_hash"]
@@ -315,7 +315,12 @@ class BaseTensorrtLLMEngine:
                 for block in data["blocks"]:
                     token_num_in_block = len(block["tokens"])
                     block_hash = block["block_hash"]
-                    if token_num_in_block != self._kv_block_size:
+                    if token_num_in_block > self._kv_block_size:
+                        logger.error(
+                            f"Block {block_hash} contains {token_num_in_block} tokens, which is greater than kv_block_size {self._kv_block_size}"
+                        )
+                        return
+                    if token_num_in_block < self._kv_block_size:
                         logger.debug(
                             f"Early stop when block {block_hash} containing {token_num_in_block} tokens not equal to kv_block_size {self._kv_block_size}"
                         )
@@ -331,14 +336,13 @@ class BaseTensorrtLLMEngine:
                 # lora_id, we need to verify if this is correct.
                 lora_id = data.get("lora_id", 0)
                 self._kv_event_publisher.publish_stored(
-                    self._event_counter,
+                    event_id,
                     token_ids,
                     num_block_tokens,
                     block_hashes,
                     lora_id,
                     parent_hash,
                 )
-                self._event_counter += 1
             elif data["type"] == "removed":
                 block_hashes = []
                 for block_hash in data["block_hashes"]:
@@ -349,10 +353,7 @@ class BaseTensorrtLLMEngine:
                         self._partial_block_hashes.remove(block_hash)
                         continue
                     block_hashes.append(block_hash)
-                self._kv_event_publisher.publish_removed(
-                    self._event_counter, block_hashes
-                )
-                self._event_counter += 1
+                self._kv_event_publisher.publish_removed(event_id, block_hashes)
         return True
 
     def _start_threads(self):
