@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use dynamo_llm::{
     backend::Backend,
+    engines::StreamingEngineAdapter,
     http::service::discovery::ModelEntry,
     key_value_store::{KeyValueStore, KeyValueStoreManager, NATSStorage},
     model_card::{BUCKET_NAME, BUCKET_TTL},
@@ -53,7 +54,10 @@ pub async fn run(
             service_name,
             engine,
             card,
-        } => (Ingress::for_engine(engine)?, service_name, card),
+        } => {
+            let engine = Arc::new(StreamingEngineAdapter::new(engine));
+            (Ingress::for_engine(engine)?, service_name, card)
+        }
         EngineConfig::StaticCore {
             service_name,
             engine: inner_engine,
