@@ -306,7 +306,7 @@ def create(
         ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD"
     ),
     envs: Optional[List[str]] = typer.Option(
-        None, "--env", help="Environment variable(s) to set (format: KEY=VALUE)"
+        None, "--env", help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo pipeline."
     ),
 ) -> None:
     """Create a deployment on Dynamo Cloud.
