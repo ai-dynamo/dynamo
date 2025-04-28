@@ -234,8 +234,8 @@ async fn chat_completions(
         if request.inner.temperature.unwrap_or(0.0) == 0.0 {
             request.inner.temperature = Some(template.temperature);
         }
-        if request.inner.max_tokens.unwrap_or(0) == 0 {
-            request.inner.max_tokens = Some(template.max_completion_tokens);
+        if request.inner.max_completion_tokens.unwrap_or(0) == 0 {
+            request.inner.max_completion_tokens = Some(template.max_completion_tokens);
         }
     }
     tracing::trace!("Received chat completions request: {:?}", request.inner);
