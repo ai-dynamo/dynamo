@@ -153,6 +153,7 @@ cp /workspace/target/release/llmctl /workspace/deploy/dynamo/sdk/src/dynamo/sdk/
 cp /workspace/target/release/dynamo-run /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
 
 uv pip install -e .
+export PYTHONPATH=$PYTHONPATH:/workspace/deploy/dynamo/sdk/src:/workspace/components/planner/src
 ```
 
 
