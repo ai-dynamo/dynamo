@@ -239,7 +239,7 @@ def main(
                 dynamo_context["component"] = component
                 dynamo_context["endpoints"] = endpoints
                 class_instance = service.inner()
-                twm = []
+                dynamo_handlers = []
                 for name, endpoint in dynamo_endpoints.items():
                     bound_method = endpoint.func.__get__(class_instance)
                     # Only pass request type for now, use Any for response
@@ -248,7 +248,7 @@ def main(
                     dynamo_wrapped_method = dynamo_endpoint(endpoint.request_type, Any)(
                         bound_method
                     )
-                    twm.append(dynamo_wrapped_method)
+                    dynamo_handlers.append(dynamo_wrapped_method)
                 # Run startup hooks before setting up endpoints
                 for name, member in vars(class_instance.__class__).items():
                     if callable(member) and getattr(
@@ -280,9 +280,13 @@ def main(
                     logger.info(
                         f"Appended lease {lease.id()}/{lease.id():x} to {watcher_name}"
                     )
-                result = await endpoints[0].serve_endpoint(twm[0], lease)
-                if class_instance.__class__.__name__ == "PrefillWorker":
-                    await asyncio.wait_for(class_instance.task, timeout=None)
+                # Launch serve_endpoint for all endpoints concurrently
+                tasks = [
+                    endpoint.serve_endpoint(handler, lease)
+                    for endpoint, handler in zip(endpoints, dynamo_handlers)
+                ]
+                # Wait for all tasks to complete
+                await asyncio.gather(*tasks)
 
             except GracefulExit:
                 logger.info(f"[{run_id}] Gracefully shutting down {service.name}")
