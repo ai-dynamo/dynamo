@@ -226,13 +226,10 @@ DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk
 
 3. **Deploy to Kubernetes**
 
-If you have a HuggingFace token, it is recommended to add it as an environment variable to your deployment to avoid getting rate limited.
-
 ```bash
 echo $DYNAMO_TAG
 export DEPLOYMENT_NAME=llm-agg
-export HF_TOKEN=<huggingface_token>
-dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml --env HF_TOKEN=$HF_TOKEN
+dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
 ```
 
 4. **Test the deployment**
