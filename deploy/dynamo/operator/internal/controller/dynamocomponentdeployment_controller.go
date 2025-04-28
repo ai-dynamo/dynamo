@@ -206,7 +206,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
 				Status:  metav1.ConditionTrue,
 				Reason:  "Reconciling",
-				Message: "DynamoComponent found",
+				Message: "DynamoComponent is ready",
 			},
 		)
 		if err != nil {
@@ -214,19 +214,19 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		}
 	} else {
 		logs.Info(fmt.Sprintf("DynamoComponent %s not ready", dynamoComponentDeployment.Spec.DynamoComponent))
-		r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeWarning, "GetDynamoComponent", err.Error())
+		r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeWarning, "GetDynamoComponent", "DynamoComponent %s is not ready", dynamoComponentDeployment.Spec.DynamoComponent)
 		_, err_ := r.setStatusConditions(ctx, req,
 			metav1.Condition{
 				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
-				Message: err.Error(),
+				Message: "DynamoComponent not ready",
 			},
 			metav1.Condition{
 				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
-				Message: err.Error(),
+				Message: "DynamoComponent not ready",
 			},
 		)
 		err = err_
