@@ -28,10 +28,10 @@ use dynamo_runtime::protocols::annotated::Annotated;
 use crate::backend::ExecutionContext;
 use crate::preprocessor::BackendInput;
 use crate::protocols::common::llm_backend::LLMEngineOutput;
-use crate::protocols::openai::chat_completions::{
-    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+use crate::protocols::openai::{
+    chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
+    completions::{prompt_to_string, CompletionRequest, CompletionResponse},
 };
-use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 
 //
 // The engines are each in their own crate under `lib/engines`
@@ -120,8 +120,35 @@ fn delta_core(tok: u32) -> Annotated<LLMEngineOutput> {
 /// Engine that accepts un-preprocessed requests and echos the prompt back as the response
 /// Useful for testing ingress such as service-http.
 struct EchoEngineFull {}
-pub fn make_engine_full() -> OpenAIChatCompletionsStreamingEngine {
-    Arc::new(EchoEngineFull {})
+
+/// Engine that dispatches requests to either OpenAICompletions
+//or OpenAIChatCompletions engine
+pub struct EngineDispatcher<E> {
+    inner: E,
+}
+
+impl<E> EngineDispatcher<E> {
+    pub fn new(inner: E) -> Self {
+        EngineDispatcher { inner }
+    }
+}
+
+/// Trait that allows handling both completion and chat completions requests
+#[async_trait]
+pub trait StreamingEngine: Send + Sync {
+    async fn handle_completion(
+        &self,
+        req: SingleIn<CompletionRequest>,
+    ) -> Result<ManyOut<Annotated<CompletionResponse>>, Error>;
+
+    async fn handle_chat(
+        &self,
+        req: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error>;
+}
+
+pub fn make_engine_full() -> Arc<dyn StreamingEngine> {
+    Arc::new(EngineDispatcher::new(EchoEngineFull {}))
 }
 
 #[async_trait]
@@ -174,5 +201,96 @@ impl
         };
 
         Ok(ResponseStream::new(Box::pin(output), ctx))
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<CompletionRequest>, ManyOut<Annotated<CompletionResponse>>, Error>
+    for EchoEngineFull
+{
+    async fn generate(
+        &self,
+        incoming_request: SingleIn<CompletionRequest>,
+    ) -> Result<ManyOut<Annotated<CompletionResponse>>, Error> {
+        let (request, context) = incoming_request.transfer(());
+        let deltas = request.response_generator();
+        let ctx = context.context();
+        let chars_string = prompt_to_string(&request.inner.prompt);
+        let output = stream! {
+            let mut id = 1;
+            for c in chars_string.chars() {
+                tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
+                let response = deltas.create_choice(0, Some(c.to_string()), None);
+                yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None };
+                id += 1;
+            }
+            let response = deltas.create_choice(0, None, Some("stop".to_string()));
+            yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None };
+
+        };
+
+        Ok(ResponseStream::new(Box::pin(output), ctx))
+    }
+}
+
+#[async_trait]
+impl<E> StreamingEngine for EngineDispatcher<E>
+where
+    E: AsyncEngine<SingleIn<CompletionRequest>, ManyOut<Annotated<CompletionResponse>>, Error>
+        + AsyncEngine<
+            SingleIn<NvCreateChatCompletionRequest>,
+            ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+            Error,
+        > + Send
+        + Sync,
+{
+    async fn handle_completion(
+        &self,
+        req: SingleIn<CompletionRequest>,
+    ) -> Result<ManyOut<Annotated<CompletionResponse>>, Error> {
+        self.inner.generate(req).await
+    }
+
+    async fn handle_chat(
+        &self,
+        req: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        self.inner.generate(req).await
+    }
+}
+
+pub struct StreamingEngineAdapter(Arc<dyn StreamingEngine>);
+
+impl StreamingEngineAdapter {
+    pub fn new(engine: Arc<dyn StreamingEngine>) -> Self {
+        StreamingEngineAdapter(engine)
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<CompletionRequest>, ManyOut<Annotated<CompletionResponse>>, Error>
+    for StreamingEngineAdapter
+{
+    async fn generate(
+        &self,
+        req: SingleIn<CompletionRequest>,
+    ) -> Result<ManyOut<Annotated<CompletionResponse>>, Error> {
+        self.0.handle_completion(req).await
+    }
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for StreamingEngineAdapter
+{
+    async fn generate(
+        &self,
+        req: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        self.0.handle_chat(req).await
     }
 }

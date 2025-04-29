@@ -15,7 +15,9 @@
 
 [workspace]
 members = [
-    "components/*",
+    "components/http",
+    "components/metrics",
+    "components/router",
     "launch/*",
     "lib/llm",
     "lib/runtime",
@@ -26,7 +28,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -37,9 +39,9 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "0.1.1" }
-dynamo-llm = { path = "lib/llm", version = "0.1.1" }
-dynamo-tokens = { path = "lib/tokens", version = "0.1.1" }
+dynamo-runtime = { path = "lib/runtime", version = "0.2.0" }
+dynamo-llm = { path = "lib/llm", version = "0.2.0" }
+dynamo-tokens = { path = "lib/tokens", version = "0.2.0" }
 
 # External dependencies
 anyhow = { version = "1" }

@@ -81,7 +81,7 @@ def serve(
         False,
         help="Print the final service configuration and exit without starting the server",
     ),
-    enable_planner: bool = typer.Option(
+    enable_local_planner: bool = typer.Option(
         False,
         help="Save a snapshot of your service state to a file that allows planner to edit your deployment configuration",
     ),
@@ -91,9 +91,8 @@ def serve(
     Starts a local server for the specified Dynamo pipeline.
     """
 
-    # Warning: internal
+    from dynamo.runtime.logging import configure_dynamo_logging
     from dynamo.sdk.lib.loader import find_and_load_service
-    from dynamo.sdk.lib.logging import configure_server_logging
     from dynamo.sdk.lib.service import LinkedServices
 
     # Extract extra arguments not captured by typer
@@ -119,7 +118,7 @@ def serve(
         console.print(f"DYNAMO_SERVICE_CONFIG={json.dumps(service_configs)}")
         raise typer.Exit()
 
-    configure_server_logging()
+    configure_dynamo_logging()
 
     if service_configs:
         logger.info(f"Running dynamo serve with service configs {service_configs}")
@@ -162,5 +161,5 @@ def serve(
         # port=port,
         dependency_map=runner_map_dict,
         service_name=service_name,
-        enable_planner=enable_planner,
+        enable_local_planner=enable_local_planner,
     )
