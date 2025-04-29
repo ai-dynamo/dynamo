@@ -27,6 +27,7 @@ use dynamo_llm::{
         },
         openai::completions::{CompletionRequest, CompletionResponse},
     },
+    request_template::RequestTemplate,
 };
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
