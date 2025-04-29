@@ -1204,6 +1204,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	}
 
 	imageName := opt.dynamoComponent.GetImage()
+	if imageName == "" {
+		return nil, errors.Errorf("image is not ready for component %s", opt.dynamoComponent.Name)
+	}
 
 	var securityContext *corev1.SecurityContext
 	var mainContainerSecurityContext *corev1.SecurityContext
