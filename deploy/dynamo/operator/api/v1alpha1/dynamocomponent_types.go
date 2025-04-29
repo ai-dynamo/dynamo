@@ -123,10 +123,13 @@ func (s *DynamoComponent) IsReady() bool {
 	return meta.IsStatusConditionTrue(s.Status.Conditions, DynamoComponentConditionTypeDynamoComponentAvailable)
 }
 
+// GetImage returns the docker image of the DynamoComponent
 func (s *DynamoComponent) GetImage() string {
 	if s.Spec.Image != "" {
+		// if the image is specified in the spec, return it
 		return s.Spec.Image
 	}
+	// if the image is not specified in the spec, the image is stored in the status condition ImageExists
 	if meta.FindStatusCondition(s.Status.Conditions, DynamoComponentConditionTypeImageExists) != nil {
 		return meta.FindStatusCondition(s.Status.Conditions, DynamoComponentConditionTypeImageExists).Message
 	}
