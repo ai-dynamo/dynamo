@@ -69,6 +69,10 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 )
 
+const (
+	dockerConfigSecretKey = ".dockerconfigjson"
+)
+
 // DynamoComponentReconciler reconciles a DynamoComponent object
 type DynamoComponentReconciler struct {
 	client.Client
@@ -600,9 +604,9 @@ func (r *DynamoComponentReconciler) RetrieveDockerRegistrySecret(ctx context.Con
 		err = errors.Wrapf(err, "get docker config json secret %s", secretName)
 		return err
 	}
-	configJSON, ok := secret.Data[".dockerconfigjson"]
+	configJSON, ok := secret.Data[dockerConfigSecretKey]
 	if !ok {
-		err = errors.Errorf("docker config json secret %s does not have .dockerconfigjson key", secretName)
+		err = errors.Errorf("docker config json secret %s does not have %s key", secretName, dockerConfigSecretKey)
 		return err
 	}
 	var configObj struct {
