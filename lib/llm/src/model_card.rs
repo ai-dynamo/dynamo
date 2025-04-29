@@ -17,6 +17,7 @@ use std::time::Duration;
 
 pub mod create;
 pub mod model;
+pub use model::ModelDeploymentCard;
 
 // TODO: Do these network/publish related model deployment card values belong here or in a
 // network module?

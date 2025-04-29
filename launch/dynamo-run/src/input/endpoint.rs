@@ -18,7 +18,7 @@ use std::sync::Arc;
 use dynamo_llm::{
     backend::Backend,
     engines::StreamingEngineAdapter,
-    http::service::discovery::ModelEntry,
+    http::service::discovery::{ModelEntry, ModelNetworkName},
     key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager},
     model_card,
     model_type::ModelType,
@@ -81,7 +81,8 @@ pub async fn run(
                 .link(preprocessor.backward_edge())?
                 .link(frontend)?;
 
-            (Ingress::for_pipeline(pipeline)?, service_name, card, true)
+            // TODO: switch last 'false' to 'true' once we have ingress-side pre-processing
+            (Ingress::for_pipeline(pipeline)?, service_name, card, false)
         }
         EngineConfig::Dynamic(_) => {
             anyhow::bail!("Cannot use endpoint for both in and out");
@@ -119,12 +120,13 @@ pub async fn run(
             .publish(model_card::BUCKET_NAME, None, &key, &mut *card.clone())
             .await?;
 
-        // Register as a component
-        let network_name = endpoint.subject_to(etcd_client.lease_id());
+        // Publish our ModelEntry to etcd. This allows ingress to find the model card.
+        // (Why don't we put the model card directly under this key?)
+        let network_name = ModelNetworkName::from_local(&endpoint, etcd_client.lease_id());
         tracing::debug!("Registering with etcd as {network_name}");
         etcd_client
             .kv_create(
-                network_name.clone(),
+                network_name.to_string(),
                 serde_json::to_vec_pretty(&model_registration)?,
                 None, // use primary lease
             )

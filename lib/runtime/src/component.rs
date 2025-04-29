@@ -166,6 +166,10 @@ impl Component {
         &self.namespace
     }
 
+    pub fn name(&self) -> String {
+        self.name.clone()
+    }
+
     pub fn endpoint(&self, endpoint: impl Into<String>) -> Endpoint {
         Endpoint {
             component: self.clone(),

@@ -15,12 +15,11 @@
 
 use std::pin::Pin;
 
-use crate::{flags::RouterMode, EngineConfig, Flags};
 use dynamo_llm::{
-    backend::Backend,
-    backend::ExecutionContext,
+    backend::{Backend, ExecutionContext},
     engines::StreamingEngineAdapter,
-    model_card::model::ModelDeploymentCard,
+    http::service::discovery::ModelNetworkName,
+    model_card::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
     protocols::common::llm_backend::{BackendInput, BackendOutput},
     types::{
@@ -39,6 +38,8 @@ use dynamo_runtime::{
     DistributedRuntime, Runtime,
 };
 use std::sync::Arc;
+
+use crate::{flags::RouterMode, EngineConfig, Flags};
 
 /// Turns an EngineConfig into an OpenAI chat-completions and completions supported StreamingEngine.
 pub async fn prepare_engine(
@@ -66,14 +67,21 @@ pub async fn prepare_engine(
                     debug_assert!(!remote_endpoints.is_empty());
                     tracing::info!(count = remote_endpoints.len(), "Model(s) discovered");
 
-                    // TODO: Fetch the MDC. Examine requires_preprocessing. Make the correct
-                    // router, potentially wrapped with a pre-processor.
-
-                    PushRouter::<
-                        NvCreateChatCompletionRequest,
-                        Annotated<NvCreateChatCompletionStreamResponse>,
-                    >::from_client(client, flags.router_mode.into())
-                    .await?
+                    let network_name: ModelNetworkName = (&remote_endpoints[0]).into();
+                    let Some(etcd_client) = distributed_runtime.etcd_client() else {
+                        anyhow::bail!("Cannot run distributed components without etcd");
+                    };
+                    let mdc = network_name.load_mdc(endpoint_id, etcd_client).await?;
+                    if mdc.requires_preprocessing {
+                        // Note requires_preprocessing is never true in our code right now
+                        todo!("Ingress-side pre-processing not supported yet");
+                    } else {
+                        PushRouter::<
+                            NvCreateChatCompletionRequest,
+                            Annotated<NvCreateChatCompletionStreamResponse>,
+                        >::from_client(client, flags.router_mode.into())
+                        .await?
+                    }
                 }
                 RouterMode::KV => todo!(),
             };

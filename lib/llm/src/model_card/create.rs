@@ -81,7 +81,7 @@ impl ModelDeploymentCard {
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
             last_published: None,
-            requires_preprocessing: true,
+            requires_preprocessing: false,
         })
     }
 
@@ -103,7 +103,7 @@ impl ModelDeploymentCard {
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
             last_published: None,
-            requires_preprocessing: true,
+            requires_preprocessing: false,
         })
     }
 }

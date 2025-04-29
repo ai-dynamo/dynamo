@@ -146,7 +146,7 @@ impl ModelDeploymentCard {
     pub fn with_name_only(name: &str) -> ModelDeploymentCard {
         ModelDeploymentCard {
             display_name: name.to_string(),
-            service_name: Slug::from_string(name).to_string(),
+            service_name: Slug::slugify(name).to_string(),
             ..Default::default()
         }
     }
@@ -238,7 +238,7 @@ impl ModelDeploymentCard {
         tracing::debug!(
             nats_addr,
             %bucket_name,
-            "Uploading model deployment card to NATS"
+            "Uploading model deployment card fields to NATS"
         );
 
         if let Some(ModelInfoType::HfConfigJson(ref src_file)) = self.model_info {
