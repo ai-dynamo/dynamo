@@ -198,13 +198,12 @@ pub async fn run(
     let mut extra: Option<Pin<Box<dyn Future<Output = ()> + Send>>> = None; // vllm and sglang sub-process
 
     let template = if let Some(path) = flags.request_template.as_ref() {
-        Some(RequestTemplate::load(path)?)
+        let template = RequestTemplate::load(path)?;
+        tracing::debug!("Using request template: {template:?}");
+        Some(template)
     } else {
         None
     };
-    if let Some(template) = template.as_ref() {
-        tracing::info!("Using request template: {template:?}");
-    }
 
     // Create the engine matching `out`
     let engine_config = match out_opt {
