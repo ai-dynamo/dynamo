@@ -31,6 +31,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemas"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/config"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
 	"github.com/huandu/xstrings"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -234,6 +235,10 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		deployment.Spec.DynamoTag = config.DynamoTag
 		deployment.Spec.DynamoComponent = parentDynamoGraphDeployment.Spec.DynamoGraph
 		deployment.Spec.ServiceName = service.Name
+		labels := make(map[string]string)
+		deployment.Spec.Labels = labels
+		deployment.Labels = labels
+		labels[commonconsts.KubeLabelDynamoComponent] = service.Name
 		if service.Config.Dynamo != nil && service.Config.Dynamo.Enabled {
 			dynamoNamespace := service.Config.Dynamo.Namespace
 			if dynamoNamespace == "" {
@@ -242,6 +247,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			}
 			deployment.Spec.DynamoNamespace = &dynamoNamespace
 			dynamoServices[service.Name] = fmt.Sprintf("%s/%s", service.Config.Dynamo.Name, dynamoNamespace)
+			labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
 		} else {
 			// dynamo is not enabled
 			if config.EntryService == service.Name {

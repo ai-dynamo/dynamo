@@ -45,6 +45,7 @@ const (
 	KubeLabelDynamoSelector = "nvidia.com/selector"
 
 	KubeLabelDynamoComponent            = "nvidia.com/dynamo-component"
+	KubeLabelDynamoNamespace            = "nvidia.com/dynamo-namespace"
 	KubeLabelDynamoDeploymentTargetType = "nvidia.com/dynamo-deployment-target-type"
 
 	KubeLabelDynamoComponentType = "nvidia.com/dynamo-component-type"

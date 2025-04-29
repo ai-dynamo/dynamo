@@ -23,6 +23,7 @@ import (
 
 	compounaiCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
 	"github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -93,6 +94,10 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dynamographdeployment-service1",
 						Namespace: "default",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent: "service1",
+							commonconsts.KubeLabelDynamoNamespace: "default",
+						},
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponent: "dynamocomponent:ac4e234",
@@ -125,6 +130,10 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									DeploymentSelectorValue: "service2",
 								},
 							},
+							Labels: map[string]string{
+								commonconsts.KubeLabelDynamoComponent: "service1",
+								commonconsts.KubeLabelDynamoNamespace: "default",
+							},
 						},
 					},
 				},
@@ -132,6 +141,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dynamographdeployment-service2",
 						Namespace: "default",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent: "service2",
+						},
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponent: "dynamocomponent:ac4e234",
@@ -140,6 +152,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 							ServiceName: "service2",
 							Autoscaling: &v1alpha1.Autoscaling{
 								Enabled: false,
+							},
+							Labels: map[string]string{
+								commonconsts.KubeLabelDynamoComponent: "service2",
 							},
 						},
 					},
@@ -202,6 +217,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dynamographdeployment-service1",
 						Namespace: "default",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent: "service1",
+						},
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponent: "dynamocomponent:ac4e234",
@@ -237,6 +255,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								Enabled: true,
 								Host:    "test-dynamographdeployment",
 							},
+							Labels: map[string]string{
+								commonconsts.KubeLabelDynamoComponent: "service1",
+							},
 						},
 					},
 				},
@@ -244,6 +265,10 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dynamographdeployment-service2",
 						Namespace: "default",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent: "service2",
+							commonconsts.KubeLabelDynamoNamespace: "default",
+						},
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponent: "dynamocomponent:ac4e234",
@@ -253,6 +278,10 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 							DynamoNamespace: &[]string{"default"}[0],
 							Autoscaling: &v1alpha1.Autoscaling{
 								Enabled: false,
+							},
+							Labels: map[string]string{
+								commonconsts.KubeLabelDynamoComponent: "service2",
+								commonconsts.KubeLabelDynamoNamespace: "default",
 							},
 						},
 					},
@@ -311,6 +340,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dynamographdeployment-service1",
 						Namespace: "default",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent: "service1",
+						},
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponent: "dynamocomponent:ac4e234",
@@ -343,6 +375,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								},
 							},
 							Ingress: v1alpha1.IngressSpec{},
+							Labels: map[string]string{
+								commonconsts.KubeLabelDynamoComponent: "service1",
+							},
 						},
 					},
 				},
@@ -350,6 +385,10 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dynamographdeployment-service2",
 						Namespace: "default",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent: "service2",
+							commonconsts.KubeLabelDynamoNamespace: "dynamo-test-dynamographdeployment",
+						},
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponent: "dynamocomponent:ac4e234",
@@ -360,6 +399,10 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								Enabled: false,
 							},
 							DynamoNamespace: &[]string{"dynamo-test-dynamographdeployment"}[0],
+							Labels: map[string]string{
+								commonconsts.KubeLabelDynamoComponent: "service2",
+								commonconsts.KubeLabelDynamoNamespace: "dynamo-test-dynamographdeployment",
+							},
 						},
 					},
 				},
