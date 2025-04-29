@@ -21,6 +21,7 @@ use dynamo_llm::{
     engines::StreamingEngineAdapter,
     http::service::{discovery, service_v2},
     model_type::ModelType,
+    request_template::RequestTemplate,
     types::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -35,11 +36,13 @@ pub async fn run(
     runtime: Runtime,
     flags: Flags,
     engine_config: EngineConfig,
+    template: Option<RequestTemplate>,
 ) -> anyhow::Result<()> {
     let http_service = service_v2::HttpService::builder()
         .port(flags.http_port)
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
+        .with_request_template(template)
         .build()?;
     match engine_config {
         EngineConfig::Dynamic(endpoint) => {

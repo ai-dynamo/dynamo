@@ -24,7 +24,7 @@ The planner is a component that monitors the state of the system and makes adjus
 After you've deployed a dynamo graph, you can start the planner with the following command:
 
 ```bash
-python components/planner.py --namespace <namespace>
+PYTHONPATH=/workspace/examples/llm python components/planner.py --namespace <namespace>
 ```
 
 ## Backends

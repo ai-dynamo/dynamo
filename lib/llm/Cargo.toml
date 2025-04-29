@@ -44,6 +44,7 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 derive_builder = {workspace = true }
 either = { workspace = true }
+etcd-client = { workspace = true }
 futures =  { workspace = true }
 rand = { workspace = true }
 prometheus = { workspace = true }

@@ -17,8 +17,8 @@ use futures::StreamExt;
 use service_metrics::DEFAULT_NAMESPACE;
 
 use dynamo_runtime::{
-    logging, protocols::annotated::Annotated, utils::Duration, DistributedRuntime, Result, Runtime,
-    Worker,
+    logging, pipeline::PushRouter, protocols::annotated::Annotated, utils::Duration,
+    DistributedRuntime, Result, Runtime, Worker,
 };
 
 fn main() -> Result<()> {
@@ -33,14 +33,13 @@ async fn app(runtime: Runtime) -> Result<()> {
     let namespace = distributed.namespace(DEFAULT_NAMESPACE)?;
     let component = namespace.component("backend")?;
 
-    let client = component
-        .endpoint("generate")
-        .client::<String, Annotated<String>>()
-        .await?;
+    let client = component.endpoint("generate").client().await?;
 
     client.wait_for_endpoints().await?;
+    let router =
+        PushRouter::<String, Annotated<String>>::from_client(client, Default::default()).await?;
 
-    let mut stream = client.random("hello world".to_string().into()).await?;
+    let mut stream = router.random("hello world".to_string().into()).await?;
 
     while let Some(resp) = stream.next().await {
         println!("{:?}", resp);

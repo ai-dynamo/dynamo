@@ -51,7 +51,7 @@ There are two additional rules set by planner to prevent over-compensation:
 ## Usage
 After you've deployed a dynamo graph - you can start the planner with the following command:
 ```bash
-python components/planner.py <arguments>
+PYTHONPATH=/workspace/examples/llm python components/planner.py <arguments>
 ```
 
 Planner takes the following arguments:

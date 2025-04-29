@@ -1619,6 +1619,7 @@ dependencies = [
  "dynamo-runtime",
  "either",
  "erased-serde",
+ "etcd-client",
  "futures",
  "galil-seiferas",
  "ggus",

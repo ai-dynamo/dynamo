@@ -30,6 +30,7 @@ mod input;
 #[cfg(any(feature = "vllm", feature = "sglang"))]
 mod net;
 mod opt;
+pub use dynamo_llm::request_template::RequestTemplate;
 pub use opt::{Input, Output};
 
 /// How we identify a namespace/component/endpoint URL.
@@ -180,9 +181,19 @@ pub async fn run(
         }
     };
 
-    // If we are in a distributed system, we need to know our component upfront
     let dyn_input = match &in_opt {
         Input::Endpoint(endpoint_path) => {
+            if model_path.as_ref().map(|mp| mp.is_file()).unwrap_or(false)
+                && flags.model_config.is_none()
+            {
+                // TODO We need to convert tokenizer extract from GGUF file into something we can
+                // publish to NATS. Ideally `tokenizer.json` directly, but otherwise an
+                // intermediate format.
+                tracing::error!("Serving GGUF files in a distributed system requires `--model-config <hf-repo-dir>` so that we can find the tokenzier config");
+                return Ok(());
+            }
+
+            // If we are in a distributed system, we need to know our component upfront
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
             let endpoint_id: Endpoint = endpoint_path.parse()?;
             Some(DynInput {
@@ -195,6 +206,14 @@ pub async fn run(
 
     #[cfg(any(feature = "vllm", feature = "sglang"))]
     let mut extra: Option<Pin<Box<dyn Future<Output = ()> + Send>>> = None; // vllm and sglang sub-process
+
+    let template = if let Some(path) = flags.request_template.as_ref() {
+        let template = RequestTemplate::load(path)?;
+        tracing::debug!("Using request template: {template:?}");
+        Some(template)
+    } else {
+        None
+    };
 
     // Create the engine matching `out`
     let engine_config = match out_opt {
@@ -216,7 +235,10 @@ pub async fn run(
                     "out=echo_core need to find the tokenizer. Pass flag --model-path <path>"
                 );
             };
-            card.requires_preprocessing = true;
+
+            // TODO: Switch to `true` once pre-processing moves ingress side
+            card.requires_preprocessing = false;
+
             EngineConfig::StaticCore {
                 service_name: card.service_name.clone(),
                 engine: dynamo_llm::engines::make_engine_core(),
@@ -461,19 +483,33 @@ pub async fn run(
 
     match in_opt {
         Input::Http => {
-            crate::input::http::run(runtime.clone(), flags, engine_config).await?;
+            crate::input::http::run(runtime.clone(), flags, engine_config, template).await?;
         }
         Input::Text => {
-            crate::input::text::run(runtime.clone(), flags, None, engine_config).await?;
+            crate::input::text::run(runtime.clone(), flags, None, engine_config, template).await?;
         }
         Input::Stdin => {
             let mut prompt = String::new();
             std::io::stdin().read_to_string(&mut prompt).unwrap();
-            crate::input::text::run(runtime.clone(), flags, Some(prompt), engine_config).await?;
+            crate::input::text::run(
+                runtime.clone(),
+                flags,
+                Some(prompt),
+                engine_config,
+                template,
+            )
+            .await?;
         }
         Input::Batch(path) => {
-            crate::input::batch::run(runtime.clone(), flags, maybe_card, path, engine_config)
-                .await?;
+            crate::input::batch::run(
+                runtime.clone(),
+                flags,
+                maybe_card,
+                path,
+                engine_config,
+                template,
+            )
+            .await?;
         }
         Input::Endpoint(path) => {
             let Some(dyn_input) = dyn_input else {

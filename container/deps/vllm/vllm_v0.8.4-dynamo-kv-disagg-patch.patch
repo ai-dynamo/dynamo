@@ -1039,10 +1039,10 @@ index 000000000..a2f9ce99e
 \ No newline at end of file
 diff --git a/vllm/distributed/device_communicators/nixl.py b/vllm/distributed/device_communicators/nixl.py
 new file mode 100644
-index 000000000..bd4ac984e
+index 000000000..4c5ed707f
 --- /dev/null
 +++ b/vllm/distributed/device_communicators/nixl.py
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,447 @@
 +# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 +# SPDX-License-Identifier: Apache-2.0
 +#
@@ -1487,6 +1487,8 @@ index 000000000..bd4ac984e
 +                done_req_ids.append(req_id)
 +            else:
 +                self._transfers[req_id] = running_reqs
++        for req_id in done_req_ids:
++            del self._transfers[req_id]
 +        return done_req_ids
 diff --git a/vllm/distributed/kv_transfer/kv_connector/dynamo_connector.py b/vllm/distributed/kv_transfer/kv_connector/dynamo_connector.py
 new file mode 100644

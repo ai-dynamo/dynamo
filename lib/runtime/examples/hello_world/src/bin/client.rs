@@ -14,8 +14,8 @@
 // limitations under the License.
 
 use dynamo_runtime::{
-    logging, protocols::annotated::Annotated, stream::StreamExt, DistributedRuntime, Result,
-    Runtime, Worker,
+    logging, pipeline::PushRouter, protocols::annotated::Annotated, stream::StreamExt,
+    DistributedRuntime, Result, Runtime, Worker,
 };
 use hello_world::DEFAULT_NAMESPACE;
 
@@ -32,12 +32,13 @@ async fn app(runtime: Runtime) -> Result<()> {
         .namespace(DEFAULT_NAMESPACE)?
         .component("backend")?
         .endpoint("generate")
-        .client::<String, Annotated<String>>()
+        .client()
         .await?;
-
     client.wait_for_endpoints().await?;
+    let router =
+        PushRouter::<String, Annotated<String>>::from_client(client, Default::default()).await?;
 
-    let mut stream = client.random("hello world".to_string().into()).await?;
+    let mut stream = router.random("hello world".to_string().into()).await?;
 
     while let Some(resp) = stream.next().await {
         println!("{:?}", resp);

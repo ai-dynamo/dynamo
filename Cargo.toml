@@ -55,6 +55,7 @@ chrono = { version = "0.4", default-features = false, features = ["alloc", "std"
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
 either = { version = "1.13", features = ["serde"] }
+etcd-client = { version = "0.14" }
 futures = { version = "0.3" }
 hf-hub = { version = "0.4.2", default-features = false, features = ["tokio", "rustls-tls"] }
 humantime = { version = "2.2.0" }

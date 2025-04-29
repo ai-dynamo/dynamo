@@ -33,7 +33,7 @@ impl Slug {
 
     /// Create [`Slug`] from a string.
     pub fn from_string(s: impl AsRef<str>) -> Slug {
-        Slug::slugify_unique(s.as_ref())
+        Slug::slugify(s.as_ref())
     }
 
     /// Turn the string into a valid slug, replacing any not-web-or-nats-safe characters with '-'
@@ -54,7 +54,7 @@ impl Slug {
     }
 
     /// Like slugify but also add a four byte hash on the end, in case two different strings slug
-    /// to the same thing.
+    /// to the same thing (e.g. because of case differences).
     pub fn slugify_unique(s: &str) -> Slug {
         let out = s
             .to_lowercase()

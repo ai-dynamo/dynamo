@@ -25,7 +25,8 @@ use tokio::sync::{mpsc, RwLock};
 use validator::Validate;
 
 use etcd_client::{
-    Compare, CompareOp, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse, WatchOptions, Watcher,
+    Compare, CompareOp, DeleteOptions, GetOptions, PutOptions, PutResponse, Txn, TxnOp,
+    TxnOpResponse, WatchOptions, Watcher,
 };
 
 pub use etcd_client::{ConnectOptions, KeyValue, LeaseClient};
@@ -172,13 +173,14 @@ impl Client {
         value: Vec<u8>,
         lease_id: Option<i64>,
     ) -> Result<()> {
-        let put_options = lease_id.map(|id| PutOptions::new().with_lease(id));
+        let id = lease_id.unwrap_or(self.lease_id());
+        let put_options = PutOptions::new().with_lease(id);
 
         // Build the transaction
         let txn = Txn::new()
             .when(vec![Compare::version(key.as_str(), CompareOp::Equal, 0)]) // Ensure the lock does not exist
             .and_then(vec![
-                TxnOp::put(key.as_str(), value, put_options), // Create the object
+                TxnOp::put(key.as_str(), value, Some(put_options)), // Create the object
             ]);
 
         // Execute the transaction
@@ -201,14 +203,15 @@ impl Client {
         value: Vec<u8>,
         lease_id: Option<i64>,
     ) -> Result<()> {
-        let put_options = lease_id.map(|id| PutOptions::new().with_lease(id));
+        let id = lease_id.unwrap_or(self.lease_id());
+        let put_options = PutOptions::new().with_lease(id);
 
         // Build the transaction that either creates the key if it doesn't exist,
         // or validates the existing value matches what we expect
         let txn = Txn::new()
             .when(vec![Compare::version(key.as_str(), CompareOp::Equal, 0)]) // Key doesn't exist
             .and_then(vec![
-                TxnOp::put(key.as_str(), value.clone(), put_options), // Create it
+                TxnOp::put(key.as_str(), value.clone(), Some(put_options)), // Create it
             ])
             .or_else(vec![
                 // If key exists but values don't match, this will fail the transaction
@@ -245,17 +248,52 @@ impl Client {
         value: impl AsRef<[u8]>,
         lease_id: Option<i64>,
     ) -> Result<()> {
+        let id = lease_id.unwrap_or(self.lease_id());
+        let put_options = PutOptions::new().with_lease(id);
         let _ = self
             .client
             .kv_client()
-            .put(
-                key.as_ref(),
-                value.as_ref(),
-                lease_id.map(|id| PutOptions::new().with_lease(id)),
-            )
+            .put(key.as_ref(), value.as_ref(), Some(put_options))
             .await?;
-
         Ok(())
+    }
+
+    pub async fn kv_put_with_options(
+        &self,
+        key: impl AsRef<str>,
+        value: impl AsRef<[u8]>,
+        options: Option<PutOptions>,
+    ) -> Result<PutResponse> {
+        let options = options
+            .unwrap_or_default()
+            .with_lease(self.primary_lease().id());
+        self.client
+            .kv_client()
+            .put(key.as_ref(), value.as_ref(), Some(options))
+            .await
+            .map_err(|err| err.into())
+    }
+
+    pub async fn kv_get(
+        &self,
+        key: impl Into<Vec<u8>>,
+        options: Option<GetOptions>,
+    ) -> Result<Vec<KeyValue>> {
+        let mut get_response = self.client.kv_client().get(key, options).await?;
+        Ok(get_response.take_kvs())
+    }
+
+    pub async fn kv_delete(
+        &self,
+        key: impl Into<Vec<u8>>,
+        options: Option<DeleteOptions>,
+    ) -> Result<i64> {
+        self.client
+            .kv_client()
+            .delete(key, options)
+            .await
+            .map(|del_response| del_response.deleted())
+            .map_err(|err| err.into())
     }
 
     pub async fn kv_get_prefix(&self, prefix: impl AsRef<str>) -> Result<Vec<KeyValue>> {

@@ -32,6 +32,8 @@ mod mem;
 pub use mem::MemoryStorage;
 mod nats;
 pub use nats::NATSStorage;
+mod etcd;
+pub use etcd::EtcdStorage;
 
 #[async_trait]
 pub trait KeyValueStore: Send + Sync {
