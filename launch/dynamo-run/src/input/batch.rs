@@ -111,11 +111,7 @@ pub async fn run(
     tracing::info!("Timer start.");
     let start = Instant::now();
     let mut lines = buffered_input.lines();
-    let template: Option<&'static RequestTemplate> = template.map(|t| {
-        let boxed = Box::new(t);
-        let leaked = Box::leak(boxed) as &'static RequestTemplate;
-        leaked
-    });
+    let template: Option<Arc<RequestTemplate>> = template.map(Arc::new);
     while let Ok(Some(line)) = lines.next_line().await {
         if cancel_token.is_cancelled() {
             break;
@@ -139,6 +135,7 @@ pub async fn run(
         let tokens_out = tokens_out.clone();
         let done_entries_tx = done_entries_tx.clone();
         let service_name_ref = service_name_ref.clone();
+        let template_clone = template.clone();
         let handle = tokio::spawn(async move {
             let local_start = Instant::now();
             let response = match evaluate(
@@ -146,7 +143,7 @@ pub async fn run(
                 service_name_ref.as_str(),
                 engine,
                 &mut entry,
-                template,
+                template_clone,
             )
             .await
             {
@@ -216,7 +213,7 @@ async fn evaluate(
     service_name: &str,
     engine: OpenAIChatCompletionsStreamingEngine,
     entry: &mut Entry,
-    template: Option<&'static RequestTemplate>,
+    template: Option<Arc<RequestTemplate>>,
 ) -> anyhow::Result<String> {
     let user_message = async_openai::types::ChatCompletionRequestMessage::User(
         async_openai::types::ChatCompletionRequestUserMessage {
@@ -228,10 +225,10 @@ async fn evaluate(
     );
     let inner = async_openai::types::CreateChatCompletionRequestArgs::default()
         .messages(vec![user_message])
-        .model(template.map_or_else(|| service_name.to_string(), |t| t.model.clone()))
+        .model(template.as_ref().map_or_else(|| service_name.to_string(), |t| t.model.clone()))
         .stream(true)
-        .max_completion_tokens(template.map_or(MAX_TOKENS, |t| t.max_completion_tokens))
-        .temperature(template.map_or(0.7, |t| t.temperature))
+        .max_completion_tokens(template.as_ref().map_or(MAX_TOKENS, |t| t.max_completion_tokens))
+        .temperature(template.as_ref().map_or(0.7, |t| t.temperature))
         .build()?;
     let req = NvCreateChatCompletionRequest { inner, nvext: None };
     let mut stream = engine.generate(Context::new(req)).await?;
