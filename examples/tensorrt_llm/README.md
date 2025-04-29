@@ -66,7 +66,11 @@ If you already have a TensorRT-LLM container image, you can skip this step.
 #### Step 2: Build the Dynamo container
 
 ```
+# On an x86 machine:
 ./container/build.sh --framework tensorrtllm
+
+# On an ARM machine:
+./container/build.sh --framework tensorrtllm --platform linux/arm64
 ```
 
 This build script internally points to the base container image built with step 1. If you skipped previous step because you already have the container image available, you can run the build script with that image as a base.
@@ -138,6 +142,8 @@ dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
 
 We are defining TRTLLM_USE_UCX_KVCACHE so that TRTLLM uses UCX for transfering the KV
 cache between the context and generation workers.
+
+NOTE: currently disaggregated serving with KV Routing may not work due to prefix cache hit is showing 0, though when it should not.
 
 ### Client
 

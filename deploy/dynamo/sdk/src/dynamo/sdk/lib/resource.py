@@ -306,91 +306,6 @@ class GPUManager:
             logger.warning(f"Error getting GPU processes for GPU {index}: {e}")
             return []
 
-    def assign_gpus(self, count: float) -> list[int]:
-        """
-        Assign GPUs for use. It can handle fractional GPU requests.
-
-        Args:
-            count: Number of GPUs to assign (can be fractional)
-
-        Returns:
-            List of GPU indices that were assigned
-        """
-        available_gpus = self.get_available_gpus()
-
-        if count > len(available_gpus):
-            logger.warning(
-                f"Requested {count} GPUs, but only {len(available_gpus)} are available. "
-                "Service may fail due to inadequate GPU resources."
-            )
-
-        # Handle fractional GPU allocation
-        if count < 1:
-            # Try to find a GPU with the same fraction size
-            try:
-                # Find a GPU where we've already used the same fraction size
-                gpu_idx, used_fraction = next(
-                    (idx, used)
-                    for idx, used, frac_size in self._gpu_fractions
-                    if frac_size == count and used < 1.0
-                )
-
-                # Update the usage for this GPU
-                for i, (idx, used, frac_size) in enumerate(self._gpu_fractions):
-                    if idx == gpu_idx and frac_size == count:
-                        new_used = used + count
-                        if new_used > 1.0:
-                            new_used = 1.0  # Cap at 1.0
-                        self._gpu_fractions[i] = (idx, new_used, frac_size)
-                        break
-
-                return [gpu_idx]
-            except StopIteration:
-                # No existing fraction of this size, find a free GPU
-                if available_gpus:
-                    gpu_idx = available_gpus[0]
-                    self._gpu_fractions.append((gpu_idx, count, count))
-                    return [gpu_idx]
-                else:
-                    # No available GPUs, return the first GPU (or log warning)
-                    if self.gpus:
-                        logger.warning("No available GPUs, using GPU 0 by default")
-                        self._gpu_fractions.append((0, count, count))
-                        return [0]
-                    else:
-                        logger.error("No GPUs available for allocation")
-                        return []
-
-        # Integer GPU allocation
-        if count >= 1:
-            if int(count) != count:
-                raise ResourceError(
-                    "Fractional GPU count greater than 1 is not supported"
-                )
-
-            count_int = int(count)
-            assigned_gpus = available_gpus[:count_int]
-
-            # Mark these GPUs as fully used
-            for gpu_idx in assigned_gpus:
-                # Check if this GPU is already in _gpu_fractions
-                if not any(idx == gpu_idx for idx, _, _ in self._gpu_fractions):
-                    self._gpu_fractions.append((gpu_idx, 1.0, 1.0))
-                else:
-                    # Update the existing entry
-                    for i, (idx, _, frac_size) in enumerate(self._gpu_fractions):
-                        if idx == gpu_idx:
-                            self._gpu_fractions[i] = (idx, 1.0, frac_size)
-
-                # Mark this GPU as unavailable for future requests
-                for gpu in self.gpus:
-                    if gpu.index == gpu_idx:
-                        gpu.available = False
-
-            return assigned_gpus
-
-        return []
-
     def get_best_gpu_for_memory(self, required_memory: int) -> int:
         """
         Return the index of the GPU with the most available memory that meets the requirement.
@@ -469,10 +384,10 @@ class GPUManager:
 
 def system_resources() -> dict[str, t.Any]:
     """
-    Get available system resources (CPU and GPU).
+    Get available GPU resources
 
     Returns:
-        Dictionary of resources with keys 'cpu' and 'nvidia.com/gpu'
+        Dictionary of resources with keys 'nvidia.com/gpu'
     """
     resources = {}
 

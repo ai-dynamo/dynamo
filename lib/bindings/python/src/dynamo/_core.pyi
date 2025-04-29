@@ -68,6 +68,12 @@ class PyLease:
         """
         ...
 
+    def is_valid(self) -> bool:
+        """
+        Check if the lease is still valid (not revoked)
+        """
+        ...
+
 class EtcdClient:
     """
     Etcd is used for discovery in the DistributedRuntime

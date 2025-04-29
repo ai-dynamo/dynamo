@@ -24,12 +24,13 @@ from transformers import AutoTokenizer
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.logging import check_required_workers
 from utils.protocol import MyRequestOutput, Tokens, vLLMGenerateRequest
-from utils.vllm import parse_vllm_args
+from utils.vllm import RouterType, parse_vllm_args
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
+from dynamo.llm import KvMetricsAggregator
 from dynamo.runtime import EtcdKvCache
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
@@ -94,7 +95,7 @@ class Processor(ProcessMixIn):
             .client()
         )
 
-        if self.engine_args.router == "kv":
+        if self.engine_args.router == RouterType.KV:
             router_ns, router_name = Router.dynamo_address()  # type: ignore
             self.router_client = (
                 await runtime.namespace(router_ns)
@@ -105,11 +106,31 @@ class Processor(ProcessMixIn):
 
         await check_required_workers(self.worker_client, self.min_workers)
 
+        kv_listener = runtime.namespace("dynamo").component("VllmWorker")
+        await kv_listener.create_service()
+        self.metrics_aggregator = KvMetricsAggregator(kv_listener)
+
         self.etcd_kv_cache = await EtcdKvCache.create(
             runtime.etcd_client(),
             "/dynamo/processor/",
             {"router": self.engine_args.router},
         )
+
+    async def _get_kv_load(self):
+        metrics = await self.metrics_aggregator.get_metrics()
+        kv_load = {}
+        for endpoint in metrics.endpoints:
+            worker_id = endpoint.worker_id
+            kv_load[worker_id] = getattr(endpoint, "gpu_cache_usage_perc", 0.0)
+        return kv_load
+
+    async def _get_pending_requests(self):
+        metrics = await self.metrics_aggregator.get_metrics()
+        pending_requests = {}
+        for endpoint in metrics.endpoints:
+            worker_id = endpoint.worker_id
+            pending_requests[worker_id] = getattr(endpoint, "num_requests_waiting", 0)
+        return pending_requests
 
     async def _generate(
         self,
@@ -125,8 +146,9 @@ class Processor(ProcessMixIn):
             engine_prompt,
             sampling_params,
         ) = await self._parse_raw_request(raw_request)
+        # TODO: queue request at processor when engines are full
         router_mode = (await self.etcd_kv_cache.get("router")).decode()
-        if router_mode == "kv":
+        if router_mode == RouterType.KV:
             router_generator = await self.router_client.generate(
                 Tokens(tokens=engine_prompt["prompt_token_ids"]).model_dump_json()
             )
@@ -157,7 +179,7 @@ class Processor(ProcessMixIn):
                     ).model_dump_json(),
                     int(worker_id),
                 )
-        elif router_mode == "random":
+        elif router_mode == RouterType.RANDOM:
             engine_generator = await self.worker_client.generate(
                 vLLMGenerateRequest(
                     engine_prompt=engine_prompt,
@@ -165,7 +187,7 @@ class Processor(ProcessMixIn):
                     request_id=request_id,
                 ).model_dump_json()
             )
-        elif router_mode == "round-robin":
+        elif router_mode == RouterType.ROUND_ROBIN:
             engine_generator = await self.worker_client.round_robin(
                 vLLMGenerateRequest(
                     engine_prompt=engine_prompt,
@@ -173,7 +195,32 @@ class Processor(ProcessMixIn):
                     request_id=request_id,
                 ).model_dump_json()
             )
-
+        elif router_mode == RouterType.KV_LOAD:
+            # route to worker with least kv load
+            # TODO: move the router to a separate file and clean up processor.py
+            try:
+                kv_load = await self._get_kv_load()
+                best_worker_id = min(kv_load, key=kv_load.get)
+                logger.info(f"Routing to worker {best_worker_id} (kv load: {kv_load})")
+                engine_generator = await self.worker_client.direct(
+                    vLLMGenerateRequest(
+                        engine_prompt=engine_prompt,
+                        sampling_params=sampling_params,
+                        request_id=request_id,
+                    ).model_dump_json(),
+                    int(best_worker_id),
+                )
+            except Exception as e:
+                logger.info(
+                    f"Error finding worker with least kv load: {e}, fallback to random"
+                )
+                engine_generator = await self.worker_client.generate(
+                    vLLMGenerateRequest(
+                        engine_prompt=engine_prompt,
+                        sampling_params=sampling_params,
+                        request_id=request_id,
+                    ).model_dump_json()
+                )
         output = self._generate_responses(engine_generator, request_type)
 
         async for response in await self._stream_response(
