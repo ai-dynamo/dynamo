@@ -89,102 +89,48 @@ curl -X 'POST' \
 
 ## Deploying to and Running the Example in Kubernetes
 
-There are two ways to deploy the hello world example:
-1. Manually using helm charts
-2. Using the Dynamo cloud Kubernetes platform and the Dynamo deploy CLI.
+This example can be deployed to a Kubernetes cluster using [Dynamo Cloud](../../docs/guides/dynamo_deploy/dynamo_cloud.md) and the Dynamo CLI.
 
-#### Deploying with helm charts
-
-The instructions for deploying the hello world example using helm charts can be found at [Deploying Dynamo Inference Graphs to Kubernetes using Helm](../../docs/guides/dynamo_deploy.md). The guide covers:
-
-1. Setting up a local Kubernetes cluster with MicroK8s
-2. Installing required dependencies like NATS and etcd
-3. Building and containerizing the pipeline
-4. Deploying using Helm charts
-5. Testing the deployment
-
-#### Deploying with the Dynamo cloud platform
-
-This example can be deployed to a Kubernetes cluster using Dynamo cloud and the Dynamo deploy CLI.
-
-##### Prerequisites
-
-Before deploying, ensure you have:
-- Dynamo CLI installed
-- Ubuntu 24.04 as the base image
-- Required dependencies:
-  - Helm package manager
-  - Dynamo SDK and CLI tools
-  - Rust packages and toolchain
+### Prerequisites
 
 You must have first followed the instructions in [deploy/dynamo/helm/README.md](../../deploy/dynamo/helm/README.md) to create your Dynamo cloud deployment.
 
-##### Understanding the Build and Deployment Process
+### Deployment Steps
 
-The deployment process involves two distinct build steps:
-
-1. **Local `dynamo build`**: This step creates a Dynamo service archive that contains:
-   - Your service code and dependencies
-   - Service configuration and metadata
-   - Runtime requirements
-   - The service graph definition
-
-2. **Remote Image Build**: When you create a deployment, a `yatai-dynamonim-image-builder` pod is created in your cluster. This pod:
-   - Takes the Dynamo service archive created in step 1
-   - Containerizes it using the specified base image
-   - Pushes the final container image to your cluster's registry
-
-##### Deployment Steps
-
-1. **Login to Dynamo Cloud**
+For detailed deployment instructions, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md). The following are the specific commands for the hello world example:
 
 ```bash
+# Set your project root directory
 export PROJECT_ROOT=$(pwd)
-export KUBE_NS=hello-world  # Must match your Kubernetes namespace
-export DYNAMO_CLOUD=https://${KUBE_NS}.dev.aire.nvidia.com
-```
 
-The `DYNAMO_CLOUD` environment variable is required for all Dynamo deployment commands. Make sure it's set before running any deployment operations.
+# Configure environment variables (see operator_deployment.md for details)
+export KUBE_NS=hello-world
+export DYNAMO_CLOUD=http://localhost:8080  # If using port-forward
+# OR
+# export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com  # If using Ingress/VirtualService
 
-2. **Build the Dynamo Base Image**
+# Build the Dynamo base image (see operator_deployment.md for details)
+export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
 
-> [!NOTE]
-> For instructions on building and pushing the Dynamo base image, see the [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image) section in the main README.
-
-```bash
-# Set runtime image name
-export DYNAMO_IMAGE=<dynamo_docker_image_name>
-
-# Prepare your project for deployment.
+# Build the service
 cd $PROJECT_ROOT/examples/hello_world
 DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk '{ print $3 }' | sed 's/\.$//')
-```
 
-3. **Deploy to Kubernetes**
-
-```bash
-echo $DYNAMO_TAG
+# Deploy to Kubernetes
 export DEPLOYMENT_NAME=ci-hw
 dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME
 ```
 
-4. **Test the deployment**
+### Testing the Deployment
 
-Once you create the Dynamo deployment, a pod prefixed with `yatai-dynamonim-image-builder` will begin running. Once it finishes running, it will create the pods necessary. Once the pods prefixed with `$HELM_RELEASE` are up and running, you can test out your example!
-
-Find your frontend pod using one of these methods:
+Once the deployment is complete, you can test it using:
 
 ```bash
-# Method 1: List all pods and find the frontend pod manually
-kubectl get pods -n ${KUBE_NS} | grep frontend | cat
-
-# Method 2: Use a label selector to find the frontend pod automatically
+# Find your frontend pod
 export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
 
 # Forward the pod's port to localhost
 kubectl port-forward pod/$FRONTEND_POD 8000:8000 -n ${KUBE_NS}
-
-# Note: We forward directly to the pod's port 8000 rather than the service port because the frontend component listens on port 8000 internally.
 
 # Test the API endpoint
 curl -X 'POST' 'http://localhost:8000/generate' \
@@ -192,6 +138,8 @@ curl -X 'POST' 'http://localhost:8000/generate' \
     -H 'Content-Type: application/json' \
     -d '{"text": "test"}'
 ```
+
+For more details on managing deployments, testing, and troubleshooting, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md).
 
 ## Expected Output
 
