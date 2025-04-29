@@ -182,104 +182,50 @@ See [close deployment](../../docs/guides/dynamo_serve.md#close-deployment) secti
 
 ## Deploy to Kubernetes
 
-These examples can be deployed to a Kubernetes cluster using Dynamo Cloud and the Dynamo deploy CLI.
+These examples can be deployed to a Kubernetes cluster using [Dynamo Cloud](../../docs/guides/dynamo_deploy/dynamo_cloud.md) and the Dynamo CLI.
 
 ### Prerequisites
 
-Before deploying, ensure you have:
-- Dynamo CLI installed
-- Ubuntu 24.04 as the base image
-- Required dependencies:
-  - Helm package manager
-  - Dynamo SDK and CLI tools
-  - Rust packages and toolchain
-
 You must have first followed the instructions in [deploy/dynamo/helm/README.md](../../deploy/dynamo/helm/README.md) to install Dynamo Cloud on your Kubernetes cluster.
 
-**Note**: Note the `KUBE_NS` variable in the following steps must match the Kubernetes namespace where you installed Dynamo Cloud. You must also expose the `dynamo-store` service externally. This will be the endpoint the CLI uses to interface with Dynamo Cloud.
+**Note**: The `KUBE_NS` variable in the following steps must match the Kubernetes namespace where you installed Dynamo Cloud. You must also expose the `dynamo-store` service externally. This will be the endpoint the CLI uses to interface with Dynamo Cloud.
 
 ### Deployment Steps
 
-1. **Configure Environment Variables**
-
-First, set up your environment variables for working with Dynamo Cloud. You have two options for accessing the `dynamo-store` service:
-
-#### Option 1: Using Port-Forward (Local Development)
-This is the simplest approach for local development and testing:
+For detailed deployment instructions, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md). The following are the specific commands for the LLM examples:
 
 ```bash
 # Set your project root directory
 export PROJECT_ROOT=$(pwd)
 
-# Set your Kubernetes namespace (must match the namespace where Dynamo cloud is installed)
+# Configure environment variables (see operator_deployment.md for details)
 export KUBE_NS=dynamo-cloud
+export DYNAMO_CLOUD=http://localhost:8080  # If using port-forward
+# OR
+# export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com  # If using Ingress/VirtualService
 
-# In a separate terminal, run port-forward to expose the dynamo-store service locally
-kubectl port-forward svc/dynamo-store 8080:80 -n $KUBE_NS
-
-# Set DYNAMO_CLOUD to use the local port-forward endpoint
-export DYNAMO_CLOUD=http://localhost:8080
-```
-
-#### Option 2: Using Ingress/VirtualService (Production)
-For production environments, you should use proper ingress configuration:
-
-```bash
-# Set your project root directory
-export PROJECT_ROOT=$(pwd)
-
-# Set your Kubernetes namespace (must match the namespace where Dynamo cloud is installed)
-export KUBE_NS=dynamo-cloud
-
-# Set DYNAMO_CLOUD to your externally accessible endpoint
-# This could be your Ingress hostname or VirtualService URL
-export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com  # Replace with your actual endpoint
-```
-
-> [!NOTE]
-> The `DYNAMO_CLOUD` environment variable is required for all Dynamo deployment commands. Make sure it's set before running any deployment operations.
-
-2. **Build the Dynamo Base Image**
-
-Before building your service, you need to ensure the base image is properly set up:
-
-1. For detailed instructions on building and pushing the Dynamo base image, see the [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image) section in the main README.
-
-2. Export the image from the previous step to your environment.
-```bash
-# Export the image from the previous step to your environment
+# Build the Dynamo base image (see operator_deployment.md for details)
 export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
 
-# Prepare your project for deployment.
+# Build the service
 cd $PROJECT_ROOT/examples/llm
 DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk '{ print $NF }' | sed 's/\.$//')
-```
 
-3. **Deploy to Kubernetes**
-
-```bash
-echo $DYNAMO_TAG
+# Deploy to Kubernetes
 export DEPLOYMENT_NAME=llm-agg
 dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
 ```
 
-4. **Test the deployment**
+### Testing the Deployment
 
-Once you create the Dynamo deployment, a pod prefixed with `yatai-dynamonim-image-builder` will begin running. Once it finishes running, pods will be created using the image that was built. Once the pods prefixed with `$DEPLOYMENT_NAME` are up and running, you can test out your example!
-
-Find your frontend pod using one of these methods:
+Once the deployment is complete, you can test it using:
 
 ```bash
-# Method 1: List all pods and find the frontend pod manually
-kubectl get pods -n ${KUBE_NS} | grep frontend | cat
-
-# Method 2: Use a label selector to find the frontend pod automatically
+# Find your frontend pod
 export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
 
 # Forward the pod's port to localhost
 kubectl port-forward pod/$FRONTEND_POD 8000:8000 -n ${KUBE_NS}
-
-# Note: We forward directly to the pod's port 8000 rather than the service port because the frontend component listens on port 8000 internally.
 
 # Test the API endpoint
 curl localhost:8000/v1/chat/completions \
@@ -296,3 +242,5 @@ curl localhost:8000/v1/chat/completions \
     "max_tokens": 30
   }'
 ```
+
+For more details on managing deployments, testing, and troubleshooting, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md).
