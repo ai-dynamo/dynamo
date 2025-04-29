@@ -42,9 +42,8 @@ from tensorrt_llm.llmapi.disagg_utils import (
 )
 from tensorrt_llm.serve.openai_protocol import DisaggregatedParams
 
-from dynamo.llm import KvMetricsPublisher
-
-from .kv_cache_event_publisher import KVCacheEventPublisher
+from dynamo.llm import KvEventPublisher, KvMetricsPublisher
+from dynamo.sdk import dynamo_context
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +136,19 @@ class BaseTensorrtLLMEngine:
         if self._publish_stats:
             self._kv_metrics_publisher = KvMetricsPublisher()
 
+        if self._publish_events:
+            if self._worker_id is None:
+                raise ValueError("Worker ID is None!")
+
+            runtime = dynamo_context["runtime"]
+            kv_listener = runtime.namespace(self._namespace_str).component(
+                self._component_str
+            )
+            self._kv_event_publisher = KvEventPublisher(
+                kv_listener, int(self._worker_id), self._kv_block_size
+            )
+            logger.info("KvEventPublisher is initialized")
+
         self._engine_config = engine_config
 
     def _init_engine(self):
@@ -170,11 +182,15 @@ class BaseTensorrtLLMEngine:
         try:
             if self._publish_stats:
                 self._init_publish_metrics_thread()
+        except Exception as e:
+            logger.error(f"Failed to initialize publish metrics threads: {e}")
+            raise e
 
+        try:
             if self._publish_events:
                 self._init_publish_kv_cache_events_thread()
         except Exception as e:
-            logger.error(f"Failed to initialize publish metrics threads: {e}")
+            logger.error(f"Failed to initialize publish events threads: {e}")
             raise e
 
     def _init_publish_metrics_thread(self):
@@ -216,20 +232,13 @@ class BaseTensorrtLLMEngine:
         )
 
     def _init_publish_kv_cache_events_thread(self):
-        if self._worker_id is None:
-            logger.error("Worker ID not initialized!")
+        if self._kv_event_publisher is None:
+            logger.error("KV event publisher not initialized!")
             return
 
-        # TODO: Use python bindings to publish kv cache events once they
-        # are available.
-        lib_path = "/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
-        self._kv_cache_events_publisher = KVCacheEventPublisher(
-            self._namespace_str,
-            self._component_str,
-            int(self._worker_id),
-            lib_path,
-            self._kv_block_size,
-        )
+        # A set to store the block hash of partial block (i.e. block containing less than kv_block_size tokens) hashes.
+        # It is used to prevent sending remove event to kv router since partial blocks are not stored.
+        self._partial_block_hashes = set()
 
         # Prepare threads for publishing kv cache events but don't start them yet.
         # TRTLLM needs to start generating tokens first before kv cache events
@@ -295,30 +304,56 @@ class BaseTensorrtLLMEngine:
             return
 
         events = self._llm_engine.get_kv_cache_events_async(timeout=5)
-        async for event_list in events:
-            for event in event_list:
-                data = event["data"]
-                if data["type"] == "stored":
-                    parent_hash = data["parent_hash"]
-                    for block in data["blocks"]:
-                        tokens = []
-                        for token in block["tokens"]:
-                            tokens.append(int(token["token_id"]))
-
-                        # Note: Currently data does not have lora_id.
-                        # Using 0 as default value. If later data has
-                        # lora_id, we need to verify if this is correct.
-                        lora_id = data.get("lora_id", 0)
-                        self._kv_cache_events_publisher.stored_event(
-                            parent_hash,
-                            block["block_hash"],
-                            tokens,
-                            lora_id,
+        async for event in events:
+            event_id = event["event_id"]
+            data = event["data"]
+            if data["type"] == "stored":
+                parent_hash = data["parent_hash"]
+                token_ids = []
+                num_block_tokens = []
+                block_hashes = []
+                for block in data["blocks"]:
+                    token_num_in_block = len(block["tokens"])
+                    block_hash = block["block_hash"]
+                    if token_num_in_block > self._kv_block_size:
+                        logger.error(
+                            f"Block {block_hash} contains {token_num_in_block} tokens, which is greater than kv_block_size {self._kv_block_size}"
                         )
-                        parent_hash = block["block_hash"]
-                elif data["type"] == "removed":
-                    for block_hash in data["block_hashes"]:
-                        self._kv_cache_events_publisher.removed_event(block_hash)
+                        return
+                    if token_num_in_block < self._kv_block_size:
+                        logger.debug(
+                            f"Early stop when block {block_hash} containing {token_num_in_block} tokens not equal to kv_block_size {self._kv_block_size}"
+                        )
+                        self._partial_block_hashes.add(block_hash)
+                        break
+                    num_block_tokens.append(token_num_in_block)
+                    block_hashes.append(block_hash)
+                    for token in block["tokens"]:
+                        token_ids.append(int(token["token_id"]))
+
+                # Note: Currently data does not have lora_id.
+                # Using 0 as default value. If later data has
+                # lora_id, we need to verify if this is correct.
+                lora_id = data.get("lora_id", 0)
+                self._kv_event_publisher.publish_stored(
+                    event_id,
+                    token_ids,
+                    num_block_tokens,
+                    block_hashes,
+                    lora_id,
+                    parent_hash,
+                )
+            elif data["type"] == "removed":
+                block_hashes = []
+                for block_hash in data["block_hashes"]:
+                    if block_hash in self._partial_block_hashes:
+                        logger.debug(
+                            f"Skipping removing block hash {block_hash} since it is a partial block"
+                        )
+                        self._partial_block_hashes.remove(block_hash)
+                        continue
+                    block_hashes.append(block_hash)
+                self._kv_event_publisher.publish_removed(event_id, block_hashes)
         return True
 
     def _start_threads(self):
