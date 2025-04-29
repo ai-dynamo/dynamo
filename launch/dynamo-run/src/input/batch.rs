@@ -225,9 +225,17 @@ async fn evaluate(
     );
     let inner = async_openai::types::CreateChatCompletionRequestArgs::default()
         .messages(vec![user_message])
-        .model(template.as_ref().map_or_else(|| service_name.to_string(), |t| t.model.clone()))
+        .model(
+            template
+                .as_ref()
+                .map_or_else(|| service_name.to_string(), |t| t.model.clone()),
+        )
         .stream(true)
-        .max_completion_tokens(template.as_ref().map_or(MAX_TOKENS, |t| t.max_completion_tokens))
+        .max_completion_tokens(
+            template
+                .as_ref()
+                .map_or(MAX_TOKENS, |t| t.max_completion_tokens),
+        )
         .temperature(template.as_ref().map_or(0.7, |t| t.temperature))
         .build()?;
     let req = NvCreateChatCompletionRequest { inner, nvext: None };

@@ -21,13 +21,13 @@ use dynamo_llm::{
     engines::StreamingEngineAdapter,
     http::service::{discovery, service_v2},
     model_type::ModelType,
+    request_template::RequestTemplate,
     types::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
         },
         openai::completions::{CompletionRequest, CompletionResponse},
     },
-    request_template::RequestTemplate,
 };
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
