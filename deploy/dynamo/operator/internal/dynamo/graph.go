@@ -236,7 +236,9 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		deployment.Spec.DynamoComponent = parentDynamoGraphDeployment.Spec.DynamoGraph
 		deployment.Spec.ServiceName = service.Name
 		labels := make(map[string]string)
+		// add the labels in the spec in order to label all sub-resources
 		deployment.Spec.Labels = labels
+		// and add the labels to the deployment itself
 		deployment.Labels = labels
 		labels[commonconsts.KubeLabelDynamoComponent] = service.Name
 		if service.Config.Dynamo != nil && service.Config.Dynamo.Enabled {
