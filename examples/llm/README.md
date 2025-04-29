@@ -244,8 +244,6 @@ export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com  # Replace with your actual 
 Before building your service, you need to ensure the base image is properly set up:
 
 1. For detailed instructions on building and pushing the Dynamo base image, see the [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image) section in the main README.
-   > [!NOTE]
-   > The Dynamo base image must be pushed to the same registry as the pipelines images configured in the [Dynamo Cloud](../../docs/guides/dynamo_deploy/dynamo_cloud.md) deployment.
 
 2. Export the image from the previous step to your environment.
 ```bash
