@@ -136,24 +136,57 @@ The deployment process involves two distinct build steps:
 
 ##### Deployment Steps
 
-1. **Login to Dynamo Cloud**
+1. **Configure Environment Variables**
+
+First, set up your environment variables for working with Dynamo Cloud. You have two options for accessing the `dynamo-store` service:
+
+###### Option 1: Using Port-Forward (Local Development)
+This is the simplest approach for local development and testing:
 
 ```bash
+# Set your project root directory
 export PROJECT_ROOT=$(pwd)
-export KUBE_NS=hello-world  # Must match your Kubernetes namespace
-export DYNAMO_CLOUD=https://${KUBE_NS}.dev.aire.nvidia.com
+
+# Set your Kubernetes namespace (must match the namespace where Dynamo cloud is installed)
+export KUBE_NS=hello-world
+
+# In a separate terminal, run port-forward to expose the dynamo-store service locally
+kubectl port-forward svc/dynamo-store 8080:80 -n $KUBE_NS
+
+# Set DYNAMO_CLOUD to use the local port-forward endpoint
+export DYNAMO_CLOUD=http://localhost:8080
 ```
 
-The `DYNAMO_CLOUD` environment variable is required for all Dynamo deployment commands. Make sure it's set before running any deployment operations.
+###### Option 2: Using Ingress/VirtualService (Production)
+For production environments, you should use proper ingress configuration:
+
+```bash
+# Set your project root directory
+export PROJECT_ROOT=$(pwd)
+
+# Set your Kubernetes namespace (must match the namespace where Dynamo cloud is installed)
+export KUBE_NS=hello-world
+
+# Set DYNAMO_CLOUD to your externally accessible endpoint
+# This could be your Ingress hostname or VirtualService URL
+export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com  # Replace with your actual endpoint
+```
+
+> [!NOTE]
+> The `DYNAMO_CLOUD` environment variable is required for all Dynamo deployment commands. Make sure it's set before running any deployment operations.
 
 2. **Build the Dynamo Base Image**
 
-> [!NOTE]
-> For instructions on building and pushing the Dynamo base image, see the [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image) section in the main README.
+Before building your service, you need to ensure the base image is properly set up:
 
+1. For detailed instructions on building and pushing the Dynamo base image, see the [Building the Dynamo Base Image](../../../README.md#building-the-dynamo-base-image) section in the main README.
+   > [!NOTE]
+   > The Dynamo base image must be pushed to the same registry as the pipelines images configured in the [Dynamo Cloud](../../docs/guides/dynamo_deploy/dynamo_cloud.md) deployment.
+
+2. Export the image from the previous step to your environment.
 ```bash
-# Set runtime image name
-export DYNAMO_IMAGE=<dynamo_docker_image_name>
+# Export the image from the previous step to your environment
+export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
 
 # Prepare your project for deployment.
 cd $PROJECT_ROOT/examples/hello_world
