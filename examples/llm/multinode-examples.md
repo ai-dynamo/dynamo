@@ -58,6 +58,19 @@ cd $DYNAMO_HOME/examples/llm
 dynamo serve components.prefill_worker:PrefillWorker -f ./configs/multinode-405b.yaml
 ```
 
+**Step 7**: [Optional] Start more decode workers on other nodes
+This example can be extended to more nodes as well. For example, if you'd like to spin up another decode worker, you can use
+```bash
+# node X
+export NATS_SERVER = '<your-nats-server-address>' # note this should start with nats://...
+export ETCD_ENDPOINTS = '<your-etcd-endpoints-address>'
+
+cd $DYNAMO_HOME/examples/llm
+dynamo serve components.worker:VllmWorker -f ./configs/multinode-405b.yaml --service-name VllmWorker
+```
+
+Note the use of `--service-name`. This will only spin up the worker that you are requesting and ignore any `depends` statements.
+
 ### Client
 
 In another terminal:
