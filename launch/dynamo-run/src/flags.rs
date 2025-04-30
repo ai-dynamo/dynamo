@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
+use regex::Regex;
 
 use clap::ValueEnum;
 use dynamo_runtime::pipeline::RouterMode as RuntimeRouterMode;
@@ -206,12 +207,23 @@ impl Flags {
         let mut max_count = 0;
         let mut verbosity_flags_count = 0;
 
+        // Regex to match exactly -v, -vv, -vvv, etc.
+        let valid_verbosity_flag = Regex::new(r"^-v+$").map_err(|e| e.to_string())?;
+        
+        // Regex to detect if an argument consists only of '-' and 'v' characters
+        // but doesn't match the valid pattern
+        let invalid_verbosity_pattern = Regex::new(r"^[-v]+$").map_err(|e| e.to_string())?;
+
         for arg in &args {
-            if arg.starts_with("-v") && arg.chars().all(|c| c == '-' || c == 'v') {
+            if valid_verbosity_flag.is_match(arg) {
+                // Valid verbosity flag
                 verbosity_flags_count += 1;
-                // Count the number of 'v's in the argument for cases like -vvvv
                 let v_count = arg.chars().filter(|&c| c == 'v').count() as u8;
                 max_count = max_count.max(v_count);
+            } else if invalid_verbosity_pattern.is_match(arg) && arg.contains('v') {
+                // Argument consists only of '-' and 'v' characters but doesn't match the valid pattern
+                // Also ensure it contains at least one 'v' to avoid matching just dashes
+                return Err(format!("Invalid verbosity flag format: '{}'. Use -v, -vv, etc.", arg));
             }
         }
 

@@ -66,6 +66,7 @@ async-openai = { version = "0.27.2" }
 clap = { version = "4.5", features = ["derive", "env"] }
 dialoguer = { version = "0.11", default-features = false, features = ["editor", "history"] }
 futures-util = { version = "0.3" }
+regex = { version = "1.11.1" }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 netlink-packet-route = { version = "0.19", optional = true }

@@ -1681,6 +1681,7 @@ dependencies = [
  "hf-hub",
  "humantime",
  "netlink-packet-route",
+ "regex",
  "rtnetlink",
  "serde",
  "serde_json",
