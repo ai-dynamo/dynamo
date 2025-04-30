@@ -18,6 +18,7 @@
 if [[ -z "${HEAD_NODE_IP}" ]]; then
     nats-server -js &
     etcd --advertise-client-urls http://0.0.0.0:2379 --listen-client-urls http://0.0.0.0:2379 &
+    HEAD_NODE_IP=`hostname -i`
 else
     export NATS_SERVER=nats://${HEAD_NODE_IP}:4222
     export ETCD_ENDPOINTS=${HEAD_NODE_IP}:2379
@@ -26,9 +27,9 @@ fi
 # start ray cluster
 if [[ -z "${RAY_LEADER_NODE_IP}" ]]; then
     ray start --head --port=6379 --disable-usage-stats
+    RAY_LEADER_NODE_IP=`hostname -i`
 else
     ray start --address=${RAY_LEADER_NODE_IP}:6379
 fi
 
-export VLLM_HOST_IP=`hostname -i`
-echo `hostname -i`
+echo "HEAD_NODE_IP=${HEAD_NODE_IP} RAY_LEADER_NODE_IP=${RAY_LEADER_NODE_IP=} source ${BASH_SOURCE[0]}"
