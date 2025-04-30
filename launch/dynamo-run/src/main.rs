@@ -36,18 +36,19 @@ const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>
 
 fn main() -> anyhow::Result<()> {
     // Set log level based on verbosity flag
-    let log_level = match dynamo_run::Flags::try_parse() {
-        Ok(flags) => match flags.verbosity {
-            0 => "info",
-            1 => "debug",
-            2 => "trace",
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "Invalid verbosity level. Valid values are v (debug) or vv (trace)"
-                ))
-            }
-        },
-        Err(_) => "info",
+    let verbosity = dynamo_run::Flags::extract_verbosity().unwrap_or_else(|e| {
+        eprintln!("Error extracting verbosity: {}", e);
+        std::process::exit(1);
+    });
+    let log_level = match verbosity {
+        0 => "info",
+        1 => "debug",
+        2 => "trace",
+        _ => {
+            return Err(anyhow::anyhow!(
+                "Invalid verbosity level. Valid values are -v (debug) or -vv (trace)"
+            ))
+        }
     };
 
     if log_level != "info" {
@@ -134,19 +135,15 @@ fn main() -> anyhow::Result<()> {
 async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
     let mut in_opt = None;
     let mut out_opt = None;
-    let args: Vec<String> = env::args().skip(1).collect();
-    if args.is_empty()
-        || args[0] == "-h"
-        || args[0] == "--help"
-        || (args.iter().all(|arg| arg == "-v" || arg == "-vv"))
-    {
+    let args: Vec<String> = dynamo_run::Flags::filtered_args().skip(1).collect();
+    if args.is_empty() || args[0] == "-h" || args[0] == "--help" {
         let engine_list = Output::available_engines().join("|");
         let usage = USAGE.replace("ENGINE_LIST", &engine_list);
         println!("{usage}");
         println!("{HELP}");
         return Ok(());
     }
-    for arg in env::args().skip(1).take(2) {
+    for arg in dynamo_run::Flags::filtered_args().skip(1).take(2) {
         let Some((in_out, val)) = arg.split_once('=') else {
             // Probably we're defaulting in and/or out, and this is a flag
             continue;
@@ -192,7 +189,7 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
     let flags = dynamo_run::Flags::try_parse_from(
         ["dynamo-run".to_string()]
             .into_iter()
-            .chain(env::args().skip(non_flag_params)),
+            .chain(dynamo_run::Flags::filtered_args().skip(non_flag_params)),
     )?;
 
     dynamo_run::run(

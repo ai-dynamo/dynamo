@@ -198,6 +198,42 @@ impl Flags {
             Ok(None)
         }
     }
+
+    /// Extract verbosity level from command line arguments without full parsing
+    /// This is used early in the startup process before we're ready to parse all arguments
+    pub fn extract_verbosity() -> Result<u8, String> {
+        let args: Vec<String> = std::env::args().collect();
+        let mut max_count = 0;
+        let mut verbosity_flags_count = 0;
+
+        for arg in &args {
+            if arg.starts_with("-v") && arg.chars().all(|c| c == '-' || c == 'v') {
+                verbosity_flags_count += 1;
+                // Count the number of 'v's in the argument for cases like -vvvv
+                let v_count = arg.chars().filter(|&c| c == 'v').count() as u8;
+                max_count = max_count.max(v_count);
+            }
+        }
+
+        if verbosity_flags_count > 1 {
+            return Err(
+                "Multiple verbosity flags detected. Please use only one verbosity flag."
+                    .to_string(),
+            );
+        }
+
+        Ok(max_count)
+    }
+
+    /// Returns a filtered version of command line arguments with verbosity flags removed
+    /// Use this instead of std::env::args() when you want to ignore verbosity flags
+    pub fn filtered_args() -> impl Iterator<Item = String> {
+        let args_vec: Vec<String> = std::env::args().collect();
+
+        args_vec.into_iter().filter(move |arg| {
+            !(arg.starts_with("-v") && arg.chars().all(|c| c == '-' || c == 'v'))
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
