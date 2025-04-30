@@ -31,7 +31,7 @@ Router:
 
 TensorRTLLMWorker:
   engine_args: "configs/llm_api_config_disagg_router.yaml"
-  llmapi-disaggregated-config: "configs/llmapi_disagg_configs/single_node_config.yaml"
+  llmapi-disaggregated-config: "configs/llmapi_disagg_router_configs/single_node_config.yaml"
   remote-prefill: true
   min-prefill-workers: 1
   router: kv
@@ -42,7 +42,7 @@ TensorRTLLMWorker:
 
 TensorRTLLMPrefillWorker:
   engine_args: "configs/llm_api_config_disagg_router.yaml"
-  llmapi-disaggregated-config: "configs/llmapi_disagg_configs/single_node_config.yaml"
+  llmapi-disaggregated-config: "configs/llmapi_disagg_router_configs/single_node_config.yaml"
   router: round-robin
   ServiceArgs:
     workers: 1
