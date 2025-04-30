@@ -51,8 +51,8 @@ def find_and_load_service(
         ImportError: If module cannot be imported
         ValueError: If service cannot be found or multiple root services exist
     """
-    logger.info(f"Loading service from import string: {import_str}")
-    logger.info(f"Working directory: {working_dir or os.getcwd()}")
+    logger.debug(f"Loading service from import string: {import_str}")
+    logger.debug(f"Working directory: {working_dir or os.getcwd()}")
 
     sys_path_modified = False
     prev_cwd = None
@@ -60,13 +60,13 @@ def find_and_load_service(
     if working_dir is not None:
         prev_cwd = os.getcwd()
         working_dir = os.path.realpath(os.path.expanduser(working_dir))
-        logger.info(f"Changing working directory to: {working_dir}")
+        logger.debug(f"Changing working directory to: {working_dir}")
         os.chdir(working_dir)
     else:
         working_dir = os.getcwd()
 
     if working_dir not in sys.path:
-        logger.info(f"Adding {working_dir} to sys.path")
+        logger.debug(f"Adding {working_dir} to sys.path")
         sys.path.insert(0, working_dir)
         sys_path_modified = True
 
@@ -74,10 +74,10 @@ def find_and_load_service(
         return _do_import(import_str, working_dir)
     finally:
         if sys_path_modified and working_dir:
-            logger.info(f"Removing {working_dir} from sys.path")
+            logger.debug(f"Removing {working_dir} from sys.path")
             sys.path.remove(working_dir)
         if prev_cwd is not None:
-            logger.info(f"Restoring working directory to: {prev_cwd}")
+            logger.debug(f"Restoring working directory to: {prev_cwd}")
             os.chdir(prev_cwd)
 
 
@@ -85,7 +85,7 @@ def _do_import(import_str: str, working_dir: str) -> DynamoService:
     """Internal function to handle the actual import logic"""
 
     import_path, _, attrs_str = import_str.partition(":")
-    logger.info(f"Parsed import string - path: {import_path}, attributes: {attrs_str}")
+    logger.debug(f"Parsed import string - path: {import_path}, attributes: {attrs_str}")
 
     if not import_path:
         raise ValueError(
@@ -95,7 +95,7 @@ def _do_import(import_str: str, working_dir: str) -> DynamoService:
 
     # Handle file path vs module name imports
     if os.path.isfile(import_path):
-        logger.info(f"Importing from file path: {import_path}")
+        logger.debug(f"Importing from file path: {import_path}")
         import_path = os.path.realpath(import_path)
         if not import_path.startswith(working_dir):
             raise ImportError(
@@ -120,26 +120,26 @@ def _do_import(import_str: str, working_dir: str) -> DynamoService:
             ):
                 break
         module_name = ".".join(module_parts[::-1])
-        logger.info(f"Constructed module name from path: {module_name}")
+        logger.debug(f"Constructed module name from path: {module_name}")
     else:
-        logger.info(f"Importing from module name: {import_path}")
+        logger.debug(f"Importing from module name: {import_path}")
         module_name = import_path
 
     try:
-        logger.info(f"Attempting to import module: {module_name}")
+        logger.debug(f"Attempting to import module: {module_name}")
         module = importlib.import_module(module_name)
     except ImportError as e:
         raise ImportError(f'Failed to import module "{module_name}": {e}')
 
     # If no specific attribute given, find the root service
     if not attrs_str:
-        logger.info("No attributes specified, searching for root service")
+        logger.debug("No attributes specified, searching for root service")
         services = [
             (name, obj)
             for name, obj in module.__dict__.items()
             if isinstance(obj, DynamoService)
         ]
-        logger.info(f"Found {len(services)} DynamoService instances")
+        logger.debug(f"Found {len(services)} DynamoService instances")
 
         if not services:
             raise ValueError(
@@ -154,7 +154,7 @@ def _do_import(import_str: str, working_dir: str) -> DynamoService:
                     dependents.add(dep.on)
 
         root_services = [(n, s) for n, s in services if s not in dependents]
-        logger.info(f"Found {len(root_services)} root services")
+        logger.debug(f"Found {len(root_services)} root services")
 
         if not root_services:
             raise ValueError(
@@ -169,18 +169,18 @@ def _do_import(import_str: str, working_dir: str) -> DynamoService:
             )
 
         _, instance = root_services[0]
-        logger.info(f"Selected root service: {instance}")
+        logger.debug(f"Selected root service: {instance}")
     else:
         # Navigate through dot-separated attributes
-        logger.info(f"Navigating attributes: {attrs_str}")
+        logger.debug(f"Navigating attributes: {attrs_str}")
         instance = module
         for attr in attrs_str.split("."):
             try:
                 if isinstance(instance, DynamoService):
-                    logger.info(f"Following dependency link: {attr}")
+                    logger.debug(f"Following dependency link: {attr}")
                     instance = instance.dependencies[attr].on
                 else:
-                    logger.info(f"Getting attribute: {attr}")
+                    logger.debug(f"Getting attribute: {attr}")
                     instance = getattr(instance, attr)
             except (AttributeError, KeyError):
                 raise ValueError(f'Attribute "{attr}" not found in "{module_name}"')
@@ -193,7 +193,7 @@ def _do_import(import_str: str, working_dir: str) -> DynamoService:
     # Set import string for debugging/logging
     if not hasattr(instance, "_import_str"):
         import_str_val = f"{module_name}:{attrs_str}" if attrs_str else module_name
-        logger.info(f"Setting _import_str to: {import_str_val}")
+        logger.debug(f"Setting _import_str to: {import_str_val}")
         object.__setattr__(instance, "_import_str", import_str_val)
 
     return instance

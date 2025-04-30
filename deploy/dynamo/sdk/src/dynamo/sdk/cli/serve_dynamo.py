@@ -22,8 +22,6 @@ import inspect
 import json
 import logging
 import os
-import signal
-import sys
 import time
 import typing as t
 from typing import Any
@@ -91,19 +89,6 @@ class GracefulExit(SystemExit):
     pass
 
 
-def setup_signal_handlers():
-    """Setup signal handlers for graceful shutdown."""
-
-    def signal_handler(sig, frame):
-        logger.info(f"Received signal {sig}, initiating graceful shutdown")
-        raise GracefulExit(0)
-
-    # Register SIGINT and SIGTERM handlers
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGQUIT, signal_handler)
-
-
 @click.command()
 @click.argument("bento_identifier", type=click.STRING, required=False, default=".")
 @click.option("--service-name", type=click.STRING, required=False, default="")
@@ -148,9 +133,6 @@ def main(
 
     from dynamo.runtime.logging import configure_dynamo_logging
 
-    # Setup signal handlers for graceful shutdown
-    setup_signal_handlers()
-
     run_id = service_name
     dynamo_context["service_name"] = service_name
     dynamo_context["runner_map"] = runner_map
@@ -158,15 +140,9 @@ def main(
 
     # Ensure environment variables are set before we initialize
     if worker_env:
-        env_list: list[dict[str, t.Any]] = json.loads(worker_env)
-        if worker_id is not None:
-            worker_key = worker_id - 1
-            if worker_key >= len(env_list):
-                raise IndexError(
-                    f"Worker ID {worker_id} is out of range, "
-                    f"the maximum worker ID is {len(env_list)}"
-                )
-            os.environ.update(env_list[worker_key])
+        logger.debug(f"Setting environment variables for {run_id}: {worker_env}")
+        env_dict = json.loads(worker_env)
+        os.environ.update(env_dict)
 
     service = import_service(bento_identifier)
     if service_name and service_name != service.name:
@@ -291,10 +267,6 @@ def main(
                 if class_instance.__class__.__name__ == "PrefillWorker":
                     await asyncio.wait_for(class_instance.task, timeout=None)
 
-            except GracefulExit:
-                logger.info(f"[{run_id}] Gracefully shutting down {service.name}")
-                # Add any specific cleanup needed
-                return None
             except Exception as e:
                 logger.error(f"Error in Dynamo component setup: {str(e)}")
                 raise
@@ -340,26 +312,12 @@ def main(
                 logger.error(f"Error in web worker: {str(e)}")
                 raise
 
-        try:
-            uvloop.install()
-            if service.app:
-                web_worker()
-            else:
-                asyncio.run(worker())
-        except GracefulExit:
-            logger.info("Exiting gracefully")
-            sys.exit(0)
-        except KeyboardInterrupt:
-            logger.info("Interrupted, shutting down gracefully")
-            sys.exit(0)
+        uvloop.install()
+        if service.app:
+            web_worker()
+        else:
+            asyncio.run(worker())
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except (GracefulExit, KeyboardInterrupt):
-        logger.info("Exiting gracefully")
-        sys.exit(0)
-    except Exception as e:
-        logger.error(f"Error in main: {str(e)}")
-        sys.exit(1)
+    main()

@@ -35,7 +35,6 @@ from simple_di import inject
 from dynamo.sdk.cli.circus import CircusRunner
 
 from .allocator import NVIDIA_GPU, ResourceAllocator
-from .circus import _get_server_socket
 from .utils import (
     DYN_LOCAL_STATE_DIR,
     ServiceProtocol,
@@ -68,59 +67,95 @@ def _get_dynamo_worker_script(bento_identifier: str, svc_name: str) -> list[str]
     return args
 
 
+def extract_gpu_ids(gpu_resources: dict[str, Any]) -> list[str]:
+    """Extract GPU IDs from resource dict containing CUDA_VISIBLE_DEVICES.
+
+    Args:
+        gpu_resources: Dict containing CUDA_VISIBLE_DEVICES key
+
+    Returns:
+        List of GPU IDs as strings
+    """
+    if not gpu_resources or "CUDA_VISIBLE_DEVICES" not in gpu_resources:
+        return []
+
+    gpu_str = gpu_resources["CUDA_VISIBLE_DEVICES"]
+    return gpu_str.split(",")
+
+
 def create_dynamo_watcher(
     bento_identifier: str,
     svc: ServiceProtocol,
     uds_path: str,
     scheduler: ResourceAllocator,
+    component_resources: Dict[str, Any],
     working_dir: Optional[str] = None,
     env: Optional[Dict[str, str]] = None,
-) -> tuple[Watcher, CircusSocket, str]:
+) -> tuple[list[Watcher], list[CircusSocket], dict[str, str]]:
     """Create a watcher for a Dynamo service in the dependency graph"""
+    from .circus import _get_server_socket
     from dynamo.sdk.cli.circus import create_circus_watcher
 
     num_workers, resource_envs = scheduler.get_resource_envs(svc)
-    uri, socket = _get_server_socket(svc, uds_path)
-    args = _get_dynamo_worker_script(bento_identifier, svc.name)
-    if resource_envs:
-        args.extend(["--worker-env", json.dumps(resource_envs)])
+    namespace, comp_name = svc.dynamo_address()
 
-    # Update env to include ServiceConfig and service-specific environment variables
-    worker_env = env.copy() if env else {}
+    watchers = []
+    sockets = []
+    worker_uris = {}
 
-    # Pass through the main service config
-    if "DYNAMO_SERVICE_CONFIG" in os.environ:
-        worker_env["DYNAMO_SERVICE_CONFIG"] = os.environ["DYNAMO_SERVICE_CONFIG"]
+    if num_workers > 0 and not resource_envs:
+        resource_envs = [{} for _ in range(num_workers)]
 
-    # Get service-specific environment variables from DYNAMO_SERVICE_ENVS
-    if "DYNAMO_SERVICE_ENVS" in os.environ:
-        try:
-            service_envs = json.loads(os.environ["DYNAMO_SERVICE_ENVS"])
-            if svc.name in service_envs:
-                service_args = service_envs[svc.name].get("ServiceArgs", {})
-                if "envs" in service_args:
-                    worker_env.update(service_args["envs"])
-                    logger.info(
-                        f"Added service-specific environment variables for {svc.name}"
-                    )
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse DYNAMO_SERVICE_ENVS: {e}")
+    # create singleton watcher per worker
+    for worker_idx in range(num_workers):
+        uri, socket = _get_server_socket(svc, uds_path, worker_idx)
+        sockets.append(socket)
 
-    # use namespace from the service
-    namespace, _ = svc.dynamo_address()
+        watcher_name = f"{namespace}_{comp_name}_{worker_idx}"
+        worker_env_dict = resource_envs[worker_idx] if resource_envs else {}
 
-    # Create the watcher with updated environment
-    watcher = create_circus_watcher(
-        name=f"{namespace}_{svc.name}",
-        args=args,
-        numprocesses=num_workers,
-        working_dir=working_dir,
-        env=worker_env,
-    )
+        # store a mapping of watcher_name: gpu_resources
+        component_resources[watcher_name] = worker_env_dict
 
-    logger.info(f"Created watcher for {svc.name}'s in the {namespace} namespace")
+        args = _get_dynamo_worker_script(bento_identifier, svc.name)
+        args.extend(["--custom-component-name", watcher_name])
+        args.extend(["--worker-env", json.dumps(worker_env_dict)])
+        watcher_env = env.copy() if env else {}
 
-    return watcher, socket, uri
+        # Pass through the main service config
+        if "DYNAMO_SERVICE_CONFIG" in os.environ:
+            watcher_env["DYNAMO_SERVICE_CONFIG"] = os.environ["DYNAMO_SERVICE_CONFIG"]
+
+        # Get service-specific environment variables from DYNAMO_SERVICE_ENVS
+        if "DYNAMO_SERVICE_ENVS" in os.environ:
+            try:
+                service_envs = json.loads(os.environ["DYNAMO_SERVICE_ENVS"])
+                if svc.name in service_envs:
+                    service_args = service_envs[svc.name].get("ServiceArgs", {})
+                    if "envs" in service_args:
+                        watcher_env.update(service_args["envs"])
+                        logger.info(
+                            f"Added service-specific environment variables for {svc.name}"
+                        )
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse DYNAMO_SERVICE_ENVS: {e}")
+
+        # watcher
+        watcher = create_circus_watcher(
+            name=watcher_name,
+            args=args,
+            singleton=True,
+            working_dir=working_dir,
+            env=watcher_env,
+        )
+        watchers.append(watcher)
+        worker_uris[watcher_name] = uri
+
+        logger.info(
+            f"Created watcher {watcher_name} for worker {worker_idx} of service {svc.name}"
+        )
+
+    return watchers, sockets, worker_uris
 
 
 @inject(squeeze_none=True)
@@ -132,7 +167,7 @@ def serve_dynamo_graph(
     enable_local_planner: bool = False,
 ) -> CircusRunner:
     from dynamo.runtime.logging import configure_dynamo_logging
-    from dynamo.sdk.cli.circus import create_arbiter, create_circus_watcher
+    from dynamo.sdk.cli.circus import create_arbiter
     from dynamo.sdk.lib.loader import find_and_load_service
 
     from .allocator import ResourceAllocator
@@ -142,6 +177,7 @@ def serve_dynamo_graph(
     bento_id: str = ""
     namespace: str = ""
     env: dict[str, Any] = {}
+    component_resources: dict[str, Any] = {}
     if isinstance(bento_identifier, Service):
         svc = bento_identifier
         bento_id = svc.import_string
@@ -161,92 +197,54 @@ def serve_dynamo_graph(
     if dependency_map is None:
         dependency_map = {}
 
-    # TODO: Only for testing, this will prevent any other dep services from getting started, relying entirely on configured deps in the runner-map
-    standalone = False
-    if service_name:
-        logger.info(f"Service '{service_name}' running in standalone mode")
-        standalone = True
-
     if service_name and service_name != svc.name:
         svc = svc.find_dependent_by_name(service_name)
-    num_workers, resource_envs = allocator.get_resource_envs(svc)
     uds_path = tempfile.mkdtemp(prefix="dynamo-uds-")
     try:
-        if not service_name and not standalone:
-            with contextlib.ExitStack() as port_stack:
-                for name, dep_svc in svc.all_services().items():
-                    if name == svc.name:
-                        continue
-                    if name in dependency_map:
-                        continue
-                    if not (
-                        hasattr(dep_svc, "is_dynamo_component")
-                        and dep_svc.is_dynamo_component()
-                    ):
-                        raise RuntimeError(
-                            f"Service {dep_svc.name} is not a Dynamo component"
-                        )
-                    new_watcher, new_socket, uri = create_dynamo_watcher(
-                        bento_id,
-                        dep_svc,
-                        uds_path,
-                        allocator,
-                        str(bento_path.absolute()),
-                        env=env,
-                    )
-                    namespace, _ = dep_svc.dynamo_address()
-                    watchers.append(new_watcher)
-                    sockets.append(new_socket)
-                    dependency_map[name] = uri
-                # reserve one more to avoid conflicts
-                port_stack.enter_context(reserve_free_port())
+        with contextlib.ExitStack() as port_stack:
+            services_to_process = {}
+            if service_name:
+                logger.info(f"Service '{service_name}' running in standalone mode")
+                services_to_process[service_name] = svc
+            else:
+                services_to_process = svc.all_services()
 
-        dynamo_args = [
-            "-m",
-            _DYNAMO_WORKER_SCRIPT,
-            bento_identifier,
-            "--service-name",
-            svc.name,
-            "--worker-id",
-            "$(CIRCUS.WID)",
-        ]
+            for name, service_to_run in services_to_process.items():
+                if name in dependency_map:
+                    continue
 
-        if hasattr(svc, "is_dynamo_component") and svc.is_dynamo_component():
-            # resource_envs is the resource allocation (ie CUDA_VISIBLE_DEVICES) for each worker created by the allocator
-            # these resource_envs are passed to each individual worker's environment which is set in serve_dynamo
-            if resource_envs:
-                dynamo_args.extend(["--worker-env", json.dumps(resource_envs)])
-            # env is the base bentoml environment variables. We make a copy and update it to add any service configurations and additional env vars
-            worker_env = env.copy() if env else {}
+                if not (
+                    hasattr(service_to_run, "is_dynamo_component")
+                    and service_to_run.is_dynamo_component()
+                ):
+                    continue
 
-            # Pass through the main service config
-            if "DYNAMO_SERVICE_CONFIG" in os.environ:
-                worker_env["DYNAMO_SERVICE_CONFIG"] = os.environ[
-                    "DYNAMO_SERVICE_CONFIG"
-                ]
+                (
+                    service_watchers,
+                    service_sockets,
+                    service_uris,
+                ) = create_dynamo_watcher(
+                    bento_id,
+                    service_to_run,
+                    uds_path,
+                    allocator,
+                    component_resources,
+                    str(bento_path.absolute()),
+                    env=env,
+                )
+                namespace, _ = service_to_run.dynamo_address()
 
-            # Get service-specific environment variables from DYNAMO_SERVICE_ENVS
-            if "DYNAMO_SERVICE_ENVS" in os.environ:
-                try:
-                    service_envs = json.loads(os.environ["DYNAMO_SERVICE_ENVS"])
-                    if svc.name in service_envs:
-                        service_args = service_envs[svc.name].get("ServiceArgs", {})
-                        if "envs" in service_args:
-                            worker_env.update(service_args["envs"])
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse DYNAMO_SERVICE_ENVS: {e}")
+                watchers.extend(service_watchers)
+                sockets.extend(service_sockets)
 
-            watcher = create_circus_watcher(
-                name=f"{namespace}_{svc.name}",
-                args=dynamo_args,
-                numprocesses=num_workers,
-                working_dir=str(bento_path.absolute()),
-                env=worker_env,
-            )
-            watchers.append(watcher)
-            logger.info(
-                f"Created watcher for {svc.name} with {num_workers} workers in the {namespace} namespace"
-            )
+                # Store the primary URI for service discovery
+                if service_uris:
+                    primary_uri = next(iter(service_uris.values()))
+                    dependency_map[name] = primary_uri
+                    dependency_map[f"{name}_workers"] = json.dumps(service_uris)
+
+            # reserve one more to avoid conflicts
+            port_stack.enter_context(reserve_free_port())
 
         # inject runner map now
         inject_env = {"BENTOML_RUNNER_MAP": json.dumps(dependency_map)}
@@ -279,7 +277,6 @@ def serve_dynamo_graph(
                 raise ValueError("No namespace found for service")
 
             # Track GPU allocation for each component
-            component_resources = {}
             logger.info(f"Building component resources for {len(watchers)} watchers")
 
             for watcher in watchers:
@@ -294,20 +291,14 @@ def serve_dynamo_graph(
                 if component_name.startswith(f"{namespace}"):
                     service_name = component_name.replace(f"{namespace}_", "", 1)
 
-                # Get GPU allocation from ResourceAllocator
-                if (
-                    not worker_gpu_info
-                    and hasattr(allocator, "_service_gpu_allocations")
-                    and service_name
-                ):
-                    gpu_allocations = getattr(allocator, "_service_gpu_allocations", {})
-                    if service_name in gpu_allocations:
-                        logger.info(
-                            f"Found GPU allocation for {service_name} in ResourceAllocator: {gpu_allocations[service_name]}"
-                        )
-                        worker_gpu_info["allocated_gpus"] = gpu_allocations[
-                            service_name
-                        ]
+                # Extract the CUDA_VISIBLE_DEVICES from the key of component_resources
+                if component_name in component_resources:
+                    worker_gpu_info["allocated_gpus"] = extract_gpu_ids(
+                        component_resources[component_name]
+                    )
+                    worker_gpu_info["required_gpus"] = len(
+                        worker_gpu_info["allocated_gpus"]
+                    )
 
                 # Store final worker GPU info
                 component_resources[component_name] = worker_gpu_info
