@@ -23,6 +23,7 @@ from typing import AsyncIterator
 from components.worker import VllmWorker
 from utils.logging import check_required_workers
 from utils.protocol import Tokens
+from utils.vllm import RouterType
 
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
@@ -59,6 +60,12 @@ def parse_args(service_name, prefix) -> Namespace:
         type=bool,
         default=False,
         help="Whether to use custom router or not",
+    )
+    parser.add_argument(
+        "--router",
+        type=str,
+        default="kv",
+        help="The router type",
     )
     config = ServiceConfig.get_instance()
     config_args = config.as_args(service_name, prefix=prefix)
@@ -100,6 +107,8 @@ class Router:
             .endpoint("generate")
             .client()
         )
+
+        self.router_type = self.args.router
 
         await check_required_workers(self.workers_client, self.args.min_workers)
 
@@ -213,6 +222,28 @@ class Router:
 
     @dynamo_endpoint()
     async def generate(self, request: Tokens) -> AsyncIterator[WorkerId]:
+        # Quick return for KV_LOAD mode
+        if self.router_type == RouterType.KV_LOAD:
+            try:
+                metrics = await self.metrics_aggregator.get_metrics()
+                kv_load = {
+                    endpoint.worker_id: getattr(endpoint, "gpu_cache_usage_perc", 0.0)
+                    for endpoint in metrics.endpoints
+                }
+
+                if kv_load:
+                    best_worker_id = min(kv_load, key=kv_load.get)
+                    logger.info(
+                        f"KV_LOAD routing to worker {best_worker_id} (kv load: {kv_load})"
+                    )
+                    yield f"{best_worker_id}_0.0"
+                    return
+            except Exception as e:
+                logger.info(
+                    f"Error finding worker with least kv load: {e}, fallback to KV routing"
+                )
+
+        # Existing KV routing logic
         lora_id = 0
         try:
             scores = await self.indexer.find_matches_for_request(

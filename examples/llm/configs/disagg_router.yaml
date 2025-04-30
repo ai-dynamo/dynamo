@@ -29,7 +29,7 @@ Processor:
 
 Router:
   min-workers: 1
-  common-configs: [model]
+  common-configs: [model, router]
 
 VllmWorker:
   max-num-batched-tokens: 16384
