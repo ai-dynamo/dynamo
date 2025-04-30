@@ -242,7 +242,7 @@ class Router:
                 yield f"{best_worker_id}_0.0"
                 return
             except Exception as e:
-                logger.info(
+                logger.exception(
                     f"Error finding worker with least kv load: {e}, fallback to KV routing"
                 )
 
