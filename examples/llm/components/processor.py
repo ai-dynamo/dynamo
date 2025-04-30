@@ -69,7 +69,7 @@ class Processor(ProcessMixIn):
             self.tokenizer, self.model_config
         )
         self.min_workers = 1
-        self.request_queue = asyncio.Queue()
+        self.request_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
         self.request_futures: Dict[str, asyncio.Future] = {}
         self.num_worker_tasks = (
             self.engine_args.router_num_threads
@@ -194,7 +194,7 @@ class Processor(ProcessMixIn):
         logger.debug(f"Got raw request: {raw_request}")
 
         # Create a future for this request
-        future = asyncio.Future()
+        future: asyncio.Future[AsyncIterator[Any]] = asyncio.Future()
         self.request_futures[request_id] = future
 
         # Enqueue the request with minimal processing
