@@ -114,7 +114,8 @@ class Router:
 
         kv_listener = self.runtime.namespace("dynamo").component("VllmWorker")
         await kv_listener.create_service()
-        self.indexer = KvIndexer(kv_listener, self.args.block_size)
+        if self.router_type == RouterType.KV:
+            self.indexer = KvIndexer(kv_listener, self.args.block_size)
         self.metrics_aggregator = KvMetricsAggregator(kv_listener)
         logger.info("KV Router initialized")
 
