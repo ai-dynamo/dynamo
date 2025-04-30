@@ -63,7 +63,40 @@ RUN apt-get update -y && \
     # Install utilities
     nvtop \
     tmux \
-    vim
+    vim \
+    autoconf \
+    libtool
+
+WORKDIR /workspace
+
+### UCX EFA Setup ###
+RUN rm -rf /opt/hpcx/ucx
+RUN cd /usr/local/src && \
+    git clone https://github.com/openucx/ucx.git && \
+    cd ucx && \
+    ./autogen.sh && ./configure \
+    --prefix=/opt/hpcx/ucx      \
+    --enable-shared             \
+    --disable-static            \
+    --disable-doxygen-doc       \
+    --enable-optimizations      \
+    --enable-cma                \
+    --enable-devel-headers      \
+    --with-cuda=/usr/local/cuda \
+    --with-verbs                \
+    --with-efa			\
+    --with-dm                   \
+    --with-gdrcopy=/usr/local   \
+    --enable-mt &&           	\
+    make -j &&                  \
+    make -j install-strip &&    \
+    ldconfig
+
+ENV LD_LIBRARY_PATH=/usr/lib:/opt/hpcx/ucx:/usr/local/cuda/compat/lib.real:$LD_LIBRARY_PATH
+ENV CPATH=/usr/include:$CPATH
+ENV PATH=/usr/bin:$PATH
+ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
+SHELL ["/bin/bash", "-c"]
 
 WORKDIR /workspace
 
@@ -99,9 +132,9 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # Install NIXL Python module
 # TODO: Move gds_path selection based on arch into NIXL build
 RUN if [ "$ARCH" = "arm64" ]; then \
-        cd /opt/nixl && uv pip install . --config-settings=setup-args="-Dgds_path=/usr/local/cuda/targets/sbsa-linux/"; \
+        cd /opt/nixl && uv pip install . --config-settings=setup-args="-Ducx_path=/opt/hpcx/ucx -Dgds_path=/usr/local/cuda/targets/sbsa-linux/"; \
     else \
-        cd /opt/nixl && uv pip install . ; \
+        cd /opt/nixl && uv pip install . --config-settings=setup-args="-Ducx_path=/opt/hpcx/ucx"; \
     fi
 
 # Install patched vllm - keep this early in Dockerfile to avoid
