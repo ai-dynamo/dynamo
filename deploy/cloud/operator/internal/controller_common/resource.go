@@ -19,15 +19,20 @@ package controller_common
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/json"
 	"fmt"
-	"sort"
+	"reflect"
 
+	"github.com/cisco-open/k8s-objectmatcher/patch"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -35,191 +40,198 @@ const (
 	NvidiaAnnotationHashKey = "nvidia.com/last-applied-hash"
 )
 
-type Resource interface {
-	client.Object
-	GetSpec() any
-	SetSpec(spec any)
-}
-
-func SyncResource[T Resource](ctx context.Context, c client.Client, desired T, createOnly bool) (T, error) {
-	// Retrieve the GroupVersionKind (GVK) of the desired object
-	gvk, err := apiutil.GVKForObject(desired, c.Scheme())
-	if err != nil {
-		return desired, fmt.Errorf("failed to get GVK for object: %w", err)
-	}
-
-	// Create a new instance of the object
-	obj, err := c.Scheme().New(gvk)
-	if err != nil {
-		return desired, fmt.Errorf("failed to create a new object for GVK %s: %w", gvk, err)
-	}
-
-	// Type assertion to ensure the object implements client.Object
-	current, ok := obj.(T)
-	if !ok {
-		return desired, fmt.Errorf("failed to cast object to the expected type %T", desired)
-	}
-	namespacedName := types.NamespacedName{
-		Name:      desired.GetName(),
-		Namespace: desired.GetNamespace(),
-	}
-
-	// Retrieve the existing resource
-	err = c.Get(ctx, namespacedName, current)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			// If the resource doesn't exist, create it
-			if err := c.Create(ctx, desired); err != nil {
-				return desired, fmt.Errorf("failed to create resource: %w", err)
-			}
-			return desired, nil
-		}
-		return desired, fmt.Errorf("failed to get resource: %w", err)
-	}
-
-	if createOnly {
-		return current, nil
-	}
-
-	// Check if the Spec has changed and update if necessary
-	if IsSpecChanged(current, desired) {
-		// update the spec of the current object with the desired spec
-		desired.SetResourceVersion(current.GetResourceVersion())
-		if err := c.Update(ctx, desired); err != nil {
-			return desired, fmt.Errorf("failed to update resource: %w", err)
-		}
-	}
-
-	// Return the updated object
-	return current, nil
-}
-
-// GetResourceHash returns a consistent hash for the given object spec
-func GetResourceHash(obj any) string {
-	// Convert obj to a map[string]interface{}
-	objMap, err := json.Marshal(obj)
-	if err != nil {
-		panic(err)
-	}
-
-	var objData map[string]interface{}
-	if err := json.Unmarshal(objMap, &objData); err != nil {
-		panic(err)
-	}
-
-	// Sort keys to ensure consistent serialization
-	sortedObjData := SortKeys(objData)
-
-	// Serialize to JSON
-	serialized, err := json.Marshal(sortedObjData)
-	if err != nil {
-		panic(err)
-	}
-
-	// Compute the hash
-	hasher := sha256.New()
-	hasher.Write(serialized)
-	return fmt.Sprintf("%x", hasher.Sum(nil))
-}
+var (
+	annotator  = patch.NewAnnotator(NvidiaAnnotationHashKey)
+	patchMaker = patch.NewPatchMaker(annotator, &patch.K8sStrategicMergePatcher{}, &patch.BaseJSONMergePatcher{})
+)
 
 // IsSpecChanged returns true if the spec has changed between the existing one
 // and the new resource spec compared by hash.
-func IsSpecChanged(current Resource, desired Resource) bool {
+func IsSpecChanged(current client.Object, desired client.Object) (bool, error) {
 	if current == nil && desired != nil {
-		return true
+		return true, nil
 	}
 
-	hashStr := GetResourceHash(desired.GetSpec())
-	foundHashAnnotation := false
-
-	currentAnnotations := current.GetAnnotations()
-	desiredAnnotations := desired.GetAnnotations()
-
-	if currentAnnotations == nil {
-		currentAnnotations = map[string]string{}
+	var patchResult *patch.PatchResult
+	opts := []patch.CalculateOption{
+		patch.IgnoreStatusFields(),
+		patch.IgnoreField("metadata"),
 	}
-	if desiredAnnotations == nil {
-		desiredAnnotations = map[string]string{}
+	patchResult, err := patchMaker.Calculate(current, desired, opts...)
+	if err != nil {
+		return false, fmt.Errorf("failed to calculate patch: %w", err)
 	}
 
-	for annotation, value := range currentAnnotations {
-		if annotation == NvidiaAnnotationHashKey {
-			if value != hashStr {
-				// Update annotation to be added to resource as per new spec and indicate spec update is required
-				desiredAnnotations[NvidiaAnnotationHashKey] = hashStr
-				desired.SetAnnotations(desiredAnnotations)
-				return true
-			}
-			foundHashAnnotation = true
-			break
+	if !patchResult.IsEmpty() {
+		err = annotator.SetLastAppliedAnnotation(desired)
+		if err != nil {
+			return false, fmt.Errorf("failed to set last applied annotation for resource %s: %w", desired.GetName(), err)
 		}
+		return true, nil
 	}
-
-	if !foundHashAnnotation {
-		// Update annotation to be added to resource as per new spec and indicate spec update is required
-		desiredAnnotations[NvidiaAnnotationHashKey] = hashStr
-		desired.SetAnnotations(desiredAnnotations)
-		return true
-	}
-
-	return false
+	return false, nil
 }
 
-// SortKeys recursively sorts the keys of a map to ensure consistent serialization
-func SortKeys(obj interface{}) interface{} {
-	switch obj := obj.(type) {
-	case map[string]interface{}:
-		sortedMap := make(map[string]interface{})
-		keys := make([]string, 0, len(obj))
-		for k := range obj {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			sortedMap[k] = SortKeys(obj[k])
-		}
-		return sortedMap
-	case []interface{}:
-		// Check if the slice contains maps and sort them by the "name" field or the first available field
-		if len(obj) > 0 {
-
-			if _, ok := obj[0].(map[string]interface{}); ok {
-				sort.SliceStable(obj, func(i, j int) bool {
-					iMap, iOk := obj[i].(map[string]interface{})
-					jMap, jOk := obj[j].(map[string]interface{})
-					if iOk && jOk {
-						// Try to sort by "name" if present
-						iName, iNameOk := iMap["name"].(string)
-						jName, jNameOk := jMap["name"].(string)
-						if iNameOk && jNameOk {
-							return iName < jName
-						}
-
-						// If "name" is not available, sort by the first key in each map
-						if len(iMap) > 0 && len(jMap) > 0 {
-							iFirstKey := firstKey(iMap)
-							jFirstKey := firstKey(jMap)
-							return iFirstKey < jFirstKey
-						}
-					}
-					// If no valid comparison is possible, maintain the original order
-					return false
-				})
-			}
-		}
-		for i, v := range obj {
-			obj[i] = SortKeys(v)
-		}
-	}
-	return obj
+type Reconciler interface {
+	client.Client
+	GetRecorder() record.EventRecorder
 }
 
-// Helper function to get the first key of a map (alphabetically sorted)
-func firstKey(m map[string]interface{}) string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
+//nolint:nakedret
+func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentResource client.Object, generateResource func(ctx context.Context) (T, bool, error)) (modified bool, res T, err error) {
+	logs := log.FromContext(ctx)
+
+	resource, toDelete, err := generateResource(ctx)
+	if err != nil {
+		return
 	}
-	sort.Strings(keys)
-	return keys[0]
+	resourceNamespace := resource.GetNamespace()
+	resourceName := resource.GetName()
+	resourceType := reflect.TypeOf(resource).Elem().Name()
+	logs = logs.WithValues("namespace", resourceNamespace, "resourceName", resourceName, "resourceType", resourceType)
+
+	// Retrieve the GroupVersionKind (GVK) of the desired object
+	gvk, err := apiutil.GVKForObject(resource, r.Scheme())
+	if err != nil {
+		logs.Error(err, "Failed to get GVK for object")
+		return
+	}
+
+	// Create a new instance of the object
+	obj, err := r.Scheme().New(gvk)
+	if err != nil {
+		logs.Error(err, "Failed to create a new object for GVK")
+		return
+	}
+
+	// Type assertion to ensure the object implements client.Object
+	oldResource, ok := obj.(T)
+	if !ok {
+		return
+	}
+
+	err = r.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: resourceNamespace}, oldResource)
+	oldResourceIsNotFound := errors.IsNotFound(err)
+	if err != nil && !oldResourceIsNotFound {
+		r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("Get%s", resourceType), "Failed to get %s %s: %s", resourceType, resourceNamespace, err)
+		logs.Error(err, "Failed to get resource.")
+		return
+	}
+	err = nil
+
+	if oldResourceIsNotFound {
+		if toDelete {
+			logs.Info("Resource not found. Nothing to do.")
+			return
+		}
+		logs.Info("Resource not found. Creating a new one.")
+
+		err = annotator.SetLastAppliedAnnotation(resource)
+		if err != nil {
+			logs.Error(err, "Failed to set last applied annotation.")
+			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for %s %s: %s", resourceType, resourceNamespace, err)
+			return
+		}
+
+		err = ctrl.SetControllerReference(parentResource, resource, r.Scheme())
+		if err != nil {
+			logs.Error(err, "Failed to set controller reference.")
+			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, "SetControllerReference", "Failed to set controller reference for %s %s: %s", resourceType, resourceNamespace, err)
+			return
+		}
+
+		r.GetRecorder().Eventf(parentResource, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Creating a new %s %s", resourceType, resourceNamespace)
+		err = r.Create(ctx, resource)
+		if err != nil {
+			logs.Error(err, "Failed to create Resource.")
+			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("Create%s", resourceType), "Failed to create %s %s: %s", resourceType, resourceNamespace, err)
+			return
+		}
+		logs.Info(fmt.Sprintf("%s created.", resourceType))
+		r.GetRecorder().Eventf(parentResource, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Created %s %s", resourceType, resourceNamespace)
+		modified = true
+		res = resource
+	} else {
+		logs.Info(fmt.Sprintf("%s found.", resourceType))
+		if toDelete {
+			logs.Info(fmt.Sprintf("%s not found. Deleting the existing one.", resourceType))
+			err = r.Delete(ctx, oldResource)
+			if err != nil {
+				logs.Error(err, fmt.Sprintf("Failed to delete %s.", resourceType))
+				r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("Delete%s", resourceType), "Failed to delete %s %s: %s", resourceType, resourceNamespace, err)
+				return
+			}
+			logs.Info(fmt.Sprintf("%s deleted.", resourceType))
+			r.GetRecorder().Eventf(parentResource, corev1.EventTypeNormal, fmt.Sprintf("Delete%s", resourceType), "Deleted %s %s", resourceType, resourceNamespace)
+			modified = true
+			return
+		}
+
+		// Check if the Spec has changed and update if necessary
+		var changed bool
+		changed, err = IsSpecChanged(oldResource, resource)
+		if err != nil {
+			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("CalculatePatch%s", resourceType), "Failed to calculate patch for %s %s: %s", resourceType, resourceNamespace, err)
+			return false, resource, fmt.Errorf("failed to check if spec has changed: %w", err)
+		}
+		if changed {
+			// update the spec of the current object with the desired spec
+			err = CopySpec(resource, oldResource)
+			if err != nil {
+				logs.Error(err, fmt.Sprintf("Failed to copy spec for %s.", resourceType))
+				r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("CopySpec%s", resourceType), "Failed to copy spec for %s %s: %s", resourceType, resourceNamespace, err)
+				return
+			}
+			err = r.Update(ctx, oldResource)
+			if err != nil {
+				logs.Error(err, fmt.Sprintf("Failed to update %s.", resourceType))
+				r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("Update%s", resourceType), "Failed to update %s %s: %s", resourceType, resourceNamespace, err)
+				return
+			}
+			logs.Info(fmt.Sprintf("%s updated.", resourceType))
+			r.GetRecorder().Eventf(parentResource, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Updated %s %s", resourceType, resourceNamespace)
+			modified = true
+			res = oldResource
+		} else {
+			logs.Info(fmt.Sprintf("%s spec is the same. Skipping update.", resourceType))
+			r.GetRecorder().Eventf(parentResource, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Skipping update %s %s", resourceType, resourceNamespace)
+			res = oldResource
+		}
+	}
+	return
+}
+
+// CopySpec copies only the Spec field from source to destination using Unstructured
+func CopySpec(source, destination client.Object) error {
+	// Convert source to unstructured
+	sourceMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(source)
+	if err != nil {
+		return err
+	}
+	sourceUnstructured := &unstructured.Unstructured{Object: sourceMap}
+
+	// Convert destination to unstructured
+	destMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(destination)
+	if err != nil {
+		return err
+	}
+	destUnstructured := &unstructured.Unstructured{Object: destMap}
+
+	// Extract only the spec from source
+	sourceSpec, found, err := unstructured.NestedFieldCopy(sourceUnstructured.Object, "spec")
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("spec not found in source object")
+	}
+
+	// Set the spec in the destination
+	err = unstructured.SetNestedField(destUnstructured.Object, sourceSpec, "spec")
+	if err != nil {
+		return err
+	}
+
+	// Convert back to the original object
+	return runtime.DefaultUnstructuredConverter.FromUnstructured(destUnstructured.Object, destination)
 }

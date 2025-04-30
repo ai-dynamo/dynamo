@@ -30,7 +30,7 @@ from tensorboardX import SummaryWriter
 from utils.prefill_queue import PrefillQueue
 
 from dynamo.llm import KvMetricsAggregator
-from dynamo.planner import LocalConnector
+from dynamo.planner import KubernetesConnector, LocalConnector
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -53,7 +53,12 @@ class Planner:
         self.runtime = runtime
         self.args = args
         self.namespace = args.namespace
-        self.connector = LocalConnector(args.namespace, runtime)
+        if args.environment == "local":
+            self.connector = LocalConnector(args.namespace, runtime)
+        elif args.environment == "kubernetes":
+            self.connector = KubernetesConnector(args.namespace)
+        else:
+            raise ValueError(f"Invalid environment: {args.environment}")
 
         self._prefill_queue_nats_server = os.getenv(
             "NATS_SERVER", "nats://localhost:4222"
@@ -464,6 +469,12 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="Number of GPUs per prefill engine",
+    )
+    parser.add_argument(
+        "--environment",
+        type=str,
+        default="local",
+        help="Environment to run the planner in (local, kubernetes)",
     )
     args = parser.parse_args()
     asyncio.run(start_planner(args))

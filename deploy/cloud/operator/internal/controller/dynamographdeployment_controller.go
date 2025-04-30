@@ -24,7 +24,6 @@ import (
 	"dario.cat/mergo"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -51,7 +50,6 @@ type etcdStorage interface {
 // DynamoGraphDeploymentReconciler reconciles a DynamoGraphDeployment object
 type DynamoGraphDeploymentReconciler struct {
 	client.Client
-	Scheme                     *runtime.Scheme
 	Config                     commonController.Config
 	Recorder                   record.EventRecorder
 	VirtualServiceGateway      string
@@ -94,6 +92,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		if err != nil {
 			dynamoDeployment.SetState(FailedState)
 			message = err.Error()
+			logger.Error(err, "Reconciliation failed")
 		}
 		// update the CRD status condition
 		dynamoDeployment.AddStatusCondition(metav1.Condition{
@@ -165,11 +164,9 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			DynamoComponent: dynamoDeployment.Spec.DynamoGraph,
 		},
 	}
-	if err := ctrl.SetControllerReference(dynamoDeployment, dynamoComponent, r.Scheme); err != nil {
-		reason = "failed_to_set_the_controller_reference_for_the_DynamoComponent"
-		return ctrl.Result{}, err
-	}
-	dynamoComponent, err = commonController.SyncResource(ctx, r.Client, dynamoComponent, false)
+	_, dynamoComponent, err = commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoComponent, bool, error) {
+		return dynamoComponent, false, nil
+	})
 	if err != nil {
 		reason = "failed_to_sync_the_DynamoComponent"
 		return ctrl.Result{}, err
@@ -186,11 +183,9 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	// reconcile the dynamoComponentsDeployments
 	for serviceName, dynamoComponentDeployment := range dynamoComponentsDeployments {
 		logger.Info("Reconciling the DynamoComponentDeployment", "serviceName", serviceName, "dynamoComponentDeployment", dynamoComponentDeployment)
-		if err := ctrl.SetControllerReference(dynamoDeployment, dynamoComponentDeployment, r.Scheme); err != nil {
-			reason = "failed_to_set_the_controller_reference_for_the_DynamoComponentDeployment"
-			return ctrl.Result{}, err
-		}
-		dynamoComponentDeployment, err = commonController.SyncResource(ctx, r.Client, dynamoComponentDeployment, false)
+		_, dynamoComponentDeployment, err = commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoComponentDeployment, bool, error) {
+			return dynamoComponentDeployment, false, nil
+		})
 		if err != nil {
 			reason = "failed_to_sync_the_DynamoComponentDeployment"
 			return ctrl.Result{}, err
@@ -293,4 +288,8 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		})).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config)).
 		Complete(r)
+}
+
+func (r *DynamoGraphDeploymentReconciler) GetRecorder() record.EventRecorder {
+	return r.Recorder
 }
