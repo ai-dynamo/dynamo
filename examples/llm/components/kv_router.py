@@ -232,13 +232,15 @@ class Router:
                     for endpoint in metrics.endpoints
                 }
 
-                if kv_load:
-                    best_worker_id = min(kv_load, key=kv_load.get)
-                    logger.info(
-                        f"KV_LOAD routing to worker {best_worker_id} (kv load: {kv_load})"
-                    )
-                    yield f"{best_worker_id}_0.0"
-                    return
+                if not kv_load:
+                    raise ValueError("No workers found for KV_LOAD routing")
+                
+                best_worker_id = min(kv_load.keys(), key=lambda k: kv_load[k])
+                logger.info(
+                    f"KV_LOAD routing to worker {best_worker_id} (kv load: {kv_load})"
+                )
+                yield f"{best_worker_id}_0.0"
+                return
             except Exception as e:
                 logger.info(
                     f"Error finding worker with least kv load: {e}, fallback to KV routing"
