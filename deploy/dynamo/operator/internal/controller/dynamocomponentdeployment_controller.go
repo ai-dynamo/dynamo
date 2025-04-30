@@ -39,6 +39,7 @@ import (
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemas"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/config"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
 	commonController "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
@@ -60,10 +61,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const (
@@ -161,7 +160,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 				Message: "Starting to reconcile DynamoComponentDeployment",
 			},
 			metav1.Condition{
-				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentFound,
+				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
 				Message: "Starting to reconcile DynamoComponentDeployment",
@@ -191,135 +190,48 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		}
 	}()
 
-	dynamoComponentFoundCondition := meta.FindStatusCondition(dynamoComponentDeployment.Status.Conditions, v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentFound)
-	if dynamoComponentFoundCondition != nil && dynamoComponentFoundCondition.Status == metav1.ConditionUnknown {
-		logs.Info(fmt.Sprintf("Getting Dynamo Component %s", dynamoComponentDeployment.Spec.DynamoComponent))
-		r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeNormal, "GetDynamoComponent", "Getting Dynamo Component %s", dynamoComponentDeployment.Spec.DynamoComponent)
-	}
-	dynamoComponentRequest := &v1alpha1.DynamoComponentRequest{}
+	// retrieve the dynamo component
 	dynamoComponentCR := &v1alpha1.DynamoComponent{}
-	err = r.Get(ctx, types.NamespacedName{
-		Namespace: dynamoComponentDeployment.Namespace,
-		Name:      getK8sName(dynamoComponentDeployment.Spec.DynamoComponent),
-	}, dynamoComponentCR)
-	dynamoComponentIsNotFound := k8serrors.IsNotFound(err)
-	if err != nil && !dynamoComponentIsNotFound {
-		err = errors.Wrapf(err, "get DynamoComponent %s/%s", dynamoComponentDeployment.Namespace, dynamoComponentDeployment.Spec.DynamoComponent)
+	err = r.Get(ctx, types.NamespacedName{Name: getK8sName(dynamoComponentDeployment.Spec.DynamoComponent), Namespace: dynamoComponentDeployment.Namespace}, dynamoComponentCR)
+	if err != nil {
+		logs.Error(err, "Failed to get DynamoComponent")
 		return
 	}
-	if dynamoComponentIsNotFound {
-		if dynamoComponentFoundCondition != nil && dynamoComponentFoundCondition.Status == metav1.ConditionUnknown {
-			logs.Info(fmt.Sprintf("DynamoComponent %s not found", dynamoComponentDeployment.Spec.DynamoComponent))
-			r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeNormal, "GetDynamoComponent", "DynamoComponent %s not found", dynamoComponentDeployment.Spec.DynamoComponent)
-		}
+
+	// check if the component is ready
+	if dynamoComponentCR.IsReady() {
+		logs.Info(fmt.Sprintf("DynamoComponent %s ready", dynamoComponentDeployment.Spec.DynamoComponent))
+		r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeNormal, "GetDynamoComponent", "DynamoComponent %s is ready", dynamoComponentDeployment.Spec.DynamoComponent)
 		dynamoComponentDeployment, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentFound,
+				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
+				Status:  metav1.ConditionTrue,
+				Reason:  "Reconciling",
+				Message: "DynamoComponent is ready",
+			},
+		)
+		if err != nil {
+			return
+		}
+	} else {
+		logs.Info(fmt.Sprintf("DynamoComponent %s not ready", dynamoComponentDeployment.Spec.DynamoComponent))
+		r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeWarning, "GetDynamoComponent", "DynamoComponent %s is not ready", dynamoComponentDeployment.Spec.DynamoComponent)
+		_, err_ := r.setStatusConditions(ctx, req,
+			metav1.Condition{
+				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
-				Message: "DynamoComponent not found",
+				Message: "DynamoComponent not ready",
 			},
-		)
-		if err != nil {
-			return
-		}
-		dynamoComponentRequestFoundCondition := meta.FindStatusCondition(dynamoComponentDeployment.Status.Conditions, v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentRequestFound)
-		if dynamoComponentRequestFoundCondition == nil || dynamoComponentRequestFoundCondition.Status != metav1.ConditionUnknown {
-			dynamoComponentDeployment, err = r.setStatusConditions(ctx, req,
-				metav1.Condition{
-					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentRequestFound,
-					Status:  metav1.ConditionUnknown,
-					Reason:  "Reconciling",
-					Message: "DynamoComponent not found",
-				},
-			)
-			if err != nil {
-				return
-			}
-		}
-		if dynamoComponentRequestFoundCondition != nil && dynamoComponentRequestFoundCondition.Status == metav1.ConditionUnknown {
-			r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeNormal, "GetDynamoComponentRequest", "Getting DynamoComponentRequest %s", dynamoComponentDeployment.Spec.DynamoComponent)
-		}
-		err = r.Get(ctx, types.NamespacedName{
-			Namespace: dynamoComponentDeployment.Namespace,
-			Name:      getK8sName(dynamoComponentDeployment.Spec.DynamoComponent),
-		}, dynamoComponentRequest)
-		if err != nil {
-			err = errors.Wrapf(err, "get DynamoComponentRequest %s/%s", dynamoComponentDeployment.Namespace, dynamoComponentDeployment.Spec.DynamoComponent)
-			dynamoComponentDeployment, err = r.setStatusConditions(ctx, req,
-				metav1.Condition{
-					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentFound,
-					Status:  metav1.ConditionFalse,
-					Reason:  "Reconciling",
-					Message: err.Error(),
-				},
-				metav1.Condition{
-					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentRequestFound,
-					Status:  metav1.ConditionFalse,
-					Reason:  "Reconciling",
-					Message: err.Error(),
-				},
-			)
-			if err != nil {
-				return
-			}
-		}
-		if dynamoComponentRequestFoundCondition != nil && dynamoComponentRequestFoundCondition.Status == metav1.ConditionUnknown {
-			logs.Info(fmt.Sprintf("DynamoComponentRequest %s found", dynamoComponentDeployment.Spec.DynamoComponent))
-			r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeNormal, "GetDynamoComponentRequest", "DynamoComponentRequest %s is found and waiting for its dynamoComponent to be provided", dynamoComponentDeployment.Spec.DynamoComponent)
-		}
-		dynamoComponentDeployment, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentRequestFound,
-				Status:  metav1.ConditionTrue,
+				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
-				Message: "DynamoComponent not found",
+				Message: "DynamoComponent not ready",
 			},
 		)
-		if err != nil {
-			return
-		}
-		dynamoComponentRequestAvailableCondition := meta.FindStatusCondition(dynamoComponentRequest.Status.Conditions, v1alpha1.DynamoGraphDeploymentConditionTypeAvailable)
-		if dynamoComponentRequestAvailableCondition != nil && dynamoComponentRequestAvailableCondition.Status == metav1.ConditionFalse {
-			err = errors.Errorf("DynamoComponentRequest %s/%s is not available: %s", dynamoComponentRequest.Namespace, dynamoComponentRequest.Name, dynamoComponentRequestAvailableCondition.Message)
-			r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeWarning, "GetDynamoComponentRequest", err.Error())
-			_, err_ := r.setStatusConditions(ctx, req,
-				metav1.Condition{
-					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentFound,
-					Status:  metav1.ConditionFalse,
-					Reason:  "Reconciling",
-					Message: err.Error(),
-				},
-				metav1.Condition{
-					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
-					Status:  metav1.ConditionFalse,
-					Reason:  "Reconciling",
-					Message: err.Error(),
-				},
-			)
-			if err_ != nil {
-				err = err_
-				return
-			}
-			return
-		}
+		err = err_
 		return
-	} else {
-		if dynamoComponentFoundCondition != nil && dynamoComponentFoundCondition.Status != metav1.ConditionTrue {
-			logs.Info(fmt.Sprintf("DynamoComponent %s found", dynamoComponentDeployment.Spec.DynamoComponent))
-			r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeNormal, "GetDynamoComponent", "DynamoComponent %s is found", dynamoComponentDeployment.Spec.DynamoComponent)
-		}
-		dynamoComponentDeployment, err = r.setStatusConditions(ctx, req,
-			metav1.Condition{
-				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentFound,
-				Status:  metav1.ConditionTrue,
-				Reason:  "Reconciling",
-				Message: "DynamoComponent found",
-			},
-		)
-		if err != nil {
-			return
-		}
 	}
 
 	modified := false
@@ -1291,7 +1203,10 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		})
 	}
 
-	imageName := opt.dynamoComponent.Spec.Image
+	imageName := opt.dynamoComponent.GetImage()
+	if imageName == "" {
+		return nil, errors.Errorf("image is not ready for component %s", opt.dynamoComponent.Name)
+	}
 
 	var securityContext *corev1.SecurityContext
 	var mainContainerSecurityContext *corev1.SecurityContext
@@ -1417,7 +1332,17 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		Volumes:    volumes,
 	}
 
-	podSpec.ImagePullSecrets = opt.dynamoComponent.Spec.ImagePullSecrets
+	podSpec.ImagePullSecrets = []corev1.LocalObjectReference{
+		{
+			Name: config.GetDockerRegistryConfig().SecretName,
+		},
+	}
+	if opt.dynamoComponent.Spec.DockerConfigJSONSecretName != "" {
+		podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, corev1.LocalObjectReference{
+			Name: opt.dynamoComponent.Spec.DockerConfigJSONSecretName,
+		})
+	}
+	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, opt.dynamoComponent.Spec.ImagePullSecrets...)
 
 	extraPodMetadata := opt.dynamoComponentDeployment.Spec.ExtraPodMetadata
 
@@ -1669,68 +1594,7 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		Watches(&v1alpha1.DynamoComponentRequest{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, dynamoComponentRequest client.Object) []reconcile.Request {
-			reqs := make([]reconcile.Request, 0)
-			logs := log.Log.WithValues("func", "Watches", "kind", "DynamoComponentRequest", "name", dynamoComponentRequest.GetName(), "namespace", dynamoComponentRequest.GetNamespace())
-			logs.Info("Triggering reconciliation for DynamoComponentRequest", "DynamoComponentRequestName", dynamoComponentRequest.GetName(), "Namespace", dynamoComponentRequest.GetNamespace())
-			dynamoComponent := &v1alpha1.DynamoComponent{}
-			err := r.Get(context.Background(), types.NamespacedName{
-				Name:      dynamoComponentRequest.GetName(),
-				Namespace: dynamoComponentRequest.GetNamespace(),
-			}, dynamoComponent)
-			dynamoComponentIsNotFound := k8serrors.IsNotFound(err)
-			if err != nil && !dynamoComponentIsNotFound {
-				logs.Info("Failed to get DynamoComponent", "name", dynamoComponentRequest.GetName(), "namespace", dynamoComponentRequest.GetNamespace(), "error", err)
-				return reqs
-			}
-			if !dynamoComponentIsNotFound {
-				logs.Info("DynamoComponent found, skipping enqueue as it's already present", "DynamoComponentName", dynamoComponentRequest.GetName())
-				return reqs
-			}
-			dynamoComponentDeployments := &v1alpha1.DynamoComponentDeploymentList{}
-			err = r.List(context.Background(), dynamoComponentDeployments, &client.ListOptions{
-				Namespace: dynamoComponentRequest.GetNamespace(),
-			})
-			if err != nil {
-				logs.Info("Failed to list DynamoComponentDeployments", "Namespace", dynamoComponentRequest.GetNamespace(), "error", err)
-				return reqs
-			}
-			for _, dynamoComponentDeployment := range dynamoComponentDeployments.Items {
-				dynamoComponentDeployment := dynamoComponentDeployment
-				if getK8sName(dynamoComponentDeployment.Spec.DynamoComponent) == dynamoComponentRequest.GetName() {
-					reqs = append(reqs, reconcile.Request{
-						NamespacedName: client.ObjectKeyFromObject(&dynamoComponentDeployment),
-					})
-				}
-			}
-			// Log the list of DynamoComponentDeployments being enqueued for reconciliation
-			logs.Info("Enqueuing DynamoComponentDeployments for reconciliation", "ReconcileRequests", reqs)
-			return reqs
-		})).WithEventFilter(controller_common.EphemeralDeploymentEventFilter(r.Config)).
-		Watches(&v1alpha1.DynamoComponent{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, dynamoComponent client.Object) []reconcile.Request {
-			logs := log.Log.WithValues("func", "Watches", "kind", "DynamoComponent", "name", dynamoComponent.GetName(), "namespace", dynamoComponent.GetNamespace())
-			logs.Info("Triggering reconciliation for DynamoComponent", "DynamoComponentName", dynamoComponent.GetName(), "Namespace", dynamoComponent.GetNamespace())
-			dynamoComponentDeployments := &v1alpha1.DynamoComponentDeploymentList{}
-			err := r.List(context.Background(), dynamoComponentDeployments, &client.ListOptions{
-				Namespace: dynamoComponent.GetNamespace(),
-			})
-			if err != nil {
-				logs.Info("Failed to list DynamoComponentDeployments", "Namespace", dynamoComponent.GetNamespace(), "error", err)
-				return []reconcile.Request{}
-			}
-			reqs := make([]reconcile.Request, 0)
-			for _, dynamoComponentDeployment := range dynamoComponentDeployments.Items {
-				dynamoComponentDeployment := dynamoComponentDeployment
-				if getK8sName(dynamoComponentDeployment.Spec.DynamoComponent) == dynamoComponent.GetName() {
-					reqs = append(reqs, reconcile.Request{
-						NamespacedName: client.ObjectKeyFromObject(&dynamoComponentDeployment),
-					})
-				}
-			}
-			// Log the list of DynamoComponentDeployments being enqueued for reconciliation
-			logs.Info("Enqueuing DynamoComponentDeployments for reconciliation", "ReconcileRequests", reqs)
-			return reqs
-		}))
+		WithEventFilter(controller_common.EphemeralDeploymentEventFilter(r.Config))
 
 	if r.UseVirtualService {
 		m.Owns(&networkingv1beta1.VirtualService{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))

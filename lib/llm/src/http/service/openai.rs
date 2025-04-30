@@ -43,6 +43,7 @@ use super::{
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionResponse, completions::CompletionResponse,
 };
+use crate::request_template::RequestTemplate;
 use crate::types::{
     openai::{chat_completions::NvCreateChatCompletionRequest, completions::CompletionRequest},
     Annotated,
@@ -219,11 +220,25 @@ async fn completions(
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
 #[tracing::instrument(skip_all)]
 async fn chat_completions(
-    State(state): State<Arc<DeploymentState>>,
-    Json(request): Json<NvCreateChatCompletionRequest>,
+    State((state, template)): State<(Arc<DeploymentState>, Option<RequestTemplate>)>,
+    Json(mut request): Json<NvCreateChatCompletionRequest>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
+
+    // Apply template values if present
+    if let Some(template) = template {
+        if request.inner.model.is_empty() {
+            request.inner.model = template.model.clone();
+        }
+        if request.inner.temperature.unwrap_or(0.0) == 0.0 {
+            request.inner.temperature = Some(template.temperature);
+        }
+        if request.inner.max_completion_tokens.unwrap_or(0) == 0 {
+            request.inner.max_completion_tokens = Some(template.max_completion_tokens);
+        }
+    }
+    tracing::trace!("Received chat completions request: {:?}", request.inner);
 
     // todo - extract distributed tracing id and context id from headers
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -512,13 +527,14 @@ pub fn completions_router(
 /// If not path is provided, the default path is `/v1/chat/completions`
 pub fn chat_completions_router(
     state: Arc<DeploymentState>,
+    template: Option<RequestTemplate>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/chat/completions".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(chat_completions))
-        .with_state(state);
+        .with_state((state, template));
     (vec![doc], router)
 }
 

@@ -126,6 +126,17 @@ pub struct Flags {
     #[arg(long)]
     pub extra_engine_args: Option<PathBuf>,
 
+    /// Path to a JSON file containing default request fields.
+    /// These fields will be merged with each request, but can be overridden by the request.
+    /// Example file contents:
+    /// {
+    ///     "model": "Qwen2.5-3B-Instruct",
+    ///     "temperature": 0.7,
+    ///     "max_completion_tokens": 4096
+    /// }
+    #[arg(long)]
+    pub request_template: Option<PathBuf>,
+
     /// Everything after a `--`.
     /// These are the command line arguments to the python engine when using `pystr` or `pytok`.
     #[arg(index = 2, last = true, hide = true, allow_hyphen_values = true)]

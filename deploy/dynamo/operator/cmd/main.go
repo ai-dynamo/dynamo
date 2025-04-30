@@ -189,13 +189,13 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponentDeployment")
 		os.Exit(1)
 	}
-	if err = (&controller.DynamoComponentRequestReconciler{
+	if err = (&controller.DynamoComponentReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("dynamo-image-builder"),
+		Recorder: mgr.GetEventRecorderFor("dynamocomponent"),
 		Config:   ctrlConfig,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponentRequest")
+		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponent")
 		os.Exit(1)
 	}
 	if err = (&controller.DynamoGraphDeploymentReconciler{

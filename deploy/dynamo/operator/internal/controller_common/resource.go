@@ -41,7 +41,7 @@ type Resource interface {
 	SetSpec(spec any)
 }
 
-func SyncResource[T Resource](ctx context.Context, c client.Client, desired T, namespacedName types.NamespacedName, createOnly bool) (T, error) {
+func SyncResource[T Resource](ctx context.Context, c client.Client, desired T, createOnly bool) (T, error) {
 	// Retrieve the GroupVersionKind (GVK) of the desired object
 	gvk, err := apiutil.GVKForObject(desired, c.Scheme())
 	if err != nil {
@@ -58,6 +58,10 @@ func SyncResource[T Resource](ctx context.Context, c client.Client, desired T, n
 	current, ok := obj.(T)
 	if !ok {
 		return desired, fmt.Errorf("failed to cast object to the expected type %T", desired)
+	}
+	namespacedName := types.NamespacedName{
+		Name:      desired.GetName(),
+		Namespace: desired.GetNamespace(),
 	}
 
 	// Retrieve the existing resource

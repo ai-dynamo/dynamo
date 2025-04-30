@@ -26,34 +26,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const (
-	EntityHandlerTypeJob = "job"
-
-	// EntityHandlerCreated indicates that the EntityHandler is created.
-	EntityHandlerCreated = "ENTITY_HANDLER_CREATED"
-	// EntityHandlerCompleted indicates that the EntityHandler has completed.
-	EntityHandlerCompleted = "ENTITY_HANDLER_COMPLETED"
-	// EntityHandlerPending indicates that the EntityHandler is in pending state.
-	EntityHandlerPending = "ENTITY_HANDLER_PENDING"
-
-	EntityHandlerCreatedState   = "EntityHandlerCreated"
-	EntityHandlerCompletedState = "EntityHandlerCompleted"
-	EntityHandlerFailedState    = "EntityHandlerFailed"
-	EntityHandlerPendingState   = "EntityHandlerPending"
-	EntityHandlerRunningState   = "EntityHandlerRunning"
-
-	PVCCreatedState = "PVCCreated"
-
-	CrdRunning    = "running"
-	CrdFailed     = "failed"
-	CrdSuccessful = "successful"
-
-	PVCMountPath = "/pvc"
-
-	// TrainingJobPVCCreated indicates that the caching pvc is created.
-	PVCCreated = "PVC_CREATED"
-)
-
 func constructPVC(crd metav1.Object, pvcConfig v1alpha1.PVC) *corev1.PersistentVolumeClaim {
 	storageClassName := pvcConfig.StorageClass
 	return &corev1.PersistentVolumeClaim{

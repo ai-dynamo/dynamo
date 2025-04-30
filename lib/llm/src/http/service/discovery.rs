@@ -248,8 +248,16 @@ async fn handle_put(
                 // Should be impossible because we only get here on an etcd event
                 anyhow::bail!("Missing etcd_client");
             };
-            let mdc = model_entry.load_mdc(endpoint_id, etcd_client).await?;
-            if mdc.requires_preprocessing {
+            let mdc = match model_entry.load_mdc(endpoint_id, etcd_client).await {
+                Ok(mdc) => Some(mdc),
+                Err(err) => {
+                    // `dynamo serve` isn't using MDC yet so can't be an error
+                    tracing::info!(%err, "load_mdc did not complete");
+                    None
+                }
+            };
+
+            if mdc.is_some() && mdc.as_ref().unwrap().requires_preprocessing {
                 // Note requires_preprocessing is never true in our code right now
                 todo!("Ingress-side pre-processing not supported yet");
             } else {

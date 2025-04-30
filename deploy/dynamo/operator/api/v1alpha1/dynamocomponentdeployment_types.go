@@ -26,9 +26,8 @@ import (
 )
 
 const (
-	DynamoGraphDeploymentConditionTypeAvailable                   = "Available"
-	DynamoGraphDeploymentConditionTypeDynamoComponentFound        = "DynamoComponentFound"
-	DynamoGraphDeploymentConditionTypeDynamoComponentRequestFound = "DynamoComponentRequestFound"
+	DynamoGraphDeploymentConditionTypeAvailable            = "Available"
+	DynamoGraphDeploymentConditionTypeDynamoComponentReady = "DynamoComponentReady"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -115,14 +114,14 @@ type DynamoComponentDeploymentStatus struct {
 	PodSelector map[string]string `json:"podSelector,omitempty"`
 }
 
-//+genclient
-//+kubebuilder:object:root=true
-//+kubebuilder:subresource:status
-//+kubebuilder:storageversion
-//+kubebuilder:printcolumn:name="DynamoComponent",type="string",JSONPath=".spec.dynamoComponent",description="Dynamo component"
-//+kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Available"
-//+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-
+// +genclient
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:storageversion
+// +kubebuilder:printcolumn:name="DynamoComponent",type="string",JSONPath=".spec.dynamoComponent",description="Dynamo component"
+// +kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Available"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:resource:shortName=dcd
 // DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API
 type DynamoComponentDeployment struct {
 	metav1.TypeMeta   `json:",inline"`

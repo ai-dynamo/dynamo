@@ -20,8 +20,19 @@
 package v1alpha1
 
 import (
+	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemas"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+const (
+	DynamoComponentConditionTypeImageBuilding            = "ImageBuilding"
+	DynamoComponentConditionTypeImageExists              = "ImageExists"
+	DynamoComponentConditionTypeImageExistsChecked       = "ImageExistsChecked"
+	DynamoComponentConditionTypeModelsExists             = "ModelsExists"
+	DynamoComponentConditionTypeDynamoComponentAvailable = "DynamoComponentAvailable"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -34,23 +45,50 @@ type DynamoComponentSpec struct {
 
 	// +kubebuilder:validation:Required
 	DynamoComponent string `json:"dynamoComponent"`
-	// +kubebuilder:validation:Required
-	Image       string `json:"image"`
-	ServiceName string `json:"serviceName,omitempty"`
+	DownloadURL     string `json:"downloadUrl,omitempty"`
+	ServiceName     string `json:"serviceName,omitempty"`
 
+	// +kubebuilder:validation:Optional
+	Image string `json:"image,omitempty"`
+
+	ImageBuildTimeout *schemas.Duration `json:"imageBuildTimeout,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	BuildArgs []string `json:"buildArgs,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	ImageBuilderExtraPodMetadata *dynamoCommon.ExtraPodMetadata `json:"imageBuilderExtraPodMetadata,omitempty"`
+	// +kubebuilder:validation:Optional
+	ImageBuilderExtraPodSpec *dynamoCommon.ExtraPodSpec `json:"imageBuilderExtraPodSpec,omitempty"`
+	// +kubebuilder:validation:Optional
+	ImageBuilderExtraContainerEnv []corev1.EnvVar `json:"imageBuilderExtraContainerEnv,omitempty"`
+	// +kubebuilder:validation:Optional
+	ImageBuilderContainerResources *corev1.ResourceRequirements `json:"imageBuilderContainerResources,omitempty"`
+
+	// +kubebuilder:validation:Optional
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	DockerConfigJSONSecretName string `json:"dockerConfigJsonSecretName,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	DownloaderContainerEnvFrom []corev1.EnvFromSource `json:"downloaderContainerEnvFrom,omitempty"`
 }
 
 // DynamoComponentStatus defines the observed state of DynamoComponent
 type DynamoComponentStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
-	Ready bool `json:"ready"`
+	Conditions []metav1.Condition `json:"conditions"`
 }
 
+// +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-
+// +kubebuilder:printcolumn:name="DynamoComponent",type="string",JSONPath=".spec.dynamoComponent",description="Dynamo component"
+// +kubebuilder:printcolumn:name="Image-Exists",type="string",JSONPath=".status.conditions[?(@.type=='ImageExists')].status",description="Image Exists"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:resource:shortName=dc
 // DynamoComponent is the Schema for the dynamocomponents API
 type DynamoComponent struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -60,7 +98,7 @@ type DynamoComponent struct {
 	Status DynamoComponentStatus `json:"status,omitempty"`
 }
 
-// +kubebuilder:object:root=true
+//+kubebuilder:object:root=true
 
 // DynamoComponentList contains a list of DynamoComponent
 type DynamoComponentList struct {
@@ -71,4 +109,29 @@ type DynamoComponentList struct {
 
 func init() {
 	SchemeBuilder.Register(&DynamoComponent{}, &DynamoComponentList{})
+}
+
+func (s *DynamoComponent) GetSpec() any {
+	return s.Spec
+}
+
+func (s *DynamoComponent) SetSpec(spec any) {
+	s.Spec = spec.(DynamoComponentSpec)
+}
+
+func (s *DynamoComponent) IsReady() bool {
+	return meta.IsStatusConditionTrue(s.Status.Conditions, DynamoComponentConditionTypeDynamoComponentAvailable)
+}
+
+// GetImage returns the docker image of the DynamoComponent
+func (s *DynamoComponent) GetImage() string {
+	if s.Spec.Image != "" {
+		// if the image is specified in the spec, return it
+		return s.Spec.Image
+	}
+	// if the image is not specified in the spec, the image is stored in the status condition ImageExists
+	if meta.FindStatusCondition(s.Status.Conditions, DynamoComponentConditionTypeImageExists) != nil {
+		return meta.FindStatusCondition(s.Status.Conditions, DynamoComponentConditionTypeImageExists).Message
+	}
+	return ""
 }

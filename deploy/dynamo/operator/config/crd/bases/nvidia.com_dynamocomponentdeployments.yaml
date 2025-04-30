@@ -26,6 +26,8 @@ spec:
     kind: DynamoComponentDeployment
     listKind: DynamoComponentDeploymentList
     plural: dynamocomponentdeployments
+    shortNames:
+    - dcd
     singular: dynamocomponentdeployment
   scope: Namespaced
   versions:
