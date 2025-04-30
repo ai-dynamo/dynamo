@@ -130,7 +130,7 @@ pub async fn run(
         });
 
     // If it's an HF repo download it
-    if let Some(inner_model_path) = model_path.as_ref() { 
+    if let Some(inner_model_path) = model_path.as_ref() {
         if !inner_model_path.exists() && !inner_model_path.is_absolute() {
             model_name = Some(inner_model_path.display().to_string());
             model_path = Some(hub::from_hf(&inner_model_path).await?);
