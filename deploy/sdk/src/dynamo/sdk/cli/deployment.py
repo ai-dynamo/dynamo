@@ -349,7 +349,7 @@ def list(
     search: Optional[str] = typer.Option(None, "--search", help="Search query"),
     dev: bool = typer.Option(False, "--dev", help="List development deployments"),
     query: Optional[str] = typer.Option(
-        None, "--query", "-q", help="Advanced query string"
+        None, "--query", "-q", help="Advanced  query string"
     ),
     endpoint: str = typer.Option(
         ...,
