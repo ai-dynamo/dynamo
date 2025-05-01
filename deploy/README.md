@@ -2,6 +2,20 @@
 
 This directory contains all the necessary files and instructions for deploying Dynamo in various environments. Choose the deployment method that best suits your needs:
 
+## Directory Structure
+
+```
+deploy/
+├── cloud/                    # Cloud deployment configurations and tools
+├── helm/                     # Helm charts for manual Kubernetes deployment
+├── metrics/                  # Monitoring and metrics configuration
+│   ├── docker-compose.yml    # Docker compose for Prometheus and Grafana
+│   ├── prometheus.yml        # Prometheus configuration
+│   └── README.md             # Metrics setup instructions
+├── sdk/                      # Dynamo SDK and related tools
+└── README.md                 # This file
+```
+
 ## Deployment Options
 
 ### 1. 🚀 Dynamo Cloud Platform [PREFERRED]
