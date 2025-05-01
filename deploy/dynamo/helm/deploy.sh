@@ -23,8 +23,8 @@ HELM_CMD=$(which helm)
 # Set default values only if not already set
 export NAMESPACE="${NAMESPACE:=dynamo-cloud}"  # Default namespace
 export RELEASE_NAME="${RELEASE_NAME:=${NAMESPACE}}"  # Default release name is same as namespace
-export DOCKER_USERNAME="${DOCKER_USERNAME:=<your-docker-username>}"  # Default docker username
-export DOCKER_PASSWORD="${DOCKER_PASSWORD:=<your-docker-password>}"  # Default docker password
+export DOCKER_USERNAME="${DOCKER_USERNAME:-}"  # Default docker username is empty
+export DOCKER_PASSWORD="${DOCKER_PASSWORD:-}"  # Default docker password is empty
 export DOCKER_SERVER="${DOCKER_SERVER:=<your-docker-server>}"  # Default docker server
 export PIPELINES_DOCKER_SERVER="${PIPELINES_DOCKER_SERVER:=${DOCKER_SERVER}}"
 export PIPELINES_DOCKER_USERNAME="${PIPELINES_DOCKER_USERNAME:=${DOCKER_USERNAME}}"
