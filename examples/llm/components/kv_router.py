@@ -18,7 +18,7 @@ import argparse
 import logging
 import random
 from argparse import Namespace
-from typing import AsyncIterator
+from typing import AsyncIterator, Tuple
 
 from components.worker import VllmWorker
 from utils.logging import check_required_workers
@@ -192,7 +192,8 @@ class Router:
                 f"Formula for {worker_id}: {worker_logits[worker_id]:.3f} = 2.0 * {score:.3f} - {gpu_cache_usage:.3f} - {normalized_waiting:.3f}"
             )
 
-        if not worker_logits or all(logit == 0 for logit in worker_logits.values()):
+        if not worker_logits or not any(worker_logits.values()):
+            logger.warning("All worker logits are zero.")
             return "", 0.0
 
         # Select the worker with the highest logit
@@ -221,30 +222,32 @@ class Router:
 
         return best_worker_id, worker_scores.get(best_worker_id, 0.0)
 
+    def _get_underloaded_worker(self, metrics: AggregatedMetrics | None):
+        kv_load = {
+            endpoint.worker_id: getattr(endpoint, "gpu_cache_usage_perc", 0.0)
+            for endpoint in metrics.endpoints
+        }
+
+        if not kv_load or not any(kv_load.values()):
+            logger.warning("All KV loads are zero.")
+            return "", 0.0
+
+        best_worker_id = min(kv_load.keys(), key=lambda k: kv_load[k])
+        return best_worker_id, kv_load[best_worker_id]
+
     @dynamo_endpoint()
-    async def generate(self, request: Tokens) -> AsyncIterator[WorkerId]:
+    async def generate(self, request: Tokens) -> AsyncIterator[Tuple[WorkerId, float]]:
+        metrics = await self.metrics_aggregator.get_metrics()
+
         # Quick return for KV_LOAD mode
         if self.router_type == RouterType.KV_LOAD:
             try:
-                metrics = await self.metrics_aggregator.get_metrics()
-                kv_load = {
-                    endpoint.worker_id: getattr(endpoint, "gpu_cache_usage_perc", 0.0)
-                    for endpoint in metrics.endpoints
-                }
-
-                if not kv_load:
-                    raise ValueError("No workers found for KV_LOAD routing")
-                
-                best_worker_id = min(kv_load.keys(), key=lambda k: kv_load[k])
-                logger.info(
-                    f"KV_LOAD routing to worker {best_worker_id} (kv load: {kv_load})"
-                )
-                yield f"{best_worker_id}_0.0"
+                yield self._get_underloaded_worker(metrics)
                 return
             except Exception as e:
-                logger.exception(
-                    f"Error finding worker with least kv load: {e}, fallback to KV routing"
-                )
+                logger.exception(f"Error getting metrics: {e}, fallback to KV routing")
+                yield "", 0.0
+                return
 
         # Existing KV routing logic
         lora_id = 0
@@ -255,8 +258,9 @@ class Router:
         except Exception as e:
             scores = {}
             logger.exception(f"Error finding matches: {e}")
+            yield "", 0.0
+            return
 
-        metrics = await self.metrics_aggregator.get_metrics()
         worker_id, prefix_hit_rate = self._cost_function(
             scores, metrics, len(request.tokens)
         )
@@ -264,4 +268,4 @@ class Router:
         logger.info(
             f"Scheduling to worker_id: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
         )
-        yield f"{worker_id}_{prefix_hit_rate}"
+        yield worker_id, 0.0

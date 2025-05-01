@@ -140,8 +140,7 @@ class Processor(ProcessMixIn):
                 Tokens(tokens=engine_prompt["prompt_token_ids"]).model_dump_json()
             )
             decision = await router_generator.__anext__()
-            decision = decision.data()
-            worker_id, prefix_hit_rate = decision.split("_")
+            worker_id, prefix_hit_rate = decision.data()
             prefix_hit_rate = float(prefix_hit_rate)
             logger.info(
                 f"Worker ID: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
