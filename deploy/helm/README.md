@@ -1,56 +1,26 @@
-# deploy Dynamo pipeline on Kubernetes
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
 
-This is a proof of concept for a Helm chart to deploy services defined in a bento.yaml configuration.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-## Usage
+http://www.apache.org/licenses/LICENSE-2.0
 
-### Prerequisites
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
 
-- make sure dynamo cli is installed
-- make sure you have a docker image registry to which you can push and pull from k8s cluster
-- set the imagePullSecrets in the values.yaml file
-- navigate to the pipeline deployment directory by running:
-  ```bash
-  cd deploy/Kubernetes/pipeline
-  ```
-- build and push the DYNAMO_IMAGE as described in the [main README](../../README.md#building-the-dynamo_image-base-image) to an image registry
-- make sure the `nats` and `etcd` dependencies are installed (under the `dependencies` subdirectory). For more details, see [Installing Required Dependencies](../../../docs/guides/dynamo_deploy.md#installing-required-dependencies)
+# Manual Helm Deployment
 
-### Setting up Image Pull Secrets
+This directory contains Helm charts for manually deploying Dynamo inference graphs to Kubernetes. These charts are used when you need full control over your deployment configuration.
 
-Before deploying, you need to ensure your Kubernetes namespace has the appropriate image pull secret configured. The Helm chart uses `docker-imagepullsecret` by default.
+For detailed documentation on manual deployment using Helm charts, please refer to:
+- [Manual Helm Deployment Guide](../docs/guides/dynamo_deploy/manual_helm_deployment.md)
+- [Minikube Setup Guide](../docs/guides/dynamo_deploy/minikube.md)
 
-You can create this secret in your namespace using:
-```bash
-kubectl create secret docker-registry docker-imagepullsecret \
-    --docker-server=<registry-server> \
-    --docker-username=<username> \
-    --docker-password=<password> \
-    -n <namespace>
-```
-
-Alternatively, you can modify the `imagePullSecrets` section in `deploy/Kubernetes/pipeline/chart/values.yaml` to match your registry credentials.
-
-### Install the Helm chart
-
-```bash
-export DYNAMO_IMAGE=<dynamo_docker_image_name>
-./deploy.sh <docker_registry> <k8s_namespace> <path_to_dynamo_directory> <dynamo_identifier> [<dynamo_config_file>]
-
-# example: export DYNAMO_IMAGE=nvcr.io/nvidian/nim-llm-dev/dynamo-base-worker:0.0.1
-# example: ./deploy.sh nvcr.io/nvidian/nim-llm-dev my-namespace ../../../examples/hello_world/ hello_world:Frontend
-# example: ./deploy.sh nvcr.io/nvidian/nim-llm-dev my-namespace ../../../examples/llm graphs.disagg_router:Frontend ../../../examples/llm/configs/disagg_router.yaml
-```
-
-### Test the deployment
-
-```bash
-# Forward the service port to localhost
-kubectl -n <k8s_namespace> port-forward svc/hello-world-frontend 3000:80
-
-# In another terminal window, test the API endpoint
-curl -X 'POST' 'http://localhost:3000/generate' \
-    -H 'accept: text/event-stream' \
-    -H 'Content-Type: application/json' \
-    -d '{"text": "test"}'
-```
+For a quick start example, see [examples/hello_world/README.md#deploying-to-kubernetes-using-helm](../../examples/hello_world/README.md#deploying-to-kubernetes-using-helm)

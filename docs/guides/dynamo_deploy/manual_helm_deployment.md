@@ -21,7 +21,7 @@ This guide will walk you through the process of deploying an inference graph cre
 
 While this guide covers deployment of Dynamo inference graphs using Helm, the preferred method to deploy an inference graph is to [deploy with the Dynamo cloud platform](operator_deployment.md). The [Dynamo cloud platform](dynamo_cloud.md) simplifies the deployment and management of Dynamo inference graphs. It includes a set of components (Operator, Kubernetes Custom Resources, etc.) that work together to streamline the deployment and management process.
 
- Once an inference graph is defined using the Dynamo SDK, it can be deployed onto a Kubernetes cluster using a simple `dynamo deploy` command that orchestrates the following deployment steps:
+Once an inference graph is defined using the Dynamo SDK, it can be deployed onto a Kubernetes cluster using a simple `dynamo deploy` command that orchestrates the following deployment steps:
 
 1. Building docker images from inference graph components on the cluster
 2. Intelligently composing the encoded inference graph into a complete deployment on Kubernetes
@@ -86,7 +86,7 @@ export PROJECT_ROOT=$(pwd)
 2. Install NATS messaging system:
 ```bash
 # Navigate to dependencies directory
-cd $PROJECT_ROOT/deploy/Kubernetes/pipeline/dependencies
+cd $PROJECT_ROOT/deploy/helm/dependencies
 
 # Add and update NATS Helm repository
 helm repo add nats https://nats-io.github.io/k8s/helm/charts/
@@ -139,7 +139,7 @@ docker push <TAG>
 3. Deploy using Helm:
 ```bash
 # Navigate to the deployment directory
-cd $PROJECT_ROOT/deploy/Kubernetes/pipeline
+cd $PROJECT_ROOT/deploy/helm
 
 # Set release name for Helm
 export HELM_RELEASE=hello-world-manual
@@ -167,4 +167,21 @@ curl -X 'POST' 'http://localhost:3000/generate' \
     -d '{"text": "test"}'
 ```
 
-For convenience, you can find a complete deployment script at `deploy/Kubernetes/pipeline/deploy.sh` that automates all of these steps.
+### Using the Deployment Script
+
+For convenience, you can use the deployment script at `deploy/helm/deploy.sh` that automates all of these steps:
+
+```bash
+export DYNAMO_IMAGE=<dynamo_docker_image_name>
+./deploy.sh <docker_registry> <k8s_namespace> <path_to_dynamo_directory> <dynamo_identifier> [<dynamo_config_file>]
+
+# Example: export DYNAMO_IMAGE=nvcr.io/nvidian/nim-llm-dev/dynamo-base-worker:0.0.1
+# Example: ./deploy.sh nvcr.io/nvidian/nim-llm-dev my-namespace ../../../examples/hello_world/ hello_world:Frontend
+# Example: ./deploy.sh nvcr.io/nvidian/nim-llm-dev my-namespace ../../../examples/llm graphs.disagg_router:Frontend ../../../examples/llm/configs/disagg_router.yaml
+```
+
+This script handles:
+1. Building and pushing the Docker image
+2. Setting up the Helm values
+3. Installing/upgrading the Helm release
+4. Configuring the necessary Kubernetes resources

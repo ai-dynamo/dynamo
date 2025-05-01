@@ -15,29 +15,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Deploying Dynamo inference graphs to Kubernetes
+# Dynamo Cloud Platform
 
-## Deployment Paths in Dynamo
+This directory contains the infrastructure components required for the Dynamo cloud platform, which is used when deploying with the `dynamo deploy` CLI commands.
 
-Dynamo provides two distinct deployment paths, each serving different purposes:
+For detailed documentation on setting up and using the Dynamo Cloud Platform, please refer to:
+- [Dynamo Cloud Platform Guide](../docs/guides/dynamo_deploy/dynamo_cloud.md)
+- [Operator Deployment Guide](../docs/guides/dynamo_deploy/operator_deployment.md)
 
-1. **Dynamo Cloud Platform** (`deploy/dynamo/helm/`)
-   - Contains the infrastructure components required for the Dynamo cloud platform
-   - Used when deploying with the `dynamo deploy` CLI commands
-   - Provides a managed deployment experience
-   - This README focuses on setting up this platform infrastructure
-   - For Dynamo cloud installation instructions, see [Installing Dynamo Cloud](./helm/README.md), which walks through installing and configuring the Dynamo cloud components on your Kubernetes cluster.
-
-2. **Manual Deployment with Helm Charts** (`deploy/Kubernetes/`)
-   - Used for manually deploying inference graphs to Kubernetes
-   - Contains Helm charts and configurations for deploying individual inference pipelines
-   - Documentation:
-        - [Deploying Dynamo Inference Graphs to Kubernetes using Helm](../Kubernetes/pipeline/README.md)
-        - [Dynamo Deploy Guide](../../docs/guides/dynamo_deploy.md)
-
-Choose the appropriate deployment path based on your needs:
-- Use `deploy/Kubernetes/` if you want to manually manage your inference graph deployments
-- Use `deploy/dynamo/helm/` if you want to use the Dynamo cloud platform and CLI tools
-
-## Hello World example
-See [examples/hello_world/README.md#deploying-to-kubernetes-using-dynamo-cloud-and-dynamo-deploy-cli](../../examples/hello_world/README.md#deploying-to-kubernetes-using-dynamo-cloud-and-dynamo-deploy-cli)
+For a quick start example, see [examples/hello_world/README.md#deploying-to-kubernetes-using-dynamo-cloud-and-dynamo-deploy-cli](../../examples/hello_world/README.md#deploying-to-kubernetes-using-dynamo-cloud-and-dynamo-deploy-cli)
