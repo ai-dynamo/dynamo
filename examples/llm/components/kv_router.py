@@ -30,6 +30,7 @@ from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint,
 from dynamo.sdk.lib.config import ServiceConfig
 
 WorkerId = str
+fallback_msg = "Will fallback to random routing."
 
 logger = logging.getLogger(__name__)
 
@@ -193,7 +194,7 @@ class Router:
             )
 
         if not worker_logits or not any(worker_logits.values()):
-            logger.warning("All worker logits are zero.")
+            logger.warning(f"All worker logits are zero. {fallback_msg}.")
             return "", 0.0
 
         # Select the worker with the highest logit
@@ -229,7 +230,7 @@ class Router:
         }
 
         if not kv_load or not any(kv_load.values()):
-            logger.warning("All KV loads are zero.")
+            logger.warning(f"All KV loads are zero. {fallback_msg}")
             return "", 0.0
 
         best_worker_id = min(kv_load.keys(), key=lambda k: kv_load[k])
@@ -243,11 +244,10 @@ class Router:
         if self.router_type == RouterType.KV_LOAD:
             try:
                 yield self._get_underloaded_worker(metrics)
-                return
             except Exception as e:
-                logger.exception(f"Error getting metrics: {e}, fallback to KV routing")
+                logger.exception(f"Error getting metrics: {e}. {fallback_msg}")
                 yield "", 0.0
-                return
+            return
 
         # Existing KV routing logic
         lora_id = 0
@@ -257,7 +257,7 @@ class Router:
             )
         except Exception as e:
             scores = {}
-            logger.exception(f"Error finding matches: {e}")
+            logger.exception(f"Error finding matches: {e}. {fallback_msg}")
             yield "", 0.0
             return
 
@@ -265,7 +265,9 @@ class Router:
             scores, metrics, len(request.tokens)
         )
 
-        logger.info(
-            f"Scheduling to worker_id: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
-        )
-        yield worker_id, 0.0
+        if worker_id:
+            logger.info(
+                f"Scheduling to worker_id: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
+            )
+
+        yield worker_id, prefix_hit_rate
