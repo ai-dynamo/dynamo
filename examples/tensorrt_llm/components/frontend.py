@@ -19,6 +19,7 @@ from pathlib import Path
 
 from components.processor import Processor
 from components.worker import TensorRTLLMWorker
+from fastapi import FastAPI
 from pydantic import BaseModel
 
 from dynamo import sdk
@@ -45,9 +46,14 @@ class FrontendConfig(BaseModel):
 
 
 @service(
+    dynamo={
+        "enabled": True,
+        "namespace": "dynamo",
+    },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
     image=DYNAMO_IMAGE,
+    app=FastAPI(title="TensorRT LLM Example"),
 )
 # todo this should be called ApiServer
 class Frontend:
