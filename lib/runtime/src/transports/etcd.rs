@@ -556,7 +556,7 @@ impl KvCache {
         let full_key = format!("{}{}", self.prefix, key);
 
         // Delete from etcd first
-        self.client.kv_delete(&full_key, None).await?;
+        self.client.kv_delete(full_key.clone(), None).await?;
 
         // Then remove from local cache
         let mut cache_write = self.cache.write().await;

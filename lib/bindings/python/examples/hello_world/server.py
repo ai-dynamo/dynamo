@@ -17,7 +17,7 @@ import asyncio
 
 import uvloop
 
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import DistributedRuntime, EtcdKvCache, dynamo_worker
 
 
 class RequestHandler:
@@ -34,6 +34,29 @@ class RequestHandler:
 
 @dynamo_worker(static=False)
 async def worker(runtime: DistributedRuntime):
+    etcd_kv_cache = await EtcdKvCache.create(
+        runtime.etcd_client(),
+        "/test/disagg_router/",
+        {
+            "max_local_prefill_length": str(100),
+            "max_prefill_queue_size": str(5),
+        },
+    )
+
+    print(await etcd_kv_cache.get_all())
+
+    await etcd_kv_cache.delete("max_local_prefill_length")
+
+    print(await etcd_kv_cache.get_all())
+
+    await etcd_kv_cache.put("add", "1".encode())
+
+    print(await etcd_kv_cache.get_all())
+
+    await etcd_kv_cache.clear_all()
+
+    print(await etcd_kv_cache.get_all())
+
     await init(runtime, "dynamo")
 
 
