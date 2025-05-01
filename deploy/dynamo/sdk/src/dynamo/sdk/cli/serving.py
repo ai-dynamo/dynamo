@@ -123,19 +123,35 @@ def create_dynamo_watcher(
     return watcher, socket, uri
 
 
-# @dynamo_worker()
-# async def clear_namespace(runtime: DistributedRuntime, namespace: str):
-#     # clear any EtcdKvCache or PrefillQueue residue under this namespace
-#     prefill_queue_nats_server = os.getenv("NATS_SERVER", "nats://localhost:4222")
-#     prefill_queue_stream_name = f"{namespace}_prefill_queue"
-#     async with PrefillQueue.get_instance(
-#         nats_server=prefill_queue_nats_server,
-#         stream_name=prefill_queue_stream_name,
-#     ) as prefill_queue:
-#         cleared_count = await prefill_queue.clear_queue()
-#         logger.info(
-#             f"Cleared {cleared_count} prefill requests from {prefill_queue_stream_name}"
-#         )
+def clear_namespace(namespace: str) -> None:
+    """
+    Check if utils/clear_namespace.py exists and run it to clear the namespace.
+    """
+    import os.path
+    import subprocess
+
+    clear_script_path = "utils/clear_namespace.py"
+
+    if os.path.exists(clear_script_path):
+        logger.info(f"Clearing namespace {namespace} using {clear_script_path}")
+        try:
+            # Run the script and wait for it to complete
+            result = subprocess.run(
+                ["python", "-m", "utils.clear_namespace", "--namespace", namespace],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            logger.info(f"Clear namespace output: {result.stdout}")
+            logger.info(f"Successfully cleared namespace {namespace}")
+            if result.stderr:
+                logger.info(f"Clear namespace stderr: {result.stderr}")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to clear namespace {namespace}: {e.stderr}")
+    else:
+        logger.debug(
+            f"Script not found at {clear_script_path}, skip namespace clearing"
+        )
 
 
 @inject(squeeze_none=True)
@@ -210,6 +226,8 @@ def serve_dynamo_graph(
                     namespace = namespace.pop()
                     logger.info(f"Serving dynamo graph with namespace {namespace}")
                 # clear residue etcd/nats entry (if any) under this namespace
+                logger.info(f"Clearing namespace {namespace} before serving")
+                clear_namespace(namespace)
 
                 for name, dep_svc in svc.all_services().items():
                     if name == svc.name or name in dependency_map:
@@ -297,6 +315,7 @@ def serve_dynamo_graph(
         }
 
         arbiter = create_arbiter(**arbiter_kwargs)
+        arbiter.exit_stack.callback(clear_namespace, namespace)
         arbiter.exit_stack.callback(shutil.rmtree, uds_path, ignore_errors=True)
         if enable_local_planner:
             arbiter.exit_stack.callback(

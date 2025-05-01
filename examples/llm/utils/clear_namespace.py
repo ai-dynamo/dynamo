@@ -23,7 +23,9 @@ import os
 from utils.prefill_queue import PrefillQueue
 
 from dynamo.runtime import DistributedRuntime, EtcdKvCache, dynamo_worker
+from dynamo.runtime.logging import configure_dynamo_logging
 
+configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -43,7 +45,7 @@ async def clear_namespace(runtime: DistributedRuntime, namespace: str):
         nats_server=prefill_queue_nats_server,
         stream_name=prefill_queue_stream_name,
     ) as prefill_queue:
-        cleared_count = await prefill_queue.clear_all()
+        cleared_count = await prefill_queue.clear_queue()
         logger.info(
             f"Cleared {cleared_count} requests from prefill queue{prefill_queue_stream_name}"
         )
