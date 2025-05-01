@@ -157,3 +157,23 @@ class NATSQueue:
             return consumer_info.num_pending
         except NatsError as e:
             raise RuntimeError(f"Failed to get queue size: {e}")
+
+    async def clear_queue(self) -> int:
+        """
+        Remove all messages from the queue by consuming and acknowledging them one by one.
+        Returns the number of messages that were cleared.
+
+        Note: This is safe for multi-process queue access as it processes one message at a time.
+        """
+        await self.ensure_connection()
+        try:
+            cleared_count = 0
+            # Continue until we can't dequeue any more messages
+            while True:
+                message = await self.dequeue_task()
+                if message is None:
+                    break
+                cleared_count += 1
+            return cleared_count
+        except NatsError as e:
+            raise RuntimeError(f"Failed to clear queue: {e}")

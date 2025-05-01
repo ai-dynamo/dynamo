@@ -123,6 +123,21 @@ def create_dynamo_watcher(
     return watcher, socket, uri
 
 
+# @dynamo_worker()
+# async def clear_namespace(runtime: DistributedRuntime, namespace: str):
+#     # clear any EtcdKvCache or PrefillQueue residue under this namespace
+#     prefill_queue_nats_server = os.getenv("NATS_SERVER", "nats://localhost:4222")
+#     prefill_queue_stream_name = f"{namespace}_prefill_queue"
+#     async with PrefillQueue.get_instance(
+#         nats_server=prefill_queue_nats_server,
+#         stream_name=prefill_queue_stream_name,
+#     ) as prefill_queue:
+#         cleared_count = await prefill_queue.clear_queue()
+#         logger.info(
+#             f"Cleared {cleared_count} prefill requests from {prefill_queue_stream_name}"
+#         )
+
+
 @inject(squeeze_none=True)
 def serve_dynamo_graph(
     bento_identifier: str | AnyService,
@@ -174,10 +189,30 @@ def serve_dynamo_graph(
     try:
         if not service_name and not standalone:
             with contextlib.ExitStack() as port_stack:
+                # first check if all components has the same namespace
+                namespace = set()
                 for name, dep_svc in svc.all_services().items():
-                    if name == svc.name:
+                    if name == svc.name or name in dependency_map:
                         continue
-                    if name in dependency_map:
+                    if not (
+                        hasattr(dep_svc, "is_dynamo_component")
+                        and dep_svc.is_dynamo_component()
+                    ):
+                        raise RuntimeError(
+                            f"Service {dep_svc.name} is not a Dynamo component"
+                        )
+                    namespace.add(dep_svc.dynamo_address()[0])
+                if len(namespace) > 1:
+                    raise RuntimeError(
+                        f"All components must have the same namespace, got {namespace}"
+                    )
+                else:
+                    namespace = namespace.pop()
+                    logger.info(f"Serving dynamo graph with namespace {namespace}")
+                # clear residue etcd/nats entry (if any) under this namespace
+
+                for name, dep_svc in svc.all_services().items():
+                    if name == svc.name or name in dependency_map:
                         continue
                     if not (
                         hasattr(dep_svc, "is_dynamo_component")
@@ -194,7 +229,6 @@ def serve_dynamo_graph(
                         str(bento_path.absolute()),
                         env=env,
                     )
-                    namespace, _ = dep_svc.dynamo_address()
                     watchers.append(new_watcher)
                     sockets.append(new_socket)
                     dependency_map[name] = uri

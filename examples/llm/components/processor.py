@@ -112,7 +112,7 @@ class Processor(ProcessMixIn):
 
         self.etcd_kv_cache = await EtcdKvCache.create(
             runtime.etcd_client(),
-            "/dynamo/processor/",
+            f"/{comp_ns}/processor/",
             {"router": self.engine_args.router},
         )
 
