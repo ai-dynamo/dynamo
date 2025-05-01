@@ -233,7 +233,15 @@ class Router:
             logger.warning(f"All KV loads are zero. {fallback_msg}")
             return "", 0.0
 
-        best_worker_id = min(kv_load.keys(), key=lambda k: kv_load[k])
+        min_load = min(kv_load.values())
+        min_load_workers = [
+            worker_id for worker_id, load in kv_load.items() if load == min_load
+        ]
+        best_worker_id = random.choice(min_load_workers)
+
+        logger.info(
+            f"Selected worker: {best_worker_id}, KV load: {kv_load[best_worker_id]:.3f}"
+        )
         return best_worker_id, kv_load[best_worker_id]
 
     @dynamo_endpoint()
