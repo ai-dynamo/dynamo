@@ -118,7 +118,7 @@ class PrefillWorker:
     async def prefill_queue_handler(self):
         logger.info("Prefill queue handler entered")
         prefill_queue_nats_server = os.getenv("NATS_SERVER", "nats://localhost:4222")
-        namespace, _ = PrefillWorker.dynamo_address()
+        namespace, _ = PrefillWorker.dynamo_address()  # type: ignore
         prefill_queue_stream_name = f"{namespace}_prefill_queue"
         logger.info(
             f"Prefill queue: {prefill_queue_nats_server}:{prefill_queue_stream_name}"

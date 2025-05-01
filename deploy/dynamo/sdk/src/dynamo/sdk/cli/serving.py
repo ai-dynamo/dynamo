@@ -206,7 +206,7 @@ def serve_dynamo_graph(
         if not service_name and not standalone:
             with contextlib.ExitStack() as port_stack:
                 # first check if all components has the same namespace
-                namespace = set()
+                namespaces = set()
                 for name, dep_svc in svc.all_services().items():
                     if name == svc.name or name in dependency_map:
                         continue
@@ -217,13 +217,13 @@ def serve_dynamo_graph(
                         raise RuntimeError(
                             f"Service {dep_svc.name} is not a Dynamo component"
                         )
-                    namespace.add(dep_svc.dynamo_address()[0])
-                if len(namespace) > 1:
+                    namespaces.add(dep_svc.dynamo_address()[0])
+                if len(namespaces) > 1:
                     raise RuntimeError(
-                        f"All components must have the same namespace, got {namespace}"
+                        f"All components must have the same namespace, got {namespaces}"
                     )
                 else:
-                    namespace = namespace.pop()
+                    namespace = namespaces.pop() if namespaces else ""
                     logger.info(f"Serving dynamo graph with namespace {namespace}")
                 # clear residue etcd/nats entry (if any) under this namespace
                 logger.info(f"Clearing namespace {namespace} before serving")
