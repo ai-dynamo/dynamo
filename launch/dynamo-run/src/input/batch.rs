@@ -80,9 +80,8 @@ pub async fn run(
         );
     }
 
-    let (service_name, engine, _inspect_template) =
-        common::prepare_engine(runtime, flags, engine_config).await?;
-    let service_name_ref = Arc::new(service_name);
+    let prepared_engine = common::prepare_engine(runtime, flags, engine_config).await?;
+    let service_name_ref = Arc::new(prepared_engine.service_name);
 
     let pre_processor = if let Some(card) = maybe_card {
         Some(OpenAIPreprocessor::new(card).await?)
@@ -129,7 +128,7 @@ pub async fn run(
         };
         entry.request_id = request_id;
 
-        let engine = engine.clone();
+        let engine = prepared_engine.engine.clone();
         let pre_processor = pre_processor.clone();
         let tokens_in = tokens_in.clone();
         let tokens_out = tokens_out.clone();

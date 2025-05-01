@@ -34,39 +34,22 @@ The code for the pipeline looks like this:
 
 ```python
 # filename: pipeline.py
-
-from dynamo.sdk import service, dynamo_endpoint, depends
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from dynamo.sdk import DYNAMO_IMAGE, depends, dynamo_endpoint, service
+
 
 class RequestType(BaseModel):
     text: str
 
-@service(resources={"cpu": "1"})
-class Frontend:
-    middle = depends(Middle)
 
-    @api
-    async def generate(self, text: str):
-        request = RequestType(text=text)
-        async for response in self.middle.generate(request.model_dump_json()):
-            yield f"Frontend: {response}"
+class ResponseType(BaseModel):
+    text: str
+
 
 @service(
-    resources={"cpu": "1"},
-    dynamo={"enabled": True, "namespace": "inference"}
-)
-class Middle:
-    backend = depends(Backend)
-
-    @dynamo_endpoint()
-    async def generate(self, req: RequestType):
-        text = f"{req.text}-mid"
-        for token in text.split():
-            yield f"Mid: {token}"
-
-@service(
-    resources={"cpu": "1"},
-    dynamo={"enabled": True, "namespace": "inference"}
+    dynamo={"enabled": True, "namespace": "inference"},
 )
 class Backend:
     @dynamo_endpoint()
@@ -74,6 +57,40 @@ class Backend:
         text = f"{req.text}-back"
         for token in text.split():
             yield f"Backend: {token}"
+
+
+@service(
+    dynamo={"enabled": True, "namespace": "inference"},
+)
+class Middle:
+    backend = depends(Backend)
+
+    @dynamo_endpoint()
+    async def generate(self, req: RequestType):
+        text = f"{req.text}-mid"
+        next_request = RequestType(text=text).model_dump_json()
+        async for response in self.backend.generate(next_request):
+            yield f"Middle: {response}"
+
+
+app = FastAPI(title="Hello World!")
+
+
+@service(
+    dynamo={"enabled": True, "namespace": "inference"},
+    app=app,
+)
+class Frontend:
+    middle = depends(Middle)
+
+    @dynamo_endpoint(is_api=True)
+    async def generate(self, request: RequestType):
+        async def content_generator():
+            async for response in self.middle.generate(request.model_dump_json()):
+                yield f"Frontend: {response}"
+
+        return StreamingResponse(content_generator())
+
 ```
 
 You can run this pipeline locally by spinning up ETCD and NATS and then running the pipeline:
@@ -106,3 +123,4 @@ federer-mid-back
 
 You can find in-depth documentation for the Dynamo SDK [here](./docs/sdk/README.md) and the Dynamo CLI [here](./docs/cli/README.md)
 
+Please refer to [hello_world](../../../examples/hello_world/README.md) and [llm](../../../examples/llm/README.md) for examples.

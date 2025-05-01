@@ -148,8 +148,8 @@ def main(
 
     from dynamo.runtime.logging import configure_dynamo_logging
 
-    # Setup signal handlers for graceful shutdown
-    setup_signal_handlers()
+    # TODO: completely disable signal handlers in serve_dynamo. It interferes with arbiter shutdown
+    # setup_signal_handlers()
 
     run_id = service_name
     dynamo_context["service_name"] = service_name

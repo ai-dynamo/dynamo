@@ -36,6 +36,7 @@ use derive_builder::Builder;
 use futures::{StreamExt, TryStreamExt};
 use std::path::{Path, PathBuf};
 use tokio::fs::File as TokioFile;
+use tokio::io::AsyncRead;
 use tokio::time;
 use url::Url;
 use validator::{Validate, ValidationError};
@@ -153,6 +154,40 @@ impl Client {
         bucket.put(key_meta, &mut disk_file).await.map_err(|e| {
             anyhow::anyhow!("Failed uploading to bucket / object store {bucket_name}/{key}: {e}")
         })?;
+
+        Ok(())
+    }
+
+    /// Download file from NATS at this URL
+    pub async fn object_store_download(
+        &self,
+        nats_url: Url,
+        filepath: &Path,
+    ) -> anyhow::Result<()> {
+        let mut disk_file = TokioFile::create(filepath).await?;
+
+        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let context = self.jetstream();
+
+        let bucket = match context.get_object_store(&bucket_name).await {
+            Ok(bucket) => bucket,
+            Err(err) if err.to_string().contains("stream not found") => {
+                // err.source() is GetStreamError, which has a kind() which
+                // is GetStreamErrorKind::JetStream which wraps a jetstream::Error
+                // which has code 404. Phew. So yeah check the string for now.
+                anyhow::bail!("NATS get_object_store bucket does not exist: {bucket_name}. {err}.");
+            }
+            Err(err) => {
+                anyhow::bail!("NATS get_object_store error: {err}");
+            }
+        };
+
+        let mut obj_reader = bucket.get(&key).await.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed downloading from bucket / object store {bucket_name}/{key}: {e}"
+            )
+        })?;
+        let _bytes_copied = tokio::io::copy(&mut obj_reader, &mut disk_file).await?;
 
         Ok(())
     }

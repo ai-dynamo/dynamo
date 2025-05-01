@@ -14,6 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    echo "Error: Bash version 4.0 or higher is required. Current version: ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"
+    exit 1
+fi
+
 set -e
 
 TAG=

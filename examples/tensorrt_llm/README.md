@@ -143,8 +143,6 @@ dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
 We are defining TRTLLM_USE_UCX_KVCACHE so that TRTLLM uses UCX for transfering the KV
 cache between the context and generation workers.
 
-NOTE: currently disaggregated serving with KV Routing may not work due to prefix cache hit is showing 0, though when it should not.
-
 ### Client
 
 See [client](../llm/README.md#client) section to learn how to send request to the deployment.
