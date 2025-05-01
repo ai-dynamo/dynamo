@@ -224,6 +224,10 @@ class Router:
         return best_worker_id, worker_scores.get(best_worker_id, 0.0)
 
     def _get_underloaded_worker(self, metrics: AggregatedMetrics | None):
+        if not metrics:
+            logger.warning(f"Cannot get metrics. {fallback_msg}")
+            return "", 0.0  
+
         kv_load = {
             endpoint.worker_id: getattr(endpoint, "gpu_cache_usage_perc", 0.0)
             for endpoint in metrics.endpoints
@@ -253,7 +257,7 @@ class Router:
             try:
                 yield self._get_underloaded_worker(metrics)
             except Exception as e:
-                logger.exception(f"Error getting metrics: {e}. {fallback_msg}")
+                logger.exception(f"Error finding underloaded worker: {e}. {fallback_msg}")
                 yield "", 0.0
             return
 
