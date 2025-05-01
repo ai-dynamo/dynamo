@@ -20,8 +20,8 @@
 package v1alpha1
 
 import (
-	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemas"
+	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

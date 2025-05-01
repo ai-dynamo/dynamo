@@ -21,9 +21,9 @@ import (
 	"context"
 	"testing"
 
-	compounaiCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
+	compounaiCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )

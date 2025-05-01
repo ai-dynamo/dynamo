@@ -21,7 +21,7 @@ import (
 	"context"
 	"os"
 
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 )
 
 func GetDynamoImageBuilderNamespace(ctx context.Context) (namespace string, err error) {

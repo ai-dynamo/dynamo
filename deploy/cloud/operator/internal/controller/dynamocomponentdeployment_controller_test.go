@@ -24,7 +24,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/bsm/gomega"
 	istioNetworking "istio.io/api/networking/v1beta1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"

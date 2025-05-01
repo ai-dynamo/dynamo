@@ -24,7 +24,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
 )
 
 type ApiStoreClient struct {

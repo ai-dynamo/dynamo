@@ -37,7 +37,7 @@ Inference graphs are compositions of service components that work together to ha
 
 ## Creating an inference graph
 
-Once you've written your various Dynamo services (docs on how to write these can be found [here](../../deploy/dynamo/sdk/docs/sdk/README.md)), you can create an inference graph by composing these services together using the following two mechanisms:
+Once you've written your various Dynamo services (docs on how to write these can be found [here](../../deploy/sdk/docs/sdk/README.md)), you can create an inference graph by composing these services together using the following two mechanisms:
 
 ### 1. Dependencies with `depends()`
 

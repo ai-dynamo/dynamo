@@ -93,7 +93,7 @@ This example can be deployed to a Kubernetes cluster using [Dynamo Cloud](../../
 
 ### Prerequisites
 
-You must have first followed the instructions in [deploy/dynamo/helm/README.md](../../deploy/dynamo/helm/README.md) to create your Dynamo cloud deployment.
+You must have first followed the instructions in [deploy/cloud/helm/README.md](../../deploy/cloud/helm/README.md) to create your Dynamo cloud deployment.
 
 ### Deployment Steps
 

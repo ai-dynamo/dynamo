@@ -98,7 +98,7 @@ export DYNAMO_INGRESS_SUFFIX=dynamo-cloud.com # change this to whatever you want
 2. [One-time Action] Create a new kubernetes namespace and set it as your default. Create image pull secrets if needed.
 
 ```bash
-cd $PROJECT_ROOT/deploy/dynamo/helm
+cd $PROJECT_ROOT/deploy/cloud/helm
 kubectl create namespace $NAMESPACE
 kubectl config set-context --current --namespace=$NAMESPACE
 

@@ -5,7 +5,7 @@ it via `dynamo serve` or `dynamo deploy`, covering basic concepts as well as
 advanced features like enabling KV routing and disaggregated serving.
 
 For detailed information about `dynamo serve` infrastructure, see the
-[Dynamo SDK Docs](../deploy/dynamo/sdk/docs/sdk/README.md).
+[Dynamo SDK Docs](../deploy/sdk/docs/sdk/README.md).
 
 For a guide that walks through how to launch a vLLM-based worker with
 implementation of Disaggregated Serving and KV-Aware Routing included,
@@ -19,7 +19,7 @@ a Python class based definition that requires a few key decorators to get going:
 - `@dynamo_endpoint`: marks methods that can be called by other workers or clients
 
 For more detailed information on these concepts, see the
-[Dynamo SDK Docs](../deploy/dynamo/sdk/docs/sdk/README.md).
+[Dynamo SDK Docs](../deploy/sdk/docs/sdk/README.md).
 
 ### Worker Skeleton
 
@@ -52,7 +52,7 @@ based on the definitions above, it would be: `your_namespace/YourWorker/your_end
 - `endpoint="your_endpoint"`: Defined by the `@dynamo_endpoint` decorator, or by default the name of the function being decorated.
 
 For more details about service configuration, resource management, and dynamo endpoints,
-see the [Dynamo SDK Docs](../deploy/dynamo/sdk/docs/README.md).
+see the [Dynamo SDK Docs](../deploy/sdk/docs/README.md).
 
 ### Request/Response Types
 
@@ -628,5 +628,5 @@ For more information on Disaggregated Serving, see the
 ## Additional Resources
 
 - Check the [examples](../examples/) directory for more detailed implementations
-- Refer to the [Dynamo SDK Docs](../deploy/dynamo/sdk/docs/sdk/README.md) for API details.
+- Refer to the [Dynamo SDK Docs](../deploy/sdk/docs/sdk/README.md) for API details.
 - For Disaggregated Serving, see the [general guide](../docs/disagg_serving.md) and [performance tuning guide](../docs/guides/disagg_perf_tuning.md).

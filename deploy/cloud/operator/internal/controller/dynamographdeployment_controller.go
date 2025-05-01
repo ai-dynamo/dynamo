@@ -33,9 +33,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
-	commonController "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/dynamo"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
 )
 
 const (

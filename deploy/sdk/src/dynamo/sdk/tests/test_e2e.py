@@ -40,7 +40,7 @@ def setup_and_teardown():
             "serve",
             "pipeline:Frontend",
             "--working-dir",
-            "deploy/dynamo/sdk/src/dynamo/sdk/tests",
+            "deploy/sdk/src/dynamo/sdk/tests",
             "--Frontend.model=qwentastic",
             "--Middle.bias=0.5",
             "--dry-run",
@@ -54,7 +54,7 @@ def setup_and_teardown():
             "serve",
             "pipeline:Frontend",
             "--working-dir",
-            "deploy/dynamo/sdk/src/dynamo/sdk/tests",
+            "deploy/sdk/src/dynamo/sdk/tests",
             "--Frontend.model=qwentastic",
             "--Middle.bias=0.5",
         ]

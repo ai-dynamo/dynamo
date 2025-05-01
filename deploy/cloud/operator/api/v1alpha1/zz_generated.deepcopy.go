@@ -38,8 +38,8 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
 	"k8s.io/api/autoscaling/v2"
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

@@ -40,10 +40,10 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller"
-	commonController "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/etcd"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller"
+	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/etcd"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
 	//+kubebuilder:scaffold:imports
 )

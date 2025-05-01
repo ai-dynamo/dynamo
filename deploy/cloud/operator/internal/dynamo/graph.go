@@ -26,19 +26,19 @@ import (
 	"strings"
 
 	"emperror.dev/errors"
-	apiStoreClient "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/api_store_client"
-	compounaiCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemas"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
-	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/config"
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
+	apiStoreClient "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/api_store_client"
+	compounaiCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	commonconfig "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/config"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/huandu/xstrings"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/archive"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/archive"
 	"gopkg.in/yaml.v2"
 )
 

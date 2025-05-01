@@ -1,4 +1,4 @@
-module github.com/ai-dynamo/dynamo/deploy/dynamo/operator
+module github.com/ai-dynamo/dynamo/deploy/cloud/operator
 
 go 1.23.0
 

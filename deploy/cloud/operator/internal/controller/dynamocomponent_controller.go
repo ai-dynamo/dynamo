@@ -35,10 +35,10 @@ import (
 	"time"
 
 	"emperror.dev/errors"
-	commonconfig "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/config"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/internal/controller_common"
+	commonconfig "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/config"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/apparentlymart/go-shquot/shquot"
 	"github.com/huandu/xstrings"
 	"github.com/mitchellh/hashstructure/v2"
@@ -63,10 +63,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	apiStoreClient "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/api_store_client"
-	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/common"
-	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/dynamo/schemas"
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
+	apiStoreClient "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/api_store_client"
+	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 )
 
 const (
