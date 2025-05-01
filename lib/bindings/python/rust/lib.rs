@@ -370,7 +370,6 @@ impl EtcdKvCache {
                 if let Some(stripped_key) = key.strip_prefix(&inner.prefix) {
                     inner.delete(stripped_key).await.map_err(to_pyerr)?;
                 } else {
-                    // This shouldn't happen, but just in case
                     inner.delete(&key).await.map_err(to_pyerr)?;
                 }
             }
