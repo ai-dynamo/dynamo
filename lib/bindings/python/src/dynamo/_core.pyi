@@ -174,6 +174,18 @@ class EtcdKvCache:
         """
         ...
 
+    async def delete(self, key: str) -> None:
+        """
+        Delete a key-value pair from the cache and etcd.
+        """
+        ...
+
+    async def clear_all(self) -> None:
+        """
+        Delete all key-value pairs from the cache and etcd.
+        """
+        ...
+
 class Namespace:
     """
     A namespace is a collection of components

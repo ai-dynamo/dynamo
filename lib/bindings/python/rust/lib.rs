@@ -347,6 +347,31 @@ impl EtcdKvCache {
             Ok(())
         })
     }
+
+    fn delete<'p>(&self, py: Python<'p>, key: String) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner.delete(&key).await.map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
+    fn clear_all<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            // Get all keys with the prefix
+            let all_keys = inner.get_all().await.keys().cloned().collect::<Vec<String>>();
+
+            // Delete each key
+            for key in all_keys {
+                inner.delete(&key).await.map_err(to_pyerr)?;
+            }
+
+            Ok(())
+        })
+    }
 }
 
 #[pymethods]
