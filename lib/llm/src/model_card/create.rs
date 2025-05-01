@@ -75,13 +75,13 @@ impl ModelDeploymentCard {
         Ok(Self {
             display_name: model_name.to_string(),
             service_name: model_name.to_string(),
-            model_info: ModelInfoType::GGUF(gguf_file.to_path_buf()),
-            tokenizer: TokenizerKind::from_gguf(gguf_file)?,
+            model_info: Some(ModelInfoType::GGUF(gguf_file.to_path_buf())),
+            tokenizer: Some(TokenizerKind::from_gguf(gguf_file)?),
             prompt_formatter: Some(PromptFormatterArtifact::GGUF(gguf_file.to_path_buf())),
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
             last_published: None,
-            requires_preprocessing: true,
+            requires_preprocessing: false,
         })
     }
 
@@ -97,13 +97,13 @@ impl ModelDeploymentCard {
         Ok(Self {
             display_name: model_name.to_string(),
             service_name: model_name.to_string(),
-            model_info: ModelInfoType::from_repo(repo_id).await?,
-            tokenizer: TokenizerKind::from_repo(repo_id).await?,
+            model_info: Some(ModelInfoType::from_repo(repo_id).await?),
+            tokenizer: Some(TokenizerKind::from_repo(repo_id).await?),
             prompt_formatter: PromptFormatterArtifact::from_repo(repo_id).await?,
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
             last_published: None,
-            requires_preprocessing: true,
+            requires_preprocessing: false,
         })
     }
 }

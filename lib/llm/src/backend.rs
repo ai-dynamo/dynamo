@@ -61,8 +61,8 @@ pub type ExecutionContext = ServerStreamingEngine<BackendInput, ExecutionOutputS
 /// Backend handles resource management and orchestrates LLM execution
 #[allow(dead_code)]
 pub struct Backend {
-    pub tokenizer: Tokenizer,     // Handles token encoding/decoding
-    validate_engine_decode: bool, // Enable validation of engine decoding
+    pub tokenizer: Option<Tokenizer>, // Handles token encoding/decoding
+    validate_engine_decode: bool,     // Enable validation of engine decoding
 }
 
 /// Internal state for managing token decoding and stream processing
@@ -79,17 +79,23 @@ impl Backend {
         let tokenizer = Tokenizer::from(Arc::new(tokenizer));
 
         Ok(Arc::new(Self {
-            tokenizer,
+            tokenizer: Some(tokenizer),
             validate_engine_decode: false,
         }))
     }
 
     pub async fn from_mdc(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
         let tokenizer = match &mdc.tokenizer {
-            TokenizerKind::HfTokenizerJson(file) => {
+            Some(TokenizerKind::HfTokenizerJson(file)) => {
                 HfTokenizer::from_file(file).map_err(Error::msg)?
             }
-            TokenizerKind::GGUF(t) => *t.clone(),
+            Some(TokenizerKind::GGUF(t)) => *t.clone(),
+            None => {
+                return Ok(Arc::new(Self {
+                    tokenizer: None,
+                    validate_engine_decode: false,
+                }));
+            }
         };
         Self::from_tokenizer(tokenizer).await
     }
@@ -98,14 +104,17 @@ impl Backend {
         &self,
         stream: ManyOut<ExecutionOutputStream>,
         stop_conditions: StopConditions,
-    ) -> DecoderUnfoldState {
-        let decoder = Decoder::new(self.tokenizer.decode_stream(false), stop_conditions);
+    ) -> anyhow::Result<DecoderUnfoldState> {
+        let Some(tokenizer) = self.tokenizer.as_ref() else {
+            anyhow::bail!("Backend built from blank ModelDeploymentCard, no tokenizer");
+        };
+        let decoder = Decoder::new(tokenizer.decode_stream(false), stop_conditions);
 
-        DecoderUnfoldState {
+        Ok(DecoderUnfoldState {
             stream,
             decoder,
             validate_engine_decode: self.validate_engine_decode,
-        }
+        })
     }
 }
 
@@ -127,7 +136,7 @@ impl
         let next_stream = next.generate(request).await?;
 
         let context = next_stream.context();
-        let state = self.decoder(next_stream, stop_conditions);
+        let state = self.decoder(next_stream, stop_conditions)?;
 
         let processed_stream = stream::unfold(state, |mut state| async move {
             match state.stream.next().await {

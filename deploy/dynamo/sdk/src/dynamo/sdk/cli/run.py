@@ -19,39 +19,30 @@ import shutil
 import subprocess
 import sys
 
-import click
+import typer
+from rich.console import Console
+
+console = Console()
 
 
-def build_run_command() -> click.Group:
-    @click.group(name="run")
-    def cli():
-        pass
+def run(ctx: typer.Context):
+    """Execute dynamo-run with any additional arguments."""
+    # Check if dynamo-run is available in PATH
+    if shutil.which("dynamo-run") is None:
+        console.print(
+            "[bold red]Error:[/bold red] 'dynamo-run' is needed but not found.\n"
+            "Please install it using: [bold cyan]cargo install dynamo-run[/bold cyan]",
+            style="red",
+        )
+        raise typer.Exit(code=1)
 
-    # set help_option_names to empty to let dynamo-run handles help option, instead of intercepting by "dynamo run"
-    @cli.command(
-        context_settings=dict(
-            ignore_unknown_options=True, allow_extra_args=True, help_option_names=()
-        ),
-    )
-    def run() -> None:
-        """Call dynamo-run with remaining arguments"""
-        # Check if dynamo-run is available in PATH
-        if shutil.which("dynamo-run") is None:
-            click.echo(
-                "Error: 'dynamo-run' is needed but not found.\n"
-                "Please install it using: cargo install dynamo-run",
-                err=True,
-            )
-            sys.exit(1)
+    # Extract all arguments after 'run'
+    args = sys.argv[sys.argv.index("run") + 1 :] if "run" in sys.argv else []
 
-        command = ["dynamo-run"] + sys.argv[2:]
-        try:
-            subprocess.run(command)
-        except Exception as e:
-            click.echo(f"Error executing dynamo-run: {str(e)}", err=True)
-            sys.exit(1)
+    command = ["dynamo-run"] + args
 
-    return cli
-
-
-run_command = build_run_command()
+    try:
+        subprocess.run(command)
+    except Exception as e:
+        console.print(f"[bold red]Error executing dynamo-run:[/bold red] {str(e)}")
+        raise typer.Exit(code=1)

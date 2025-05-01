@@ -21,6 +21,8 @@ Frontend:
 Processor:
   engine_args: "configs/llm_api_config_router.yaml"
   router: kv
+  ServiceArgs:
+    workers: 5  # to reduce the tokenization bottleneck at a high concurrency
 
 Router:
   model-name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B

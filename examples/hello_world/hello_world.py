@@ -15,11 +15,13 @@
 
 import logging
 
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from dynamo.sdk import DYNAMO_IMAGE, api, depends, dynamo_endpoint, service
+from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sdk import DYNAMO_IMAGE, depends, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
-from dynamo.sdk.lib.logging import configure_server_logging
 
 logger = logging.getLogger(__name__)
 
@@ -102,15 +104,22 @@ class Middle:
             yield f"Middle: {response}"
 
 
+app = FastAPI(title="Hello World!")
+
+
 @service(
+    dynamo={"enabled": True, "namespace": "inference"},
     image=DYNAMO_IMAGE,
-)  # Regular HTTP API
+    app=app,
+)
 class Frontend:
+    """A simple frontend HTTP API that forwards requests to the dynamo graph."""
+
     middle = depends(Middle)
 
     def __init__(self) -> None:
         # Configure logging
-        configure_server_logging(service_name="Frontend")
+        configure_dynamo_logging(service_name="Frontend")
 
         logger.info("Starting frontend")
         config = ServiceConfig.get_instance()
@@ -119,12 +128,13 @@ class Frontend:
         logger.info(f"Frontend config message: {self.message}")
         logger.info(f"Frontend config port: {self.port}")
 
-    @api
-    async def generate(self, text):
+    @dynamo_endpoint(is_api=True)
+    async def generate(self, request: RequestType):
         """Stream results from the pipeline."""
-        logger.info(f"Frontend received: {text}")
-        logger.info(f"Frontend received type: {type(text)}")
-        txt = RequestType(text=text)
-        logger.info(f"Frontend sending: {type(txt)}")
-        async for response in self.middle.generate(txt.model_dump_json()):
-            yield f"Frontend: {response}"
+        logger.info(f"Frontend received: {request.text}")
+
+        async def content_generator():
+            async for response in self.middle.generate(request.model_dump_json()):
+                yield f"Frontend: {response}"
+
+        return StreamingResponse(content_generator())

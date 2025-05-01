@@ -16,10 +16,6 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
-global:
-  # NGC API Key to use as default for docker registry password
-  NGC_API_KEY: ""
-
 # Namespace restriction configuration for the operator
 # If enabled: true and targetNamespace is empty, the operator will be restricted to the release namespace
 # If enabled: true and targetNamespace is set, the operator will be restricted to the specified namespace
@@ -77,40 +73,30 @@ controllerManager:
     annotations: {}
 
 dynamo:
-  yatai:
+  apiStore:
     endpoint: http://dynamo-server.dynamo-system.svc.cluster.local
     clusterName: default
 
-  yataiSystem:
-    # If left blank, will default to the installation namespace
-    namespace: ""
-
   internalImages:
-    bentoDownloader: quay.io/bentoml/bento-downloader:0.0.5
-    kaniko: quay.io/bentoml/kaniko:debug
-    buildkit: moby/buildkit:latest
-    buildkitRootless: quay.io/bentoml/buildkit:master-rootless
-    metricsTransformer: quay.io/bentoml/yatai-bento-metrics-transformer:0.0.4
-    debugger: quay.io/bentoml/bento-debugger:0.0.8
-    monitorExporter: quay.io/bentoml/bentoml-monitor-exporter:0.0.3
-    proxy: quay.io/bentoml/bentoml-proxy:0.0.1
+    dynamoComponentsDownloader: rapidfort/curl:latest
+    kaniko: gcr.io/kaniko-project/executor:debug
+    buildkit: moby/buildkit:v0.20.2
+    buildkitRootless: moby/buildkit:v0.20.2-rootless
+    debugger: python:3.12-slim
 
-  disableAutomateBentoImageBuilder: false
   enableRestrictedSecurityContext: false
-  disableYataiComponentRegistration: false
 
   dockerRegistry:
     server: 'nvcr.io/nvidian/nim-llm-dev'
     inClusterServer: ''
     username: '$oauthtoken'
-    # If not set, will use global.NGC_API_KEY
     password: ""
     passwordExistingSecretName: ''
     passwordExistingSecretKey: ''
     secure: true
-    bentoRepositoryName: yatai-bentos
+    dynamoComponentsRepositoryName: dynamo-pipelines
 
-  bentoImageBuildEngine: buildkit # options: kaniko, buildkit, buildkit-rootless
+  imageBuildEngine: buildkit # options: kaniko, buildkit, buildkit-rootless
   addNamespacePrefixToImageName: false
 
   estargz:

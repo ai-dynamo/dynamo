@@ -35,7 +35,7 @@ The code for the pipeline looks like this:
 ```python
 # filename: pipeline.py
 
-from dynamo.sdk import service, dynamo_endpoint, depends, api
+from dynamo.sdk import service, dynamo_endpoint, depends
 from pydantic import BaseModel
 
 class RequestType(BaseModel):
@@ -93,7 +93,7 @@ dynamo serve pipeline:Frontend
 Once it's up and running, you can make a request to the pipeline using
 
 ```bash
-curl -X POST http://localhost:3000/generate \
+curl -X POST http://localhost:8000/generate \
     -H "Content-Type: application/json" \
     -d '{"text": "federer"}'
 ```

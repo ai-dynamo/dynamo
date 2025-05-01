@@ -58,6 +58,19 @@ cd $DYNAMO_HOME/examples/llm
 dynamo serve components.prefill_worker:PrefillWorker -f ./configs/multinode-405b.yaml
 ```
 
+**Step 7**: [Optional] Start more decode workers on other nodes
+This example can be extended to more nodes as well. For example, if you'd like to spin up another decode worker, you can use
+```bash
+# node X
+export NATS_SERVER = '<your-nats-server-address>' # note this should start with nats://...
+export ETCD_ENDPOINTS = '<your-etcd-endpoints-address>'
+
+cd $DYNAMO_HOME/examples/llm
+dynamo serve components.worker:VllmWorker -f ./configs/multinode-405b.yaml --service-name VllmWorker
+```
+
+Note the use of `--service-name`. This will only spin up the worker that you are requesting and ignore any `depends` statements.
+
 ### Client
 
 In another terminal:
@@ -164,3 +177,53 @@ curl <node1-ip>:8000/v1/chat/completions \
     "max_tokens": 300
   }'
 ```
+
+##### Disaggregated Deployment
+
+In this example, we will be deploying two replicas of the model (one prefill worker
+and one decode worker). We will be using 4 H100x8 nodes and group every two of them
+into one Ray cluster in the same way as described in aggregated deployment.
+However, for etcd and nats server, we will only run them in
+one node and let's consider that node to be the head node of the whole deployment.
+
+Note that if you are starting etcd server directly instead of using `docker compose`,
+you should add additional arguments to be discoverable in other node.
+```bash
+etcd --advertise-client-urls http://<head-node-ip>:2379 --listen-client-urls http://<head-node-ip>:2379,http://127.0.0.1:2379
+```
+
+**Step 1**: On every two nodes, set up Ray cluster as described in
+[aggregated deployment](#aggregated-deployment). After that, you should have
+two independent Ray cluster, each has access to 16 GPUs.
+
+**Step 2** start the deployment by running different flavors of `dynamo serve`
+on one of the node for each Ray cluster, using the configuration file,
+`configs/mutinode_disagg_r1.yaml`.
+
+For decode, below command will be used and the node will be the entry point of
+the whole deployment. In other words, the ip of the node should be used to send
+requests to.
+```bash
+# if not head node
+export NATS_SERVER='nats://<nats-server-ip>:4222'
+export ETCD_ENDPOINTS='<etcd-endpoints-ip>:2379'
+
+cd $DYNAMO_HOME/examples/llm
+dynamo serve graphs.agg:Frontend -f ./configs/mutinode_disagg_r1.yaml
+```
+
+For prefill:
+```bash
+# if not head node
+export NATS_SERVER='nats://<nats-server-ip>:4222'
+export ETCD_ENDPOINTS='<etcd-endpoints-ip>:2379'
+
+cd $DYNAMO_HOME/examples/llm
+dynamo serve components.prefill_worker:PrefillWorker -f ./configs/mutinode_disagg_r1.yaml
+```
+
+### Client
+
+In another terminal, you can send the same curl request as described in
+[aggregated deployment](#aggregated-deployment), addressing to the ip of
+the decode node.

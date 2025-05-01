@@ -27,9 +27,9 @@ use llm_rs::{
     },
 };
 
-use dynamo_runtime::pipeline::{Operator, ServiceFrontend, Source};
-
-use dynamo_runtime::pipeline::{ManyOut, SegmentSink, SingleIn};
+use dynamo_runtime::pipeline::{
+    ManyOut, Operator, PushRouter, SegmentSink, ServiceFrontend, SingleIn, Source,
+};
 
 #[pyclass]
 pub(crate) struct OAIChatPreprocessor {
@@ -76,13 +76,14 @@ impl OAIChatPreprocessor {
         let builder = self.current.inner.endpoint_builder().handler(ingress);
         let endpoint = Arc::new(self.next.inner.clone());
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let client = Arc::new(
-                endpoint
-                    .client::<BackendInput, Annotated<BackendOutput>>()
-                    .await
-                    .map_err(to_pyerr)?,
-            );
-            network.attach(client).map_err(to_pyerr)?;
+            let client = endpoint.client().await.map_err(to_pyerr)?;
+            let router = PushRouter::<BackendInput, Annotated<BackendOutput>>::from_client(
+                client,
+                Default::default(),
+            )
+            .await
+            .map_err(to_pyerr)?;
+            network.attach(Arc::new(router)).map_err(to_pyerr)?;
             builder.start().await.map_err(to_pyerr)?;
             Ok(())
         })

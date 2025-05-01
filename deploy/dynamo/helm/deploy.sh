@@ -26,24 +26,68 @@ export RELEASE_NAME="${RELEASE_NAME:=${NAMESPACE}}"  # Default release name is s
 export DOCKER_USERNAME="${DOCKER_USERNAME:=<your-docker-username>}"  # Default docker username
 export DOCKER_PASSWORD="${DOCKER_PASSWORD:=<your-docker-password>}"  # Default docker password
 export DOCKER_SERVER="${DOCKER_SERVER:=<your-docker-server>}"  # Default docker server
+export PIPELINES_DOCKER_SERVER="${PIPELINES_DOCKER_SERVER:=${DOCKER_SERVER}}"
+export PIPELINES_DOCKER_USERNAME="${PIPELINES_DOCKER_USERNAME:=${DOCKER_USERNAME}}"
+export PIPELINES_DOCKER_PASSWORD="${PIPELINES_DOCKER_PASSWORD:=${DOCKER_PASSWORD}}"
 export IMAGE_TAG="${IMAGE_TAG:=latest}"  # Default image tag
 export DYNAMO_INGRESS_SUFFIX="${DYNAMO_INGRESS_SUFFIX:=dynamo-cloud.com}"
+export DOCKER_SECRET_NAME="${DOCKER_SECRET_NAME:=docker-imagepullsecret}"
+export INGRESS_ENABLED="${INGRESS_ENABLED:=false}"
+export ISTIO_ENABLED="${ISTIO_ENABLED:=false}"
+export ISTIO_GATEWAY="${ISTIO_GATEWAY:=istio-system/istio-ingressgateway}"
+export INGRESS_CLASS="${INGRESS_CLASS:=nginx}"
+
+# Add command line options
+INTERACTIVE=false
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+  key="$1"
+  case $key in
+    --interactive)
+      INTERACTIVE=true
+      shift
+      ;;
+    --help)
+      echo "Usage: $0 [options]"
+      echo "Options:"
+      echo "  --interactive       Run in interactive mode"
+      echo "  --help              Show this help message"
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1"
+      echo "Use --help for usage information."
+      exit 1
+      ;;
+  esac
+done
+
+if [ "$INTERACTIVE" = true ]; then
+  source network-config-wizard.sh
+fi
+
 
 # Check if required variables are set
-if [ "$DOCKER_USERNAME" = "<your-docker-username>" ]; then
-    echo "Error: Please set your DOCKER_USERNAME in the script or via environment variable"
-    exit 1
-fi
-
-if [ "$DOCKER_PASSWORD" = "<your-docker-password>" ]; then
-    echo "Error: Please set your DOCKER_PASSWORD in the script or via environment variable"
-    exit 1
-fi
-
 if [ "$DOCKER_SERVER" = "<your-docker-server>" ]; then
     echo "Error: Please set your DOCKER_SERVER in the script or via environment variable"
     exit 1
 fi
+
+# Creates a docker registry secret. Only proceed if both username and password are set
+if [[ -n "${DOCKER_USERNAME:-}" && -n "${DOCKER_PASSWORD:-}" ]]; then
+  echo "Creating/updating Docker registry secret '$DOCKER_SECRET_NAME' in namespace '$NAMESPACE'..."
+
+  kubectl create secret docker-registry "$DOCKER_SECRET_NAME" \
+    --docker-username="$DOCKER_USERNAME" \
+    --docker-password="$DOCKER_PASSWORD" \
+    --docker-server="$DOCKER_SERVER" \
+    --namespace "$NAMESPACE" \
+    --dry-run=client -o yaml | kubectl apply -f -
+else
+  echo "DOCKER_USERNAME and/or DOCKER_PASSWORD not set — skipping docker secret creation."
+fi
+
 
 # Function to retry commands
 retry_command() {
@@ -87,11 +131,19 @@ echo "IMAGE_TAG: $IMAGE_TAG"
 echo "DOCKER_USERNAME: $DOCKER_USERNAME"
 echo "DOCKER_SERVER: $DOCKER_SERVER"
 echo "DOCKER_PASSWORD: [HIDDEN]"
+echo "PIPELINES_DOCKER_SERVER: $PIPELINES_DOCKER_SERVER"
+echo "PIPELINES_DOCKER_USERNAME: $PIPELINES_DOCKER_USERNAME"
+echo "PIPELINES_DOCKER_PASSWORD: [HIDDEN]"
+echo "DOCKER_SECRET_NAME: $DOCKER_SECRET_NAME"
+echo "INGRESS_ENABLED: $INGRESS_ENABLED"
+echo "ISTIO_ENABLED: $ISTIO_ENABLED"
+echo "INGRESS_CLASS: $INGRESS_CLASS"
+echo "ISTIO_GATEWAY: $ISTIO_GATEWAY"
+echo "DYNAMO_INGRESS_SUFFIX: $DYNAMO_INGRESS_SUFFIX"
 
+envsubst '${NAMESPACE} ${RELEASE_NAME} ${DOCKER_USERNAME} ${DOCKER_PASSWORD} ${DOCKER_SERVER} ${IMAGE_TAG} ${DYNAMO_INGRESS_SUFFIX} ${PIPELINES_DOCKER_SERVER} ${PIPELINES_DOCKER_USERNAME} ${PIPELINES_DOCKER_PASSWORD} ${DOCKER_SECRET_NAME} ${INGRESS_ENABLED} ${ISTIO_ENABLED} ${INGRESS_CLASS} ${ISTIO_GATEWAY}' < dynamo-platform-values.yaml > generated-values.yaml
 echo "generated file contents:"
-envsubst '${NAMESPACE} ${RELEASE_NAME} ${DOCKER_USERNAME} ${DOCKER_PASSWORD} ${DOCKER_SERVER} ${IMAGE_TAG} ${DYNAMO_INGRESS_SUFFIX}' < dynamo-platform-values.yaml
-
-envsubst '${NAMESPACE} ${RELEASE_NAME} ${DOCKER_USERNAME} ${DOCKER_PASSWORD} ${DOCKER_SERVER} ${IMAGE_TAG} ${DYNAMO_INGRESS_SUFFIX}' < dynamo-platform-values.yaml > generated-values.yaml
+cat generated-values.yaml
 
 echo ""
 echo "Generated values file saved as generated-values.yaml"

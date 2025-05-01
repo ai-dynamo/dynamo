@@ -15,8 +15,7 @@
 
 ## Append samples of your project ##
 resources:
-- nvidia.com_v1alpha1_dynamonimdeployment.yaml
-- nvidia.com_v1alpha1_dynamonimrequest.yaml
-- nvidia.com_v1alpha1_dynamonim.yaml
-- nvidia.com_v1alpha1_dynamodeployment.yaml
+- nvidia.com_v1alpha1_dynamocomponentdeployment.yaml
+- nvidia.com_v1alpha1_dynamocomponent.yaml
+- nvidia.com_v1alpha1_dynamographdeployment.yaml
 #+kubebuilder:scaffold:manifestskustomizesamples

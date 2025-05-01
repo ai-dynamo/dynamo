@@ -35,10 +35,10 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the Project itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
-# - dynamonim_editor_role.yaml
-# - dynamonim_viewer_role.yaml
-# - dynamonimrequest_editor_role.yaml
-# - dynamonimrequest_viewer_role.yaml
-# - dynamonimdeployment_editor_role.yaml
-# - dynamonimdeployment_viewer_role.yaml
+# - dynamocomponent_editor_role.yaml
+# - dynamocomponent_viewer_role.yaml
+# - dynamocomponent_editor_role.yaml
+# - dynamocomponent_viewer_role.yaml
+# - dynamocomponentdeployment_editor_role.yaml
+# - dynamocomponentdeployment_viewer_role.yaml
 

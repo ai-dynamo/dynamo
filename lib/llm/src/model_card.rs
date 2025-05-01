@@ -13,5 +13,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 pub mod create;
 pub mod model;
+pub use model::ModelDeploymentCard;
+
+// TODO: Do these network/publish related model deployment card values belong here or in a
+// network module?
+
+/// Identify model deployment cards in the key-value store
+pub const BUCKET_NAME: &str = "mdc";
+
+/// Delete model deployment cards that haven't been re-published after this long.
+/// Cleans up if the worker stopped.
+pub const BUCKET_TTL: Duration = Duration::from_secs(5 * 60);

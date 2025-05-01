@@ -34,10 +34,12 @@ use dynamo_runtime::pipeline::error as pipeline_error;
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 
-use dynamo_llm::protocols::openai::chat_completions::{
-    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+use dynamo_llm::protocols::openai::{
+    chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
+    completions::{prompt_to_string, CompletionRequest, CompletionResponse},
 };
-use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+
+use dynamo_llm::engines::{EngineDispatcher, StreamingEngine};
 
 /// How many requests mistral will run at once in the paged attention scheduler.
 /// It actually runs 1 fewer than this.
@@ -49,11 +51,9 @@ const PAGED_ATTENTION_MAX_NUM_SEQS: usize = 10;
 /// finish_reason=stop and no tokens for one of the requests.
 const EXP_ENABLE_PAGED_ATTENTION: bool = false;
 
-pub async fn make_engine(
-    gguf_path: &Path,
-) -> pipeline_error::Result<OpenAIChatCompletionsStreamingEngine> {
+pub async fn make_engine(gguf_path: &Path) -> pipeline_error::Result<Arc<dyn StreamingEngine>> {
     let engine = MistralRsEngine::new(gguf_path).await?;
-    let engine: OpenAIChatCompletionsStreamingEngine = Arc::new(engine);
+    let engine: Arc<dyn StreamingEngine> = Arc::new(EngineDispatcher::new(engine));
     Ok(engine)
 }
 
@@ -165,8 +165,48 @@ impl MistralRsEngine {
         let engine = MistralRsEngine {
             mistralrs: builder.build(),
         };
+
         // skip the id used for dummy run https://github.com/EricLBuehler/mistral.rs/issues/1218
         let _ = engine.mistralrs.next_request_id();
+
+        // Perform warmup request
+        let (tx, mut rx) = channel(1);
+        let request_id = engine.mistralrs.next_request_id();
+        let warmup_request = Request::Normal(NormalRequest {
+            id: request_id,
+            messages: RequestMessage::Chat(vec![IndexMap::from([
+                ("role".to_string(), Either::Left("user".to_string())),
+                ("content".to_string(), Either::Left("test".to_string())),
+            ])]),
+            sampling_params: SamplingParams::deterministic(),
+            response: tx,
+            return_logprobs: false,
+            is_streaming: false,
+            constraint: Constraint::None,
+            suffix: None,
+            adapters: None,
+            tools: None,
+            tool_choice: None,
+            logits_processors: None,
+            return_raw_logits: false,
+        });
+
+        // Send warmup request and consume response
+        if let Ok(sender) = engine.mistralrs.get_sender() {
+            if let Ok(()) = sender.send(warmup_request).await {
+                if let Some(response) = rx.recv().await {
+                    match response.as_result() {
+                        Ok(r) => {
+                            tracing::debug!(request_id, "Warmup response: {r:?}");
+                        }
+                        Err(err) => {
+                            tracing::error!(request_id, %err, "Failed converting response to result.");
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(engine)
     }
 }
@@ -365,4 +405,131 @@ fn to_logit_bias(lb: HashMap<String, serde_json::Value>) -> HashMap<u32, f32> {
         out.insert(token_id, bias as f32);
     }
     out
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<CompletionRequest>, ManyOut<Annotated<CompletionResponse>>, Error>
+    for MistralRsEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<CompletionRequest>,
+    ) -> Result<ManyOut<Annotated<CompletionResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        let (tx, mut rx) = channel(10_000);
+        let response_generator = request.response_generator();
+
+        let messages = RequestMessage::Completion {
+            text: prompt_to_string(&request.inner.prompt),
+            echo_prompt: false,
+            best_of: Some(1),
+        };
+        let det = SamplingParams::deterministic();
+        // allow deprecated because max_tokens
+        #[allow(deprecated)]
+        let sampling_params = SamplingParams {
+            temperature: request
+                .inner
+                .temperature
+                .map(|t| t as f64)
+                .or(det.temperature),
+            top_p: request.inner.top_p.map(|t| t as f64).or(det.top_p),
+            top_n_logprobs: request
+                .inner
+                .logprobs
+                .map(|t| t as usize)
+                .unwrap_or(det.top_n_logprobs),
+            frequency_penalty: request.inner.frequency_penalty.or(det.frequency_penalty),
+            presence_penalty: request.inner.presence_penalty.or(det.presence_penalty),
+            stop_toks: request
+                .inner
+                .stop
+                .clone()
+                .map(to_stop_tokens)
+                .or(det.stop_toks),
+            max_len: request
+                .inner
+                .max_tokens
+                .or(request.inner.max_tokens)
+                .map(|m| m as usize)
+                .or(det.max_len),
+            logits_bias: request
+                .inner
+                .logit_bias
+                .clone()
+                .map(to_logit_bias)
+                .or(det.logits_bias),
+            // These are not in async-openai yet
+            top_k: det.top_k,
+            min_p: det.min_p,
+            n_choices: 1,
+            dry_params: det.dry_params,
+        };
+
+        let request_id = self.mistralrs.next_request_id();
+        let mistralrs_request = Request::Normal(NormalRequest {
+            id: request_id,
+            messages,
+            sampling_params,
+            response: tx,
+            return_logprobs: false,
+            is_streaming: true,
+            constraint: Constraint::None,
+            suffix: None,
+            adapters: None,
+            tools: None,
+            tool_choice: None,
+            logits_processors: None,
+            return_raw_logits: false,
+        });
+
+        self.mistralrs.get_sender()?.send(mistralrs_request).await?;
+
+        let output = stream! {
+            while let Some(response) = rx.recv().await {
+                let response = match response.as_result() {
+                    Ok(r) => r,
+                    Err(err) => {
+                        tracing::error!(request_id, %err, "Failed converting mistralrs channel response to result.");
+                        break;
+                    }
+                };
+                match response {
+                    ResponseOk::CompletionChunk(c) => {
+                        let from_assistant = c.choices[0].text.clone();
+
+                        let finish_reason = match &c.choices[0].finish_reason.as_deref() {
+                            Some("stop") | Some("canceled") => {
+                                Some(FinishReason::Stop)
+                            }
+                            Some("length") => {
+                                Some(FinishReason::Length)
+                            }
+                            Some(s) => {
+                                tracing::warn!(request_id, stop_reason = s, "Unknow stop reason");
+                                Some(FinishReason::Stop)
+                            }
+                            None => None,
+                        };
+                        #[allow(deprecated)]
+                        let inner = response_generator.create_choice(0, Some(from_assistant), None);
+                        let ann = Annotated{
+                            id: None,
+                            data: Some(inner),
+                            event: None,
+                            comment: None,
+                        };
+                        yield ann;
+
+                        if finish_reason.is_some() {
+                            break;
+                        }
+                    },
+                    x => tracing::error!(request_id, "Unhandled. {x:?}"),
+                }
+            }
+        };
+        Ok(ResponseStream::new(Box::pin(output), ctx))
+    }
 }

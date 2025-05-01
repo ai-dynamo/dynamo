@@ -58,16 +58,16 @@ BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
 TENSORRTLLM_BASE_IMAGE=tensorrt_llm/release
-TENSORRTLLM_BASE_IMAGE_TAG=latest
+TENSORRTLLM_BASE_IMAGE_TAG=latest_squashed
 TENSORRTLLM_PIP_WHEEL_PATH=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+VLLM_BASE_IMAGE_TAG="25.03-cuda12.8-devel-ubuntu24.04"
 
 NONE_BASE_IMAGE="ubuntu"
 NONE_BASE_IMAGE_TAG="24.04"
 
-NIXL_COMMIT=3aa8133369566e9ce61301f7eb56ad79b7f4fd92
+NIXL_COMMIT=3810b36b1ad0b647488e163f0f4e8dfc22ffabdf
 NIXL_REPO=ai-dynamo/nixl.git
 
 get_options() {
@@ -287,6 +287,11 @@ error() {
 }
 
 get_options "$@"
+
+# Automatically set ARCH and ARCH_ALT if PLATFORM is linux/arm64
+if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
+    BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
+fi
 
 # Update DOCKERFILE if framework is VLLM
 if [[ $FRAMEWORK == "VLLM" ]]; then

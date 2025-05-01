@@ -15,7 +15,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.1.1"
+version = "0.2.0"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -29,8 +29,11 @@ dependencies = [
     "bentoml==1.4.8",
     "types-psutil==7.0.0.20250218",
     "kubernetes==32.0.1",
-    "ai-dynamo-runtime==0.1.1",
+    "ai-dynamo-runtime==0.2.0",
+    "fastapi==0.115.6",
     "distro",
+    "typer",
+    "circus>=0.17.0",
 ]
 
 classifiers = [
@@ -54,12 +57,12 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 
 [project.optional-dependencies]
 all = [
-    "ai-dynamo-vllm~=0.7.2",
+    "ai-dynamo-vllm~=0.8.4",
     "nixl",
 ]
 
 vllm = [
-    "ai-dynamo-vllm~=0.7.2"
+    "ai-dynamo-vllm~=0.8.4"
 ]
 
 [project.scripts]
@@ -75,7 +78,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["deploy/dynamo/sdk/src/dynamo"]
+packages = ["deploy/dynamo/sdk/src/dynamo", "components/planner/src/dynamo"]
 
 # This section is for including the binaries in the wheel package
 # but doesn't make them executable scripts in the venv bin directory

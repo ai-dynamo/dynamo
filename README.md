@@ -46,6 +46,8 @@ source venv/bin/activate
 
 pip install ai-dynamo[all]
 ```
+> [!NOTE]
+> To ensure compatibility, please refer to the examples in the release branch or tag that matches the version you installed.
 
 ### Building the Dynamo Base Image
 
@@ -62,6 +64,10 @@ docker tag dynamo:latest-vllm <your-registry>/dynamo-base:latest-vllm
 docker login <your-registry>
 docker push <your-registry>/dynamo-base:latest-vllm
 ```
+
+Notes about builds for specific frameworks:
+- For specific details on the `--framework vllm` build, see [here](examples/llm/README.md).
+- For specific details on the `--framework tensorrtllm` build, see [here](examples/tensorrt_llm/README.md).
 
 After building, you can use this image by setting the `DYNAMO_IMAGE` environment variable to point to your built image:
 ```bash
@@ -151,6 +157,7 @@ cp /workspace/target/release/llmctl /workspace/deploy/dynamo/sdk/src/dynamo/sdk/
 cp /workspace/target/release/dynamo-run /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
 
 uv pip install -e .
+export PYTHONPATH=$PYTHONPATH:/workspace/deploy/dynamo/sdk/src:/workspace/components/planner/src
 ```
 
 

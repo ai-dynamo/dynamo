@@ -38,11 +38,13 @@ dynamo-runtime = { workspace = true }
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
+async-nats = { workspace = true }
 async_zmq = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 derive_builder = {workspace = true }
 either = { workspace = true }
+etcd-client = { workspace = true }
 futures =  { workspace = true }
 rand = { workspace = true }
 prometheus = { workspace = true }
@@ -54,6 +56,7 @@ tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 validator = { workspace = true }
+url = { workspace = true }
 uuid = { workspace = true }
 xxhash-rust = { workspace = true }
 strum = { workspace = true }
@@ -68,7 +71,7 @@ regex = "1"
 rayon = "1"
 
 # kv_cuda
-cudarc = { git = "https://github.com/coreylowman/cudarc.git", rev = "8c52e735b55bf8e979e1a16bd85e3dfe4f87c9fe", features = ["cuda-12040"], optional = true }
+cudarc = { version = "0.16.2", features = ["cuda-12040"], optional = true }
 ndarray = { version = "0.16", optional = true }
 
 # protocols

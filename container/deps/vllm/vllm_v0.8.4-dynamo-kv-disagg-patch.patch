@@ -1039,10 +1039,10 @@ index 000000000..a2f9ce99e
 \ No newline at end of file
 diff --git a/vllm/distributed/device_communicators/nixl.py b/vllm/distributed/device_communicators/nixl.py
 new file mode 100644
-index 000000000..bd4ac984e
+index 000000000..4c5ed707f
 --- /dev/null
 +++ b/vllm/distributed/device_communicators/nixl.py
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,447 @@
 +# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 +# SPDX-License-Identifier: Apache-2.0
 +#
@@ -1487,6 +1487,8 @@ index 000000000..bd4ac984e
 +                done_req_ids.append(req_id)
 +            else:
 +                self._transfers[req_id] = running_reqs
++        for req_id in done_req_ids:
++            del self._transfers[req_id]
 +        return done_req_ids
 diff --git a/vllm/distributed/kv_transfer/kv_connector/dynamo_connector.py b/vllm/distributed/kv_transfer/kv_connector/dynamo_connector.py
 new file mode 100644
@@ -3270,7 +3272,7 @@ index 54f7b8fb6..0559f9db2 100644
  
      def _abort_and_cache_schedule(
 diff --git a/vllm/engine/multiprocessing/__init__.py b/vllm/engine/multiprocessing/__init__.py
-index cafd8150b..ab1c11329 100644
+index cafd8150b..6a5e45b4e 100644
 --- a/vllm/engine/multiprocessing/__init__.py
 +++ b/vllm/engine/multiprocessing/__init__.py
 @@ -1,4 +1,17 @@
@@ -3335,16 +3337,42 @@ index cafd8150b..ab1c11329 100644
  
  @dataclass
  class RPCError:
-@@ -116,7 +135,7 @@ class RPCStartupRequest(Enum):
+@@ -113,9 +132,21 @@ class RPCStartupRequest(Enum):
+     IS_SERVER_READY = 1
+ 
+ 
++@dataclass
++class RPCHasUnfinishedRequestsRequest:
++    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
++
++
  @dataclass
  class RPCStartupResponse:
      tracing_enabled: bool
--
 +    nixl_metadata: Optional[bytes] = None
++
++
++@dataclass
++class RPCHasUnfinishedRequestsResponse:
++    has_unfinished_requests: bool
++    request_id: str
+ 
  
  class RPCUProfileRequest(Enum):
-     START_PROFILE = 1
-@@ -181,3 +200,13 @@ def ENGINE_DEAD_ERROR(
+@@ -165,10 +196,10 @@ class RPCAdapterLoadedResponse:
+ RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
+                       RPCUProfileRequest, RPCLoadAdapterRequest,
+                       RPCResetPrefixCacheRequest, RPCSleepRequest,
+-                      RPCWakeUpRequest, RPCIsSleepingRequest]
++                      RPCWakeUpRequest, RPCIsSleepingRequest, RPCHasUnfinishedRequestsRequest]
+ 
+ REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCAdapterLoadedResponse,
+-                          RPCIsSleepingResponse, RPCError]
++                          RPCIsSleepingResponse, RPCError, RPCHasUnfinishedRequestsResponse]
+ 
+ 
+ def ENGINE_DEAD_ERROR(
+@@ -181,3 +212,13 @@ def ENGINE_DEAD_ERROR(
      return MQEngineDeadError(
          "Engine loop is not running. Inspect the stacktrace to "
          f"find the original error: {repr(error)}.")
@@ -3359,7 +3387,7 @@ index cafd8150b..ab1c11329 100644
 +    gpu_cache_usage_perc: float
 +    gpu_prefix_cache_hit_rate: float
 diff --git a/vllm/engine/multiprocessing/client.py b/vllm/engine/multiprocessing/client.py
-index f058b1329..fa99e635c 100644
+index f058b1329..2fdb5b8bf 100644
 --- a/vllm/engine/multiprocessing/client.py
 +++ b/vllm/engine/multiprocessing/client.py
 @@ -1,4 +1,17 @@
@@ -3408,16 +3436,19 @@ index f058b1329..fa99e635c 100644
                                           RPCAdapterLoadedResponse, RPCError,
                                           RPCIsSleepingRequest,
                                           RPCIsSleepingResponse,
-@@ -34,7 +51,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
+@@ -33,8 +50,9 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
+                                          RPCProcessRequest,
                                           RPCResetPrefixCacheRequest,
                                           RPCSleepRequest, RPCStartupRequest,
-                                          RPCStartupResponse,
+-                                         RPCStartupResponse,
 -                                         RPCUProfileRequest, RPCWakeUpRequest)
++                                         RPCStartupResponse, RPCHasUnfinishedRequestsRequest,
++                                         RPCHasUnfinishedRequestsResponse,
 +                                         RPCUProfileRequest, KvMetrics, RPCWakeUpRequest)
  from vllm.engine.protocol import EngineClient
  # yapf: enable
  from vllm.envs import VLLM_RPC_TIMEOUT
-@@ -48,6 +65,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
+@@ -48,6 +66,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
  from vllm.sampling_params import SamplingParams
  from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
  from vllm.utils import Device, deprecate_kwargs
@@ -3426,7 +3457,7 @@ index f058b1329..fa99e635c 100644
  
  logger = init_logger(__name__)
  
-@@ -93,6 +112,7 @@ class MQLLMEngineClient(EngineClient):
+@@ -93,6 +113,7 @@ class MQLLMEngineClient(EngineClient):
          self._errored_with: Optional[BaseException] = None
  
          # Get the configs.
@@ -3434,7 +3465,7 @@ index f058b1329..fa99e635c 100644
          self.model_config = engine_config.model_config
          self.decoding_config = engine_config.decoding_config
  
-@@ -117,6 +137,10 @@ class MQLLMEngineClient(EngineClient):
+@@ -117,6 +138,10 @@ class MQLLMEngineClient(EngineClient):
          self.heartbeat_socket: Socket = self.context.socket(zmq.constants.PULL)
          self.heartbeat_socket.connect(f"{ipc_path}{IPC_HEALTH_EXT}")
  
@@ -3445,7 +3476,7 @@ index f058b1329..fa99e635c 100644
          # IPC path for the data socket.
          self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
  
-@@ -131,8 +155,27 @@ class MQLLMEngineClient(EngineClient):
+@@ -131,8 +156,27 @@ class MQLLMEngineClient(EngineClient):
          # Loop to check health of the LLMEngine periodically.
          # Started after the MQLLMEngine is ready.
          self.health_loop: Optional[asyncio.Task] = None
@@ -3473,7 +3504,7 @@ index f058b1329..fa99e635c 100644
      @staticmethod
      def is_unsupported_config(vllm_config: VllmConfig):
          # Pipeline parallel not yet supported
-@@ -182,6 +225,61 @@ class MQLLMEngineClient(EngineClient):
+@@ -182,6 +226,61 @@ class MQLLMEngineClient(EngineClient):
          except Exception as e:
              self._set_errored(e)
  
@@ -3535,7 +3566,25 @@ index f058b1329..fa99e635c 100644
      async def run_output_handler_loop(self):
          """Get RequestOutputs from Engine and stream to Request Queues"""
  
-@@ -283,12 +381,26 @@ class MQLLMEngineClient(EngineClient):
+@@ -250,7 +349,7 @@ class MQLLMEngineClient(EngineClient):
+                 # Put each output into the appropriate queue.
+                 elif isinstance(
+                         request_outputs,
+-                    (RPCAdapterLoadedResponse, RPCIsSleepingResponse)):
++                    (RPCAdapterLoadedResponse, RPCIsSleepingResponse, RPCHasUnfinishedRequestsResponse)):
+                     self._add_output(request_outputs)
+                 else:
+                     for request_output in request_outputs:
+@@ -261,7 +360,7 @@ class MQLLMEngineClient(EngineClient):
+ 
+     def _add_output(self, request_output: Union[RequestOutput,
+                                                 RPCAdapterLoadedResponse,
+-                                                RPCIsSleepingResponse]):
++                                                RPCIsSleepingResponse, RPCHasUnfinishedRequestsResponse]):
+         queue = self.output_queues.get(request_output.request_id)
+         if queue is not None:
+             queue.put_nowait(request_output)
+@@ -283,12 +382,25 @@ class MQLLMEngineClient(EngineClient):
              # Wait until server is ready.
              response = await self._wait_for_server_rpc(socket)
  
@@ -3558,7 +3607,6 @@ index f058b1329..fa99e635c 100644
 +            if self.metrics_loop is None:
 +                self.metrics_loop = asyncio.create_task(
 +                    self.run_metrics_loop(timeout=VLLM_RPC_TIMEOUT))
-+
  
      def close(self):
          """Destroy the ZeroMQ Context."""
@@ -3634,15 +3682,31 @@ index f058b1329..fa99e635c 100644
              await self.input_socket.send_multipart(parts, copy=False)
  
              # 4) Stream the RequestOutputs from the output queue. Note
-@@ -740,3 +866,6 @@ class MQLLMEngineClient(EngineClient):
+@@ -740,3 +866,22 @@ class MQLLMEngineClient(EngineClient):
          # Raise on error, otherwise happily return None
          if isinstance(request_output, BaseException):
              raise request_output
 +
 +    def set_metrics_publisher(self, metrics_publisher):
 +        self.metrics_publisher = metrics_publisher
++                
++    async def has_unfinished_requests(self) -> bool:
++        logger.info("Checking if there are unfinished requests")
++        if "has_unfinished_requests" not in self.output_queues:
++            logger.info("Creating has unfinished requests queue")
++            
++        request = RPCHasUnfinishedRequestsRequest()
++        queue: asyncio.Queue[Union[BaseException, RPCHasUnfinishedRequestsResponse]] = asyncio.Queue()
++        self.output_queues[request.request_id] = queue
++        request_bytes = pickle.dumps(request)
++        await self.input_socket.send_multipart((request_bytes, ), copy=False)
++        response = await queue.get()
++        self.output_queues.pop(request.request_id)
++        if isinstance(response, BaseException):
++            raise response
++        return response.has_unfinished_requests
 diff --git a/vllm/engine/multiprocessing/engine.py b/vllm/engine/multiprocessing/engine.py
-index 6ed5ae0a9..af4bd942b 100644
+index 6ed5ae0a9..3a320c42c 100644
 --- a/vllm/engine/multiprocessing/engine.py
 +++ b/vllm/engine/multiprocessing/engine.py
 @@ -1,13 +1,27 @@
@@ -3688,11 +3752,13 @@ index 6ed5ae0a9..af4bd942b 100644
                                           RPCAdapterLoadedResponse, RPCError,
                                           RPCIsSleepingRequest,
                                           RPCIsSleepingResponse,
-@@ -25,13 +41,19 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
+@@ -25,13 +41,21 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                           RPCResetPrefixCacheRequest,
                                           RPCSleepRequest, RPCStartupRequest,
                                           RPCStartupResponse,
 -                                         RPCUProfileRequest, RPCWakeUpRequest)
++                                         RPCHasUnfinishedRequestsRequest,
++                                         RPCHasUnfinishedRequestsResponse,
 +                                         RPCUProfileRequest, RPCWakeUpRequest, KvMetrics,
 +                                         IPC_REMOTE_NIXL_METADATA_EXT)
  # yapf: enable
@@ -3709,7 +3775,7 @@ index 6ed5ae0a9..af4bd942b 100644
  from vllm.worker.model_runner_base import InputProcessingError
  
  logger = init_logger(__name__)
-@@ -39,6 +61,77 @@ logger = init_logger(__name__)
+@@ -39,6 +63,77 @@ logger = init_logger(__name__)
  POLLING_TIMEOUT_MS = 10000
  HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
  
@@ -3787,7 +3853,7 @@ index 6ed5ae0a9..af4bd942b 100644
  
  class MQLLMEngine:
      """A multiprocessing wrapper for :class:`LLMEngine`.
-@@ -101,12 +194,37 @@ class MQLLMEngine:
+@@ -101,12 +196,37 @@ class MQLLMEngine:
          self.heartbeat_socket = self.ctx.socket(zmq.constants.PUSH)
          self.heartbeat_socket.bind(f"{ipc_path}{IPC_HEALTH_EXT}")
  
@@ -3825,7 +3891,7 @@ index 6ed5ae0a9..af4bd942b 100644
      @property
      def dead_error(self) -> BaseException:
          if self._errored_with is not None:
-@@ -192,8 +310,17 @@ class MQLLMEngine:
+@@ -192,8 +312,17 @@ class MQLLMEngine:
                  # Handle the query from the Client.
                  if request == RPCStartupRequest.IS_SERVER_READY:
                      tracing_enabled = self.engine.is_tracing_enabled()
@@ -3845,7 +3911,7 @@ index 6ed5ae0a9..af4bd942b 100644
  
              except Exception as e:
                  response = e
-@@ -206,6 +333,7 @@ class MQLLMEngine:
+@@ -206,6 +335,7 @@ class MQLLMEngine:
  
          while True:
              if not self.engine.has_unfinished_requests():
@@ -3853,7 +3919,7 @@ index 6ed5ae0a9..af4bd942b 100644
                  # Poll until there is work to do.
                  while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
                      # When there's no work, check on engine health and send
-@@ -249,6 +377,13 @@ class MQLLMEngine:
+@@ -249,6 +379,13 @@ class MQLLMEngine:
      def handle_new_input(self):
          """Handle new input from the socket"""
          try:
@@ -3867,7 +3933,16 @@ index 6ed5ae0a9..af4bd942b 100644
              while self.input_socket.poll(timeout=0) != 0:
                  frames = self.input_socket.recv_multipart(copy=False)
                  request = pickle.loads(frames[0].buffer)
-@@ -297,6 +432,11 @@ class MQLLMEngine:
+@@ -277,6 +414,8 @@ class MQLLMEngine:
+                     self.wake_up(request.tags)
+                 elif isinstance(request, RPCIsSleepingRequest):
+                     self._handle_is_sleeping_request(request)
++                elif isinstance(request, RPCHasUnfinishedRequestsRequest):
++                    self._handle_has_unfinished_requests_request(request)
+                 else:
+                     raise ValueError("Unknown RPCRequest Type: "
+                                      f"{type(request)}")
+@@ -297,6 +436,11 @@ class MQLLMEngine:
              self._send_outputs(rpc_err)
  
          try:
@@ -3879,7 +3954,7 @@ index 6ed5ae0a9..af4bd942b 100644
              self.engine.add_request(
                  request_id=request_id,
                  prompt=request.prompt,
-@@ -304,7 +444,9 @@ class MQLLMEngine:
+@@ -304,7 +448,9 @@ class MQLLMEngine:
                  lora_request=request.lora_request,
                  trace_headers=request.trace_headers,
                  prompt_adapter_request=request.prompt_adapter_request,
@@ -3890,6 +3965,17 @@ index 6ed5ae0a9..af4bd942b 100644
  
              if self.log_requests:
                  logger.info("Added request %s.", request.request_id)
+@@ -348,6 +494,10 @@ class MQLLMEngine:
+         self._send_outputs(
+             RPCIsSleepingResponse(request_id=request.request_id,
+                                   is_sleeping=is_sleeping))
++        
++    def _handle_has_unfinished_requests_request(self, request: RPCHasUnfinishedRequestsRequest):
++        response =  RPCHasUnfinishedRequestsResponse(request_id=request.request_id, has_unfinished_requests=self.engine.has_unfinished_requests())
++        self._send_outputs(response)
+ 
+     def _health_check(self):
+         # Send unhealthy if engine has already errored
 diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
 index dd0b67df4..f436b0752 100644
 --- a/vllm/entrypoints/openai/serving_chat.py

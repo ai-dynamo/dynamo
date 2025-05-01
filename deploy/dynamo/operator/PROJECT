@@ -13,7 +13,14 @@ resources:
     namespaced: true
   controller: true
   domain: nvidia.com
-  kind: DynamoNimDeployment
+  kind: DynamoComponentDeployment
+  path: github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: nvidia.com
+  kind: DynamoComponent
   path: github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1
   version: v1alpha1
 - api:
@@ -21,22 +28,7 @@ resources:
     namespaced: true
   controller: true
   domain: nvidia.com
-  kind: DynamoNimRequest
-  path: github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1
-  version: v1alpha1
-- api:
-    crdVersion: v1
-    namespaced: true
-  domain: nvidia.com
-  kind: DynamoNim
-  path: github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1
-  version: v1alpha1
-- api:
-    crdVersion: v1
-    namespaced: true
-  controller: true
-  domain: nvidia.com
-  kind: DynamoDeployment
+  kind: DynamoGraphDeployment
   path: github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1
   version: v1alpha1
 version: "3"

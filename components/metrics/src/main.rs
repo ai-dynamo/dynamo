@@ -127,11 +127,7 @@ async fn app(runtime: Runtime) -> Result<()> {
     tracing::debug!("Creating unique instance of Count at {key}");
     drt.etcd_client()
         .expect("Unreachable because of DistributedRuntime::from_settings above")
-        .kv_create(
-            key,
-            serde_json::to_vec_pretty(&config)?,
-            Some(drt.primary_lease().unwrap().id()),
-        )
+        .kv_create(key, serde_json::to_vec_pretty(&config)?, None)
         .await
         .context("Unable to create unique instance of Count; possibly one already exists")?;
 

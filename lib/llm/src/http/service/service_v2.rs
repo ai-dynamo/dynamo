@@ -15,6 +15,7 @@
 
 use super::metrics;
 use super::ModelManager;
+use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
 use tokio::task::JoinHandle;
@@ -44,6 +45,9 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "true")]
     enable_cmpl_endpoints: bool,
+
+    #[builder(default = "None")]
+    request_template: Option<RequestTemplate>,
 }
 
 impl HttpService {
@@ -91,6 +95,7 @@ impl HttpServiceConfigBuilder {
         model_manager.metrics().register(&registry)?;
 
         let mut router = axum::Router::new();
+
         let mut all_docs = Vec::new();
 
         let mut routes = vec![
@@ -101,6 +106,7 @@ impl HttpServiceConfigBuilder {
         if config.enable_chat_endpoints {
             routes.push(super::openai::chat_completions_router(
                 model_manager.state(),
+                config.request_template,
                 None,
             ));
         }
@@ -128,5 +134,10 @@ impl HttpServiceConfigBuilder {
             port: config.port,
             host: config.host,
         })
+    }
+
+    pub fn with_request_template(mut self, request_template: Option<RequestTemplate>) -> Self {
+        self.request_template = Some(request_template);
+        self
     }
 }

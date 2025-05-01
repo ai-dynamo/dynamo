@@ -34,11 +34,14 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_runtime::slug::Slug;
+use dynamo_runtime::transports::nats;
 use either::Either;
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
+use url::Url;
 
 use crate::gguf::{Content, ContentConfig};
+use crate::key_value_store::Versioned;
 use crate::protocols::TokenIdType;
 
 pub const BUCKET_NAME: &str = "mdc";
@@ -93,7 +96,7 @@ pub enum PromptContextMixin {
     Llama3DateTime,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Builder)]
+#[derive(Serialize, Deserialize, Clone, Debug, Builder, Default)]
 pub struct ModelDeploymentCard {
     /// Human readable model name, e.g. "Meta Llama 3.1 8B Instruct"
     pub display_name: String,
@@ -103,10 +106,10 @@ pub struct ModelDeploymentCard {
     pub service_name: String,
 
     /// Model information
-    pub model_info: ModelInfoType,
+    pub model_info: Option<ModelInfoType>,
 
     /// Tokenizer configuration
-    pub tokenizer: TokenizerKind,
+    pub tokenizer: Option<TokenizerKind>,
 
     /// Prompt Formatter configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,15 +138,24 @@ impl ModelDeploymentCard {
         ModelDeploymentCardBuilder::default()
     }
 
+    /// Create a ModelDeploymentCard where only the name is filled in.
+    ///
+    /// Single-process setups don't need an MDC to communicate model details, but it
+    /// simplifies the code to assume we always have one. This is how you get one in those
+    /// cases. A quasi-null object: <https://en.wikipedia.org/wiki/Null_object_pattern>
+    pub fn with_name_only(name: &str) -> ModelDeploymentCard {
+        ModelDeploymentCard {
+            display_name: name.to_string(),
+            service_name: Slug::slugify(name).to_string(),
+            ..Default::default()
+        }
+    }
+
     /// A URL and NATS friendly and very likely unique ID for this model.
     /// Mostly human readable. a-z, 0-9, _ and - only.
     /// Pass the service_name.
     pub fn service_name_slug(s: &str) -> Slug {
         Slug::from_string(s)
-    }
-
-    pub fn set_service_name(&mut self, service_name: &str) {
-        self.service_name = service_name.to_string();
     }
 
     /// How often we should check if a model deployment card expired because it's workers are gone
@@ -155,10 +167,6 @@ impl ModelDeploymentCard {
                 unreachable!("Cannot run card expiry watcher, invalid CARD_MAX_AGE");
             }
         }
-    }
-
-    pub fn slug(&self) -> Slug {
-        ModelDeploymentCard::service_name_slug(&self.service_name)
     }
 
     /// Load a model deployment card from a JSON file
@@ -173,10 +181,22 @@ impl ModelDeploymentCard {
         Ok(serde_json::from_str(json)?)
     }
 
+    //
+    // Methods
+    //
+
     /// Save the model deployment card to a JSON file
     pub fn save_to_json_file(&self, file: &str) -> Result<(), anyhow::Error> {
         std::fs::write(file, self.to_json()?)?;
         Ok(())
+    }
+
+    pub fn set_service_name(&mut self, service_name: &str) {
+        self.service_name = service_name.to_string();
+    }
+
+    pub fn slug(&self) -> Slug {
+        ModelDeploymentCard::service_name_slug(&self.service_name)
     }
 
     /// Serialize the model deployment card to a JSON string
@@ -200,11 +220,86 @@ impl ModelDeploymentCard {
 
     pub fn tokenizer_hf(&self) -> anyhow::Result<HfTokenizer> {
         match &self.tokenizer {
-            TokenizerKind::HfTokenizerJson(file) => {
+            Some(TokenizerKind::HfTokenizerJson(file)) => {
                 HfTokenizer::from_file(file).map_err(anyhow::Error::msg)
             }
-            TokenizerKind::GGUF(t) => Ok(*t.clone()),
+            Some(TokenizerKind::GGUF(t)) => Ok(*t.clone()),
+            None => {
+                anyhow::bail!("Blank ModelDeploymentCard does not have a tokenizer");
+            }
         }
+    }
+
+    /// Move the files this MDC uses into the NATS object store.
+    /// Updates the URI's to point to NATS.
+    pub async fn move_to_nats(&mut self, nats_client: nats::Client) -> Result<()> {
+        let nats_addr = nats_client.addr();
+        let bucket_name = self.slug();
+        tracing::debug!(
+            nats_addr,
+            %bucket_name,
+            "Uploading model deployment card fields to NATS"
+        );
+
+        if let Some(ModelInfoType::HfConfigJson(ref src_file)) = self.model_info {
+            if !nats::is_nats_url(src_file) {
+                let target = format!("nats://{nats_addr}/{bucket_name}/config.json");
+                nats_client
+                    .object_store_upload(&PathBuf::from(src_file), Url::parse(&target)?)
+                    .await?;
+                self.model_info = Some(ModelInfoType::HfConfigJson(target));
+            }
+        }
+
+        if let Some(PromptFormatterArtifact::HfTokenizerConfigJson(ref src_file)) =
+            self.prompt_formatter
+        {
+            if !nats::is_nats_url(src_file) {
+                let target = format!("nats://{nats_addr}/{bucket_name}/tokenizer_config.json");
+                nats_client
+                    .object_store_upload(&PathBuf::from(src_file), Url::parse(&target)?)
+                    .await?;
+                self.prompt_formatter =
+                    Some(PromptFormatterArtifact::HfTokenizerConfigJson(target));
+            }
+        }
+
+        if let Some(TokenizerKind::HfTokenizerJson(ref src_file)) = self.tokenizer {
+            if !nats::is_nats_url(src_file) {
+                let target = format!("nats://{nats_addr}/{bucket_name}/tokenizer.json");
+                nats_client
+                    .object_store_upload(&PathBuf::from(src_file), Url::parse(&target)?)
+                    .await?;
+                self.tokenizer = Some(TokenizerKind::HfTokenizerJson(target));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Delete this card from the key-value store and it's URLs from the object store
+    pub async fn delete_from_nats(&mut self, nats_client: nats::Client) -> Result<()> {
+        let nats_addr = nats_client.addr();
+        let bucket_name = self.slug();
+        tracing::trace!(
+            nats_addr,
+            %bucket_name,
+            "Delete model deployment card from NATS"
+        );
+        nats_client
+            .object_store_delete_bucket(bucket_name.as_ref())
+            .await
+    }
+}
+
+impl Versioned for ModelDeploymentCard {
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn set_revision(&mut self, revision: u64) {
+        self.last_published = Some(chrono::Utc::now());
+        self.revision = revision;
     }
 }
 

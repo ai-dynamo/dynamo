@@ -3,96 +3,65 @@ package consts
 const (
 	HPACPUDefaultAverageUtilization = 80
 
-	// nolint: gosec
-	YataiApiTokenHeaderName = "X-YATAI-API-TOKEN"
-
-	NgcOrganizationHeaderName = "Nv-Ngc-Org"
-	NgcUserHeaderName         = "Nv-Actor-Id"
-
 	DefaultUserId = "default"
 	DefaultOrgId  = "default"
 
-	BentoServicePort       = 3000
-	BentoServicePortName   = "http"
-	BentoContainerPortName = "http"
+	DynamoServicePort       = 3000
+	DynamoServicePortName   = "http"
+	DynamoContainerPortName = "http"
 
-	YataiImageBuilderComponentName = "yatai-image-builder"
-	YataiDeploymentComponentName   = "yatai-deployment"
+	DynamoImageBuilderComponentName = "dynamo-image-builder"
 
-	YataiBentoDeploymentComponentApiServer = "api-server"
+	DynamoApiServerComponentName = "api-server"
 
-	InternalImagesBentoDownloaderDefault    = "quay.io/bentoml/bento-downloader:0.0.3"
-	InternalImagesKanikoDefault             = "quay.io/bentoml/kaniko:1.9.1"
-	InternalImagesMetricsTransformerDefault = "quay.io/bentoml/yatai-bento-metrics-transformer:0.0.3"
-	InternalImagesBuildkitDefault           = "quay.io/bentoml/buildkit:master"
-	InternalImagesBuildkitRootlessDefault   = "quay.io/bentoml/buildkit:master-rootless"
+	InternalImagesDynamoComponentsDownloaderDefault = "rapidfort/curl:latest"
+	InternalImagesKanikoDefault                     = "gcr.io/kaniko-project/executor:debug"
+	InternalImagesBuildkitDefault                   = "moby/buildkit:v0.20.2"
+	InternalImagesBuildkitRootlessDefault           = "moby/buildkit:v0.20.2-rootless"
 
-	EnvYataiEndpoint    = "YATAI_ENDPOINT"
-	EnvYataiClusterName = "YATAI_CLUSTER_NAME"
+	EnvApiStoreEndpoint    = "API_STORE_ENDPOINT"
+	EnvApiStoreClusterName = "API_STORE_CLUSTER_NAME"
 	// nolint: gosec
-	EnvYataiApiToken = "YATAI_API_TOKEN"
+	EnvApiStoreApiToken = "API_STORE_API_TOKEN"
 
-	EnvBentoServicePort = "PORT"
+	EnvDynamoServicePort = "PORT"
 
-	// tracking envars
-	EnvYataiDeploymentUID = "YATAI_T_DEPLOYMENT_UID"
+	EnvDockerRegistryServer                         = "DOCKER_REGISTRY_SERVER"
+	EnvDockerRegistrySecret                         = "DOCKER_REGISTRY_SECRET_NAME"
+	EnvDockerRegistrySecure                         = "DOCKER_REGISTRY_SECURE"
+	EnvDockerRegistryDynamoComponentsRepositoryName = "DOCKER_REGISTRY_DYNAMO_COMPONENTS_REPOSITORY_NAME"
 
-	EnvYataiBentoDeploymentName      = "YATAI_BENTO_DEPLOYMENT_NAME"
-	EnvYataiBentoDeploymentNamespace = "YATAI_BENTO_DEPLOYMENT_NAMESPACE"
+	EnvInternalImagesDynamoComponentsDownloader = "INTERNAL_IMAGES_DYNAMO_COMPONENTS_DOWNLOADER"
+	EnvInternalImagesKaniko                     = "INTERNAL_IMAGES_KANIKO"
+	EnvInternalImagesBuildkit                   = "INTERNAL_IMAGES_BUILDKIT"
+	EnvInternalImagesBuildkitRootless           = "INTERNAL_IMAGES_BUILDKIT_ROOTLESS"
 
-	EnvDockerRegistryServer          = "DOCKER_REGISTRY_SERVER"
-	EnvDockerRegistryInClusterServer = "DOCKER_REGISTRY_IN_CLUSTER_SERVER"
-	EnvDockerRegistryUsername        = "DOCKER_REGISTRY_USERNAME"
-	// nolint:gosec
-	EnvDockerRegistryPassword            = "DOCKER_REGISTRY_PASSWORD"
-	EnvDockerRegistrySecure              = "DOCKER_REGISTRY_SECURE"
-	EnvDockerRegistryBentoRepositoryName = "DOCKER_REGISTRY_BENTO_REPOSITORY_NAME"
-	EnvDockerRegistryModelRepositoryName = "DOCKER_REGISTRY_MODEL_REPOSITORY_NAME"
+	EnvDynamoSystemNamespace       = "DYNAMO_SYSTEM_NAMESPACE"
+	EnvDynamoImageBuilderNamespace = "DYNAMO_IMAGE_BUILDER_NAMESPACE"
 
-	EnvInternalImagesBentoDownloader    = "INTERNAL_IMAGES_BENTO_DOWNLOADER"
-	EnvInternalImagesKaniko             = "INTERNAL_IMAGES_KANIKO"
-	EnvInternalImagesMetricsTransformer = "INTERNAL_IMAGES_METRICS_TRANSFORMER"
-	EnvInternalImagesBuildkit           = "INTERNAL_IMAGES_BUILDKIT"
-	EnvInternalImagesBuildkitRootless   = "INTERNAL_IMAGES_BUILDKIT_ROOTLESS"
+	KubeLabelDynamoSelector = "nvidia.com/selector"
 
-	EnvYataiSystemNamespace       = "YATAI_SYSTEM_NAMESPACE"
-	EnvYataiImageBuilderNamespace = "YATAI_IMAGE_BUILDER_NAMESPACE"
-	EnvYataiDeploymentNamespace   = "YATAI_DEPLOYMENT_NAMESPACE"
-	EnvBentoDeploymentNamespaces  = "BENTO_DEPLOYMENT_NAMESPACES"
-	EnvImageBuildersNamespace     = "IMAGE_BUILDERS_NAMESPACE"
+	KubeLabelDynamoComponent            = "nvidia.com/dynamo-component"
+	KubeLabelDynamoNamespace            = "nvidia.com/dynamo-namespace"
+	KubeLabelDynamoDeploymentTargetType = "nvidia.com/dynamo-deployment-target-type"
 
-	KubeLabelYataiSelector        = "yatai.ai/selector"
-	KubeLabelYataiBentoRepository = "yatai.ai/bento-repository"
-	KubeLabelYataiBento           = "yatai.ai/bento"
-	KubeLabelYataiModelRepository = "yatai.ai/model-repository"
-	KubeLabelYataiModel           = "yatai.ai/model"
+	KubeLabelDynamoComponentType = "nvidia.com/dynamo-component-type"
 
-	KubeLabelYataiBentoDeployment              = "yatai.ai/bento-deployment"
-	KubeLabelYataiBentoDeploymentComponentType = "yatai.ai/bento-deployment-component-type"
-	KubeLabelYataiBentoDeploymentTargetType    = "yatai.ai/bento-deployment-target-type"
-	KubeLabelBentoRepository                   = "yatai.ai/bento-repository"
-	KubeLabelBentoVersion                      = "yatai.ai/bento-version"
-	KubeLabelCreator                           = "yatai.ai/creator"
-
-	KubeLabelIsBentoImageBuilder = "yatai.ai/is-bento-image-builder"
-	KubeLabelIsModelSeeder       = "yatai.ai/is-model-seeder"
-	KubeLabelBentoRequest        = "yatai.ai/bento-request"
+	KubeLabelIsDynamoImageBuilder = "nvidia.com/is-dynamo-image-builder"
 
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
 
-	KubeLabelYataiImageBuilderPod = "yatai.ai/yatai-image-builder-pod"
-	KubeLabelBentoDeploymentPod   = "yatai.ai/bento-deployment-pod"
+	KubeLabelDynamoImageBuilderPod = "nvidia.com/dynamo-image-builder-pod"
+	KubeLabelDynamoDeploymentPod   = "nvidia.com/dynamo-deployment-pod"
 
-	KubeAnnotationBentoRepository        = "yatai.ai/bento-repository"
-	KubeAnnotationBentoVersion           = "yatai.ai/bento-version"
-	KubeAnnotationDockerRegistryInsecure = "yatai.ai/docker-registry-insecure"
-
-	KubeAnnotationYataiImageBuilderSeparateModels = "yatai.ai/yatai-image-builder-separate-models"
-	KubeAnnotationIsMultiTenancy                  = "yatai.ai/is-multi-tenancy"
+	KubeAnnotationDynamoRepository             = "nvidia.com/dynamo-repository"
+	KubeAnnotationDynamoVersion                = "nvidia.com/dynamo-version"
+	KubeAnnotationDynamoDockerRegistryInsecure = "nvidia.com/docker-registry-insecure"
 
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
 
-	// nolint: gosec
-	KubeSecretNameRegcred = "yatai-regcred"
+	KubeAnnotationDynamoComponentHash            = "nvidia.com/dynamo-request-hash"
+	KubeAnnotationDynamoComponentImageBuiderHash = "nvidia.com/dynamo-request-image-builder-hash"
+	KubeAnnotationDynamoComponentStorageNS       = "nvidia.com/dynamo-storage-namespace"
 )

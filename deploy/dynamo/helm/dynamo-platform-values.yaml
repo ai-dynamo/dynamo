@@ -13,15 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Global values used across charts
-global:
-  NGC_API_KEY: ${DOCKER_PASSWORD}
-
 dynamo-operator:
   natsAddr: "nats://${RELEASE_NAME}-nats:4222"
   etcdAddr: "${RELEASE_NAME}-etcd:2379"
-  istioVirtualServiceEnabled: false
-  ingressControllerClassName: ""
   namespaceRestriction:
     targetNamespace: ${NAMESPACE}
   controllerManager:
@@ -29,27 +23,41 @@ dynamo-operator:
       image:
         repository: ${DOCKER_SERVER}/dynamo-operator
         tag: ${IMAGE_TAG}
+  imagePullSecrets:
+    - name: ${DOCKER_SECRET_NAME}
 
   dynamo:
-    dynamoIngressSuffix: ${DYNAMO_INGRESS_SUFFIX}
+    ingress:
+      enabled: ${INGRESS_ENABLED}
+      className: ${INGRESS_CLASS}
+      tlsSecretName: my-tls-secret
+    istio:
+      enabled: ${ISTIO_ENABLED}
+      gateway: ${ISTIO_GATEWAY}
+    ingressHostSuffix: ${DYNAMO_INGRESS_SUFFIX}
     dockerRegistry:
-      server: ${DOCKER_SERVER}
-      username: ${DOCKER_USERNAME}
-      password: ${DOCKER_PASSWORD}
+      server: ${PIPELINES_DOCKER_SERVER}
+      username: ${PIPELINES_DOCKER_USERNAME}
+      password: ${PIPELINES_DOCKER_PASSWORD}
+    imageBuildEngine: buildkit
 
 dynamo-api-store:
   namespaceRestriction:
     enabled: true
     targetNamespace: ${NAMESPACE}
   istio:
+    enabled: ${ISTIO_ENABLED}
+    gateway: ${ISTIO_GATEWAY}
     host: ${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
   image:
     repository: ${DOCKER_SERVER}/dynamo-api-store
     tag: ${IMAGE_TAG}
     pullPolicy: IfNotPresent
   imagePullSecrets:
-    - name: docker-imagepullsecret
+    - name: ${DOCKER_SECRET_NAME}
   ingress:
+    enabled: ${INGRESS_ENABLED}
+    className: ${INGRESS_CLASS}
     hosts:
       - host: ${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
         paths:

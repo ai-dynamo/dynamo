@@ -23,10 +23,9 @@ import (
 	"time"
 )
 
-type DynamoNIM struct {
+type DynamoComponent struct {
 	PresignedDownloadUrl string                `json:"presigned_download_url"`
 	TransmissionStrategy *TransmissionStrategy `json:"transmission_strategy"`
-	Manifest             *DynamoNIMManifest    `json:"manifest"`
 }
 
 type TransmissionStrategy string
@@ -35,11 +34,6 @@ const (
 	TransmissionStrategyPresignedURL TransmissionStrategy = "presigned_url"
 	TransmissionStrategyProxy        TransmissionStrategy = "proxy"
 )
-
-type DynamoNIMManifest struct {
-	BentomlVersion string   `json:"bentoml_version"`
-	Models         []string `json:"models"`
-}
 
 type Duration time.Duration
 
@@ -77,12 +71,10 @@ const (
 )
 
 type DockerRegistrySchema struct {
-	BentosRepositoryURI          string `json:"bentosRepositoryURI"`
-	ModelsRepositoryURI          string `json:"modelsRepositoryURI"`
-	BentosRepositoryURIInCluster string `json:"bentosRepositoryURIInCluster"`
-	ModelsRepositoryURIInCluster string `json:"modelsRepositoryURIInCluster"`
-	Server                       string `json:"server"`
-	Username                     string `json:"username"`
-	Password                     string `json:"password"`
-	Secure                       bool   `json:"secure"`
+	DynamoRepositoryURI string `json:"dynamoRepositoryURI"`
+	Server              string `json:"server"`
+	Username            string `json:"username"`
+	Password            string `json:"password"`
+	SecretName          string `json:"secretName"`
+	Secure              bool   `json:"secure"`
 }

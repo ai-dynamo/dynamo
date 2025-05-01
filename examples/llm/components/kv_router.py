@@ -18,18 +18,19 @@ import argparse
 import logging
 import random
 from argparse import Namespace
-from typing import AsyncIterator
+from typing import AsyncIterator, Tuple
 
 from components.worker import VllmWorker
 from utils.logging import check_required_workers
 from utils.protocol import Tokens
-from vllm.logger import logger as vllm_logger
+from utils.vllm import RouterType
 
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
 WorkerId = str
+fallback_msg = "Will fallback to random routing."
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,12 @@ def parse_args(service_name, prefix) -> Namespace:
         default=False,
         help="Whether to use custom router or not",
     )
+    parser.add_argument(
+        "--router",
+        type=str,
+        default="kv",
+        help="The router type",
+    )
     config = ServiceConfig.get_instance()
     config_args = config.as_args(service_name, prefix=prefix)
     args = parser.parse_args(config_args)
@@ -83,7 +90,7 @@ class Router:
     worker = depends(VllmWorker)
 
     def __init__(self):
-        vllm_logger.info("Initializing Custom Router")
+        logger.info("Initializing Custom Router")
         self.args = parse_args(self.__class__.__name__, "")
 
         self.default_metrics = {
@@ -102,11 +109,14 @@ class Router:
             .client()
         )
 
+        self.router_type = self.args.router
+
         await check_required_workers(self.workers_client, self.args.min_workers)
 
         kv_listener = self.runtime.namespace("dynamo").component("VllmWorker")
         await kv_listener.create_service()
-        self.indexer = KvIndexer(kv_listener, self.args.block_size)
+        if self.router_type == RouterType.KV:
+            self.indexer = KvIndexer(kv_listener, self.args.block_size)
         self.metrics_aggregator = KvMetricsAggregator(kv_listener)
         logger.info("KV Router initialized")
 
@@ -141,6 +151,8 @@ class Router:
                 worker_scores[worker_id] = (
                     score * self.indexer.block_size() / token_length
                 )
+        else:
+            logger.warning("Cannot get KV scores")
 
         worker_metrics = {}
         max_waiting = 0.0
@@ -154,6 +166,8 @@ class Router:
                 max_waiting = max(
                     max_waiting, worker_metrics[worker_id]["num_requests_waiting"]
                 )
+        else:
+            logger.warning("Cannot get metrics")
 
         # Get all worker IDs from the client. This is needed because scores / metrics may not have values for all workers
         # and we want all workers to be considered in the logit calculation
@@ -175,11 +189,12 @@ class Router:
             # Have 1 metric that weights towards cache hit
             # 2 metrics that penalize overloaded worker and queuing
             worker_logits[worker_id] = 2 * score - gpu_cache_usage - normalized_waiting
-            vllm_logger.info(
+            logger.info(
                 f"Formula for {worker_id}: {worker_logits[worker_id]:.3f} = 2.0 * {score:.3f} - {gpu_cache_usage:.3f} - {normalized_waiting:.3f}"
             )
 
-        if not worker_logits or all(logit == 0 for logit in worker_logits.values()):
+        if not worker_logits or not any(worker_logits.values()):
+            logger.warning(f"All worker logits are zero. {fallback_msg}.")
             return "", 0.0
 
         # Select the worker with the highest logit
@@ -204,12 +219,51 @@ class Router:
 
             # Log to vllm_logger
             for message in log_messages:
-                vllm_logger.info(message)
+                logger.info(message)
 
         return best_worker_id, worker_scores.get(best_worker_id, 0.0)
 
+    def _get_underloaded_worker(self, metrics: AggregatedMetrics | None):
+        if not metrics:
+            logger.warning(f"Cannot get metrics. {fallback_msg}")
+            return "", 0.0
+
+        kv_load = {
+            endpoint.worker_id: getattr(endpoint, "gpu_cache_usage_perc", 0.0)
+            for endpoint in metrics.endpoints
+        }
+
+        if not kv_load or not any(kv_load.values()):
+            logger.warning(f"All KV loads are zero. {fallback_msg}")
+            return "", 0.0
+
+        min_load = min(kv_load.values())
+        min_load_workers = [
+            worker_id for worker_id, load in kv_load.items() if load == min_load
+        ]
+        best_worker_id = random.choice(min_load_workers)
+
+        logger.info(
+            f"Selected worker: {best_worker_id}, KV load: {kv_load[best_worker_id]:.3f}"
+        )
+        return best_worker_id, kv_load[best_worker_id]
+
     @dynamo_endpoint()
-    async def generate(self, request: Tokens) -> AsyncIterator[WorkerId]:
+    async def generate(self, request: Tokens) -> AsyncIterator[Tuple[WorkerId, float]]:
+        metrics = await self.metrics_aggregator.get_metrics()
+
+        # Quick return for KV_LOAD mode
+        if self.router_type == RouterType.KV_LOAD:
+            try:
+                yield self._get_underloaded_worker(metrics)
+            except Exception as e:
+                logger.exception(
+                    f"Error finding underloaded worker: {e}. {fallback_msg}"
+                )
+                yield "", 0.0
+            return
+
+        # Existing KV routing logic
         lora_id = 0
         try:
             scores = await self.indexer.find_matches_for_request(
@@ -217,14 +271,17 @@ class Router:
             )
         except Exception as e:
             scores = {}
-            vllm_logger.exception(f"Error finding matches: {e}")
+            logger.exception(f"Error finding matches: {e}. {fallback_msg}")
+            yield "", 0.0
+            return
 
-        metrics = await self.metrics_aggregator.get_metrics()
         worker_id, prefix_hit_rate = self._cost_function(
             scores, metrics, len(request.tokens)
         )
 
-        vllm_logger.info(
-            f"Scheduling to worker_id: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
-        )
-        yield f"{worker_id}_{prefix_hit_rate}"
+        if worker_id:
+            logger.info(
+                f"Scheduling to worker_id: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
+            )
+
+        yield worker_id, prefix_hit_rate

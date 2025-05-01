@@ -18,37 +18,12 @@
 package controller
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/ai-dynamo/dynamo/deploy/dynamo/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-)
-
-const (
-	EntityHandlerTypeJob = "job"
-
-	// EntityHandlerCreated indicates that the EntityHandler is created.
-	EntityHandlerCreated = "ENTITY_HANDLER_CREATED"
-	// EntityHandlerCompleted indicates that the EntityHandler has completed.
-	EntityHandlerCompleted = "ENTITY_HANDLER_COMPLETED"
-	// EntityHandlerPending indicates that the EntityHandler is in pending state.
-	EntityHandlerPending = "ENTITY_HANDLER_PENDING"
-
-	EntityHandlerCreatedState   = "EntityHandlerCreated"
-	EntityHandlerCompletedState = "EntityHandlerCompleted"
-	EntityHandlerFailedState    = "EntityHandlerFailed"
-	EntityHandlerPendingState   = "EntityHandlerPending"
-	EntityHandlerRunningState   = "EntityHandlerRunning"
-
-	PVCCreatedState = "PVCCreated"
-
-	CrdRunning    = "running"
-	CrdFailed     = "failed"
-	CrdSuccessful = "successful"
-
-	PVCMountPath = "/pvc"
-
-	// TrainingJobPVCCreated indicates that the caching pvc is created.
-	PVCCreated = "PVC_CREATED"
 )
 
 func constructPVC(crd metav1.Object, pvcConfig v1alpha1.PVC) *corev1.PersistentVolumeClaim {
@@ -75,4 +50,20 @@ func getPvcName(crd metav1.Object, defaultName *string) string {
 		return *defaultName
 	}
 	return crd.GetName()
+}
+
+func getIngressHost(ingressSpec v1alpha1.IngressSpec) string {
+	host := ingressSpec.Host
+	if ingressSpec.HostPrefix != nil {
+		host = *ingressSpec.HostPrefix + host
+	}
+	ingressSuffix := DefaultIngressSuffix
+	if ingressSpec.HostSuffix != nil {
+		ingressSuffix = *ingressSpec.HostSuffix
+	}
+	return fmt.Sprintf("%s.%s", host, ingressSuffix)
+}
+
+func getK8sName(value string) string {
+	return strings.ReplaceAll(value, ":", "--")
 }

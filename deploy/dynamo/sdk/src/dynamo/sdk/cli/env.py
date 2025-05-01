@@ -19,7 +19,6 @@ import platform
 import subprocess
 import sys
 
-import click
 import distro
 import pkg_resources
 
@@ -141,34 +140,22 @@ def get_python_packages() -> str:
     return "\n".join(out)
 
 
-def build_env_command() -> click.Command:
-    @click.command(name="env")
-    def env() -> None:
-        """Display information about the current environment."""
-        click.echo("System Information:")
-        click.echo(f"OS: {get_os_version()}")
-        click.echo(f"Glibc Version: {get_glibc_version()}")
-        click.echo(f"GCC Version: {get_gcc_version()}")
-        click.echo(f"Cmake Version: {get_cmake_version()}")
-        click.echo(f"Rust Version: {get_rust_version()}")
-        click.echo(f"Docker Version: {get_docker_version()}")
+def env() -> None:
+    """Display information about the current environment."""
+    print("System Information:")
+    print(f"OS: {get_os_version()}")
+    print(f"Glibc Version: {get_glibc_version()}")
+    print(f"GCC Version: {get_gcc_version()}")
+    print(f"Cmake Version: {get_cmake_version()}")
+    print(f"Rust Version: {get_rust_version()}")
+    print(f"Docker Version: {get_docker_version()}")
 
-        click.echo("\nCPU Information:")
-        click.echo(f"{get_cpu_architecture()}")
+    print("\nCPU Information:")
+    print(f"{get_cpu_architecture()}")
 
-        click.echo("\nGPU Information:")
-        click.echo(f"Models and configurations: {query_nvidia_smi('gpu_name')}")
-        click.echo(f"Driver Version: {query_nvidia_smi('driver_version')}")
-        click.echo(f"CUDA Runtime Version: {get_cuda_version()}")
-        click.echo(f"Topology: {get_gpu_topo()}")
-        # Get Python version
-        py_version = sys.version.split()[0]
-        click.echo(f"\nPython Version: {py_version}")
-        click.echo(f"Python Platform: {get_python_platform()}")
-        click.echo("\nPython Packages:")
-        click.echo(f"{get_python_packages()}")
-
-    return env
-
-
-env_command = build_env_command()
+    # Python Environment
+    py_version = sys.version.split()[0]
+    print(f"\nPython Version: {py_version}")
+    print(f"Python Platform: {get_python_platform()}")
+    print("\nPython Packages:")
+    print(f"{get_python_packages()}")
