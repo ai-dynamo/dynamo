@@ -80,7 +80,7 @@ You can run this pipeline locally by spinning up ETCD and NATS and then running 
 
 ```bash
 # Spin up ETCD and NATS
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
 then

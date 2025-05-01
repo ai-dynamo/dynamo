@@ -144,7 +144,7 @@ We've provided a set of basic configurations for this example [here](../../examp
 
 ### 4. Serve your graph
 
-As a prerequisite, ensure you have NATS and etcd running by running the docker compose in the deploy directory. You can find it [here](../../deploy/docker-compose.yml).
+As a prerequisite, ensure you have NATS and etcd running by running the docker compose in the deploy directory. You can find it [here](../../deploy/metrics/docker-compose.yml).
 
 ```bash
 docker compose up -d

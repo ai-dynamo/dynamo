@@ -45,9 +45,9 @@ In this example, we will use 2 nodes to demo the disagg serving.
   - Deploys DummyWorker as the monolith worker
 
 ### Prerequisites
-On Node 1, start required services (etcd and NATS) using [Docker Compose](../../../deploy/docker-compose.yml)
+On Node 1, start required services (etcd and NATS) using [Docker Compose](../../../deploy/metrics/docker-compose.yml)
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
 ### Run the Deployment

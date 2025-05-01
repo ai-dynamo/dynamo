@@ -112,7 +112,7 @@ example.
 First start the Dynamo Distributed Runtime services:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 #### Start Dynamo LLM Serving Components
 
@@ -180,7 +180,7 @@ cd ../../../
 pip install .[all]
 
 # To test
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/metrics/docker-compose.yml up -d
 cd examples/llm
 dynamo serve graphs.agg:Frontend -f configs/agg.yaml
 ```

@@ -64,9 +64,9 @@ sequenceDiagram
 
 ### Prerequisites
 
-Start required services (etcd and NATS) using [Docker Compose](../../deploy/docker-compose.yml)
+Start required services (etcd and NATS) using [Docker Compose](../../deploy/metrics/docker-compose.yml)
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
 ### Build docker

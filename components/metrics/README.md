@@ -90,7 +90,7 @@ To visualize the metrics being exposed on the Prometheus endpoint,
 see the Prometheus and Grafana configurations in
 [deploy/metrics](../../deploy/metrics):
 ```bash
-docker compose -f deploy/docker-compose.yml --profile metrics up -d
+docker compose -f deploy/metrics/docker-compose.yml --profile metrics up -d
 ```
 
 ## Metrics Collection Modes
@@ -167,7 +167,6 @@ To view the metrics hosted on the PushGateway:
 # curl http://<pushgateway_ip>:<pushgateway_port>/metrics
 curl 127.0.0.1:9091/metrics
 ```
-
 ## Building/Running from Source
 
 For easy iteration while making edits to the metrics component, you can use `cargo run`
@@ -176,4 +175,5 @@ to build and run with your local changes:
 ```bash
 cargo run --bin metrics -- --component my_component --endpoint my_endpoint
 ```
+
 
