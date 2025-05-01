@@ -362,7 +362,12 @@ impl EtcdKvCache {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             // Get all keys with the prefix
-            let all_keys = inner.get_all().await.keys().cloned().collect::<Vec<String>>();
+            let all_keys = inner
+                .get_all()
+                .await
+                .keys()
+                .cloned()
+                .collect::<Vec<String>>();
 
             // Delete each key
             for key in all_keys {
