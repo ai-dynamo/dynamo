@@ -59,10 +59,25 @@ BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 # Base Images
 TENSORRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
 TENSORRTLLM_BASE_IMAGE_TAG=25.03-py3
+
+# Important Note: There are two ways to build the dynamo image with TensorRT-LLM.
+# 1. Use the local TensorRT-LLM wheel directory.
+# 2. Use the TensorRT-LLM wheel on artifactory.
+#
+# If using option 1, the TENSORRTLLM_PIP_WHEEL must be a path to a directory
+# containing TensorRT-LLM wheel file along with commit.txt file with the 
+# <arch>_<commit ID> as contents. If no valid trtllm wheel is found, the script
+# will attempt to build the wheel from source and store the built wheel in the
+# specified directory. TRTLLM_COMMIT from the TensorRT-LLM main branch will be
+# used to build the wheel.
+#
+# If using option 2, the TENSORRTLLM_PIP_WHEEL must be the TensorRT-LLM wheel
+# package that will be installed from the specified TensorRT-LLM PyPI Index URL.
+# This option will ignore the TRTLLM_COMMIT option.
+#
 # Path to the local TensorRT-LLM wheel directory or the wheel on artifactory.
 TENSORRTLLM_PIP_WHEEL="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
-# feat: Support Top-K logprobs and prompt_logprobs in LLMAPI (#3388)
 TRTLLM_COMMIT=83f37614ef735d251281136c3c05b1fecf8ef68b
 # TensorRT-LLM PyPI index URL
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
@@ -316,7 +331,9 @@ error() {
 get_options "$@"
 
 # Automatically set ARCH and ARCH_ALT if PLATFORM is linux/arm64
+ARCH="amd64"
 if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
+    ARCH="arm64"
     BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
 fi
 
@@ -405,6 +422,7 @@ check_wheel_file() {
         fi
 
         # Check if commit ID matches, otherwise re-build the wheel
+        # Commit ID is of the form <arch>_<commit_id>
         commit_id=$(cat "$commit_file")
         if [ "$commit_id" != "$2" ]; then
             echo "Error: Commit ID mismatch. Expected '$2', got '$commit_id'"
@@ -419,9 +437,9 @@ if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
     if [ -d "${TENSORRTLLM_PIP_WHEEL}" ]; then
         BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=1"
         echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL}"
-        if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL}" "${TRTLLM_COMMIT}"; then
+        if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL}" "${ARCH}_${TRTLLM_COMMIT}"; then
             echo "WARN: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL}, attempting to build from source"
-            if ! ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL} -c ${TRTLLM_COMMIT}; then
+            if ! ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL} -c ${TRTLLM_COMMIT} -a ${ARCH}; then
                 error "ERROR: Failed to build TensorRT-LLM wheel"
             fi
         fi
@@ -434,7 +452,7 @@ if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
         BUILD_ARGS+=" --build-arg TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL}"
 
         # Create a dummy directory to satisfy the build context requirement
-        # There is no way to conditionally copy the build context.
+        # There is no way to conditionally copy the build context in dockerfile.
         mkdir -p /tmp/dummy_dir
         BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=/tmp/dummy_dir"
     fi

@@ -18,13 +18,15 @@
 
 # This script builds the TRT-LLM base image for Dynamo with TensorRT-LLM.
 
-while getopts "c:o:" opt; do
+while getopts "c:o:a:" opt; do
   case ${opt} in
     c) TRTLLM_COMMIT=$OPTARG ;;
     o) OUTPUT_DIR=$OPTARG ;;
-    *) echo "Usage: $(basename $0) [-c commit] [-o output_dir]"
+    a) ARCH=$OPTARG ;;
+    *) echo "Usage: $(basename $0) [-c commit] [-o output_dir] [-a arch]"
        echo "  -c: TensorRT-LLM commit to build"
        echo "  -o: Output directory for wheel files"
+       echo "  -a: Architecture (amd64 or arm64)"
        exit 1 ;;
   esac
 done
@@ -62,4 +64,5 @@ docker run -it -v$OUTPUT_DIR:/trtllm_wheel docker.io/tensorrt_llm/wheel:latest c
 )
 
 # Store the commit hash in the output directory to ensure the wheel is built from the correct commit.
-echo $TRTLLM_COMMIT > $OUTPUT_DIR/commit.txt
+rm -rf $OUTPUT_DIR/commit.txt
+echo ${ARCH}_${TRTLLM_COMMIT} > $OUTPUT_DIR/commit.txt
