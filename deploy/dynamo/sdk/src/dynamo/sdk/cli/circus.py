@@ -32,7 +32,7 @@ from circus.arbiter import Arbiter as _Arbiter
 from circus.sockets import CircusSocket
 from circus.watcher import Watcher
 
-from .utils import ServiceProtocol
+from .utils import ServiceProtocol, reserve_free_port
 
 
 class Arbiter(_Arbiter):
@@ -99,11 +99,20 @@ def create_circus_watcher(
     )
 
 
+def get_env_or_reserved_port(env_var):
+    port_env = os.environ.get(env_var)
+    if port_env:
+        return int(port_env)
+    else:
+        with reserve_free_port() as port:
+            return port
+
+
 def create_arbiter(
     watchers: list[Watcher], *, threaded: bool = False, **kwargs: Any
 ) -> Arbiter:
-    endpoint_port = int(os.environ.get("DYN_CIRCUS_ENDPOINT_PORT", "41234"))
-    pubsub_port = int(os.environ.get("DYN_CIRCUS_PUBSUB_PORT", "52345"))
+    endpoint_port = get_env_or_reserved_port("DYN_CIRCUS_ENDPOINT_PORT")
+    pubsub_port = get_env_or_reserved_port("DYN_CIRCUS_PUBSUB_PORT")
 
     return Arbiter(
         watchers,
