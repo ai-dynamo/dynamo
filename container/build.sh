@@ -57,9 +57,16 @@ DOCKERFILE=${SOURCE_DIR}/Dockerfile
 BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
-TENSORRTLLM_BASE_IMAGE=tensorrt_llm/release
-TENSORRTLLM_BASE_IMAGE_TAG=latest_squashed
-TENSORRTLLM_PIP_WHEEL_PATH=""
+TENSORRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
+TENSORRTLLM_BASE_IMAGE_TAG=25.03-py3
+# Path to the local TensorRT-LLM wheel directory or the wheel on artifactory.
+TENSORRTLLM_PIP_WHEEL="/tmp/trtllm_wheel/"
+# TensorRT-LLM commit to use for building the trtllm wheel if not provided.
+# feat: Support Top-K logprobs and prompt_logprobs in LLMAPI (#3388)
+TRTLLM_COMMIT=83f37614ef735d251281136c3c05b1fecf8ef68b
+# TensorRT-LLM PyPI index URL
+TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
+
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 VLLM_BASE_IMAGE_TAG="25.03-cuda12.8-devel-ubuntu24.04"
@@ -69,6 +76,8 @@ NONE_BASE_IMAGE_TAG="24.04"
 
 NIXL_COMMIT=d247e88c72db75dc00e4e37aa21ed8d99e60c27d
 NIXL_REPO=ai-dynamo/nixl.git
+
+NO_CACHE=""
 
 get_options() {
     while :; do
@@ -93,9 +102,25 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
-        --tensorrtllm-pip-wheel-path)
+        --tensorrtllm-pip-wheel)
             if [ "$2" ]; then
-                TENSORRTLLM_PIP_WHEEL_PATH=$2
+                TENSORRTLLM_PIP_WHEEL=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --tensorrtllm-commit)
+            if [ "$2" ]; then
+                TRTLLM_COMMIT=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --tensorrtllm-index-url)
+            if [ "$2" ]; then
+                TENSORRTLLM_INDEX_URL=$2
                 shift
             else
                 missing_requirement "$1"
@@ -252,7 +277,7 @@ show_image_options() {
     echo "   Base: '${BASE_IMAGE}'"
     echo "   Base_Image_Tag: '${BASE_IMAGE_TAG}'"
     if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
-        echo "   Tensorrtllm_Pip_Wheel_Path: '${TENSORRTLLM_PIP_WHEEL_PATH}'"
+        echo "   Tensorrtllm_Pip_Wheel: '${TENSORRTLLM_PIP_WHEEL}'"
     fi
     echo "   Build Context: '${BUILD_CONTEXT}'"
     echo "   Build Arguments: '${BUILD_ARGS}'"
@@ -266,7 +291,9 @@ show_help() {
     echo "  [--base-image-tag base image tag]"
     echo "  [--platform platform for docker build"
     echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
-    echo "  [--tensorrtllm-pip-wheel-path path to tensorrtllm pip wheel]"
+    echo "  [--tensorrtllm-commit tensorrtllm commit to use for building the trtllm wheel if the wheel is not provided]"
+    echo "  [--tensorrtllm-pip-wheel path to tensorrtllm pip wheel or wheel on artifactory]"
+    echo "  [--tensorrtllm-index-url tensorrtllm PyPI index URL if providing the wheel from artifactory]"
     echo "  [--build-arg additional build args to pass to docker build]"
     echo "  [--cache-from cache location to start from]"
     echo "  [--cache-to location where to cache the build output]"
@@ -349,9 +376,67 @@ if [ -n "${GITLAB_TOKEN}" ]; then
     BUILD_ARGS+=" --build-arg GITLAB_TOKEN=${GITLAB_TOKEN} "
 fi
 
+
+check_wheel_file() {
+    local wheel_dir="$1"
+    # Check if directory exists
+    if [ ! -d "$wheel_dir" ]; then
+        echo "Error: Directory '$wheel_dir' does not exist"
+        return 1
+    fi
+
+    # Look for .whl files
+    wheel_count=$(find "$wheel_dir" -name "*.whl" | wc -l)
+
+    if [ "$wheel_count" -eq 0 ]; then
+        echo "WARN: No .whl files found in '$wheel_dir'"
+        return 1
+    elif [ "$wheel_count" -gt 1 ]; then
+        echo "Warning: Multiple wheel files found in '$wheel_dir'. Will use first one found."
+        find "$wheel_dir" -name "*.whl" | head -n 1
+        return 0
+    else
+        echo "Found $wheel_count wheel files in '$wheel_dir'"
+        # Check if commit file exists
+        commit_file="$wheel_dir/commit.txt"
+        if [ ! -f "$commit_file" ]; then
+            echo "Error: Commit file '$commit_file' does not exist"
+            return 1
+        fi
+
+        # Check if commit ID matches, otherwise re-build the wheel
+        commit_id=$(cat "$commit_file")
+        if [ "$commit_id" != "$2" ]; then
+            echo "Error: Commit ID mismatch. Expected '$2', got '$commit_id'"
+            rm -rf $wheel_dir/*.whl
+            return 1
+        fi
+        return 0
+    fi
+}
+
 if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
-    if [ -n "${TENSORRTLLM_PIP_WHEEL_PATH}" ]; then
-        BUILD_ARGS+=" --build-arg TENSORRTLLM_PIP_WHEEL_PATH=${TENSORRTLLM_PIP_WHEEL_PATH} "
+    if [ -d "${TENSORRTLLM_PIP_WHEEL}" ]; then
+        BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=1"
+        echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL}"
+        if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL}" "${TRTLLM_COMMIT}"; then
+            echo "WARN: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL}, attempting to build from source"
+            if ! ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL} -c ${TRTLLM_COMMIT}; then
+                error "ERROR: Failed to build TensorRT-LLM wheel"
+            fi
+        fi
+        echo "Installing TensorRT-LLM from local wheel directory"
+        BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL}"
+
+    else
+        BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=0"
+        BUILD_ARGS+=" --build-arg TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL}"
+        BUILD_ARGS+=" --build-arg TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL}"
+
+        # Create a dummy directory to satisfy the build context requirement
+        # There is no way to conditionally copy the build context.
+        mkdir -p /tmp/dummy_dir
+        BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=/tmp/dummy_dir"
     fi
 fi
 
@@ -372,19 +457,6 @@ show_image_options
 
 if [ -z "$RUN_PREFIX" ]; then
     set -x
-fi
-
-# Check if the TensorRT-LLM base image exists
-if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
-    if docker inspect --type=image "$BASE_IMAGE:$BASE_IMAGE_TAG" > /dev/null 2>&1; then
-        echo "Image '$BASE_IMAGE:$BASE_IMAGE_TAG' is found."
-    else
-        echo "Image '$BASE_IMAGE:$BASE_IMAGE_TAG' is not found." >&2
-        echo "Please build the TensorRT-LLM base image first. Run ./build_trtllm_base_image.sh" >&2
-        echo "or use --base-image and --base-image-tag to an existing TensorRT-LLM base image." >&2
-        echo "See https://nvidia.github.io/TensorRT-LLM/installation/build-from-source-linux.html for more information." >&2
-        exit 1
-    fi
 fi
 
 $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE

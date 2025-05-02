@@ -14,22 +14,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Build the TRT-LLM base image.
+# Build the TRT-LLM wheel.
 
 # This script builds the TRT-LLM base image for Dynamo with TensorRT-LLM.
-TRTLLM_COMMIT=dfbcb543
 
-while getopts "c:" opt; do
+while getopts "c:o:" opt; do
   case ${opt} in
     c) TRTLLM_COMMIT=$OPTARG ;;
-    *) echo "Invalid option" ;;
+    o) OUTPUT_DIR=$OPTARG ;;
+    *) echo "Usage: $(basename $0) [-c commit] [-o output_dir]"
+       echo "  -c: TensorRT-LLM commit to build"
+       echo "  -o: Output directory for wheel files"
+       exit 1 ;;
   esac
 done
 
-python3 -m venv /tmp/squash-env
+# Set default output directory if not specified
+if [ -z "$OUTPUT_DIR" ]; then
+    OUTPUT_DIR="/tmp/trtllm_wheel"
+fi
 
-source /tmp/squash-env/bin/activate
-pip3 install docker-squash
 
 (cd /tmp && \
 # Clone the TensorRT-LLM repository.
@@ -50,9 +54,12 @@ git submodule update --init --recursive
 git lfs pull
 
 # Build the TRT-LLM base image.
-make -C docker release_build)
+make -C docker wheel_build
 
-pip3 install docker-squash
-docker-squash -t tensorrt_llm/release:latest_squashed tensorrt_llm/release:latest
+# Copy the wheel to the host
+mkdir -p $OUTPUT_DIR
+docker run -it -v$OUTPUT_DIR:/trtllm_wheel docker.io/tensorrt_llm/wheel:latest cp /src/tensorrt_llm/build/tensorrt_llm-0.20.0rc2-cp312-cp312-linux_x86_64.whl /trtllm_wheel/
+)
 
-deactivate
+# Store the commit hash in the output directory to ensure the wheel is built from the correct commit.
+echo $TRTLLM_COMMIT > $OUTPUT_DIR/commit.txt
