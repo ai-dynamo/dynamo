@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Example 2xGB200 (2x4xB200) Configs for Context & Generation
+# - Context on 1xGB200 (4xB00)
+# - Generation on 1xGB200 (4xB200)
+
+# NOTE: Fields like hostname, ports, urls, etc. only used by trtllm-serve, not by dynamo
+
+backend: pytorch
+
+context_servers:
+  num_instances: 1
+  max_batch_size: 1
+  max_num_tokens: 8192
+  max_seq_len: 8192
+  free_gpu_memory_fraction: 0.75
+  tensor_parallel_size: 4
+  moe_expert_parallel_size: 4
+  # DEP = DP Attention, EP MoE
+  # TEP = TP Attention, EP MoE
+  # Enabling DP attention (DEP) depends on ISL.
+  # - DEP can have more requests/s but may OOM with larger ISL like 32k
+  # - To avoid OOM for large ISL, TEP must be used.
+  enable_attention_dp: false
+  pipeline_parallel_size: 1
+  pytorch_backend_config:
+    print_iter_log: true
+    # NOTE: This dtype must match in both context/generation configs
+    kv_cache_dtype: fp8
+
+generation_servers:
+  num_instances: 1
+  tensor_parallel_size: 4
+  moe_expert_parallel_size: 4
+  enable_attention_dp: false
+  pipeline_parallel_size: 1
+  max_batch_size: 256
+  max_num_tokens: 256
+  # 8448 = 8192 ISL + 256 OSL
+  max_seq_len: 8448
+  free_gpu_memory_fraction: 0.95
+  pytorch_backend_config:
+    use_cuda_graph: true
+    cuda_graph_padding_enabled: true
+    cuda_graph_batch_sizes:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    - 64
+    - 128
+    - 256
+    print_iter_log: true
+    enable_overlap_scheduler: true
+    # NOTE: This dtype must match in both context/generation configs
+    kv_cache_dtype: fp8
