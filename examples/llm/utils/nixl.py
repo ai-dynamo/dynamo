@@ -74,9 +74,12 @@ class NixlMetadataStore:
         serialized_metadata = msgspec.msgpack.encode(metadata)
         key = "/".join([self._key_prefix, engine_id])
         # put with primary lease so that the kv entry will be deleted when the worker shutdowns
-        await self._client.kv_put(
-            key, serialized_metadata, self._client.primary_lease_id()
-        )
+        try:
+            await self._client.kv_create(
+                key, serialized_metadata, self._client.primary_lease_id()
+            )
+        except Exception as e:
+            logger.warning(f"Error saving metadata for engine {engine_id}: {e}")
         self._stored.add(engine_id)
 
     async def get(self, engine_id) -> NixlMetadata:
