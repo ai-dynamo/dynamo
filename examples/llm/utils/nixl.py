@@ -73,7 +73,7 @@ class NixlMetadataStore:
     async def put(self, engine_id, metadata: NixlMetadata):
         serialized_metadata = msgspec.msgpack.encode(metadata)
         key = "/".join([self._key_prefix, engine_id])
-        # put with primary lease so that the kv entry will be deleted when the worker shutdowns
+        # create with primary lease so that the kv entry will be deleted when the worker shutdowns
         try:
             await self._client.kv_create(
                 key, serialized_metadata, self._client.primary_lease_id()
