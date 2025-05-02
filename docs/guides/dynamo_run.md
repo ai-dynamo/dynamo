@@ -112,7 +112,7 @@ sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libssl-d
 ```
 brew install cmake protobuf
 
-# Check that Metal is accessible
+## Check that Metal is accessible
 xcrun -sdk macosx metal
 ```
 If Metal is accessible, you should see an error like `metal: error: no input files`, which confirms it is installed correctly.
@@ -157,7 +157,6 @@ cd target/debug
 
 To build for other engines, see the following sections.
 
-
 ### sglang
 
 1. Setup the python virtual env:
@@ -192,7 +191,7 @@ cd target/debug
 ./dynamo-run in=none out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 1 --leader-addr 10.217.98.122:9876
 ```
 
-To pass extra arguments to the sglang engine see *Extra engine arguments* below.
+To pass extra arguments to the sglang engine see [Extra engine arguments](#Extra engine arguments) below.
 
 ### llama_cpp
 
@@ -250,7 +249,7 @@ dynamo-run in=text out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --tensor-paralle
 dynamo-run in=none out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 1
 ```
 
-To pass extra arguments to the vllm engine see [Extra engine arguments](#extra_engine_arguments) below.
+To pass extra arguments to the vllm engine see [Extra engine arguments](#Extra engine arguments) below.
 
 ### Python bring-your-own-engine
 
@@ -327,16 +326,16 @@ This allows quick iteration on the engine setup. Note how the `-n` `1` is includ
 
 #### TensorRT-LLM engine
 
-To run a TRT-LLM model with dynamo-run we have included a python based [async engine] (/examples/tensorrt_llm/engines/agg_engine.py).
-To configure the TensorRT-LLM async engine please see [llm_api_config.yaml](/examples/tensorrt_llm/configs/llm_api_config.yaml). The file defines the options that need to be passed to the LLM engine. Follow the steps below to serve trtllm on dynamo run.
+To run a TRT-LLM model with dynamo-run we have included a python based [async engine] (https://github.com/ai-dynamo/dynamo/blob/main/examples/tensorrt_llm/engines/agg_engine.py).
+To configure the TensorRT-LLM async engine please see [llm_api_config.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/tensorrt_llm/configs/llm_api_config.yaml). The file defines the options that need to be passed to the LLM engine. Follow the steps below to serve trtllm on dynamo run.
 
 ##### Step 1: Build the environment
 
-See instructions [here](/examples/tensorrt_llm/README.md#build-docker) to build the dynamo container with TensorRT-LLM.
+See instructions [here](https://github.com/ai-dynamo/dynamo/blob/main/examples/tensorrt_llm/README.md#build-docker) to build the dynamo container with TensorRT-LLM.
 
 ##### Step 2: Run the environment
 
-See instructions [here](/examples/tensorrt_llm/README.md#run-container) to run the built environment.
+See instructions [here](https://github.com/ai-dynamo/dynamo/blob/main/examples/tensorrt_llm/README.md#run-container) to run the built environment.
 
 ##### Step 3: Execute `dynamo run` command
 
@@ -449,6 +448,7 @@ The output looks like this:
 
 The input defaults to `in=text`. The output will default to `mistralrs` engine. If not available whatever engine you have compiled in (so depending on `--features`).
 
+<a id="extra_engine_arguments"></a>
 ### Extra engine arguments
 
 The vllm and sglang backends support passing any argument the engine accepts.

@@ -173,4 +173,4 @@ Since worker information is stored in etcd, we can shutdown workers by simply re
 - Decode/aggregated worker endpoints are immediately removed from etcd so that they would not accept new requests. They finish any in-flight requests, shut down their engine, and exit gracefully
 - Prefill workers stop pulling from the prefill queue and exit gracefully after all pending remote kv cache writes finish
 
-You can also visualize this by revoking a workers etcd lease while it has ongoing requests. We have an example script in the repo that does this [here](../lib/bindings/python/examples/hello_world/revoke_lease.py)
+You can also visualize this by revoking a workers etcd lease while it has ongoing requests. Refer to this example script that does this: [revoke_lease.py](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/revoke_lease.py).

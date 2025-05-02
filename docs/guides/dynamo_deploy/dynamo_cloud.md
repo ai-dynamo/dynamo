@@ -172,7 +172,7 @@ export DYNAMO_CLOUD=http://localhost:<local-port>
 After deploying the Dynamo cloud platform, you can:
 
 1. Deploy your first inference graph using the [Dynamo CLI](operator_deployment.md)
-2. Deploy Dynamo LLM pipelines to Kubernetes using the [Dynamo CLI](../../../examples/llm/README.md)!
+2. Deploy Dynamo LLM pipelines to Kubernetes using the [Dynamo CLI](../../examples/llm_deployment.md)!
 3. Manage your deployments using the Dynamo CLI
 
 For more detailed information about deploying inference graphs, see the [Dynamo Deploy Guide](README.md).

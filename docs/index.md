@@ -17,12 +17,6 @@ limitations under the License.
 
 # NVIDIA Dynamo
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
-[![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/nvidia-dynamo)
-
-| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[Support Matrix](docs/support_matrix.md)** | **[Guides](docs/guides)** | **[Architecture and Features](docs/architecture/architecture.md)** | **[APIs](lib/bindings/python/README.md)** | **[SDK](deploy/dynamo/sdk/README.md)** |
-
 NVIDIA Dynamo is a high-throughput low-latency inference framework designed for serving generative AI and reasoning models in multi-node distributed environments. Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLang or others) and captures LLM-specific capabilities such as:
 
 - **Disaggregated prefill & decode inference** – Maximizes GPU throughput and facilitates trade off between throughput and latency.
@@ -33,10 +27,24 @@ NVIDIA Dynamo is a high-throughput low-latency inference framework designed for 
 
 Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach.
 
+### Development Environment
+
+For a consistent development environment, you can use the provided devcontainer configuration. This requires:
+- [Docker](https://www.docker.com/products/docker-desktop)
+- [VS Code](https://code.visualstudio.com/) with the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
+
+To use the devcontainer:
+1. Open the project in VS Code
+2. Click on the button in the bottom-left corner
+3. Select "Reopen in Container"
+
+This will build and start a container with all the necessary dependencies for Dynamo development.
+
+
 ### Installation
 
 The following examples require a few system level packages.
-Recommended to use Ubuntu 24.04 with a x86_64 CPU. See [docs/support_matrix.md](support_matrix.md)
+Recommended to use Ubuntu 24.04 with a x86_64 CPU. See [support_matrix.md](support_matrix.md)
 
 ```
 apt-get update
@@ -66,8 +74,8 @@ docker push <your-registry>/dynamo-base:latest-vllm
 ```
 
 Notes about builds for specific frameworks:
-- For specific details on the `--framework vllm` build, see [here](examples/llm/README.md).
-- For specific details on the `--framework tensorrtllm` build, see [here](examples/tensorrt_llm/README.md).
+- For specific details on the `--framework vllm` build, see [here](examples/llm_deployment.md).
+- For specific details on the `--framework tensorrtllm` build, see [here](examples/trtllm.md).
 
 After building, you can use this image by setting the `DYNAMO_IMAGE` environment variable to point to your built image:
 ```bash
@@ -142,7 +150,7 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ### Local Development
 
-If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions see the [ReadMe](.devcontainer/README.md) for more details.
+If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions see the [ReadMe](https://github.com/ai-dynamo/dynamo/blob/main/.devcontainer/README.md) for more details.
 
 Otherwise, to develop locally, we recommend working inside of the container
 

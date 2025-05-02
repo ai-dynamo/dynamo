@@ -13,7 +13,7 @@ Before proceeding with deployment, ensure you have:
   - Helm package manager
   - Rust packages and toolchain
 
-You must have first followed the instructions in [deploy/dynamo/helm/README.md](../../../deploy/dynamo/helm/README.md) to install Dynamo Cloud on your Kubernetes cluster.
+You must have first followed the instructions in [deploy/dynamo/helm/README.md](https://github.com/ai-dynamo/dynamo/blob/main/deploy/dynamo/helm/README.md) to install Dynamo Cloud on your Kubernetes cluster.
 
 **Note**: Note the `KUBE_NS` variable in the following steps must match the Kubernetes namespace where you installed Dynamo Cloud. You must also expose the `dynamo-store` service externally. This will be the endpoint the CLI uses to interface with Dynamo Cloud.
 ## Understanding the Deployment Process
@@ -81,7 +81,7 @@ export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com  # Replace with your actual 
 
 Before building your service, you need to ensure the base image is properly set up:
 
-1. For detailed instructions on building and pushing the Dynamo base image, see the [Building the Dynamo Base Image](../../../README.md#building-the-dynamo-base-image) section in the main README.
+1. For detailed instructions on building and pushing the Dynamo base image, see the [Building the Dynamo Base Image](../../index.md#building-the-dynamo-base-image) section in the main README.
 
 2. Export the image from the previous step to your environment.
 ```bash

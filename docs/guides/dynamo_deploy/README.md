@@ -44,21 +44,22 @@ The manual deployment path (`deploy/Kubernetes/`) is available for users who nee
 - Provides full control over deployment parameters
 - Requires manual management of infrastructure components
 - Documentation:
-  - [Deploying Dynamo Inference Graphs to Kubernetes using Helm](../../Kubernetes/pipeline/README.md): all-in-one script
-  - [Manual Helm Deployment Guide](manual_helm_deployment.md): detailed instructions on manual deployment
+   - [Manual Helm Deployment Guide](manual_helm_deployment.md): detailed instructions on manual deployment
+   - [Deploying Dynamo Inference Graphs to Kubernetes using Helm](manual_helm_deployment.md#Deploying Dynamo Inference Graphs to Kubernetes using Helm): all-in-one script
+
 
 ## Getting Started
 
 1. **For Dynamo Cloud Platform**:
    - Follow the [Dynamo Cloud Platform Guide](dynamo_cloud.md)
    - Deploy a Hello World pipeline using the [Operator Deployment Guide](operator_deployment.md)
-   - Deploy a Dynamo LLM pipeline to Kubernetes [Deploy LLM Guide](../../../examples/llm/README.md#deploy-to-kubernetes)
+   - Deploy a Dynamo LLM pipeline to Kubernetes [Deploy LLM Guide](../../examples/llm_deployment.md#deploy-to-kubernetes)
 
 2. **For Manual Deployment**:
    - Follow the [Manual Helm Deployment Guide](manual_helm_deployment.md)
 
 ## Example Deployment
 
-See the [Hello World example](../../../examples/hello_world/README.md#deploying-to-and-running-the-example-in-kubernetes) for a complete walkthrough of deploying a simple inference graph.
+See the [Hello World example](../../examples/hello_world.md#Deploying to and Running the Example in Kubernetes) for a complete walkthrough of deploying a simple inference graph.
 
-See the [LLM example](../../../examples/llm/README.md#deploy-to-kubernetes) for a complete walkthrough of deploying a production-ready LLM inference pipeline to Kubernetes.
+See the [LLM example](../../examples/llm_deployment.md#deploy-to-kubernetes) for a complete walkthrough of deploying a production-ready LLM inference pipeline to Kubernetes.

@@ -94,7 +94,7 @@ The statefile is a json file created when initially running `dynamo serve` and i
 
 When one Decode worker is spun up, the statefile looks like:
 
-```json
+```none
 {
   "dynamo_VllmWorker": {..., resources={...}},
 }
@@ -102,7 +102,7 @@ When one Decode worker is spun up, the statefile looks like:
 
 Now another decode worker is added:
 
-```json
+```none
 {
   "dynamo_VllmWorker": {..., resources={...}},
   "dynamo_VllmWorker_1": {..., resources={...}},
@@ -111,7 +111,7 @@ Now another decode worker is added:
 
 Then one decode worker is removed:
 
-```json
+```none
 {
   "dynamo_VllmWorker": {..., resources={...}},
 }
@@ -119,7 +119,7 @@ Then one decode worker is removed:
 
 If the last decode worker is removed, the statefile looks like:
 
-```json
+```none
 {
   "dynamo_VllmWorker": {...},
 }
