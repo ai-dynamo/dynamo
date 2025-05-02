@@ -203,7 +203,7 @@ cd /workspace/examples/tensorrt_llm
 dynamo serve components.prefill_worker:TensorRTLLMPrefillWorker -f ./configs/disagg.yaml --service-name TensorRTLLMPrefillWorker &
 ```
 
-Now you have a 2-node deployment with 1 Decode worker on node1, and 1 Prefill worker on node2!
+Now you have a 2-node deployment with 1 Decode worker on the head node, and 1 Prefill worker on a worker node!
 
 ##### Additional Notes for Multi-Node Deployments
 
