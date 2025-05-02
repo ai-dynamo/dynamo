@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,28 +12,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-accelerate==1.6.0
-fastapi==0.115.6
-ftfy
-grpcio-tools==1.66.0
-httpx
-kubernetes==32.0.1
-msgspec
-mypy
-numpy
-opentelemetry-api
-opentelemetry-sdk
-pip==25.0.1
-pre-commit
-protobuf==5.27.3
-pydantic==2.7.1
-pyright
-PyYAML
-sentencepiece
-tensorboard==2.19.0
-tensorboardX==2.6.2.2
-transformers
-tritonclient==2.53.0
-types-PyYAML
-uvicorn
