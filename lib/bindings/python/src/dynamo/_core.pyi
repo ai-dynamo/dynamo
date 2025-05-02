@@ -79,6 +79,12 @@ class EtcdClient:
     Etcd is used for discovery in the DistributedRuntime
     """
 
+    async def primary_lease_id(self) -> int:
+        """
+        return the primary lease id.
+        """
+        ...
+
     async def kv_create_or_validate(
         self, key: str, value: bytes, lease_id: Optional[int] = None
     ) -> None:

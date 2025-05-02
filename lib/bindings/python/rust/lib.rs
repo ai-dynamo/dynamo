@@ -499,6 +499,10 @@ impl EtcdClient {
         })
     }
 
+    fn primary_lease_id(&self) -> i64 {
+        self.inner.lease_id()
+    }
+
     #[pyo3(signature = (key, value, lease_id=None))]
     fn kv_put<'p>(
         &self,
