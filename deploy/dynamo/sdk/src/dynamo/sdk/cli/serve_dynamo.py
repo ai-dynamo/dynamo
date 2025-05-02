@@ -314,7 +314,7 @@ def main(
                 if added_routes:
                     # Configure uvicorn with graceful shutdown
                     # get the port from PORT env var or use 8000 as default
-                    port = os.environ.get("PORT", 8000)
+                    port = int(os.environ.get("PORT", 8000))
                     config = uvicorn.Config(
                         service.app, host="0.0.0.0", port=port, log_level="info"
                     )
