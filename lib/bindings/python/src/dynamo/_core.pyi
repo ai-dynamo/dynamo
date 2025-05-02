@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from enum import Enum
 from typing import AsyncGenerator, AsyncIterator, Callable, Dict, List, Optional, Union
 
 def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
@@ -605,3 +606,13 @@ class HttpAsyncEngine:
     """
 
     ...
+
+class ModelType(Enum):
+    CHAT = 1
+    COMPLETION = 2
+    BACKEND = 3
+
+async def register_llm(endpoint: Endpoint, path: str, model_type: ModelType) -> None:
+    """Attach the model at path to the given endpoint, and advertise it as model_type"""
+    ...
+

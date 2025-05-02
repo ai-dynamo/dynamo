@@ -20,7 +20,8 @@ const IGNORED: [&str; 3] = [".gitattributes", "LICENSE", "README.md"];
 
 /// Attempt to download a model from Hugging Face
 /// Returns the directory it is in
-pub async fn from_hf(name: &Path) -> anyhow::Result<PathBuf> {
+pub async fn from_hf(name: impl AsRef<Path>) -> anyhow::Result<PathBuf> {
+    let name = name.as_ref();
     let api = ApiBuilder::new().with_progress(true).build()?;
     let model_name = name.display().to_string();
 

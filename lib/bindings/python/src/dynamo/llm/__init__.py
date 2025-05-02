@@ -25,3 +25,4 @@ from dynamo._core import KvMetricsPublisher as KvMetricsPublisher
 from dynamo._core import KvRecorder as KvRecorder
 from dynamo._core import KvRouter as KvRouter
 from dynamo._core import OverlapScores as OverlapScores
+from dynamo._core import register_llm as register_llm

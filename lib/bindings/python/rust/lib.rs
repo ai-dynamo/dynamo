@@ -51,6 +51,7 @@ const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     logging::init();
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
+    m.add_function(wrap_pyfunction!(register_llm, m)?)?;
 
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<CancellationToken>()?;
@@ -95,6 +96,43 @@ where
 #[pyo3(text_signature = "(level, message, module, file, line)")]
 fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) {
     logging::log_message(level, message, module, file, line);
+}
+
+#[pyfunction]
+#[pyo3(text_signature = "(endpoint, path, model_type)")]
+fn register_llm<'p>(
+    py: Python<'p>,
+    endpoint: Endpoint,
+    path: &str,
+    model_type: u32,
+) -> PyResult<Bound<'p, PyAny>> {
+    // TODO: Is there a better way?
+    let model_type_obj = match model_type {
+        1 => llm_rs::model_type::ModelType::Chat,
+        2 => llm_rs::model_type::ModelType::Completion,
+        3 => llm_rs::model_type::ModelType::Backend,
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Invalid model_type {model_type}. Must be 1-3.",
+            ));
+        }
+    };
+
+    let inner_path = path.to_string();
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        // Download from HF, load the ModelDeploymentCard
+        let mut local_model = llm_rs::LocalModel::prepare(&inner_path, None, None)
+            .await
+            .map_err(to_pyerr)?;
+
+        // Advertise ourself on etcd so ingress can find us
+        local_model
+            .attach(&endpoint.inner, model_type_obj)
+            .await
+            .map_err(to_pyerr)?;
+
+        Ok(())
+    })
 }
 
 #[pyclass]
