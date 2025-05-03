@@ -60,7 +60,10 @@ BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 TENSORRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
 TENSORRTLLM_BASE_IMAGE_TAG=25.03-py3
 
-# Important Note: There are two ways to build the dynamo image with TensorRT-LLM.
+# Important Note: Because of ABI compatibility issues between TensorRT-LLM and NGC PyTorch,
+# we need to build the TensorRT-LLM wheel from source.
+#
+# There are two ways to build the dynamo image with TensorRT-LLM.
 # 1. Use the local TensorRT-LLM wheel directory.
 # 2. Use the TensorRT-LLM wheel on artifactory.
 #
@@ -73,7 +76,9 @@ TENSORRTLLM_BASE_IMAGE_TAG=25.03-py3
 #
 # If using option 2, the TENSORRTLLM_PIP_WHEEL must be the TensorRT-LLM wheel
 # package that will be installed from the specified TensorRT-LLM PyPI Index URL.
-# This option will ignore the TRTLLM_COMMIT option.
+# This option will ignore the TRTLLM_COMMIT option. As the TensorRT-LLM wheel from PyPI
+# is not ABI compatible with NGC PyTorch, you can use TENSORRTLLM_INDEX_URL to specify
+# a private PyPI index URL which has your pre-built TensorRT-LLM wheel.
 #
 # Path to the local TensorRT-LLM wheel directory or the wheel on artifactory.
 TENSORRTLLM_PIP_WHEEL="/tmp/trtllm_wheel/"
