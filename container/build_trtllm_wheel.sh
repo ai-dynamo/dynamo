@@ -66,3 +66,6 @@ docker run -v$OUTPUT_DIR:/trtllm_wheel docker.io/tensorrt_llm/wheel:latest cp /s
 # Store the commit hash in the output directory to ensure the wheel is built from the correct commit.
 rm -rf $OUTPUT_DIR/commit.txt
 echo ${ARCH}_${TRTLLM_COMMIT} > $OUTPUT_DIR/commit.txt
+
+echo "TRT-LLM wheel built successfully."
+ls -al $OUTPUT_DIR
