@@ -60,7 +60,11 @@ make -C docker wheel_build
 
 # Copy the wheel to the host
 mkdir -p $OUTPUT_DIR
-docker run -v$OUTPUT_DIR:/trtllm_wheel docker.io/tensorrt_llm/wheel:latest cp /src/tensorrt_llm/build/*.whl /trtllm_wheel/
+
+docker create --name trtllm_wheel_container docker.io/tensorrt_llm/wheel:latest
+docker cp trtllm_wheel_container:/src/tensorrt_llm/build $OUTPUT_DIR/
+cp $OUTPUT_DIR/build/*.whl $OUTPUT_DIR/
+docker rm trtllm_wheel_container || true
 )
 
 # Store the commit hash in the output directory to ensure the wheel is built from the correct commit.
