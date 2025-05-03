@@ -75,6 +75,7 @@ class NixlMetadataStore:
         key = "/".join([self._key_prefix, engine_id])
         # create with primary lease so that the kv entry will be deleted when the worker shutdowns
         try:
+            # TODO: should we create a series of function in etcd client to use primary lease?
             await self._client.kv_create_or_validate(
                 key, serialized_metadata, self._client.primary_lease_id()
             )
