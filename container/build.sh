@@ -67,7 +67,7 @@ TENSORRTLLM_BASE_IMAGE_TAG=25.03-py3
 # 1. Use the local TensorRT-LLM wheel directory.
 # 2. Use the TensorRT-LLM wheel on artifactory.
 #
-# If using option 1, the TENSORRTLLM_PIP_WHEEL must be a path to a directory
+# If using option 1, the TENSORRTLLM_PIP_WHEEL_DIR must be a path to a directory
 # containing TensorRT-LLM wheel file along with commit.txt file with the
 # <arch>_<commit ID> as contents. If no valid trtllm wheel is found, the script
 # will attempt to build the wheel from source and store the built wheel in the
@@ -80,13 +80,18 @@ TENSORRTLLM_BASE_IMAGE_TAG=25.03-py3
 # is not ABI compatible with NGC PyTorch, you can use TENSORRTLLM_INDEX_URL to specify
 # a private PyPI index URL which has your pre-built TensorRT-LLM wheel.
 #
+# By default, we will use option 1. If you want to use option 2, you can set
+# TENSORRTLLM_PIP_WHEEL to the TensorRT-LLM wheel on artifactory.
+#
 # Path to the local TensorRT-LLM wheel directory or the wheel on artifactory.
-TENSORRTLLM_PIP_WHEEL="/tmp/trtllm_wheel/"
+TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. When
 TRTLLM_COMMIT=83f37614ef735d251281136c3c05b1fecf8ef68b
 # TensorRT-LLM PyPI index URL
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
+TENSORRTLLM_PIP_WHEEL=""
+
 
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
@@ -440,17 +445,22 @@ check_wheel_file() {
 }
 
 if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
-    if [ -d "${TENSORRTLLM_PIP_WHEEL}" ]; then
+    if [ -z "${TENSORRTLLM_PIP_WHEEL}" ]; then
+        # Use option 1
+        if [ ! -d "${TENSORRTLLM_PIP_WHEEL_DIR}" ]; then
+            # Create the directory if it doesn't exist
+            mkdir -p ${TENSORRTLLM_PIP_WHEEL_DIR}
+        fi
         BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=1"
-        echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL}"
-        if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL}" "${ARCH}_${TRTLLM_COMMIT}"; then
-            echo "WARN: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL}, attempting to build from source"
-            if ! ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL} -c ${TRTLLM_COMMIT} -a ${ARCH}; then
+        echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
+        if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}" "${ARCH}_${TRTLLM_COMMIT}"; then
+            echo "WARN: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL_DIR}, attempting to build from source"
+            if ! ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH}; then
                 error "ERROR: Failed to build TensorRT-LLM wheel"
             fi
         fi
         echo "Installing TensorRT-LLM from local wheel directory"
-        BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL}"
+        BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL_DIR}"
 
     else
         BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=0"
