@@ -65,7 +65,7 @@ TENSORRTLLM_BASE_IMAGE_TAG=25.03-py3
 # 2. Use the TensorRT-LLM wheel on artifactory.
 #
 # If using option 1, the TENSORRTLLM_PIP_WHEEL must be a path to a directory
-# containing TensorRT-LLM wheel file along with commit.txt file with the 
+# containing TensorRT-LLM wheel file along with commit.txt file with the
 # <arch>_<commit ID> as contents. If no valid trtllm wheel is found, the script
 # will attempt to build the wheel from source and store the built wheel in the
 # specified directory. TRTLLM_COMMIT from the TensorRT-LLM main branch will be
@@ -78,6 +78,7 @@ TENSORRTLLM_BASE_IMAGE_TAG=25.03-py3
 # Path to the local TensorRT-LLM wheel directory or the wheel on artifactory.
 TENSORRTLLM_PIP_WHEEL="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
+# Important Note: This commit is not used in our CI pipeline. When
 TRTLLM_COMMIT=83f37614ef735d251281136c3c05b1fecf8ef68b
 # TensorRT-LLM PyPI index URL
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
