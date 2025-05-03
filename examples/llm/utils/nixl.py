@@ -75,7 +75,7 @@ class NixlMetadataStore:
         key = "/".join([self._key_prefix, engine_id])
         # create with primary lease so that the kv entry will be deleted when the worker shutdowns
         try:
-            await self._client.kv_create(
+            await self._client.kv_create_or_validate(
                 key, serialized_metadata, self._client.primary_lease_id()
             )
         except Exception as e:
