@@ -464,7 +464,7 @@ if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
         echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
         if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}" "${ARCH}_${TRTLLM_COMMIT}"; then
             echo "WARN: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL_DIR}, attempting to build from source"
-            if ! ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH}; then
+            if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH}; then
                 error "ERROR: Failed to build TensorRT-LLM wheel"
             fi
         fi
