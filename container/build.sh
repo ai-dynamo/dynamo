@@ -128,9 +128,9 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
-        --tensorrtllm-pip-wheel)
+        --tensorrtllm-pip-wheel-dir)
             if [ "$2" ]; then
-                TENSORRTLLM_PIP_WHEEL=$2
+                TENSORRTLLM_PIP_WHEEL_DIR=$2
                 shift
             else
                 missing_requirement "$1"
@@ -139,6 +139,14 @@ get_options() {
         --tensorrtllm-commit)
             if [ "$2" ]; then
                 TRTLLM_COMMIT=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --tensorrtllm-pip-wheel)
+            if [ "$2" ]; then
+                TENSORRTLLM_PIP_WHEEL=$2
                 shift
             else
                 missing_requirement "$1"
@@ -317,8 +325,9 @@ show_help() {
     echo "  [--base-image-tag base image tag]"
     echo "  [--platform platform for docker build"
     echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
+    echo "  [--tensorrtllm-pip-wheel-dir path to tensorrtllm pip wheel directory]"
     echo "  [--tensorrtllm-commit tensorrtllm commit to use for building the trtllm wheel if the wheel is not provided]"
-    echo "  [--tensorrtllm-pip-wheel path to tensorrtllm pip wheel or wheel on artifactory]"
+    echo "  [--tensorrtllm-pip-wheel tensorrtllm pip wheel on artifactory]"
     echo "  [--tensorrtllm-index-url tensorrtllm PyPI index URL if providing the wheel from artifactory]"
     echo "  [--build-arg additional build args to pass to docker build]"
     echo "  [--cache-from cache location to start from]"
