@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 import time
 import uuid
@@ -14,7 +29,7 @@ from sglang.srt.openai_api.protocol import (
 )
 from sglang.srt.server_args import ServerArgs
 from utils.protocol import MyRequestOutput
-from utils.tokenizer_manager import DynamoTokenizerManager
+from utils.tokenizer_manager import PatchedTokenizerManager
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +44,7 @@ class ProcessMixIn:
     completions_processor: "CompletionsProcessor | None"
 
     def __init__(self):
-        # TODO: change name to PatchedSGLangTokenizerManager
-        self.tokenizer_manager = DynamoTokenizerManager(self.engine_args)
+        self.tokenizer_manager = PatchedTokenizerManager(self.engine_args)
         print("tokenizer manager initialized?")
 
     def _get_processor(
@@ -64,7 +78,7 @@ class ChatProcessor:
     async def preprocess(
         self,
         raw_request: ChatCompletionRequest,
-        tokenizer_manager: DynamoTokenizerManager,
+        tokenizer_manager: PatchedTokenizerManager,
     ) -> GenerateReqInput:
         chat_generate_req_input, _ = v1_chat_generate_request(
             [raw_request], tokenizer_manager
@@ -170,7 +184,7 @@ class CompletionsProcessor:
     # the v1_generate_request does not tokenize under the hood so we return the TokenizedGenerateReqInput along with sampling params as a dict
     # because the sgl.Engine runs SamplingParams.__init__()
     async def preprocess(
-        self, raw_request: CompletionRequest, tokenizer_manager: DynamoTokenizerManager
+        self, raw_request: CompletionRequest, tokenizer_manager: PatchedTokenizerManager
     ) -> TokenizedGenerateReqInput:
         generate_req_input, _ = v1_generate_request([raw_request])
         tokenized_generate_req_input = await tokenizer_manager._tokenize_one_request(
