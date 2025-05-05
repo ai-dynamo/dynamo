@@ -243,7 +243,9 @@ class Processor(ProcessMixIn):
                 prefix_hit_rate = 0.0  # Default value
                 if self.use_router:
                     router_generator = await self.router_client.generate(
-                        Tokens(tokens=engine_prompt["prompt_token_ids"]).model_dump_json()
+                        Tokens(
+                            tokens=engine_prompt["prompt_token_ids"]
+                        ).model_dump_json()
                     )
                     decision = await router_generator.__anext__()
                     worker_id, prefix_hit_rate = decision.data()
@@ -259,7 +261,9 @@ class Processor(ProcessMixIn):
 
                 if self.use_router:
                     if worker_id == "":
-                        engine_generator = await self.worker_client.generate(request_obj)
+                        engine_generator = await self.worker_client.generate(
+                            request_obj
+                        )
                     else:
                         engine_generator = await self.worker_client.direct(
                             request_obj, int(worker_id)
