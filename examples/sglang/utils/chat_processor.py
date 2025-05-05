@@ -19,12 +19,18 @@ import uuid
 from typing import AsyncIterator, Union
 
 from sglang.srt.managers.io_struct import GenerateReqInput, TokenizedGenerateReqInput
-from sglang.srt.openai_api.adapter import v1_chat_generate_request, v1_generate_request
+from sglang.srt.openai_api.adapter import (
+    to_openai_style_logprobs,
+    v1_chat_generate_request,
+    v1_generate_request,
+)
 from sglang.srt.openai_api.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse,
     CompletionRequest,
+    CompletionResponseStreamChoice,
+    CompletionStreamResponse,
     DeltaMessage,
 )
 from sglang.srt.server_args import ServerArgs
@@ -192,3 +198,131 @@ class CompletionsProcessor:
         )
 
         return tokenized_generate_req_input, generate_req_input.sampling_params
+
+    async def generate_stream_response(
+        self,
+        request: CompletionRequest,
+        sglang_generator: AsyncIterator,
+        tokenizer_manager=None,
+    ):
+        stream_buffers = {}
+        n_prev_tokens = {}
+        created = int(time.time())
+        content_id = str(uuid.uuid4())
+
+        async for response in sglang_generator:
+            try:
+                response_data = response.data()
+
+                output = MyRequestOutput.model_validate_json(response_data)
+                content = output.text
+
+                index = content.get("index", 0)
+                stream_buffer = stream_buffers.get(index, "")
+                n_prev_token = n_prev_tokens.get(index, 0)
+
+                output_ids = content.get("output_ids", [])
+
+                if (
+                    tokenizer_manager
+                    and hasattr(tokenizer_manager, "tokenizer")
+                    and tokenizer_manager.tokenizer
+                ):
+                    curr_text = tokenizer_manager.tokenizer.decode(output_ids)
+                else:
+                    curr_text = str(output_ids)
+
+                delta = curr_text[len(stream_buffer) :]
+                stream_buffer = curr_text
+
+                if request.logprobs is not None:
+                    if not stream_buffer and request.echo:
+                        input_token_logprobs = content["meta_info"].get(
+                            "input_token_logprobs"
+                        )
+                        input_top_logprobs = content["meta_info"].get(
+                            "input_top_logprobs"
+                        )
+                    else:
+                        input_token_logprobs = None
+                        input_top_logprobs = None
+
+                    logprobs = to_openai_style_logprobs(
+                        input_token_logprobs=input_token_logprobs,
+                        input_top_logprobs=input_top_logprobs,
+                        output_token_logprobs=content["meta_info"].get(
+                            "output_token_logprobs", []
+                        )[n_prev_token:],
+                        output_top_logprobs=content["meta_info"].get(
+                            "output_top_logprobs", []
+                        )[n_prev_token:],
+                    )
+                    n_prev_token = len(
+                        content["meta_info"].get("output_token_logprobs", [])
+                    )
+                else:
+                    logprobs = None
+
+                if delta:
+                    choice_data = CompletionResponseStreamChoice(
+                        index=index,
+                        text=delta,
+                        logprobs=logprobs,
+                        finish_reason=content["meta_info"].get("finish_reason")["type"]
+                        if content["meta_info"].get("finish_reason")
+                        else None,
+                        matched_stop=(
+                            content["meta_info"].get("finish_reason")["matched"]
+                            if content["meta_info"].get("finish_reason")
+                            and "matched" in content["meta_info"].get("finish_reason")
+                            else None
+                        ),
+                    )
+
+                    chunk = CompletionStreamResponse(
+                        id=content["meta_info"].get("id", content_id),
+                        created=created,
+                        object="text_completion",
+                        choices=[choice_data],
+                        model=request.model,
+                    )
+
+                    stream_buffers[index] = stream_buffer
+                    n_prev_tokens[index] = n_prev_token
+
+                    yield chunk.model_dump()
+
+            except Exception as e:
+                logger.error(
+                    f"Error processing completion response: {e}", exc_info=True
+                )
+                error_choice = CompletionResponseStreamChoice(
+                    index=0,
+                    text=f"Error: {str(e)}",
+                    logprobs=None,
+                    finish_reason="error",
+                )
+                error_chunk = CompletionStreamResponse(
+                    id=content_id,
+                    created=created,
+                    object="text_completion",
+                    choices=[error_choice],
+                    model=request.model,
+                )
+                yield error_chunk.model_dump()
+
+        # Final chunk with finish_reason="stop"
+        final_choice = CompletionResponseStreamChoice(
+            index=0,
+            text="",
+            logprobs=None,
+            finish_reason="stop",
+        )
+        final_chunk = CompletionStreamResponse(
+            id=content_id,
+            created=created,
+            object="text_completion",
+            choices=[final_choice],
+            model=request.model,
+        )
+        yield final_chunk.model_dump()

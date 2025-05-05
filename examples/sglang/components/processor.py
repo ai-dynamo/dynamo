@@ -107,7 +107,11 @@ class Processor(ProcessMixIn):
         ):
             yield response
 
-    # @dynamo_endpoint()
-    # async def completions(self, raw_request: CompletionRequest):
-    #     async for response in self._generate(raw_request, RequestType.COMPLETION):
-    #         yield response
+    @dynamo_endpoint(name="completions")
+    async def completions(self, raw_request: CompletionRequest):
+        sglang_generator = self._generate(raw_request, RequestType.COMPLETION)
+
+        async for response in self.completions_processor.generate_stream_response(
+            raw_request, sglang_generator, self.tokenizer_manager
+        ):
+            yield response
