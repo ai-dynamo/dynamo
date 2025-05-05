@@ -482,6 +482,24 @@ impl Namespace {
 #[pymethods]
 impl EtcdClient {
     #[pyo3(signature = (key, value, lease_id=None))]
+    fn kv_create<'p>(
+        &self,
+        py: Python<'p>,
+        key: String,
+        value: Vec<u8>,
+        lease_id: Option<i64>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let client = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            client
+                .kv_create(key, value, lease_id)
+                .await
+                .map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
+    #[pyo3(signature = (key, value, lease_id=None))]
     fn kv_create_or_validate<'p>(
         &self,
         py: Python<'p>,
@@ -497,6 +515,10 @@ impl EtcdClient {
                 .map_err(to_pyerr)?;
             Ok(())
         })
+    }
+
+    fn primary_lease_id(&self) -> i64 {
+        self.inner.lease_id()
     }
 
     #[pyo3(signature = (key, value, lease_id=None))]

@@ -128,7 +128,7 @@ pub struct ModelDeploymentCard {
 
     /// Does this model expect preprocessing (tokenization, etc) to be already done?
     /// If this is true they get a BackendInput JSON. If this is false they get
-    /// a ChatCompletionRequest JSON.
+    /// an NvCreateChatCompletionRequest JSON.
     #[serde(default)]
     pub requires_preprocessing: bool,
 }
@@ -275,6 +275,58 @@ impl ModelDeploymentCard {
         }
 
         Ok(())
+    }
+
+    /// Move the files this MDC uses from the NATS object store to local disk.
+    /// Updates the URI's to point to the created files.
+    ///
+    /// The returned TempDir must be kept alive, it cleans up on drop.
+    pub async fn move_from_nats(&mut self, nats_client: nats::Client) -> Result<tempfile::TempDir> {
+        let nats_addr = nats_client.addr();
+        let bucket_name = self.slug();
+        let target_dir = tempfile::TempDir::with_prefix(bucket_name.to_string())?;
+        tracing::debug!(
+            nats_addr,
+            %bucket_name,
+            target_dir = %target_dir.path().display(),
+            "Downloading model deployment card fields from NATS"
+        );
+
+        if let Some(ModelInfoType::HfConfigJson(ref src_url)) = self.model_info {
+            if nats::is_nats_url(src_url) {
+                let target = target_dir.path().join("config.json");
+                nats_client
+                    .object_store_download(Url::parse(src_url)?, &target)
+                    .await?;
+                self.model_info = Some(ModelInfoType::HfConfigJson(target.display().to_string()));
+            }
+        }
+
+        if let Some(PromptFormatterArtifact::HfTokenizerConfigJson(ref src_url)) =
+            self.prompt_formatter
+        {
+            if nats::is_nats_url(src_url) {
+                let target = target_dir.path().join("tokenizer_config.json");
+                nats_client
+                    .object_store_download(Url::parse(src_url)?, &target)
+                    .await?;
+                self.prompt_formatter = Some(PromptFormatterArtifact::HfTokenizerConfigJson(
+                    target.display().to_string(),
+                ));
+            }
+        }
+
+        if let Some(TokenizerKind::HfTokenizerJson(ref src_url)) = self.tokenizer {
+            if nats::is_nats_url(src_url) {
+                let target = target_dir.path().join("tokenizer.json");
+                nats_client
+                    .object_store_download(Url::parse(src_url)?, &target)
+                    .await?;
+                self.tokenizer = Some(TokenizerKind::HfTokenizerJson(target.display().to_string()));
+            }
+        }
+
+        Ok(target_dir)
     }
 
     /// Delete this card from the key-value store and it's URLs from the object store

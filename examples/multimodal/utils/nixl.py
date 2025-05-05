@@ -73,14 +73,7 @@ class NixlMetadataStore:
     async def put(self, engine_id, metadata: NixlMetadata):
         serialized_metadata = msgspec.msgpack.encode(metadata)
         key = "/".join([self._key_prefix, engine_id])
-        # create with primary lease so that the kv entry will be deleted when the worker shutdowns
-        try:
-            # TODO: should we create a series of function in etcd client to use primary lease?
-            await self._client.kv_create_or_validate(
-                key, serialized_metadata, self._client.primary_lease_id()
-            )
-        except Exception as e:
-            logger.warning(f"A different metadata exists for engine {engine_id}: {e}")
+        await self._client.kv_put(key, serialized_metadata, None)
         self._stored.add(engine_id)
 
     async def get(self, engine_id) -> NixlMetadata:

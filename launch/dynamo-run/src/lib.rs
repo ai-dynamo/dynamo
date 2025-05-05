@@ -242,10 +242,6 @@ pub async fn run(
                     "out=echo_core need to find the tokenizer. Pass flag --model-path <path>"
                 );
             };
-
-            // TODO: Switch to `true` once pre-processing moves ingress side
-            card.requires_preprocessing = false;
-
             EngineConfig::StaticCore {
                 service_name: card.service_name.clone(),
                 engine: dynamo_llm::engines::make_engine_core(),

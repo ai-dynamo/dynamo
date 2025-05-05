@@ -76,15 +76,15 @@ async fn app(runtime: Runtime) -> Result<()> {
         .component(&args.component)?;
     let etcd_root = component.etcd_path();
 
-    // Create watchers for all model types
-    let mut watcher_tasks = Vec::new();
+    // TODO: A single watcher already watches all model types and does the right thing.
+    // The paths need change here and in llmctl to not include the model_type
 
-    for model_type in ModelType::all() {
+    // Create watchers for `Chat` and `Completion` model types
+    for model_type in [ModelType::Chat, ModelType::Completion] {
         let etcd_path = format!("{}/models/{}/", etcd_root, model_type.as_str());
 
         let state = Arc::new(ModelWatchState {
             prefix: etcd_path.clone(),
-            model_type,
             manager: manager.clone(),
             drt: distributed.clone(),
         });
@@ -94,8 +94,7 @@ async fn app(runtime: Runtime) -> Result<()> {
                 etcd_client.kv_get_and_watch_prefix(etcd_path).await?;
 
             let (_prefix, _watcher, receiver) = models_watcher.dissolve();
-            let watcher_task = tokio::spawn(model_watcher(state, receiver));
-            watcher_tasks.push(watcher_task);
+            tokio::spawn(model_watcher(state, receiver));
         }
     }
 
