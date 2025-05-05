@@ -6,7 +6,7 @@ const (
 	DefaultUserId = "default"
 	DefaultOrgId  = "default"
 
-	DynamoServicePort       = 3000
+	DynamoServicePort       = 8000
 	DynamoServicePortName   = "http"
 	DynamoContainerPortName = "http"
 
