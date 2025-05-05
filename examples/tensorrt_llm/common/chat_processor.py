@@ -19,7 +19,6 @@ from typing import Any, Dict, List, Union
 
 from common.parser import LLMAPIConfig
 from common.protocol import (
-    DisaggregatedTypeConverter,
     DynamoTRTLLMChatCompletionResponseStreamChoice,
     DynamoTRTLLMChatCompletionStreamResponse,
     DynamoTRTLLMCompletionResponseStreamChoice,
@@ -190,7 +189,7 @@ class ChatProcessor(BaseChatProcessor):
             )
             if response.outputs[0].disaggregated_params is not None:
                 # Do not include the disaggregated params in response
-                # from Processor.
+                # from processor.
                 pass
 
             chunk = DynamoTRTLLMChatCompletionStreamResponse(
@@ -403,11 +402,9 @@ class CompletionsProcessor:
                 finish_reason=output.finish_reason,
             )
             if output.disaggregated_params is not None:
-                choice.disaggregated_params = (
-                    DisaggregatedTypeConverter.to_oai_disaggregated_params(
-                        output.disaggregated_params
-                    )
-                )
+                # Block the disagg_params
+                pass
+
             chunk = DynamoTRTLLMCompletionStreamResponse(
                 model=self.model,
                 choices=[choice],
@@ -429,6 +426,7 @@ class CompletionsProcessor:
 
         return TRTLLMWorkerRequest(
             id=request.id,
+            model=request.model,
             prompt=prompt,
             sampling_params=asdict(sampling_params),
             disaggregated_params=request.disaggregated_params,

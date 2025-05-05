@@ -131,32 +131,114 @@ cd /workspace/examples/tensorrt_llm
 dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
 ```
 
-We are defining TRTLLM_USE_UCX_KVCACHE so that TRTLLM uses UCX for transfering the KV
-cache between the context and generation workers.
-
 #### Disaggregated serving with KV Routing
 ```bash
 cd /workspace/examples/tensorrt_llm
 dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
 ```
 
-We are defining TRTLLM_USE_UCX_KVCACHE so that TRTLLM uses UCX for transfering the KV
-cache between the context and generation workers.
+#### Multi-Node Disaggregated Serving
+
+In the following example, we will demonstrate how to run a Disaggregated Serving
+deployment across multiple nodes. For simplicity, we will demonstrate how to
+deploy a single Decode worker on one node, and a single Prefill worker on the other node.
+However, the instance counts, TP sizes, other configs, and responsibilities of each node
+can be customized and deployed in similar ways.
+
+##### Head Node
+
+Start nats/etcd:
+```bash
+# NATS data persisted to /tmp/nats/jetstream by default
+nats-server -js &
+
+# Persist data to /tmp/etcd, otherwise defaults to ${PWD}/default.etcd if left unspecified
+etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd &
+
+# NOTE: Clearing out the etcd and nats jetstream data directories across runs
+#       helps to guarantee a clean and reproducible results.
+```
+
+Launch graph of Frontend, Processor, and TensorRTLLMWorker (decode) on head node:
+
+```bash
+cd /workspace/examples/tensorrt_llm
+dynamo serve graphs.agg:Frontend -f ./configs/disagg.yaml &
+```
+
+Notes:
+- The aggregated graph (`graphs.agg`) is chosen here because it also describes
+  our desired deployment settings for the head node: launching the utility components
+  (Frontend, Processor), and only the decode worker (TensorRTLLMWorker configured with
+  `remote-prefill` enabled). We plan to launch the `TensorRTLLMPrefillWorker`
+  independently on a separate node in the next step of this demonstration.
+  You are free to customize the graph and configuration of components launched on
+  each node.
+- The disaggregated config `configs/disagg.yaml` is intentionally chosen here as a
+  single source of truth to be used for deployments on all of our nodes, describing
+  the configurations for all of our components, including both decode and prefill
+  workers, but can be customized based on your deployment needs.
+
+##### Worker Node(s)
+
+Set environment variables pointing at the etcd/nats endpoints on the head node
+so the Dynamo Distributed Runtime can orchestrate communication and
+discoverability between the head node and worker nodes:
+```bash
+# if not head node
+export HEAD_NODE_IP="<head-node-ip>"
+export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
+export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
+```
+
+Deploy a Prefill worker:
+```
+cd /workspace/examples/tensorrt_llm
+dynamo serve components.prefill_worker:TensorRTLLMPrefillWorker -f ./configs/disagg.yaml --service-name TensorRTLLMPrefillWorker &
+```
+
+Now you have a 2-node deployment with 1 Decode worker on the head node, and 1 Prefill worker on a worker node!
+
+##### Additional Notes for Multi-Node Deployments
+
+Notes:
+- To include a router in this deployment, change the graph to one that includes the router, such as `graphs.agg_router`,
+  and change the config to one that includes the router, such as `configs/disagg_router.yaml`
+- This step is assuming you're disaggregated serving and planning to launch prefill workers on separate nodes.
+  Howerver, for an aggregated deployment with additional aggregated worker replicas on other nodes, this step
+  remains mostly the same. The primary difference between aggregation and disaggregation for this step is
+  whether or not the `TensorRTLLMWorker` is configured to do `remote-prefill` or not in the config file
+  (ex: `configs/disagg.yaml` vs `configs/agg.yaml`).
+- To apply the same concept for launching additional decode workers on worker nodes, you can
+  directly start them, similar to the prefill worker step above:
+  ```bash
+  # Example: deploy decode worker only
+  cd /workspace/examples/tensorrt_llm
+  dynamo serve components.worker:TensorRTLLMWorker -f ./configs/disagg.yaml --service-name TensorRTLLMWorker &
+  ```
 
 ### Client
 
 See [client](../llm/README.md#client) section to learn how to send request to the deployment.
 
+NOTE: To send a request to a multi-node deployment, target the node which deployed the `Frontend` component.
+
 ### Close deployment
 
 See [close deployment](../../docs/guides/dynamo_serve.md#close-deployment) section to learn about how to close the deployment.
 
-Remaining tasks:
+### Benchmarking
 
+To benchmark your deployment with GenAI-Perf, see this utility script, configuring the
+`model` name and `host` based on your deployment: [perf.sh](../llm/benchmarks/perf.sh)
+
+### Future Work
+
+Remaining tasks:
 - [x] Add support for the disaggregated serving.
+- [x] Add multi-node support.
+- [x] Add instructions for benchmarking.
 - [ ] Add integration test coverage.
-- [ ] Add instructions for benchmarking.
-- [ ] Add multi-node support.
 - [ ] Merge the code base with llm example to reduce the code duplication.
 - [ ] Use processor from dynamo-llm framework.
 - [ ] Enable NIXL integration with TensorRT-LLM once available. Currently, TensorRT-LLM uses UCX to transfer KV cache.
