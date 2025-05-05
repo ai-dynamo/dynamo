@@ -312,17 +312,6 @@ RUN cargo build --release --locked --features mistralrs,sglang,vllm,python \
     -p file://$PWD/components/http \
     -p metrics
 
-# Create symlinks for wheel building
-RUN mkdir -p /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/ && \
-    # Remove existing symlinks
-    rm -f /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/* && \
-    # Create new symlinks pointing to the correct location
-    ln -sf /workspace/target/release/dynamo-run /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/dynamo-run && \
-    ln -sf /workspace/target/release/http /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/http && \
-    ln -sf /workspace/target/release/llmctl /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/llmctl && \
-    ln -sf /workspace/target/release/metrics /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/metrics && \
-    ln -sf /workspace/target/release/mock_worker /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/mock_worker
-
 # Build dynamo wheel
 RUN uv build --wheel --out-dir /workspace/dist && \
     cd /workspace/lib/bindings/python && \
