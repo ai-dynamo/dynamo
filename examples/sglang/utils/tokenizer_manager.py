@@ -30,7 +30,6 @@ from sglang.srt.server_args import ServerArgs
 
 
 class PatchedTokenizerManager(TokenizerManager):
-    # TODO: THIS IS A SIMPLE POC MOVE THIS TO RUST WHEN WE SHIP
     """
     This class acts as a patch for the `TokenizerManager` class in SGLang. Because
     Dynamo has it's own communication primatives - we don't need to use the
@@ -149,7 +148,6 @@ class PatchedTokenizerManager(TokenizerManager):
         sampling_params.normalize(self.tokenizer)
         sampling_params.verify()
 
-        # Build return object
         if isinstance(obj, GenerateReqInput):
             tokenized_obj = TokenizedGenerateReqInput(
                 obj.rid,

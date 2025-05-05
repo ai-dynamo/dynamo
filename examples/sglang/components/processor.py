@@ -89,19 +89,15 @@ class Processor(ProcessMixIn):
 
         logger.warning(request_obj)
 
-        # Get the async generator from worker
         output_generator = await self.worker_client.generate(request_obj)
 
-        # Properly yield each result from the generator
         async for result in output_generator:
             yield result
 
     @dynamo_endpoint(name="chat/completions")
     async def chat_completions(self, raw_request: ChatCompletionRequest):
-        # Get a stream generator from _generate
         sglang_generator = self._generate(raw_request, RequestType.CHAT)
 
-        # Process the stream using generate_stream_response from ChatProcessor
         async for response in self.chat_processor.generate_stream_response(
             raw_request, sglang_generator, self.tokenizer_manager
         ):
