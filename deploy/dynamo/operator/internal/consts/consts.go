@@ -26,11 +26,8 @@ const (
 
 	EnvDynamoServicePort = "PORT"
 
-	EnvDockerRegistryServer          = "DOCKER_REGISTRY_SERVER"
-	EnvDockerRegistryInClusterServer = "DOCKER_REGISTRY_IN_CLUSTER_SERVER"
-	EnvDockerRegistryUsername        = "DOCKER_REGISTRY_USERNAME"
-	// nolint:gosec
-	EnvDockerRegistryPassword                       = "DOCKER_REGISTRY_PASSWORD"
+	EnvDockerRegistryServer                         = "DOCKER_REGISTRY_SERVER"
+	EnvDockerRegistrySecret                         = "DOCKER_REGISTRY_SECRET_NAME"
 	EnvDockerRegistrySecure                         = "DOCKER_REGISTRY_SECURE"
 	EnvDockerRegistryDynamoComponentsRepositoryName = "DOCKER_REGISTRY_DYNAMO_COMPONENTS_REPOSITORY_NAME"
 
@@ -45,12 +42,12 @@ const (
 	KubeLabelDynamoSelector = "nvidia.com/selector"
 
 	KubeLabelDynamoComponent            = "nvidia.com/dynamo-component"
+	KubeLabelDynamoNamespace            = "nvidia.com/dynamo-namespace"
 	KubeLabelDynamoDeploymentTargetType = "nvidia.com/dynamo-deployment-target-type"
 
 	KubeLabelDynamoComponentType = "nvidia.com/dynamo-component-type"
 
-	KubeLabelIsDynamoImageBuilder   = "nvidia.com/is-dynamo-image-builder"
-	KubeLabelDynamoComponentRequest = "nvidia.com/dynamo-component-request"
+	KubeLabelIsDynamoImageBuilder = "nvidia.com/is-dynamo-image-builder"
 
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
@@ -64,10 +61,7 @@ const (
 
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
 
-	// nolint: gosec
-	KubeSecretNameRegcred = "dynamo-regcred"
-
-	KubeAnnotationDynamoComponentRequestHash            = "nvidia.com/dynamo-request-hash"
-	KubeAnnotationDynamoComponentRequestImageBuiderHash = "nvidia.com/dynamo-request-image-builder-hash"
-	KubeAnnotationDynamoComponentStorageNS              = "nvidia.com/dynamo-storage-namespace"
+	KubeAnnotationDynamoComponentHash            = "nvidia.com/dynamo-request-hash"
+	KubeAnnotationDynamoComponentImageBuiderHash = "nvidia.com/dynamo-request-image-builder-hash"
+	KubeAnnotationDynamoComponentStorageNS       = "nvidia.com/dynamo-storage-namespace"
 )

@@ -52,7 +52,7 @@ type DynamoGraphDeploymentStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-
+// +kubebuilder:resource:shortName=dgd
 // DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 type DynamoGraphDeployment struct {
 	metav1.TypeMeta   `json:",inline"`

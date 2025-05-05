@@ -129,7 +129,6 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments
-  - dynamocomponentrequests
   - dynamocomponents
   - dynamographdeployments
   verbs:
@@ -144,7 +143,7 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments/finalizers
-  - dynamocomponentrequests/finalizers
+  - dynamocomponents/finalizers
   - dynamographdeployments/finalizers
   verbs:
   - update
@@ -152,7 +151,6 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments/status
-  - dynamocomponentrequests/status
   - dynamocomponents/status
   - dynamographdeployments/status
   verbs:

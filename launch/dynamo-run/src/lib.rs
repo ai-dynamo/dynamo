@@ -15,7 +15,7 @@
 
 #[cfg(any(feature = "vllm", feature = "sglang"))]
 use std::{future::Future, pin::Pin};
-use std::{io::Read, sync::Arc};
+use std::{io::Read, path::PathBuf, sync::Arc};
 
 use dynamo_llm::{
     backend::ExecutionContext, engines::StreamingEngine, kv_router::publisher::KvMetricsPublisher,
@@ -52,6 +52,9 @@ const PYTHON_STR_SCHEME: &str = "pystr:";
 /// How we identify a python token endpoint
 #[cfg(feature = "python")]
 const PYTHON_TOK_SCHEME: &str = "pytok:";
+
+/// Prefix for Hugging Face model repository
+const HF_SCHEME: &str = "hf://";
 
 pub enum EngineConfig {
     /// An remote networked engine we don't know about yet
@@ -91,12 +94,16 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let cancel_token = runtime.primary_token();
 
-    // Turn relative paths into absolute paths
+    // Turn relative paths into absolute paths and canonicalize them
     let mut model_path = flags
         .model_path_pos
         .clone()
         .or(flags.model_path_flag.clone())
         .and_then(|p| {
+            // Check for hf:// prefix first
+            if let Some(hf_path) = p.to_string_lossy().strip_prefix(HF_SCHEME) {
+                return Some(PathBuf::from(hf_path));
+            }
             if p.exists() {
                 p.canonicalize().ok()
             } else {
@@ -124,7 +131,7 @@ pub async fn run(
 
     // If it's an HF repo download it
     if let Some(inner_model_path) = model_path.as_ref() {
-        if !inner_model_path.exists() {
+        if !inner_model_path.exists() && !inner_model_path.is_absolute() {
             model_name = Some(inner_model_path.display().to_string());
             model_path = Some(hub::from_hf(inner_model_path).await?);
         }
@@ -235,10 +242,6 @@ pub async fn run(
                     "out=echo_core need to find the tokenizer. Pass flag --model-path <path>"
                 );
             };
-
-            // TODO: Switch to `true` once pre-processing moves ingress side
-            card.requires_preprocessing = false;
-
             EngineConfig::StaticCore {
                 service_name: card.service_name.clone(),
                 engine: dynamo_llm::engines::make_engine_core(),

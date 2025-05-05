@@ -20,8 +20,9 @@ use dynamo_llm::{
     engines::StreamingEngineAdapter,
     http::service::discovery::ModelNetworkName,
     model_card::ModelDeploymentCard,
+    model_type::ModelType,
     preprocessor::OpenAIPreprocessor,
-    protocols::common::llm_backend::{BackendInput, BackendOutput},
+    protocols::common::llm_backend::{BackendInput, BackendOutput, LLMEngineOutput},
     types::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -33,7 +34,8 @@ use dynamo_llm::{
 use dynamo_runtime::{
     engine::{AsyncEngineStream, Data},
     pipeline::{
-        Context, ManyOut, Operator, PushRouter, ServiceBackend, ServiceFrontend, SingleIn, Source,
+        Context, ManyOut, Operator, PushRouter, SegmentSource, ServiceBackend, ServiceFrontend,
+        SingleIn, Source,
     },
     DistributedRuntime, Runtime,
 };
@@ -41,12 +43,19 @@ use std::sync::Arc;
 
 use crate::{flags::RouterMode, EngineConfig, Flags};
 
+pub struct PreparedEngine {
+    pub service_name: String,
+    pub engine: OpenAIChatCompletionsStreamingEngine,
+    pub inspect_template: bool,
+    pub _cache_dir: Option<tempfile::TempDir>,
+}
+
 /// Turns an EngineConfig into an OpenAI chat-completions and completions supported StreamingEngine.
 pub async fn prepare_engine(
     runtime: Runtime,
     flags: Flags,
     engine_config: EngineConfig,
-) -> anyhow::Result<(String, OpenAIChatCompletionsStreamingEngine, bool)> {
+) -> anyhow::Result<PreparedEngine> {
     match engine_config {
         EngineConfig::Dynamic(endpoint_id) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
@@ -57,12 +66,11 @@ pub async fn prepare_engine(
                 .endpoint(endpoint_id.name.clone());
 
             let client = endpoint.client().await?;
-            let router = match &flags.router_mode {
+            let mut cache_dir = None;
+            let engine: OpenAIChatCompletionsStreamingEngine = match &flags.router_mode {
                 RouterMode::Random | RouterMode::RoundRobin => {
                     tracing::info!("Waiting for remote model..");
 
-                    // We then use the ModelDeploymentCard's `requires_preprocessing`
-                    // field to decide what kind of PushRouter to make.
                     let remote_endpoints = client.wait_for_endpoints().await?;
                     debug_assert!(!remote_endpoints.is_empty());
                     tracing::info!(count = remote_endpoints.len(), "Model(s) discovered");
@@ -71,16 +79,65 @@ pub async fn prepare_engine(
                     let Some(etcd_client) = distributed_runtime.etcd_client() else {
                         anyhow::bail!("Cannot run distributed components without etcd");
                     };
-                    let mdc = network_name.load_mdc(endpoint_id, etcd_client).await?;
-                    if mdc.requires_preprocessing {
-                        // Note requires_preprocessing is never true in our code right now
-                        todo!("Ingress-side pre-processing not supported yet");
-                    } else {
-                        PushRouter::<
-                            NvCreateChatCompletionRequest,
-                            Annotated<NvCreateChatCompletionStreamResponse>,
-                        >::from_client(client, flags.router_mode.into())
-                        .await?
+                    let network_entry = network_name.load_entry(etcd_client.clone()).await?;
+                    let mut card = network_entry.load_mdc(endpoint_id, etcd_client).await?;
+
+                    match network_entry.model_type {
+                        ModelType::Backend => {
+                            // Download tokenizer.json etc to local disk
+                            cache_dir = Some(
+                                card.move_from_nats(distributed_runtime.nats_client())
+                                    .await?,
+                            );
+
+                            // The backend doesn't mind what we expose to the user (chat or
+                            // completions), and this function is only used by text and batch input so
+                            // the user doesn't see the HTTP request. So use Chat.
+                            let frontend = SegmentSource::<
+                                SingleIn<NvCreateChatCompletionRequest>,
+                                ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+                            >::new();
+                            let preprocessor =
+                                OpenAIPreprocessor::new(card.clone()).await?.into_operator();
+                            let backend = Backend::from_mdc(card.clone()).await?.into_operator();
+                            let router =
+                                PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
+                                    client,
+                                    flags.router_mode.into(),
+                                )
+                                .await?;
+
+                            frontend
+                                .link(preprocessor.forward_edge())?
+                                .link(backend.forward_edge())?
+                                .link(ServiceBackend::from_engine(Arc::new(router)))?
+                                .link(backend.backward_edge())?
+                                .link(preprocessor.backward_edge())?
+                                .link(frontend)?
+                        }
+                        ModelType::Chat => Arc::new(
+                            PushRouter::<
+                                NvCreateChatCompletionRequest,
+                                Annotated<NvCreateChatCompletionStreamResponse>,
+                            >::from_client(
+                                client, flags.router_mode.into()
+                            )
+                            .await?,
+                        ),
+                        ModelType::Completion => {
+                            anyhow::bail!("text and batch input only accept remote Chat models, not Completion");
+                            /*
+                            Arc::new(
+                                PushRouter::<
+                                    CompletionRequest,
+                                    Annotated<CompletionResponse>,
+                                >::from_client(
+                                    client, flags.router_mode.into()
+                                )
+                                .await?,
+                            )
+                            */
+                        }
                     }
                 }
                 RouterMode::KV => todo!(),
@@ -89,16 +146,26 @@ pub async fn prepare_engine(
             // The service_name isn't used for text chat outside of logs,
             // so use the path. That avoids having to listen on etcd for model registration.
             let service_name = endpoint.subject();
-            Ok((service_name, Arc::new(router), false))
+            Ok(PreparedEngine {
+                service_name,
+                engine,
+                inspect_template: false,
+                _cache_dir: cache_dir,
+            })
         }
         EngineConfig::StaticFull {
             service_name,
             engine,
             card: _card,
         } => {
-            tracing::debug!("Model: {service_name}");
+            tracing::debug!("Model: {service_name} with engine pre-processing");
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
-            Ok((service_name, engine, false))
+            Ok(PreparedEngine {
+                service_name,
+                engine,
+                inspect_template: false,
+                _cache_dir: None,
+            })
         }
         EngineConfig::StaticCore {
             service_name,
@@ -111,8 +178,13 @@ pub async fn prepare_engine(
             >(&card, inner_engine)
             .await?;
 
-            tracing::debug!("Model: {service_name} with pre-processing");
-            Ok((service_name, pipeline, true))
+            tracing::debug!("Model: {service_name} with Dynamo pre-processing");
+            Ok(PreparedEngine {
+                service_name,
+                engine: pipeline,
+                inspect_template: true,
+                _cache_dir: None,
+            })
         }
         EngineConfig::None => unreachable!(),
     }

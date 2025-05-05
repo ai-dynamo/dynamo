@@ -20,13 +20,11 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"dario.cat/mergo"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -156,25 +154,32 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
-	// reconcile the dynamoComponentRequest
+	// reconcile the dynamoComponent
 	// for now we use the same component for all the services and we differentiate them by the service name when launching the component
-	dynamoComponentRequest := &nvidiacomv1alpha1.DynamoComponentRequest{
+	dynamoComponent := &nvidiacomv1alpha1.DynamoComponent{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      strings.ReplaceAll(dynamoDeployment.Spec.DynamoGraph, ":", "--"),
+			Name:      getK8sName(dynamoDeployment.Spec.DynamoGraph),
 			Namespace: dynamoDeployment.Namespace,
 		},
-		Spec: nvidiacomv1alpha1.DynamoComponentRequestSpec{
+		Spec: nvidiacomv1alpha1.DynamoComponentSpec{
 			DynamoComponent: dynamoDeployment.Spec.DynamoGraph,
 		},
 	}
-	if err := ctrl.SetControllerReference(dynamoDeployment, dynamoComponentRequest, r.Scheme); err != nil {
-		reason = "failed_to_set_the_controller_reference_for_the_DynamoComponentRequest"
+	if err := ctrl.SetControllerReference(dynamoDeployment, dynamoComponent, r.Scheme); err != nil {
+		reason = "failed_to_set_the_controller_reference_for_the_DynamoComponent"
 		return ctrl.Result{}, err
 	}
-	_, err = commonController.SyncResource(ctx, r.Client, dynamoComponentRequest, types.NamespacedName{Name: dynamoComponentRequest.Name, Namespace: dynamoComponentRequest.Namespace}, false)
+	dynamoComponent, err = commonController.SyncResource(ctx, r.Client, dynamoComponent, false)
 	if err != nil {
-		reason = "failed_to_sync_the_DynamoComponentRequest"
+		reason = "failed_to_sync_the_DynamoComponent"
 		return ctrl.Result{}, err
+	}
+	if !dynamoComponent.IsReady() {
+		logger.Info("The DynamoComponent is not ready")
+		reason = "dynamoComponent_is_not_ready"
+		message = "The DynamoComponent is not ready"
+		readyStatus = metav1.ConditionFalse
+		return ctrl.Result{}, nil
 	}
 
 	notReadyDeployments := []string{}
@@ -185,7 +190,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			reason = "failed_to_set_the_controller_reference_for_the_DynamoComponentDeployment"
 			return ctrl.Result{}, err
 		}
-		dynamoComponentDeployment, err = commonController.SyncResource(ctx, r.Client, dynamoComponentDeployment, types.NamespacedName{Name: dynamoComponentDeployment.Name, Namespace: dynamoComponentDeployment.Namespace}, false)
+		dynamoComponentDeployment, err = commonController.SyncResource(ctx, r.Client, dynamoComponentDeployment, false)
 		if err != nil {
 			reason = "failed_to_sync_the_DynamoComponentDeployment"
 			return ctrl.Result{}, err
@@ -270,6 +275,13 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		)).
 		Named("dynamographdeployment").
 		Owns(&nvidiacomv1alpha1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.Funcs{
+			// ignore creation cause we don't want to be called again after we create the deployment
+			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
+			GenericFunc: func(ge event.GenericEvent) bool { return true },
+		})).
+		Owns(&nvidiacomv1alpha1.DynamoComponent{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },

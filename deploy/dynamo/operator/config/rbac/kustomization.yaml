@@ -37,8 +37,8 @@ resources:
 # if you do not want those helpers be installed with your Project.
 # - dynamocomponent_editor_role.yaml
 # - dynamocomponent_viewer_role.yaml
-# - dynamocomponentrequest_editor_role.yaml
-# - dynamocomponentrequest_viewer_role.yaml
+# - dynamocomponent_editor_role.yaml
+# - dynamocomponent_viewer_role.yaml
 # - dynamocomponentdeployment_editor_role.yaml
 # - dynamocomponentdeployment_viewer_role.yaml
 

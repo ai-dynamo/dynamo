@@ -18,7 +18,6 @@
 # It should be run by config/default
 resources:
 - bases/nvidia.com_dynamocomponentdeployments.yaml
-- bases/nvidia.com_dynamocomponentrequests.yaml
 - bases/nvidia.com_dynamocomponents.yaml
 - bases/nvidia.com_dynamographdeployments.yaml
 #+kubebuilder:scaffold:crdkustomizeresource
@@ -31,7 +30,6 @@ patches: []
 # [CERTMANAGER] To enable cert-manager, uncomment all the sections with [CERTMANAGER] prefix.
 # patches here are for enabling the CA injection for each CRD
 #- path: patches/cainjection_in_dynamocomponentdeployments.yaml
-#- path: patches/cainjection_in_dynamocomponentrequests.yaml
 #- path: patches/cainjection_in_dynamocomponents.yaml
 #+kubebuilder:scaffold:crdkustomizecainjectionpatch
 

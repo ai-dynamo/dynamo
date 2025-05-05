@@ -26,6 +26,8 @@ spec:
     kind: DynamoGraphDeployment
     listKind: DynamoGraphDeploymentList
     plural: dynamographdeployments
+    shortNames:
+    - dgd
     singular: dynamographdeployment
   scope: Namespaced
   versions:

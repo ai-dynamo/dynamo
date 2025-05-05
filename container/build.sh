@@ -14,6 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    echo "Error: Bash version 4.0 or higher is required. Current version: ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"
+    exit 1
+fi
+
 set -e
 
 TAG=
@@ -62,7 +67,7 @@ VLLM_BASE_IMAGE_TAG="25.03-cuda12.8-devel-ubuntu24.04"
 NONE_BASE_IMAGE="ubuntu"
 NONE_BASE_IMAGE_TAG="24.04"
 
-NIXL_COMMIT=3810b36b1ad0b647488e163f0f4e8dfc22ffabdf
+NIXL_COMMIT=d247e88c72db75dc00e4e37aa21ed8d99e60c27d
 NIXL_REPO=ai-dynamo/nixl.git
 
 get_options() {

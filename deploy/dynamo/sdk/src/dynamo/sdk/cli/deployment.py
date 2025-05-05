@@ -77,6 +77,7 @@ def create_deployment(
     timeout: int = 3600,
     dev: bool = False,
     args: Optional[List[str]] = None,
+    envs: Optional[List[str]] = None,
     _cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
 ) -> Deployment:
     # Load config from file and serialize to env
@@ -86,6 +87,14 @@ def create_deployment(
         config_json = json.dumps(service_configs)
         logger.info(f"Deployment service configuration: {config_json}")
         env_dicts.append({"name": "DYN_DEPLOYMENT_CONFIG", "value": config_json})
+
+    # Add user-supplied envs
+    if envs:
+        for env in envs:
+            if "=" not in env:
+                raise CLIException(f"Invalid env format: {env}. Use KEY=VALUE.")
+            key, value = env.split("=", 1)
+            env_dicts.append({"name": key, "value": value})
 
     config_params = DeploymentConfigParameters(
         name=name,
@@ -296,6 +305,11 @@ def create(
     endpoint: str = typer.Option(
         ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD"
     ),
+    envs: Optional[List[str]] = typer.Option(
+        None,
+        "--env",
+        help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo pipeline.",
+    ),
 ) -> None:
     """Create a deployment on Dynamo Cloud.
 
@@ -309,6 +323,7 @@ def create(
         wait=wait,
         timeout=timeout,
         args=ctx.args if hasattr(ctx, "args") else None,
+        envs=envs,
     )
 
 
