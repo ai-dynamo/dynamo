@@ -64,12 +64,9 @@ class SGLangWorker:
 
         logger.warning("WE ARE HERE")
         
-        # Make sure each result is properly serialized to be streamable
         async for result in g:
-            # Convert the result to a serializable format if needed
             # Wrap the SGLang result in MyRequestOutput
             response = MyRequestOutput(text=result)
-            logger.warning(response)
             yield response.model_dump_json()
 
 

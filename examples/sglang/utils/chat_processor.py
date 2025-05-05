@@ -1,5 +1,8 @@
 from sglang.srt.server_args import ServerArgs
-from typing import Union
+from typing import Union, AsyncIterator
+import uuid
+import time
+import logging
 from sglang.srt.managers.io_struct import (
     GenerateReqInput,
     TokenizedGenerateReqInput,
@@ -7,9 +10,15 @@ from sglang.srt.managers.io_struct import (
 from sglang.srt.openai_api.protocol import (
     ChatCompletionRequest,
     CompletionRequest,
+    ChatCompletionStreamResponse,
+    ChatCompletionResponseStreamChoice,
+    DeltaMessage,
 )
 from sglang.srt.openai_api.adapter import v1_chat_generate_request, v1_generate_request
 from utils.tokenizer_manager import DynamoTokenizerManager
+from utils.protocol import MyRequestOutput
+
+logger = logging.getLogger(__name__)
 
 class ProcessMixIn:
     """
@@ -51,6 +60,91 @@ class ChatProcessor:
     async def preprocess(self, raw_request: ChatCompletionRequest, tokenizer_manager: DynamoTokenizerManager) -> GenerateReqInput:
         chat_generate_req_input, _ = v1_chat_generate_request([raw_request], tokenizer_manager)
         return chat_generate_req_input, chat_generate_req_input.sampling_params
+    
+    async def generate_stream_response(self, request: ChatCompletionRequest, sglang_generator: AsyncIterator, tokenizer_manager=None):
+        """Converts SGLang stream outputs to OpenAI-compatible chat completion responses"""
+        is_first = True
+        stream_buffer = ""
+        created = int(time.time())
+        content_id = str(uuid.uuid4())
+        
+        async for response in sglang_generator:
+            try:
+                response_data = response.data()
+                
+                output = MyRequestOutput.model_validate_json(response_data)
+                content = output.text
+                
+                if is_first:
+                    is_first = False
+                    choice = ChatCompletionResponseStreamChoice(
+                        index=0,
+                        delta=DeltaMessage(role="assistant"),
+                        finish_reason=None,
+                    )
+                    chunk = ChatCompletionStreamResponse(
+                        id=content_id,
+                        created=created,
+                        choices=[choice],
+                        model=request.model,
+                    )
+                    yield chunk.model_dump()
+                
+                output_ids = content.get("output_ids", [])
+                meta_info = content.get("meta_info", {})
+                
+                if tokenizer_manager and hasattr(tokenizer_manager, 'tokenizer') and tokenizer_manager.tokenizer:
+                    curr_text = tokenizer_manager.tokenizer.decode(output_ids)
+                else:
+                    curr_text = str(output_ids)
+                    
+                delta = curr_text[len(stream_buffer):]
+                stream_buffer = curr_text
+                
+                finish_reason = meta_info.get("finish_reason")
+                finish_reason_type = finish_reason.get("type") if finish_reason else None
+                
+                if delta: 
+                    choice = ChatCompletionResponseStreamChoice(
+                        index=0,
+                        delta=DeltaMessage(content=delta),
+                        finish_reason=None, 
+                    )
+                    chunk = ChatCompletionStreamResponse(
+                        id=meta_info.get("id", content_id),
+                        created=created,
+                        choices=[choice],
+                        model=request.model,
+                    )
+                    yield chunk.model_dump()
+                    
+            except Exception as e:
+                logger.error(f"Error processing response: {e}")
+                error_choice = ChatCompletionResponseStreamChoice(
+                    index=0,
+                    delta=DeltaMessage(content=f"Error: {str(e)}"),
+                    finish_reason="error"
+                )
+                error_chunk = ChatCompletionStreamResponse(
+                    id=content_id,
+                    created=created,
+                    choices=[error_choice],
+                    model=request.model
+                )
+                yield error_chunk.model_dump()
+        
+        choice = ChatCompletionResponseStreamChoice(
+            index=0,
+            delta=DeltaMessage(), 
+            finish_reason="stop", 
+        )
+        final_chunk = ChatCompletionStreamResponse(
+            id=content_id,
+            created=created,
+            choices=[choice],
+            model=request.model,
+        )
+        yield final_chunk.model_dump()
 
 class CompletionsProcessor:
     def parse_raw_request(self, raw_request: CompletionRequest) -> CompletionRequest:
