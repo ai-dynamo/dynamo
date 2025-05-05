@@ -1522,8 +1522,8 @@ func (r *DynamoComponentDeploymentReconciler) generateService(ctx context.Contex
 		},
 	}
 
-	if !opt.isGenericService && !opt.containsStealingTrafficDebugModeEnabled {
-		// if it's not a generic service and not contains stealing traffic debug mode enabled, we don't need to create the service
+	if !opt.dynamoComponentDeployment.IsMainComponent() || (!opt.isGenericService && !opt.containsStealingTrafficDebugModeEnabled) {
+		// if it's not the main component or if it's not a generic service and not contains stealing traffic debug mode enabled, we don't need to create the service
 		return kubeService, true, nil
 	}
 
