@@ -4,7 +4,7 @@
 
 Dynamo `DistributedRuntime` is the core infrastructure in dynamo that enables distributed communication and coordination between different dynamo components. It is implemented in rust (`/lib/runtime`) and exposed to other programming languages via binding (i.e., python bindings can be found in `/lib/bindings/python`). `DistributedRuntime` follows a hierarchical structure:
 
-- `DistributedRuntime`: This is the highest level object that exposes the distributed runtime interface. It maintains connection to external services (e.g., ETCD for service discovery and NATS for messaging) and manages lifecycle with cancellation tokens. 
+- `DistributedRuntime`: This is the highest level object that exposes the distributed runtime interface. It maintains connection to external services (e.g., ETCD for service discovery and NATS for messaging) and manages lifecycle with cancellation tokens.
 - `Namespace`: A `Namespace` is a logical grouping of components that isolate between different model deployments. A `DistributedRuntime` can have multiple `Namespace`s.
 - `Component`: A `Component` is a discoverable object within a `Namespace` that represents a logical unit of workers. A `Namespace` can have multiple `Component`s.
 - `Endpoint`: An `Endpoint` is a network-accessible service that provides a specific service or function. A `Component` can have multiple `Endpoint`s.
@@ -24,12 +24,12 @@ In this section, we explain what happens under the hood when `DistributedRuntime
 - `DistributedRuntime`: When a `DistributedRuntime` object is created, it will establish connections to the following two services:
     - ETCD (dynamic mode only): for service discovery,
     - NATS (both static and dynamic mode): for messaging,
-  
+
   where ETCD and NATS are two global services (there could be multiple ETCD and NATS services for high availability).
 
   For ETCD, it also creates a primary lease and spin up a background task to keep the lease alive. All objects registered under this `DistributedRuntime` will use this lease_id to maintain their life cycle. There is also a cancellation token that is tied to the primary lease. When the cancellation token is triggered or the background task failed, the primary lease will be revoked or expired and the kv pairs stored with this lease_id will be removed.
 - `Namespace`: `Namespace`s are primarily a logical grouping mechanism and is not registered in ETCD. It provides the root path for all componenets under this `Namespace`.
-- `Component`: When a `Component` object is created, similar to `Namespace`, it will not be registered in ETCD. When `create_service` is called, it creates a NATS service group using `{namespace_name}.{service_name}` and registers a service in the registry of the `Component`, where the registry is an internal data structure that tracks all services and endpoints within the `DistributedRuntime`. 
+- `Component`: When a `Component` object is created, similar to `Namespace`, it will not be registered in ETCD. When `create_service` is called, it creates a NATS service group using `{namespace_name}.{service_name}` and registers a service in the registry of the `Component`, where the registry is an internal data structure that tracks all services and endpoints within the `DistributedRuntime`.
 - `Endpoint`: When an Endpoint object is created and started, it performs two key registrations:
   - NATS Registration: The endpoint is registered with the NATS service group created during service creation. The endpoint is assigned a unique subject following the naming: `{namespace_name}.{service_name}.{endpoint_name}-{lease_id_hex}`.
   - ETCD Registration: The endpoint information is stored in ETCD at a path following the naming: `/services/{namespace}/{component}/{endpoint}-{lease_id}`. Note that the endpoints of different workers of the same type (i.e., two `PrefillWorker`s in one deployment) will share the same `Namespace`, `Componenet`, and `Endpoint` name. They are distinguished by their different primary `lease_id` of their `DistributedRuntime`.
@@ -44,7 +44,7 @@ The user can decide which load balancing strategy to use when using the `Client`
 - `round_robin`: select endpoints in round-robin order,
 - `direct`: direct the request to a specific endpoint by specifying the `lease_id` of the endpoint.
 
-After selecting which endpoint to hit, the `Client` sends the serialized request to the NATS subject of the selected `Endpoint`. The `Endpoint` receives the request and create a TCP response stream using the connection information from the request, which establishes a direct TCP connection to the `Client`. Then, as the worker generates the response, it serializes each response chunk and sends the serialized data over the TCP connection. 
+After selecting which endpoint to hit, the `Client` sends the serialized request to the NATS subject of the selected `Endpoint`. The `Endpoint` receives the request and create a TCP response stream using the connection information from the request, which establishes a direct TCP connection to the `Client`. Then, as the worker generates the response, it serializes each response chunk and sends the serialized data over the TCP connection.
 
 ## Examples
 
