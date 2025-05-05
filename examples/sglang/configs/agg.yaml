@@ -13,19 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 Frontend:
-  served_model_name: Qwen/Qwen2.5-0.5B
+  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   endpoint: dynamo.Processor.chat/completions
   port: 8000
 
 Processor:
-  model-path: Qwen/Qwen2.5-0.5B
-  served-model-name: Qwen2.5-0.5B
+  model-path: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  served-model-name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   trust-remote-code: true
   skip-tokenizer-init: true
 
 SGLangWorker:
-  model-path: Qwen/Qwen2.5-0.5B
-  served-model-name: Qwen2.5-0.5B
+  model-path: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  served-model-name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  tp: 1
   trust-remote-code: true
   skip-tokenizer-init: true
   ServiceArgs:
