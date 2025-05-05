@@ -5,9 +5,11 @@
 Dynamo `DistributedRuntime` is the core infrastructure in dynamo that enables distributed communication and coordination between different dynamo components. It is implemented in rust (`/lib/runtime`) and exposed to other programming languages via binding (i.e., python bindings can be found in `/lib/bindings/python`). `DistributedRuntime` follows a hierarchical structure:
 
 - `DistributedRuntime`: This is the highest level object that exposes the distributed runtime interface. It maintains connection to external services (e.g., ETCD for service discovery and NATS for messaging) and manages lifecycle with cancellation tokens.
-- `Namespace`: A `Namespace` is a logical grouping of components that isolate between different model deployments. A `DistributedRuntime` can have multiple `Namespace`s.
-- `Component`: A `Component` is a discoverable object within a `Namespace` that represents a logical unit of workers. A `Namespace` can have multiple `Component`s.
-- `Endpoint`: An `Endpoint` is a network-accessible service that provides a specific service or function. A `Component` can have multiple `Endpoint`s.
+- `Namespace`: A `Namespace` is a logical grouping of components that isolate between different model deployments. 
+- `Component`: A `Component` is a discoverable object within a `Namespace` that represents a logical unit of workers. 
+- `Endpoint`: An `Endpoint` is a network-accessible service that provides a specific service or function. 
+
+While theoretically each `DistributedRuntime` can have multiple `Namespace`s as long as their names are unique (similar logic also applies to `Component/Namespace` and `Endpoint/Component`), in practice, each dynamo components typically are deployed with its own process and thus has its own `DistributedRuntime`. However, they share the same namespace to discover each other, which will be covered later.
 
 For example, the deployment configuration `examples/llm/configs/disagg.yaml` have four workers:
 
