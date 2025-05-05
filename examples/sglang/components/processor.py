@@ -13,30 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import time
 import logging
 import uuid
 from enum import Enum
-from typing import AsyncIterator, Tuple, Union
+from typing import Union
+
 from components.worker import SGLangWorker
-
+from sglang.srt.openai_api.protocol import ChatCompletionRequest, CompletionRequest
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
-from utils.protocol import SGLangGenerateRequest, MyRequestOutput
+from utils.protocol import SGLangGenerateRequest
+from utils.sglang import parse_sglang_args
 
-from sglang.srt.openai_api.protocol import (
-    ChatCompletionRequest,
-    CompletionRequest,
-    ChatCompletionResponse,
-    CompletionResponse,
-    ChatCompletionStreamResponse,
-    ChatCompletionResponseStreamChoice,
-    DeltaMessage,
-)
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
 logger = logging.getLogger(__name__)
-
-from utils.sglang import parse_sglang_args
 
 
 class RequestType(Enum):
@@ -61,7 +51,7 @@ class Processor(ProcessMixIn):
 
     def __init__(self):
         class_name = self.__class__.__name__
-        self.engine_args = parse_sglang_args(class_name, "") 
+        self.engine_args = parse_sglang_args(class_name, "")
         self.chat_processor = ChatProcessor()
         self.completions_processor = CompletionsProcessor()
         # init tokenizer manager
@@ -101,7 +91,7 @@ class Processor(ProcessMixIn):
 
         # Get the async generator from worker
         output_generator = await self.worker_client.generate(request_obj)
-        
+
         # Properly yield each result from the generator
         async for result in output_generator:
             yield result
@@ -110,12 +100,10 @@ class Processor(ProcessMixIn):
     async def chat_completions(self, raw_request: ChatCompletionRequest):
         # Get a stream generator from _generate
         sglang_generator = self._generate(raw_request, RequestType.CHAT)
-        
+
         # Process the stream using generate_stream_response from ChatProcessor
         async for response in self.chat_processor.generate_stream_response(
-            raw_request, 
-            sglang_generator, 
-            self.tokenizer_manager
+            raw_request, sglang_generator, self.tokenizer_manager
         ):
             yield response
 

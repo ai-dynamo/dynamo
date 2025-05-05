@@ -1,26 +1,28 @@
-from sglang.srt.managers.tokenizer_manager import TokenizerManager
-from sglang.srt.managers.io_struct import (
-    GenerateReqInput,
-    TokenizedGenerateReqInput,
-    EmbeddingReqInput,
-    TokenizedEmbeddingReqInput,
-    SessionParams,
-    SamplingParams,
-)
-from sglang.srt.configs.model_config import ModelConfig
-from sglang.srt.server_args import ServerArgs
-from sglang.srt.hf_transformers_utils import get_tokenizer
 from typing import Dict, List, Optional, Union
 
+from sglang.srt.configs.model_config import ModelConfig
+from sglang.srt.hf_transformers_utils import get_tokenizer
+from sglang.srt.managers.io_struct import (
+    EmbeddingReqInput,
+    GenerateReqInput,
+    SamplingParams,
+    SessionParams,
+    TokenizedEmbeddingReqInput,
+    TokenizedGenerateReqInput,
+)
+from sglang.srt.managers.tokenizer_manager import TokenizerManager
+from sglang.srt.server_args import ServerArgs
+
+
 class DynamoTokenizerManager(TokenizerManager):
-    # TODO: THIS IS A SIMPLE POC MOVE THIS TO RUST WHEN WE SHIP  
+    # TODO: THIS IS A SIMPLE POC MOVE THIS TO RUST WHEN WE SHIP
     """
     This class acts as a patch for the `TokenizerManager` class in SGLang. Because
     Dynamo has it's own communication primatives - we don't need to use the
     ZMQ initialization and communication. We also don't currently support multimodel
     inputs or embedding APIs.
 
-    Ideally much of this (if not all) can and should get handled in rust land very soon. But 
+    Ideally much of this (if not all) can and should get handled in rust land very soon. But
     in order to use sglang helper functions like `v1_chat_generate_request` we need to be able to pass
     in a `TokenizerManager` instance (even though it's not expressly typed as such).
     """
@@ -48,7 +50,6 @@ class DynamoTokenizerManager(TokenizerManager):
 
         self.is_generation = self.model_config.is_generation
         self.context_len = self.model_config.context_len
-
 
     async def _tokenize_one_request(
         self,
@@ -79,9 +80,7 @@ class DynamoTokenizerManager(TokenizerManager):
             input_ids = self.tokenizer.encode(input_text)
 
         self._validate_token_len(obj, input_ids)
-        return self._create_tokenized_object(
-            obj, input_text, input_ids, input_embeds
-        )
+        return self._create_tokenized_object(obj, input_text, input_ids, input_embeds)
 
     def _validate_token_len(
         self, obj: Union[GenerateReqInput, EmbeddingReqInput], input_ids: List[int]

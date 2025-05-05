@@ -14,24 +14,27 @@
 # limitations under the License.
 
 """
-SGLang disaggregated serving flow is 
+SGLang disaggregated serving flow is
 
 Processor -> PrefillWorker -> DecodeWorker
 
-This is different from how we've implemented the vLLM disaggregated flow. 
+This is different from how we've implemented the vLLM disaggregated flow.
 
 For now - the SGLangWorker will be responsible for aggreagted and prefill and we will
-have a separate DecodeWorker. 
+have a separate DecodeWorker.
 """
 
 import logging
-from dynamo.sdk import service, depends, dynamo_context, dynamo_endpoint
-from utils.sglang import parse_sglang_args
-from dynamo.sdk.lib.service import LeaseConfig
+
 import sglang as sgl
-from utils.protocol import SGLangGenerateRequest, MyRequestOutput
+from utils.protocol import MyRequestOutput, SGLangGenerateRequest
+from utils.sglang import parse_sglang_args
+
+from dynamo.sdk import dynamo_endpoint, service
+from dynamo.sdk.lib.service import LeaseConfig
 
 logger = logging.getLogger(__name__)
+
 
 @service(
     dynamo={
@@ -43,7 +46,6 @@ logger = logging.getLogger(__name__)
     workers=1,
 )
 class SGLangWorker:
-
     def __init__(self):
         class_name = self.__class__.__name__
         self.engine_args = parse_sglang_args(class_name, "")
@@ -59,16 +61,8 @@ class SGLangWorker:
         g = await self.engine.async_generate(
             input_ids=request.input_ids,
             sampling_params=request.sampling_params,
-            stream=True
+            stream=True,
         )
 
-        logger.warning("WE ARE HERE")
-        
         async for result in g:
-            # Wrap the SGLang result in MyRequestOutput
-            response = MyRequestOutput(text=result)
-            yield response.model_dump_json()
-
-
-
-        
+            yield MyRequestOutput(text=result).model_dump_json()
