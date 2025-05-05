@@ -78,6 +78,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<http::HttpError>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
     m.add_class::<EtcdKvCache>()?;
+    m.add_class::<ModelType>()?;
 
     engine::add_to_module(m)?;
 
@@ -104,18 +105,12 @@ fn register_llm<'p>(
     py: Python<'p>,
     endpoint: Endpoint,
     path: &str,
-    model_type: u32,
+    model_type: ModelType,
 ) -> PyResult<Bound<'p, PyAny>> {
-    // TODO: Is there a better way?
     let model_type_obj = match model_type {
-        1 => llm_rs::model_type::ModelType::Chat,
-        2 => llm_rs::model_type::ModelType::Completion,
-        3 => llm_rs::model_type::ModelType::Backend,
-        _ => {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Invalid model_type {model_type}. Must be 1-3.",
-            ));
-        }
+        ModelType::Chat => llm_rs::model_type::ModelType::Chat,
+        ModelType::Completion => llm_rs::model_type::ModelType::Completion,
+        ModelType::Backend => llm_rs::model_type::ModelType::Backend,
     };
 
     let inner_path = path.to_string();
@@ -191,6 +186,15 @@ struct Client {
 #[derive(Clone)]
 struct PyLease {
     inner: rs::transports::etcd::Lease,
+}
+
+#[pyclass(eq, eq_int)]
+#[derive(Clone, PartialEq)]
+#[repr(i32)]
+enum ModelType {
+    Chat = 1,
+    Completion = 2,
+    Backend = 3,
 }
 
 #[pymethods]
