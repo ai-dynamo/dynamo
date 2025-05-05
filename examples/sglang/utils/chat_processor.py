@@ -16,7 +16,7 @@
 import logging
 import time
 import uuid
-from typing import AsyncIterator, Union
+from typing import AsyncIterator, Dict, Union
 
 from sglang.srt.managers.io_struct import GenerateReqInput, TokenizedGenerateReqInput
 from sglang.srt.openai_api.adapter import (
@@ -205,8 +205,8 @@ class CompletionsProcessor:
         sglang_generator: AsyncIterator,
         tokenizer_manager=None,
     ):
-        stream_buffers = {}
-        n_prev_tokens = {}
+        stream_buffers: Dict[int, str] = {}
+        n_prev_tokens: Dict[int, int] = {}
         created = int(time.time())
         content_id = str(uuid.uuid4())
 
