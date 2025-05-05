@@ -28,6 +28,9 @@ from sglang.srt.openai_api.protocol import (
     CompletionRequest,
     ChatCompletionResponse,
     CompletionResponse,
+    ChatCompletionStreamResponse,
+    ChatCompletionResponseStreamChoice,
+    DeltaMessage,
 )
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
@@ -105,46 +108,114 @@ class Processor(ProcessMixIn):
 
     @dynamo_endpoint(name="chat/completions")
     async def chat_completions(self, raw_request: ChatCompletionRequest):
-        async for response in self._generate(raw_request, RequestType.CHAT):
+        # Get a stream generator from _generate
+        sglang_generator = self._generate(raw_request, RequestType.CHAT)
+        
+        # Process the stream using generate_stream_response
+        async for response in self.generate_stream_response(raw_request, sglang_generator):
+            yield response
+
+    async def generate_stream_response(self, request: ChatCompletionRequest, sglang_generator):
+        """Converts SGLang stream outputs to OpenAI-compatible chat completion responses"""
+        is_first = True
+        stream_buffer = ""
+        created = int(time.time())
+        content_id = str(uuid.uuid4())
+        
+        async for response in sglang_generator:
             try:
                 # Get the data from the response
                 response_data = response.data()
                 
                 # Parse the MyRequestOutput object
                 output = MyRequestOutput.model_validate_json(response_data)
+                content = output.text
                 
-                # Extract token IDs and meta info
-                output_ids = output.text.get('output_ids', [])
-                meta_info = output.text.get('meta_info', {})
+                if is_first:
+                    # First chunk with role
+                    is_first = False
+                    # Send a message with just the role
+                    choice = ChatCompletionResponseStreamChoice(
+                        index=0,
+                        delta=DeltaMessage(role="assistant"),
+                        finish_reason=None,
+                    )
+                    chunk = ChatCompletionStreamResponse(
+                        id=content_id,
+                        created=created,
+                        choices=[choice],
+                        model=request.model,
+                    )
+                    # Convert to serialized JSON format for streaming
+                    yield chunk.model_dump()
+                
+                # Get the output_ids from content
+                output_ids = content.get("output_ids", [])
+                meta_info = content.get("meta_info", {})
                 
                 # Decode the tokens to get text
                 if hasattr(self.tokenizer_manager, 'tokenizer') and self.tokenizer_manager.tokenizer:
-                    # Only decode the new tokens (not the entire sequence)
-                    output_text = self.tokenizer_manager.tokenizer.decode(output_ids)
+                    curr_text = self.tokenizer_manager.tokenizer.decode(output_ids)
                 else:
-                    output_text = str(output_ids)  # Fallback if tokenizer not available
+                    curr_text = str(output_ids)  # Fallback
+                    
+                # Calculate delta (new content since last chunk)
+                delta = curr_text[len(stream_buffer):]
+                stream_buffer = curr_text
                 
-                # Format as OpenAI chat completion response
-                chat_response = {
-                    "id": meta_info.get('id', str(uuid.uuid4())),
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": raw_request.model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": output_text},
-                            "finish_reason": meta_info.get('finish_reason', None)
-                        }
-                    ]
-                }
+                # Get finish reason from meta info
+                finish_reason = meta_info.get("finish_reason")
+                finish_reason_type = finish_reason.get("type") if finish_reason else None
                 
-                # Yield the properly formatted response
-                yield chat_response
+                # Create OpenAI-compatible response
+                if delta:  # Only send non-empty deltas
+                    choice = ChatCompletionResponseStreamChoice(
+                        index=0,
+                        delta=DeltaMessage(content=delta),
+                        finish_reason=None,  # Only set on final chunk
+                    )
+                    chunk = ChatCompletionStreamResponse(
+                        id=meta_info.get("id", content_id),
+                        created=created,
+                        choices=[choice],
+                        model=request.model,
+                    )
+                    # Convert to serialized JSON format for streaming
+                    yield chunk.model_dump()
+                    
             except Exception as e:
                 logger.error(f"Error processing response: {e}")
-                # Fallback - just pass through the original response
-                yield response
+                # If we get an error, try to create a valid response
+                error_choice = ChatCompletionResponseStreamChoice(
+                    index=0,
+                    delta=DeltaMessage(content=f"Error: {str(e)}"),
+                    finish_reason="error"
+                )
+                error_chunk = ChatCompletionStreamResponse(
+                    id=content_id,
+                    created=created,
+                    choices=[error_choice],
+                    model=request.model
+                )
+                yield error_chunk.model_dump()
+        
+        # Send a final chunk with finish_reason
+        choice = ChatCompletionResponseStreamChoice(
+            index=0,
+            delta=DeltaMessage(),  # Empty delta for final chunk
+            finish_reason="stop",  # Or get from the last chunk
+        )
+        final_chunk = ChatCompletionStreamResponse(
+            id=content_id,
+            created=created,
+            choices=[choice],
+            model=request.model,
+        )
+        yield final_chunk.model_dump()
+        
+        # Send DONE marker (optional based on client expectations)
+        # This might be needed depending on your client implementation
+        # yield "data: [DONE]\n\n"
 
     # @dynamo_endpoint()
     # async def completions(self, raw_request: CompletionRequest):
