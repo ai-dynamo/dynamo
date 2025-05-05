@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from enum import Enum
 from typing import AsyncGenerator, AsyncIterator, Callable, Dict, List, Optional, Union
 
 def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
@@ -607,7 +606,7 @@ class HttpAsyncEngine:
 
     ...
 
-class ModelType(Enum):
+class ModelType:
     """What type of request this model needs: Chat, Component or Backend (pre-processed)"""
     ...
 
