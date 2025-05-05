@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Example 2xGB200 (2x4xB200) Configs for Context & Generation
+# Example Configs for Context & Generation on GB200 nodes
 # - Context on 1xGB200 (4xB00)
 # - Generation on 1xGB200 (4xB200)
 
@@ -34,7 +34,7 @@ context_servers:
   # Enabling DP attention (DEP) depends on ISL.
   # - DEP can have more requests/s but may OOM with larger ISL like 32k
   # - To avoid OOM for large ISL, TEP must be used.
-  enable_attention_dp: false
+  enable_attention_dp: true
   pipeline_parallel_size: 1
   pytorch_backend_config:
     print_iter_log: true
@@ -45,13 +45,18 @@ generation_servers:
   num_instances: 1
   tensor_parallel_size: 4
   moe_expert_parallel_size: 4
-  enable_attention_dp: false
+  enable_attention_dp: true
   pipeline_parallel_size: 1
   max_batch_size: 256
   max_num_tokens: 256
   # 8448 = 8192 ISL + 256 OSL
   max_seq_len: 8448
-  free_gpu_memory_fraction: 0.95
+  # With dp attention disabled: 0.80 is fine
+  #free_gpu_memory_fraction: 0.80
+  # With dp attention enabled: can OOM with 8K ISL at concurrency 256 at high
+  # free_gpu_memory_fraction values, so keep it low.
+  free_gpu_memory_fraction: 0.30
+
   pytorch_backend_config:
     use_cuda_graph: true
     cuda_graph_padding_enabled: true
