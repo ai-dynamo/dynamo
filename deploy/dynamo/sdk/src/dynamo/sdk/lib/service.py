@@ -133,10 +133,21 @@ class DynamoService(Service[T]):
 
         # Register Dynamo endpoints
         self._dynamo_endpoints: Dict[str, DynamoEndpoint] = {}
+        self._api_endpoints: list[str] = []
         for field in dir(inner):
             value = getattr(inner, field)
             if isinstance(value, DynamoEndpoint):
                 self._dynamo_endpoints[value.name] = value
+                if getattr(value, "is_api", False):
+                    # Ensure endpoint path starts with '/'
+                    path = (
+                        value.name if value.name.startswith("/") else f"/{value.name}"
+                    )
+                    self._api_endpoints.append(path)
+        # If any API endpoints exist, mark service as HTTP-exposed and list endpoints
+        if self._api_endpoints:
+            self.config["http_exposed"] = True
+            self.config["api_endpoints"] = self._api_endpoints.copy()
 
         self._linked_services: List[DynamoService] = []  # Track linked services
 
