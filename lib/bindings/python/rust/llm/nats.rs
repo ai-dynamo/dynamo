@@ -25,7 +25,11 @@ impl NatsQueue {
     #[new]
     #[pyo3(signature = (stream_name, nats_server, dequeue_timeout))]
     fn new(stream_name: String, nats_server: String, dequeue_timeout: f64) -> PyResult<Self> {
-        let inner = Arc::new(Mutex::new(crate::rs::transports::nats::NatsQueue::new(stream_name, nats_server, std::time::Duration::from_secs(dequeue_timeout as u64))));
+        let inner = Arc::new(Mutex::new(crate::rs::transports::nats::NatsQueue::new(
+            stream_name,
+            nats_server,
+            std::time::Duration::from_secs(dequeue_timeout as u64),
+        )));
         Ok(Self { inner })
     }
 
@@ -40,7 +44,12 @@ impl NatsQueue {
     fn ensure_connection<'p>(&mut self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let queue = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            queue.lock().await.ensure_connection().await.map_err(to_pyerr)?;
+            queue
+                .lock()
+                .await
+                .ensure_connection()
+                .await
+                .map_err(to_pyerr)?;
             Ok(())
         })
     }
@@ -53,21 +62,35 @@ impl NatsQueue {
         })
     }
 
-    fn enqueue_task<'p>(&mut self, py: Python<'p>, task_data: Py<PyBytes>) -> PyResult<Bound<'p, PyAny>> {
+    fn enqueue_task<'p>(
+        &mut self,
+        py: Python<'p>,
+        task_data: Py<PyBytes>,
+    ) -> PyResult<Bound<'p, PyAny>> {
         let bytes = task_data.as_bytes(py).to_vec();
 
         let queue = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            queue.lock().await.enqueue_task(bytes.into()).await.map_err(to_pyerr)?;
+            queue
+                .lock()
+                .await
+                .enqueue_task(bytes.into())
+                .await
+                .map_err(to_pyerr)?;
             Ok(())
         })
     }
 
-
     fn dequeue_task<'p>(&mut self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let queue = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            Ok(queue.lock().await.dequeue_task().await.map_err(to_pyerr)?.map(|bytes| bytes.to_vec()))
+            Ok(queue
+                .lock()
+                .await
+                .dequeue_task()
+                .await
+                .map_err(to_pyerr)?
+                .map(|bytes| bytes.to_vec()))
         })
     }
 
