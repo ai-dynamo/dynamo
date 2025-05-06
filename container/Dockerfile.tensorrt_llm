@@ -259,12 +259,7 @@ ENV DYNAMO_HOME=/workspace
 
 # Use UCX for TRTLLM KV Cache Transfer
 ENV TRTLLM_USE_UCX_KVCACHE=1
-# Needed to use NVLink for TRTLLM KV Cache Transfer
-# https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/advanced/disaggregated-service.md
-ENV UCX_CUDA_COPY_ASYNC_MEM_TYPE=cuda
-ENV UCX_CUDA_COPY_DMABUF=no
-ENV UCX_MEMTYPE_CACHE=no
-ENV UCX_RNDV_PIPELINE_ERROR_HANDLING=y
+
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
