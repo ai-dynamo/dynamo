@@ -71,36 +71,31 @@ pub async fn run(
                 }
             }
         }
-        EngineConfig::StaticFull {
-            service_name,
-            engine,
-            ..
-        } => {
+        EngineConfig::StaticFull { engine, model } => {
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = http_service.model_manager();
-            manager.add_completions_model(&service_name, engine.clone())?;
-            manager.add_chat_completions_model(&service_name, engine)?;
+            manager.add_completions_model(model.service_name(), engine.clone())?;
+            manager.add_chat_completions_model(model.service_name(), engine)?;
         }
         EngineConfig::StaticCore {
-            service_name,
             engine: inner_engine,
-            card,
+            model,
         } => {
             let manager = http_service.model_manager();
 
             let chat_pipeline = common::build_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(&card, inner_engine.clone())
+            >(model.card(), inner_engine.clone())
             .await?;
-            manager.add_chat_completions_model(&service_name, chat_pipeline)?;
+            manager.add_chat_completions_model(model.service_name(), chat_pipeline)?;
 
             let cmpl_pipeline = common::build_pipeline::<CompletionRequest, CompletionResponse>(
-                &card,
+                model.card(),
                 inner_engine,
             )
             .await?;
-            manager.add_completions_model(&service_name, cmpl_pipeline)?;
+            manager.add_completions_model(model.service_name(), cmpl_pipeline)?;
         }
         EngineConfig::None => unreachable!(),
     }

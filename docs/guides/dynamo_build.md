@@ -85,7 +85,7 @@ dynamo build hello_world:Frontend --containerize
 
 ### 4. Run your container
 
-As a prerequisite, ensure you have NATS and etcd running by running the docker compose in the deploy directory. You can find it [here](../../deploy/docker-compose.yml).
+As a prerequisite, ensure you have NATS and etcd running by running the docker compose in the deploy directory. You can find it [here](../../deploy/metrics/docker-compose.yml).
 
 ```bash
 docker compose up -d
@@ -145,7 +145,7 @@ dynamo build graphs.agg:Frontend --containerize
 
 ### 4. Run your container
 
-As a prerequisite, ensure you have NATS and etcd running by running the docker compose in the deploy directory. You can find it [here](../../deploy/docker-compose.yml).
+As a prerequisite, ensure you have NATS and etcd running by running the docker compose in the deploy directory. You can find it [here](../../deploy/metrics/docker-compose.yml).
 
 ```bash
 docker compose up -d

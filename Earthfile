@@ -26,7 +26,7 @@ golang-base:
 
 operator-src:
     FROM +golang-base
-    COPY ./deploy/dynamo/operator /artifacts/operator
+    COPY ./deploy/cloud/operator /artifacts/operator
     SAVE ARTIFACT /artifacts/operator
 
 
@@ -116,13 +116,13 @@ dynamo-build:
         cargo doc --no-deps
 
     # Create symlinks for wheel building
-    RUN mkdir -p /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/ && \
+    RUN mkdir -p /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/ && \
         # Remove existing symlinks
-        rm -f /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/* && \
+        rm -f /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/* && \
         # Create new symlinks pointing to the correct location
-        ln -sf /workspace/target/release/dynamo-run /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/dynamo-run && \
-        ln -sf /workspace/target/release/http /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/http && \
-        ln -sf /workspace/target/release/llmctl /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/llmctl
+        ln -sf /workspace/target/release/dynamo-run /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/dynamo-run && \
+        ln -sf /workspace/target/release/http /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/http && \
+        ln -sf /workspace/target/release/llmctl /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/llmctl
 
 
     RUN cd /workspace/lib/bindings/python && \
@@ -174,16 +174,16 @@ dynamo-base-docker:
 
 ############### ALL TARGETS ##############################
 all-test:
-    BUILD ./deploy/dynamo/operator+test
+    BUILD ./deploy/cloud/operator+test
 
 all-docker:
     ARG DOCKER_SERVER=my-registry
     ARG IMAGE_TAG=latest
-    BUILD ./deploy/dynamo/operator+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
-    BUILD ./deploy/dynamo/api-store+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+    BUILD ./deploy/cloud/operator+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+    BUILD ./deploy/cloud/api-store+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 
 all-lint:
-    BUILD ./deploy/dynamo/operator+lint
+    BUILD ./deploy/cloud/operator+lint
 
 all:
     BUILD +all-test
