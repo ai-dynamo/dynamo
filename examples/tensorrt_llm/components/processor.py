@@ -19,7 +19,10 @@ import logging
 
 from common.chat_processor import ChatProcessorMixin
 from common.parser import parse_tensorrt_llm_args
-from common.protocol import DynamoTRTLLMChatCompletionRequest
+from common.protocol import (
+    DynamoTRTLLMChatCompletionRequest,
+    DynamoTRTLLMCompletionRequest,
+)
 from common.utils import RequestType
 from components.kv_router import Router
 from components.worker import TensorRTLLMWorker
@@ -156,7 +159,7 @@ class Processor(ChatProcessorMixin):
         async for response in self._generate(raw_request, RequestType.CHAT):
             yield response
 
-    # @dynamo_endpoint()
-    # async def completions(self, raw_request):
-    #     async for response in self._generate(raw_request, RequestType.COMPLETION):
-    #         yield response
+    @dynamo_endpoint(name="completions")
+    async def completions(self, raw_request: DynamoTRTLLMCompletionRequest):
+        async for response in self._generate(raw_request, RequestType.COMPLETION):
+            yield response

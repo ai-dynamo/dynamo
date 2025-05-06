@@ -36,17 +36,13 @@ pub async fn run(
     template: Option<RequestTemplate>,
 ) -> anyhow::Result<()> {
     let cancel_token = runtime.primary_token();
-    let (service_name, engine, inspect_template): (
-        String,
-        OpenAIChatCompletionsStreamingEngine,
-        bool,
-    ) = common::prepare_engine(runtime, flags, engine_config).await?;
+    let prepared_engine = common::prepare_engine(runtime, flags, engine_config).await?;
     main_loop(
         cancel_token,
-        &service_name,
-        engine,
+        &prepared_engine.service_name,
+        prepared_engine.engine,
         single_prompt,
-        inspect_template,
+        prepared_engine.inspect_template,
         template,
     )
     .await

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+accelerate==1.6.0
 fastapi==0.115.6
 ftfy
 grpcio-tools==1.66.0

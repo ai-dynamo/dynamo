@@ -148,8 +148,8 @@ def main(
 
     from dynamo.runtime.logging import configure_dynamo_logging
 
-    # Setup signal handlers for graceful shutdown
-    setup_signal_handlers()
+    # TODO: completely disable signal handlers in serve_dynamo. It interferes with arbiter shutdown
+    # setup_signal_handlers()
 
     run_id = service_name
     dynamo_context["service_name"] = service_name
@@ -313,14 +313,16 @@ def main(
 
                 if added_routes:
                     # Configure uvicorn with graceful shutdown
+                    # get the port from PORT env var or use 8000 as default
+                    port = int(os.environ.get("PORT", 8000))
                     config = uvicorn.Config(
-                        service.app, host="0.0.0.0", port=8000, log_level="info"
+                        service.app, host="0.0.0.0", port=port, log_level="info"
                     )
                     server = uvicorn.Server(config)
 
                     # Start the server with graceful shutdown handling
                     logger.info(
-                        f"Starting FastAPI server on 0.0.0.0:8000 with routes: {added_routes}"
+                        f"Starting FastAPI server on 0.0.0.0:{port} with routes: {added_routes}"
                     )
                     server.run()
                 else:

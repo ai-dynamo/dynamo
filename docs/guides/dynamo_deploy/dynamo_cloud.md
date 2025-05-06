@@ -86,18 +86,7 @@ Once you've built and pushed the components, you can deploy the platform to your
 
 Before deploying Dynamo Cloud, ensure your Kubernetes cluster meets the following requirements:
 
-#### 1. 🛡️ Istio Installation
-Dynamo Cloud requires Istio for service mesh capabilities. Verify Istio is installed and running:
-
-```bash
-# Check if Istio is installed
-kubectl get pods -n istio-system
-
-# Expected output should show running Istio pods
-# istiod-* pods should be in Running state
-```
-
-#### 2. 💾 PVC Support with Default Storage Class
+#### 1. 💾 PVC Support with Default Storage Class
 Dynamo Cloud requires Persistent Volume Claim (PVC) support with a default storage class. Verify your cluster configuration:
 
 ```bash
@@ -134,6 +123,20 @@ export PIPELINES_DOCKER_SERVER=<your-docker-server>
 export PIPELINES_DOCKER_USERNAME=<your-docker-username>
 export PIPELINES_DOCKER_PASSWORD=<your-docker-password>
 ```
+
+If you wish to expose your Dynamo Cloud Platform externally, you can setup the following environment variables:
+
+```bash
+# if using ingress
+export INGRESS_ENABLED="true"
+export INGRESS_CLASS="nginx" # or whatever ingress class you have configured
+
+# if using istio
+export ISTIO_ENABLED="true"
+export ISTIO_GATEWAY="istio-system/istio-ingressgateway" # or whatever istio gateway you have configured
+```
+
+Running the installation script with `--interactive` will guide you through the process of exposing your Dynamo Cloud Platform externally if you don't want to set these environment variables manually.
 
 2. [One-time Action] Create a new kubernetes namespace and set it as your default.
 

@@ -335,6 +335,10 @@ class BaseTensorrtLLMEngine:
                 # Using 0 as default value. If later data has
                 # lora_id, we need to verify if this is correct.
                 lora_id = data.get("lora_id", 0)
+
+                logger.debug(
+                    f"publish stored event: event_id: {event_id}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_id: {lora_id}, parent_hash: {parent_hash}"
+                )
                 self._kv_event_publisher.publish_stored(
                     event_id,
                     token_ids,
@@ -353,6 +357,10 @@ class BaseTensorrtLLMEngine:
                         self._partial_block_hashes.remove(block_hash)
                         continue
                     block_hashes.append(block_hash)
+
+                logger.debug(
+                    f"publish removed event: event_id: {event_id}, block_hashes: {block_hashes}"
+                )
                 self._kv_event_publisher.publish_removed(event_id, block_hashes)
         return True
 

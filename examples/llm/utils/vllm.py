@@ -44,6 +44,12 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
         help="Router type to use for scheduling requests to workers",
     )
     parser.add_argument(
+        "--router-num-threads",
+        type=int,
+        default=4,
+        help="Number of threads to use for the router to process the requests",
+    )
+    parser.add_argument(
         "--remote-prefill", action="store_true", help="Enable remote prefill"
     )
     parser.add_argument(
@@ -67,6 +73,7 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     args = parser.parse_args(vllm_args)
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine_args.router = args.router
+    engine_args.router_num_threads = args.router_num_threads
     engine_args.remote_prefill = args.remote_prefill
     engine_args.conditional_disagg = args.conditional_disagg
     engine_args.max_local_prefill_length = args.max_local_prefill_length

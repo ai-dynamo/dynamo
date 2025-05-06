@@ -19,6 +19,7 @@ from pathlib import Path
 
 from components.processor import Processor
 from components.worker import TensorRTLLMWorker
+from fastapi import FastAPI
 from pydantic import BaseModel
 
 from dynamo import sdk
@@ -40,14 +41,20 @@ def get_http_binary_path():
 
 class FrontendConfig(BaseModel):
     served_model_name: str
-    endpoint: str
+    endpoint_chat: str
+    endpoint_completions: str
     port: int = 8080
 
 
 @service(
+    dynamo={
+        "enabled": True,
+        "namespace": "dynamo",
+    },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
     image=DYNAMO_IMAGE,
+    app=FastAPI(title="TensorRT LLM Example"),
 )
 # todo this should be called ApiServer
 class Frontend:
@@ -58,6 +65,7 @@ class Frontend:
         config = ServiceConfig.get_instance()
         frontend_config = FrontendConfig(**config.get("Frontend", {}))
 
+        # Chat/completions Endpoint
         subprocess.run(
             [
                 "llmctl",
@@ -74,7 +82,28 @@ class Frontend:
                 "add",
                 "chat-models",
                 frontend_config.served_model_name,
-                frontend_config.endpoint,
+                frontend_config.endpoint_chat,
+            ]
+        )
+
+        # Completions Endpoint
+        subprocess.run(
+            [
+                "llmctl",
+                "http",
+                "remove",
+                "completions",
+                frontend_config.served_model_name,
+            ]
+        )
+        subprocess.run(
+            [
+                "llmctl",
+                "http",
+                "add",
+                "completions",
+                frontend_config.served_model_name,
+                frontend_config.endpoint_completions,
             ]
         )
 

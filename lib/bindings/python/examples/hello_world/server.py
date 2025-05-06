@@ -34,6 +34,9 @@ class RequestHandler:
 
 @dynamo_worker(static=False)
 async def worker(runtime: DistributedRuntime):
+    print(
+        f"Primary lease ID: {runtime.etcd_client().primary_lease_id()}/{runtime.etcd_client().primary_lease_id():#x}"
+    )
     await init(runtime, "dynamo")
 
 
