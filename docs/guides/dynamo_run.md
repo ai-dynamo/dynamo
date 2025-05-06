@@ -4,8 +4,9 @@
     * [Automatically download a model from Hugging Face](#use-model-from-hugging-face)
     * [Run a model from local file](#run-a-model-from-local-file)
     * [Multi-node](#multi-node)
-* [Compiling from Source](#compiling-from-source)
+* [Full usage details](#full-usage-details)
     * [Setup](#setup)
+    * [MistralRS](#mistralrs)
     * [Sglang](#sglang)
     * [lama.cpp](#llama_cpp)
     * [Vllm](#vllm)
@@ -17,6 +18,13 @@
 * [Extra engine arguments](#extra-engine-arguments)
 
 `dynamo-run` is a CLI tool for exploring the Dynamo components, and an example of how to use them from Rust. It is also available as `dynamo run` if using the Python wheel.
+
+It supports the following engines: mistralrs, llamacpp, sglang, vllm and tensorrt-llm. MistralRS is the default and easiest to use.
+
+Usage:
+```
+dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn://<path> [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin]
+```
 
 ## Quickstart with pip and vllm
 
@@ -80,7 +88,7 @@ dynamo run in=http out=dyn://llama3B_pool
 
 **Node 2:**
 ```
-dynamo run in=dyn://llama3B_pool out=vllm ~/llm_models/Llama-3.2-3B-Instruct
+dynamo run in=dyn://llama3B_pool out=vllm ~/llms/Llama-3.2-3B-Instruct
 ```
 
 This will use etcd to auto-discover the model and NATS to talk to it. You can run multiple workers on the same endpoint and it will pick one at random each time.
@@ -89,7 +97,7 @@ The `llama3B_pool` name is purely symbolic, pick anything as long as it matches 
 
 Run `dynamo run --help` for more options.
 
-## Compiling from Source
+## Full usage details
 
 `dynamo-run` is what `dynamo run` executes. It is an example of what you can build in Rust with the `dynamo-llm` and `dynamo-runtime`. The following guide demonstrates how you can build from source with all the features.
 
@@ -125,14 +133,13 @@ source $HOME/.cargo/env
 
 #### Step 3: Build
 
-Run `cargo build` to install the `dynamo-run` binary in `target/debug`.
+Run `cargo build --features cuda -p dynamo-run` to install the `dynamo-run` binary in `target/debug`.
 
 > **Optionally**, you can run `cargo build` from any location with arguments:
 > ```
 > --target-dir /path/to/target_directory` specify target_directory with write privileges
 > --manifest-path /path/to/project/Cargo.toml` if cargo build is run outside of `launch/` directory
 > ```
-
 
 - Linux with GPU and CUDA (tested on Ubuntu):
 ```
@@ -155,8 +162,25 @@ cd target/debug
 ```
 > Note: Build with `--release` for a smaller binary and better performance, but longer build times. The binary will be in `target/release`.
 
-To build for other engines, see the following sections.
+### mistralrs
 
+[mistral.rs](https://github.com/EricLBuehler/mistral.rs) is a pure Rust engine that is fast to run, fast to load, supports GGUF as well as safetensors, and runs well on CPU as well as GPU. For those reasons it is the default engine.
+
+```
+dynamo-run Qwen/Qwen2.5-3B-Instruct
+```
+
+is equivalent to
+
+```
+dynamo-run in=text out=mistralrs Qwen/Qwen2.5-3B-Instruct
+```
+
+### llama_cpp
+
+```
+dynamo-run out=llamacpp ~/llms/Llama-3.2-3B-Instruct-Q6_K.gguf
+```
 
 ### sglang
 
@@ -170,42 +194,20 @@ uv pip install sgl-kernel --force-reinstall --no-deps
 uv pip install "sglang[all]==0.4.2" --find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/
 ```
 
-2. Build
+2. Run
 
-```
-cargo build --features sglang
-```
+Any example above using `out=sglang` will work, but our sglang backend is also multi-gpu.
 
-3. Run
-
-Any example above using `out=sglang` will work, but our sglang backend is also multi-gpu and multi-node.
-
-**Node 1:**
 ```
 cd target/debug
-./dynamo-run in=http out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 0 --leader-addr 10.217.98.122:9876
-```
-
-**Node 2:**
-```
-cd target/debug
-./dynamo-run in=none out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 1 --leader-addr 10.217.98.122:9876
+./dynamo-run in=http out=sglang --model-path ~/llms/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8
 ```
 
 To pass extra arguments to the sglang engine see *Extra engine arguments* below.
 
-### llama_cpp
-
-```
-cargo build --features llamacpp,cuda
-cd target/debug
-dynamo-run out=llamacpp ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf
-```
-If the build step also builds llama_cpp libraries into the same folder as the binary ("libllama.so", "libggml.so", "libggml-base.so", "libggml-cpu.so", "libggml-cuda.so"), then `dynamo-run` will need to find those at runtime. Set `LD_LIBRARY_PATH`, and be sure to deploy them alongside the `dynamo-run` binary.
-
 ### vllm
 
-Using the [vllm](https://github.com/vllm-project/vllm) Python library. We only use the back half of vllm, talking to it over `zmq`. Slow startup, fast inference. Supports both safetensors from HF and GGUF files.
+Using the [vllm](https://github.com/vllm-project/vllm) Python library. Slow startup, fast inference. Supports both safetensors from HF and GGUF files, but is very slow for GGUF - prefer llamacpp.
 
 We use [uv](https://docs.astral.sh/uv/) but any virtualenv manager should work.
 
@@ -230,16 +232,9 @@ Inside that virtualenv:
 
 **HF repo:**
 ```
-./dynamo-run in=http out=vllm ~/llm_models/Llama-3.2-3B-Instruct/
+./dynamo-run in=http out=vllm ~/llms/Llama-3.2-3B-Instruct/
 
 ```
-
-**GGUF:**
-```
-./dynamo-run in=http out=vllm ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf
-```
-
-Note that vllm GGUF handling is very slow. Prefer llamacpp.
 
 **Multi-node:**
 
@@ -447,7 +442,7 @@ The output looks like this:
 
 ### Defaults
 
-The input defaults to `in=text`. The output will default to `mistralrs` engine. If not available whatever engine you have compiled in (so depending on `--features`).
+The input defaults to `in=text`. The output will default to `mistralrs` engine, unless it is disabled with `--no-default-features` in which case vllm is used.
 
 ### Extra engine arguments
 
@@ -463,5 +458,5 @@ Put the arguments in a JSON file:
 
 Pass it like this:
 ```
-dynamo-run out=sglang ~/llm_models/Llama-3.2-3B-Instruct --extra-engine-args sglang_extra.json
+dynamo-run out=sglang ~/llms/Llama-3.2-3B-Instruct --extra-engine-args sglang_extra.json
 ```

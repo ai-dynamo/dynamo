@@ -183,7 +183,6 @@ pub async fn prepare_engine(
                 _cache_dir: None,
             })
         }
-        EngineConfig::None => unreachable!(),
     }
 }
 
