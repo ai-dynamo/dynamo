@@ -19,18 +19,21 @@ For example, the deployment configuration `examples/llm/configs/disagg.yaml` hav
 
 Since the four workers are deployed in different processes, each of them have their own `DistributedRuntime`. Within their own `DistributedRuntime`, they all have their own `Namespace`s named `dynamo`. Then, under their own `dynamo` namespace, they have their own `Component`s named `Frontend/Processor/VllmWorker/PrefillWorker`. Lastly, for the `Endpoint`, `Frontend` has no `Endpoints`, `Processor` and `VllmWorker` each has a `generate` endpoint, and `PrefillWorker` has a placeholder `mock` endpoint. Their `DistributedRuntime`s and `Namespace`s are set in the `@service` decorators in `examples/llm/components/<frontend/processor/worker/prefill_worker>.py`. Their `Component`s are set by their name in `/deploy/dynamo/sdk/src/dynamo/sdk/cli/serve_dynamo.py`. Their `Endpoint`s are set by the `@dynamo_endpoint` decorators in `examples/llm/components/<frontend/processor/worker/prefill_worker>.py`.
 
-## Initilization
+## Initialization
 
-In this section, we explain what happens under the hood when `DistributedRuntime/Namespace/Component/Endpoint` objects are created. There are two modes for `DistributedRuntime` initialization: dynamic and static. In static mode, components and endpoints are defined using known addresses and do not change during runtime. In dynamic modes, components and endpoints are discovered through the network and can change during runtime. We focus on the dynamic mode in the rest of this document. Static mode is simply dynamic mode without registration and discovery.
+In this section, we explain what happens under the hood when `DistributedRuntime/Namespace/Component/Endpoint` objects are created. There are two modes for `DistributedRuntime` initialization: dynamic and static. In static mode, components and endpoints are defined using known addresses and do not change during runtime. In dynamic modes, components and endpoints are discovered through the network and can change during runtime. We focus on the dynamic mode in the rest of this document. Static mode is basically dynamic mode without registration and discovery and hence does not rely on ETCD.
+
+> [!CAUTION]
+> The hierarchy and naming in ETCD and NATS might be changed and this document might not reflect the latest changes. However, the main idea would remain the same.
 
 - `DistributedRuntime`: When a `DistributedRuntime` object is created, it will establish connections to the following two services:
-    - ETCD (dynamic mode only): for service discovery,
-    - NATS (both static and dynamic mode): for messaging,
+    - ETCD (dynamic mode only): for service discovery. In static mode, `DistributedRuntime` can operate without ETCD.
+    - NATS (both static and dynamic mode): for messaging.
 
   where ETCD and NATS are two global services (there could be multiple ETCD and NATS services for high availability).
 
   For ETCD, it also creates a primary lease and spin up a background task to keep the lease alive. All objects registered under this `DistributedRuntime` will use this lease_id to maintain their life cycle. There is also a cancellation token that is tied to the primary lease. When the cancellation token is triggered or the background task failed, the primary lease will be revoked or expired and the kv pairs stored with this lease_id will be removed.
-- `Namespace`: `Namespace`s are primarily a logical grouping mechanism and is not registered in ETCD. It provides the root path for all componenets under this `Namespace`.
+- `Namespace`: `Namespace`s are primarily a logical grouping mechanism and is not registered in ETCD. It provides the root path for all components under this `Namespace`.
 - `Component`: When a `Component` object is created, similar to `Namespace`, it will not be registered in ETCD. When `create_service` is called, it creates a NATS service group using `{namespace_name}.{service_name}` and registers a service in the registry of the `Component`, where the registry is an internal data structure that tracks all services and endpoints within the `DistributedRuntime`.
 - `Endpoint`: When an Endpoint object is created and started, it performs two key registrations:
   - NATS Registration: The endpoint is registered with the NATS service group created during service creation. The endpoint is assigned a unique subject following the naming: `{namespace_name}.{service_name}.{endpoint_name}-{lease_id_hex}`.
@@ -53,4 +56,4 @@ After selecting which endpoint to hit, the `Client` sends the serialized request
 We provide native rust and python (through binding) examples for basic usage of `DistributedRuntime`:
 
 - Rust: `/lib/runtime/examples/`
-- Python: `/lib/bindings/python/examples/`
+- Python: `/lib/bindings/python/examples/`. We also provide a complete example of using `DistributedRuntime` for communication and Dynamo's LLM library for prompt templates and (de)tokenization to deploy a vllm-based service. Please refer to `lib/bindings/python/examples/hello_world/server_vllm.py` for details.
