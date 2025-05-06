@@ -243,7 +243,7 @@ func (r *DynamoGraphDeploymentReconciler) isEndpointSecured(deployment *nvidiaco
         return true
     }
     // deploy with Istio and a VirtualServiceGateway,
-    if deployment.Spec.Ingress.VirtualServiceGateway != "" {
+    if deployment.Spec.Ingress.VirtualServiceGateway != nil && *deployment.Spec.Ingress.VirtualServiceGateway != "" {
         // assumes operator always configures the Gateway for TLS
         return true
     }
