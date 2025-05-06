@@ -86,6 +86,9 @@ spec:
         {{- if .Values.dynamo.ingressHostSuffix }}
           - --ingress-host-suffix={{ .Values.dynamo.ingressHostSuffix }}
         {{- end }}
+        {{- if .Values.dynamo.virtualServiceEnforcesHTTPS }}
+          - --virtual-service-enforces-https={{ .Values.dynamo.virtualServiceEnforcesHTTPS }}
+        {{- end }}
 
         command:
         - /manager

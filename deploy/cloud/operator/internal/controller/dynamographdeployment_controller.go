@@ -238,7 +238,10 @@ func (r *DynamoGraphDeploymentReconciler) generateDefaultIngressSpec(dynamoDeplo
 }
 
 func (r *DynamoGraphDeploymentReconciler) isEndpointSecured() bool {
-	return r.IngressControllerTLSSecret != "" || r.VirtualServiceGateway != ""
+	if r.VirtualServiceGateway != "" && r.Config.VirtualServiceEnforcesHTTPS {
+		return true
+	}
+	return r.IngressControllerTLSSecret != ""
 }
 
 func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {

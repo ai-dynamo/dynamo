@@ -253,6 +253,14 @@ if [ "$CONFIG_TYPE" = "istio" ]; then
     fi
   fi
 
+  # Ask if the Istio gateway enforces HTTPS
+  read -p "Does your Istio gateway enforce HTTPS (redirects HTTP to HTTPS)? [y/n]: " ENFORCE_HTTPS_REPLY
+  if [[ "$ENFORCE_HTTPS_REPLY" =~ ^[Yy]$ ]]; then
+    export VIRTUAL_SERVICE_ENFORCES_HTTPS=true
+  else
+    export VIRTUAL_SERVICE_ENFORCES_HTTPS=false
+  fi
+
 elif [ "$CONFIG_TYPE" = "ingress" ]; then
   echo -e "${CYAN}Configuring Ingress settings...${NC}"
 
