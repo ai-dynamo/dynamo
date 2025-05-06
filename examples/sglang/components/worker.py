@@ -31,7 +31,6 @@ from utils.protocol import MyRequestOutput, SGLangGenerateRequest
 from utils.sglang import parse_sglang_args
 
 from dynamo.sdk import dynamo_endpoint, service
-from dynamo.sdk.lib.service import LeaseConfig
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +39,8 @@ logger = logging.getLogger(__name__)
     dynamo={
         "enabled": True,
         "namespace": "dynamo",
-        "custom_lease": LeaseConfig(ttl=1),  # 1 second
     },
-    resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
+    resources={"gpu": 1},
     workers=1,
 )
 class SGLangWorker:

@@ -39,7 +39,6 @@ class RequestType(Enum):
         "enabled": True,
         "namespace": "dynamo",
     },
-    resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
 )
 class Processor(ProcessMixIn):
@@ -86,8 +85,6 @@ class Processor(ProcessMixIn):
             input_ids=request.input_ids,
             sampling_params=sampling_params,
         ).model_dump_json()
-
-        logger.warning(request_obj)
 
         output_generator = await self.worker_client.generate(request_obj)
 

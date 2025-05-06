@@ -53,7 +53,6 @@ class FrontendConfig(BaseModel):
         "enabled": True,
         "namespace": "dynamo",
     },
-    resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
     image=DYNAMO_IMAGE,
     app=FastAPI(title="LLM Example"),
