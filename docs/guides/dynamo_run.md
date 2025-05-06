@@ -239,16 +239,16 @@ Inside that virtualenv:
 ./dynamo-run in=http out=vllm ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf
 ```
 
-**Multi-node:**
-**Node 1:**
-```
-dynamo-run in=text out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --tensor-parallel-size 8 --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 0
-```
+Note that vllm GGUF handling is very slow. Prefer llamacpp.
 
-**Node 2:**
-```
-dynamo-run in=none out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 1
-```
+**Multi-node:**
+
+vllm uses [ray](https://docs.vllm.ai/en/latest/serving/distributed_serving.html#running-vllm-on-multiple-nodes) for pipeline parallel inference. Dynamo does not change or manage that.
+
+Head node (the one running `dynamo-run`): `ray start --head --port=6379 --dashboard-host 0.0.0.0`
+Each worker node: `ray start --address='<HEAD_NODE_IP>:6379`
+
+Remember to pass dynamo-run `--tensor-parallel-size <total-gpus-across-cluster>`, which is often constrained by a model dimension such as being a divisor of the number of attention heads.
 
 To pass extra arguments to the vllm engine see [Extra engine arguments](#extra_engine_arguments) below.
 

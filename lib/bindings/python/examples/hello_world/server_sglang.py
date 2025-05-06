@@ -14,30 +14,26 @@
 # limitations under the License.
 
 #
-# A very basic example of vllm worker handling pre-processed requests.
+# A very basic example of sglang worker handling pre-processed requests.
 #
 # Dynamo does the HTTP handling, prompt templating and tokenization, then forwards the
-# request via NATS to this python script, which runs vllm.
+# request via NATS to this python script, which runs sglang.
 #
-# Setup a virtualenv with dynamo.llm, dynamo.runtime and vllm installed
+# Setup a virtualenv with dynamo.llm, dynamo.runtime and sglang[all] installed
 #  in lib/bindings/python `maturin develop` and `pip install -e .` should do it
 # Start nats and etcd:
 #  - nats-server -js
 #
-# Window 1: `python server_vllm.py`. Wait for log "Starting endpoint".
+# Window 1: `python server_sglang.py`. Wait for log "Starting endpoint".
 # Window 2: `dynamo-run out=dyn://dynamo.backend.generate`
 
 import argparse
 import asyncio
 import sys
 
+import sglang
 import uvloop
-from vllm import SamplingParams
-from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.openai.api_server import (
-    build_async_engine_client_from_engine_args,
-)
-from vllm.inputs import TokensPrompt
+from sglang.srt.server_args import ServerArgs
 
 from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
@@ -64,37 +60,26 @@ class RequestHandler:
         self.engine_client = engine
 
     async def generate(self, request):
-        request_id = "1"  # hello_world example only
-
         # print(f"Received request: {request}")
-        prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
-        sampling_params = SamplingParams(
-            temperature=request["sampling_options"]["temperature"],
-            # vllm defaults this to 16
-            max_tokens=request["stop_conditions"]["max_tokens"],
-        )
+        sampling_params = {
+            "temperature": request["sampling_options"]["temperature"],
+            # sglang defaults this to 128
+            "max_new_tokens": request["stop_conditions"]["max_tokens"],
+        }
         num_output_tokens_so_far = 0
-        gen = self.engine_client.generate(prompt, sampling_params, request_id)
+        gen = await self.engine_client.async_generate(
+            input_ids=request["token_ids"], sampling_params=sampling_params, stream=True
+        )
         async for res in gen:
-            # res is vllm's RequestOutput
+            # res is a dict
 
-            # This is the expected way for a request to end.
-            # The new token ID will be eos, don't forward it.
-            if res.finished:
-                yield {"finish_reason": "stop", "token_ids": []}
-                break
-
-            if not res.outputs:
-                yield {"finish_reason": "error", "token_ids": []}
-                break
-
-            output = res.outputs[0]
-            next_total_toks = len(output.token_ids)
-            out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
-            if output.finish_reason:
-                out["finish_reason"] = output.finish_reason
-            if output.stop_reason:
-                out["stop_reason"] = output.stop_reason
+            finish_reason = res["meta_info"]["finish_reason"]
+            if finish_reason:
+                # Don't forward the stop token
+                out = {"token_ids": [], "finish_reason": finish_reason["type"]}
+            else:
+                next_total_toks = len(res["output_ids"])
+                out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}
             yield out
             num_output_tokens_so_far = next_total_toks
 
@@ -116,14 +101,12 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     await register_llm(endpoint, config.model, ModelType.Backend)
 
-    engine_args = AsyncEngineArgs(
-        model=config.model,
-        task="generate",
+    engine_args = ServerArgs(
+        model_path=config.model,
         skip_tokenizer_init=True,
     )
 
-    engine_context = build_async_engine_client_from_engine_args(engine_args)
-    engine_client = await engine_context.__aenter__()
+    engine_client = sglang.Engine(server_args=engine_args)
 
     # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
     # after the lease is revoked
@@ -132,7 +115,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
 def cmd_line_args():
     parser = argparse.ArgumentParser(
-        description="vLLM server integrated with Dynamo runtime."
+        description="SGLang server integrated with Dynamo runtime."
     )
     parser.add_argument(
         "--endpoint",

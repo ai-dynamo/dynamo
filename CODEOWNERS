@@ -4,11 +4,11 @@
 # https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
 # Rust
-*.rs @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @alec-flowers @kkranen @oandreeva-nv @ai-dynamo/Devops
+*.rs @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @alec-flowers @kkranen @oandreeva-nv @ai-dynamo/Devops @jthomson04
 Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @kkranen @oandreeva-nv @ai-dynamo/Devops
 
 # Python Libraries
-*.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen @ai-dynamo/Devops
+*.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen @ai-dynamo/Devops @jthomson04
 
 # Container/Environments
 /container/ @rmccorm4 @tanmayv25 @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @ai-dynamo/Devops

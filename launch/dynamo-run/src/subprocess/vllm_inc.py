@@ -12,8 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 #
+
 # A very basic example of vllm worker handling pre-processed requests.
 #
 # Dynamo does the HTTP handling, prompt templating and tokenization, then forwards the
@@ -29,6 +29,7 @@
 
 import argparse
 import asyncio
+import logging
 import sys
 
 import uvloop
@@ -45,6 +46,9 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
+# TODO this should match DYN_LOG level
+logging.basicConfig(level=logging.INFO)
+
 
 class Config:
     """Command line parameters or defaults"""
@@ -53,6 +57,8 @@ class Config:
     component: str
     endpoint: str
     model: str
+    tensor_parallel_size: int
+    extra_engine_args: str
 
 
 class RequestHandler:
@@ -66,7 +72,7 @@ class RequestHandler:
     async def generate(self, request):
         request_id = "1"  # hello_world example only
 
-        # print(f"Received request: {request}")
+        logging.debug(f"Received request: {request}")
         prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
         sampling_params = SamplingParams(
             temperature=request["sampling_options"]["temperature"],
@@ -112,15 +118,30 @@ async def init(runtime: DistributedRuntime, config: Config):
     await component.create_service()
 
     endpoint = component.endpoint(config.endpoint)
-    print("Started server instance")
+    logging.info("Started server instance")
 
     await register_llm(endpoint, config.model, ModelType.Backend)
 
-    engine_args = AsyncEngineArgs(
-        model=config.model,
-        task="generate",
-        skip_tokenizer_init=True,
-    )
+    arg_map = {
+        "model": config.model,
+        "task": "generate",
+        "tensor_parallel_size": config.tensor_parallel_size,
+        "skip_tokenizer_init": True,
+    }
+    if config.extra_engine_args != "":
+        json_map = {}
+        # extra_engine_args is a filename
+        try:
+            with open(config.extra_engine_args) as f:
+                json_map = json.load(f)
+        except FileNotFoundError:
+            logging.error(f"File {config.extra_engine_args} not found.")
+        except json.JSONDecodeError as e:
+            logging.error(f"Invalid JSON in {config.extra_engine_args}: {e}")
+        logging.debug(f"Adding extra engine arguments: {json_map}")
+        arg_map = {**arg_map, **json_map}  # json_map gets precedence
+
+    engine_args = AsyncEngineArgs(**arg_map)
 
     engine_context = build_async_engine_client_from_engine_args(engine_args)
     engine_client = await engine_context.__aenter__()
@@ -132,7 +153,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
 def cmd_line_args():
     parser = argparse.ArgumentParser(
-        description="vLLM server integrated with Dynamo runtime."
+        description="vLLM server integrated with Dynamo LLM."
     )
     parser.add_argument(
         "--endpoint",
@@ -146,6 +167,15 @@ def cmd_line_args():
         default=DEFAULT_MODEL,
         help=f"Path to disk model or HuggingFace model identifier to load. Default: {DEFAULT_MODEL}",
     )
+    parser.add_argument(
+        "--tensor-parallel-size", type=int, default=1, help="Number of GPUs to use."
+    )
+    parser.add_argument(
+        "--extra-engine-args",
+        type=str,
+        default="",
+        help="Path to a JSON file containing additional keyword arguments to pass to the vLLM AsyncLLMEngine.",
+    )
     args = parser.parse_args()
 
     config = Config()
@@ -154,7 +184,7 @@ def cmd_line_args():
     endpoint_str = args.endpoint.replace("dyn://", "", 1)
     endpoint_parts = endpoint_str.split(".")
     if len(endpoint_parts) != 3:
-        print(
+        logging.error(
             f"Invalid endpoint format: '{args.endpoint}'. Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
         )
         sys.exit(1)
@@ -164,6 +194,8 @@ def cmd_line_args():
     config.namespace = parsed_namespace
     config.component = parsed_component_name
     config.endpoint = parsed_endpoint_name
+    config.tensor_parallel_size = args.tensor_parallel_size
+    config.extra_engine_args = args.extra_engine_args
 
     return config
 
