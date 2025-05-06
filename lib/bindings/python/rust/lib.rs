@@ -51,6 +51,7 @@ const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     logging::init();
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
+    m.add_function(wrap_pyfunction!(register_llm, m)?)?;
 
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<CancellationToken>()?;
@@ -77,6 +78,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<http::HttpError>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
     m.add_class::<EtcdKvCache>()?;
+    m.add_class::<ModelType>()?;
 
     engine::add_to_module(m)?;
 
@@ -95,6 +97,37 @@ where
 #[pyo3(text_signature = "(level, message, module, file, line)")]
 fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) {
     logging::log_message(level, message, module, file, line);
+}
+
+#[pyfunction]
+#[pyo3(text_signature = "(endpoint, path, model_type)")]
+fn register_llm<'p>(
+    py: Python<'p>,
+    endpoint: Endpoint,
+    path: &str,
+    model_type: ModelType,
+) -> PyResult<Bound<'p, PyAny>> {
+    let model_type_obj = match model_type {
+        ModelType::Chat => llm_rs::model_type::ModelType::Chat,
+        ModelType::Completion => llm_rs::model_type::ModelType::Completion,
+        ModelType::Backend => llm_rs::model_type::ModelType::Backend,
+    };
+
+    let inner_path = path.to_string();
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        // Download from HF, load the ModelDeploymentCard
+        let mut local_model = llm_rs::LocalModel::prepare(&inner_path, None, None)
+            .await
+            .map_err(to_pyerr)?;
+
+        // Advertise ourself on etcd so ingress can find us
+        local_model
+            .attach(&endpoint.inner, model_type_obj)
+            .await
+            .map_err(to_pyerr)?;
+
+        Ok(())
+    })
 }
 
 #[pyclass]
@@ -153,6 +186,15 @@ struct Client {
 #[derive(Clone)]
 struct PyLease {
     inner: rs::transports::etcd::Lease,
+}
+
+#[pyclass(eq, eq_int)]
+#[derive(Clone, PartialEq)]
+#[repr(i32)]
+enum ModelType {
+    Chat = 1,
+    Completion = 2,
+    Backend = 3,
 }
 
 #[pymethods]

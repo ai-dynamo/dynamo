@@ -29,6 +29,11 @@ const DEFAULT_COMPONENT: &str = "C";
 
 const DEFAULT_ENDPOINT: &str = "E";
 
+/// How we identify a namespace/component/endpoint URL.
+/// Technically the '://' is not part of the scheme but it eliminates several string
+/// concatenations.
+pub const ENDPOINT_SCHEME: &str = "dyn://";
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Component {
     pub name: String,
@@ -158,9 +163,13 @@ impl FromStr for Endpoint {
     /// assert_eq!(endpoint.namespace, "namespace");
     /// assert_eq!(endpoint.component, "component");
     /// assert_eq!(endpoint.name, "endpoint");
+    /// let endpoint: Endpoint = "dyn://namespace/component/endpoint".parse().unwrap();
+    /// // same as above
+    /// assert_eq!(endpoint.name, "endpoint");
     /// ```
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Endpoint::from(s))
+        let cleaned = s.strip_prefix(ENDPOINT_SCHEME).unwrap_or(s);
+        Ok(Endpoint::from(cleaned))
     }
 }
 

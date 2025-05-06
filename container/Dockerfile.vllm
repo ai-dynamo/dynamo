@@ -302,7 +302,7 @@ COPY hatch_build.py /workspace/
 COPY lib/ /workspace/lib/
 COPY components /workspace/components
 COPY launch /workspace/launch
-COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
+COPY deploy/sdk /workspace/deploy/sdk
 
 # Build Rust crate binaries packaged with the wheel
 RUN cargo build --release --locked --features mistralrs,sglang,vllm,python \

@@ -59,6 +59,7 @@ etcd-client = { version = "0.14" }
 futures = { version = "0.3" }
 hf-hub = { version = "0.4.2", default-features = false, features = ["tokio", "rustls-tls"] }
 humantime = { version = "2.2.0" }
+libc = { version = "0.2" }
 prometheus = { version = "0.14" }
 rand = { version = "0.9.0" }
 serde = { version = "1", features = ["derive"] }
