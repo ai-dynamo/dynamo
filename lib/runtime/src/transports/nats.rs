@@ -342,7 +342,6 @@ pub fn url_to_bucket_and_key(url: &Url) -> anyhow::Result<(String, String)> {
 }
 
 /// A queue implementation using NATS JetStream
-
 pub struct NatsQueue {
     /// The name of the stream to use for the queue
     stream_name: String,
