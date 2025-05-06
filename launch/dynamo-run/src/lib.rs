@@ -15,14 +15,14 @@
 
 #[cfg(any(feature = "vllm", feature = "sglang"))]
 use std::{future::Future, pin::Pin};
-use std::{io::Read, sync::Arc};
+use std::{io::Read, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use dynamo_llm::{
     backend::ExecutionContext, engines::StreamingEngine, kv_router::publisher::KvMetricsPublisher,
     LocalModel,
 };
-use dynamo_runtime::{protocols::Endpoint, DistributedRuntime};
+use dynamo_runtime::{protocols::Endpoint, CancellationToken, DistributedRuntime};
 
 mod flags;
 pub use flags::Flags;
@@ -32,11 +32,7 @@ mod net;
 mod opt;
 pub use dynamo_llm::request_template::RequestTemplate;
 pub use opt::{Input, Output};
-
-/// How we identify a namespace/component/endpoint URL.
-/// Technically the '://' is not part of the scheme but it eliminates several string
-/// concatenations.
-const ENDPOINT_SCHEME: &str = "dyn://";
+mod subprocess;
 
 /// When `in=text` the user doesn't need to know the model name, and doesn't need to provide it on
 /// the command line. Hence it's optional, and defaults to this.
@@ -44,6 +40,8 @@ const INVISIBLE_MODEL_NAME: &str = "dynamo-run";
 
 /// The component name for the KV publisher, if used
 const KV_PUBLISHER_COMPONENT: &str = "kvpublisher";
+
+const CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How we identify a python string endpoint
 #[cfg(feature = "python")]
@@ -97,6 +95,8 @@ pub async fn run(
         // If output is an endpoint we are ingress and don't have a local model, but making an
         // empty one cleans up the code.
         Output::Endpoint(_) => Default::default(),
+
+        // All other output types have a local model
         _ => {
             match &maybe_path {
                 Some(model_path) => {
@@ -143,7 +143,6 @@ pub async fn run(
         _ => None,
     };
 
-    #[cfg(any(feature = "vllm", feature = "sglang"))]
     let mut extra: Option<Pin<Box<dyn Future<Output = ()> + Send>>> = None; // vllm and sglang sub-process
 
     let template = if let Some(path) = flags.request_template.as_ref() {
@@ -184,8 +183,42 @@ pub async fn run(
             engine: dynamo_engine_mistralrs::make_engine(local_model.path()).await?,
             model: Box::new(local_model),
         },
-        #[cfg(feature = "sglang")]
+
         Output::SgLang => {
+            if !local_model.path().is_dir() {
+                // TODO Does sglang support GGUF? Can we make it work?
+                anyhow::bail!("`--model-path should point at a HuggingFace repo checkout");
+            }
+            let (py_script, mut child) = match subprocess::start(
+                subprocess::sglang::PY,
+                local_model.path(),
+                flags.tensor_parallel_size,
+                if flags.base_gpu_id == 0 {
+                    None
+                } else {
+                    Some(flags.base_gpu_id)
+                },
+                flags.extra_engine_args.as_deref(),
+            )
+            .await
+            {
+                Ok(x) => x,
+                Err(err) => {
+                    anyhow::bail!("Failed starting sglang sub-process: {err}");
+                }
+            };
+            let cancel_token = cancel_token.clone();
+
+            // Sub-process cleanup
+            extra = Some(Box::pin(async move {
+                stopper(cancel_token, child, py_script).await;
+            }));
+            let endpoint: Endpoint = subprocess::ENDPOINT.parse()?;
+            EngineConfig::Dynamic(endpoint)
+        }
+
+        #[cfg(feature = "sglang")]
+        Output::SgLangLegacy => {
             if !local_model.path().is_dir() {
                 anyhow::bail!("`--model-path should point at a HuggingFace repo checkout");
             }
@@ -295,7 +328,7 @@ pub async fn run(
         }
 
         #[cfg(feature = "vllm")]
-        Output::Vllm | Output::Vllm0_8 => {
+        Output::Vllm0_8 => {
             if flags.base_gpu_id != 0 {
                 anyhow::bail!("vllm does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
             }
@@ -316,6 +349,35 @@ pub async fn run(
                 engine,
                 model: Box::new(local_model),
             }
+        }
+
+        // No feature flag because it uses a sub-process, it's very cheap to include
+        Output::Vllm => {
+            if flags.base_gpu_id != 0 {
+                anyhow::bail!("vllm does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
+            }
+            let (py_script, mut child) = match subprocess::start(
+                subprocess::vllm::PY,
+                local_model.path(),
+                flags.tensor_parallel_size,
+                None, // base_gpu_id. vllm uses CUDA_VISIBLE_DEVICES instead
+                flags.extra_engine_args.as_deref(),
+            )
+            .await
+            {
+                Ok(x) => x,
+                Err(err) => {
+                    anyhow::bail!("Failed starting vllm sub-process: {err}");
+                }
+            };
+            let cancel_token = cancel_token.clone();
+
+            // Sub-process cleanup
+            extra = Some(Box::pin(async move {
+                stopper(cancel_token, child, py_script).await;
+            }));
+            let endpoint: Endpoint = subprocess::ENDPOINT.parse()?;
+            EngineConfig::Dynamic(endpoint)
         }
 
         #[cfg(feature = "llamacpp")]
@@ -394,11 +456,50 @@ pub async fn run(
         }
     }
 
-    #[cfg(any(feature = "vllm", feature = "sglang"))]
     // Allow engines to ask main thread to wait on an extra future.
+    // We use this to stop the vllm and sglang sub-process
     if let Some(extra) = extra {
         extra.await;
     }
 
     Ok(())
+}
+
+/// Wait for cancel_token to be cancelled, then stop the child as gracefully as possible.
+/// Keeps the TempPath alive until the child is stopped.
+async fn stopper(
+    cancel_token: CancellationToken,
+    mut child: tokio::process::Child,
+    py_script: tempfile::TempPath,
+) {
+    cancel_token.cancelled().await;
+
+    // Ask subprocess to stop gracefully
+    if let Some(pid) = child.id() {
+        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    }
+
+    tokio::select! {
+        exit = child.wait() => {
+            tracing::trace!("vllm sub-process graceful exit");
+            match exit {
+                Ok(exit_status) if exit_status.success() => {}
+                Ok(exit_status) => {
+                    // This is nearly always 15 (SIGTERM)
+                    tracing::trace!("vllm sub-process non-0 exit: {exit_status}");
+                }
+                Err(err) => {
+                    tracing::warn!("vllm sub-process error getting exit status: {err}");
+                }
+            }
+        }
+        _ = tokio::time::sleep(CHILD_STOP_TIMEOUT) => {
+            // It didn't stop in time, kill it
+            child.kill().await.expect("Failed killing vllm subprocess");
+            let _ = child.wait().await;
+        }
+    }
+    // This temporary file contains the python script running the engine. It deletes on drop.
+    // Keep it alive until the engine has stopped.
+    drop(py_script);
 }
