@@ -143,7 +143,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			}
 		}
 		if deployment.Spec.Ingress.Enabled {
-			dynamoDeployment.SetEndpointStatus((r.isEndpointSecured()), getIngressHost(deployment.Spec.Ingress))
+			dynamoDeployment.SetEndpointStatus((r.isEndpointSecured(deployment)), getIngressHost(deployment.Spec.Ingress))
 		}
 	}
 
@@ -237,8 +237,17 @@ func (r *DynamoGraphDeploymentReconciler) generateDefaultIngressSpec(dynamoDeplo
 	return res
 }
 
-func (r *DynamoGraphDeploymentReconciler) isEndpointSecured() bool {
-	return r.IngressControllerTLSSecret != ""
+func (r *DynamoGraphDeploymentReconciler) isEndpointSecured(deployment *nvidiacomv1alpha1.DynamoComponentDeployment) bool {
+    // deploy with a standard Ingress and a TLS secret
+    if deployment.Spec.Ingress.TLS.SecretName != "" {
+        return true
+    }
+    // deploy with Istio and a VirtualServiceGateway,
+    if deployment.Spec.Ingress.VirtualServiceGateway != "" {
+        // assumes operator always configures the Gateway for TLS
+        return true
+    }
+	return false
 }
 
 func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
