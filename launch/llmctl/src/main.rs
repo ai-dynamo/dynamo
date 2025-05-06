@@ -362,8 +362,10 @@ async fn list_models(
     let mut models = Vec::new();
     let model_types = match model_type {
         Some(mt) => vec![mt],
-        None => ModelType::all(),
+        None => vec![ModelType::Chat, ModelType::Completion],
     };
+
+    // TODO: Do we need the model_type in etcd key?
 
     for mt in model_types {
         let prefix = format!("{}/models/{}/", component.etcd_path(), mt.as_str(),);

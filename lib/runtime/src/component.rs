@@ -48,6 +48,7 @@ use super::{
 };
 
 use crate::pipeline::network::{ingress::push_endpoint::PushEndpoint, PushWorkHandler};
+use crate::protocols::Endpoint as EndpointId;
 use async_nats::{
     rustls::quic,
     service::{Service, ServiceExt},
@@ -155,7 +156,7 @@ impl Component {
 
     pub fn service_name(&self) -> String {
         let service_name = format!("{}_{}", self.namespace.name(), self.name);
-        Slug::slugify_unique(&service_name).to_string()
+        Slug::slugify(&service_name).to_string()
     }
 
     pub fn path(&self) -> String {
@@ -237,6 +238,14 @@ impl RuntimeProvider for Endpoint {
 }
 
 impl Endpoint {
+    pub fn id(&self) -> EndpointId {
+        EndpointId {
+            namespace: self.component.namespace().name().to_string(),
+            component: self.component.name().to_string(),
+            name: self.name().to_string(),
+        }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }

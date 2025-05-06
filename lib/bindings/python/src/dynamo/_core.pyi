@@ -79,6 +79,20 @@ class EtcdClient:
     Etcd is used for discovery in the DistributedRuntime
     """
 
+    def primary_lease_id(self) -> int:
+        """
+        return the primary lease id.
+        """
+        ...
+
+    async def kv_create(
+        self, key: str, value: bytes, lease_id: Optional[int] = None
+    ) -> None:
+        """
+        Atomically create a key in etcd, fail if the key already exists.
+        """
+        ...
+
     async def kv_create_or_validate(
         self, key: str, value: bytes, lease_id: Optional[int] = None
     ) -> None:
@@ -603,3 +617,12 @@ class HttpAsyncEngine:
     """
 
     ...
+
+class ModelType:
+    """What type of request this model needs: Chat, Component or Backend (pre-processed)"""
+    ...
+
+async def register_llm(endpoint: Endpoint, path: str, model_type: ModelType) -> None:
+    """Attach the model at path to the given endpoint, and advertise it as model_type"""
+    ...
+

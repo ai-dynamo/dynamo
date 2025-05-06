@@ -53,10 +53,10 @@ cargo build --locked --profile dev --features mistralrs,sglang,vllm,python
 cargo doc --no-deps
 
 # create symlinks for the binaries in the deploy directory
-mkdir -p $HOME/dynamo/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
-ln -sf $HOME/dynamo/.build/target/debug/dynamo-run $HOME/dynamo/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/dynamo-run
-ln -sf $HOME/dynamo/.build/target/debug/http $HOME/dynamo/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/http
-ln -sf $HOME/dynamo/.build/target/debug/llmctl $HOME/dynamo/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/llmctl
+mkdir -p $HOME/dynamo/deploy/sdk/src/dynamo/sdk/cli/bin
+ln -sf $HOME/dynamo/.build/target/debug/dynamo-run $HOME/dynamo/deploy/sdk/src/dynamo/sdk/cli/bin/dynamo-run
+ln -sf $HOME/dynamo/.build/target/debug/http $HOME/dynamo/deploy/sdk/src/dynamo/sdk/cli/bin/http
+ln -sf $HOME/dynamo/.build/target/debug/llmctl $HOME/dynamo/deploy/sdk/src/dynamo/sdk/cli/bin/llmctl
 
 # install the python bindings in editable mode
 cd $HOME/dynamo/lib/bindings/python && retry uv pip install -e .

@@ -37,7 +37,7 @@ Inference graphs are compositions of service components that work together to ha
 
 ## Creating an inference graph
 
-Once you've written your various Dynamo services (docs on how to write these can be found [here](../../deploy/dynamo/sdk/docs/sdk/README.md)), you can create an inference graph by composing these services together using the following two mechanisms:
+Once you've written your various Dynamo services (docs on how to write these can be found [here](../../deploy/sdk/docs/sdk/README.md)), you can create an inference graph by composing these services together using the following two mechanisms:
 
 ### 1. Dependencies with `depends()`
 
@@ -144,7 +144,7 @@ We've provided a set of basic configurations for this example [here](../../examp
 
 ### 4. Serve your graph
 
-As a prerequisite, ensure you have NATS and etcd running by running the docker compose in the deploy directory. You can find it [here](../../deploy/docker-compose.yml).
+As a prerequisite, ensure you have NATS and etcd running by running the docker compose in the deploy directory. You can find it [here](../../deploy/metrics/docker-compose.yml).
 
 ```bash
 docker compose up -d
