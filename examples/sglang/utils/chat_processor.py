@@ -103,6 +103,8 @@ class ChatProcessor:
         created = int(time.time())
         content_id = str(uuid.uuid4())
 
+        # this comes from sglang's internal method here
+        # https://github.com/sgl-project/sglang/blob/c9abd7be011f14d46ee56fc9cb716e4d116b9a9b/python/sglang/srt/openai_api/adapter.py#L1412
         async for response in sglang_generator:
             try:
                 response_data = response.data()
@@ -210,6 +212,8 @@ class CompletionsProcessor:
         created = int(time.time())
         content_id = str(uuid.uuid4())
 
+        # this comes from sglang's internal method here
+        # https://github.com/sgl-project/sglang/blob/c9abd7be011f14d46ee56fc9cb716e4d116b9a9b/python/sglang/srt/openai_api/adapter.py#L734
         async for response in sglang_generator:
             try:
                 response_data = response.data()
