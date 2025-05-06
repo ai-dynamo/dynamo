@@ -13,6 +13,20 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
+from .decorators import (
+    AbstractDynamoService,
+    abstract_dynamo_endpoint,
+    dynamo_endpoint,
+)
+from .service import service
+
+__all__ = [
+    "AbstractDynamoService",
+    "abstract_dynamo_endpoint",
+    "dynamo_endpoint",
+    "service",
+]
+
 
 def main() -> None:
     print("Hello from dynamo sdk!")

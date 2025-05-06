@@ -194,6 +194,12 @@ def serve_dynamo_graph(
                         str(bento_path.absolute()),
                         env=env,
                     )
+
+                    if not dep_svc.is_servable():
+                        raise RuntimeError(
+                            f"Service {dep_svc.name} is not servable. Please use link to override with a concrete implementation."
+                        )
+
                     namespace, _ = dep_svc.dynamo_address()
                     watchers.append(new_watcher)
                     sockets.append(new_socket)

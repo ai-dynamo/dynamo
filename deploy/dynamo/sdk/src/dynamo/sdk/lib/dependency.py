@@ -23,7 +23,8 @@ from _bentoml_sdk.service import Service
 from _bentoml_sdk.service.dependency import Dependency
 
 from dynamo.runtime import DistributedRuntime
-from dynamo.sdk.lib.service import DynamoService
+from dynamo.sdk.lib.decorators import AbstractDynamoService
+from dynamo.sdk.lib.service import DynamoConfig, DynamoService
 
 T = TypeVar("T")
 
@@ -78,6 +79,9 @@ class DynamoClient:
 
 class DynamoDependency(Dependency[T]):
     """Enhanced dependency that supports Dynamo endpoints"""
+
+    # Cache for abstract service instances
+    _abstract_service_cache: Dict[type[AbstractDynamoService], DynamoService] = {}
 
     def __init__(
         self,
@@ -143,7 +147,7 @@ class DynamoDependency(Dependency[T]):
 
 
 def depends(
-    on: Service[T] | None = None,
+    on: Service[T] | type[AbstractDynamoService] | None = None,
     *,
     url: str | None = None,
     deployment: str | None = None,
@@ -152,17 +156,43 @@ def depends(
     """Create a dependency that's Dynamo-aware.
 
     If the dependency is on a Dynamo-enabled service, this will return a client
-    that can call Dynamo endpoints. Otherwise behaves like normal BentoML dependency.
+    that can call Dynamo endpoints. If the dependency is on a AbstractDynamoService,
+    it will create a placeholder service with the interface as its inner.
+    Otherwise behaves like normal BentoML dependency.
 
     Args:
-        on: The service to depend on
+        on: The service to depend on, or a AbstractDynamoService type
         url: URL for remote service
         deployment: Deployment name
         cluster: Cluster name
 
     Raises:
+        TypeError: If on is not a Service or AbstractDynamoService
         AttributeError: When trying to call a non-existent Dynamo endpoint
     """
-    if on is not None and not isinstance(on, Service):
-        raise TypeError("depends() expects a class decorated with @service()")
-    return DynamoDependency(on, url=url, deployment=deployment, cluster=cluster)
+    if on is None:
+        return DynamoDependency(on, url=url, deployment=deployment, cluster=cluster)
+
+    if isinstance(on, Service):
+        return DynamoDependency(on, url=url, deployment=deployment, cluster=cluster)
+
+    if isinstance(on, type) and issubclass(on, AbstractDynamoService):
+        # Check cache first
+        if on in DynamoDependency._abstract_service_cache:
+            service = DynamoDependency._abstract_service_cache[on]
+        else:
+            # Create new service instance and cache it
+            service = DynamoService(
+                config={},
+                inner=on,
+                dynamo_config=DynamoConfig(enabled=True),
+            )
+            DynamoDependency._abstract_service_cache[on] = service
+
+        return DynamoDependency(
+            service, url=url, deployment=deployment, cluster=cluster
+        )
+
+    raise TypeError(
+        "depends() expects either a class decorated with @service() or a AbstractDynamoService type"
+    )
