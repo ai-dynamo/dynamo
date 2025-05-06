@@ -23,7 +23,6 @@ jobs:
   assign-labels:
     name: Assign labels
     runs-on: ubuntu-latest
-    needs: check-pr-title
     steps:
       - uses: mauroalderete/action-assign-labels@671a4ca2da0f900464c58b8b5540a1e07133e915 # v1.5.1
         with:
