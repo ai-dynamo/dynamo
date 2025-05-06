@@ -16,46 +16,7 @@ jobs:
     name: Validate PR title
     runs-on: ubuntu-latest
     steps:
-      - uses: amannn/action-semantic-pull-request@0723387faaf9b38adef4775cd42cfd5155ed6017 # v5.5.3
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  assign-labels:
-    name: Assign labels
-    runs-on: ubuntu-latest
-    steps:
-      - uses: mauroalderete/action-assign-labels@671a4ca2da0f900464c58b8b5540a1e07133e915 # v1.5.1
+      - uses:  ytanikin/pr-conventional-commits@8267db1bacc237419f9ed0228bb9d94e94271a1d #v1.4.1
         with:
-          pull-request-number: ${{ github.event.pull_request.number }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          conventional-commits: |
-            conventional-commits:
-              - type: 'fix'
-                nouns: ['fix', 'bug']
-                labels: ['bug']
-              - type: 'feat'
-                nouns: ['feature', 'feat']
-                labels: ['enhancement']
-              - type: 'documentation'
-                nouns: ['doc','docs','documentation']
-                labels: ['documentation']
-              - type: 'build'
-                nouns: ['build','builds']
-                labels: ['build']
-              - type: 'ci'
-                nouns: ['ci',']
-                labels: ['ci']
-              - type: 'revert'
-                nouns: ['revert']
-                labels: ['revert']
-              - type: 'refactor'
-                nouns: ['refactor']
-                labels: ['refactor']
-              - type: 'style'
-                nouns: ['style']
-                labels: ['style']
-              - type: 'test'
-                nouns: ['test']
-                labels: ['test']
-              - type: 'chore'
-                labels: ['chore']
+          task_types: '["feat","fix","docs","test","ci","refactor","perf","chore","revert"]'
+          add_label: 'true'
