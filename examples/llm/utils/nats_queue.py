@@ -18,7 +18,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import ClassVar, Optional
 
-from dynamo._core import NatsQueue as RustNatsQueue
+from dynamo._core import NatsQueue
 
 
 class NATSQueue:
@@ -31,7 +31,7 @@ class NATSQueue:
         nats_server: str = "nats://localhost:4222",
         dequeue_timeout: float = 1,
     ):
-        self.nats_q = RustNatsQueue(stream_name, nats_server, dequeue_timeout)
+        self.nats_q = NatsQueue(stream_name, nats_server, dequeue_timeout)
 
     @classmethod
     @asynccontextmanager
