@@ -1678,7 +1678,6 @@ dependencies = [
  "dynamo-runtime",
  "futures",
  "futures-util",
- "hf-hub",
  "humantime",
  "netlink-packet-route",
  "rtnetlink",

@@ -46,6 +46,7 @@ derive_builder = {workspace = true }
 either = { workspace = true }
 etcd-client = { workspace = true }
 futures =  { workspace = true }
+hf-hub = { workspace = true }
 rand = { workspace = true }
 prometheus = { workspace = true }
 serde = { workspace = true }
