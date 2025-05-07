@@ -65,7 +65,7 @@ class RequestHandler:
         for key, value in request["sampling_options"].items():
             if value:
                 # TODO: Do these always match? Maybe allow-list the fields that do match
-                sampling_params[key] = valure
+                sampling_params[key] = value
 
         # sglang defaults this to 128
         max_new_tokens = request["stop_conditions"]["max_tokens"]
