@@ -3,7 +3,6 @@ import logging
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
 from components.planner import start_planner
 from pydantic import BaseModel
-from dynamo.sdk.lib.service import ComponentType
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -15,13 +14,12 @@ class RequestType(BaseModel):
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
 
 import argparse
-parser = argparse.ArgumentParser()
 
 @service(
     dynamo={
         "enabled": True,
         "namespace": "dynamo",
-        "component_type": ComponentType.PLANNER,
+        "component_type": "planner",
     },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -35,18 +33,35 @@ class Planner:
 
         config = ServiceConfig.get_instance()
 
-        # TODO: this should default to whichever namespace this service is actually running in
-        # can be passed via CLI arg to dynamo serve with --Planner.namespace and --Planner.environment
-        self.namespace = config.get("Planner", {}).get("namespace", "dynamo")
+        # Get namespace directly from dynamo_context as it contains the active namespace
+        self.namespace = dynamo_context["namespace"]
         self.environment = config.get("Planner", {}).get("environment", "local")
 
-        self.args = parser.parse_args([
-            "--namespace", self.namespace,          # your chosen namespace
-            "--environment", self.environment,    # your chosen environment
-        ])
+        # Create args with all parameters from planner.py, using defaults except for namespace and environment
+        self.args = argparse.Namespace(
+            namespace=self.namespace,
+            environment=self.environment,
+            served_model_name="vllm",
+            no_operation=False,
+            log_dir=None,
+            adjustment_interval=10,
+            metric_pulling_interval=1,
+            max_gpu_budget=8,
+            min_endpoint=1,
+            decode_kv_scale_up_threshold=0.9,
+            decode_kv_scale_down_threshold=0.5,
+            prefill_queue_scale_up_threshold=5,
+            prefill_queue_scale_down_threshold=0.2,
+            decode_engine_num_gpu=1,
+            prefill_engine_num_gpu=1,
+        )
 
     @async_on_start
     async def async_init(self):
+        import asyncio
+        # Trying to see if setting a sleep will fix the issue with the statefile not being created
+        await asyncio.sleep(60)
+        logger.info("Calling start_planner")
         await start_planner(self.runtime, self.args)
 
     @dynamo_endpoint()
