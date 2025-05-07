@@ -148,7 +148,6 @@ class DynamoService(Service[T]):
         if self._api_endpoints:
             self.config["http_exposed"] = True
             self.config["api_endpoints"] = self._api_endpoints.copy()
-            self.config["port"] = 8000
 
         self._linked_services: List[DynamoService] = []  # Track linked services
 

@@ -72,7 +72,6 @@ type Config struct {
 	Autoscaling *Autoscaling  `yaml:"autoscaling,omitempty"`
 	HttpExposed bool          `yaml:"http_exposed,omitempty"`
 	ApiEndpoints []string     `yaml:"api_endpoints,omitempty"`
-	Port         int          `yaml:"port,omitempty"`
 }
 
 type ServiceConfig struct {
