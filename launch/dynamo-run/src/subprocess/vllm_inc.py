@@ -11,13 +11,15 @@
 # Start nats and etcd:
 #  - nats-server -js
 #
-# Window 1: `python server_vllm.py`. Wait for log "Starting endpoint".
+# Window 1: `python vllm_inc.py`. Wait for log "Starting endpoint".
 # Window 2: `dynamo-run out=dyn://dynamo.backend.generate`
 
 import argparse
 import asyncio
 import logging
+import os
 import sys
+import uuid
 from typing import Optional
 
 import uvloop
@@ -59,9 +61,9 @@ class RequestHandler:
         self.default_sampling_params = default_sampling_params
 
     async def generate(self, request):
-        request_id = "1"  # hello_world example only
+        # logging.debug(f"Received request: {request}")
+        request_id = str(uuid.uuid4().hex)
 
-        logging.debug(f"Received request: {request}")
         prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
 
         sampling_params = SamplingParams(**self.default_sampling_params)
@@ -123,6 +125,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         "task": "generate",
         "tensor_parallel_size": config.tensor_parallel_size,
         "skip_tokenizer_init": True,
+        "disable_log_stats": True,
+        "disable_log_requests": True,
     }
     if config.extra_engine_args != "":
         json_map = {}
@@ -137,6 +141,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         logging.debug(f"Adding extra engine arguments: {json_map}")
         arg_map = {**arg_map, **json_map}  # json_map gets precedence
 
+    os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
     engine_args = AsyncEngineArgs(**arg_map)
     model_config = engine_args.create_model_config()
     # Load default sampling params from `generation_config.json`
