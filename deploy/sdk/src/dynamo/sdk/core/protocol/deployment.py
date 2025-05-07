@@ -79,10 +79,10 @@ class ScalingPolicy:
 class Service:
     """A single component."""
 
-    id: str | None = None
     name: str
     namespace: str
     class_name: str
+    id: str | None = None
     cmd: list[str] = field(default_factory=list)
     resources: Resources | None = None
     environment: dict[str, str] = field(default_factory=dict)
@@ -97,12 +97,6 @@ class Deployment:
     name: str
     namespace: str
     services: list[Service] = field(default_factory=list)
-
-
-@dataclass
-class ScalingPolicy:
-    policy: str
-    parameters: dict[str, t.Union[int, float, str]] = field(default_factory=dict)
 
 
 class DeploymentManager(ABC):
