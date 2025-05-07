@@ -15,6 +15,8 @@
 
 import logging
 
+from utils.ns import get_namespace
+
 from dynamo.runtime import EtcdKvCache
 from dynamo.sdk import dynamo_context
 
@@ -38,7 +40,7 @@ class PyDisaggregatedRouter:
         runtime = dynamo_context["runtime"]
         self.etcd_kv_cache = await EtcdKvCache.create(
             runtime.etcd_client(),
-            "/dynamo/disagg_router/",
+            f"/{get_namespace()}/disagg_router/",
             {
                 "max_local_prefill_length": str(self.max_local_prefill_length),
                 "max_prefill_queue_size": str(self.max_prefill_queue_size),

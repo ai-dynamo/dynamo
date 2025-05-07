@@ -22,6 +22,7 @@ from typing import AsyncIterator, Tuple
 
 from components.worker import VllmWorker
 from utils.logging import check_required_workers
+from utils.ns import get_namespace
 from utils.protocol import Tokens
 from utils.vllm import RouterType
 
@@ -77,7 +78,7 @@ def parse_args(service_name, prefix) -> Namespace:
 @service(
     dynamo={
         "enabled": True,
-        "namespace": "dynamo",
+        "namespace": get_namespace(),
     },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -103,7 +104,7 @@ class Router:
     async def async_init(self):
         self.runtime = dynamo_context["runtime"]
         self.workers_client = (
-            await self.runtime.namespace("dynamo")
+            await self.runtime.namespace(get_namespace())
             .component("VllmWorker")
             .endpoint("generate")
             .client()
@@ -113,7 +114,7 @@ class Router:
 
         await check_required_workers(self.workers_client, self.args.min_workers)
 
-        kv_listener = self.runtime.namespace("dynamo").component("VllmWorker")
+        kv_listener = self.runtime.namespace(get_namespace()).component("VllmWorker")
         await kv_listener.create_service()
         if self.router_type == RouterType.KV:
             self.indexer = KvIndexer(kv_listener, self.args.block_size)

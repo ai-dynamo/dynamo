@@ -21,6 +21,7 @@ import sys
 
 from pydantic import BaseModel
 from utils.nixl import NixlMetadataStore
+from utils.ns import get_namespace
 from utils.prefill_queue import PrefillQueue
 from utils.vllm import parse_vllm_args
 from vllm.entrypoints.openai.api_server import (
@@ -42,7 +43,7 @@ class RequestType(BaseModel):
 @service(
     dynamo={
         "enabled": True,
-        "namespace": "dynamo",
+        "namespace": get_namespace(),
         "custom_lease": LeaseConfig(ttl=1),  # 1 second
     },
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
@@ -87,7 +88,7 @@ class PrefillWorker:
             raise RuntimeError("Failed to initialize engine client")
         runtime = dynamo_context["runtime"]
         metadata = self.engine_client.nixl_metadata
-        self._metadata_store = NixlMetadataStore("dynamo", runtime)
+        self._metadata_store = NixlMetadataStore(get_namespace(), runtime)
         await self._metadata_store.put(metadata.engine_id, metadata)
         self.task = asyncio.create_task(self.prefill_queue_handler())
 
@@ -119,9 +120,13 @@ class PrefillWorker:
         logger.info("Prefill queue handler entered")
         prefill_queue_nats_server = os.getenv("NATS_SERVER", "nats://localhost:4222")
         prefill_queue_stream_name = (
-            self.engine_args.served_model_name
-            if self.engine_args.served_model_name is not None
-            else "vllm"
+            get_namespace()
+            + "_"
+            + (
+                self.engine_args.served_model_name
+                if self.engine_args.served_model_name is not None
+                else "vllm"
+            )
         )
         logger.info(
             f"Prefill queue: {prefill_queue_nats_server}:{prefill_queue_stream_name}"

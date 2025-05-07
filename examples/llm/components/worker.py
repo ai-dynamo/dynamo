@@ -22,6 +22,7 @@ import signal
 from components.disagg_router import PyDisaggregatedRouter
 from components.prefill_worker import PrefillWorker
 from utils.nixl import NixlMetadataStore
+from utils.ns import get_namespace
 from utils.prefill_queue import PrefillQueue
 from utils.protocol import MyRequestOutput, vLLMGenerateRequest
 from utils.vllm import RouterType, parse_vllm_args
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 @service(
     dynamo={
         "enabled": True,
-        "namespace": "dynamo",
+        "namespace": get_namespace(),
         "custom_lease": LeaseConfig(ttl=1),  # 1 second
     },
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
@@ -64,7 +65,7 @@ class VllmWorker:
         self._prefill_queue_nats_server = os.getenv(
             "NATS_SERVER", "nats://localhost:4222"
         )
-        self._prefill_queue_stream_name = self.model_name
+        self._prefill_queue_stream_name = get_namespace() + "_" + self.model_name
         logger.info(
             f"Prefill queue: {self._prefill_queue_nats_server}:{self._prefill_queue_stream_name}"
         )
@@ -90,7 +91,7 @@ class VllmWorker:
                 self.engine_args.enable_prefix_caching = True
 
             os.environ["VLLM_WORKER_ID"] = str(dynamo_context.get("lease").id())
-            os.environ["VLLM_KV_NAMESPACE"] = "dynamo"
+            os.environ["VLLM_KV_NAMESPACE"] = get_namespace()
             os.environ["VLLM_KV_COMPONENT"] = class_name
 
         self.metrics_publisher = KvMetricsPublisher()
@@ -128,7 +129,7 @@ class VllmWorker:
 
         if self.engine_args.remote_prefill:
             metadata = self.engine_client.nixl_metadata
-            metadata_store = NixlMetadataStore("dynamo", runtime)
+            metadata_store = NixlMetadataStore(get_namespace(), runtime)
             await metadata_store.put(metadata.engine_id, metadata)
 
         if self.engine_args.conditional_disagg:

@@ -12,31 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-Common:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  router: kv
-  block-size: 64
-  max-model-len: 16384
-  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
 
-Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  port: 8000
 
-Processor:
-  common-configs: [model, block-size, max-model-len, router]
+import os
 
-Router:
-  min-workers: 1
-  common-configs: [model, router]
 
-VllmWorker:
-  enforce-eager: true
-  max-num-batched-tokens: 16384
-  enable-prefix-caching: true
-  tensor-parallel-size: 1
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: 1
-  common-configs: [model, block-size, max-model-len, router, kv-transfer-config]
+def get_namespace():
+    return os.getenv("DYN_NAMESPACE", "dynamo")

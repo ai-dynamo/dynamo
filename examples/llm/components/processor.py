@@ -24,6 +24,7 @@ from components.worker import VllmWorker
 from transformers import AutoTokenizer
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.logging import check_required_workers
+from utils.ns import get_namespace
 from utils.protocol import MyRequestOutput, Tokens, vLLMGenerateRequest
 from utils.vllm import RouterType, parse_vllm_args
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -46,7 +47,7 @@ class RequestType(Enum):
 @service(
     dynamo={
         "enabled": True,
-        "namespace": "dynamo",
+        "namespace": get_namespace(),
     },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -115,13 +116,13 @@ class Processor(ProcessMixIn):
 
         await check_required_workers(self.worker_client, self.min_workers)
 
-        kv_listener = runtime.namespace("dynamo").component("VllmWorker")
+        kv_listener = runtime.namespace(get_namespace()).component("VllmWorker")
         await kv_listener.create_service()
         self.metrics_aggregator = KvMetricsAggregator(kv_listener)
 
         self.etcd_kv_cache = await EtcdKvCache.create(
             runtime.etcd_client(),
-            "/dynamo/processor/",
+            f"/{get_namespace()}/processor/",
             {"router": self.engine_args.router},
         )
 
