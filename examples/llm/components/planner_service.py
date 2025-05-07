@@ -21,11 +21,11 @@ parser = argparse.ArgumentParser()
     dynamo={
         "enabled": True,
         "namespace": "dynamo",
+        "component_type": ComponentType.PLANNER,
     },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
     image=DYNAMO_IMAGE,
-    component_type=ComponentType.PLANNER
 )
 class Planner:
     def __init__(self):
