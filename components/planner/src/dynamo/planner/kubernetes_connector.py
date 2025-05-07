@@ -18,12 +18,13 @@ from .planner_connector import PlannerConnector
 
 
 class KubernetesConnector(PlannerConnector):
-    def __init__(self):
+    def __init__(self, namespace: str):
         self.kube_api = KubernetesAPI()
+        self.namespace = namespace
 
     async def add_component(self, component_name: str):
         """Add a component by increasing its replica count to 1"""
-        deployment = await self.kube_api.get_graph_deployment(component_name)
+        deployment = await self.kube_api.get_graph_deployment(component_name, self.namespace)
         if deployment is None:
             raise ValueError(
                 f"Graph not found for component {component_name} in dynamo namespace {self.namespace}"

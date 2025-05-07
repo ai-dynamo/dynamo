@@ -110,7 +110,7 @@ class KubernetesAPI:
             raise
 
 
-    async def update_component_replicas(
+    async def update_graph_replicas(
         self, graph_deployment_name: str, component_name: str, replicas: int
     ) -> None:
         """Update the replicas count for a component in a DynamoGraphDeployment"""
