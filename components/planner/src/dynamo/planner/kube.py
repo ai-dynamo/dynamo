@@ -42,13 +42,13 @@ class KubernetesAPI:
         self, component_name: str, dynamo_namespace: str
     ) -> Optional[dict]:
         """
-        Get DynamoGraphDeployment by first finding the associated DynamoComponentDeployment 
+        Get DynamoGraphDeployment by first finding the associated DynamoComponentDeployment
         and then retrieving its owner reference.
-        
+
         Args:
             component_name: The name of the component
             dynamo_namespace: The dynamo namespace
-            
+
         Returns:
             The DynamoGraphDeployment object or None if not found
         """
@@ -76,13 +76,16 @@ class KubernetesAPI:
 
             # Get the component deployment and extract the owner reference
             component_deployment = items[0]
-            owner_refs = component_deployment.get("metadata", {}).get("ownerReferences", [])
+            owner_refs = component_deployment.get("metadata", {}).get(
+                "ownerReferences", []
+            )
 
             # Find the DynamoGraphDeployment in the owner references
             graph_deployment_ref = None
             for ref in owner_refs:
-                if (ref.get("apiVersion") == "nvidia.com/v1alpha1" and 
-                    ref.get("kind") == "DynamoGraphDeployment"):
+                if (ref.get("apiVersion") == "nvidia.com/v1alpha1" 
+                    and ref.get("kind") == "DynamoGraphDeployment"
+                ):
                     graph_deployment_ref = ref
                     break
 
@@ -99,7 +102,7 @@ class KubernetesAPI:
                 version="v1alpha1",
                 namespace=self.current_namespace,
                 plural="dynamographdeployments",
-                name=graph_deployment_name
+                name=graph_deployment_name,
             )
 
             return graph_deployment
@@ -108,7 +111,6 @@ class KubernetesAPI:
             if e.status == 404:
                 return None
             raise
-
 
     async def update_graph_replicas(
         self, graph_deployment_name: str, component_name: str, replicas: int
