@@ -37,6 +37,7 @@ from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 from dynamo.sdk import dynamo_context
 from dynamo.sdk.cli.utils import append_dynamo_state
 from dynamo.sdk.lib.service import LinkedServices
+from dynamo.sdk.lib.utils import get_host_port
 
 logger = logging.getLogger(__name__)
 
@@ -313,16 +314,15 @@ def main(
 
                 if added_routes:
                     # Configure uvicorn with graceful shutdown
-                    # get the port from PORT env var or use 8000 as default
-                    port = int(os.environ.get("PORT", 8000))
+                    host, port = get_host_port()
                     config = uvicorn.Config(
-                        service.app, host="0.0.0.0", port=port, log_level="info"
+                        service.app, host=host, port=port, log_level="info"
                     )
                     server = uvicorn.Server(config)
 
                     # Start the server with graceful shutdown handling
                     logger.info(
-                        f"Starting FastAPI server on 0.0.0.0:{port} with routes: {added_routes}"
+                        f"Starting FastAPI server on {config.host}:{config.port} with routes: {added_routes}"
                     )
                     server.run()
                 else:
