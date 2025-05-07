@@ -78,10 +78,10 @@ type Config struct {
 }
 
 type ServiceConfig struct {
-	Name         string              `yaml:"name"`
-	Type         string              `yaml:"type,omitempty"`
-	Dependencies []map[string]string `yaml:"dependencies,omitempty"`
-	Config       Config              `yaml:"config"`
+	Name          string              `yaml:"name"`
+	ComponentType string              `yaml:"component_type,omitempty"`
+	Dependencies  []map[string]string `yaml:"dependencies,omitempty"`
+	Config        Config              `yaml:"config"`
 }
 
 func (s ServiceConfig) GetNamespace() *string {
@@ -295,7 +295,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			deployment.Spec.Autoscaling.MinReplicas = service.Config.Autoscaling.MinReplicas
 			deployment.Spec.Autoscaling.MaxReplicas = service.Config.Autoscaling.MaxReplicas
 		}
-		if service.Type == ComponentTypePlanner {
+		if service.ComponentType == ComponentTypePlanner {
 			deployment.Spec.ExtraPodSpec = &common.ExtraPodSpec{
 				ServiceAccountName: PlannerServiceAccountName,
 			}
