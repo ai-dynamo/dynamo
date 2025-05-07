@@ -44,6 +44,7 @@ async def clear_namespace(runtime: DistributedRuntime, namespace: str):
     async with PrefillQueue.get_instance(
         nats_server=prefill_queue_nats_server,
         stream_name=prefill_queue_stream_name,
+        dequeue_timeout=1,
     ) as prefill_queue:
         cleared_count = await prefill_queue.clear_queue()
         logger.info(
