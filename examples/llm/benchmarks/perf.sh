@@ -25,7 +25,7 @@ osl=150
 # Concurrency levels to test
 for concurrency in 1 2 4 8 16 32 64 128 256; do
 
-  # NOTE: For Dynamo HTTP OpenAI frontned, use `nvext` for fields like
+  # NOTE: For Dynamo HTTP OpenAI frontend, use `nvext` for fields like
   # `ignore_eos` since they are not in the official OpenAI spec.
   genai-perf profile \
     --model ${model} \
