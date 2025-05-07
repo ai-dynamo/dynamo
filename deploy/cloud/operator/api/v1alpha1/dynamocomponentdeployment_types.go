@@ -20,6 +20,8 @@
 package v1alpha1
 
 import (
+	"strings"
+
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -159,4 +161,8 @@ func (s *DynamoComponentDeployment) GetSpec() any {
 
 func (s *DynamoComponentDeployment) SetSpec(spec any) {
 	s.Spec = spec.(DynamoComponentDeploymentSpec)
+}
+
+func (s *DynamoComponentDeployment) IsMainComponent() bool {
+	return strings.HasSuffix(s.Spec.DynamoTag, s.Spec.ServiceName)
 }

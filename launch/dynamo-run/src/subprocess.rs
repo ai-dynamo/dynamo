@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::borrow::Cow;
 use std::io::Write;
@@ -22,6 +10,8 @@ use std::sync::LazyLock;
 use anyhow::Context;
 use regex::Regex;
 use tokio::io::AsyncBufReadExt;
+
+use dynamo_llm::engines::MultiNodeConfig;
 
 pub mod sglang;
 pub mod vllm;
@@ -39,6 +29,8 @@ pub async fn start(
     // sglang which GPU to start from, on a multi-GPU system
     // vllm uses CUDA_VISIBLE_DEVICES
     base_gpu_id: Option<u32>,
+    // sglang multi-node config. vllm uses `ray` externally
+    multi_node_config: Option<MultiNodeConfig>,
     // Path to a JSON file containing extra arguments to the backend engine
     extra_engine_args: Option<&Path>,
 ) -> anyhow::Result<(tempfile::TempPath, tokio::process::Child)> {
@@ -60,6 +52,15 @@ pub async fn start(
     if let Some(base_gpu_id) = base_gpu_id {
         args.push("--base-gpu-id".to_string());
         args.push(base_gpu_id.to_string());
+    }
+    // sglang only
+    if let Some(multi_node_config) = multi_node_config {
+        args.push("--nnodes".to_string());
+        args.push(multi_node_config.num_nodes.to_string());
+        args.push("--node-rank".to_string());
+        args.push(multi_node_config.node_rank.to_string());
+        args.push("--dist-init-addr".to_string());
+        args.push(multi_node_config.leader_addr);
     }
     if let Some(extra_engine_args) = extra_engine_args {
         args.push("--extra-engine-args".to_string());
