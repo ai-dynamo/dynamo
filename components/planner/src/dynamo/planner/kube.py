@@ -37,35 +37,78 @@ class KubernetesAPI:
             # Fallback to 'default' if not running in k8s
             return "default"
 
+
     async def get_graph_deployment(
         self, component_name: str, dynamo_namespace: str
     ) -> Optional[dict]:
-        """Get DynamoGraphDeployment custom resource"""
+        """
+        Get DynamoGraphDeployment by first finding the associated DynamoComponentDeployment 
+        and then retrieving its owner reference.
+        
+        Args:
+            component_name: The name of the component
+            dynamo_namespace: The dynamo namespace
+            
+        Returns:
+            The DynamoGraphDeployment object or None if not found
+        """
         try:
-            # Use label selector to find the deployment
-            label_selector = f"nvidia.com/dynamo-namespace={dynamo_namespace}"
-            response = self.custom_api.list_namespaced_custom_object(
+            # First, find the DynamoComponentDeployment using the component name and namespace labels
+            label_selector = f"nvidia.com/dynamo-component={component_name},nvidia.com/dynamo-namespace={dynamo_namespace}"
+
+            component_deployments = self.custom_api.list_namespaced_custom_object(
+                group="nvidia.com",
+                version="v1alpha1",
+                namespace=self.current_namespace,
+                plural="dynamocomponentdeployments",
+                label_selector=label_selector,
+            )
+
+            items = component_deployments.get("items", [])
+            if not items:
+                return None
+
+            if len(items) > 1:
+                raise ValueError(
+                    f"Multiple component deployments found for component {component_name} in dynamo namespace {dynamo_namespace}. "
+                    "Expected exactly one deployment."
+                )
+
+            # Get the component deployment and extract the owner reference
+            component_deployment = items[0]
+            owner_refs = component_deployment.get("metadata", {}).get("ownerReferences", [])
+
+            # Find the DynamoGraphDeployment in the owner references
+            graph_deployment_ref = None
+            for ref in owner_refs:
+                if (ref.get("apiVersion") == "nvidia.com/v1alpha1" and 
+                    ref.get("kind") == "DynamoGraphDeployment"):
+                    graph_deployment_ref = ref
+                    break
+
+            if not graph_deployment_ref:
+                return None
+
+            # Get the actual DynamoGraphDeployment using the name from the owner reference
+            graph_deployment_name = graph_deployment_ref.get("name")
+            if not graph_deployment_name:
+                return None
+
+            graph_deployment = self.custom_api.get_namespaced_custom_object(
                 group="nvidia.com",
                 version="v1alpha1",
                 namespace=self.current_namespace,
                 plural="dynamographdeployments",
-                label_selector=label_selector,
+                name=graph_deployment_name
             )
 
-            items = response.get("items", [])
-            if not items:
-                return None
-            if len(items) > 1:
-                raise ValueError(
-                    f"Multiple deployments found for component {component_name} in dynamo namespace {dynamo_namespace}. "
-                    "Expected exactly one deployment."
-                )
-            return items[0]
+            return graph_deployment
 
         except client.ApiException as e:
             if e.status == 404:
                 return None
             raise
+
 
     async def update_component_replicas(
         self, graph_deployment_name: str, component_name: str, replicas: int
