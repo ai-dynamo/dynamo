@@ -156,6 +156,13 @@ class Processor(ChatProcessorMixin):
                     raise ValueError(
                         "max_tokens and max_completion_tokens must be the same"
                     )
+
+        # max_tokens is required for TRTLLM sampling params
+        if raw_request.max_completion_tokens is None:
+            if raw_request.max_tokens is None:
+                raw_request.max_tokens = 20
+                raw_request.max_completion_tokens = raw_request.max_tokens
+
         async for response in self._generate(raw_request, RequestType.CHAT):
             yield response
 
