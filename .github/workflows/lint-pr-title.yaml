@@ -15,5 +15,5 @@ jobs:
     steps:
       - uses:  ytanikin/pr-conventional-commits@b628c5a234cc32513014b7bfdd1e47b532124d98
         with:
-          task_types: '["feat","fix","docs","test","ci","refactor","perf","chore","revert", "style", "build"]'
+          task_types: '["feat", "fix", "docs", "test", "ci", "refactor", "perf", "chore", "revert", "style", "build"]'
           add_label: 'true'
