@@ -4,6 +4,9 @@ from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
 from components.planner import start_planner
 from pydantic import BaseModel
 from dynamo.sdk.lib.service import ComponentType
+from dynamo.sdk.lib.config import ServiceConfig
+from dynamo.runtime.logging import configure_dynamo_logging
+
 logger = logging.getLogger(__name__)
 
 class RequestType(BaseModel):
@@ -26,11 +29,20 @@ parser = argparse.ArgumentParser()
 )
 class Planner:
     def __init__(self):
+        configure_dynamo_logging(service_name="Planner")
+        logger.info("Starting planner")
         self.runtime = dynamo_context["runtime"]
-        self.namespace = "dynamo" # TODO: this needs to be dynamic based on the injected value
+
+        config = ServiceConfig.get_instance()
+
+        # TODO: this should default to whichever namespace this service is actually running in
+        # can be passed via CLI arg to dynamo serve with --Planner.namespace and --Planner.environment
+        self.namespace = config.get("Planner", {}).get("namespace", "dynamo")
+        self.environment = config.get("Planner", {}).get("environment", "local")
+
         self.args = parser.parse_args([
             "--namespace", self.namespace,          # your chosen namespace
-            "--environment", "kubernetes",    # your chosen environment
+            "--environment", self.environment,    # your chosen environment
         ])
 
     @async_on_start
