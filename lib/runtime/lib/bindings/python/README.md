@@ -44,7 +44,7 @@ cargo test
 
 The simplest way to deploy the pre-requisite services is using
 [docker-compose](https://docs.docker.com/compose/install/linux/),
-defined in the project's root [docker-compose.yml](docker-compose.yml).
+defined in the project's root [docker-compose.yml](../../../docker-compose.yml).
 
 ```
 docker-compose up -d

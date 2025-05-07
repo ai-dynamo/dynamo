@@ -15,7 +15,7 @@
 
 use std::{fmt, io::IsTerminal as _, path::PathBuf};
 
-use crate::ENDPOINT_SCHEME;
+use dynamo_runtime::protocols::ENDPOINT_SCHEME;
 
 const BATCH_PREFIX: &str = "batch:";
 
@@ -52,8 +52,7 @@ impl TryFrom<&str> for Input {
             "stdin" => Ok(Input::Stdin),
             "none" => Ok(Input::None),
             endpoint_path if endpoint_path.starts_with(ENDPOINT_SCHEME) => {
-                let path = endpoint_path.strip_prefix(ENDPOINT_SCHEME).unwrap();
-                Ok(Input::Endpoint(path.to_string()))
+                Ok(Input::Endpoint(endpoint_path.to_string()))
             }
             batch_patch if batch_patch.starts_with(BATCH_PREFIX) => {
                 let path = batch_patch.strip_prefix(BATCH_PREFIX).unwrap();
@@ -103,6 +102,9 @@ pub enum Output {
     MistralRs,
 
     #[cfg(feature = "sglang")]
+    /// Deprecated
+    SgLangLegacy,
+
     /// Run inference using sglang
     SgLang,
 
@@ -110,8 +112,8 @@ pub enum Output {
     /// Run inference using llama.cpp
     LlamaCpp,
 
-    #[cfg(feature = "vllm")]
-    /// Alias for vllm0_8
+    // Start vllm in a sub-process connecting via nats
+    // Sugar for `python vllm_inc.py --endpoint <thing> --model <thing>`
     Vllm,
 
     #[cfg(feature = "vllm")]
@@ -145,13 +147,15 @@ impl TryFrom<&str> for Output {
             "mistralrs" => Ok(Output::MistralRs),
 
             #[cfg(feature = "sglang")]
+            "sglang_legacy" => Ok(Output::SgLangLegacy),
+
             "sglang" => Ok(Output::SgLang),
 
             #[cfg(feature = "llamacpp")]
             "llamacpp" | "llama_cpp" => Ok(Output::LlamaCpp),
 
-            #[cfg(feature = "vllm")]
             "vllm" => Ok(Output::Vllm),
+
             #[cfg(feature = "vllm")]
             "vllm0_8" => Ok(Output::Vllm0_8),
             #[cfg(feature = "vllm")]
@@ -193,13 +197,15 @@ impl fmt::Display for Output {
             Output::MistralRs => "mistralrs",
 
             #[cfg(feature = "sglang")]
+            Output::SgLangLegacy => "sglang_legacy",
+
             Output::SgLang => "sglang",
 
             #[cfg(feature = "llamacpp")]
             Output::LlamaCpp => "llamacpp",
 
-            #[cfg(feature = "vllm")]
             Output::Vllm => "vllm",
+
             #[cfg(feature = "vllm")]
             Output::Vllm0_8 => "vllm0_8",
             #[cfg(feature = "vllm")]
@@ -222,27 +228,11 @@ impl fmt::Display for Output {
 
 /// Returns the engine to use if user did not say on cmd line.
 /// Nearly always defaults to mistralrs which has no dependencies and we include by default.
-/// If built with --no-default-features and a specific engine, default to that.
+/// If built with --no-default-features default to subprocess vllm.
 #[allow(unused_assignments, unused_mut)]
 impl Default for Output {
     fn default() -> Self {
-        // Default if no engines
-        let mut out = Output::EchoFull;
-
-        #[cfg(feature = "llamacpp")]
-        {
-            out = Output::LlamaCpp;
-        }
-
-        #[cfg(feature = "sglang")]
-        {
-            out = Output::SgLang;
-        }
-
-        #[cfg(feature = "vllm")]
-        {
-            out = Output::Vllm;
-        }
+        let mut out = Output::Vllm;
 
         #[cfg(feature = "mistralrs")]
         {
@@ -267,14 +257,15 @@ impl Output {
             out.push(Output::LlamaCpp.to_string());
         }
 
+        out.push(Output::SgLang.to_string());
         #[cfg(feature = "sglang")]
         {
-            out.push(Output::SgLang.to_string());
+            out.push(Output::SgLangLegacy.to_string());
         }
 
+        out.push(Output::Vllm.to_string());
         #[cfg(feature = "vllm")]
         {
-            out.push(Output::Vllm.to_string());
             out.push(Output::Vllm0_7.to_string());
             out.push(Output::Vllm0_8.to_string());
         }

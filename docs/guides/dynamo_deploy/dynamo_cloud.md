@@ -141,7 +141,7 @@ Running the installation script with `--interactive` will guide you through the 
 2. [One-time Action] Create a new kubernetes namespace and set it as your default.
 
 ```bash
-cd deploy/dynamo/helm
+cd deploy/cloud/helm
 kubectl create namespace $NAMESPACE
 kubectl config set-context --current --namespace=$NAMESPACE
 ```

@@ -99,7 +99,9 @@ pub async fn run(
         }
         EngineConfig::None => unreachable!(),
     }
-    http_service.run(runtime.primary_token()).await
+    http_service.run(runtime.primary_token()).await?;
+    runtime.shutdown(); // Cancel primary token
+    Ok(())
 }
 
 /// Spawns a task that watches for new models in etcd at network_prefix,
