@@ -202,6 +202,7 @@ pub async fn run(
         tokens_out,
         tokens_out / cmp::max(elapsed.as_secs(), 1),
     );
+    cancel_token.cancel(); // stop everything else
 
     Ok(())
 }

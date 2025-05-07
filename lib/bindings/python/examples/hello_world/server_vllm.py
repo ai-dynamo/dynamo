@@ -151,10 +151,7 @@ def cmd_line_args():
     config = Config()
     config.model = args.model
 
-    endpoint_str = args.endpoint
-    if endpoint_str.startswith("dyn://"):
-        endpoint_str = endpoint_str[len("dyn://") :]
-
+    endpoint_str = args.endpoint.replace("dyn://", "", 1)
     endpoint_parts = endpoint_str.split(".")
     if len(endpoint_parts) != 3:
         print(

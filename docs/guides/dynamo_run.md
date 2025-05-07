@@ -3,24 +3,38 @@
 * [Quickstart with pip and vllm](#quickstart-with-pip-and-vllm)
     * [Automatically download a model from Hugging Face](#use-model-from-hugging-face)
     * [Run a model from local file](#run-a-model-from-local-file)
-    * [Multi-node](#multi-node)
-* [Compiling from Source](#compiling-from-source)
+    * [Distributed system](#distributed-system)
+* [Full usage details](#full-usage-details)
     * [Setup](#setup)
+    * [mistral.rs](#mistralrs)
+    * [llama.cpp](#llamacpp)
     * [Sglang](#sglang)
-    * [lama.cpp](#llama_cpp)
     * [Vllm](#vllm)
-    * [Python bring-your-own-engine](#python-bring-your-own-engine)
     * [TensorRT-LLM](#tensorrt-llm-engine)
     * [Echo Engines](#echo-engines)
+    * [Write your own engine in Python](#write-your-own-engine-in-python)
 * [Batch mode](#batch-mode)
 * [Defaults](#defaults)
 * [Extra engine arguments](#extra-engine-arguments)
 
 `dynamo-run` is a CLI tool for exploring the Dynamo components, and an example of how to use them from Rust. It is also available as `dynamo run` if using the Python wheel.
 
+It supports the following engines: mistralrs, llamacpp, sglang, vllm and tensorrt-llm. `mistralrs` is the default.
+
+Usage:
+```
+dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn://<path> [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin]
+```
+
+Example: `dynamo run Qwen/Qwen2.5-3B-Instruct`.
+
+Set environment variable `DYN_LOG` to adjust logging level, e.g. `export DYN_LOG=debug`. It has the same syntax as `RUST_LOG`, ask AI for details.
+
 ## Quickstart with pip and vllm
 
 If you used `pip` to install `dynamo` you should have the `dynamo-run` binary pre-installed with the `vllm` engine. You must be in a virtual env with vllm installed to use this. To compile from source, see "Full documentation" below.
+
+The vllm and sglang engines require [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`). Mistralrs and llamacpp do not.
 
 ### Use model from Hugging Face
 
@@ -69,18 +83,26 @@ curl localhost:8080/v1/models
 curl -d '{"model": "Llama-3.2-3B-Instruct-Q4_K_M", "max_completion_tokens": 2049, "messages":[{"role":"user", "content": "What is the capital of South Africa?" }]}' -H 'Content-Type: application/json' http://localhost:8080/v1/chat/completions
 ```
 
-### Multi-node
+### Distributed System
 
-You will need [etcd](https://etcd.io/) and [nats](https://nats.io) installed and accessible from both nodes.
+You can run the ingress side (HTTP server and pre-processing) on one machine, for example a CPU node, and the worker on a different machine (a GPU node).
+
+You will need [etcd](https://etcd.io/) and [nats](https://nats.io) with jetstream installed and accessible from both nodes.
 
 **Node 1:**
+
+OpenAI compliant HTTP server, optional pre-processing, worker discovery.
+
 ```
 dynamo run in=http out=dyn://llama3B_pool
 ```
 
 **Node 2:**
+
+Vllm engine. Receives and returns requests over the network.
+
 ```
-dynamo run in=dyn://llama3B_pool out=vllm ~/llm_models/Llama-3.2-3B-Instruct
+dynamo-run in=dyn://llama3B_pool out=vllm ~/llms/Llama-3.2-3B-Instruct
 ```
 
 This will use etcd to auto-discover the model and NATS to talk to it. You can run multiple workers on the same endpoint and it will pick one at random each time.
@@ -89,7 +111,7 @@ The `llama3B_pool` name is purely symbolic, pick anything as long as it matches 
 
 Run `dynamo run --help` for more options.
 
-## Compiling from Source
+## Full usage details
 
 `dynamo-run` is what `dynamo run` executes. It is an example of what you can build in Rust with the `dynamo-llm` and `dynamo-runtime`. The following guide demonstrates how you can build from source with all the features.
 
@@ -125,15 +147,6 @@ source $HOME/.cargo/env
 
 #### Step 3: Build
 
-Run `cargo build` to install the `dynamo-run` binary in `target/debug`.
-
-> **Optionally**, you can run `cargo build` from any location with arguments:
-> ```
-> --target-dir /path/to/target_directory` specify target_directory with write privileges
-> --manifest-path /path/to/project/Cargo.toml` if cargo build is run outside of `launch/` directory
-> ```
-
-
 - Linux with GPU and CUDA (tested on Ubuntu):
 ```
 cargo build --features cuda
@@ -149,16 +162,49 @@ cargo build --features metal
 cargo build
 ```
 
+Optionally you can run `cargo build` from any location with arguments:
+
+```
+--target-dir /path/to/target_directory` # specify target_directory with write privileges
+--manifest-path /path/to/project/Cargo.toml` # if cargo build is run outside of `launch/` directory
+```
+
 The binary will be called `dynamo-run` in `target/debug`
 ```
 cd target/debug
 ```
-> Note: Build with `--release` for a smaller binary and better performance, but longer build times. The binary will be in `target/release`.
 
-To build for other engines, see the following sections.
+Build with `--release` for a smaller binary and better performance, but longer build times. The binary will be in `target/release`.
 
+### mistralrs
+
+[mistral.rs](https://github.com/EricLBuehler/mistral.rs) is a pure Rust engine that is fast to run, fast to load, supports GGUF as well as safetensors, and runs well on CPU as well as GPU. For those reasons it is the default engine.
+
+```
+dynamo-run Qwen/Qwen2.5-3B-Instruct
+```
+
+is equivalent to
+
+```
+dynamo-run in=text out=mistralrs Qwen/Qwen2.5-3B-Instruct
+```
+
+### llamacpp
+
+Currently [llama.cpp](https://github.com/ggml-org/llama.cpp) is not included by default. Build it like this:
+
+```
+cargo build --features llamacpp[,cuda|metal|vulkan] -p dynamo-run
+```
+
+```
+dynamo-run out=llamacpp ~/llms/Llama-3.2-3B-Instruct-Q6_K.gguf
+```
 
 ### sglang
+
+The [SGLang](https://docs.sglang.ai/index.html) engine requires [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`) to be running.
 
 1. Setup the python virtual env:
 
@@ -170,42 +216,49 @@ uv pip install sgl-kernel --force-reinstall --no-deps
 uv pip install "sglang[all]==0.4.2" --find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/
 ```
 
-2. Build
+2. Run
 
-```
-cargo build --features sglang
-```
+Any example above using `out=sglang` will work, but our sglang backend is also multi-gpu.
 
-3. Run
-
-Any example above using `out=sglang` will work, but our sglang backend is also multi-gpu and multi-node.
-
-**Node 1:**
 ```
 cd target/debug
-./dynamo-run in=http out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 0 --leader-addr 10.217.98.122:9876
-```
-
-**Node 2:**
-```
-cd target/debug
-./dynamo-run in=none out=sglang --model-path ~/llm_models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8 --num-nodes 2 --node-rank 1 --leader-addr 10.217.98.122:9876
+./dynamo-run in=http out=sglang --model-path ~/llms/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 8
 ```
 
 To pass extra arguments to the sglang engine see *Extra engine arguments* below.
 
-### llama_cpp
+**Multi-GPU**
 
+Pass `--tensor-parallel-size <NUM-GPUS>` to `dynamo-run`. To specify which GPU to start from pass `--base-gpu-id <num>`.
+
+For example on a shared eight GPU machine where GPUs 0-3 are already in use:
 ```
-cargo build --features llamacpp,cuda
-cd target/debug
-dynamo-run out=llamacpp ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf
+dynamo-run out=sglang <model> --tensor-parallel-size 4 --base-gpu-id 4
 ```
-If the build step also builds llama_cpp libraries into the same folder as the binary ("libllama.so", "libggml.so", "libggml-base.so", "libggml-cpu.so", "libggml-cuda.so"), then `dynamo-run` will need to find those at runtime. Set `LD_LIBRARY_PATH`, and be sure to deploy them alongside the `dynamo-run` binary.
+
+**Multi-node:**
+
+Dynamo only manages the leader node (node rank 0). The follower nodes are started in the [normal sglang way](https://docs.sglang.ai/references/deepseek.html#running-examples-on-multi-node).
+
+Leader node:
+```
+dynamo-run out=sglang /data/models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 16 --node-rank 0 --num-nodes 2 --leader-addr 10.217.98.122:5000
+```
+
+All follower nodes. Increment `node-rank` each time:
+```
+python3 -m sglang.launch_server --model-path /data/models/DeepSeek-R1-Distill-Llama-70B --tp 16 --dist-init-addr 10.217.98.122:5000 --nnodes 2 --node-rank 1 --trust-remote-code
+```
+
+- Parameters `--leader-addr` and `--dist-init-addr` must match and be the IP address of the leader node. All followers must be able to connect. SGLang is using [PyTorch Distributed](https://docs.pytorch.org/tutorials/beginner/dist_overview.html) for networking.
+- Parameters `--tensor-parallel-size` and `--tp` must match and be the total number of GPUs across the cluster.
+- `--node-rank` must be unique consecutive integers starting at 1. The leader, managed by Dynamo, is 0.
 
 ### vllm
 
-Using the [vllm](https://github.com/vllm-project/vllm) Python library. We only use the back half of vllm, talking to it over `zmq`. Slow startup, fast inference. Supports both safetensors from HF and GGUF files.
+Using the [vllm](https://github.com/vllm-project/vllm) Python library. Slow startup, fast inference. Supports both safetensors from HF and GGUF files, but is very slow for GGUF - prefer llamacpp.
+
+The vllm engine requires requires [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`) to be running.
 
 We use [uv](https://docs.astral.sh/uv/) but any virtualenv manager should work.
 
@@ -230,100 +283,32 @@ Inside that virtualenv:
 
 **HF repo:**
 ```
-./dynamo-run in=http out=vllm ~/llm_models/Llama-3.2-3B-Instruct/
+./dynamo-run in=http out=vllm ~/llms/Llama-3.2-3B-Instruct/
 
-```
-
-**GGUF:**
-```
-./dynamo-run in=http out=vllm ~/llm_models/Llama-3.2-3B-Instruct-Q6_K.gguf
-```
-
-**Multi-node:**
-**Node 1:**
-```
-dynamo-run in=text out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --tensor-parallel-size 8 --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 0
-```
-
-**Node 2:**
-```
-dynamo-run in=none out=vllm ~/llm_models/Llama-3.2-3B-Instruct/ --num-nodes 2 --leader-addr 10.217.98.122:6539 --node-rank 1
 ```
 
 To pass extra arguments to the vllm engine see [Extra engine arguments](#extra_engine_arguments) below.
 
-### Python bring-your-own-engine
+**Multi-GPU**
 
-You can provide your own engine in a Python file. The file must provide a generator with this signature:
-```
-async def generate(request):
-```
+Pass `--tensor-parallel-size <NUM-GPUS>` to `dynamo-run`.
 
-Build: `cargo build --features python`
+To specify which GPUs to use set environment variable `CUDA_VISIBLE_DEVICES`.
 
-#### Python does the pre-processing
+**Multi-node:**
 
-If the Python engine wants to receive and returns strings - it will do the prompt templating and tokenization itself - run it like this:
+vllm uses [ray](https://docs.vllm.ai/en/latest/serving/distributed_serving.html#running-vllm-on-multiple-nodes) for pipeline parallel inference. Dynamo does not change or manage that.
 
-```
-dynamo-run out=pystr:/home/user/my_python_engine.py
-```
+Here is an example on two 8x nodes:
+- Leader node: `ray start --head --port=6379`
+- Each follower node: `ray start --address='<HEAD_NODE_IP>:6379`
+- Leader node: `dynamo-run out=vllm ~/llms/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 16`
 
-- The `request` parameter is a map, an OpenAI compatible create chat completion request: https://platform.openai.com/docs/api-reference/chat/create
-- The function must `yield` a series of maps conforming to create chat completion stream response (example below).
-- If using an HTTP front-end add the `--model-name` flag. This is the name we serve the model under.
+The `--tensor-parallel-size` parameter is the total number of GPUs in the cluster. This is often constrained by a model dimension such as being a divisor of the number of attention heads.
 
-The file is loaded once at startup and kept in memory.
+Startup can be slow so you may want to `export DYN_LOG=debug` to see progress.
 
-**Example engine:**
-```
-import asyncio
-
-async def generate(request):
-    yield {"id":"1","choices":[{"index":0,"delta":{"content":"The","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-3B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
-    await asyncio.sleep(0.1)
-    yield {"id":"1","choices":[{"index":0,"delta":{"content":" capital","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-3B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
-    await asyncio.sleep(0.1)
-    yield {"id":"1","choices":[{"index":0,"delta":{"content":" of","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-3B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
-    await asyncio.sleep(0.1)
-    yield {"id":"1","choices":[{"index":0,"delta":{"content":" France","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-3B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
-    await asyncio.sleep(0.1)
-    yield {"id":"1","choices":[{"index":0,"delta":{"content":" is","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-3B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
-    await asyncio.sleep(0.1)
-    yield {"id":"1","choices":[{"index":0,"delta":{"content":" Paris","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-3B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
-    await asyncio.sleep(0.1)
-    yield {"id":"1","choices":[{"index":0,"delta":{"content":".","role":"assistant"}}],"created":1841762283,"model":"Llama-3.2-3B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
-    await asyncio.sleep(0.1)
-    yield {"id":"1","choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"stop"}],"created":1841762283,"model":"Llama-3.2-3B-Instruct","system_fingerprint":"local","object":"chat.completion.chunk"}
-```
-
-Command line arguments are passed to the python engine like this:
-```
-dynamo-run out=pystr:my_python_engine.py -- -n 42 --custom-arg Orange --yes
-```
-
-The python engine receives the arguments in `sys.argv`. The argument list will include some standard ones as well as anything after the `--`.
-
-This input:
-```
-dynamo-run out=pystr:my_engine.py /opt/models/Llama-3.2-3B-Instruct/ --model-name llama_3.2 --tensor-parallel-size 4 -- -n 1
-```
-
-is read like this:
-```
-async def generate(request):
-    .. as before ..
-
-if __name__ == "__main__":
-    print(f"MAIN: {sys.argv}")
-```
-
-and produces this output:
-```
-MAIN: ['my_engine.py', '--model-path', '/opt/models/Llama-3.2-3B-Instruct/', '--model-name', 'llama3.2', '--http-port', '8080', '--tensor-parallel-size', '4', '--base-gpu-id', '0', '--num-nodes', '1', '--node-rank', '0', '-n', '1']
-```
-
-This allows quick iteration on the engine setup. Note how the `-n` `1` is included. Flags `--leader-addr` and `--model-config` will also be added if provided to `dynamo-run`.
+Shutdown: `ray stop`
 
 #### TensorRT-LLM engine
 
@@ -344,47 +329,6 @@ Execute the following to load the TensorRT-LLM model specified in the configurat
 ```
 dynamo run out=pystr:/workspace/examples/tensorrt_llm/engines/trtllm_engine.py  -- --engine_args /workspace/examples/tensorrt_llm/configs/llm_api_config.yaml
 ```
-
-#### Dynamo does the pre-processing
-
-If the Python engine wants to receive and return tokens - the prompt templating and tokenization is already done - run it like this:
-```
-dynamo-run out=pytok:/home/user/my_python_engine.py --model-path <hf-repo-checkout>
-```
-
-- The request parameter is a map that looks like this:
-```
-{'token_ids': [128000, 128006, 9125, 128007, ... lots more ... ], 'stop_conditions': {'max_tokens': 8192, 'stop': None, 'stop_token_ids_hidden': [128001, 128008, 128009], 'min_tokens': None, 'ignore_eos': None}, 'sampling_options': {'n': None, 'best_of': None, 'presence_penalty': None, 'frequency_penalty': None, 'repetition_penalty': None, 'temperature': None, 'top_p': None, 'top_k': None, 'min_p': None, 'use_beam_search': None, 'length_penalty': None, 'seed': None}, 'eos_token_ids': [128001, 128008, 128009], 'mdc_sum': 'f1cd44546fdcbd664189863b7daece0f139a962b89778469e4cffc9be58ccc88', 'annotations': []}
-```
-
-- The `generate` function must `yield` a series of maps that look like this:
-```
-{"token_ids":[791],"tokens":None,"text":None,"cum_log_probs":None,"log_probs":None,"finish_reason":None}
-```
-
-- Command like flag `--model-path` which must point to a Hugging Face repo checkout containing the `tokenizer.json`. The `--model-name` flag is optional. If not provided we use the HF repo name (directory name) as the model name.
-
-**Example engine:**
-```
-import asyncio
-
-async def generate(request):
-    yield {"token_ids":[791]}
-    await asyncio.sleep(0.1)
-    yield {"token_ids":[6864]}
-    await asyncio.sleep(0.1)
-    yield {"token_ids":[315]}
-    await asyncio.sleep(0.1)
-    yield {"token_ids":[9822]}
-    await asyncio.sleep(0.1)
-    yield {"token_ids":[374]}
-    await asyncio.sleep(0.1)
-    yield {"token_ids":[12366]}
-    await asyncio.sleep(0.1)
-    yield {"token_ids":[13]}
-```
-
-`pytok` supports the same ways of passing command line arguments as `pystr` - `initialize` or `main` with `sys.argv`.
 
 ### Echo Engines
 
@@ -445,9 +389,78 @@ The output looks like this:
 {"text":"What is the capital of Spain?","response":".The capital of Spain is Madrid.","tokens_in":7,"tokens_out":7,"elapsed_ms":855}
 ```
 
+### Write your own engine in Python
+
+Note: This section replaces "bring-your-own-engine".
+
+The [dynamo](https://pypi.org/project/ai-dynamo/) Python library allows you to build your own engine and attach it to Dynamo.
+
+The Python file must do three things:
+1. Decorate a function to get the runtime
+2. Register on the network
+3. Attach a request handler
+
+```
+from dynamo.llm import ModelType, register_llm
+from dynamo.runtime import DistributedRuntime, dynamo_worker
+
+# 1. Decorate a function to get the runtime
+#
+@dynamo_worker(static=False)
+async def worker(runtime: DistributedRuntime):
+
+    # 2. Register ourselves on the network
+    #
+    component = runtime.namespace("namespace").component("component")
+    await component.create_service()
+    model_path = "Qwen/Qwen2.5-0.5B-Instruct" # or "/data/models/Qwen2.5-0.5B-Instruct"
+    model_type = ModelType.Backend
+    endpoint = component.endpoint("endpoint")
+    await register_llm(endpoint, model_path, model_type)
+
+    # Initialize your engine here
+    # engine = ...
+
+    # 3. Attach request handler
+    #
+    await endpoint.serve_endpoint(RequestHandler(engine).generate, None)
+
+class RequestHandler:
+
+    def __init__(self, engine):
+        ...
+
+    async def generate(self, request):
+        # Call the engine
+        # yield result dict
+        ...
+
+if __name__ == "__main__":
+    uvloop.install()
+    asyncio.run(worker())
+```
+
+
+The `model_path` can be:
+- A HuggingFace repo ID. It will be downloaded and cached locally.
+- The path to a checkout of a HuggingFace repo - any folder containing safetensor files as well as `config.json`, `tokenizer.json` and `tokenizer_config.json`.
+- The path to a GGUF file, if your engine supports that.
+
+The `model_type` can be:
+- ModelType.Backend. Dynamo handles pre-processing. Your `generate` method receives a `request` dict containing a `token_ids` array of int. It must return a dict also containing a `token_ids` array and an optional `finish_reason` string.
+- ModelType.Chat. Your `generate` method receives a `request` and must return a response dict of type [OpenAI Chat Completion](https://platform.openai.com/docs/api-reference/chat). Your engine handles pre-processing.
+- ModelType.Completion. Your `generate` method receives a `request` and must return a response dict of the older [Completions](https://platform.openai.com/docs/api-reference/completions). Your engine handles pre-processing.
+
+Here are some example engines:
+- [vllm simple](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_vllm.py)
+- [sglang simple](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_sglang.py)
+- [vllm](https://github.com/ai-dynamo/dynamo/blob/main/launch/dynamo-run/src/subprocess/vllm_inc.py)
+- [sglang](https://github.com/ai-dynamo/dynamo/blob/main/launch/dynamo-run/src/subprocess/sglang_inc.py)
+
+
 ### Defaults
 
-The input defaults to `in=text`. The output will default to `mistralrs` engine. If not available whatever engine you have compiled in (so depending on `--features`).
+The input defaults to `in=text`. The output will default to `out=mistralrs` engine, unless it is disabled with `--no-default-features` in which case vllm is used.
 
 ### Extra engine arguments
 
@@ -463,5 +476,5 @@ Put the arguments in a JSON file:
 
 Pass it like this:
 ```
-dynamo-run out=sglang ~/llm_models/Llama-3.2-3B-Instruct --extra-engine-args sglang_extra.json
+dynamo-run out=sglang ~/llms/Llama-3.2-3B-Instruct --extra-engine-args sglang_extra.json
 ```

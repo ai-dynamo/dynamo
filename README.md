@@ -21,7 +21,7 @@ limitations under the License.
 [![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/nvidia-dynamo)
 
-| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[Support Matrix](support_matrix.md)** | **[Guides](docs/guides)** | **[Architecture and Features](docs/architecture.md)** | **[APIs](lib/bindings/python/README.md)** | **[SDK](deploy/dynamo/sdk/README.md)** |
+| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[Support Matrix](support_matrix.md)** | **[Guides](docs/guides)** | **[Architecture and Features](docs/architecture.md)** | **[APIs](lib/bindings/python/README.md)** | **[SDK](deploy/sdk/README.md)** |
 
 NVIDIA Dynamo is a high-throughput low-latency inference framework designed for serving generative AI and reasoning models in multi-node distributed environments. Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLang or others) and captures LLM-specific capabilities such as:
 
@@ -44,7 +44,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip pytho
 python3 -m venv venv
 source venv/bin/activate
 
-pip install ai-dynamo[all]
+pip install "ai-dynamo[all]"
 ```
 > [!NOTE]
 > To ensure compatibility, please refer to the examples in the release branch or tag that matches the version you installed.
@@ -112,7 +112,7 @@ example.
 First start the Dynamo Distributed Runtime services:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 #### Start Dynamo LLM Serving Components
 
@@ -151,13 +151,13 @@ Otherwise, to develop locally, we recommend working inside of the container
 ./container/run.sh -it --mount-workspace
 
 cargo build --release
-mkdir -p /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
-cp /workspace/target/release/http /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
-cp /workspace/target/release/llmctl /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
-cp /workspace/target/release/dynamo-run /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
+mkdir -p /workspace/deploy/sdk/src/dynamo/sdk/cli/bin
+cp /workspace/target/release/http /workspace/deploy/sdk/src/dynamo/sdk/cli/bin
+cp /workspace/target/release/llmctl /workspace/deploy/sdk/src/dynamo/sdk/cli/bin
+cp /workspace/target/release/dynamo-run /workspace/deploy/sdk/src/dynamo/sdk/cli/bin
 
 uv pip install -e .
-export PYTHONPATH=$PYTHONPATH:/workspace/deploy/dynamo/sdk/src:/workspace/components/planner/src
+export PYTHONPATH=$PYTHONPATH:/workspace/deploy/sdk/src:/workspace/components/planner/src
 ```
 
 
@@ -177,10 +177,10 @@ cd lib/bindings/python
 pip install .
 
 cd ../../../
-pip install .[all]
+pip install ".[all]"
 
 # To test
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/metrics/docker-compose.yml up -d
 cd examples/llm
 dynamo serve graphs.agg:Frontend -f configs/agg.yaml
 ```
