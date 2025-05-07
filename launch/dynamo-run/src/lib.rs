@@ -26,10 +26,6 @@ const CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(feature = "python")]
 const PYTHON_STR_SCHEME: &str = "pystr:";
 
-/// How we identify a python token endpoint
-#[cfg(feature = "python")]
-const PYTHON_TOK_SCHEME: &str = "pytok:";
-
 pub enum EngineConfig {
     /// An remote networked engine we don't know about yet
     Dynamic(Endpoint),
@@ -133,6 +129,11 @@ pub async fn run(
                 // TODO Does sglang support GGUF? Can we make it work?
                 anyhow::bail!("`--model-path should point at a HuggingFace repo checkout");
             }
+            let multi_node_conf = dynamo_llm::engines::MultiNodeConfig {
+                num_nodes: flags.num_nodes,
+                node_rank: flags.node_rank,
+                leader_addr: flags.leader_addr.clone().unwrap_or_default(),
+            };
             let (py_script, child) = match subprocess::start(
                 subprocess::sglang::PY,
                 local_model.path(),
@@ -141,6 +142,11 @@ pub async fn run(
                     None
                 } else {
                     Some(flags.base_gpu_id)
+                },
+                if flags.num_nodes <= 1 {
+                    None
+                } else {
+                    Some(multi_node_conf)
                 },
                 flags.extra_engine_args.as_deref(),
             )
@@ -169,6 +175,7 @@ pub async fn run(
                 local_model.path(),
                 flags.tensor_parallel_size,
                 None, // base_gpu_id. vllm uses CUDA_VISIBLE_DEVICES instead
+                None, // multi-node config. vllm uses `ray`, see guide
                 flags.extra_engine_args.as_deref(),
             )
             .await
@@ -209,18 +216,6 @@ pub async fn run(
             let engine =
                 dynamo_engine_python::make_string_engine(cancel_token.clone(), &p, py_args).await?;
             EngineConfig::StaticFull {
-                engine,
-                model: Box::new(local_model),
-            }
-        }
-        #[cfg(feature = "python")]
-        Output::PythonTok(path_str) => {
-            let card = local_model.card();
-            let py_args = flags.as_vec(&path_str, &card.service_name);
-            let p = std::path::PathBuf::from(path_str);
-            let engine =
-                dynamo_engine_python::make_token_engine(cancel_token.clone(), &p, py_args).await?;
-            EngineConfig::StaticCore {
                 engine,
                 model: Box::new(local_model),
             }
