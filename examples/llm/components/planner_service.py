@@ -3,7 +3,7 @@ import logging
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
 from components.planner import start_planner
 from pydantic import BaseModel
-
+from dynamo.sdk.lib.service import ComponentType
 logger = logging.getLogger(__name__)
 
 class RequestType(BaseModel):
@@ -21,7 +21,8 @@ parser = argparse.ArgumentParser()
     },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
-    image=DYNAMO_IMAGE
+    image=DYNAMO_IMAGE,
+    component_type=ComponentType.PLANNER
 )
 class Planner:
     def __init__(self):
