@@ -165,6 +165,9 @@ class Processor(ChatProcessorMixin):
             # If ignore_eos is True, set min_tokens to max_tokens to guarantee
             # the full expected OSL for consistent benchmarking purposes.
             if ignore_eos:
+                logger.debug(
+                    f"[preprocessor] `ignore_eos` detected, setting `min_tokens` to `max_completion_tokens`: {raw_request.max_completion_tokens}"
+                )
                 raw_request.min_tokens = raw_request.max_completion_tokens
 
         async for response in self._generate(raw_request, RequestType.CHAT):
