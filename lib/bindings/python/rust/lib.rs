@@ -101,12 +101,13 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
 }
 
 #[pyfunction]
-#[pyo3(text_signature = "(endpoint, path, model_type)")]
+#[pyo3(signature = (model_type, endpoint, model_path, model_name=None))]
 fn register_llm<'p>(
     py: Python<'p>,
-    endpoint: Endpoint,
-    path: &str,
     model_type: ModelType,
+    endpoint: Endpoint,
+    model_path: &str,
+    model_name: Option<&str>,
 ) -> PyResult<Bound<'p, PyAny>> {
     let model_type_obj = match model_type {
         ModelType::Chat => llm_rs::model_type::ModelType::Chat,
@@ -114,10 +115,11 @@ fn register_llm<'p>(
         ModelType::Backend => llm_rs::model_type::ModelType::Backend,
     };
 
-    let inner_path = path.to_string();
+    let inner_path = model_path.to_string();
+    let model_name = model_name.map(|n| n.to_string());
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         // Download from HF, load the ModelDeploymentCard
-        let mut local_model = llm_rs::LocalModel::prepare(&inner_path, None, None)
+        let mut local_model = llm_rs::LocalModel::prepare(&inner_path, None, model_name)
             .await
             .map_err(to_pyerr)?;
 

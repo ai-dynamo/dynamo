@@ -416,7 +416,8 @@ async def worker(runtime: DistributedRuntime):
     model_path = "Qwen/Qwen2.5-0.5B-Instruct" # or "/data/models/Qwen2.5-0.5B-Instruct"
     model_type = ModelType.Backend
     endpoint = component.endpoint("endpoint")
-    await register_llm(endpoint, model_path, model_type)
+    # Optional last param to register_llm is model_name. If not present derives it from model_path
+    await register_llm(model_type, endpoint, model_path)
 
     # Initialize your engine here
     # engine = ...

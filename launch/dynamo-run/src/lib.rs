@@ -72,7 +72,7 @@ pub async fn run(
                     LocalModel::prepare(
                         model_path.to_str().context("Invalid UTF-8 in model path")?,
                         flags.model_config.as_deref(),
-                        maybe_model_name.as_deref(),
+                        maybe_model_name,
                     )
                     .await?
                 }
@@ -136,7 +136,7 @@ pub async fn run(
             };
             let (py_script, child) = match subprocess::start(
                 subprocess::sglang::PY,
-                local_model.path(),
+                &local_model,
                 flags.tensor_parallel_size,
                 if flags.base_gpu_id == 0 {
                     None
@@ -172,7 +172,7 @@ pub async fn run(
             }
             let (py_script, child) = match subprocess::start(
                 subprocess::vllm::PY,
-                local_model.path(),
+                &local_model,
                 flags.tensor_parallel_size,
                 None, // base_gpu_id. vllm uses CUDA_VISIBLE_DEVICES instead
                 None, // multi-node config. vllm uses `ray`, see guide

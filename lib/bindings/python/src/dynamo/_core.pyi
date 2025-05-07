@@ -610,7 +610,7 @@ class ModelType:
     """What type of request this model needs: Chat, Component or Backend (pre-processed)"""
     ...
 
-async def register_llm(endpoint: Endpoint, path: str, model_type: ModelType) -> None:
+async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str]) -> None:
     """Attach the model at path to the given endpoint, and advertise it as model_type"""
     ...
 
