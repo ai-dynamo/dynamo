@@ -84,7 +84,7 @@ class KubernetesAPI:
             graph_deployment_ref = None
             for ref in owner_refs:
                 if (
-                    ref.get("apiVersion") == "nvidia.com/v1alpha1" 
+                    ref.get("apiVersion") == "nvidia.com/v1alpha1"
                     and ref.get("kind") == "DynamoGraphDeployment"
                 ):
                     graph_deployment_ref = ref
