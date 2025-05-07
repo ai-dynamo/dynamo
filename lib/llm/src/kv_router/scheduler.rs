@@ -218,6 +218,7 @@ pub fn process_worker_selection(
     // Update worker state predictively
     // Will be overwritten on next polling of metrics
     worker.data.num_requests_waiting += 1;
+    // Assumes radix attention so KV load is only incremented by uncached blocks
     worker.data.kv_active_blocks += selection.required_blocks - selection.overlap_blocks as u64;
 
     // Emit event
