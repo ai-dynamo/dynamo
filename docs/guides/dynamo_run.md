@@ -6,9 +6,9 @@
     * [Multi-node](#multi-node)
 * [Full usage details](#full-usage-details)
     * [Setup](#setup)
-    * [MistralRS](#mistralrs)
+    * [mistral.rs](#mistral_rs)
     * [Sglang](#sglang)
-    * [lama.cpp](#llama_cpp)
+    * [llama.cpp](#llama_cpp)
     * [Vllm](#vllm)
     * [Python bring-your-own-engine](#python-bring-your-own-engine)
     * [TensorRT-LLM](#tensorrt-llm-engine)
@@ -19,7 +19,7 @@
 
 `dynamo-run` is a CLI tool for exploring the Dynamo components, and an example of how to use them from Rust. It is also available as `dynamo run` if using the Python wheel.
 
-It supports the following engines: mistralrs, llamacpp, sglang, vllm and tensorrt-llm. MistralRS is the default and easiest to use.
+It supports the following engines: mistralrs, llamacpp, sglang, vllm and tensorrt-llm. `mistralrs` is the default and easiest to use.
 
 Usage:
 ```
@@ -29,6 +29,8 @@ dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mi
 ## Quickstart with pip and vllm
 
 If you used `pip` to install `dynamo` you should have the `dynamo-run` binary pre-installed with the `vllm` engine. You must be in a virtual env with vllm installed to use this. To compile from source, see "Full documentation" below.
+
+The vllm and sglang engines require [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`). Mistralrs and llamacpp do not.
 
 ### Use model from Hugging Face
 
@@ -79,7 +81,7 @@ curl -d '{"model": "Llama-3.2-3B-Instruct-Q4_K_M", "max_completion_tokens": 2049
 
 ### Multi-node
 
-You will need [etcd](https://etcd.io/) and [nats](https://nats.io) installed and accessible from both nodes.
+You will need [etcd](https://etcd.io/) and [nats](https://nats.io) with jetstream installed and accessible from both nodes.
 
 **Node 1:**
 ```
@@ -133,14 +135,6 @@ source $HOME/.cargo/env
 
 #### Step 3: Build
 
-Run `cargo build --features cuda -p dynamo-run` to install the `dynamo-run` binary in `target/debug`.
-
-> **Optionally**, you can run `cargo build` from any location with arguments:
-> ```
-> --target-dir /path/to/target_directory` specify target_directory with write privileges
-> --manifest-path /path/to/project/Cargo.toml` if cargo build is run outside of `launch/` directory
-> ```
-
 - Linux with GPU and CUDA (tested on Ubuntu):
 ```
 cargo build --features cuda
@@ -156,11 +150,19 @@ cargo build --features metal
 cargo build
 ```
 
+Optionally you can run `cargo build` from any location with arguments:
+
+```
+--target-dir /path/to/target_directory` # specify target_directory with write privileges
+--manifest-path /path/to/project/Cargo.toml` # if cargo build is run outside of `launch/` directory
+```
+
 The binary will be called `dynamo-run` in `target/debug`
 ```
 cd target/debug
 ```
-> Note: Build with `--release` for a smaller binary and better performance, but longer build times. The binary will be in `target/release`.
+
+Build with `--release` for a smaller binary and better performance, but longer build times. The binary will be in `target/release`.
 
 ### mistralrs
 
@@ -178,11 +180,19 @@ dynamo-run in=text out=mistralrs Qwen/Qwen2.5-3B-Instruct
 
 ### llama_cpp
 
+Currently llama_cpp is not included by default. Build it like this:
+
+```
+cargo build --features llamacpp[,cuda|metal|vulkan] -p dynamo-run
+```
+
 ```
 dynamo-run out=llamacpp ~/llms/Llama-3.2-3B-Instruct-Q6_K.gguf
 ```
 
 ### sglang
+
+The sglang engine requires requires [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`) to be running.
 
 1. Setup the python virtual env:
 
@@ -208,6 +218,8 @@ To pass extra arguments to the sglang engine see *Extra engine arguments* below.
 ### vllm
 
 Using the [vllm](https://github.com/vllm-project/vllm) Python library. Slow startup, fast inference. Supports both safetensors from HF and GGUF files, but is very slow for GGUF - prefer llamacpp.
+
+The vllm engine requires requires [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`) to be running.
 
 We use [uv](https://docs.astral.sh/uv/) but any virtualenv manager should work.
 
@@ -442,7 +454,7 @@ The output looks like this:
 
 ### Defaults
 
-The input defaults to `in=text`. The output will default to `mistralrs` engine, unless it is disabled with `--no-default-features` in which case vllm is used.
+The input defaults to `in=text`. The output will default to `out=mistralrs` engine, unless it is disabled with `--no-default-features` in which case vllm is used.
 
 ### Extra engine arguments
 
