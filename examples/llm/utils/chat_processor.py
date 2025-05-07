@@ -29,8 +29,9 @@ from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_engine import RequestPrompt
 from vllm.inputs.data import TokensPrompt
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.sampling_params import SamplingParams
+from vllm.transformers_utils.tokenizer import AnyTokenizer
+
 
 @runtime_checkable
 class ProcessMixInRequired(Protocol):
