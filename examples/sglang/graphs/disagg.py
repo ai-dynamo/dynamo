@@ -13,27 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict
+from components.decode_worker import SGLangDecodeWorker
+from components.frontend import Frontend
+from components.processor import Processor
+from components.worker import SGLangWorker
 
-from pydantic import BaseModel
-
-
-class SGLangGenerateRequest(BaseModel):
-    # Wrapper around the GenerateReqInput which is the input to SGLang engine
-    request_id: str
-    input_ids: list[int]
-    sampling_params: dict
-
-    # disaggrgation
-    bootstrap_host: str | None = None
-    bootstrap_port: int | None = None
-    bootstrap_room: int | None = None
-
-
-class MyRequestOutput(BaseModel):
-    text: Dict[str, Any]
-
-
-class BootstrapInfo(BaseModel):
-    host: str
-    port: int
+Frontend.link(Processor).link(SGLangWorker).link(SGLangDecodeWorker)
