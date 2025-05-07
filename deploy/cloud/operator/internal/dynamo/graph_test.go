@@ -533,8 +533,8 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 					DynamoTag: "dynamocomponent:MyService1",
 					Services: []ServiceConfig{
 						{
-							Name: "service1",
-							Type: ComponentTypePlanner,
+							Name:          "service1",
+							ComponentType: ComponentTypePlanner,
 							Config: Config{
 								Dynamo: &DynamoConfig{
 									Enabled:   true,
