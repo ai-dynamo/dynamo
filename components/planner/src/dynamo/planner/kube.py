@@ -37,7 +37,6 @@ class KubernetesAPI:
             # Fallback to 'default' if not running in k8s
             return "default"
 
-
     async def get_graph_deployment(
         self, component_name: str, dynamo_namespace: str
     ) -> Optional[dict]:
