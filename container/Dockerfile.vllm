@@ -71,6 +71,12 @@ WORKDIR /workspace
 # Copy nixl source, and use commit hash as cache hint
 COPY --from=nixl_base /opt/nixl /opt/nixl
 COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
+RUN cd /opt/nixl && \
+    mkdir build && \
+    meson setup build/ --prefix=/usr/local/nixl && \
+    cd build/ && \
+    ninja && \
+    ninja install
 
 ### NATS & ETCD SETUP ###
 # nats
@@ -273,6 +279,7 @@ ARG RELEASE_BUILD
 WORKDIR /workspace
 
 RUN yum update -y \
+    && yum install -y llvm-toolset \
     && yum install -y python3.12-devel \
     && yum install -y protobuf-compiler \
     && yum clean all \
@@ -285,6 +292,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
+COPY --from=base /usr/local/nixl /opt/nvidia/nvda_nixl
 COPY --from=base /workspace /workspace
 COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
 ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
@@ -333,6 +341,7 @@ WORKDIR /workspace
 
 COPY --from=wheel_builder /workspace/dist/ /workspace/dist/
 COPY --from=wheel_builder /workspace/target/ /workspace/target/
+COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
 # Copy Cargo cache to avoid re-downloading dependencies
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
