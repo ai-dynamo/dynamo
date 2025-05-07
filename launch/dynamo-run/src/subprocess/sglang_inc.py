@@ -59,8 +59,6 @@ class RequestHandler:
         self.engine_client = engine
 
     async def generate(self, request):
-        logging.debug("Generate start here")
-
         sampling_params = {}
         for key, value in request["sampling_options"].items():
             if value:
@@ -202,6 +200,7 @@ def cmd_line_args():
     if args.model_name:
         config.model_name = args.model_name
     else:
+        # This becomes an `Option` on the Rust side
         config.model_name = None
 
     endpoint_str = args.endpoint.replace("dyn://", "", 1)
