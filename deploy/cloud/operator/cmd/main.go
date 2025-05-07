@@ -71,7 +71,7 @@ func main() {
 	var natsAddr string
 	var etcdAddr string
 	var istioVirtualServiceGateway string
-	var virtualServiceEnforcesHTTPS bool
+	var virtualServiceSupportsHTTPS bool
 	var ingressControllerClassName string
 	var ingressControllerTLSSecretName string
 	var ingressHostSuffix string
@@ -92,7 +92,7 @@ func main() {
 	flag.StringVar(&etcdAddr, "etcdAddr", "", "address of the etcd server")
 	flag.StringVar(&istioVirtualServiceGateway, "istio-virtual-service-gateway", "",
 		"The name of the istio virtual service gateway to use")
-	flag.BoolVar(&virtualServiceEnforcesHTTPS, "virtual-service-enforces-https", false,
+	flag.BoolVar(&virtualServiceSupportsHTTPS, "virtual-service-supports-https", false,
 		"If set, assume VirtualService endpoints are HTTPS")
 	flag.StringVar(&ingressControllerClassName, "ingress-controller-class-name", "",
 		"The name of the ingress controller class to use")
@@ -110,7 +110,7 @@ func main() {
 
 	ctrlConfig := commonController.Config{
 		RestrictedNamespace:           restrictedNamespace,
-		VirtualServiceEnforcesHTTPS: virtualServiceEnforcesHTTPS,
+		VirtualServiceSupportsHTTPS: virtualServiceSupportsHTTPS,
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))

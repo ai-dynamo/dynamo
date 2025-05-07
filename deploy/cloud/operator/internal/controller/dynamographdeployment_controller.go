@@ -238,7 +238,7 @@ func (r *DynamoGraphDeploymentReconciler) generateDefaultIngressSpec(dynamoDeplo
 }
 
 func (r *DynamoGraphDeploymentReconciler) isEndpointSecured() bool {
-	if r.VirtualServiceGateway != "" && r.Config.VirtualServiceEnforcesHTTPS {
+	if r.VirtualServiceGateway != "" && r.Config.VirtualServiceSupportsHTTPS {
 		return true
 	}
 	return r.IngressControllerTLSSecret != ""
