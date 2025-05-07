@@ -744,6 +744,8 @@ impl<'a, S: Storage, M: BlockMetadata> AsBlockSlice<'a, ImmutableBlock<S, M>>
 }
 
 pub mod nixl {
+    use crate::block_manager::storage::SystemStorage;
+    use crate::block_manager::{DeviceStorage, PinnedStorage};
 
     use super::*;
 
