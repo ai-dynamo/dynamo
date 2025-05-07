@@ -125,8 +125,9 @@ async def init(runtime: DistributedRuntime, config: Config):
         "task": "generate",
         "tensor_parallel_size": config.tensor_parallel_size,
         "skip_tokenizer_init": True,
-        "disable_log_stats": True,
         "disable_log_requests": True,
+        # KV routing relies on logging KV metrics
+        "disable_log_stats": False,
     }
     if config.extra_engine_args != "":
         json_map = {}
