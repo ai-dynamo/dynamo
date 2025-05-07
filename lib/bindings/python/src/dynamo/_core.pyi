@@ -49,6 +49,12 @@ class DistributedRuntime:
         """
         ...
 
+    def shutdown(self) -> None:
+        """
+        Shutdown the runtime by triggering the cancellation token
+        """
+        ...
+
 class PyLease:
     """
     A lease object

@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import asyncio
+import signal
+import sys
 
 import uvloop
 
@@ -37,7 +39,25 @@ async def worker(runtime: DistributedRuntime):
     print(
         f"Primary lease ID: {runtime.etcd_client().primary_lease_id()}/{runtime.etcd_client().primary_lease_id():#x}"
     )
+    
+    # Set up signal handler for graceful shutdown
+    loop = asyncio.get_running_loop()
+    
+    def signal_handler():
+        # Schedule the shutdown coroutine instead of calling it directly
+        asyncio.create_task(graceful_shutdown(runtime))
+    
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
+    
+    print("Signal handlers registered for graceful shutdown")
     await init(runtime, "dynamo")
+    
+
+async def graceful_shutdown(runtime: DistributedRuntime):
+    print(f"Received shutdown signal, shutting down...")
+    runtime.shutdown()
+    print("Shutdown complete")
 
 
 async def init(runtime: DistributedRuntime, ns: str):
@@ -46,16 +66,14 @@ async def init(runtime: DistributedRuntime, ns: str):
     A `Component` can serve multiple endpoints
     """
     component = runtime.namespace(ns).component("backend")
-    lease = await component.create_service_with_custom_lease(ttl=1)
-    lease_id = lease.id()
-    print(f"Created custom lease with ID: {lease_id}/{lease_id:#x}")
+    await component.create_service()
 
     endpoint = component.endpoint("generate")
     print("Started server instance")
 
     # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
     # after the lease is revoked
-    await endpoint.serve_endpoint(RequestHandler().generate, lease)
+    await endpoint.serve_endpoint(RequestHandler().generate)
 
 
 if __name__ == "__main__":
