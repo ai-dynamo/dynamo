@@ -66,12 +66,12 @@ type Autoscaling struct {
 }
 
 type Config struct {
-	Dynamo      *DynamoConfig `yaml:"dynamo,omitempty"`
-	Resources   *Resources    `yaml:"resources,omitempty"`
-	Traffic     *Traffic      `yaml:"traffic,omitempty"`
-	Autoscaling *Autoscaling  `yaml:"autoscaling,omitempty"`
-	HttpExposed bool          `yaml:"http_exposed,omitempty"`
-	ApiEndpoints []string     `yaml:"api_endpoints,omitempty"`
+	Dynamo       *DynamoConfig `yaml:"dynamo,omitempty"`
+	Resources    *Resources    `yaml:"resources,omitempty"`
+	Traffic      *Traffic      `yaml:"traffic,omitempty"`
+	Autoscaling  *Autoscaling  `yaml:"autoscaling,omitempty"`
+	HttpExposed  bool          `yaml:"http_exposed,omitempty"`
+	ApiEndpoints []string      `yaml:"api_endpoints,omitempty"`
 }
 
 type ServiceConfig struct {

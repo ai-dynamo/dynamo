@@ -109,7 +109,7 @@ func main() {
 	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
 
 	ctrlConfig := commonController.Config{
-		RestrictedNamespace:           restrictedNamespace,
+		RestrictedNamespace:         restrictedNamespace,
 		VirtualServiceSupportsHTTPS: virtualServiceSupportsHTTPS,
 	}
 
