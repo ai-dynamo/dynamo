@@ -15,7 +15,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use clap::ValueEnum;
 use dynamo_runtime::pipeline::RouterMode as RuntimeRouterMode;
@@ -106,21 +105,6 @@ pub struct Flags {
     #[arg(long, default_value = "round-robin")]
     pub router_mode: RouterMode,
 
-    /// Internal use only.
-    // Start the python vllm engine sub-process.
-    #[arg(long, hide = true, default_value = "false")]
-    pub internal_vllm_process: bool,
-
-    /// Internal use only.
-    /// Start the sglang Python sub-process.
-    /// The params in the tuple are:
-    /// - the fd of the write end of a pipe where sglang will signal that it's ready.
-    /// - the node rank (0 for first host, 1 for second host, etc)
-    /// - the workers' rank (globally unique)
-    /// - the GPU to use (locally unique)
-    #[arg(long, hide = true, value_parser = parse_sglang_flags)]
-    pub internal_sglang_process: Option<SgLangFlags>,
-
     /// Additional engine-specific arguments from a JSON file.
     /// Contains a mapping of parameter names to values.
     #[arg(long)]
@@ -198,30 +182,6 @@ impl Flags {
             Ok(None)
         }
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct SgLangFlags {
-    pub pipe_fd: u32,
-    pub tp_rank: u32,
-    pub gpu_id: u32,
-}
-fn parse_sglang_flags(s: &str) -> Result<SgLangFlags, String> {
-    let nums: Vec<u32> = s
-        .split(',')
-        .map(u32::from_str)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-
-    if nums.len() != 3 {
-        return Err("Need exactly 3 numbers".into());
-    }
-
-    Ok(SgLangFlags {
-        pipe_fd: nums[0],
-        tp_rank: nums[1],
-        gpu_id: nums[2],
-    })
 }
 
 #[derive(Default, PartialEq, Eq, ValueEnum, Clone, Debug)]

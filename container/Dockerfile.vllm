@@ -59,7 +59,9 @@ RUN apt-get update -y && \
     ninja-build \
     pybind11-dev \
     # Rust build dependencies
+	clang \
     libclang-dev \
+	git \
     # Install utilities
     nvtop \
     tmux \
@@ -305,7 +307,7 @@ COPY launch /workspace/launch
 COPY deploy/sdk /workspace/deploy/sdk
 
 # Build Rust crate binaries packaged with the wheel
-RUN cargo build --release --locked --features mistralrs,sglang,vllm,python \
+RUN cargo build --release --locked --features mistralrs,python \
     -p dynamo-run \
     -p llmctl \
     # Multiple http named crates are present in dependencies, need to specify the path

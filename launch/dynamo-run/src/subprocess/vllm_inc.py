@@ -66,19 +66,20 @@ class RequestHandler:
     Request handler for the generate endpoint
     """
 
-    def __init__(self, engine):
+    def __init__(self, engine, default_sampling_params):
         self.engine_client = engine
+        self.default_sampling_params = default_sampling_params
 
     async def generate(self, request):
         request_id = "1"  # hello_world example only
 
         logging.debug(f"Received request: {request}")
         prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
-        sampling_params = SamplingParams(
-            temperature=request["sampling_options"]["temperature"],
-            # vllm defaults this to 16
-            max_tokens=request["stop_conditions"]["max_tokens"],
-        )
+
+        sampling_params = SamplingParams(**self.default_sampling_params)
+        sampling_params.temperature = request["sampling_options"]["temperature"]
+        sampling_params.max_tokens = request["stop_conditions"]["max_tokens"]
+
         num_output_tokens_so_far = 0
         gen = self.engine_client.generate(prompt, sampling_params, request_id)
         async for res in gen:
@@ -142,13 +143,18 @@ async def init(runtime: DistributedRuntime, config: Config):
         arg_map = {**arg_map, **json_map}  # json_map gets precedence
 
     engine_args = AsyncEngineArgs(**arg_map)
+    model_config = engine_args.create_model_config()
+    # Load default sampling params from `generation_config.json`
+    default_sampling_params = model_config.get_diff_sampling_param()
 
     engine_context = build_async_engine_client_from_engine_args(engine_args)
     engine_client = await engine_context.__aenter__()
 
     # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
     # after the lease is revoked
-    await endpoint.serve_endpoint(RequestHandler(engine_client).generate, None)
+    await endpoint.serve_endpoint(
+        RequestHandler(engine_client, default_sampling_params).generate, None
+    )
 
 
 def cmd_line_args():

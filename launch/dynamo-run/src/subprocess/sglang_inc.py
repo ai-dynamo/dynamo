@@ -1,18 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
 
 #
 # A very basic example of sglang worker handling pre-processed requests.
@@ -52,6 +39,9 @@ class Config:
     model: str
     base_gpu_id: int
     tensor_parallel_size: int
+    nnodes: int
+    node_rank: int
+    dist_init_addr: str
     extra_engine_args: str
 
 
@@ -111,6 +101,13 @@ async def init(runtime: DistributedRuntime, config: Config):
         "tp_size": config.tensor_parallel_size,
         "base_gpu_id": config.base_gpu_id,
     }
+    if config.dist_init_addr != "":
+        arg_map["trust_remote_code"] = True
+        arg_map["nnodes"] = config.nnodes
+        arg_map["dist_init_addr"] = config.dist_init_addr
+        # In practice this is always 0 because Dynamo only manages the leader
+        arg_map["node_rank"] = config.node_rank
+
     if config.extra_engine_args != "":
         json_map = {}
         # extra_engine_args is a filename
@@ -158,6 +155,21 @@ def cmd_line_args():
         "--tensor-parallel-size", type=int, default=1, help="Number of GPUs to use."
     )
     parser.add_argument(
+        "--nnodes", type=int, default=1, help="The number of machines SGLang will use"
+    )
+    parser.add_argument(
+        "--node-rank",
+        type=int,
+        default=0,
+        help="Unique number for each node. 0 for the leader.",
+    )
+    parser.add_argument(
+        "--dist-init-addr",
+        type=str,
+        default="",
+        help="Host address (e.g., `192.168.0.2:25000`) of the node with rank 0",
+    )
+    parser.add_argument(
         "--extra-engine-args",
         type=str,
         default="",
@@ -183,6 +195,9 @@ def cmd_line_args():
     config.endpoint = parsed_endpoint_name
     config.base_gpu_id = args.base_gpu_id
     config.tensor_parallel_size = args.tensor_parallel_size
+    config.nnodes = args.nnodes
+    config.node_rank = args.node_rank
+    config.dist_init_addr = args.dist_init_addr
     config.extra_engine_args = args.extra_engine_args
 
     return config
