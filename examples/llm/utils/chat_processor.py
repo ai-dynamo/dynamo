@@ -30,7 +30,7 @@ from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_engine import RequestPrompt
 from vllm.inputs.data import TokensPrompt
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-
+from vllm.sampling_params import SamplingParams
 
 @runtime_checkable
 class ProcessMixInRequired(Protocol):
@@ -50,6 +50,7 @@ class ProcessMixIn(ProcessMixInRequired):
     chat_processor: "ChatProcessor | None"
     completions_processor: "CompletionsProcessor | None"
     model_config: ModelConfig
+    default_sampling_params: SamplingParams
 
     def __init__(self):
         pass
@@ -76,11 +77,10 @@ class ProcessMixIn(ProcessMixInRequired):
         default_max_tokens = self.model_config.max_model_len - len(
             preprocess_result.engine_prompt["prompt_token_ids"]
         )
-        default_sampling_params = self.model_config.get_diff_sampling_param()
         sampling_params = request.to_sampling_params(
             default_max_tokens,
             self.model_config.logits_processor_pattern,
-            default_sampling_params,
+            self.default_sampling_params,
         )
         return (
             request,
