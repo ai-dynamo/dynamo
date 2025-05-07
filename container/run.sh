@@ -288,6 +288,24 @@ if [ -z "$RUN_PREFIX" ]; then
     set -x
 fi
 
-${RUN_PREFIX} docker run ${GPU_STRING} ${INTERACTIVE} ${RM_STRING} --network host --shm-size=10G --ulimit memlock=-1 --ulimit stack=67108864 ${ENVIRONMENT_VARIABLES} ${VOLUME_MOUNTS} -w /workspace --cap-add CAP_SYS_PTRACE --ipc host ${PRIVILEGED_STRING} ${NAME_STRING} ${ENTRYPOINT_STRING} ${IMAGE} "${REMAINING_ARGS[@]}"
+${RUN_PREFIX} docker run \
+    ${GPU_STRING} \
+    ${INTERACTIVE} \
+    ${RM_STRING} \
+    --network host \
+    --shm-size=10G \
+    --ulimit memlock=-1 \
+    --ulimit stack=67108864 \
+    --ulimit nofile=65536:65536 \
+    ${ENVIRONMENT_VARIABLES} \
+    ${VOLUME_MOUNTS} \
+    -w /workspace \
+    --cap-add CAP_SYS_PTRACE \
+    --ipc host \
+    ${PRIVILEGED_STRING} \
+    ${NAME_STRING} \
+    ${ENTRYPOINT_STRING} \
+    ${IMAGE} \
+    "${REMAINING_ARGS[@]}"
 
 { set +x; } 2>/dev/null

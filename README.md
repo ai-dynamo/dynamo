@@ -44,7 +44,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip pytho
 python3 -m venv venv
 source venv/bin/activate
 
-pip install ai-dynamo[all]
+pip install "ai-dynamo[all]"
 ```
 > [!NOTE]
 > To ensure compatibility, please refer to the examples in the release branch or tag that matches the version you installed.
@@ -177,7 +177,7 @@ cd lib/bindings/python
 pip install .
 
 cd ../../../
-pip install .[all]
+pip install ".[all]"
 
 # To test
 docker compose -f deploy/metrics/docker-compose.yml up -d

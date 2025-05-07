@@ -31,6 +31,8 @@ context_servers:
   enable_chunked_prefill: false
   kv_cache_config:
     free_gpu_memory_fraction: 0.40
+  cache_transceiver_config:
+    max_num_tokens: 10240
   pytorch_backend_config:
     enable_overlap_scheduler: false
     use_cuda_graph: false
@@ -44,6 +46,8 @@ generation_servers:
   max_batch_size: 256
   kv_cache_config:
     free_gpu_memory_fraction: 0.40
+  cache_transceiver_config:
+    max_num_tokens: 256
   pytorch_backend_config:
     enable_overlap_scheduler: true
     use_cuda_graph: false
