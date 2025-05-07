@@ -8,15 +8,12 @@ on:
       - synchronize
       - reopened
 
-permissions:
-  pull-requests: read
-
 jobs:
-  check-pr-title:
-    name: Validate PR title
+  conventional-commits:
+    name: Validate PR title and add label
     runs-on: ubuntu-latest
     steps:
-      - uses:  ytanikin/pr-conventional-commits@8267db1bacc237419f9ed0228bb9d94e94271a1d #v1.4.1
+      - uses:  ytanikin/pr-conventional-commits@b628c5a234cc32513014b7bfdd1e47b532124d98
         with:
           task_types: '["feat","fix","docs","test","ci","refactor","perf","chore","revert", "style", "build"]'
           add_label: 'true'
