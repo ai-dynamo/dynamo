@@ -399,7 +399,6 @@ impl Component {
             Ok(())
         })
     }
-
 }
 
 #[pymethods]
