@@ -18,7 +18,7 @@ import logging
 
 from pydantic import BaseModel
 
-from components.planner import start_planner
+from components.planner import start_planner  # type: ignore[attr-defined]
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
