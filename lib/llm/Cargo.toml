@@ -99,8 +99,8 @@ toktrie_hf_tokenizers =  { version = "0.6.28" }
 bs62 = { version = "0.1" }
 erased-serde = { version = "0.4" }
 itertools = { version = "0.14.0" }
-minijinja = { version = "2.3.1", features = ["loader"] }
-minijinja-contrib = { version = "2.3.1", features = ["pycompat"] }
+minijinja = { version = "2.10.2", features = ["loader"] }
+minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
 
 # GGUF
 ggus = "0.4.0"
