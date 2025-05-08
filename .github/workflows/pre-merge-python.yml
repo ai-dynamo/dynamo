@@ -47,7 +47,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
         run: |
           ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target ci_minimum --framework ${{ matrix.framework }}
-      # Needs nixl installed for nixl-sys crate to build
       - name: Run Rust checks (llm/block_manager)
         run: |
           docker run -w /workspace --name ${{ env.CONTAINER_ID }} ${{ steps.define_image_tag.outputs.image_tag }} "cd lib/llm && cargo fmt -- --check && cargo clippy --features "block_manager" --no-deps --all-targets -- -D warnings && cargo test --locked --all-targets --features=block_manager"
