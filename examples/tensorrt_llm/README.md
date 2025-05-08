@@ -197,6 +197,12 @@ Notes:
   cd /workspace/examples/tensorrt_llm
   dynamo serve components.worker:TensorRTLLMWorker -f ./configs/disagg.yaml --service-name TensorRTLLMWorker &
   ```
+- If you see an error about MPI Spawn failing during TRTLLM Worker initialziation on a Slurm-based cluster,
+  try unsetting the following environment variables before launching the TRTLLM worker:
+  ```bash
+  # Workaround for error: `mpi4py.MPI.Exception: MPI_ERR_SPAWN: could not spawn processes`
+  unset SLURM_JOBID SLURM_JOB_ID SLURM_NODELIST
+  ```
 
 ### Client
 
