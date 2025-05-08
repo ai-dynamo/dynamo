@@ -61,7 +61,8 @@ func IsSpecChanged(current client.Object, desired client.Object) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("failed to calculate patch: %w", err)
 	}
-
+	logs := log.FromContext(context.Background())
+	logs.Info("patchResult", "patchResult", patchResult)
 	return !patchResult.IsEmpty(), nil
 }
 
