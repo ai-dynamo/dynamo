@@ -134,6 +134,8 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # Install NIXL Python module
 # TODO: Move gds_path selection based on arch into NIXL build
 RUN if [ "$ARCH" = "arm64" ]; then \
+        ls -ltR /opt/hpcx/ucx && \
+        ls -ltR /usr/local/cuda/ && \
         cd /opt/nixl && uv pip install . --config-settings=setup-args="-Ducx_path=/opt/hpcx/ucx -Dgds_path=/usr/local/cuda/targets/sbsa-linux/"; \
     else \
         cd /opt/nixl && uv pip install . --config-settings=setup-args="-Ducx_path=/opt/hpcx/ucx"; \
