@@ -56,13 +56,17 @@ func IsSpecChanged(current client.Object, desired client.Object) (bool, error) {
 	opts := []patch.CalculateOption{
 		patch.IgnoreStatusFields(),
 		patch.IgnoreField("metadata"),
+		patch.IgnoreField("apiVersion"),
+		patch.IgnoreField("kind"),
 	}
 	patchResult, err := patchMaker.Calculate(current, desired, opts...)
 	if err != nil {
 		return false, fmt.Errorf("failed to calculate patch: %w", err)
 	}
-	logs := log.FromContext(context.Background())
-	logs.Info("patchResult", "patchResult", patchResult)
+	if !patchResult.IsEmpty() {
+		logs := log.FromContext(context.Background())
+		logs.Info("patchResult", "patchResult", patchResult)
+	}
 	return !patchResult.IsEmpty(), nil
 }
 
