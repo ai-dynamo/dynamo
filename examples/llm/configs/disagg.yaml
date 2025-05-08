@@ -48,3 +48,4 @@ PrefillWorker:
 
 Planner:
   environment: local
+  no-operation: true

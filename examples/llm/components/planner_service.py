@@ -52,7 +52,7 @@ class Planner:
         # Get namespace directly from dynamo_context as it contains the active namespace
         self.namespace = dynamo_context["namespace"]
         self.environment = config.get("Planner", {}).get("environment", "local")
-        self.no_operation = config.get("Planner", {}).get("no_operation", False)
+        self.no_operation = config.get("Planner", {}).get("no-operation", True)
 
         # Create args with all parameters from planner.py, using defaults except for namespace and environment
         self.args = argparse.Namespace(

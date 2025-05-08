@@ -44,3 +44,4 @@ VllmWorker:
 
 Planner:
   environment: local
+  no-operation: true
