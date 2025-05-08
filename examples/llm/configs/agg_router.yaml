@@ -43,4 +43,4 @@ VllmWorker:
   common-configs: [model, block-size, max-model-len, router, kv-transfer-config]
 
 Planner:
-  environment: kubernetes
+  environment: local

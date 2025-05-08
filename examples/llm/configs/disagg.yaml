@@ -47,4 +47,4 @@ PrefillWorker:
   common-configs: [model, block-size, max-model-len, kv-transfer-config]
 
 Planner:
-  environment: kubernetes
+  environment: local

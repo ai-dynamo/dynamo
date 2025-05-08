@@ -38,4 +38,4 @@ VllmWorker:
   common-configs: [model, block-size, max-model-len]
 
 Planner:
-  environment: kubernetes
+  environment: local

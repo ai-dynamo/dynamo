@@ -52,13 +52,14 @@ class Planner:
         # Get namespace directly from dynamo_context as it contains the active namespace
         self.namespace = dynamo_context["namespace"]
         self.environment = config.get("Planner", {}).get("environment", "local")
+        self.no_operation = config.get("Planner", {}).get("no_operation", False)
 
         # Create args with all parameters from planner.py, using defaults except for namespace and environment
         self.args = argparse.Namespace(
             namespace=self.namespace,
             environment=self.environment,
             served_model_name="vllm",
-            no_operation=False,
+            no_operation=self.no_operation,
             log_dir=None,
             adjustment_interval=10,
             metric_pulling_interval=1,
@@ -76,7 +77,6 @@ class Planner:
     async def async_init(self):
         import asyncio
 
-        # Trying to see if setting a sleep will fix the issue with the statefile not being created
         await asyncio.sleep(60)
         logger.info("Calling start_planner")
         await start_planner(self.runtime, self.args)
