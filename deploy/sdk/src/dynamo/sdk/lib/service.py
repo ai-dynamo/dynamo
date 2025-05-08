@@ -19,8 +19,8 @@ import logging
 import os
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple, TypeVar, Union
 from enum import Enum
+from typing import Any, Dict, List, Optional, Set, Tuple, TypeVar, Union
 
 # WARNING: internal
 from _bentoml_sdk import Service, ServiceConfig
@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 class ComponentType(str, Enum):
     """Types of Dynamo components"""
+
     PLANNER = "planner"
     # Future types can be added here like:
     # METRICS = "metrics"
@@ -78,7 +79,9 @@ class DynamoConfig:
     name: str | None = None
     namespace: str | None = None
     custom_lease: LeaseConfig | None = None
-    component_type: ComponentType | None = None  # Indicates if this is a meta/system component
+    component_type: ComponentType | None = (
+        None  # Indicates if this is a meta/system component
+    )
 
 
 @dataclass

@@ -17,9 +17,9 @@ import logging
 import subprocess
 from pathlib import Path
 
+from components.planner_service import Planner
 from components.processor import Processor
 from components.worker import VllmWorker
-from components.planner_service import Planner
 from fastapi import FastAPI
 from pydantic import BaseModel
 

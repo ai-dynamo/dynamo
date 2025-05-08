@@ -1,19 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 
-from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
-from components.planner import start_planner
 from pydantic import BaseModel
-from dynamo.sdk.lib.config import ServiceConfig
+
+from components.planner import start_planner
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk.lib.config import ServiceConfig
 
 logger = logging.getLogger(__name__)
+
 
 class RequestType(BaseModel):
     text: str
 
-from dynamo.sdk.lib.image import DYNAMO_IMAGE
 
 import argparse
+
+from dynamo.sdk.lib.image import DYNAMO_IMAGE
+
 
 @service(
     dynamo={
@@ -59,6 +78,7 @@ class Planner:
     @async_on_start
     async def async_init(self):
         import asyncio
+
         # Trying to see if setting a sleep will fix the issue with the statefile not being created
         await asyncio.sleep(60)
         logger.info("Calling start_planner")
