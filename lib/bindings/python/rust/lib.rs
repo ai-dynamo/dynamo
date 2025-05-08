@@ -404,7 +404,7 @@ impl Endpoint {
             self.event_loop.clone(),
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
-        let mut builder = self.inner.endpoint_builder().handler(ingress);
+        let builder = self.inner.endpoint_builder().handler(ingress);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             builder.start().await.map_err(to_pyerr)?;
             Ok(())
