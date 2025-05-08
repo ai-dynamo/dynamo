@@ -25,14 +25,21 @@ have a separate DecodeWorker.
 """
 
 import logging
+import socket
 
-import sglang as sgl
-from utils.protocol import MyRequestOutput, SGLangGenerateRequest
+from components.decode_worker import SGLangDecodeWorker
+from sglang.srt.utils import get_ip
+from utils.protocol import BootstrapInfo, MyRequestOutput, SGLangGenerateRequest
 from utils.sglang import parse_sglang_args
 
-from dynamo.sdk import dynamo_endpoint, service
+import sglang as sgl
+from dynamo.sdk import depends, dynamo_endpoint, service
 
 logger = logging.getLogger(__name__)
+
+"""
+In SGLang, PD Disaggregation goes from Prefill -> Decode
+"""
 
 
 @service(
@@ -44,15 +51,31 @@ logger = logging.getLogger(__name__)
     workers=1,
 )
 class SGLangWorker:
+    sglang_decode_worker = depends(SGLangDecodeWorker)
+
     def __init__(self):
         class_name = self.__class__.__name__
         self.engine_args = parse_sglang_args(class_name, "")
         self.engine = sgl.Engine(server_args=self.engine_args)
-        logger.warning("worker initialized")
+        logger.info("SGLangWorker initialized")
 
     def shutdown_sglang_engine(self, signum, frame):
         logger.info("Shutting down SGLang engine")
         self.engine.shutdown()
+
+    def _get_bootstrap_info(self):
+        inner_tm = self.engine.tokenizer_manager
+        bootstrap_port = inner_tm.server_args.disaggregation_bootstrap_port
+
+        # multinode check
+        if inner_tm.server_args.dist_init_addr:
+            bootstrap_host = socket.gethostbyname(
+                inner_tm.server_args.dist_init_addr.split(":")[0]
+            )
+        else:
+            bootstrap_host = get_ip()
+
+        return BootstrapInfo(host=bootstrap_host, port=bootstrap_port)
 
     @dynamo_endpoint()
     async def generate(self, request: SGLangGenerateRequest):
@@ -60,7 +83,17 @@ class SGLangWorker:
             input_ids=request.input_ids,
             sampling_params=request.sampling_params,
             stream=True,
+            bootstrap_host=request.bootstrap_host,
+            bootstrap_port=request.bootstrap_port,
+            bootstrap_room=request.bootstrap_room,
         )
 
         async for result in g:
             yield MyRequestOutput(text=result).model_dump_json()
+
+    @dynamo_endpoint()
+    async def get_url(self, request: dict):
+        """
+        The bootstrap server details are stored in each engines internal tokenizer manager state
+        """
+        yield self._get_bootstrap_info().model_dump_json()
