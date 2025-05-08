@@ -25,7 +25,7 @@ readme.workspace = true
 description = "Dynamo LLM Library"
 
 [features]
-default = ["block_manager"]
+default = []
 
 block_manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray"]
 sentencepiece = ["dep:sentencepiece"]
