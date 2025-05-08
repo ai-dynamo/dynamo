@@ -100,9 +100,11 @@ class PrefillWorker:
 
         self.task.add_done_callback(prefill_queue_handler_cb)
 
-        # Set up signal handler for graceful shutdown
-        loop = asyncio.get_running_loop()
         self.shutdown_requested = False
+        
+        # Set up signal handler for graceful shutdown
+        # TODO: move to dynamo sdk
+        loop = asyncio.get_running_loop()
 
         def signal_handler():
             # Schedule the shutdown coroutine instead of calling it directly

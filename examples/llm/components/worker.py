@@ -141,6 +141,7 @@ class VllmWorker:
             self.disaggregated_router = None
 
         # Set up signal handler for graceful shutdown
+        # TODO: move to dynamo sdk
         loop = asyncio.get_running_loop()
 
         def signal_handler():
