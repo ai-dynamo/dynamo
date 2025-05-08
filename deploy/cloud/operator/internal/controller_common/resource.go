@@ -19,10 +19,12 @@ package controller_common
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
 
-	"github.com/cisco-open/k8s-objectmatcher/patch"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -40,35 +42,35 @@ const (
 	NvidiaAnnotationHashKey = "nvidia.com/last-applied-hash"
 )
 
-var (
-	annotator  = patch.NewAnnotator(NvidiaAnnotationHashKey)
-	patchMaker = patch.NewPatchMaker(annotator, &patch.K8sStrategicMergePatcher{}, &patch.BaseJSONMergePatcher{})
-)
+// var (
+// 	annotator  = patch.NewAnnotator(NvidiaAnnotationHashKey)
+// 	patchMaker = patch.NewPatchMaker(annotator, &patch.K8sStrategicMergePatcher{}, &patch.BaseJSONMergePatcher{})
+// )
 
 // IsSpecChanged returns true if the spec has changed between the existing one
 // and the new resource spec compared by hash.
-func IsSpecChanged(current client.Object, desired client.Object) (bool, error) {
-	if current == nil && desired != nil {
-		return true, nil
-	}
+// func IsSpecChanged(current client.Object, desired client.Object) (bool, error) {
+// 	if current == nil && desired != nil {
+// 		return true, nil
+// 	}
 
-	var patchResult *patch.PatchResult
-	opts := []patch.CalculateOption{
-		patch.IgnoreStatusFields(),
-		patch.IgnoreField("metadata"),
-		patch.IgnoreField("apiVersion"),
-		patch.IgnoreField("kind"),
-	}
-	patchResult, err := patchMaker.Calculate(current, desired, opts...)
-	if err != nil {
-		return false, fmt.Errorf("failed to calculate patch: %w", err)
-	}
-	if !patchResult.IsEmpty() {
-		logs := log.FromContext(context.Background())
-		logs.Info("patchResult", "patchResult", patchResult)
-	}
-	return !patchResult.IsEmpty(), nil
-}
+// 	var patchResult *patch.PatchResult
+// 	opts := []patch.CalculateOption{
+// 		patch.IgnoreStatusFields(),
+// 		patch.IgnoreField("metadata"),
+// 		patch.IgnoreField("apiVersion"),
+// 		patch.IgnoreField("kind"),
+// 	}
+// 	patchResult, err := patchMaker.Calculate(current, desired, opts...)
+// 	if err != nil {
+// 		return false, fmt.Errorf("failed to calculate patch: %w", err)
+// 	}
+// 	if !patchResult.IsEmpty() {
+// 		logs := log.FromContext(context.Background())
+// 		logs.Info("patchResult", "patchResult", patchResult)
+// 	}
+// 	return !patchResult.IsEmpty(), nil
+// }
 
 type Reconciler interface {
 	client.Client
@@ -131,10 +133,24 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 			return
 		}
 
-		err = annotator.SetLastAppliedAnnotation(resource)
+		// err = annotator.SetLastAppliedAnnotation(resource)
+		// if err != nil {
+		// 	logs.Error(err, "Failed to set last applied annotation.")
+		// 	r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for %s %s: %s", resourceType, resourceNamespace, err)
+		// 	return
+		// }
+		var hash string
+		hash, err = GetSpecHash(resource)
 		if err != nil {
-			logs.Error(err, "Failed to set last applied annotation.")
-			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for %s %s: %s", resourceType, resourceNamespace, err)
+			logs.Error(err, "Failed to get spec hash.")
+			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, "GetSpecHash", "Failed to get spec hash for %s %s: %s", resourceType, resourceNamespace, err)
+			return
+		}
+
+		err = updateHashAnnotation(resource, hash)
+		if err != nil {
+			logs.Error(err, "Failed to update hash annotation.")
+			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, "UpdateHashAnnotation", "Failed to update hash annotation for %s %s: %s", resourceType, resourceNamespace, err)
 			return
 		}
 
@@ -166,13 +182,13 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 		}
 
 		// Check if the Spec has changed and update if necessary
-		var changed bool
-		changed, err = IsSpecChanged(oldResource, resource)
+		var newHash *string
+		newHash, err = IsSpecChanged2(oldResource, resource)
 		if err != nil {
 			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("CalculatePatch%s", resourceType), "Failed to calculate patch for %s %s: %s", resourceType, resourceNamespace, err)
 			return false, resource, fmt.Errorf("failed to check if spec has changed: %w", err)
 		}
-		if changed {
+		if newHash != nil {
 			// update the spec of the current object with the desired spec
 			err = CopySpec(resource, oldResource)
 			if err != nil {
@@ -180,10 +196,17 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 				r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("CopySpec%s", resourceType), "Failed to copy spec for %s %s: %s", resourceType, resourceNamespace, err)
 				return
 			}
-			err = annotator.SetLastAppliedAnnotation(oldResource)
+			// err = annotator.SetLastAppliedAnnotation(oldResource)
+			// if err != nil {
+			// 	logs.Error(err, "Failed to set last applied annotation.")
+			// 	r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for %s %s: %s", resourceType, resourceNamespace, err)
+			// 	return
+			// }
+
+			err = updateHashAnnotation(oldResource, *newHash)
 			if err != nil {
-				logs.Error(err, "Failed to set last applied annotation.")
-				r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for %s %s: %s", resourceType, resourceNamespace, err)
+				logs.Error(err, "Failed to update hash annotation.")
+				r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, "UpdateHashAnnotation", "Failed to update hash annotation for %s %s: %s", resourceType, resourceNamespace, err)
 				return
 			}
 			err = r.Update(ctx, oldResource)
@@ -238,4 +261,141 @@ func CopySpec(source, destination client.Object) error {
 
 	// Convert back to the original object
 	return runtime.DefaultUnstructuredConverter.FromUnstructured(destUnstructured.Object, destination)
+}
+
+func getSpec(obj client.Object) (any, error) {
+	// Convert source to unstructured
+	sourceMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+	if err != nil {
+		return nil, err
+	}
+	sourceUnstructured := &unstructured.Unstructured{Object: sourceMap}
+	// Extract only the spec from source
+	spec, found, err := unstructured.NestedFieldCopy(sourceUnstructured.Object, "spec")
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	return spec, nil
+}
+
+// IsSpecChanged returns the new hash if the spec has changed between the existing one
+func IsSpecChanged2(current client.Object, desired client.Object) (*string, error) {
+	hashStr, err := GetSpecHash(desired)
+	if err != nil {
+		return nil, err
+	}
+	if currentHash, ok := current.GetAnnotations()[NvidiaAnnotationHashKey]; ok {
+		if currentHash == hashStr {
+			return nil, nil
+		}
+	}
+	return &hashStr, nil
+}
+
+func GetSpecHash(obj client.Object) (string, error) {
+	spec, err := getSpec(obj)
+	if err != nil {
+		return "", err
+	}
+	return GetResourceHash(spec)
+}
+
+func updateHashAnnotation(obj client.Object, hash string) error {
+	annotations := obj.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[NvidiaAnnotationHashKey] = hash
+	obj.SetAnnotations(annotations)
+	return nil
+}
+
+// GetResourceHash returns a consistent hash for the given object spec
+func GetResourceHash(obj any) (string, error) {
+	// Convert obj to a map[string]interface{}
+	objMap, err := json.Marshal(obj)
+	if err != nil {
+		return "", err
+	}
+
+	var objData map[string]interface{}
+	if err := json.Unmarshal(objMap, &objData); err != nil {
+		return "", err
+	}
+
+	// Sort keys to ensure consistent serialization
+	sortedObjData := SortKeys(objData)
+
+	// Serialize to JSON
+	serialized, err := json.Marshal(sortedObjData)
+	if err != nil {
+		return "", err
+	}
+
+	// Compute the hash
+	hasher := sha256.New()
+	hasher.Write(serialized)
+	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
+}
+
+// SortKeys recursively sorts the keys of a map to ensure consistent serialization
+func SortKeys(obj interface{}) interface{} {
+	switch obj := obj.(type) {
+	case map[string]interface{}:
+		sortedMap := make(map[string]interface{})
+		keys := make([]string, 0, len(obj))
+		for k := range obj {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			sortedMap[k] = SortKeys(obj[k])
+		}
+		return sortedMap
+	case []interface{}:
+		// Check if the slice contains maps and sort them by the "name" field or the first available field
+		if len(obj) > 0 {
+
+			if _, ok := obj[0].(map[string]interface{}); ok {
+				sort.SliceStable(obj, func(i, j int) bool {
+					iMap, iOk := obj[i].(map[string]interface{})
+					jMap, jOk := obj[j].(map[string]interface{})
+					if iOk && jOk {
+						// Try to sort by "name" if present
+						iName, iNameOk := iMap["name"].(string)
+						jName, jNameOk := jMap["name"].(string)
+						if iNameOk && jNameOk {
+							return iName < jName
+						}
+
+						// If "name" is not available, sort by the first key in each map
+						if len(iMap) > 0 && len(jMap) > 0 {
+							iFirstKey := firstKey(iMap)
+							jFirstKey := firstKey(jMap)
+							return iFirstKey < jFirstKey
+						}
+					}
+					// If no valid comparison is possible, maintain the original order
+					return false
+				})
+			}
+		}
+		for i, v := range obj {
+			obj[i] = SortKeys(v)
+		}
+	}
+	return obj
+}
+
+// Helper function to get the first key of a map (alphabetically sorted)
+func firstKey(m map[string]interface{}) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys[0]
 }
