@@ -17,12 +17,13 @@
 # - Context on 1xGB200 (4xB00)
 # - Generation on 1xGB200 (4xB200)
 
-# NOTE: Fields like hostname, ports, urls, etc. only used by trtllm-serve, not by dynamo
+# NOTE: Fields like hostname, ports, urls, num_instances, etc. only used by trtllm-serve, not by dynamo
 
 backend: pytorch
 
 context_servers:
-  num_instances: 1
+  # Context processes many tokens all at once for high ISL, so batching
+  # is not always necessary to get good perf/utilization
   max_batch_size: 1
   max_num_tokens: 8192
   max_seq_len: 8192
@@ -42,7 +43,6 @@ context_servers:
     kv_cache_dtype: fp8
 
 generation_servers:
-  num_instances: 1
   tensor_parallel_size: 4
   moe_expert_parallel_size: 4
   enable_attention_dp: true
@@ -51,8 +51,8 @@ generation_servers:
   max_num_tokens: 256
   # 8448 = 8192 ISL + 256 OSL
   max_seq_len: 8448
-  # With dp attention disabled: 0.80 is fine
-  #free_gpu_memory_fraction: 0.80
+  # With dp attention disabled: >= 0.80 is fine
+  #free_gpu_memory_fraction: 0.85
   # With dp attention enabled: can OOM with 8K ISL at concurrency 256 at high
   # free_gpu_memory_fraction values, so keep it low.
   free_gpu_memory_fraction: 0.30

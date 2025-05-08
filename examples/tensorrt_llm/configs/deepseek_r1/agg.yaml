@@ -15,7 +15,8 @@
 
 Frontend:
   served_model_name: deepseek-ai/DeepSeek-R1
-  endpoint: dynamo.Processor.chat/completions
+  endpoint_chat: dynamo.Processor.chat/completions
+  endpoint_completions: dynamo.Processor.completions
   port: 8000
 
 Processor:

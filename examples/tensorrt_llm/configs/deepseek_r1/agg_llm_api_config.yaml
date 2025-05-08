@@ -13,25 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# https://huggingface.co/nvidia/DeepSeek-R1-FP4
 model_name: "deepseek-ai/DeepSeek-R1"
 backend: pytorch
 
 tensor_parallel_size: 4
 moe_expert_parallel_size: 4
 pipeline_parallel_size: 1
-enable_attention_dp: true
 
 max_batch_size: 256
 # 8448 = 8192 ISL + 256 OSL
 max_num_tokens: 8448
 max_seq_len: 8448
 
+enable_attention_dp: false
 kv_cache_config:
-  # With dp attention disabled: 0.80 is fine
-  #free_gpu_memory_fraction: 0.80
+  # With dp attention disabled: >= 0.80 is fine
+  free_gpu_memory_fraction: 0.85
   # With dp attention enabled: can OOM with 8K ISL at concurrency 256 at high
   # free_gpu_memory_fraction values, so keep it low.
-  free_gpu_memory_fraction: 0.30
+  # free_gpu_memory_fraction: 0.30
 
 pytorch_backend_config:
   use_cuda_graph: true
