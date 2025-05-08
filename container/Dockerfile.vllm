@@ -76,7 +76,8 @@ RUN rm -rf /opt/hpcx/ucx
 RUN rm -rf /usr/local/ucx
 RUN cd /usr/local/src && \
     git clone https://github.com/openucx/ucx.git && \
-    cd ucx && \
+    cd ucx &&                   \
+    git checkout v1.19.x &&     \
     ./autogen.sh && ./configure \
     --prefix=/usr/local/ucx     \
     --enable-shared             \
@@ -87,10 +88,10 @@ RUN cd /usr/local/src && \
     --enable-devel-headers      \
     --with-cuda=/usr/local/cuda \
     --with-verbs                \
-    --with-efa			        \
+    --with-efa                  \
     --with-dm                   \
     --with-gdrcopy=/usr/local   \
-    --enable-mt &&           	\
+    --enable-mt &&              \
     make -j &&                  \
     make -j install-strip &&    \
     ldconfig
@@ -137,7 +138,7 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 RUN if [ "$ARCH" = "arm64" ]; then \
         cd /opt/nixl && uv pip install . --config-settings=setup-args="-Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
     else \
-        cd /opt/nixl && uv pip install . --config-settings=setup-args='-Dgds_path=/usr/local/cuda/targets/x86_64-linux'; \
+        cd /opt/nixl && uv pip install . ; \
     fi
 
 # Install patched vllm - keep this early in Dockerfile to avoid
