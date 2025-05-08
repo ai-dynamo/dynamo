@@ -29,7 +29,8 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-from .utils import resolve_service_config
+from dynamo.sdk.cli.utils import resolve_service_config
+from dynamo.sdk.core.runner import TargetEnum
 
 if t.TYPE_CHECKING:
     P = t.ParamSpec("P")  # type: ignore
@@ -85,16 +86,23 @@ def serve(
         False,
         help="Save a snapshot of your service state to a file that allows planner to edit your deployment configuration",
     ),
+    target: TargetEnum = typer.Option(
+        TargetEnum.DYNAMO,
+        "--target",
+        help="Specify the target: 'dynamo' or 'bento'.",
+        case_sensitive=False,
+    ),
 ):
     """Locally serve a Dynamo pipeline.
 
     Starts a local server for the specified Dynamo pipeline.
     """
-
     from dynamo.runtime.logging import configure_dynamo_logging
+    from dynamo.sdk.cli.utils import configure_target_environment
+    from dynamo.sdk.core.protocol.interface import LinkedServices
     from dynamo.sdk.lib.loader import find_and_load_service
-    from dynamo.sdk.lib.service import LinkedServices
 
+    configure_target_environment(target)
     # Extract extra arguments not captured by typer
     service_configs = resolve_service_config(config_file, ctx.args)
 
@@ -153,7 +161,6 @@ def serve(
             border_style="green",
         )
     )
-
     serve_dynamo_graph(
         dynamo_pipeline,
         working_dir=working_dir_str,
@@ -162,4 +169,5 @@ def serve(
         dependency_map=runner_map_dict,
         service_name=service_name,
         enable_local_planner=enable_local_planner,
+        target=target,
     )

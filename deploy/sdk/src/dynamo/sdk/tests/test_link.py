@@ -15,7 +15,7 @@
 
 import pytest
 
-from dynamo.sdk.lib.service import LinkedServices
+from dynamo.sdk.core.protocol.interface import LinkedServices
 
 pytestmark = pytest.mark.pre_merge
 
@@ -38,8 +38,8 @@ def test_remove_backend2():
     LinkedServices.remove_unused_edges()
 
     # Final state assertions after linking and cleanup
-    assert set(Frontend.dependencies.keys()) == {"middle"}
     assert Frontend.dependencies["middle"].on == Middle
+    assert set(Frontend.dependencies.keys()) == {"middle"}
 
     assert set(Middle.dependencies.keys()) == {"backend"}
     assert Middle.dependencies["backend"].on == Backend

@@ -37,6 +37,7 @@ from rich.syntax import Syntax
 from simple_di import Provide, inject
 
 from dynamo.sdk.cli.bento_util import Bento
+from dynamo.sdk.core.runner import TargetEnum
 
 if t.TYPE_CHECKING:
     from bentoml._internal.bento import BentoStore
@@ -171,6 +172,12 @@ def build(
         help="Containerize the Dynamo pipeline after building. Shortcut for 'dynamo build && dynamo containerize'.",
     ),
     platform: str = typer.Option(None, "--platform", help="Platform to build for"),
+    target: TargetEnum = typer.Option(
+        TargetEnum.BENTO,
+        "--target",
+        help="Specify the target: 'dynamo' or 'bento'.",
+        case_sensitive=False,
+    ),
 ) -> None:
     """Build a new Dynamo pipeline from the specified path.
 
@@ -178,6 +185,10 @@ def build(
     """
     from bentoml._internal.configuration import get_quiet_mode, set_quiet_mode
     from bentoml._internal.log import configure_logging
+
+    from dynamo.sdk.cli.utils import configure_target_environment
+
+    configure_target_environment(target)
 
     # Validate output format
     valid_outputs = ["tag", "default"]
@@ -196,12 +207,16 @@ def build(
     else:
         build_ctx = dynamo_pipeline
 
+    if target != TargetEnum.BENTO:
+        raise NotImplementedError(
+            "currently only bento based build target is supported"
+        )
+
     bento = build_bentofile(
         service=service,
         build_ctx=build_ctx,
         platform=platform,
     )
-
     containerize_cmd = f"dynamo containerize {bento.tag}"
 
     if output == "tag":

@@ -17,11 +17,11 @@
 # Use this to test changes made to CLI, SDK, etc
 
 
-from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from dynamo.sdk import depends, dynamo_endpoint, service
+from dynamo.sdk.core.protocol.interface import DynamoTransport
 
 """
 Pipeline Architecture:
@@ -54,9 +54,6 @@ class ResponseType(BaseModel):
 
 
 GPU_ENABLED = False
-
-
-app = FastAPI(title="Hello World!")
 
 
 @service(
@@ -151,7 +148,6 @@ class Middle:
     resources={"cpu": "1"},
     traffic={"timeout": 60},
     dynamo={"enabled": True, "namespace": "inference"},
-    app=app,
 )
 class Frontend:
     middle = depends(Middle)
@@ -160,7 +156,7 @@ class Frontend:
     def __init__(self) -> None:
         print("Starting frontend")
 
-    @dynamo_endpoint(is_api=True)
+    @dynamo_endpoint(transports=[DynamoTransport.HTTP])
     async def generate(self, request: RequestType):
         """Stream results from the pipeline."""
         print(f"Frontend received: {request.text}")

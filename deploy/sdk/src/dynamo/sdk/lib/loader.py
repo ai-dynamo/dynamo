@@ -83,7 +83,6 @@ def find_and_load_service(
 
 def _do_import(import_str: str, working_dir: str) -> DynamoService:
     """Internal function to handle the actual import logic"""
-
     import_path, _, attrs_str = import_str.partition(":")
     logger.info(f"Parsed import string - path: {import_path}, attributes: {attrs_str}")
 
@@ -184,11 +183,6 @@ def _do_import(import_str: str, working_dir: str) -> DynamoService:
                     instance = getattr(instance, attr)
             except (AttributeError, KeyError):
                 raise ValueError(f'Attribute "{attr}" not found in "{module_name}"')
-
-    if not isinstance(instance, DynamoService):
-        raise ValueError(
-            f'Object "{attrs_str}" in module "{module_name}" is not a DynamoService'
-        )
 
     # Set import string for debugging/logging
     if not hasattr(instance, "_import_str"):

@@ -16,13 +16,10 @@
 # from typing import Any
 
 from bentoml import on_shutdown as async_on_shutdown
-from bentoml._internal.context import server_context  # type: ignore
 
-from dynamo.sdk.lib.decorators import async_on_start, dynamo_endpoint
-from dynamo.sdk.lib.dependency import depends
-from dynamo.sdk.lib.image import DYNAMO_IMAGE
-from dynamo.sdk.lib.service import service
-from dynamo.sdk.lib.decorators import abstract_dynamo_endpoint, AbstractDynamoService
+from dynamo.sdk.core.decorators.endpoint import dynamo_endpoint
+from dynamo.sdk.core.lib import DYNAMO_IMAGE, depends, service
+from dynamo.sdk.lib.decorators import async_on_start, abstract_dynamo_endpoint, AbstractDynamoService
 
 dynamo_context = {}
 
@@ -33,7 +30,6 @@ __all__ = [
     "depends",
     "dynamo_context",
     "dynamo_endpoint",
-    "server_context",
     "service",
     "abstract_dynamo_endpoint",
     "AbstractDynamoService",
