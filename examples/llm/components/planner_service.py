@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import logging
 
 from pydantic import BaseModel
@@ -21,17 +22,13 @@ from components.planner import start_planner
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
+from dynamo.sdk.lib.image import DYNAMO_IMAGE
 
 logger = logging.getLogger(__name__)
 
 
 class RequestType(BaseModel):
     text: str
-
-
-import argparse
-
-from dynamo.sdk.lib.image import DYNAMO_IMAGE
 
 
 @service(
