@@ -188,6 +188,18 @@ class EtcdKvCache:
         """
         ...
 
+    async def delete(self, key: str) -> None:
+        """
+        Delete a key-value pair from the cache and etcd.
+        """
+        ...
+
+    async def clear_all(self) -> None:
+        """
+        Delete all key-value pairs from the cache and etcd.
+        """
+        ...
+
 class Namespace:
     """
     A namespace is a collection of components
@@ -610,7 +622,72 @@ class ModelType:
     """What type of request this model needs: Chat, Component or Backend (pre-processed)"""
     ...
 
-async def register_llm(endpoint: Endpoint, path: str, model_type: ModelType) -> None:
+async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str]) -> None:
     """Attach the model at path to the given endpoint, and advertise it as model_type"""
     ...
+
+class NatsQueue:
+    """
+    A queue implementation using NATS JetStream for task distribution
+    """
+
+    def __init__(self, stream_name: str, nats_server: str, dequeue_timeout: float) -> None:
+        """
+        Create a new NatsQueue instance.
+
+        Args:
+            stream_name: Name of the NATS JetStream stream
+            nats_server: URL of the NATS server
+            dequeue_timeout: Default timeout in seconds for dequeue operations
+        """
+        ...
+
+    async def connect(self) -> None:
+        """
+        Connect to the NATS server
+        """
+        ...
+
+    async def ensure_connection(self) -> None:
+        """
+        Ensure connection to the NATS server, connecting if not already connected
+        """
+        ...
+
+    async def close(self) -> None:
+        """
+        Close the connection to the NATS server
+        """
+        ...
+
+    async def enqueue_task(self, task_data: bytes) -> None:
+        """
+        Enqueue a task to the NATS JetStream
+
+        Args:
+            task_data: The task data as bytes
+        """
+        ...
+
+    async def dequeue_task(self, timeout: Optional[float] = None) -> Optional[bytes]:
+        """
+        Dequeue a task from the NATS JetStream
+
+        Args:
+            timeout: Optional timeout in seconds for this specific dequeue operation.
+                    If None, uses the default timeout specified during initialization.
+
+        Returns:
+            The task data as bytes if available, None if no task is available
+        """
+        ...
+
+    async def get_queue_size(self) -> int:
+        """
+        Get the current size of the queue
+
+        Returns:
+            The number of messages in the queue
+        """
+        ...
 

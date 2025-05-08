@@ -24,7 +24,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip pytho
 python3 -m venv venv
 source venv/bin/activate
 
-pip install ai-dynamo[all]
+pip install "ai-dynamo[all]"
 ```
 
 ## Dynamo workflow

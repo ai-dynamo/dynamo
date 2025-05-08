@@ -1,23 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Context;
 use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 
@@ -57,6 +44,10 @@ impl LocalModel {
         &self.full_path
     }
 
+    pub fn display_name(&self) -> &str {
+        &self.card.display_name
+    }
+
     pub fn service_name(&self) -> &str {
         &self.card.service_name
     }
@@ -74,7 +65,7 @@ impl LocalModel {
     pub async fn prepare(
         model_path: &str,
         override_config: Option<&Path>,
-        override_name: Option<&str>,
+        override_name: Option<String>,
     ) -> anyhow::Result<LocalModel> {
         // Name it
 
@@ -91,23 +82,21 @@ impl LocalModel {
             fs::canonicalize(relative_path)?
         };
 
-        let model_name = match override_name.map(|s| s.to_string()) {
-            Some(name) => name,
-            None => {
-                if is_hf_repo {
-                    // HF repos use their full name ("org/name") not the folder name
-                    relative_path.to_string()
-                } else {
-                    full_path
-                        .iter()
-                        .next_back()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .with_context(|| {
-                            format!("Invalid model path, too short: {}", full_path.display())
-                        })?
-                }
+        let model_name = override_name.unwrap_or_else(|| {
+            if is_hf_repo {
+                // HF repos use their full name ("org/name") not the folder name
+                relative_path.to_string()
+            } else {
+                full_path
+                    .iter()
+                    .next_back()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| {
+                        // Panic because we can't do anything without a model
+                        panic!("Invalid model path, too short: '{}'", full_path.display())
+                    })
             }
-        };
+        });
 
         // Load the ModelDeploymentCard
 

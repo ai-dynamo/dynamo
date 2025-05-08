@@ -49,9 +49,10 @@ const (
 
 // ServiceConfig represents the YAML configuration structure for a service
 type DynamoConfig struct {
-	Enabled   bool   `yaml:"enabled"`
-	Namespace string `yaml:"namespace"`
-	Name      string `yaml:"name"`
+	Enabled       bool   `yaml:"enabled"`
+	Namespace     string `yaml:"namespace"`
+	Name          string `yaml:"name"`
+	ComponentType string `yaml:"component_type,omitempty"`
 }
 
 type Resources struct {
@@ -71,17 +72,18 @@ type Autoscaling struct {
 }
 
 type Config struct {
-	Dynamo      *DynamoConfig `yaml:"dynamo,omitempty"`
-	Resources   *Resources    `yaml:"resources,omitempty"`
-	Traffic     *Traffic      `yaml:"traffic,omitempty"`
-	Autoscaling *Autoscaling  `yaml:"autoscaling,omitempty"`
+	Dynamo       *DynamoConfig `yaml:"dynamo,omitempty"`
+	Resources    *Resources    `yaml:"resources,omitempty"`
+	Traffic      *Traffic      `yaml:"traffic,omitempty"`
+	Autoscaling  *Autoscaling  `yaml:"autoscaling,omitempty"`
+	HttpExposed  bool          `yaml:"http_exposed,omitempty"`
+	ApiEndpoints []string      `yaml:"api_endpoints,omitempty"`
 }
 
 type ServiceConfig struct {
-	Name          string              `yaml:"name"`
-	ComponentType string              `yaml:"component_type,omitempty"`
-	Dependencies  []map[string]string `yaml:"dependencies,omitempty"`
-	Config        Config              `yaml:"config"`
+	Name         string              `yaml:"name"`
+	Dependencies []map[string]string `yaml:"dependencies,omitempty"`
+	Config       Config              `yaml:"config"`
 }
 
 func (s ServiceConfig) GetNamespace() *string {
@@ -264,13 +266,18 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 				return nil, fmt.Errorf("different namespaces for the same graph, expected %s, got %s", graphDynamoNamespace, dynamoNamespace)
 			}
 			graphDynamoNamespace = dynamoNamespace
-		} else {
-			// dynamo is not enabled
-			if config.EntryService == service.Name {
-				// enable virtual service for the entry service
-				deployment.Spec.Ingress = *ingressSpec
+			if service.Config.Dynamo.ComponentType == ComponentTypePlanner {
+				deployment.Spec.ExtraPodSpec = &common.ExtraPodSpec{
+					ServiceAccountName: PlannerServiceAccountName,
+				}
 			}
 		}
+		// Check http_exposed independently
+		if config.EntryService == service.Name && service.Config.HttpExposed {
+			deployment.Spec.Ingress = *ingressSpec
+			// TODO (maybe): add paths to IngressSpec
+		}
+
 		if service.Config.Resources != nil {
 			deployment.Spec.Resources = &common.Resources{
 				Requests: &common.ResourceItem{
@@ -294,11 +301,6 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			deployment.Spec.Autoscaling.Enabled = true
 			deployment.Spec.Autoscaling.MinReplicas = service.Config.Autoscaling.MinReplicas
 			deployment.Spec.Autoscaling.MaxReplicas = service.Config.Autoscaling.MaxReplicas
-		}
-		if service.ComponentType == ComponentTypePlanner {
-			deployment.Spec.ExtraPodSpec = &common.ExtraPodSpec{
-				ServiceAccountName: PlannerServiceAccountName,
-			}
 		}
 		deployments[service.Name] = deployment
 	}

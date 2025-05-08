@@ -19,14 +19,11 @@ from .planner_connector import PlannerConnector
 
 class KubernetesConnector(PlannerConnector):
     def __init__(self, namespace: str):
-        print(f"Initializing KubernetesConnector with namespace: {namespace}")
         self.kube_api = KubernetesAPI()
-        print(f"Kube API initialized")
         self.namespace = namespace
-        print(f"Namespace set to: {self.namespace}")
 
     async def add_component(self, component_name: str):
-        """Add a component by increasing its replica count to 1"""
+        """Add a component by increasing its replica count by 1"""
         deployment = await self.kube_api.get_graph_deployment(
             component_name, self.namespace
         )
@@ -43,7 +40,7 @@ class KubernetesConnector(PlannerConnector):
         )
 
     async def remove_component(self, component_name: str):
-        """Remove a component by setting its replica count to 0"""
+        """Remove a component by decreasing its replica count by 1"""
         deployment = await self.kube_api.get_graph_deployment(
             component_name, self.namespace
         )
@@ -62,11 +59,7 @@ class KubernetesConnector(PlannerConnector):
 
     def _get_current_replicas(self, deployment: dict, component_name: str) -> int:
         """Get the current replicas for a component in a graph deployment"""
-        return (
-            deployment["spec"]["services"][component_name]["replicas"]
-            if "replicas" in deployment["spec"]["services"][component_name]
-            else 1
-        )
+        return deployment.get("spec", {}).get("services", {}).get(component_name, {}).get("replicas", 1)
 
     def _get_graph_deployment_name(self, deployment: dict) -> str:
         """Get the name of the graph deployment"""

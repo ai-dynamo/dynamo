@@ -1,18 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
 
 #
 # A very basic example of sglang worker handling pre-processed requests.
@@ -30,7 +17,9 @@
 
 import argparse
 import asyncio
+import logging
 import sys
+from typing import Optional
 
 import sglang
 import uvloop
@@ -42,6 +31,8 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
+logging.basicConfig(level=logging.DEBUG)
+
 
 class Config:
     """Command line parameters or defaults"""
@@ -49,9 +40,13 @@ class Config:
     namespace: str
     component: str
     endpoint: str
-    model: str
+    model_path: str
+    model_name: Optional[str]
     base_gpu_id: int
     tensor_parallel_size: int
+    nnodes: int
+    node_rank: int
+    dist_init_addr: str
     extra_engine_args: str
 
 
@@ -64,12 +59,17 @@ class RequestHandler:
         self.engine_client = engine
 
     async def generate(self, request):
-        # print(f"Received request: {request}")
-        sampling_params = {
-            "temperature": request["sampling_options"]["temperature"],
-            # sglang defaults this to 128
-            "max_new_tokens": request["stop_conditions"]["max_tokens"],
-        }
+        sampling_params = {}
+        for key, value in request["sampling_options"].items():
+            if value:
+                # TODO: Do these always match? Maybe allow-list the fields that do match
+                sampling_params[key] = value
+
+        # sglang defaults this to 128
+        max_new_tokens = request["stop_conditions"]["max_tokens"]
+        if max_new_tokens:
+            sampling_params["max_new_tokens"] = max_new_tokens
+
         num_output_tokens_so_far = 0
         gen = await self.engine_client.async_generate(
             input_ids=request["token_ids"], sampling_params=sampling_params, stream=True
@@ -101,16 +101,23 @@ async def init(runtime: DistributedRuntime, config: Config):
     await component.create_service()
 
     endpoint = component.endpoint(config.endpoint)
-    print("Started server instance")
-
-    await register_llm(endpoint, config.model, ModelType.Backend)
+    await register_llm(
+        ModelType.Backend, endpoint, config.model_path, config.model_name
+    )
 
     arg_map = {
-        "model_path": config.model,
+        "model_path": config.model_path,
         "skip_tokenizer_init": True,
         "tp_size": config.tensor_parallel_size,
         "base_gpu_id": config.base_gpu_id,
     }
+    if config.dist_init_addr != "":
+        arg_map["trust_remote_code"] = True
+        arg_map["nnodes"] = config.nnodes
+        arg_map["dist_init_addr"] = config.dist_init_addr
+        # In practice this is always 0 because Dynamo only manages the leader
+        arg_map["node_rank"] = config.node_rank
+
     if config.extra_engine_args != "":
         json_map = {}
         # extra_engine_args is a filename
@@ -123,6 +130,8 @@ async def init(runtime: DistributedRuntime, config: Config):
             logging.error(f"Invalid JSON in {config.extra_engine_args}: {e}")
         logging.debug(f"Adding extra engine arguments: {json_map}")
         arg_map = {**arg_map, **json_map}  # json_map gets precedence
+
+    # TODO fetch default SamplingParams from generation_config.json
 
     engine_args = ServerArgs(**arg_map)
     engine_client = sglang.Engine(server_args=engine_args)
@@ -143,10 +152,16 @@ def cmd_line_args():
         help=f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Default: {DEFAULT_ENDPOINT}",
     )
     parser.add_argument(
-        "--model",
+        "--model-path",
         type=str,
         default=DEFAULT_MODEL,
         help=f"Path to disk model or HuggingFace model identifier to load. Default: {DEFAULT_MODEL}",
+    )
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        default="",
+        help="Name to serve the model under. Defaults to deriving it from model path.",
     )
     parser.add_argument(
         "--base-gpu-id",
@@ -158,6 +173,21 @@ def cmd_line_args():
         "--tensor-parallel-size", type=int, default=1, help="Number of GPUs to use."
     )
     parser.add_argument(
+        "--nnodes", type=int, default=1, help="The number of machines SGLang will use"
+    )
+    parser.add_argument(
+        "--node-rank",
+        type=int,
+        default=0,
+        help="Unique number for each node. 0 for the leader.",
+    )
+    parser.add_argument(
+        "--dist-init-addr",
+        type=str,
+        default="",
+        help="Host address (e.g., `192.168.0.2:25000`) of the node with rank 0",
+    )
+    parser.add_argument(
         "--extra-engine-args",
         type=str,
         default="",
@@ -166,12 +196,17 @@ def cmd_line_args():
     args = parser.parse_args()
 
     config = Config()
-    config.model = args.model
+    config.model_path = args.model_path
+    if args.model_name:
+        config.model_name = args.model_name
+    else:
+        # This becomes an `Option` on the Rust side
+        config.model_name = None
 
     endpoint_str = args.endpoint.replace("dyn://", "", 1)
     endpoint_parts = endpoint_str.split(".")
     if len(endpoint_parts) != 3:
-        print(
+        logging.error(
             f"Invalid endpoint format: '{args.endpoint}'. Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
         )
         sys.exit(1)
@@ -183,6 +218,9 @@ def cmd_line_args():
     config.endpoint = parsed_endpoint_name
     config.base_gpu_id = args.base_gpu_id
     config.tensor_parallel_size = args.tensor_parallel_size
+    config.nnodes = args.nnodes
+    config.node_rank = args.node_rank
+    config.dist_init_addr = args.dist_init_addr
     config.extra_engine_args = args.extra_engine_args
 
     return config

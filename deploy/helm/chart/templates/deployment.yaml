@@ -86,7 +86,7 @@ spec:
         - name: WORKERS
           value: "{{ .config.workers }}"
         {{- end }}
-        - name: PORT
+        - name: DYNAMO_PORT
           value: "3000"
         {{- if $.Values.natsAddr }}
         - name: NATS_SERVER

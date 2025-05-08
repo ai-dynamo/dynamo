@@ -68,7 +68,7 @@ async def test_add_component_increases_replicas(kubernetes_connector, mock_kube_
 
 
 @pytest.mark.asyncio
-async def test_add_component_with_no_existing_replicas(
+async def test_add_component_with_no_replicas_specified(
     kubernetes_connector, mock_kube_api
 ):
     # Arrange

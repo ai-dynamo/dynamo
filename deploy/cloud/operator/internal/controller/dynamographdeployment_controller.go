@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"dario.cat/mergo"
@@ -33,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
 )
@@ -41,6 +43,8 @@ const (
 	FailedState  = "failed"
 	ReadyState   = "successful"
 	PendingState = "pending"
+
+	DYN_DEPLOYMENT_CONFIG_ENV_VAR = "DYN_DEPLOYMENT_CONFIG"
 )
 
 type etcdStorage interface {
@@ -111,6 +115,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 	deleted, err := commonController.HandleFinalizer(ctx, dynamoDeployment, r.Client, r)
 	if err != nil {
+		logger.Error(err, "failed to handle the finalizer")
 		reason = "failed_to_handle_the_finalizer"
 		return ctrl.Result{}, err
 	}
@@ -121,6 +126,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	// fetch the dynamoGraphConfig
 	dynamoGraphConfig, err := dynamo.GetDynamoGraphConfig(ctx, dynamoDeployment, r.Recorder)
 	if err != nil {
+		logger.Error(err, "failed to get the DynamoGraphConfig")
 		reason = "failed_to_get_the_DynamoGraphConfig"
 		return ctrl.Result{}, err
 	}
@@ -128,6 +134,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	// generate the dynamoComponentsDeployments from the config
 	dynamoComponentsDeployments, err := dynamo.GenerateDynamoComponentsDeployments(ctx, dynamoDeployment, dynamoGraphConfig, r.generateDefaultIngressSpec(dynamoDeployment))
 	if err != nil {
+		logger.Error(err, "failed to generate the DynamoComponentsDeployments")
 		reason = "failed_to_generate_the_DynamoComponentsDeployments"
 		return ctrl.Result{}, err
 	}
@@ -137,12 +144,13 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		if _, ok := dynamoDeployment.Spec.Services[serviceName]; ok {
 			err := mergo.Merge(&deployment.Spec.DynamoComponentDeploymentSharedSpec, dynamoDeployment.Spec.Services[serviceName].DynamoComponentDeploymentSharedSpec, mergo.WithOverride)
 			if err != nil {
+				logger.Error(err, "failed to merge the DynamoComponentsDeployments")
 				reason = "failed_to_merge_the_DynamoComponentsDeployments"
 				return ctrl.Result{}, err
 			}
 		}
 		if deployment.Spec.Ingress.Enabled {
-			dynamoDeployment.SetEndpointStatus((r.isEndpointSecured()), getIngressHost(deployment.Spec.Ingress))
+			dynamoDeployment.SetEndpointStatus(r.isEndpointSecured(), getIngressHost(deployment.Spec.Ingress))
 		}
 	}
 
@@ -150,6 +158,11 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	for _, deployment := range dynamoComponentsDeployments {
 		if len(dynamoDeployment.Spec.Envs) > 0 {
 			deployment.Spec.Envs = mergeEnvs(dynamoDeployment.Spec.Envs, deployment.Spec.Envs)
+		}
+		err := updateDynDeploymentConfig(deployment, consts.DynamoServicePort)
+		if err != nil {
+			logger.Error(err, fmt.Sprintf("Failed to update the %v env var", DYN_DEPLOYMENT_CONFIG_ENV_VAR))
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -168,6 +181,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return dynamoComponent, false, nil
 	})
 	if err != nil {
+		logger.Error(err, "failed to sync the DynamoComponent")
 		reason = "failed_to_sync_the_DynamoComponent"
 		return ctrl.Result{}, err
 	}
@@ -187,6 +201,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			return dynamoComponentDeployment, false, nil
 		})
 		if err != nil {
+			logger.Error(err, "failed to sync the DynamoComponentDeployment")
 			reason = "failed_to_sync_the_DynamoComponentDeployment"
 			return ctrl.Result{}, err
 		}
@@ -233,6 +248,9 @@ func (r *DynamoGraphDeploymentReconciler) generateDefaultIngressSpec(dynamoDeplo
 }
 
 func (r *DynamoGraphDeploymentReconciler) isEndpointSecured() bool {
+	if r.VirtualServiceGateway != "" && r.Config.VirtualServiceSupportsHTTPS {
+		return true
+	}
 	return r.IngressControllerTLSSecret != ""
 }
 
@@ -255,6 +273,39 @@ func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 		merged = append(merged, env)
 	}
 	return merged
+}
+
+// updateDynDeploymentConfig updates the DYN_DEPLOYMENT_CONFIG env var for the given dynamoDeploymentComponent
+// It updates the port for the given service in the DYN_DEPLOYMENT_CONFIG env var (if it is the main component)
+func updateDynDeploymentConfig(dynamoDeploymentComponent *nvidiacomv1alpha1.DynamoComponentDeployment, newPort int) error {
+	if dynamoDeploymentComponent.IsMainComponent() {
+		for i, env := range dynamoDeploymentComponent.Spec.Envs {
+			if env.Name == DYN_DEPLOYMENT_CONFIG_ENV_VAR {
+				var config map[string]any
+				if err := json.Unmarshal([]byte(env.Value), &config); err != nil {
+					return fmt.Errorf("failed to unmarshal %v: %w", DYN_DEPLOYMENT_CONFIG_ENV_VAR, err)
+				}
+
+				// Safely navigate and update the config
+				if serviceConfig, ok := config[dynamoDeploymentComponent.Spec.ServiceName].(map[string]any); ok {
+					if _, portExists := serviceConfig["port"]; portExists {
+						serviceConfig["port"] = newPort
+					}
+				}
+
+				// Marshal back to JSON string
+				updated, err := json.Marshal(config)
+				if err != nil {
+					return fmt.Errorf("failed to marshal updated config: %w", err)
+				}
+
+				// Update env var
+				dynamoDeploymentComponent.Spec.Envs[i].Value = string(updated)
+				break
+			}
+		}
+	}
+	return nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {

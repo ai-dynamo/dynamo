@@ -74,6 +74,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::KvMetricsAggregator>()?;
     m.add_class::<llm::kv::KvEventPublisher>()?;
     m.add_class::<llm::kv::KvRecorder>()?;
+    m.add_class::<llm::nats::NatsQueue>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpError>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
@@ -100,12 +101,13 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
 }
 
 #[pyfunction]
-#[pyo3(text_signature = "(endpoint, path, model_type)")]
+#[pyo3(signature = (model_type, endpoint, model_path, model_name=None))]
 fn register_llm<'p>(
     py: Python<'p>,
-    endpoint: Endpoint,
-    path: &str,
     model_type: ModelType,
+    endpoint: Endpoint,
+    model_path: &str,
+    model_name: Option<&str>,
 ) -> PyResult<Bound<'p, PyAny>> {
     let model_type_obj = match model_type {
         ModelType::Chat => llm_rs::model_type::ModelType::Chat,
@@ -113,10 +115,11 @@ fn register_llm<'p>(
         ModelType::Backend => llm_rs::model_type::ModelType::Backend,
     };
 
-    let inner_path = path.to_string();
+    let inner_path = model_path.to_string();
+    let model_name = model_name.map(|n| n.to_string());
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         // Download from HF, load the ModelDeploymentCard
-        let mut local_model = llm_rs::LocalModel::prepare(&inner_path, None, None)
+        let mut local_model = llm_rs::LocalModel::prepare(&inner_path, None, model_name)
             .await
             .map_err(to_pyerr)?;
 
@@ -386,6 +389,41 @@ impl EtcdKvCache {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             inner.put(&key, value, lease_id).await.map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
+    fn delete<'p>(&self, py: Python<'p>, key: String) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner.delete(&key).await.map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
+    fn clear_all<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            // Get all keys with the prefix
+            let all_keys = inner
+                .get_all()
+                .await
+                .keys()
+                .cloned()
+                .collect::<Vec<String>>();
+
+            // Delete each key
+            for key in all_keys {
+                // Strip the prefix from the key before deleting
+                if let Some(stripped_key) = key.strip_prefix(&inner.prefix) {
+                    inner.delete(stripped_key).await.map_err(to_pyerr)?;
+                } else {
+                    inner.delete(&key).await.map_err(to_pyerr)?;
+                }
+            }
+
             Ok(())
         })
     }
