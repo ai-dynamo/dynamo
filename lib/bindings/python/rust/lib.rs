@@ -183,12 +183,6 @@ struct Client {
     router: rs::pipeline::PushRouter<serde_json::Value, serde_json::Value>,
 }
 
-#[pyclass]
-#[derive(Clone)]
-struct PyLease {
-    inner: rs::transports::etcd::Lease,
-}
-
 #[pyclass(eq, eq_int)]
 #[derive(Clone, PartialEq)]
 #[repr(i32)]
@@ -196,25 +190,6 @@ enum ModelType {
     Chat = 1,
     Completion = 2,
     Backend = 3,
-}
-
-#[pymethods]
-impl PyLease {
-    fn id(&self) -> i64 {
-        self.inner.id()
-    }
-
-    fn revoke(&self) {
-        self.inner.revoke();
-    }
-
-    fn is_valid<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let lease = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let is_valid = lease.is_valid().await.map_err(to_pyerr)?;
-            Ok(is_valid)
-        })
-    }
 }
 
 #[pymethods]
@@ -425,50 +400,15 @@ impl Component {
         })
     }
 
-    #[pyo3(signature = (ttl=1))]
-    fn create_service_with_custom_lease<'p>(
-        &self,
-        py: Python<'p>,
-        ttl: i64,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let component = self.inner.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Get the etcd client from the runtime
-            let etcd_client = component
-                .drt()
-                .etcd_client()
-                .ok_or_else(|| to_pyerr("etcd client not found"))?;
-
-            // Create a custom lease with the specified TTL
-            let custom_lease = etcd_client.create_lease(ttl).await.map_err(to_pyerr)?;
-
-            tracing::info!("created custom lease: {:?}", custom_lease);
-
-            // Create a service
-            // TODO: tie the lease to service instead of endpoint
-            let _service = component
-                .service_builder()
-                .create()
-                .await
-                .map_err(to_pyerr)?;
-
-            // Return the lease
-            Ok(PyLease {
-                inner: custom_lease,
-            })
-        })
-    }
 }
 
 #[pymethods]
 impl Endpoint {
-    #[pyo3(signature = (generator, lease=None))]
+    #[pyo3(signature = (generator))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
         generator: PyObject,
-        lease: Option<&PyLease>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
@@ -476,9 +416,6 @@ impl Endpoint {
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
         let mut builder = self.inner.endpoint_builder().handler(ingress);
-        if lease.is_some() {
-            builder = builder.lease(lease.map(|l| l.inner.clone()));
-        }
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             builder.start().await.map_err(to_pyerr)?;
             Ok(())
