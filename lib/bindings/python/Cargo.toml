@@ -67,3 +67,5 @@ pyo3-async-runtimes = { version = "0.23.0", default-features = false, features =
 ] }
 
 pythonize = "0.23"
+
+dlpark = { version = "0.5", features = ["pyo3", "half"] }

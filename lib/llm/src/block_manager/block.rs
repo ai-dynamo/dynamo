@@ -46,7 +46,7 @@ use std::{
 
 use thiserror::Error;
 
-mod private {
+pub mod private {
     pub struct PrivateToken;
 }
 

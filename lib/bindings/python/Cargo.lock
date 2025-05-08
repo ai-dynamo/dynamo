@@ -987,6 +987,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dlpark"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc178fc3bf4ce54c26ccffcf271ff574954ac4b940f15121be3d69f277194537"
+dependencies = [
+ "half",
+ "pyo3",
+]
+
+[[package]]
 name = "dyn-stack"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1086,6 +1096,7 @@ dependencies = [
 name = "dynamo-py3"
 version = "0.2.1"
 dependencies = [
+ "dlpark",
  "dynamo-engine-python",
  "dynamo-llm",
  "dynamo-runtime",
