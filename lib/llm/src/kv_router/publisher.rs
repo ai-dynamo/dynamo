@@ -107,7 +107,6 @@ impl KvMetricsPublisher {
             .handler(handler)
             .start()
             .await
-
     }
 }
 
