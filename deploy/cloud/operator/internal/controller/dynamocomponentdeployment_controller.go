@@ -254,7 +254,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 
 	// create or update api-server hpa
 	modified_, _, err = commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*autoscalingv2.HorizontalPodAutoscaler, bool, error) {
-		return r.generateHPA(ctx, generateResourceOption{
+		return r.generateHPA(generateResourceOption{
 			dynamoComponentDeployment: dynamoComponentDeployment,
 			dynamoComponent:           dynamoComponentCR,
 		})
@@ -847,7 +847,7 @@ type generateResourceOption struct {
 	isGenericService                        bool
 }
 
-func (r *DynamoComponentDeploymentReconciler) generateHPA(_ context.Context, opt generateResourceOption) (*autoscalingv2.HorizontalPodAutoscaler, bool, error) {
+func (r *DynamoComponentDeploymentReconciler) generateHPA(opt generateResourceOption) (*autoscalingv2.HorizontalPodAutoscaler, bool, error) {
 	labels := r.getKubeLabels(opt.dynamoComponentDeployment, opt.dynamoComponent)
 
 	annotations := r.getKubeAnnotations(opt.dynamoComponentDeployment, opt.dynamoComponent)
