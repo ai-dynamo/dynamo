@@ -33,6 +33,7 @@ from circus.watcher import Watcher
 from simple_di import inject
 
 from dynamo.sdk.cli.circus import CircusRunner
+from dynamo.sdk.core.runner import TargetEnum
 
 from .allocator import NVIDIA_GPU, ResourceAllocator
 from .circus import _get_server_socket
@@ -56,7 +57,7 @@ _DYNAMO_WORKER_SCRIPT = "dynamo.sdk.cli.serve_dynamo"
 
 
 def _get_dynamo_worker_script(
-    bento_identifier: str, svc_name: str, target: str
+    bento_identifier: str, svc_name: str, target: TargetEnum
 ) -> list[str]:
     args = [
         "-m",
@@ -79,7 +80,7 @@ def create_dynamo_watcher(
     scheduler: ResourceAllocator,
     working_dir: Optional[str] = None,
     env: Optional[Dict[str, str]] = None,
-    target: str = "local",
+    target: TargetEnum = TargetEnum.DYNAMO,
 ) -> tuple[Watcher, CircusSocket, str]:
     """Create a watcher for a Dynamo service in the dependency graph"""
     from dynamo.sdk.cli.circus import create_circus_watcher
@@ -134,7 +135,7 @@ def serve_dynamo_graph(
     dependency_map: dict[str, str] | None = None,
     service_name: str = "",
     enable_local_planner: bool = False,
-    target: str = "local",
+    target: TargetEnum = TargetEnum.DYNAMO,
 ) -> CircusRunner:
     from dynamo.runtime.logging import configure_dynamo_logging
     from dynamo.sdk.cli.circus import create_arbiter, create_circus_watcher

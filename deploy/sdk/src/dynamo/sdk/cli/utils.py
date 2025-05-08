@@ -32,6 +32,7 @@ import yaml
 from click import Command, Context
 
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sdk.core.runner import TargetEnum
 
 configure_dynamo_logging()
 
@@ -353,18 +354,18 @@ def resolve_service_config(
     return service_configs
 
 
-def set_deployment_target(target: str):
+def configure_target_environment(target: TargetEnum):
     from dynamo.sdk.core.lib import set_target
 
-    if target == "kubernetes" or target == "bento":
+    if target == TargetEnum.BENTO:
         from dynamo.sdk.core.runner.bentoml import K8sDeploymentTarget
 
         target = K8sDeploymentTarget()
-    elif target == "local":
+    elif target == TargetEnum.DYNAMO:
         from dynamo.sdk.core.runner.dynamo import LocalDeploymentTarget
 
         target = LocalDeploymentTarget()
     else:
         raise ValueError(f"Invalid target: {target}")
-    logger.info(f"Setting deployment target to {target.__class__.__name__}")
+    logger.info(f"Setting deployment target to {target}")
     set_target(target)

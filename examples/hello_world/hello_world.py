@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+import os
 
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -81,7 +82,7 @@ class Backend:
         logger.info(f"Backend received: {req_text}")
         text = f"{req_text}-{self.message}"
         for token in text.split():
-            yield f"Backend: {token}"
+            yield f"[process_id:{os.getpid()}] Backend: {token}"
 
 
 @service(
@@ -106,7 +107,7 @@ class Middle:
         next_request = RequestType(text=text).model_dump_json()
         async for response in self.backend.generate(next_request):
             logger.info(f"Middle received response: {response}")
-            yield f"Middle: {response}"
+            yield f"[process_id:{os.getpid()}] Middle: {response}"
 
 
 @service(
@@ -136,6 +137,6 @@ class Frontend:
 
         async def content_generator():
             async for response in self.middle.generate(request.model_dump_json()):
-                yield f"Frontend: {response}"
+                yield f"[process_id:{os.getpid()}] Frontend: {response}"
 
         return StreamingResponse(content_generator())

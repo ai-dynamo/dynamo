@@ -113,8 +113,8 @@ def add_fastapi_routes(app, service, class_instance):
 @click.option(
     "--target",
     type=click.STRING,
-    default="local",
-    help="Specify the deployment target: 'kubernetes' for Kubernetes cluster or 'local' for local execution.",
+    default="dynamo",
+    help="Specify the target: 'dynamo' or 'bento'.",
 )
 def main(
     bento_identifier: str,
@@ -133,9 +133,10 @@ def main(
     from bentoml._internal.context import server_context
 
     from dynamo.runtime.logging import configure_dynamo_logging
-    from dynamo.sdk.cli.utils import set_deployment_target
+    from dynamo.sdk.cli.utils import configure_target_environment
+    from dynamo.sdk.core.runner import TargetEnum
 
-    set_deployment_target(target)
+    configure_target_environment(TargetEnum(target))
 
     dynamo_context["service_name"] = service_name
     dynamo_context["runner_map"] = runner_map
