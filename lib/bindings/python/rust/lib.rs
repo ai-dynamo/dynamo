@@ -236,16 +236,6 @@ impl DistributedRuntime {
         }
     }
 
-    fn primary_token(&self) -> CancellationToken {
-        let inner = self.inner.runtime().primary_token();
-        CancellationToken { inner }
-    }
-
-    fn child_token(&self) -> CancellationToken {
-        let inner = self.inner.runtime().child_token();
-        CancellationToken { inner }
-    }
-
     fn shutdown(&self) {
         self.inner.runtime().shutdown();
     }

@@ -55,12 +55,6 @@ class DistributedRuntime:
         """
         ...
 
-    def primary_token(self) -> CancellationToken:
-        """
-        Get the primary token
-        """
-        ...
-
 class CancellationToken:
     """
     A token that can be used to cancel a task
