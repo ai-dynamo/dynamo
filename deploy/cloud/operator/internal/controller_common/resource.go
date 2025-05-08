@@ -42,36 +42,6 @@ const (
 	NvidiaAnnotationHashKey = "nvidia.com/last-applied-hash"
 )
 
-// var (
-// 	annotator  = patch.NewAnnotator(NvidiaAnnotationHashKey)
-// 	patchMaker = patch.NewPatchMaker(annotator, &patch.K8sStrategicMergePatcher{}, &patch.BaseJSONMergePatcher{})
-// )
-
-// IsSpecChanged returns true if the spec has changed between the existing one
-// and the new resource spec compared by hash.
-// func IsSpecChanged(current client.Object, desired client.Object) (bool, error) {
-// 	if current == nil && desired != nil {
-// 		return true, nil
-// 	}
-
-// 	var patchResult *patch.PatchResult
-// 	opts := []patch.CalculateOption{
-// 		patch.IgnoreStatusFields(),
-// 		patch.IgnoreField("metadata"),
-// 		patch.IgnoreField("apiVersion"),
-// 		patch.IgnoreField("kind"),
-// 	}
-// 	patchResult, err := patchMaker.Calculate(current, desired, opts...)
-// 	if err != nil {
-// 		return false, fmt.Errorf("failed to calculate patch: %w", err)
-// 	}
-// 	if !patchResult.IsEmpty() {
-// 		logs := log.FromContext(context.Background())
-// 		logs.Info("patchResult", "patchResult", patchResult)
-// 	}
-// 	return !patchResult.IsEmpty(), nil
-// }
-
 type Reconciler interface {
 	client.Client
 	GetRecorder() record.EventRecorder
@@ -133,12 +103,6 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 			return
 		}
 
-		// err = annotator.SetLastAppliedAnnotation(resource)
-		// if err != nil {
-		// 	logs.Error(err, "Failed to set last applied annotation.")
-		// 	r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for %s %s: %s", resourceType, resourceNamespace, err)
-		// 	return
-		// }
 		var hash string
 		hash, err = GetSpecHash(resource)
 		if err != nil {
@@ -183,7 +147,7 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 
 		// Check if the Spec has changed and update if necessary
 		var newHash *string
-		newHash, err = IsSpecChanged2(oldResource, resource)
+		newHash, err = IsSpecChanged(oldResource, resource)
 		if err != nil {
 			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("CalculatePatch%s", resourceType), "Failed to calculate patch for %s %s: %s", resourceType, resourceNamespace, err)
 			return false, resource, fmt.Errorf("failed to check if spec has changed: %w", err)
@@ -196,12 +160,6 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 				r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("CopySpec%s", resourceType), "Failed to copy spec for %s %s: %s", resourceType, resourceNamespace, err)
 				return
 			}
-			// err = annotator.SetLastAppliedAnnotation(oldResource)
-			// if err != nil {
-			// 	logs.Error(err, "Failed to set last applied annotation.")
-			// 	r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for %s %s: %s", resourceType, resourceNamespace, err)
-			// 	return
-			// }
 
 			err = updateHashAnnotation(oldResource, *newHash)
 			if err != nil {
@@ -282,7 +240,7 @@ func getSpec(obj client.Object) (any, error) {
 }
 
 // IsSpecChanged returns the new hash if the spec has changed between the existing one
-func IsSpecChanged2(current client.Object, desired client.Object) (*string, error) {
+func IsSpecChanged(current client.Object, desired client.Object) (*string, error) {
 	hashStr, err := GetSpecHash(desired)
 	if err != nil {
 		return nil, err
