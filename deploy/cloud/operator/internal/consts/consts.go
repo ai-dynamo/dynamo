@@ -24,7 +24,7 @@ const (
 	// nolint: gosec
 	EnvApiStoreApiToken = "API_STORE_API_TOKEN"
 
-	EnvDynamoServicePort = "PORT"
+	EnvDynamoServicePort = "DYNAMO_PORT"
 
 	EnvDockerRegistryServer                         = "DOCKER_REGISTRY_SERVER"
 	EnvDockerRegistrySecret                         = "DOCKER_REGISTRY_SECRET_NAME"

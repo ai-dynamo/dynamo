@@ -254,7 +254,7 @@ if [ "$CONFIG_TYPE" = "istio" ]; then
   fi
 
   # Ask if the Istio gateway supports HTTPS
-  read -p "Does your Istio gateway support HTTPS? [y/n]: " SUPPORTS_HTTPS_REPLY
+  read -p "Does your Istio gateway support HTTPS? (y/n): " SUPPORTS_HTTPS_REPLY
   if [[ "$SUPPORTS_HTTPS_REPLY" =~ ^[Yy]$ ]]; then
     export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
   else
