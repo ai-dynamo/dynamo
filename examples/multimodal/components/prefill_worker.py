@@ -17,11 +17,16 @@
 import asyncio
 import logging
 import os
+import signal
 import sys
 
+import torch
+from components.encode_worker import EncodeWorker
 from pydantic import BaseModel
+from utils.logging import check_required_workers
 from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
+from utils.protocol import EncodeRequest, EncodeResponse
 from utils.vllm import parse_vllm_args
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
@@ -29,8 +34,7 @@ from vllm.entrypoints.openai.api_server import (
 from vllm.inputs.data import TokensPrompt
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 
-from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
-from dynamo.sdk.lib.service import LeaseConfig
+from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -43,17 +47,19 @@ class RequestType(BaseModel):
     dynamo={
         "enabled": True,
         "namespace": "dynamo",
-        "custom_lease": LeaseConfig(ttl=1),  # 1 second
     },
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
     workers=1,
 )
 class PrefillWorker:
+    encode_worker = depends(EncodeWorker)
+
     def __init__(self):
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
         self._loaded_metadata = set()
         self.initialized = False
+        self.min_workers = 1
         if self.engine_args.enable_chunked_prefill is not False:
             logger.info("Chunked prefill is not supported yet, setting to False")
             self.engine_args.enable_chunked_prefill = False
@@ -76,6 +82,9 @@ class PrefillWorker:
             )
             self.engine_args.enable_prefix_caching = False
 
+        signal.signal(signal.SIGTERM, self.shutdown_vllm_engine)
+        signal.signal(signal.SIGINT, self.shutdown_vllm_engine)
+
     @async_on_start
     async def async_init(self):
         self._engine_context = build_async_engine_client_from_engine_args(
@@ -86,10 +95,21 @@ class PrefillWorker:
         else:
             raise RuntimeError("Failed to initialize engine client")
         runtime = dynamo_context["runtime"]
+
+        enc_comp_ns, enc_comp_name = EncodeWorker.dynamo_address()  # type: ignore
+        self.encode_worker_client = (
+            await runtime.namespace(enc_comp_ns)
+            .component(enc_comp_name)
+            .endpoint("encode")
+            .client()
+        )
+
+        await check_required_workers(self.encode_worker_client, self.min_workers)
+
         metadata = self.engine_client.nixl_metadata
         self._metadata_store = NixlMetadataStore("dynamo", runtime)
         await self._metadata_store.put(metadata.engine_id, metadata)
-        self.task = asyncio.create_task(self.prefill_queue_handler())
+        task = asyncio.create_task(self.prefill_queue_handler())
 
         def prefill_queue_handler_cb(fut):
             try:
@@ -99,13 +119,12 @@ class PrefillWorker:
                 logger.error(f"[ERROR] prefill queue handler failed: {e!r}")
                 sys.exit(1)
 
-        self.task.add_done_callback(prefill_queue_handler_cb)
-        self.lease = dynamo_context["lease"]
+        task.add_done_callback(prefill_queue_handler_cb)
         logger.info("PrefillWorker initialized")
 
-    def shutdown_vllm_engine(self):
+    def shutdown_vllm_engine(self, signum, frame):
         """Shutdown the background loop"""
-        logger.info("Shutting down vllm engine")
+        logger.info(f"Received signal {signum}, shutting down")
         loop = asyncio.get_event_loop()
         try:
             self.engine_client.close()
@@ -118,8 +137,11 @@ class PrefillWorker:
     async def prefill_queue_handler(self):
         logger.info("Prefill queue handler entered")
         prefill_queue_nats_server = os.getenv("NATS_SERVER", "nats://localhost:4222")
-        namespace, _ = PrefillWorker.dynamo_address()  # type: ignore
-        prefill_queue_stream_name = f"{namespace}_prefill_queue"
+        prefill_queue_stream_name = (
+            self.engine_args.served_model_name
+            if self.engine_args.served_model_name is not None
+            else "vllm"
+        )
         logger.info(
             f"Prefill queue: {prefill_queue_nats_server}:{prefill_queue_stream_name}"
         )
@@ -140,22 +162,22 @@ class PrefillWorker:
                     )
                     async for _ in self.generate(prefill_request):
                         pass
-                is_valid = await self.lease.is_valid()
-                if not is_valid:
-                    logger.info(
-                        "Shutdown requested, checking if engine has any pending prefill sending requests"
-                    )
-                    while True:
-                        if not await self.engine_client.has_unfinished_requests():
-                            break
-                        logger.info(
-                            "Engine has pending prefill sending requests, rechecking in 1 second..."
-                        )
-                        await asyncio.sleep(1)
-                    self.shutdown_vllm_engine()
-                    break
 
     async def generate(self, request: RemotePrefillRequest):
+        if request.multimodal_data_source["image_url"] is None:
+            raise ValueError("No image url provided for prefill request")
+
+        encode_generator = await self.encode_worker_client.round_robin(
+            EncodeRequest(
+                image_url=request.multimodal_data_source["image_url"],
+            ).model_dump_json()
+        )
+        async for encode_response in encode_generator:
+            encode_output = EncodeResponse.model_validate_json(encode_response.data())
+            image_features = torch.tensor(
+                encode_output.image_features, device="cpu", dtype=torch.float16
+            )
+
         sampling_params = request.sampling_params
         sampling_params.max_tokens = 1
         sampling_params.min_tokens = 1
@@ -178,9 +200,25 @@ class PrefillWorker:
             )
             self._loaded_metadata.add(request.engine_id)
 
+        # To make sure the decode worker can pre-allocate the memory with the correct size for the prefill worker to transfer the kv cache,
+        # some placeholder dummy tokens were inserted based on the embedding size in the worker.py.
+        # The structure of the prompt is "\nUSER: <image> <dummy_tokens>\n<user_prompt>\nASSISTANT:", need to remove the dummy tokens after the image token.
+        IMAGE_TOKEN_ID = 32000
+        embedding_size = image_features.shape[1]
+        padding_size = embedding_size - 1
+        image_token_index = request.prompt_token_ids.index(IMAGE_TOKEN_ID)
+        dummy_token_index = image_token_index + 1
+        prompt_token_ids = (
+            request.prompt_token_ids[:dummy_token_index]
+            + request.prompt_token_ids[dummy_token_index + padding_size :]
+        )
+
         async for _ in self.engine_client.generate(
             request_id=request.request_id,
-            prompt=TokensPrompt(prompt_token_ids=request.prompt_token_ids),
+            prompt=TokensPrompt(
+                prompt_token_ids=prompt_token_ids,
+                multi_modal_data={"image": image_features},
+            ),
             sampling_params=sampling_params,
             remote_prefill_params=remote_prefill_params,
         ):

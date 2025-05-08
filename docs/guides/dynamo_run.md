@@ -190,6 +190,8 @@ is equivalent to
 dynamo-run in=text out=mistralrs Qwen/Qwen2.5-3B-Instruct
 ```
 
+If you have multiple GPUs, mistral.rs does automatic tensor parallelism. You do not need to pass any extra flags to dynamo-run to enable it.
+
 ### llamacpp
 
 Currently [llama.cpp](https://github.com/ggml-org/llama.cpp) is not included by default. Build it like this:
@@ -201,6 +203,8 @@ cargo build --features llamacpp[,cuda|metal|vulkan] -p dynamo-run
 ```
 dynamo-run out=llamacpp ~/llms/Llama-3.2-3B-Instruct-Q6_K.gguf
 ```
+
+llamacpp is best for single-GPU inference with a quantized GGUF model file.
 
 ### sglang
 
@@ -416,7 +420,8 @@ async def worker(runtime: DistributedRuntime):
     model_path = "Qwen/Qwen2.5-0.5B-Instruct" # or "/data/models/Qwen2.5-0.5B-Instruct"
     model_type = ModelType.Backend
     endpoint = component.endpoint("endpoint")
-    await register_llm(endpoint, model_path, model_type)
+    # Optional last param to register_llm is model_name. If not present derives it from model_path
+    await register_llm(model_type, endpoint, model_path)
 
     # Initialize your engine here
     # engine = ...

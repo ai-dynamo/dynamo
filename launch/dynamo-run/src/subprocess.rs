@@ -12,6 +12,7 @@ use regex::Regex;
 use tokio::io::AsyncBufReadExt;
 
 use dynamo_llm::engines::MultiNodeConfig;
+use dynamo_llm::LocalModel;
 
 pub mod sglang;
 pub mod vllm;
@@ -22,8 +23,8 @@ pub const ENDPOINT: &str = "dyn://dynamo.internal.worker";
 pub async fn start(
     // The Python code to run
     py_script: &'static str,
-    // Path to folder or file with model weights
-    model_path: &Path,
+    // Model info
+    local_model: &LocalModel,
     // How many GPUs to use
     tensor_parallel_size: u32,
     // sglang which GPU to start from, on a multi-GPU system
@@ -43,8 +44,10 @@ pub async fn start(
         script_path.to_string_lossy().to_string(),
         "--endpoint".to_string(),
         ENDPOINT.to_string(),
-        "--model".to_string(),
-        model_path.to_string_lossy().to_string(),
+        "--model-path".to_string(),
+        local_model.path().to_string_lossy().to_string(),
+        "--model-name".to_string(),
+        local_model.display_name().to_string(),
         "--tensor-parallel-size".to_string(),
         tensor_parallel_size.to_string(),
     ];
