@@ -59,7 +59,12 @@ class KubernetesConnector(PlannerConnector):
 
     def _get_current_replicas(self, deployment: dict, component_name: str) -> int:
         """Get the current replicas for a component in a graph deployment"""
-        return deployment.get("spec", {}).get("services", {}).get(component_name, {}).get("replicas", 1)
+        return (
+            deployment.get("spec", {})
+            .get("services", {})
+            .get(component_name, {})
+            .get("replicas", 1)
+        )
 
     def _get_graph_deployment_name(self, deployment: dict) -> str:
         """Get the name of the graph deployment"""

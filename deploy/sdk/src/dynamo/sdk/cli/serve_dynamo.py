@@ -173,6 +173,11 @@ def main(
     if service_name and service_name != service.name:
         service = service.find_dependent_by_name(service_name)
 
+    # Set namespace in dynamo_context if service is a dynamo component
+    if service.is_dynamo_component():
+        namespace, _ = service.dynamo_address()
+        dynamo_context["namespace"] = namespace
+
     configure_dynamo_logging(service_name=service_name, worker_id=worker_id)
     if runner_map:
         BentoMLContainer.remote_runner_mapping.set(

@@ -360,7 +360,8 @@ class Planner:
             await asyncio.sleep(self.args.metric_pulling_interval / 10)
 
 
-@dynamo_worker()
+# @dynamo_worker()
+# TODO: let's make it such that planner still works via CLI invokation
 async def start_planner(runtime: DistributedRuntime, args: argparse.Namespace):
     planner = Planner(runtime, args)
     console = Console()
@@ -477,4 +478,4 @@ if __name__ == "__main__":
         help="Environment to run the planner in (local, kubernetes)",
     )
     args = parser.parse_args()
-    asyncio.run(start_planner(args))
+    asyncio.run(dynamo_worker()(start_planner)(args))
