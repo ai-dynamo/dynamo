@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+{{- range .Values.services }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $.Release.Name }}-{{ .name | lower }}
+  labels:
+    app: {{ $.Release.Name }}-{{ .name | lower }}
+spec:
+  replicas: {{ .config.workers | default 1 }}
+  selector:
+    matchLabels:
+      app: {{ $.Release.Name }}-{{ .name | lower }}
+  template:
+    metadata:
+      labels:
+        app: {{ $.Release.Name }}-{{ .name | lower }}
+    spec:
+      # pull secrets
+      imagePullSecrets:
+      {{- range $.Values.imagePullSecrets }}
+        - name: {{ .name }}
+      {{- end }}
+      securityContext:
+        runAsUser: 0
+      containers:
+      - name: {{ $.Release.Name }}-{{ .name | lower }}
+        image: {{ $.Values.image }}
+        args:
+        {{ if $.Values.configFilePath }}
+        - cd src && uv run dynamo serve --service-name {{ .name }} {{ $.Values.dynamoIdentifier }} -f {{ $.Values.configFilePath }}
+        {{ else }}
+        - cd src && uv run dynamo serve --service-name {{ .name }} {{ $.Values.dynamoIdentifier }}
+        {{ end }}
+        command:
+        - sh
+        - -c
+        {{ if .config.resources }}
+        resources:
+          requests:
+            {{ if .config.resources.cpu }}
+            cpu: "{{ .config.resources.cpu }}"
+            {{ end }}
+            {{ if .config.resources.memory }}
+            memory: "{{ .config.resources.memory }}"
+            {{ end }}
+            {{ if .config.resources.gpu }}
+            nvidia.com/gpu: "{{ .config.resources.gpu }}"
+            {{ end }}
+          limits:
+            {{ if .config.resources.cpu }}
+            cpu: "{{ .config.resources.cpu }}"
+            {{ end }}
+            {{ if .config.resources.memory }}
+            memory: "{{ .config.resources.memory }}"
+            {{ end }}
+            {{ if .config.resources.gpu }}
+            nvidia.com/gpu: "{{ .config.resources.gpu }}"
+            {{ end }}
+        {{ end }}
+        env:
+        {{- if and .config.traffic .config.traffic.timeout }}
+        - name: TRAFFIC_TIMEOUT
+          value: "{{ .config.traffic.timeout }}"
+        {{- end }}
+        {{- if and .config.dynamo .config.dynamo.enabled }}
+        - name: DYNAMO_NAMESPACE
+          value: "{{ .config.dynamo.namespace }}"
+        - name: DYNAMO_NAME
+          value: "{{ .config.dynamo.name }}"
+        {{- end }}
+        {{- if .config.workers }}
+        - name: WORKERS
+          value: "{{ .config.workers }}"
+        {{- end }}
+        - name: DYNAMO_PORT
+          value: "3000"
+        {{- if $.Values.natsAddr }}
+        - name: NATS_SERVER
+          value: {{ $.Values.natsAddr }}
+        {{- end }}
+        {{- if $.Values.etcdAddr }}
+        - name: ETCD_ENDPOINTS
+          value: {{ $.Values.etcdAddr }}
+        {{- end }}
+---
+{{- end }}

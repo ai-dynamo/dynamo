@@ -21,7 +21,7 @@ from argparse import Namespace
 from typing import AsyncIterator, Tuple
 
 from components.worker import VllmWorker
-from utils.logging import check_required_workers
+from utils.check_worker import check_required_workers
 from utils.protocol import Tokens
 from utils.vllm import RouterType
 

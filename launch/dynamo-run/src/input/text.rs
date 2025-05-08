@@ -191,6 +191,7 @@ async fn main_loop(
             break;
         }
     }
+    cancel_token.cancel(); // stop everything else
     println!();
     Ok(())
 }

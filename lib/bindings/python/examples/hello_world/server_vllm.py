@@ -112,9 +112,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     await component.create_service()
 
     endpoint = component.endpoint(config.endpoint)
-    print("Started server instance")
-
-    await register_llm(endpoint, config.model, ModelType.Backend)
+    await register_llm(ModelType.Backend, endpoint, config.model)
 
     engine_args = AsyncEngineArgs(
         model=config.model,
@@ -151,10 +149,7 @@ def cmd_line_args():
     config = Config()
     config.model = args.model
 
-    endpoint_str = args.endpoint
-    if endpoint_str.startswith("dyn://"):
-        endpoint_str = endpoint_str[len("dyn://") :]
-
+    endpoint_str = args.endpoint.replace("dyn://", "", 1)
     endpoint_parts = endpoint_str.split(".")
     if len(endpoint_parts) != 3:
         print(

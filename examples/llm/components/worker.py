@@ -56,15 +56,11 @@ class VllmWorker:
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
         self.do_remote_prefill = self.engine_args.remote_prefill
-        self.model_name = (
-            self.engine_args.served_model_name
-            if self.engine_args.served_model_name is not None
-            else "vllm"
-        )
         self._prefill_queue_nats_server = os.getenv(
             "NATS_SERVER", "nats://localhost:4222"
         )
-        self._prefill_queue_stream_name = self.model_name
+        self.namespace, _ = VllmWorker.dynamo_address()  # type: ignore
+        self._prefill_queue_stream_name = f"{self.namespace}_prefill_queue"
         logger.info(
             f"Prefill queue: {self._prefill_queue_nats_server}:{self._prefill_queue_stream_name}"
         )
@@ -134,7 +130,7 @@ class VllmWorker:
         if self.engine_args.conditional_disagg:
             self.disaggregated_router = PyDisaggregatedRouter(
                 runtime,
-                self.model_name,
+                self.namespace,
                 max_local_prefill_length=self.engine_args.max_local_prefill_length,
                 max_prefill_queue_size=self.engine_args.max_prefill_queue_size,
             )

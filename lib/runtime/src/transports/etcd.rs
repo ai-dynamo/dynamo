@@ -551,7 +551,19 @@ impl KvCache {
         Ok(())
     }
 
-    // TODO: add a method to create/delete keys
+    /// Delete a key from both the cache and etcd
+    pub async fn delete(&self, key: &str) -> Result<()> {
+        let full_key = format!("{}{}", self.prefix, key);
+
+        // Delete from etcd first
+        self.client.kv_delete(full_key.clone(), None).await?;
+
+        // Then remove from local cache
+        let mut cache_write = self.cache.write().await;
+        cache_write.remove(&full_key);
+
+        Ok(())
+    }
 }
 
 #[cfg(feature = "integration")]
