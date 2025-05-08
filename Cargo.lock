@@ -3919,15 +3919,15 @@ dependencies = [
 
 [[package]]
 name = "nixl-sys"
-version = "0.1.1"
-source = "git+https://github.com/ai-dynamo/nixl.git?branch=ryan%2Fkvbm#6d4e8aa487683201e7076f3194f97539bfd638d2"
+version = "0.2.0"
+source = "git+https://github.com/ai-dynamo/nixl.git?rev=f0429ba00628f9bbb76f770bf00e51870a071fc0#f0429ba00628f9bbb76f770bf00e51870a071fc0"
 dependencies = [
  "bindgen 0.71.1",
  "cc",
  "libc",
  "pkg-config",
  "serde",
- "thiserror 2.0.12",
+ "thiserror 1.0.69",
  "tracing",
 ]
 
