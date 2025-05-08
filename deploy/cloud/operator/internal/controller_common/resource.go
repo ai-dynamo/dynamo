@@ -120,17 +120,17 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 		}
 		logs.Info("Resource not found. Creating a new one.")
 
-		err = annotator.SetLastAppliedAnnotation(resource)
-		if err != nil {
-			logs.Error(err, "Failed to set last applied annotation.")
-			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for %s %s: %s", resourceType, resourceNamespace, err)
-			return
-		}
-
 		err = ctrl.SetControllerReference(parentResource, resource, r.Scheme())
 		if err != nil {
 			logs.Error(err, "Failed to set controller reference.")
 			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, "SetControllerReference", "Failed to set controller reference for %s %s: %s", resourceType, resourceNamespace, err)
+			return
+		}
+
+		err = annotator.SetLastAppliedAnnotation(resource)
+		if err != nil {
+			logs.Error(err, "Failed to set last applied annotation.")
+			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for %s %s: %s", resourceType, resourceNamespace, err)
 			return
 		}
 
