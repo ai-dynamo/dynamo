@@ -33,6 +33,8 @@ context_servers:
     free_gpu_memory_fraction: 0.40
     event_buffer_max_size: 1024
     enable_block_reuse: true
+  cache_transceiver_config:
+    max_num_tokens: 10240
   pytorch_backend_config:
     enable_overlap_scheduler: false
     use_cuda_graph: false
@@ -49,6 +51,8 @@ generation_servers:
     free_gpu_memory_fraction: 0.40
     event_buffer_max_size: 1024
     enable_block_reuse: true
+  cache_transceiver_config:
+    max_num_tokens: 256
   pytorch_backend_config:
     enable_overlap_scheduler: true
     use_cuda_graph: false

@@ -125,12 +125,6 @@ pub struct ModelDeploymentCard {
     /// Incrementing count of how many times we published this card
     #[serde(default, skip_serializing)]
     pub revision: u64,
-
-    /// Does this model expect preprocessing (tokenization, etc) to be already done?
-    /// If this is true they get a BackendInput JSON. If this is false they get
-    /// an NvCreateChatCompletionRequest JSON.
-    #[serde(default)]
-    pub requires_preprocessing: bool,
 }
 
 impl ModelDeploymentCard {
@@ -171,9 +165,7 @@ impl ModelDeploymentCard {
 
     /// Load a model deployment card from a JSON file
     pub fn load_from_json_file<P: AsRef<Path>>(file: P) -> std::io::Result<Self> {
-        let mut card: ModelDeploymentCard = serde_json::from_str(&std::fs::read_to_string(file)?)?;
-        card.requires_preprocessing = false;
-        Ok(card)
+        Ok(serde_json::from_str(&std::fs::read_to_string(file)?)?)
     }
 
     /// Load a model deployment card from a JSON string
@@ -216,6 +208,12 @@ impl ModelDeploymentCard {
         } else {
             false
         }
+    }
+
+    /// Is this a full model card with tokenizer?
+    /// There are cases where we have a placeholder card (see `with_name_only`).
+    pub fn has_tokenizer(&self) -> bool {
+        self.tokenizer.is_some()
     }
 
     pub fn tokenizer_hf(&self) -> anyhow::Result<HfTokenizer> {

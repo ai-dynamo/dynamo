@@ -23,6 +23,25 @@ use std::path::Path;
 use crate::model_card::model::{ModelInfoType, PromptFormatterArtifact, TokenizerKind};
 
 impl ModelDeploymentCard {
+    /// Allow user to override the name we register this model under.
+    /// Corresponds to vllm's `--served-model-name`.
+    pub fn set_name(&mut self, name: &str) {
+        self.display_name = name.to_string();
+        self.service_name = name.to_string();
+    }
+
+    /// Build an in-memory ModelDeploymentCard from either:
+    /// - a folder containing config.json, tokenizer.json and token_config.json
+    /// - a GGUF file
+    pub async fn load(config_path: impl AsRef<Path>) -> anyhow::Result<ModelDeploymentCard> {
+        let config_path = config_path.as_ref();
+        if config_path.is_dir() {
+            Self::from_local_path(config_path).await
+        } else {
+            Self::from_gguf(config_path).await
+        }
+    }
+
     /// Creates a ModelDeploymentCard from a local directory path.
     ///
     /// Currently HuggingFace format is supported and following files are expected:
@@ -38,10 +57,7 @@ impl ModelDeploymentCard {
     /// - The path doesn't exist or isn't a directory
     /// - The path contains invalid Unicode characters
     /// - Required model files are missing or invalid
-    pub async fn from_local_path(
-        local_root_dir: impl AsRef<Path>,
-        model_name: Option<&str>,
-    ) -> anyhow::Result<Self> {
+    async fn from_local_path(local_root_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
         let local_root_dir = local_root_dir.as_ref();
         check_valid_local_repo_path(local_root_dir)?;
         let repo_id = local_root_dir
@@ -49,22 +65,18 @@ impl ModelDeploymentCard {
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Path contains invalid Unicode"))?
             .to_string();
-        let model_name = model_name.unwrap_or(
-            local_root_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .ok_or_else(|| anyhow::anyhow!("Invalid model directory name"))?,
-        );
+        let model_name = local_root_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("Invalid model directory name"))?;
         Self::from_repo(&repo_id, model_name).await
     }
 
-    pub async fn from_gguf(gguf_file: &Path, model_name: Option<&str>) -> anyhow::Result<Self> {
-        let model_name = model_name.map(|s| s.to_string()).or_else(|| {
-            gguf_file
-                .iter()
-                .next_back()
-                .map(|n| n.to_string_lossy().to_string())
-        });
+    async fn from_gguf(gguf_file: &Path) -> anyhow::Result<Self> {
+        let model_name = gguf_file
+            .iter()
+            .next_back()
+            .map(|n| n.to_string_lossy().to_string());
         let Some(model_name) = model_name else {
             // I think this would only happy on an empty path
             anyhow::bail!(
@@ -81,19 +93,19 @@ impl ModelDeploymentCard {
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
             last_published: None,
-            requires_preprocessing: false,
         })
     }
 
     /// TODO: This will be implemented after nova-hub is integrated with the model-card
     /// TODO: Attempt to auto-detect model type and construct an MDC from a NGC repo
-    pub async fn from_ngc_repo(_: &str) -> anyhow::Result<Self> {
+    #[allow(dead_code)]
+    async fn from_ngc_repo(_: &str) -> anyhow::Result<Self> {
         Err(anyhow::anyhow!(
             "ModelDeploymentCard::from_ngc_repo is not implemented"
         ))
     }
 
-    pub async fn from_repo(repo_id: &str, model_name: &str) -> anyhow::Result<Self> {
+    async fn from_repo(repo_id: &str, model_name: &str) -> anyhow::Result<Self> {
         Ok(Self {
             display_name: model_name.to_string(),
             service_name: model_name.to_string(),
@@ -103,7 +115,6 @@ impl ModelDeploymentCard {
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
             last_published: None,
-            requires_preprocessing: false,
         })
     }
 }

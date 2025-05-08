@@ -66,7 +66,7 @@ struct Entry {
 pub async fn run(
     runtime: Runtime,
     flags: Flags,
-    maybe_card: Option<ModelDeploymentCard>,
+    card: ModelDeploymentCard,
     input_jsonl: PathBuf,
     engine_config: EngineConfig,
     template: Option<RequestTemplate>,
@@ -83,7 +83,7 @@ pub async fn run(
     let prepared_engine = common::prepare_engine(runtime, flags, engine_config).await?;
     let service_name_ref = Arc::new(prepared_engine.service_name);
 
-    let pre_processor = if let Some(card) = maybe_card {
+    let pre_processor = if card.has_tokenizer() {
         Some(OpenAIPreprocessor::new(card).await?)
     } else {
         None
@@ -202,6 +202,7 @@ pub async fn run(
         tokens_out,
         tokens_out / cmp::max(elapsed.as_secs(), 1),
     );
+    cancel_token.cancel(); // stop everything else
 
     Ok(())
 }

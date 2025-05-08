@@ -153,11 +153,8 @@ pub async fn prepare_engine(
                 _cache_dir: cache_dir,
             })
         }
-        EngineConfig::StaticFull {
-            service_name,
-            engine,
-            card: _card,
-        } => {
+        EngineConfig::StaticFull { engine, model } => {
+            let service_name = model.service_name().to_string();
             tracing::debug!("Model: {service_name} with engine pre-processing");
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             Ok(PreparedEngine {
@@ -168,16 +165,16 @@ pub async fn prepare_engine(
             })
         }
         EngineConfig::StaticCore {
-            service_name,
             engine: inner_engine,
-            card,
+            model,
         } => {
             let pipeline = build_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(&card, inner_engine)
+            >(model.card(), inner_engine)
             .await?;
 
+            let service_name = model.service_name().to_string();
             tracing::debug!("Model: {service_name} with Dynamo pre-processing");
             Ok(PreparedEngine {
                 service_name,
@@ -186,7 +183,6 @@ pub async fn prepare_engine(
                 _cache_dir: None,
             })
         }
-        EngineConfig::None => unreachable!(),
     }
 }
 
@@ -236,7 +232,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_chat_completions_pipeline_core_engine_succeeds() -> anyhow::Result<()> {
         // Create test model card
-        let card = ModelDeploymentCard::from_local_path(HF_PATH, None).await?;
+        let card = ModelDeploymentCard::load(HF_PATH).await?;
         let engine = dynamo_llm::engines::make_engine_core();
 
         // Build pipeline for chat completions
@@ -255,7 +251,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_completions_pipeline_core_engine_succeeds() -> anyhow::Result<()> {
         // Create test model card
-        let card = ModelDeploymentCard::from_local_path(HF_PATH, None).await?;
+        let card = ModelDeploymentCard::load(HF_PATH).await?;
         let engine = dynamo_llm::engines::make_engine_core();
 
         // Build pipeline for completions

@@ -25,12 +25,12 @@ class PyDisaggregatedRouter:
     def __init__(
         self,
         runtime,
-        served_model_name,
+        namespace,
         max_local_prefill_length=1000,
         max_prefill_queue_size=2,
     ):
         self.runtime = runtime
-        self.served_model_name = served_model_name
+        self.namespace = namespace
         self.max_local_prefill_length = max_local_prefill_length
         self.max_prefill_queue_size = max_prefill_queue_size
 
@@ -38,7 +38,7 @@ class PyDisaggregatedRouter:
         runtime = dynamo_context["runtime"]
         self.etcd_kv_cache = await EtcdKvCache.create(
             runtime.etcd_client(),
-            "/dynamo/disagg_router/",
+            f"/{self.namespace}/disagg_router/",
             {
                 "max_local_prefill_length": str(self.max_local_prefill_length),
                 "max_prefill_queue_size": str(self.max_prefill_queue_size),
