@@ -126,13 +126,6 @@ class BentoMLService(ServiceInterface[T]):
         """Find dynamo service by name"""
         return self.all_services()[name]
 
-    # def init_dependencies(self) -> dict[str, "DependencyInterface"]:
-    #     for field_name in dir(self._bentoml_service.inner):
-    #         field = getattr(self._bentoml_service.inner, field_name)
-    #         if isinstance(field, DependencyInterface):
-    #             self.dependencies[field.on.name] = field
-    #     return self.dependencies
-
     def dynamo_address(self) -> tuple[str, str]:
         return (self._dynamo_config.namespace, self._dynamo_config.name)
 

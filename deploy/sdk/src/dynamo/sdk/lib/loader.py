@@ -184,11 +184,6 @@ def _do_import(import_str: str, working_dir: str) -> DynamoService:
             except (AttributeError, KeyError):
                 raise ValueError(f'Attribute "{attr}" not found in "{module_name}"')
 
-    # if not isinstance(instance, DynamoService):
-    #     raise ValueError(
-    #         f'Object "{attrs_str}" in module "{module_name}" is not a DynamoService'
-    #     )
-
     # Set import string for debugging/logging
     if not hasattr(instance, "_import_str"):
         import_str_val = f"{module_name}:{attrs_str}" if attrs_str else module_name

@@ -22,9 +22,7 @@ from pydantic import BaseModel
 from dynamo.runtime.logging import configure_dynamo_logging
 
 # todo: bis: s/dynamo_endpoint/endpoint
-from dynamo.sdk import DYNAMO_IMAGE, depends
-from dynamo.sdk import dynamo_endpoint as endpoint
-from dynamo.sdk import service
+from dynamo.sdk import DYNAMO_IMAGE, depends, dynamo_endpoint, service
 from dynamo.sdk.core.protocol.interface import DynamoTransport
 from dynamo.sdk.lib.config import ServiceConfig
 
@@ -75,7 +73,7 @@ class Backend:
         self.message = config.get("Backend", {}).get("message", "back")
         logger.info(f"Backend config message: {self.message}")
 
-    @endpoint()
+    @dynamo_endpoint()
     async def generate(self, req: RequestType):
         """Generate tokens."""
         req_text = req.text
@@ -98,7 +96,7 @@ class Middle:
         self.message = config.get("Middle", {}).get("message", "mid")
         logger.info(f"Middle config message: {self.message}")
 
-    @endpoint()
+    @dynamo_endpoint()
     async def generate(self, req: RequestType):
         """Forward requests to backend."""
         req_text = req.text
@@ -130,7 +128,7 @@ class Frontend:
         logger.info(f"Frontend config message: {self.message}")
         logger.info(f"Frontend config port: {self.port}")
 
-    @endpoint(transports=[DynamoTransport.HTTP])
+    @dynamo_endpoint(transports=[DynamoTransport.HTTP])
     async def generate(self, request: RequestType):
         """Stream results from the pipeline."""
         logger.info(f"Frontend received: {request.text}")
