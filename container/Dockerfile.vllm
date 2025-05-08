@@ -315,7 +315,7 @@ COPY launch /workspace/launch
 COPY deploy/sdk /workspace/deploy/sdk
 
 # Build Rust crate binaries packaged with the wheel
-RUN cargo build --release --locked --features mistralrs,python \
+RUN cargo build --release --locked --features mistralrs,python,dynamo-llm/block_manager \
     -p dynamo-run \
     -p llmctl \
     # Multiple http named crates are present in dependencies, need to specify the path
@@ -351,7 +351,7 @@ COPY . /workspace
 
 # Build rest of the crates
 # Need to figure out rust caching to avoid rebuilding and remove exclude flags
-RUN cargo build --release --locked --workspace \
+RUN cargo build --release --locked --features block_manager --workspace \
     --exclude dynamo-run \
     --exclude llmctl \
     --exclude file://$PWD/components/http \
