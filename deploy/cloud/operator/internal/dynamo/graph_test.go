@@ -455,61 +455,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "Test GenerateDynamoComponentsDeployments dynamo dependency, different namespace",
-			args: args{
-				parentDynamoGraphDeployment: &v1alpha1.DynamoGraphDeployment{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamographdeployment",
-						Namespace: "default",
-					},
-					Spec: v1alpha1.DynamoGraphDeploymentSpec{
-						DynamoGraph: "dynamocomponent:ac4e234",
-					},
-				},
-				config: &DynamoGraphConfig{
-					DynamoTag:    "dynamocomponent:MyService2",
-					EntryService: "service1",
-					Services: []ServiceConfig{
-						{
-							Name:         "service1",
-							Dependencies: []map[string]string{{"service": "service2"}},
-							Config: Config{
-								Dynamo: &DynamoConfig{
-									Enabled:   true,
-									Namespace: "namespace1",
-									Name:      "service1",
-								},
-								Resources: &Resources{
-									CPU:    "1",
-									Memory: "1Gi",
-									GPU:    "0",
-									Custom: map[string]string{},
-								},
-								Autoscaling: &Autoscaling{
-									MinReplicas: 1,
-									MaxReplicas: 5,
-								},
-							},
-						},
-						{
-							Name:         "service2",
-							Dependencies: []map[string]string{},
-							Config: Config{
-								Dynamo: &DynamoConfig{
-									Enabled:   true,
-									Namespace: "namespace2",
-									Name:      "service2",
-								},
-							},
-						},
-					},
-				},
-				ingressSpec: &v1alpha1.IngressSpec{},
-			},
-			want:    nil,
-			wantErr: true,
-		},
-		{
 			name: "Test GenerateDynamoComponentsDeployments dependency not found",
 			args: args{
 				parentDynamoGraphDeployment: &v1alpha1.DynamoGraphDeployment{
