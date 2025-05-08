@@ -55,6 +55,12 @@ class DistributedRuntime:
         """
         ...
 
+    def primary_token(self) -> CancellationToken:
+        """
+        Get the primary token
+        """
+        ...
+
 class PyLease:
     """
     A lease object

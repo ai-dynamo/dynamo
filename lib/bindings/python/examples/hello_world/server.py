@@ -55,9 +55,9 @@ async def worker(runtime: DistributedRuntime):
     
 
 async def graceful_shutdown(runtime: DistributedRuntime):
-    print(f"Received shutdown signal, shutting down...")
+    print(f"Received shutdown signal, shutting down DistributedRuntime")
     runtime.shutdown()
-    print("Shutdown complete")
+    print("DistributedRuntime shutdown complete")
 
 
 async def init(runtime: DistributedRuntime, ns: str):
