@@ -35,7 +35,6 @@ from fastapi.responses import StreamingResponse
 
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 from dynamo.sdk import dynamo_context
-from dynamo.sdk.cli.utils import append_dynamo_state
 from dynamo.sdk.lib.service import LinkedServices
 
 logger = logging.getLogger(__name__)

@@ -17,8 +17,9 @@
 import asyncio
 import logging
 import os
-import sys
 import signal
+import sys
+
 from pydantic import BaseModel
 from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
@@ -30,7 +31,6 @@ from vllm.inputs.data import TokensPrompt
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
-from dynamo.sdk.lib.service import LeaseConfig
 
 logger = logging.getLogger(__name__)
 
@@ -103,11 +103,11 @@ class PrefillWorker:
         # Set up signal handler for graceful shutdown
         loop = asyncio.get_running_loop()
         self.shutdown_requested = False
-        
+
         def signal_handler():
             # Schedule the shutdown coroutine instead of calling it directly
             asyncio.create_task(self.graceful_shutdown(runtime))
-        
+
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, signal_handler)
 

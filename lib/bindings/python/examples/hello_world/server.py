@@ -15,7 +15,6 @@
 
 import asyncio
 import signal
-import sys
 
 import uvloop
 
@@ -39,23 +38,23 @@ async def worker(runtime: DistributedRuntime):
     print(
         f"Primary lease ID: {runtime.etcd_client().primary_lease_id()}/{runtime.etcd_client().primary_lease_id():#x}"
     )
-    
+
     # Set up signal handler for graceful shutdown
     loop = asyncio.get_running_loop()
-    
+
     def signal_handler():
         # Schedule the shutdown coroutine instead of calling it directly
         asyncio.create_task(graceful_shutdown(runtime))
-    
+
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
-    
+
     print("Signal handlers registered for graceful shutdown")
     await init(runtime, "dynamo")
-    
+
 
 async def graceful_shutdown(runtime: DistributedRuntime):
-    print(f"Received shutdown signal, shutting down DistributedRuntime")
+    print("Received shutdown signal, shutting down DistributedRuntime")
     runtime.shutdown()
     print("DistributedRuntime shutdown complete")
 

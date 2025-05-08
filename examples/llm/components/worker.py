@@ -33,7 +33,6 @@ from vllm.sampling_params import RequestOutputKind
 
 from dynamo.llm import KvMetricsPublisher
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
-from dynamo.sdk.lib.service import LeaseConfig
 
 logger = logging.getLogger(__name__)
 
@@ -143,11 +142,11 @@ class VllmWorker:
 
         # Set up signal handler for graceful shutdown
         loop = asyncio.get_running_loop()
-        
+
         def signal_handler():
             # Schedule the shutdown coroutine instead of calling it directly
             asyncio.create_task(self.graceful_shutdown(runtime))
-        
+
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, signal_handler)
 

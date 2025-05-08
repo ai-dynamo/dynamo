@@ -187,7 +187,7 @@ class CircusController:
                 logger.warning(f"Failed to send SIGTERM to {name}: {response}")
         except Exception as e:
             logger.warning(f"Error sending SIGTERM to {name}: {e}")
-        
+
         # Now wait for the process to exit gracefully
         exited = await self._wait_for_process_graceful_exit(name, timeout)
         if not exited:
