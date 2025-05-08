@@ -82,8 +82,22 @@ class NATSQueue:
     async def enqueue_task(self, task_data: bytes) -> None:
         await self.nats_q.enqueue_task(task_data)
 
-    async def dequeue_task(self) -> Optional[bytes]:
-        return await self.nats_q.dequeue_task()
+    async def dequeue_task(self, timeout: Optional[float] = None) -> Optional[bytes]:
+        return await self.nats_q.dequeue_task(timeout)
 
     async def get_queue_size(self) -> int:
         return await self.nats_q.get_queue_size()
+
+    async def clear_queue(self) -> int:
+        try:
+            cleared_count = 0
+            # Continue until we can't dequeue any more messages
+            while True:
+                # use a small timeout
+                message = await self.dequeue_task(timeout=0.1)
+                if message is None:
+                    break
+                cleared_count += 1
+            return cleared_count
+        except Exception as e:
+            raise RuntimeError(f"Failed to clear queue: {e}")
