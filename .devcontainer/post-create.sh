@@ -49,7 +49,7 @@ mkdir -p $HOME/dynamo/.build/target
 export CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 
 # build project, it will be saved at $HOME/dynamo/.build/target
-cargo build --locked --profile dev --features mistralrs,sglang,vllm,python
+cargo build --locked --profile dev --features mistralrs,python
 cargo doc --no-deps
 
 # create symlinks for the binaries in the deploy directory

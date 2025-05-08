@@ -15,7 +15,9 @@
 
 from components.frontend import Frontend
 from components.kv_router import Router
+from components.planner_service import Planner
 from components.processor import Processor
 from components.worker import VllmWorker
 
 Frontend.link(Processor).link(Router).link(VllmWorker)
+Frontend.link(Planner)

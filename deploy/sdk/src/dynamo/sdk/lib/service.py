@@ -19,6 +19,7 @@ import logging
 import os
 from collections import defaultdict
 from dataclasses import asdict, dataclass
+from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple, TypeVar, Union
 
 # WARNING: internal
@@ -32,6 +33,16 @@ from dynamo.sdk.lib.decorators import DynamoEndpoint
 T = TypeVar("T", bound=object)
 
 logger = logging.getLogger(__name__)
+
+
+class ComponentType(str, Enum):
+    """Types of Dynamo components"""
+
+    PLANNER = "planner"
+    # Future types can be added here like:
+    # METRICS = "metrics"
+    # MONITOR = "monitor"
+    # etc.
 
 
 class RuntimeLinkedServices:
@@ -68,6 +79,9 @@ class DynamoConfig:
     name: str | None = None
     namespace: str | None = None
     custom_lease: LeaseConfig | None = None
+    component_type: ComponentType | None = (
+        None  # Indicates if this is a meta/system component
+    )
 
 
 @dataclass
@@ -133,10 +147,21 @@ class DynamoService(Service[T]):
 
         # Register Dynamo endpoints
         self._dynamo_endpoints: Dict[str, DynamoEndpoint] = {}
+        self._api_endpoints: list[str] = []
         for field in dir(inner):
             value = getattr(inner, field)
             if isinstance(value, DynamoEndpoint):
                 self._dynamo_endpoints[value.name] = value
+                if getattr(value, "is_api", False):
+                    # Ensure endpoint path starts with '/'
+                    path = (
+                        value.name if value.name.startswith("/") else f"/{value.name}"
+                    )
+                    self._api_endpoints.append(path)
+        # If any API endpoints exist, mark service as HTTP-exposed and list endpoints
+        if self._api_endpoints:
+            self.config["http_exposed"] = True
+            self.config["api_endpoints"] = self._api_endpoints.copy()
 
         self._linked_services: List[DynamoService] = []  # Track linked services
 

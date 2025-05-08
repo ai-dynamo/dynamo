@@ -15,8 +15,10 @@
 
 from components.frontend import Frontend
 from components.kv_router import Router
+from components.planner_service import Planner
 from components.prefill_worker import PrefillWorker
 from components.processor import Processor
 from components.worker import VllmWorker
 
 Frontend.link(Processor).link(Router).link(VllmWorker).link(PrefillWorker)
+Frontend.link(Planner)

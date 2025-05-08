@@ -228,9 +228,8 @@ fn run_request(
         limit,
     );
 
-    // create a llama_batch with size 512
     // we use this object to submit token data for decoding
-    let mut batch = LlamaBatch::new(512, 1);
+    let mut batch = LlamaBatch::new(std::cmp::max(512, max_output_tokens as usize), 1);
     let last_index: i32 = (tokens_list.len() - 1) as i32;
     for (i, token) in (0_i32..).zip(tokens_list.into_iter()) {
         // llama_decode will output logits only for the last token of the prompt

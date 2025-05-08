@@ -12,31 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-Common:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  block-size: 64
-  max-model-len: 16384
 
-Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  endpoint: dynamo.Processor.chat/completions
-  port: 8000
+import os
 
-Processor:
-  router: round-robin
-  router-num-threads: 4
-  common-configs: [model, block-size, max-model-len]
 
-VllmWorker:
-  enforce-eager: true
-  max-num-batched-tokens: 16384
-  enable-prefix-caching: true
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: 1
-  common-configs: [model, block-size, max-model-len]
-
-Planner:
-  environment: local
-  no-operation: true
+def get_host_port():
+    """Gets host and port from environment variables. Defaults to 0.0.0.0:8000."""
+    port = int(os.environ.get("DYNAMO_PORT", 8000))
+    host = os.environ.get("DYNAMO_HOST", "0.0.0.0")
+    return host, port

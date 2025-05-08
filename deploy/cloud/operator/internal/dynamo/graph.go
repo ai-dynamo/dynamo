@@ -27,7 +27,7 @@ import (
 
 	"emperror.dev/errors"
 	apiStoreClient "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/api_store_client"
-	compounaiCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconfig "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/config"
@@ -42,11 +42,17 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+const (
+	ComponentTypePlanner      = "planner"
+	PlannerServiceAccountName = "planner-serviceaccount"
+)
+
 // ServiceConfig represents the YAML configuration structure for a service
 type DynamoConfig struct {
-	Enabled   bool   `yaml:"enabled"`
-	Namespace string `yaml:"namespace"`
-	Name      string `yaml:"name"`
+	Enabled       bool   `yaml:"enabled"`
+	Namespace     string `yaml:"namespace"`
+	Name          string `yaml:"name"`
+	ComponentType string `yaml:"component_type,omitempty"`
 }
 
 type Resources struct {
@@ -66,10 +72,12 @@ type Autoscaling struct {
 }
 
 type Config struct {
-	Dynamo      *DynamoConfig `yaml:"dynamo,omitempty"`
-	Resources   *Resources    `yaml:"resources,omitempty"`
-	Traffic     *Traffic      `yaml:"traffic,omitempty"`
-	Autoscaling *Autoscaling  `yaml:"autoscaling,omitempty"`
+	Dynamo       *DynamoConfig `yaml:"dynamo,omitempty"`
+	Resources    *Resources    `yaml:"resources,omitempty"`
+	Traffic      *Traffic      `yaml:"traffic,omitempty"`
+	Autoscaling  *Autoscaling  `yaml:"autoscaling,omitempty"`
+	HttpExposed  bool          `yaml:"http_exposed,omitempty"`
+	ApiEndpoints []string      `yaml:"api_endpoints,omitempty"`
 }
 
 type ServiceConfig struct {
@@ -228,6 +236,7 @@ func GetDynamoGraphConfig(ctx context.Context, dynamoDeployment *v1alpha1.Dynamo
 func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, config *DynamoGraphConfig, ingressSpec *v1alpha1.IngressSpec) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	dynamoServices := make(map[string]string)
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
+	graphDynamoNamespace := ""
 	for _, service := range config.Services {
 		deployment := &v1alpha1.DynamoComponentDeployment{}
 		deployment.Name = fmt.Sprintf("%s-%s", parentDynamoGraphDeployment.Name, strings.ToLower(service.Name))
@@ -250,22 +259,34 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			deployment.Spec.DynamoNamespace = &dynamoNamespace
 			dynamoServices[service.Name] = fmt.Sprintf("%s/%s", service.Config.Dynamo.Name, dynamoNamespace)
 			labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
-		} else {
-			// dynamo is not enabled
-			if config.EntryService == service.Name {
-				// enable virtual service for the entry service
-				deployment.Spec.Ingress = *ingressSpec
+			// we check that all dynamo components are in the same namespace
+			// this is needed for the planner to work correctly
+			// this check will be removed when the global planner will be implemented
+			if graphDynamoNamespace != "" && graphDynamoNamespace != dynamoNamespace {
+				return nil, fmt.Errorf("different namespaces for the same graph, expected %s, got %s", graphDynamoNamespace, dynamoNamespace)
+			}
+			graphDynamoNamespace = dynamoNamespace
+			if service.Config.Dynamo.ComponentType == ComponentTypePlanner {
+				deployment.Spec.ExtraPodSpec = &common.ExtraPodSpec{
+					ServiceAccountName: PlannerServiceAccountName,
+				}
 			}
 		}
+		// Check http_exposed independently
+		if config.EntryService == service.Name && service.Config.HttpExposed {
+			deployment.Spec.Ingress = *ingressSpec
+			// TODO (maybe): add paths to IngressSpec
+		}
+
 		if service.Config.Resources != nil {
-			deployment.Spec.Resources = &compounaiCommon.Resources{
-				Requests: &compounaiCommon.ResourceItem{
+			deployment.Spec.Resources = &common.Resources{
+				Requests: &common.ResourceItem{
 					CPU:    service.Config.Resources.CPU,
 					Memory: service.Config.Resources.Memory,
 					GPU:    service.Config.Resources.GPU,
 					Custom: service.Config.Resources.Custom,
 				},
-				Limits: &compounaiCommon.ResourceItem{
+				Limits: &common.ResourceItem{
 					CPU:    service.Config.Resources.CPU,
 					Memory: service.Config.Resources.Memory,
 					GPU:    service.Config.Resources.GPU,

@@ -17,6 +17,7 @@ import logging
 import subprocess
 from pathlib import Path
 
+from components.planner_service import Planner
 from components.processor import Processor
 from components.worker import VllmWorker
 from fastapi import FastAPI
@@ -60,6 +61,7 @@ class FrontendConfig(BaseModel):
     app=FastAPI(title="LLM Example"),
 )
 class Frontend:
+    planner = depends(Planner)
     worker = depends(VllmWorker)
     processor = depends(Processor)
 
