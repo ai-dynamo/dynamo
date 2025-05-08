@@ -62,14 +62,7 @@ func IsSpecChanged(current client.Object, desired client.Object) (bool, error) {
 		return false, fmt.Errorf("failed to calculate patch: %w", err)
 	}
 
-	if !patchResult.IsEmpty() {
-		err = annotator.SetLastAppliedAnnotation(desired)
-		if err != nil {
-			return false, fmt.Errorf("failed to set last applied annotation for resource %s: %w", desired.GetName(), err)
-		}
-		return true, nil
-	}
-	return false, nil
+	return !patchResult.IsEmpty(), nil
 }
 
 type Reconciler interface {
@@ -180,6 +173,12 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 			if err != nil {
 				logs.Error(err, fmt.Sprintf("Failed to copy spec for %s.", resourceType))
 				r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("CopySpec%s", resourceType), "Failed to copy spec for %s %s: %s", resourceType, resourceNamespace, err)
+				return
+			}
+			err = annotator.SetLastAppliedAnnotation(oldResource)
+			if err != nil {
+				logs.Error(err, "Failed to set last applied annotation.")
+				r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for %s %s: %s", resourceType, resourceNamespace, err)
 				return
 			}
 			err = r.Update(ctx, oldResource)
