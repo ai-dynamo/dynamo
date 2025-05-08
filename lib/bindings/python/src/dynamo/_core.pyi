@@ -54,22 +54,6 @@ class DistributedRuntime:
         Shutdown the runtime by triggering the cancellation token
         """
         ...
-
-class CancellationToken:
-    """
-    A token that can be used to cancel a task
-    """
-
-    def cancel(self) -> None:
-        ...
-
-    async def cancelled(self) -> bool:
-        """
-        await this function will block until the token is cancelled
-        """
-        ...
-
-
 class EtcdClient:
     """
     Etcd is used for discovery in the DistributedRuntime
