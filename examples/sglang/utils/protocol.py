@@ -13,21 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
-
-
-class SGLangGenerateRequest(BaseModel):
-    # Wrapper around the GenerateReqInput which is the input to SGLang engine
-    request_id: str
-    input_ids: list[int]
-    sampling_params: dict
-
-
-class MyRequestOutput(BaseModel):
-    text: Dict[str, Any]
-
 
 TokenIdType = int
 
