@@ -173,7 +173,7 @@ def build(
     ),
     platform: str = typer.Option(None, "--platform", help="Platform to build for"),
     target: TargetEnum = typer.Option(
-        TargetEnum.DYNAMO,
+        TargetEnum.BENTO,
         "--target",
         help="Specify the target: 'dynamo' or 'bento'.",
         case_sensitive=False,
@@ -207,12 +207,16 @@ def build(
     else:
         build_ctx = dynamo_pipeline
 
+    if target != TargetEnum.BENTO:
+        raise NotImplementedError(
+            "currently only bento based build target is supported"
+        )
+
     bento = build_bentofile(
         service=service,
         build_ctx=build_ctx,
         platform=platform,
     )
-
     containerize_cmd = f"dynamo containerize {bento.tag}"
 
     if output == "tag":
