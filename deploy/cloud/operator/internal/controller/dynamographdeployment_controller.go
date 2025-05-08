@@ -143,7 +143,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			}
 		}
 		if deployment.Spec.Ingress.Enabled {
-			dynamoDeployment.SetEndpointStatus((r.isEndpointSecured()), getIngressHost(deployment.Spec.Ingress))
+			dynamoDeployment.SetEndpointStatus(r.isEndpointSecured(), getIngressHost(deployment.Spec.Ingress))
 		}
 	}
 
@@ -238,6 +238,9 @@ func (r *DynamoGraphDeploymentReconciler) generateDefaultIngressSpec(dynamoDeplo
 }
 
 func (r *DynamoGraphDeploymentReconciler) isEndpointSecured() bool {
+	if r.VirtualServiceGateway != "" && r.Config.VirtualServiceSupportsHTTPS {
+		return true
+	}
 	return r.IngressControllerTLSSecret != ""
 }
 

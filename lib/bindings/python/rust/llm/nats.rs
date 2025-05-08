@@ -81,13 +81,19 @@ impl NatsQueue {
         })
     }
 
-    fn dequeue_task<'p>(&mut self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+    #[pyo3(signature = (timeout=None))]
+    fn dequeue_task<'p>(
+        &mut self,
+        py: Python<'p>,
+        timeout: Option<f64>,
+    ) -> PyResult<Bound<'p, PyAny>> {
         let queue = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let timeout_duration = timeout.map(std::time::Duration::from_secs_f64);
             Ok(queue
                 .lock()
                 .await
-                .dequeue_task()
+                .dequeue_task(timeout_duration)
                 .await
                 .map_err(to_pyerr)?
                 .map(|bytes| bytes.to_vec()))

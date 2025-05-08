@@ -38,9 +38,9 @@
 //!   of a NIXL-compatible block layout. It can be deserialized to reconstruct the layout, typically
 //!   on a remote node, assuming the described NIXL memory regions are accessible.
 //! - `NixlBlockLayoutKinds`: An internal enum used during serialization to differentiate between
-//!    different types of layouts (e.g., `FullyContiguous`).
+//!   different types of layouts (e.g., `FullyContiguous`).
 //! - `SerializableNixlLayout<C>`: An internal generic struct that captures the configuration (`C`),
-//!    base offset, NIXL storage descriptors, and storage type for a specific layout kind.
+//!   base offset, NIXL storage descriptors, and storage type for a specific layout kind.
 //!
 //! ### 3. Integration with Core Layouts
 //! The module provides implementations of these NIXL traits for concrete layout types from the
@@ -339,7 +339,7 @@ mod tests {
 
         config.validate().unwrap();
 
-        let mut layout = FullyContiguous::allocate(config, &SystemAllocator::default()).unwrap();
+        let mut layout = FullyContiguous::allocate(config, &SystemAllocator).unwrap();
         let agent = NixlAgent::new("test").unwrap();
 
         tracing::info!("Registering layout");

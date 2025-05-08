@@ -13,6 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(dead_code)]
+
 //! Types and utilities for handling sequences of tokens, including block creation and hashing.
 
 use bytemuck::cast_slice;

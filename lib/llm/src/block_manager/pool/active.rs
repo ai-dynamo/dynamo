@@ -27,23 +27,6 @@ impl<S: Storage, M: BlockMetadata> ActiveBlockPool<S, M> {
         }
     }
 
-    // /// Inserts a weak reference to a block into the active pool map.
-    // ///
-    // /// This is typically used when a block is matched from the inactive pool
-    // /// and needs to be tracked as potentially active.
-    // ///
-    // /// # Arguments
-    // ///
-    // /// * `sequence_hash` - The sequence hash of the block.
-    // /// * `weak_block_ref` - A weak reference ([`Weak<MutableBlock<S, M>>`]) to the block.
-    // pub fn insert_weak_block_ref(
-    //     &mut self,
-    //     sequence_hash: SequenceHash,
-    //     weak_block_ref: Weak<MutableBlock<S, M>>,
-    // ) {
-    //     self.map.insert(sequence_hash, weak_block_ref);
-    // }
-
     pub fn register(
         &mut self,
         block: MutableBlock<S, M>,

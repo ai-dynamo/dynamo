@@ -182,6 +182,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 							Name:         "service1",
 							Dependencies: []map[string]string{{"service": "service2"}},
 							Config: Config{
+								HttpExposed: true,
 								Resources: &Resources{
 									CPU:    "1",
 									Memory: "1Gi",
@@ -260,6 +261,10 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 							},
 						},
 					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						Conditions:  nil,
+						PodSelector: nil,
+					},
 				},
 				"service2": {
 					ObjectMeta: metav1.ObjectMeta{
@@ -282,6 +287,18 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 							Labels: map[string]string{
 								commonconsts.KubeLabelDynamoComponent: "service2",
 								commonconsts.KubeLabelDynamoNamespace: "default",
+							},
+							Ingress: v1alpha1.IngressSpec{
+								Enabled:                    false,
+								Host:                       "",
+								UseVirtualService:          false,
+								VirtualServiceGateway:      nil,
+								HostPrefix:                 nil,
+								Annotations:                nil,
+								Labels:                     nil,
+								TLS:                        nil,
+								HostSuffix:                 nil,
+								IngressControllerClassName: nil,
 							},
 						},
 					},
@@ -309,6 +326,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 							Name:         "service1",
 							Dependencies: []map[string]string{{"service": "service2"}},
 							Config: Config{
+								HttpExposed: true,
 								Resources: &Resources{
 									CPU:    "1",
 									Memory: "1Gi",
@@ -374,11 +392,26 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									DeploymentSelectorValue: "service2/dynamo-test-dynamographdeployment",
 								},
 							},
-							Ingress: v1alpha1.IngressSpec{},
+							Ingress: v1alpha1.IngressSpec{
+								Enabled:                    false,
+								Host:                       "",
+								UseVirtualService:          false,
+								VirtualServiceGateway:      nil,
+								HostPrefix:                 nil,
+								Annotations:                nil,
+								Labels:                     nil,
+								TLS:                        nil,
+								HostSuffix:                 nil,
+								IngressControllerClassName: nil,
+							},
 							Labels: map[string]string{
 								commonconsts.KubeLabelDynamoComponent: "service1",
 							},
 						},
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						Conditions:  nil,
+						PodSelector: nil,
 					},
 				},
 				"service2": {
@@ -402,6 +435,18 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 							Labels: map[string]string{
 								commonconsts.KubeLabelDynamoComponent: "service2",
 								commonconsts.KubeLabelDynamoNamespace: "dynamo-test-dynamographdeployment",
+							},
+							Ingress: v1alpha1.IngressSpec{
+								Enabled:                    false,
+								Host:                       "",
+								UseVirtualService:          false,
+								VirtualServiceGateway:      nil,
+								HostPrefix:                 nil,
+								Annotations:                nil,
+								Labels:                     nil,
+								TLS:                        nil,
+								HostSuffix:                 nil,
+								IngressControllerClassName: nil,
 							},
 						},
 					},
@@ -461,6 +506,250 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 				ingressSpec: &v1alpha1.IngressSpec{},
 			},
 			wantErr: true,
+		},
+		{
+			name: "Test GenerateDynamoComponentsDeployments ingress enabled by default",
+			args: args{
+				parentDynamoGraphDeployment: &v1alpha1.DynamoGraphDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dynamographdeployment",
+						Namespace: "default",
+					},
+					Spec: v1alpha1.DynamoGraphDeploymentSpec{
+						DynamoGraph: "dynamocomponent:ac4e234",
+					},
+				},
+				config: &DynamoGraphConfig{
+					DynamoTag:    "dynamocomponent:MyServiceIngressEnabled",
+					EntryService: "service1",
+					Services: []ServiceConfig{
+						{
+							Name: "service1",
+							Config: Config{
+								HttpExposed: true,
+							},
+						},
+					},
+				},
+				ingressSpec: &v1alpha1.IngressSpec{
+					Enabled: true,
+					Host:    "test-dynamographdeployment",
+				},
+			},
+			want: map[string]*v1alpha1.DynamoComponentDeployment{
+				"service1": {
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dynamographdeployment-service1",
+						Namespace: "default",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent: "service1",
+						},
+					},
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponent: "dynamocomponent:ac4e234",
+						DynamoTag:       "dynamocomponent:MyServiceIngressEnabled",
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: nil,
+							Labels: map[string]string{
+								commonconsts.KubeLabelDynamoComponent: "service1",
+							},
+							ServiceName:     "service1",
+							DynamoNamespace: nil,
+							Resources:       nil,
+							Autoscaling: &v1alpha1.Autoscaling{
+								Enabled:     false,
+								MinReplicas: 0,
+								MaxReplicas: 0,
+								Behavior:    nil,
+								Metrics:     nil,
+							},
+							Envs:             nil,
+							EnvFromSecret:    nil,
+							PVC:              nil,
+							RunMode:          nil,
+							ExternalServices: nil,
+							Ingress: v1alpha1.IngressSpec{
+								Enabled: true,
+								Host:    "test-dynamographdeployment",
+							},
+							ExtraPodMetadata: nil,
+							ExtraPodSpec:     nil,
+							LivenessProbe:    nil,
+							ReadinessProbe:   nil,
+							Replicas:         nil,
+						},
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						Conditions:  nil,
+						PodSelector: nil,
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "Test GenerateDynamoComponentsDeployments ingress explicitly disabled",
+			args: args{
+				parentDynamoGraphDeployment: &v1alpha1.DynamoGraphDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dynamographdeployment",
+						Namespace: "default",
+					},
+					Spec: v1alpha1.DynamoGraphDeploymentSpec{
+						DynamoGraph: "dynamocomponent:ac4e234",
+					},
+				},
+				config: &DynamoGraphConfig{
+					DynamoTag: "dynamocomponent:MyServiceIngressDisabled",
+					Services: []ServiceConfig{
+						{
+							Name:   "service1",
+							Config: Config{},
+						},
+					},
+				},
+				ingressSpec: &v1alpha1.IngressSpec{
+					Enabled: false,
+				},
+			},
+			want: map[string]*v1alpha1.DynamoComponentDeployment{
+				"service1": {
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dynamographdeployment-service1",
+						Namespace: "default",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent: "service1",
+						},
+					},
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponent: "dynamocomponent:ac4e234",
+						DynamoTag:       "dynamocomponent:MyServiceIngressDisabled",
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: nil,
+							Labels: map[string]string{
+								commonconsts.KubeLabelDynamoComponent: "service1",
+							},
+							ServiceName:     "service1",
+							DynamoNamespace: nil,
+							Resources:       nil,
+							Autoscaling: &v1alpha1.Autoscaling{
+								Enabled:     false,
+								MinReplicas: 0,
+								MaxReplicas: 0,
+								Behavior:    nil,
+								Metrics:     nil,
+							},
+							Envs:             nil,
+							EnvFromSecret:    nil,
+							PVC:              nil,
+							RunMode:          nil,
+							ExternalServices: nil,
+							Ingress: v1alpha1.IngressSpec{
+								Enabled:                    false,
+								Host:                       "",
+								UseVirtualService:          false,
+								VirtualServiceGateway:      nil,
+								HostPrefix:                 nil,
+								Annotations:                nil,
+								Labels:                     nil,
+								TLS:                        nil,
+								HostSuffix:                 nil,
+								IngressControllerClassName: nil,
+							},
+							ExtraPodMetadata: nil,
+							ExtraPodSpec:     nil,
+							LivenessProbe:    nil,
+							ReadinessProbe:   nil,
+							Replicas:         nil,
+						},
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						Conditions:  nil,
+						PodSelector: nil,
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "Test GenerateDynamoComponentsDeployments ingress custom host",
+			args: args{
+				parentDynamoGraphDeployment: &v1alpha1.DynamoGraphDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dynamographdeployment",
+						Namespace: "default",
+					},
+					Spec: v1alpha1.DynamoGraphDeploymentSpec{
+						DynamoGraph: "dynamocomponent:ac4e234",
+					},
+				},
+				config: &DynamoGraphConfig{
+					DynamoTag:    "dynamocomponent:MyServiceIngressCustomHost",
+					EntryService: "service1",
+					Services: []ServiceConfig{
+						{
+							Name: "service1",
+							Config: Config{
+								HttpExposed: true,
+							},
+						},
+					},
+				},
+				ingressSpec: &v1alpha1.IngressSpec{
+					Enabled: true,
+					Host:    "custom-host",
+				},
+			},
+			want: map[string]*v1alpha1.DynamoComponentDeployment{
+				"service1": {
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dynamographdeployment-service1",
+						Namespace: "default",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent: "service1",
+						},
+					},
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponent: "dynamocomponent:ac4e234",
+						DynamoTag:       "dynamocomponent:MyServiceIngressCustomHost",
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: nil,
+							Labels: map[string]string{
+								commonconsts.KubeLabelDynamoComponent: "service1",
+							},
+							ServiceName:     "service1",
+							DynamoNamespace: nil,
+							Resources:       nil,
+							Autoscaling: &v1alpha1.Autoscaling{
+								Enabled:     false,
+								MinReplicas: 0,
+								MaxReplicas: 0,
+								Behavior:    nil,
+								Metrics:     nil,
+							},
+							Envs:             nil,
+							EnvFromSecret:    nil,
+							PVC:              nil,
+							RunMode:          nil,
+							ExternalServices: nil,
+							Ingress: v1alpha1.IngressSpec{
+								Enabled: true,
+								Host:    "custom-host",
+							},
+							ExtraPodMetadata: nil,
+							ExtraPodSpec:     nil,
+							LivenessProbe:    nil,
+							ReadinessProbe:   nil,
+							Replicas:         nil,
+						},
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						Conditions:  nil,
+						PodSelector: nil,
+					},
+				},
+			},
+			wantErr: false,
 		},
 	}
 	for _, tt := range tests {

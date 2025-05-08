@@ -740,7 +740,7 @@ func (r *DynamoComponentDeploymentReconciler) generateIngress(ctx context.Contex
 									Service: &networkingv1.IngressServiceBackend{
 										Name: opt.dynamoComponentDeployment.Name,
 										Port: networkingv1.ServiceBackendPort{
-											Number: 3000,
+											Number: commonconsts.DynamoServicePort,
 										},
 									},
 								},
@@ -800,7 +800,7 @@ func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context
 						Destination: &istioNetworking.Destination{
 							Host: opt.dynamoComponentDeployment.Name,
 							Port: &istioNetworking.PortSelector{
-								Number: 3000,
+								Number: commonconsts.DynamoServicePort,
 							},
 						},
 					},
@@ -1121,7 +1121,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	// todo : remove this line when https://github.com/ai-dynamo/dynamo/issues/345 is fixed
 	enableDependsOption := false
 	if len(opt.dynamoComponentDeployment.Spec.ExternalServices) > 0 && enableDependsOption {
-		serviceSuffix := fmt.Sprintf("%s.svc.cluster.local:3000", opt.dynamoComponentDeployment.Namespace)
+		serviceSuffix := fmt.Sprintf("%s.svc.cluster.local:%d", opt.dynamoComponentDeployment.Namespace, containerPort)
 		keys := make([]string, 0, len(opt.dynamoComponentDeployment.Spec.ExternalServices))
 
 		for key := range opt.dynamoComponentDeployment.Spec.ExternalServices {

@@ -23,7 +23,7 @@ from components.kv_router import Router
 from components.worker import VllmWorker
 from transformers import AutoTokenizer
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
-from utils.logging import check_required_workers
+from utils.check_worker import check_required_workers
 from utils.protocol import MyRequestOutput, Tokens, vLLMGenerateRequest
 from utils.vllm import RouterType, parse_vllm_args
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -121,7 +121,7 @@ class Processor(ProcessMixIn):
 
         self.etcd_kv_cache = await EtcdKvCache.create(
             runtime.etcd_client(),
-            "/dynamo/processor/",
+            f"/{comp_ns}/processor/",
             {"router": self.engine_args.router},
         )
 

@@ -57,9 +57,9 @@
 //! - `layer_stride_in_bytes`: The size of one memory region (page).
 //! - `natural_block_stride`: The size of one block if there were no additional alignment padding between blocks.
 //! - `block_stride_in_bytes`: The actual stride between the start of consecutive blocks, potentially larger than
-//!    `natural_block_stride` to meet `alignment` requirements.
+//!   `natural_block_stride` to meet `alignment` requirements.
 //! - `base_offset`: An offset applied from the start of the allocated [`Storage`] to ensure the first block's
-//!    data begins at an aligned address.
+//!   data begins at an aligned address.
 //!
 //! The function `align_up` is a utility to ensure values are aligned to the nearest multiple of a power-of-2 alignment.
 //!

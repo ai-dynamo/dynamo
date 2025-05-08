@@ -1648,7 +1648,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let mut layout = FullyContiguous::allocate(config, &SystemAllocator::default()).unwrap();
+        let mut layout = FullyContiguous::allocate(config, &SystemAllocator).unwrap();
         let agent = NixlAgent::new("test").unwrap();
 
         tracing::info!("Registering layout");

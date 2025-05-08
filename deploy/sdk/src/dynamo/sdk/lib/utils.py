@@ -12,3 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+import os
+
+
+def get_host_port():
+    """Gets host and port from environment variables. Defaults to 0.0.0.0:8000."""
+    port = int(os.environ.get("DYNAMO_PORT", 8000))
+    host = os.environ.get("DYNAMO_HOST", "0.0.0.0")
+    return host, port

@@ -66,10 +66,12 @@ type Autoscaling struct {
 }
 
 type Config struct {
-	Dynamo      *DynamoConfig `yaml:"dynamo,omitempty"`
-	Resources   *Resources    `yaml:"resources,omitempty"`
-	Traffic     *Traffic      `yaml:"traffic,omitempty"`
-	Autoscaling *Autoscaling  `yaml:"autoscaling,omitempty"`
+	Dynamo       *DynamoConfig `yaml:"dynamo,omitempty"`
+	Resources    *Resources    `yaml:"resources,omitempty"`
+	Traffic      *Traffic      `yaml:"traffic,omitempty"`
+	Autoscaling  *Autoscaling  `yaml:"autoscaling,omitempty"`
+	HttpExposed  bool          `yaml:"http_exposed,omitempty"`
+	ApiEndpoints []string      `yaml:"api_endpoints,omitempty"`
 }
 
 type ServiceConfig struct {
@@ -250,13 +252,13 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			deployment.Spec.DynamoNamespace = &dynamoNamespace
 			dynamoServices[service.Name] = fmt.Sprintf("%s/%s", service.Config.Dynamo.Name, dynamoNamespace)
 			labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
-		} else {
-			// dynamo is not enabled
-			if config.EntryService == service.Name {
-				// enable virtual service for the entry service
-				deployment.Spec.Ingress = *ingressSpec
-			}
 		}
+		// Check http_exposed independently
+		if config.EntryService == service.Name && service.Config.HttpExposed {
+			deployment.Spec.Ingress = *ingressSpec
+			// TODO (maybe): add paths to IngressSpec
+		}
+
 		if service.Config.Resources != nil {
 			deployment.Spec.Resources = &compounaiCommon.Resources{
 				Requests: &compounaiCommon.ResourceItem{

@@ -1,18 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
 
 # A very basic example of vllm worker handling pre-processed requests.
 #
@@ -24,13 +11,16 @@
 # Start nats and etcd:
 #  - nats-server -js
 #
-# Window 1: `python server_vllm.py`. Wait for log "Starting endpoint".
+# Window 1: `python vllm_inc.py`. Wait for log "Starting endpoint".
 # Window 2: `dynamo-run out=dyn://dynamo.backend.generate`
 
 import argparse
 import asyncio
 import logging
+import os
 import sys
+import uuid
+from typing import Optional
 
 import uvloop
 from vllm import SamplingParams
@@ -46,8 +36,7 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
-# TODO this should match DYN_LOG level
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 
 class Config:
@@ -56,7 +45,8 @@ class Config:
     namespace: str
     component: str
     endpoint: str
-    model: str
+    model_path: str
+    model_name: Optional[str]
     tensor_parallel_size: int
     extra_engine_args: str
 
@@ -71,14 +61,21 @@ class RequestHandler:
         self.default_sampling_params = default_sampling_params
 
     async def generate(self, request):
-        request_id = "1"  # hello_world example only
+        # logging.debug(f"Received request: {request}")
+        request_id = str(uuid.uuid4().hex)
 
-        logging.debug(f"Received request: {request}")
         prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
 
         sampling_params = SamplingParams(**self.default_sampling_params)
-        sampling_params.temperature = request["sampling_options"]["temperature"]
-        sampling_params.max_tokens = request["stop_conditions"]["max_tokens"]
+        for key, value in request["sampling_options"].items():
+            if not value:
+                continue
+            if hasattr(sampling_params, key):
+                setattr(sampling_params, key, value)
+
+        max_tokens = request["stop_conditions"]["max_tokens"]
+        if max_tokens:
+            sampling_params.max_tokens = max_tokens
 
         num_output_tokens_so_far = 0
         gen = self.engine_client.generate(prompt, sampling_params, request_id)
@@ -119,15 +116,18 @@ async def init(runtime: DistributedRuntime, config: Config):
     await component.create_service()
 
     endpoint = component.endpoint(config.endpoint)
-    logging.info("Started server instance")
-
-    await register_llm(endpoint, config.model, ModelType.Backend)
+    await register_llm(
+        ModelType.Backend, endpoint, config.model_path, config.model_name
+    )
 
     arg_map = {
-        "model": config.model,
+        "model": config.model_path,
         "task": "generate",
         "tensor_parallel_size": config.tensor_parallel_size,
         "skip_tokenizer_init": True,
+        "disable_log_requests": True,
+        # KV routing relies on logging KV metrics
+        "disable_log_stats": False,
     }
     if config.extra_engine_args != "":
         json_map = {}
@@ -142,6 +142,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         logging.debug(f"Adding extra engine arguments: {json_map}")
         arg_map = {**arg_map, **json_map}  # json_map gets precedence
 
+    os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
     engine_args = AsyncEngineArgs(**arg_map)
     model_config = engine_args.create_model_config()
     # Load default sampling params from `generation_config.json`
@@ -168,10 +169,16 @@ def cmd_line_args():
         help=f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Default: {DEFAULT_ENDPOINT}",
     )
     parser.add_argument(
-        "--model",
+        "--model-path",
         type=str,
         default=DEFAULT_MODEL,
         help=f"Path to disk model or HuggingFace model identifier to load. Default: {DEFAULT_MODEL}",
+    )
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        default="",
+        help="Name to serve the model under. Defaults to deriving it from model path.",
     )
     parser.add_argument(
         "--tensor-parallel-size", type=int, default=1, help="Number of GPUs to use."
@@ -185,7 +192,12 @@ def cmd_line_args():
     args = parser.parse_args()
 
     config = Config()
-    config.model = args.model
+    config.model_path = args.model_path
+    if args.model_name:
+        config.model_name = args.model_name
+    else:
+        # This becomes an `Option` on the Rust side
+        config.model_name = None
 
     endpoint_str = args.endpoint.replace("dyn://", "", 1)
     endpoint_parts = endpoint_str.split(".")
