@@ -47,8 +47,13 @@ type Reconciler interface {
 	GetRecorder() record.EventRecorder
 }
 
+// ResourceGenerator is a function that generates a resource.
+// it must return the resource, a boolean indicating if the resource should be deleted, and an error
+// if the resource should be deleted, the returned resource must contain the necessary information to delete it (name and namespace)
+type ResourceGenerator[T client.Object] func(ctx context.Context) (T, bool, error)
+
 //nolint:nakedret
-func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentResource client.Object, generateResource func(ctx context.Context) (T, bool, error)) (modified bool, res T, err error) {
+func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentResource client.Object, generateResource ResourceGenerator[T]) (modified bool, res T, err error) {
 	logs := log.FromContext(ctx)
 
 	resource, toDelete, err := generateResource(ctx)
