@@ -19,8 +19,11 @@ from .planner_connector import PlannerConnector
 
 class KubernetesConnector(PlannerConnector):
     def __init__(self, namespace: str):
+        print(f"Initializing KubernetesConnector with namespace: {namespace}")
         self.kube_api = KubernetesAPI()
+        print(f"Kube API initialized")
         self.namespace = namespace
+        print(f"Namespace set to: {self.namespace}")
 
     async def add_component(self, component_name: str):
         """Add a component by increasing its replica count to 1"""

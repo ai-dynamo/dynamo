@@ -63,6 +63,7 @@ class Planner:
         await asyncio.sleep(60)
         logger.info("Calling start_planner")
         await start_planner(self.runtime, self.args)
+        logger.info("Planner started")
 
     @dynamo_endpoint()
     async def generate(self, request: RequestType):
