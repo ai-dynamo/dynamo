@@ -21,10 +21,10 @@ import logging
 import sys
 from typing import Optional
 
-import sglang
 import uvloop
 from sglang.srt.server_args import ServerArgs
 
+import sglang
 from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
@@ -60,16 +60,12 @@ class RequestHandler:
 
     async def generate(self, request):
         sampling_params = {}
-        for key, value in request["sampling_options"].items():
-            if value:
-                # TODO: Do these always match? Maybe allow-list the fields that do match
-                sampling_params[key] = value
-
-        # sglang defaults this to 128
-        max_new_tokens = request["stop_conditions"]["max_tokens"]
-        if max_new_tokens:
-            sampling_params["max_new_tokens"] = max_new_tokens
-
+        if request["sampling_options"]["temperature"] is not None:
+            sampling_params["temperature"] = request["sampling_options"]["temperature"]
+        sampling_params = {
+            # sglang defaults this to 128
+            "max_new_tokens": request["stop_conditions"]["max_tokens"],
+        }
         num_output_tokens_so_far = 0
         gen = await self.engine_client.async_generate(
             input_ids=request["token_ids"], sampling_params=sampling_params, stream=True
