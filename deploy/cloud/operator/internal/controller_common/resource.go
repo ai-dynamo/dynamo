@@ -111,12 +111,7 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 			return
 		}
 
-		err = updateHashAnnotation(resource, hash)
-		if err != nil {
-			logs.Error(err, "Failed to update hash annotation.")
-			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, "UpdateHashAnnotation", "Failed to update hash annotation for %s %s: %s", resourceType, resourceNamespace, err)
-			return
-		}
+		updateHashAnnotation(resource, hash)
 
 		r.GetRecorder().Eventf(parentResource, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Creating a new %s %s", resourceType, resourceNamespace)
 		err = r.Create(ctx, resource)
@@ -161,12 +156,8 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 				return
 			}
 
-			err = updateHashAnnotation(oldResource, *newHash)
-			if err != nil {
-				logs.Error(err, "Failed to update hash annotation.")
-				r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, "UpdateHashAnnotation", "Failed to update hash annotation for %s %s: %s", resourceType, resourceNamespace, err)
-				return
-			}
+			updateHashAnnotation(oldResource, *newHash)
+
 			err = r.Update(ctx, oldResource)
 			if err != nil {
 				logs.Error(err, fmt.Sprintf("Failed to update %s.", resourceType))
@@ -261,14 +252,13 @@ func GetSpecHash(obj client.Object) (string, error) {
 	return GetResourceHash(spec)
 }
 
-func updateHashAnnotation(obj client.Object, hash string) error {
+func updateHashAnnotation(obj client.Object, hash string) {
 	annotations := obj.GetAnnotations()
 	if annotations == nil {
 		annotations = map[string]string{}
 	}
 	annotations[NvidiaAnnotationHashKey] = hash
 	obj.SetAnnotations(annotations)
-	return nil
 }
 
 // GetResourceHash returns a consistent hash for the given object spec

@@ -404,11 +404,8 @@ func TestIsSpecChanged2(t *testing.T) {
 			if err != nil {
 				t.Errorf("failed to get spec hash in test for resource %s: %s", tt.current.GetName(), err)
 			}
-			err = updateHashAnnotation(tt.current, hash)
-			if err != nil {
-				t.Errorf("failed to update hash annotation in test for resource %s: %s", tt.current.GetName(), err)
-			}
-			gotHash, err := IsSpecChanged2(tt.current, tt.desired)
+			updateHashAnnotation(tt.current, hash)
+			gotHash, err := IsSpecChanged(tt.current, tt.desired)
 			if err != nil {
 				t.Errorf("failed to check if spec has changed in test for resource %s: %s", tt.current.GetName(), err)
 			}
