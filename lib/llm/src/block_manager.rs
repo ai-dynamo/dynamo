@@ -163,7 +163,7 @@ impl<Metadata: BlockMetadata> Drop for KvBlockManager<Metadata> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-full"))]
 mod tests {
     use super::*;
 
