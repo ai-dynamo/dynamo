@@ -22,9 +22,7 @@ use pyo3::{Python, PyObject, PyResult, ffi::c_str, prelude::IntoPy, types::PyTup
 use dlpark::prelude::{Device, DataType, ManagerCtx, ShapeAndStrides, ToTensor};
 use std::sync::{Arc, Mutex};
 
-use dynamo_llm::block_manager::block::{BlockDataProviderMut, BlockDataExt};
-// TODO: Remove this
-use dynamo_llm::block_manager::block::private;
+use dynamo_llm::block_manager::block::BlockDataExt;
 
 // TODO: Different storage types?
 pub type BlockType = dynamo_llm::block_manager::block::MutableBlock<dynamo_llm::block_manager::storage::PinnedStorage, dynamo_llm::block_manager::block::BasicMetadata>;
@@ -36,9 +34,7 @@ struct DlPackTensor {
 impl ToTensor for DlPackTensor {
     fn data_ptr(&self) -> *mut std::ffi::c_void {
         let mut mutable_block = self.block.lock().unwrap();
-        // TODO: How to access without private::PrivateToken?
-        let block_data_mut = mutable_block.block_data_mut(private::PrivateToken);
-        let mut block_view_mut = block_data_mut.block_view_mut().expect("Failed to get mutable block view");
+        let mut block_view_mut = mutable_block.block_view_mut().expect("Failed to get mutable block view");
         unsafe {
             block_view_mut.as_mut_ptr() as *mut std::ffi::c_void
         }

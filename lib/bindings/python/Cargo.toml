@@ -35,7 +35,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 
-dynamo-llm = { path = "../../llm" }
+dynamo-llm = { path = "../../llm", features = ["block-manager"] }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-engine-python = { path = "../../engines/python" }
 
