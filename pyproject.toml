@@ -29,7 +29,7 @@ dependencies = [
     "bentoml==1.4.8",
     "types-psutil==7.0.0.20250218",
     "kubernetes==32.0.1",
-    "ai-dynamo-runtime==0.2.0",
+    "ai-dynamo-runtime==0.2.1",
     "fastapi==0.115.6",
     "distro",
     "typer",
