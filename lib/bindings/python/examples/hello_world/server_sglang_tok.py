@@ -4,12 +4,13 @@
 #
 # A very basic example of sglang worker handling pre-processed requests.
 #
-# Dynamo does the HTTP handling, prompt templating and tokenization, then forwards the
-# request via NATS to this python script, which runs sglang.
+# Dynamo does the HTTP handling and load balancing, then forwards the
+# request via NATS to this python script, which runs sglang. sglang will
+# do the pre/post-processing.
 #
-# The key differences between this and `server_sglang_tok.py` are:
-# - The `register_llm` function registers us a `Backend` model
-# - The `generate` function receives a pre-tokenized request and must return token_ids in the response.
+# The key differences between this and `server_sglang.py` are:
+# - The `register_llm` function registers us a `Chat` model
+# - The `generate` function receives a chat completion request and must return matching response
 #
 # Setup a virtualenv with dynamo.llm, dynamo.runtime and sglang[all] installed
 #  in lib/bindings/python `maturin develop` and `pip install -e .` should do it
@@ -22,16 +23,19 @@
 import argparse
 import asyncio
 import sys
+import time
 
-import sglang
 import uvloop
+from sglang.srt.entrypoints.engine import _launch_subprocesses
+from sglang.srt.openai_api.adapter import v1_chat_generate_request
+from sglang.srt.openai_api.protocol import ChatCompletionRequest
 from sglang.srt.server_args import ServerArgs
 
 from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
-DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
 
 class Config:
@@ -48,32 +52,43 @@ class RequestHandler:
     Request handler for the generate endpoint
     """
 
-    def __init__(self, engine):
-        self.engine_client = engine
+    def __init__(self, tokenizer_manager):
+        self.tokenizer_manager = tokenizer_manager
 
     async def generate(self, request):
+        # Request is dict matching OpenAI Chat Completions
+        # https://platform.openai.com/docs/api-reference/chat
+        # Return type must be the matching Response
+
         # print(f"Received request: {request}")
-        sampling_params = {
-            "temperature": request["sampling_options"]["temperature"],
-            # sglang defaults this to 128
-            "max_new_tokens": request["stop_conditions"]["max_tokens"],
-        }
-        num_output_tokens_so_far = 0
-        gen = await self.engine_client.async_generate(
-            input_ids=request["token_ids"], sampling_params=sampling_params, stream=True
+
+        count = 0
+        adapted_request, _ = v1_chat_generate_request(
+            [ChatCompletionRequest(**request)], self.tokenizer_manager
         )
-        async for res in gen:
-            # res is a dict
+        async for res in self.tokenizer_manager.generate_request(adapted_request, None):
+            index = res.get("index", 0)
+            text = res["text"]
 
             finish_reason = res["meta_info"]["finish_reason"]
-            if finish_reason:
-                # Don't forward the stop token
-                out = {"token_ids": [], "finish_reason": finish_reason["type"]}
-            else:
-                next_total_toks = len(res["output_ids"])
-                out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}
-            yield out
-            num_output_tokens_so_far = next_total_toks
+            finish_reason_type = finish_reason["type"] if finish_reason else None
+            next_count = len(text)
+            delta = text[count:]
+            choice_data = {
+                "index": index,
+                "delta": {"role": "assistant", "content": delta},
+                "finish_reason": finish_reason_type,
+            }
+            created = int(time.time())
+            response = {
+                "id": res["meta_info"]["id"],
+                "created": created,
+                "choices": [choice_data],
+                "model": request["model"],
+                "object": "chat.completion",
+            }
+            yield response
+            count = next_count
 
 
 @dynamo_worker(static=False)
@@ -89,18 +104,14 @@ async def init(runtime: DistributedRuntime, config: Config):
     await component.create_service()
 
     endpoint = component.endpoint(config.endpoint)
-    await register_llm(ModelType.Backend, endpoint, config.model)
+    await register_llm(ModelType.Chat, endpoint, config.model)
 
-    engine_args = ServerArgs(
-        model_path=config.model,
-        skip_tokenizer_init=True,
-    )
-
-    engine_client = sglang.Engine(server_args=engine_args)
+    server_args = ServerArgs(model_path=config.model)
+    tokenizer_manager, _scheduler_info = _launch_subprocesses(server_args=server_args)
 
     # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
     # after the lease is revoked
-    await endpoint.serve_endpoint(RequestHandler(engine_client).generate)
+    await endpoint.serve_endpoint(RequestHandler(tokenizer_manager).generate)
 
 
 def cmd_line_args():
