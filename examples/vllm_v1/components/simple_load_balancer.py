@@ -1,0 +1,160 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import logging
+import uuid
+import copy
+from enum import Enum
+from typing import AsyncGenerator
+
+from dynamo.llm import ModelType, register_llm
+from dynamo.sdk import depends, service, dynamo_endpoint, async_on_start, dynamo_context
+from vllm.sampling_params import SamplingParams, KVTransferParams
+from vllm.inputs import TokensPrompt
+from components.worker import VllmWorker, VllmPrefillWorker, VllmDecodeWorker
+from utils.args import parse_vllm_args
+from utils.protocol import PreprocessedRequest, vLLMGenerateRequest, MyRequestOutput
+
+logger = logging.getLogger(__name__)
+
+
+class RequestType(Enum):
+    CHAT = "chat"
+    COMPLETION = "completion"
+
+
+@service(
+    dynamo={
+        "enabled": True,
+        "namespace": "dynamo",
+    },
+    resources={"cpu": "10", "memory": "20Gi"},
+    workers=1,
+)
+class SimpleLoadBalancer:
+    worker = depends(VllmWorker)
+    prefill_worker = depends(VllmPrefillWorker)
+    decode_worker = depends(VllmDecodeWorker)
+
+    def __init__(self):
+        class_name = self.__class__.__name__
+        self.engine_args = parse_vllm_args(class_name, "")
+        model_config = self.engine_args.create_model_config()
+        # Load default sampling params from `generation_config.json`
+        self.default_sampling_params = model_config.get_diff_sampling_param()
+
+    @async_on_start
+    async def async_init(self):
+        runtime = dynamo_context["runtime"]
+        logger.info("Registering LLM for discovery")
+        comp_ns, comp_name = SimpleLoadBalancer.dynamo_address()  # type: ignore
+        endpoint = runtime.namespace(comp_ns).component(comp_name).endpoint("generate")
+        for served_model_name in self.engine_args.served_model_name:
+            await register_llm(
+                ModelType.Backend,
+                endpoint,
+                self.engine_args.model,
+                served_model_name,
+            )
+
+        logger.info("SimpleLoadBalancer has been initialized")
+
+    async def send_request_to_prefill(self, request: vLLMGenerateRequest) -> MyRequestOutput:
+
+        prefill_request = copy.deepcopy(request)
+        prefill_request.sampling_params.kv_transfer_params = KVTransferParams(
+            do_remote_decode=True,
+        )
+        prefill_request.sampling_params.max_tokens = 1
+        prefill_request.sampling_params.min_tokens = 1
+
+        logger.debug(f"Prefill request: %s", prefill_request.model_dump_json())
+
+        async for prefill_response in self.prefill_worker.generate(prefill_request.model_dump_json()):
+            return MyRequestOutput.model_validate_json(prefill_response)
+
+    async def send_request_to_decode(self, request: vLLMGenerateRequest, prefill_response: MyRequestOutput) -> AsyncGenerator[MyRequestOutput, None]:
+
+        decode_request = copy.deepcopy(request)
+        decode_request.sampling_params.kv_transfer_params = prefill_response.kv_transfer_params
+
+        logger.debug(f"Decode request: %s", decode_request.model_dump_json())
+
+        async for decode_response in self.decode_worker.generate(decode_request.model_dump_json()):
+            yield MyRequestOutput.model_validate_json(decode_response)
+
+
+    def create_vllm_request(self, request: PreprocessedRequest) -> vLLMGenerateRequest:
+        # logging.debug(f"Received request: {request}")
+        request_id = str(uuid.uuid4().hex)
+
+        prompt = TokensPrompt(prompt_token_ids=request.token_ids)
+
+        sampling_params = SamplingParams(**self.default_sampling_params)
+        for key, value in request.sampling_options.model_dump().items():
+            if not value:
+                continue
+            if hasattr(sampling_params, key):
+                setattr(sampling_params, key, value)
+
+        max_tokens = request.stop_conditions.max_tokens
+        if max_tokens:
+            sampling_params.max_tokens = max_tokens
+
+        return vLLMGenerateRequest(
+            prompt=prompt,
+            sampling_params=sampling_params,
+            request_id=request_id,
+        )
+
+    @dynamo_endpoint()
+    async def generate(self, request: PreprocessedRequest):
+
+        logger.debug(f"Processor received completion request: %s", request.model_dump_json())
+
+        vllm_request = self.create_vllm_request(request)
+
+        logger.debug(f"VLLM request: %s", vllm_request.model_dump_json())
+
+        prefill_response = await self.send_request_to_prefill(vllm_request)
+
+        logger.debug(f"Prefill response: %s", prefill_response.model_dump_json())
+
+        num_output_tokens_so_far = 0
+        gen = self.send_request_to_decode(vllm_request, prefill_response)
+        async for res in gen:
+            logger.debug(f"Decode response: %s", res.model_dump_json())
+            # res is our MyRequestOutput
+
+            # This is the expected way for a request to end.
+            # The new token ID will be eos, don't forward it.
+            if res.finished:
+                yield {"finish_reason": "stop", "token_ids": []}
+                break
+
+            if not res.outputs:
+                yield {"finish_reason": "error", "token_ids": []}
+                break
+
+            output = res.outputs[0]
+            next_total_toks = len(output.token_ids)
+            out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+            if output.finish_reason:
+                out["finish_reason"] = output.finish_reason
+            if output.stop_reason:
+                out["stop_reason"] = output.stop_reason
+            yield out
+            num_output_tokens_so_far = next_total_toks
+    

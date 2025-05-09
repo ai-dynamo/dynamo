@@ -23,12 +23,10 @@ import signal
 from typing import Optional
 
 from utils.args import parse_vllm_args
+from utils.protocol import vLLMGenerateRequest, MyRequestOutput
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
 )
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels, BaseModelPath
-from vllm.entrypoints.openai.protocol import CompletionRequest
 
 from dynamo.sdk import async_on_start, dynamo_endpoint, service
 
@@ -46,8 +44,6 @@ class VllmBaseWorker:
 
         self.set_side_channel_port()
 
-        print(f"self.engine_args: {self.engine_args}")
-
     async def async_init(self):
         self._engine_context = build_async_engine_client_from_engine_args(
             self.engine_args
@@ -56,24 +52,6 @@ class VllmBaseWorker:
             self.engine_client = await self._engine_context.__aenter__()
         else:
             raise RuntimeError("Failed to initialize engine client")
-
-        model_config = self.engine_args.create_model_config()
-        model_paths = [BaseModelPath(name, name) for name in self.engine_args.served_model_name]
-
-        print(f"model_path: {model_paths}, type: {type(model_paths)}")
-
-        oai_serving_models = OpenAIServingModels(
-            self.engine_client,
-            model_config,
-            model_paths,
-        )
-
-        self.openai_serving_completions = OpenAIServingCompletion(
-            self.engine_client,
-            model_config,
-            oai_serving_models,
-            request_logger=None,
-        )
 
         logger.info("VllmWorker has been initialized")
 
@@ -90,32 +68,32 @@ class VllmBaseWorker:
             loop.stop()
 
     @dynamo_endpoint()
-    async def completions(self, request: CompletionRequest):
+    async def generate(self, request: vLLMGenerateRequest):
 
-        logger.info(f"VllmWorker received completion request: {request}")
+        gen = self.engine_client.generate(
+            prompt=request.prompt,
+            sampling_params=request.sampling_params,
+            request_id=request.request_id,
+        )
 
-        response = await self.openai_serving_completions.create_completion(request)
-
-        if request.stream:
-            logger.info(f"VllmWorker streaming response")
-            async for chunk in response:
-                if chunk.startswith("data: [DONE]"):
-                    break
-                response = json.loads(chunk.lstrip("data: "))
-                yield response
-
-        else:
-            logger.info(f"VllmWorker response: {response}, type: {type(response)}")
-            yield response.model_dump()
-
+        async for response in gen:
+            yield MyRequestOutput(
+                request_id=response.request_id,
+                prompt=response.prompt,
+                prompt_token_ids=response.prompt_token_ids,
+                prompt_logprobs=response.prompt_logprobs,
+                outputs=response.outputs,
+                finished=response.finished,
+                metrics=response.metrics,
+                kv_transfer_params=response.kv_transfer_params,
+            ).model_dump_json()
 
     def set_side_channel_port(self, port: Optional[int] = None):
         if port is None:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind(('', 0))  # Bind to a free port provided by the host.
                 port = s.getsockname()[1]  # Get the port number assigned.
-                print(f"Unused port: {port}")
-        logger.info(f"Setting VLLM_NIXL_SIDE_CHANNEL_PORT to {port}")
+        logger.debug("Setting VLLM_NIXL_SIDE_CHANNEL_PORT to %s", port)
         os.environ["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(port)
 
 

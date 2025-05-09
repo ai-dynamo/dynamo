@@ -18,13 +18,12 @@ Common:
   served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
 Frontend:
-  endpoint: dynamo.Processor.completions
+  endpoint: dynamo.SimpleLoadBalancer.generate
   port: 8000
   served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
-Processor:
-  router: round-robin
-  common-configs: [model]
+SimpleLoadBalancer:
+  common-configs: [model, kv-transfer-config, served_model_name]
 
 VllmPrefillWorker:
   enforce-eager: true
