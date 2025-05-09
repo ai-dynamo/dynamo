@@ -201,13 +201,12 @@ cargo build --features llamacpp[,cuda|metal|vulkan] -p dynamo-run
 ```
 
 ```
-dynamo-run out=llamacpp ~/llms/Llama-3.2-3B-Instruct-Q6_K.gguf
+dynamo-run out=llamacpp ~/llms/gemma-3-1b-it-q4_0.gguf
+dynamo-run out=llamacpp ~/llms/Qwen3-0.6B-Q8_0.gguf # From https://huggingface.co/ggml-org
 ```
 
 Note that in some cases we are unable to extract the tokenizer from the GGUF, and so a Hugging Face checkout of a matching model must also be passed. Dynamo will use the weights from the GGUF and the pre-processor (`tokenizer.json`, etc) from the `--model-config`:
 ```
-dynamo-run out=llamacpp ~/llms/gemma-3-1b-it-q4_0.gguf --model-config ~/llms/gemma-3-1b-it
-
 dynamo-run out=llamacpp ~/llms/Llama-4-Scout-17B-16E-Instruct-UD-IQ1_S.gguf --model-config ~/llms/Llama-4-Scout-17B-16E-Instruct
 ```
 
