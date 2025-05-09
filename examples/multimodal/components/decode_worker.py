@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import connect
 import logging
 import os
 import signal
@@ -21,8 +22,8 @@ from typing import Optional
 
 import torch
 from components.disagg_router import PyDisaggregatedRouter
-from components.encode_worker import EncodeWorker
-from components.prefill_worker import PrefillWorker
+from components.encode_worker import VllmEncodeWorker
+from components.prefill_worker import VllmPrefillWorker
 from transformers import LlavaForConditionalGeneration
 from utils.logging import check_required_workers
 from utils.nixl import NixlMetadataStore
@@ -53,11 +54,11 @@ logger = logging.getLogger(__name__)
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
     workers=1,
 )
-class VllmWorker:
+class VllmDecodeWorker:
     # For disaggregated serving, we need to link the prefill worker to the vllm worker
-    prefill_worker = depends(PrefillWorker)
+    prefill_worker = depends(VllmPrefillWorker)
     # For aggregated serving, we need to link the encode worker to the vllm worker.
-    encode_worker = depends(EncodeWorker)
+    encode_worker = depends(VllmEncodeWorker)
 
     def __init__(self):
         self.client = None
@@ -141,7 +142,11 @@ class VllmWorker:
                 vision_tower.vision_model.embeddings.position_embedding.num_embeddings
             )
         else:
-            enc_comp_ns, enc_comp_name = EncodeWorker.dynamo_address()  # type: ignore
+            EMBEDDINGS_SHAPE = (1, 577, 4096)
+            EMBEDDINGS_DTYPE = torch.float16
+            EMBEDDINGS_DEVICE = "cuda"
+
+            enc_comp_ns, enc_comp_name = VllmEncodeWorker.dynamo_address()  # type: ignore
             self.encode_worker_client = (
                 await runtime.namespace(enc_comp_ns)
                 .component(enc_comp_name)
@@ -149,9 +154,20 @@ class VllmWorker:
                 .client()
             )
 
+            self._connector = connect.Connector(runtime=runtime, namespace=enc_comp_ns)
+            await self._connector.initialize()
+
+            # Create a longer-lived buffer for receiving the image embeddings.
+            embeddings = torch.empty(EMBEDDINGS_SHAPE, dtype=EMBEDDINGS_DTYPE, device=EMBEDDINGS_DEVICE)
+            descriptor = connect.Descriptor(embeddings)
+            # Register the descriptor w/ NIXL (this is optional, if not done here the connect subsytem will take care of this automatically).
+            descriptor.register_memory(self._connector)
+            self._embeddings_descriptor = (embeddings, descriptor)
+
             await check_required_workers(self.encode_worker_client, self.min_workers)
             self.disaggregated_router = None
-        logger.info("VllmWorker has been initialized")
+
+        logger.info("Initialization complete.")
 
     def shutdown_vllm_engine(self, signum, frame):
         """Shutdown the background loop"""
@@ -159,7 +175,7 @@ class VllmWorker:
         loop = asyncio.get_event_loop()
         try:
             self.engine_client.close()
-            logger.info("VllmWorker shutdown complete")
+            logger.info("Shutdown complete.")
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
         finally:
@@ -177,8 +193,18 @@ class VllmWorker:
 
     @dynamo_endpoint()
     async def generate(self, request: vLLMMultimodalRequest):
-        image_features = None
+        request_id = request.request_id
+        image_url = request.image_url
+        logger.info(
+            f"Received multimodal request {{ id: {request_id}, image_url: '{image_url}' }}."
+        )
+        embeddings = None
         if self.do_remote_prefill:
+            logger.debug(
+                f"Disaggregated: request {{ id: {request_id}, image_url: '{image_url}' }}"
+                " prefill worker will populate the decode model's key-value cache ahead of time;"
+                " no direct encode worker interaction required."
+            )
             if self.disaggregated_router is not None:
                 async with PrefillQueue.get_instance(
                     nats_server=self._prefill_queue_nats_server,
@@ -195,21 +221,21 @@ class VllmWorker:
                 disagg_router_decision = True
 
             if self.do_remote_prefill and disagg_router_decision:
+                logger.debug(
+                    f"Prefilling remotely for request {{ id: {request_id}, image_url: '{image_url}' }} with length {len(request.engine_prompt['prompt_token_ids'])}"
+                )
                 remote_prefill_params = RemotePrefillParams(
                     is_remote_prefill=True,
                     remote_prefill_request_callback=self.get_remote_prefill_request_callback(),
                     # Pass the image url as part of the RemotePrefillParams, which will be passed to the prefill worker via RemotePrefillRequest
                     multimodal_data_source={
-                        "image_url": request.image_url,
+                        "image_url": image_url,
                     },
-                )
-                logger.info(
-                    f"Prefilling remotely for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
                 )
             else:
                 remote_prefill_params = None
-                logger.info(
-                    f"Prefilling locally for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
+                logger.debug(
+                    f"Prefilling locally for request {{ id: {request_id}, image_url: '{image_url}' }} with length {len(request.engine_prompt['prompt_token_ids'])}"
                 )
 
             # The decode worker will pre-allocate the memory based on the prompt token length for the prefill worker to transfer the kv cache.
@@ -231,33 +257,53 @@ class VllmWorker:
             )
 
         else:
-            # For aggregated serving, the vllm worker will directly send the encode request to the encode worker.
-            encode_generator = await self.encode_worker_client.round_robin(
-                EncodeRequest(
-                    image_url=request.image_url,
-                ).model_dump_json()
+            logger.debug(
+                f"Aggregated: request {{ id: {request_id}, image_url: '{image_url}' }}"
+                " no prefill worker available, embeddings directly from encode worker."
             )
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            async for encode_response in encode_generator:
-                encode_output = EncodeResponse.model_validate_json(
-                    encode_response.data()
+            # Extract the pre-allocated, reusable image embeddings tensor and its descriptor.
+            # Doing this avoids unnessesary memory de/registration with NIXL.
+            embeddings, descriptor = self._embeddings_descriptor
+
+            with self._connector.create_writable(descriptor) as writable:
+                # Extract serialized metadata about the operation from the writable operation,
+                # and use it to create a new EncodeRequest.
+                encode_request = EncodeRequest(
+                    request_id=request_id,
+                    image_url=image_url,
+                    serialized_request=writable.to_serialized(),
                 )
-                image_features = torch.tensor(
-                    encode_output.image_features, device=device, dtype=torch.float16
+                logger.debug(f"Encode request: {encode_request.model_dump_json()}")
+                encode_generator = await self.encode_worker_client.round_robin(
+                    encode_request.model_dump_json()
                 )
+
+                async for encode_response in encode_generator:
+                    encode_output = EncodeResponse.model_validate_json(encode_response.data())
+                    logger.info(f"Received response: {{ id: {encode_output.request_id} }}")
+
+                # Wait for the write operation to complete.
+                # This will block until the write operation is complete.
+                # This await should be a no-op since we've already received a response from the encode worker.
+                await writable.wait_for_completion()
+                # At this point, the `embeddings` tensor is filled with the image embeddings from the remote encode worker.
 
             remote_prefill_params = None
             logger.info(
-                f"Prefilling locally for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
+                f"Prefilling locally for request {{ id: {request_id}, image_url: '{image_url}' }} with length {len(request.engine_prompt['prompt_token_ids'])}"
             )
             prompt_ids = request.engine_prompt["prompt_token_ids"]
 
         # rust HTTP requires Delta streaming
         request.sampling_params.output_kind = RequestOutputKind.DELTA
 
-        if image_features is not None:
-            multi_modal_data = {"image": image_features}
+        # When using aggregated serving, the encode worker will have provided the key-value cache updates via the prefill worker.
+        # When using disaggregated serving, the encode worker will have provided the key-value cache updates via the encode worker.
+        if embeddings is not None:
+            logger.debug("Aggregated: embedding data from encode worker provided via multi-modal data to decode model.")
+            multi_modal_data = {"image": embeddings}
         else:
+            logger.debug("Disaggregated: no embedding data required as prefill will have provided key-value cache updates via encode worker.")
             multi_modal_data = None
 
         async for response in self.engine_client.generate(
@@ -269,6 +315,7 @@ class VllmWorker:
             request_id=request.request_id,
             remote_prefill_params=remote_prefill_params,
         ):
+            logger.debug(f"Yeilding response {{ id: {response.request_id}, prompt: '{response.prompt}' }}")
             yield MyRequestOutput(
                 request_id=response.request_id,
                 prompt=response.prompt,

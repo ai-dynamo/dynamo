@@ -26,6 +26,8 @@ from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import PromptLogprobs, RequestMetrics
 
+import connect
+
 
 class Request(BaseModel):
     prompt: str
@@ -70,7 +72,6 @@ class vLLMGenerateRequest(BaseModel):
     """
     Serializable class of all the fields vLLM engine requires for inference
     """
-
     model_config = ConfigDict(arbitrary_types_allowed=True)
     engine_prompt: PatchedTokensPrompt
     sampling_params: SamplingParams
@@ -108,15 +109,15 @@ class EncodeRequest(BaseModel):
     """
     Serializable class of all the fields vLLM engine requires for inference
     """
-
     model_config = ConfigDict(arbitrary_types_allowed=True)
     image_url: str
+    request_id: str
+    serialized_request: Optional[connect.SerializedRequest] = None
 
 
 class EncodeResponse(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    image_features: List[List[List[float]]]
+    request_id: str
 
 
 class MyRequestOutput(BaseModel):
@@ -127,9 +128,7 @@ class MyRequestOutput(BaseModel):
     This class is used to serialize the RequestOutput and any recursively defined types
     We can do this because PromptLogprobs, RequestMetrics, and CompletionOutput are all serializable dataclasses
     """
-
     model_config = ConfigDict(arbitrary_types_allowed=True)
-
     request_id: str
     prompt: Optional[str] = None
     prompt_token_ids: Optional[List[int]] = None

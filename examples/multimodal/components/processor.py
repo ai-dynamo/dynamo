@@ -19,7 +19,7 @@ import uuid
 from enum import Enum
 from typing import AsyncIterator, Tuple, Union
 
-from components.worker import VllmWorker
+from components.decode_worker import VllmDecodeWorker
 from transformers import AutoTokenizer
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.logging import check_required_workers
@@ -53,7 +53,7 @@ class Processor(ProcessMixIn):
     vLLM pre and post processing
     """
 
-    worker = depends(VllmWorker)
+    worker = depends(VllmDecodeWorker)
 
     def __init__(self):
         class_name = self.__class__.__name__
@@ -83,7 +83,7 @@ class Processor(ProcessMixIn):
     @async_on_start
     async def async_init(self):
         runtime = dynamo_context["runtime"]
-        comp_ns, comp_name = VllmWorker.dynamo_address()  # type: ignore
+        comp_ns, comp_name = VllmDecodeWorker.dynamo_address()  # type: ignore
         self.worker_client = (
             await runtime.namespace(comp_ns)
             .component(comp_name)

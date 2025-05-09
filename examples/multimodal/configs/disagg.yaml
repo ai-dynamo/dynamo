@@ -22,7 +22,7 @@ Processor:
   router: round-robin
   common-configs: [model, block-size]
 
-VllmWorker:
+VllmDecodeWorker:
   remote-prefill: true
   conditional-disagg: true
   max-local-prefill-length: 10
@@ -33,7 +33,7 @@ VllmWorker:
       gpu: 1
   common-configs: [model, block-size, max-model-len, kv-transfer-config]
 
-PrefillWorker:
+VllmPrefillWorker:
   max-num-batched-tokens: 16384
   ServiceArgs:
     workers: 1
@@ -41,7 +41,7 @@ PrefillWorker:
       gpu: 1
   common-configs: [model, block-size, max-model-len, kv-transfer-config]
 
-EncodeWorker:
+VllmEncodeWorker:
   tensor-parallel-size: 1
   router: random
   ServiceArgs:
