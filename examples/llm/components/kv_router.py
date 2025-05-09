@@ -76,7 +76,6 @@ def parse_args(service_name, prefix) -> Namespace:
 
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "dynamo",
     },
     resources={"cpu": "10", "memory": "20Gi"},

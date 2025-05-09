@@ -35,7 +35,6 @@ logger = logging.getLogger(__name__)
 
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "dynamo",
     },
     resources={"cpu": "10", "memory": "20Gi"},

@@ -22,8 +22,7 @@ from components.utils import GeneralRequest
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
-from dynamo.sdk import depends, dynamo_endpoint, service
-from dynamo.sdk.lib.image import DYNAMO_IMAGE
+from dynamo.sdk import DYNAMO_IMAGE, depends, dynamo_api, service
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,7 @@ app = FastAPI(title="Hello World LLM")
 
 
 @service(
-    dynamo={"enabled": True, "namespace": "dynamo-demo"},
+    dynamo={"namespace": "dynamo-demo"},
     image=DYNAMO_IMAGE,
     app=app,
 )
@@ -46,7 +45,7 @@ class Frontend:
         logger.debug(f"Received signal {signum}, shutting down...")
         sys.exit(0)
 
-    @dynamo_endpoint(is_api=True)
+    @dynamo_api()
     async def generate(self, prompt, request_id):  # from request body keys
         """Stream results from the pipeline."""
         logger.info(f"Received: {prompt=},{request_id=}")

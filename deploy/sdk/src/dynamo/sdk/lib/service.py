@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections import defaultdict
 from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple, TypeVar, Union
@@ -28,6 +27,7 @@ from _bentoml_sdk.images import Image
 from _bentoml_sdk.service.config import validate
 from fastapi import FastAPI
 
+from dynamo.sdk.core.protocol.interface import DynamoTransport, LinkedServices
 from dynamo.sdk.lib.decorators import DynamoEndpoint
 
 T = TypeVar("T", bound=object)
@@ -43,32 +43,6 @@ class ComponentType(str, Enum):
     # METRICS = "metrics"
     # MONITOR = "monitor"
     # etc.
-
-
-class RuntimeLinkedServices:
-    """
-    A class to track the linked services in the runtime.
-    """
-
-    def __init__(self) -> None:
-        self.edges: Dict[DynamoService, Set[DynamoService]] = defaultdict(set)
-
-    def add(self, edge: Tuple[DynamoService, DynamoService]):
-        src, dest = edge
-        self.edges[src].add(dest.inner)
-        # track the dest node as well so we can cleanup later
-        self.edges[dest]
-
-    def remove_unused_edges(self):
-        # this method is idempotent
-        if not self.edges:
-            return
-        # remove edges that are not in the current service
-        for u, vertices in self.edges.items():
-            u.remove_unused_edges(used_edges=vertices)
-
-
-LinkedServices = RuntimeLinkedServices()
 
 
 @dataclass
@@ -152,7 +126,9 @@ class DynamoService(Service[T]):
             value = getattr(inner, field)
             if isinstance(value, DynamoEndpoint):
                 self._dynamo_endpoints[value.name] = value
-                if getattr(value, "is_api", False):
+                if DynamoTransport.HTTP in getattr(
+                    value, "_transports", [DynamoTransport.DEFAULT]
+                ):
                     # Ensure endpoint path starts with '/'
                     path = (
                         value.name if value.name.startswith("/") else f"/{value.name}"
@@ -174,15 +150,8 @@ class DynamoService(Service[T]):
             return service_config.get("ServiceArgs")
         return None
 
-    def is_dynamo_component(self) -> bool:
-        """Check if this service is configured as a Dynamo component"""
-        return self._dynamo_config.enabled
-
     def dynamo_address(self) -> Tuple[Optional[str], Optional[str]]:
         """Get the Dynamo address for this component in namespace/name format"""
-        if not self.is_dynamo_component():
-            raise ValueError("Service is not configured as a Dynamo component")
-
         # Check if we have a runner map with Dynamo address
         runner_map = os.environ.get("BENTOML_RUNNER_MAP")
         if runner_map:

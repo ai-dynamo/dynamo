@@ -1007,7 +1007,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-python"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "akin",
  "anyhow",
@@ -1084,7 +1084,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-py3"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "dynamo-engine-python",
  "dynamo-llm",
@@ -1105,7 +1105,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -4570,8 +4570,10 @@ dependencies = [
  "percent-encoding",
  "pin-project",
  "prost",
+ "rustls-pemfile",
  "socket2",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower 0.4.13",
  "tower-layer",

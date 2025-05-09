@@ -1541,7 +1541,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-llamacpp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-stream",
  "dynamo-llm",
@@ -1553,7 +1553,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-mistralrs"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1572,7 +1572,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-python"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1593,7 +1593,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "akin",
  "anyhow",
@@ -1658,7 +1658,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-run"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1687,7 +1687,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -1736,7 +1736,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytemuck",
  "derive-getters",
@@ -2731,7 +2731,7 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "dynamo-llm",
@@ -3375,7 +3375,7 @@ checksum = "d750af042f7ef4f724306de029d18836c26c1765a54a6a3f094cbd23a7267ffa"
 
 [[package]]
 name = "libdynamo_llm"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -3488,7 +3488,7 @@ dependencies = [
 
 [[package]]
 name = "llmctl"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "dynamo-llm",
@@ -3687,7 +3687,7 @@ dependencies = [
 
 [[package]]
 name = "metrics"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axum 0.6.20",
  "clap",
@@ -5398,7 +5398,7 @@ dependencies = [
 
 [[package]]
 name = "router"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "dynamo-llm",
@@ -6777,8 +6777,10 @@ dependencies = [
  "percent-encoding",
  "pin-project",
  "prost 0.13.5",
+ "rustls-pemfile",
  "socket2",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower 0.4.13",
  "tower-layer",

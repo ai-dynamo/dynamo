@@ -131,7 +131,7 @@ class DynamoDependency(Dependency[T]):
 
     def get(self, *args: Any, **kwargs: Any) -> T | Any:
         # If this is a Dynamo-enabled service, return the Dynamo client
-        if isinstance(self.on, DynamoService) and self.on.is_dynamo_component():
+        if isinstance(self.on, DynamoService):
             if self._dynamo_client is None:
                 self._dynamo_client = DynamoClient(self.on)
                 if self._runtime:

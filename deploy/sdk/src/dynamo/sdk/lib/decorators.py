@@ -21,15 +21,21 @@ from typing import Any, get_type_hints
 
 from pydantic import BaseModel
 
+from dynamo.sdk.core.protocol.interface import DynamoTransport
+
 
 class DynamoEndpoint:
     """Decorator class for Dynamo endpoints"""
 
-    def __init__(self, func: t.Callable, name: str | None = None, is_api: bool = False):
+    def __init__(
+        self,
+        func: t.Callable,
+        name: str | None = None,
+        transports: t.List[DynamoTransport] | None = None,
+    ):
         self.func = func
         self.name = name or func.__name__
-        self.is_dynamo_endpoint = True
-        self.is_api = is_api
+        self._transports = transports or [DynamoTransport.DEFAULT]
         # Extract request type from hints
         hints = get_type_hints(func)
         args = list(hints.items())
@@ -78,7 +84,8 @@ def dynamo_endpoint(
     """
 
     def decorator(func: t.Callable) -> DynamoEndpoint:
-        return DynamoEndpoint(func, name, is_api)
+        transports = [DynamoTransport.HTTP] if is_api else [DynamoTransport.DEFAULT]
+        return DynamoEndpoint(func, name, transports)
 
     return decorator
 

@@ -45,7 +45,6 @@ class RequestType(BaseModel):
 
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "dynamo",
     },
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},

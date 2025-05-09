@@ -30,7 +30,6 @@ from dynamo.sdk import dynamo_endpoint, service
 
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "your_namespace",
     },
 )
@@ -108,7 +107,6 @@ class ResponseType(BaseModel):
 
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "your_namespace",
     }
 )
@@ -218,7 +216,6 @@ class ResponseType(BaseModel):
 
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "your_namespace",
     }
 )
@@ -312,7 +309,6 @@ in your class implementation:
 ```python
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "your_namespace",
     },
 )
@@ -340,7 +336,6 @@ your own custom metrics and use them in your cost function:
 ```python
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "your_namespace",
     },
 )
@@ -551,7 +546,6 @@ disaggregation, the DecodeWorker could just always do the Prefill step as well.
 ```python
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "your_namespace",
     },
 )
@@ -579,7 +573,6 @@ class DecodeWorker:
 
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "your_namespace",
     },
 )
