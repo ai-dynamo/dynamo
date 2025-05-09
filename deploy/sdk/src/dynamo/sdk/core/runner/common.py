@@ -18,13 +18,20 @@
 import json
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, ClassVar, Dict
 
 logger = logging.getLogger(__name__)
 
 
 class ServiceMixin:
     """Mixin for Dynamo services to inject configuration from environment."""
+
+    # Class variable to store service configurations
+    _global_service_configs: ClassVar[Dict[str, Dict[str, Any]]] = {}
+
+    def all_services(self) -> Dict[str, Any]:
+        """Return all services in the dependency chain."""
+        raise NotImplementedError("")
 
     def inject_config(self) -> None:
         """Inject configuration from environment into service configs.
