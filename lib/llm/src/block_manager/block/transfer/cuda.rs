@@ -130,6 +130,8 @@ where
 }
 
 /// Helper function to perform the appropriate CUDA memcpy based on storage types
+// Allow dead code because it's used in debug assertions
+#[allow(dead_code)]
 fn expected_strategy<Source: Storage, Dest: Storage>() -> TransferStrategy {
     match (
         std::any::TypeId::of::<Source>(),
