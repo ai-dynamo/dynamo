@@ -13,18 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional, Any
-from typing_extensions import NotRequired
+import json
+from typing import Any, List, Optional
 
 import msgspec
-import json
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_core import core_schema
-from vllm.sampling_params import SamplingParams, KVTransferParams
+from typing_extensions import NotRequired
 from vllm.inputs import TokensPrompt
-from vllm.outputs import CompletionOutput
-from vllm.sequence import PromptLogprobs, RequestMetrics
 from vllm.lora.request import LoRARequest
+from vllm.outputs import CompletionOutput
+from vllm.sampling_params import KVTransferParams, SamplingParams
+from vllm.sequence import PromptLogprobs, RequestMetrics
 
 TokenIdType = int
 
@@ -89,6 +89,7 @@ KVTransferParams.__get_pydantic_core_schema__ = classmethod(
 LoRARequest.__get_pydantic_core_schema__ = classmethod(
     lambda cls, source, handler: core_schema.any_schema()
 )
+
 
 class vLLMGenerateRequest(BaseModel):
     """

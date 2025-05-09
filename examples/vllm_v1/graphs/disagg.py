@@ -15,7 +15,7 @@
 
 from components.frontend import Frontend
 from components.simple_load_balancer import SimpleLoadBalancer
-from components.worker import VllmPrefillWorker, VllmDecodeWorker
+from components.worker import VllmDecodeWorker, VllmPrefillWorker
 
 processor = Frontend.link(SimpleLoadBalancer)
 processor.link(VllmPrefillWorker)

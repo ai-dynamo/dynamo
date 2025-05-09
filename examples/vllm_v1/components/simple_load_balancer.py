@@ -13,19 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import logging
 import uuid
-import copy
 from enum import Enum
 from typing import AsyncGenerator
 
-from dynamo.llm import ModelType, register_llm
-from dynamo.sdk import depends, service, dynamo_endpoint, async_on_start, dynamo_context
-from vllm.sampling_params import SamplingParams, KVTransferParams
-from vllm.inputs import TokensPrompt
-from components.worker import VllmWorker, VllmPrefillWorker, VllmDecodeWorker
+from components.worker import VllmDecodeWorker, VllmPrefillWorker, VllmWorker
 from utils.args import parse_vllm_args
-from utils.protocol import PreprocessedRequest, vLLMGenerateRequest, MyRequestOutput
+from utils.protocol import MyRequestOutput, PreprocessedRequest, vLLMGenerateRequest
+from vllm.inputs import TokensPrompt
+from vllm.sampling_params import KVTransferParams, SamplingParams
+
+from dynamo.llm import ModelType, register_llm
+from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +72,9 @@ class SimpleLoadBalancer:
 
         logger.info("SimpleLoadBalancer has been initialized")
 
-    async def send_request_to_prefill(self, request: vLLMGenerateRequest) -> MyRequestOutput:
-
+    async def send_request_to_prefill(
+        self, request: vLLMGenerateRequest
+    ) -> MyRequestOutput:
         prefill_request = copy.deepcopy(request)
         prefill_request.sampling_params.kv_transfer_params = KVTransferParams(
             do_remote_decode=True,
@@ -80,21 +82,27 @@ class SimpleLoadBalancer:
         prefill_request.sampling_params.max_tokens = 1
         prefill_request.sampling_params.min_tokens = 1
 
-        logger.debug(f"Prefill request: %s", prefill_request.model_dump_json())
+        logger.debug("Prefill request: %s", prefill_request.model_dump_json())
 
-        async for prefill_response in self.prefill_worker.generate(prefill_request.model_dump_json()):
+        async for prefill_response in self.prefill_worker.generate(
+            prefill_request.model_dump_json()
+        ):
             return MyRequestOutput.model_validate_json(prefill_response)
 
-    async def send_request_to_decode(self, request: vLLMGenerateRequest, prefill_response: MyRequestOutput) -> AsyncGenerator[MyRequestOutput, None]:
-
+    async def send_request_to_decode(
+        self, request: vLLMGenerateRequest, prefill_response: MyRequestOutput
+    ) -> AsyncGenerator[MyRequestOutput, None]:
         decode_request = copy.deepcopy(request)
-        decode_request.sampling_params.kv_transfer_params = prefill_response.kv_transfer_params
+        decode_request.sampling_params.kv_transfer_params = (
+            prefill_response.kv_transfer_params
+        )
 
-        logger.debug(f"Decode request: %s", decode_request.model_dump_json())
+        logger.debug("Decode request: %s", decode_request.model_dump_json())
 
-        async for decode_response in self.decode_worker.generate(decode_request.model_dump_json()):
+        async for decode_response in self.decode_worker.generate(
+            decode_request.model_dump_json()
+        ):
             yield MyRequestOutput.model_validate_json(decode_response)
-
 
     def create_vllm_request(self, request: PreprocessedRequest) -> vLLMGenerateRequest:
         # logging.debug(f"Received request: {request}")
@@ -121,21 +129,22 @@ class SimpleLoadBalancer:
 
     @dynamo_endpoint()
     async def generate(self, request: PreprocessedRequest):
-
-        logger.debug(f"Processor received completion request: %s", request.model_dump_json())
+        logger.debug(
+            "Processor received completion request: %s", request.model_dump_json()
+        )
 
         vllm_request = self.create_vllm_request(request)
 
-        logger.debug(f"VLLM request: %s", vllm_request.model_dump_json())
+        logger.debug("VLLM request: %s", vllm_request.model_dump_json())
 
         prefill_response = await self.send_request_to_prefill(vllm_request)
 
-        logger.debug(f"Prefill response: %s", prefill_response.model_dump_json())
+        logger.debug("Prefill response: %s", prefill_response.model_dump_json())
 
         num_output_tokens_so_far = 0
         gen = self.send_request_to_decode(vllm_request, prefill_response)
         async for res in gen:
-            logger.debug(f"Decode response: %s", res.model_dump_json())
+            logger.debug("Decode response: %s", res.model_dump_json())
             # res is our MyRequestOutput
 
             # This is the expected way for a request to end.
@@ -157,4 +166,3 @@ class SimpleLoadBalancer:
                 out["stop_reason"] = output.stop_reason
             yield out
             num_output_tokens_so_far = next_total_toks
-    
