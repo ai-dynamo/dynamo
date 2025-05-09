@@ -439,7 +439,7 @@ async def worker(runtime: DistributedRuntime):
 
     # 3. Attach request handler
     #
-    await endpoint.serve_endpoint(RequestHandler(engine).generate, None)
+    await endpoint.serve_endpoint(RequestHandler(engine).generate)
 
 class RequestHandler:
 

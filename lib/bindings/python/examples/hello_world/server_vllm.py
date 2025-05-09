@@ -125,7 +125,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
     # after the lease is revoked
-    await endpoint.serve_endpoint(RequestHandler(engine_client).generate, None)
+    await endpoint.serve_endpoint(RequestHandler(engine_client).generate)
 
 
 def cmd_line_args():
