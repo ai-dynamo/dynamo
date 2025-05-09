@@ -60,7 +60,7 @@ class SGLangWorker:
     async def async_init(self):
         runtime = dynamo_context["runtime"]
         logger.info("Registering LLM for discovery")
-        comp_ns, comp_name = SGLangWorker.dynamo_address()
+        comp_ns, comp_name = SGLangWorker.dynamo_address()  # type: ignore
         endpoint = runtime.namespace(comp_ns).component(comp_name).endpoint("generate")
         await register_llm(
             ModelType.Backend,

@@ -22,7 +22,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 import dynamo.sdk as sdk
-from dynamo.sdk import async_on_shutdown, depends, service
+from dynamo.sdk import depends, service
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
 
@@ -87,8 +87,3 @@ class Frontend:
             stdout=None,
             stderr=None,
         )
-
-    @async_on_shutdown
-    async def async_close(self):
-        """Clean up resources before shutdown."""
-        self.process.terminate()
