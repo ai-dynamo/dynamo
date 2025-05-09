@@ -42,7 +42,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 |--------------------|---------------|----------------------|--------------|
 | ai-dynamo          |    0.2.1      |     >=2.28           |              |
 | ai-dynamo-runtime  |    0.2.1      |     >=2.28           |              |
-| ai-dynamo-vllm     |  0.8.4* | >=2.28 (recommended) |                    |
+| ai-dynamo-vllm     |  0.8.4.post1* | >=2.28 (recommended) |                    |
 | NIXL               |    0.2.1      |     >=2.27           | >=11.8      |
 
 ### Build Dependency
