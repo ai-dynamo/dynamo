@@ -231,7 +231,7 @@ impl DeploymentState {
 }
 
 /// Documentation for a route
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RouteDoc {
     method: axum::http::Method,
     path: String,
