@@ -26,6 +26,7 @@ pub use state::{BlockState, BlockStateInvalid};
 use crate::block_manager::{
     state::{KvBlockManagerState as BlockManager, TransferContext},
     storage::{Local, Remote, Storage},
+    CacheLevel,
 };
 use crate::tokens::{SaltHash, SequenceHash, Token, TokenBlock, Tokens};
 
@@ -687,6 +688,15 @@ impl<S: Storage, M: BlockMetadata> ImmutableBlock<S, M> {
     pub(crate) fn new(block: Arc<MutableBlock<S, M>>) -> Self {
         Self { block }
     }
+
+    pub fn manager(&self) -> Option<&Arc<BlockManager<M>>> {
+        // Access the underlying Block's manager field directly through deref
+        (*self).manager.as_ref()
+    }
+
+    pub fn mutable_block(&self) -> &Arc<MutableBlock<S, M>> {
+        &self.block
+    }
 }
 
 impl<S: Storage + NixlDescriptor, M: BlockMetadata> ReadableBlock for ImmutableBlock<S, M> {
@@ -740,6 +750,15 @@ impl<'a, S: Storage, M: BlockMetadata> AsBlockSlice<'a, ImmutableBlock<S, M>>
 {
     fn as_block_slice(&'a self) -> &'a [ImmutableBlock<S, M>] {
         self.as_slice()
+    }
+}
+
+impl<S: Storage, M: BlockMetadata> ImmutableBlock<S, M> {
+    pub fn enqueue_offload_to(&self, location: CacheLevel, priority: u64) -> Result<()> {
+        if let Some(manager) = self.manager() {
+            manager.offload_block(self, location, priority)?;
+        }
+        Ok(())
     }
 }
 

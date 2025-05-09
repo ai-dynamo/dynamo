@@ -408,7 +408,7 @@ impl DeviceAllocator {
             ctx: Cuda::device_or_create(device_id)?,
         })
     }
-    
+
     pub fn ctx(&self) -> &Arc<CudaContext> {
         &self.ctx
     }
