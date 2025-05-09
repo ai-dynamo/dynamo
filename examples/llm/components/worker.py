@@ -33,7 +33,6 @@ from vllm.sampling_params import RequestOutputKind
 
 from dynamo.llm import KvMetricsPublisher
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
-from dynamo.sdk.lib.service import LeaseConfig
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +41,6 @@ logger = logging.getLogger(__name__)
     dynamo={
         "enabled": True,
         "namespace": "dynamo",
-        "custom_lease": LeaseConfig(ttl=1),  # 1 second
     },
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -138,7 +136,23 @@ class VllmWorker:
         else:
             self.disaggregated_router = None
 
+        # Set up signal handler for graceful shutdown
+        # TODO: move to dynamo sdk
+        loop = asyncio.get_running_loop()
+
+        def signal_handler():
+            # Schedule the shutdown coroutine instead of calling it directly
+            asyncio.create_task(self.graceful_shutdown(runtime))
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, signal_handler)
+
         logger.info("VllmWorker has been initialized")
+
+    async def graceful_shutdown(self, runtime):
+        logger.info("Received shutdown signal, shutting down DistributedRuntime")
+        runtime.shutdown()
+        logger.info("DistributedRuntime shutdown complete")
 
     def shutdown_vllm_engine(self, signum, frame):
         """Shutdown the background loop"""
@@ -154,12 +168,8 @@ class VllmWorker:
 
     async def create_metrics_publisher_endpoint(self):
         component = dynamo_context["component"]
-        lease = dynamo_context["lease"]
-        if lease is None:
-            logger.info("Creating metrics publisher endpoint with primary lease")
-        else:
-            logger.info(f"Creating metrics publisher endpoint with lease: {lease}")
-        await self.metrics_publisher.create_endpoint(component, lease)
+        logger.info("Creating metrics publisher endpoint with primary lease")
+        await self.metrics_publisher.create_endpoint(component)
 
     def get_remote_prefill_request_callback(self):
         # TODO: integrate prefill_queue to dynamo endpoint

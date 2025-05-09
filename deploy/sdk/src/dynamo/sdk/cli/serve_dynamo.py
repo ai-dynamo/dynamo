@@ -35,7 +35,6 @@ from fastapi.responses import StreamingResponse
 
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 from dynamo.sdk import dynamo_context
-from dynamo.sdk.cli.utils import append_dynamo_state
 from dynamo.sdk.lib.service import LinkedServices
 from dynamo.sdk.lib.utils import get_host_port
 
@@ -208,21 +207,9 @@ def main(
             component = runtime.namespace(namespace).component(component_name)
 
             try:
-                # if a custom lease is specified we need to create the service with that lease
-                lease = None
-                if service._dynamo_config.custom_lease:
-                    lease = await component.create_service_with_custom_lease(
-                        ttl=service._dynamo_config.custom_lease.ttl
-                    )
-                    lease_id = lease.id()
-                    dynamo_context["lease"] = lease
-                    logger.info(
-                        f"Created {service.name} component with custom lease id {lease_id}"
-                    )
-                else:
-                    # Create service first
-                    await component.create_service()
-                    logger.info(f"Created {service.name} component")
+                # Create service first
+                await component.create_service()
+                logger.info(f"Created {service.name} component")
 
                 # Set runtime on all dependencies
                 for dep in service.dependencies.values():
@@ -272,30 +259,14 @@ def main(
                     f"Starting {service.name} instance with all registered endpoints"
                 )
                 # TODO:bis: convert to list
-                if lease is None:
-                    logger.info(f"Serving {service.name} with primary lease")
-                else:
-                    logger.info(f"Serving {service.name} with lease: {lease.id()}")
-                    # Map custom lease to component
-                    watcher_name = None
-                    if custom_component_name:
-                        watcher_name = custom_component_name
-                    else:
-                        watcher_name = f"{namespace}_{component_name}"
-                    append_dynamo_state(namespace, watcher_name, {"lease": lease.id()})
-                    logger.info(
-                        f"Appended lease {lease.id()}/{lease.id():x} to {watcher_name}"
-                    )
+                logger.info(f"Serving {service.name} with primary lease")
                 # Launch serve_endpoint for all endpoints concurrently
                 tasks = [
-                    endpoint.serve_endpoint(handler, lease)
+                    endpoint.serve_endpoint(handler)
                     for endpoint, handler in zip(endpoints, dynamo_handlers)
                 ]
                 # Wait for all tasks to complete
                 await asyncio.gather(*tasks)
-
-                if class_instance.__class__.__name__ == "PrefillWorker":
-                    await asyncio.wait_for(class_instance.task, timeout=None)
 
             except GracefulExit:
                 logger.info(f"[{run_id}] Gracefully shutting down {service.name}")

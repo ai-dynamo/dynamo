@@ -49,31 +49,11 @@ class DistributedRuntime:
         """
         ...
 
-class PyLease:
-    """
-    A lease object
-    """
-
-    def id(self) -> int:
+    def shutdown(self) -> None:
         """
-        Return the id of the lease
-        Refer to https://etcd.io/docs/v3.4/learning/api/ for examples on how to use the lease id
+        Shutdown the runtime by triggering the cancellation token
         """
         ...
-
-    def revoke(self) -> None:
-        """
-        Revoke the lease by triggering the cancellation token
-        This will invalidate the kv pairs associated with this lease
-        """
-        ...
-
-    def is_valid(self) -> bool:
-        """
-        Check if the lease is still valid (not revoked)
-        """
-        ...
-
 class EtcdClient:
     """
     Etcd is used for discovery in the DistributedRuntime
@@ -229,14 +209,6 @@ class Component:
     def endpoint(self, name: str) -> Endpoint:
         """
         Create an endpoint
-        """
-        ...
-
-    def create_service_with_custom_lease(self, ttl: int) -> PyLease:
-        """
-        Create a service with a custom lease
-        The lease needs to be tied to the endpoint of this services when creating the endpoints later
-        TODO: tie the lease to the service instead of the endpoint
         """
         ...
 

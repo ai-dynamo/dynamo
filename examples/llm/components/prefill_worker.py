@@ -17,6 +17,7 @@
 import asyncio
 import logging
 import os
+import signal
 import sys
 
 from pydantic import BaseModel
@@ -30,7 +31,6 @@ from vllm.inputs.data import TokensPrompt
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
-from dynamo.sdk.lib.service import LeaseConfig
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,6 @@ class RequestType(BaseModel):
     dynamo={
         "enabled": True,
         "namespace": "dynamo",
-        "custom_lease": LeaseConfig(ttl=1),  # 1 second
     },
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -100,8 +99,31 @@ class PrefillWorker:
                 sys.exit(1)
 
         self.task.add_done_callback(prefill_queue_handler_cb)
-        self.lease = dynamo_context["lease"]
+
+        self.shutdown_requested = False
+
+        # Set up signal handler for graceful shutdown
+        # TODO: move to dynamo sdk
+        loop = asyncio.get_running_loop()
+
+        def signal_handler():
+            # Schedule the shutdown coroutine instead of calling it directly
+            asyncio.create_task(self.graceful_shutdown(runtime))
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, signal_handler)
+
         logger.info("PrefillWorker initialized")
+
+    async def graceful_shutdown(self, runtime):
+        logger.info("Received shutdown signal, shutting down DistributedRuntime")
+        # first shutdown the vllm engine
+        self.shutdown_requested = True
+        await asyncio.wait_for(self.task, timeout=None)
+
+        # then shutdown the mock endpoint
+        runtime.shutdown()
+        logger.info("DistributedRuntime shutdown complete")
 
     def shutdown_vllm_engine(self):
         """Shutdown the background loop"""
@@ -140,8 +162,7 @@ class PrefillWorker:
                     )
                     async for _ in self.generate(prefill_request):
                         pass
-                is_valid = await self.lease.is_valid()
-                if not is_valid:
+                if self.shutdown_requested:
                     logger.info(
                         "Shutdown requested, checking if engine has any pending prefill sending requests"
                     )
