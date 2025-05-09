@@ -34,6 +34,7 @@ dependencies = [
     "distro",
     "typer",
     "circus>=0.17.0",
+    "sglang[all]==0.4.6.post2"
 ]
 
 classifiers = [
