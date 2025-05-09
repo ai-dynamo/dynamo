@@ -37,7 +37,7 @@ The code for the pipeline looks like this:
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from dynamo.sdk import DYNAMO_IMAGE, depends, dynamo_endpoint, service
+from dynamo.sdk import DYNAMO_IMAGE, depends, dynamo_endpoint, service, dynamo_api
 
 
 class RequestType(BaseModel):
@@ -83,7 +83,7 @@ app = FastAPI(title="Hello World!")
 class Frontend:
     middle = depends(Middle)
 
-    @dynamo_endpoint(is_api=True)
+    @dynamo_api()
     async def generate(self, request: RequestType):
         async def content_generator():
             async for response in self.middle.generate(request.model_dump_json()):

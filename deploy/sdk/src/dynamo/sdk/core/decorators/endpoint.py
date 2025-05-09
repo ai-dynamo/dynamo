@@ -85,6 +85,18 @@ def dynamo_endpoint(
     return decorator
 
 
+def dynamo_api(
+    name: Optional[str] = None,
+    **kwargs,
+) -> Callable[[Callable], DynamoEndpoint]:
+    """Decorator for dynamo endpoints."""
+
+    def decorator(func: Callable) -> DynamoEndpoint:
+        return DynamoEndpoint(func, name, transports=[DynamoTransport.HTTP], **kwargs)
+
+    return decorator
+
+
 class DynamoClient:
     """Client for calling Dynamo endpoints with streaming support"""
 
