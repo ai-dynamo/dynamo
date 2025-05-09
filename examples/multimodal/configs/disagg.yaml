@@ -49,3 +49,8 @@ EncodeWorker:
     resources:
       gpu: 1
   common-configs: [model]
+
+FrameworkArgs:
+  encode-framework: onnx
+  onnx-model-path: /workspace/examples/multimodal/llava_onnx_encoder
+  hf-model-path: /tmp/llava-1.5-7b-hf
