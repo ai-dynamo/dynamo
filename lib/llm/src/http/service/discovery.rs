@@ -265,28 +265,36 @@ async fn handle_put(model_entry: &ModelEntry, state: Arc<ModelWatchState>) -> an
             // function. Needs checking carefully, possibly we need to store it in state.
             let _cache_dir = Some(card.move_from_nats(state.drt.nats_client()).await?);
 
-            let frontend = SegmentSource::<
-                SingleIn<NvCreateChatCompletionRequest>,
-                ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-            >::new();
-            let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
-            let backend = Backend::from_mdc(card.clone()).await?.into_operator();
-            let router = PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
-                client.clone(),
-                RouterMode::Random, // TODO how do we configure this?
-            )
-            .await?;
+            match card.prompt_formatter {
+                Some(ref _prompt_formatter) => {
+                    let frontend = SegmentSource::<
+                        SingleIn<NvCreateChatCompletionRequest>,
+                        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+                    >::new();
+                    let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
+                    let backend = Backend::from_mdc(card.clone()).await?.into_operator();
+                    let router =
+                        PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
+                            client.clone(),
+                            RouterMode::Random, // TODO how do we configure this?
+                        )
+                        .await?;
 
-            let chat_engine = frontend
-                .link(preprocessor.forward_edge())?
-                .link(backend.forward_edge())?
-                .link(ServiceBackend::from_engine(Arc::new(router)))?
-                .link(backend.backward_edge())?
-                .link(preprocessor.backward_edge())?
-                .link(frontend)?;
-            state
-                .manager
-                .add_chat_completions_model(&model_entry.name, chat_engine)?;
+                    let chat_engine = frontend
+                        .link(preprocessor.forward_edge())?
+                        .link(backend.forward_edge())?
+                        .link(ServiceBackend::from_engine(Arc::new(router)))?
+                        .link(backend.backward_edge())?
+                        .link(preprocessor.backward_edge())?
+                        .link(frontend)?;
+                    state
+                        .manager
+                        .add_chat_completions_model(&model_entry.name, chat_engine)?;
+                }
+                None => {
+                    tracing::warn!("Chat Completions endpoint can't be deployed: Model tokenizer does not contain chat template.");
+                }
+            }
 
             let frontend = SegmentSource::<
                 SingleIn<CompletionRequest>,
