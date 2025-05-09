@@ -15,6 +15,7 @@
 
 use super::metrics;
 use super::ModelManager;
+use super::RouteDoc;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
@@ -27,6 +28,7 @@ pub struct HttpService {
     router: axum::Router,
     port: u16,
     host: String,
+    route_docs: Vec<RouteDoc>,
 }
 
 #[derive(Clone, Builder)]
@@ -82,6 +84,11 @@ impl HttpService {
 
         Ok(())
     }
+
+    /// Documentation of exposed HTTP endpoints
+    pub fn route_docs(&self) -> &[RouteDoc] {
+        &self.route_docs
+    }
 }
 
 impl HttpServiceConfigBuilder {
@@ -133,6 +140,7 @@ impl HttpServiceConfigBuilder {
             router,
             port: config.port,
             host: config.host,
+            route_docs: all_docs,
         })
     }
 
