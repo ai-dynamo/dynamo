@@ -27,10 +27,10 @@ have a separate DecodeWorker.
 import logging
 import signal
 
+import sglang as sgl
 from utils.protocol import PreprocessedRequest
 from utils.sglang import parse_sglang_args
 
-import sglang as sgl
 from dynamo.llm import ModelType, register_llm
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
 
