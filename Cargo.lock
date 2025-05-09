@@ -522,7 +522,7 @@ dependencies = [
  "bitflags 2.9.0",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.10.5",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -3401,7 +3401,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if 1.0.0",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -4081,15 +4081,16 @@ dependencies = [
 
 [[package]]
 name = "nixl-sys"
-version = "0.2.0"
-source = "git+https://github.com/ai-dynamo/nixl.git?rev=f0429ba00628f9bbb76f770bf00e51870a071fc0#f0429ba00628f9bbb76f770bf00e51870a071fc0"
+version = "0.2.1-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4698155ec791ae888482b0c1c5d19792a1b457167fa8ec0ffa487ffef8c8e5a"
 dependencies = [
  "bindgen 0.71.1",
  "cc",
  "libc",
  "pkg-config",
  "serde",
- "thiserror 1.0.69",
+ "thiserror 2.0.12",
  "tracing",
 ]
 
