@@ -138,7 +138,6 @@ class BentoMLService(ServiceMixin, ServiceInterface[T]):
         instance = self.inner()
         return instance
 
-    # TODO: add attribution to bentoml
     def find_dependent_by_name(self, name: str) -> "ServiceInterface":
         """Find dynamo service by name"""
         return self.all_services()[name]
