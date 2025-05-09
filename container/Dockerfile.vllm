@@ -108,6 +108,12 @@ WORKDIR /workspace
 # Copy nixl source, and use commit hash as cache hint
 COPY --from=nixl_base /opt/nixl /opt/nixl
 COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
+RUN cd /opt/nixl && \
+    mkdir build && \
+    meson setup build/ --prefix=/usr/local/nixl && \
+    cd build/ && \
+    ninja && \
+    ninja install
 
 ### NATS & ETCD SETUP ###
 # nats
@@ -310,6 +316,7 @@ ARG RELEASE_BUILD
 WORKDIR /workspace
 
 RUN yum update -y \
+    && yum install -y llvm-toolset \
     && yum install -y python3.12-devel \
     && yum install -y protobuf-compiler \
     && yum clean all \
@@ -322,6 +329,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
+COPY --from=base /usr/local/nixl /opt/nvidia/nvda_nixl
 COPY --from=base /workspace /workspace
 COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
 ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
@@ -342,7 +350,7 @@ COPY launch /workspace/launch
 COPY deploy/sdk /workspace/deploy/sdk
 
 # Build Rust crate binaries packaged with the wheel
-RUN cargo build --release --locked --features mistralrs,python \
+RUN cargo build --release --locked --features mistralrs,python,dynamo-llm/block-manager \
     -p dynamo-run \
     -p llmctl \
     # Multiple http named crates are present in dependencies, need to specify the path
@@ -370,6 +378,7 @@ WORKDIR /workspace
 
 COPY --from=wheel_builder /workspace/dist/ /workspace/dist/
 COPY --from=wheel_builder /workspace/target/ /workspace/target/
+COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
 # Copy Cargo cache to avoid re-downloading dependencies
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
@@ -377,7 +386,7 @@ COPY . /workspace
 
 # Build rest of the crates
 # Need to figure out rust caching to avoid rebuilding and remove exclude flags
-RUN cargo build --release --locked --workspace \
+RUN cargo build --release --locked --features block-manager --workspace \
     --exclude dynamo-run \
     --exclude llmctl \
     --exclude file://$PWD/components/http \
@@ -405,6 +414,7 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH=/opt/dynamo/bindings/lib/libdynamo_llm_capi.so
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/
 
 ##########################################
 ########## Perf Analyzer Image ###########
