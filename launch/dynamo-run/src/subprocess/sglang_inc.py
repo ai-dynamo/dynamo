@@ -21,10 +21,10 @@ import logging
 import sys
 from typing import Optional
 
+import sglang
 import uvloop
 from sglang.srt.server_args import ServerArgs
 
-import sglang
 from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
