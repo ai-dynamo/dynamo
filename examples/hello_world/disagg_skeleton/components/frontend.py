@@ -30,7 +30,7 @@ app = FastAPI(title="Hello World LLM")
 
 
 @service(
-    dynamo={"enabled": True, "namespace": "dynamo-demo"},
+    dynamo={"namespace": "dynamo-demo"},
     image=DYNAMO_IMAGE,
     app=app,
 )

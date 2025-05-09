@@ -49,7 +49,7 @@ class ResponseType(BaseModel):
 
 
 @service(
-    dynamo={"enabled": True, "namespace": "inference"},
+    dynamo={"namespace": "inference"},
 )
 class Backend:
     @dynamo_endpoint()
@@ -60,7 +60,7 @@ class Backend:
 
 
 @service(
-    dynamo={"enabled": True, "namespace": "inference"},
+    dynamo={"namespace": "inference"},
 )
 class Middle:
     backend = depends(Backend)
@@ -77,7 +77,7 @@ app = FastAPI(title="Hello World!")
 
 
 @service(
-    dynamo={"enabled": True, "namespace": "inference"},
+    dynamo={"namespace": "inference"},
     app=app,
 )
 class Frontend:

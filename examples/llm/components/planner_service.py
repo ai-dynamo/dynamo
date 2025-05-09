@@ -33,7 +33,6 @@ class RequestType(BaseModel):
 
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "dynamo",
         "component_type": "planner",
     },

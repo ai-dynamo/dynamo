@@ -60,7 +60,6 @@ GPU_ENABLED = False
     resources={"cpu": "1"},
     traffic={"timeout": 30},
     dynamo={
-        "enabled": True,
         "namespace": "inference",
     },
     workers=1,
@@ -91,7 +90,7 @@ class Backend:
 @service(
     resources={"cpu": "2"},
     traffic={"timeout": 30},
-    dynamo={"enabled": True, "namespace": "inference"},
+    dynamo={"namespace": "inference"},
 )
 class Backend2:
     backend = depends(Backend)
@@ -113,7 +112,7 @@ class Backend2:
 @service(
     resources={"cpu": "1"},
     traffic={"timeout": 30},
-    dynamo={"enabled": True, "namespace": "inference"},
+    dynamo={"namespace": "inference"},
 )
 class Middle:
     backend = depends(Backend)
@@ -147,7 +146,7 @@ class Middle:
 @service(
     resources={"cpu": "1"},
     traffic={"timeout": 60},
-    dynamo={"enabled": True, "namespace": "inference"},
+    dynamo={"namespace": "inference"},
 )
 class Frontend:
     middle = depends(Middle)

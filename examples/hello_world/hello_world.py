@@ -58,7 +58,6 @@ class ResponseType(BaseModel):
 
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "inference",
     },
     image=DYNAMO_IMAGE,
@@ -81,7 +80,7 @@ class Backend:
 
 
 @service(
-    dynamo={"enabled": True, "namespace": "inference"},
+    dynamo={"namespace": "inference"},
     image=DYNAMO_IMAGE,
 )
 class Middle:
@@ -106,7 +105,7 @@ class Middle:
 
 
 @service(
-    dynamo={"enabled": True, "namespace": "inference"},
+    dynamo={"namespace": "inference"},
     image=DYNAMO_IMAGE,
 )
 class Frontend:

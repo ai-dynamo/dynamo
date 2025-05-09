@@ -51,7 +51,6 @@ class FrontendConfig(BaseModel):
 # todo this should be called ApiServer
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "dynamo",
     },
     resources={"cpu": "10", "memory": "20Gi"},

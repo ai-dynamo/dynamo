@@ -49,7 +49,6 @@ class FrontendConfig(BaseModel):
 
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "dynamo",
     },
     workers=1,
