@@ -34,8 +34,6 @@ dependencies = [
     "distro",
     "typer",
     "circus>=0.17.0",
-    # SGLang does not have pre-built wheel for ARM yet so we only install for x86
-    "sglang[all]==0.4.6.post2; platform_machine=='x86_64'"
 ]
 
 classifiers = [

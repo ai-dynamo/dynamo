@@ -20,7 +20,7 @@ limitations under the License.
 This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations using SGLang. SGLang internally uses ZMQ to communicate between the ingress and the engine processes. For Dynamo, we leverage the runtime to communicate directly with the engine processes and handle ingress and pre/post processing on our end.
 
 > [!IMPORTANT]
-> SGLang currently does not have pre-built wheels for ARM. If you are on an ARM machine - you will need to install SGLang from source
+> In order to run these examples, you will need to install sglang using `uv pip install "sglang[all]>=0.4.6.post2"`. Additionally, SGLang currently does not have pre-built wheels for ARM. If you are on an ARM machine - you will need to install SGLang from source.
 
 ## Deployment Architectures
 
@@ -35,6 +35,7 @@ See [deployment architectures](../llm/README.md#deployment-architectures) to lea
 ### Prerequisites
 
 Start required services (etcd and NATS) using [Docker Compose](../../deploy/docker-compose.yml)
+
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
@@ -60,4 +61,3 @@ docker compose -f deploy/docker-compose.yml up -d
 cd /workspace/examples/sglang
 dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
 ```
-
