@@ -73,6 +73,7 @@ controllerManager:
     annotations: {}
 
 dynamo:
+  enableLWS: false
   apiStore:
     endpoint: http://dynamo-server.dynamo-system.svc.cluster.local
     clusterName: default
