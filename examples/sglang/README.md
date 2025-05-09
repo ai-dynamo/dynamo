@@ -19,6 +19,9 @@ limitations under the License.
 
 This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations using SGLang. SGLang internally uses ZMQ to communicate between the ingress and the engine processes. For Dynamo, we leverage the runtime to communicate directly with the engine processes and handle ingress and pre/post processing on our end.
 
+> [!IMPORTANT]
+> SGLang currently does not have pre-built wheels for ARM. If you are on an ARM machine - you will need to install SGLang from source
+
 ## Deployment Architectures
 
 See [deployment architectures](../llm/README.md#deployment-architectures) to learn about the general idea of the architecture. SGLang currently support only aggregated serving but routing and disaggregation support are coming very soon!
