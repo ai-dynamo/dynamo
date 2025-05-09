@@ -88,7 +88,7 @@ TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-TRTLLM_COMMIT=83f37614ef735d251281136c3c05b1fecf8ef68b
+TRTLLM_COMMIT=81cc60a0fd3b8575d867a349a0be9bc0f8972887
 # TensorRT-LLM PyPI index URL
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
 TENSORRTLLM_PIP_WHEEL=""
