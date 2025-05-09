@@ -222,7 +222,7 @@ unsafe fn cuda_memcpy_d2d(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-cuda"))]
 mod tests {
     use super::*;
     use crate::block_manager::storage::{

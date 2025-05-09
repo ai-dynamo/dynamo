@@ -40,5 +40,5 @@ pub mod types;
 mod local_model;
 pub use local_model::LocalModel;
 
-#[cfg(feature = "block_manager")]
+#[cfg(feature = "block-manager")]
 pub mod block_manager;
