@@ -27,10 +27,10 @@ have a separate DecodeWorker.
 import logging
 import signal
 
-import sglang as sgl
 from utils.protocol import PreprocessedRequest
 from utils.sglang import parse_sglang_args
 
+import sglang as sgl
 from dynamo.llm import ModelType, register_llm
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
 
@@ -73,14 +73,24 @@ class SGLangWorker:
         self.engine.shutdown()
         logger.info("SGLang engine shutdown")
 
+    def _build_sampling_params(self, request: PreprocessedRequest) -> dict:
+        # TODO: maintain a full mapping from PreprocessedRequest to SGLang's SamplingParams
+        sampling_params = {}
+        if request.sampling_options.temperature:
+            sampling_params["temperature"] = request.sampling_options.temperature
+        if request.sampling_options.top_p:
+            sampling_params["top_p"] = request.sampling_options.top_p
+        if request.sampling_options.top_k:
+            sampling_params["top_k"] = request.sampling_options.top_k
+        sampling_params["max_new_tokens"] = request.stop_conditions.max_tokens
+        if request.stop_conditions.ignore_eos:
+            sampling_params["ignore_eos"] = request.stop_conditions.ignore_eos
+        return sampling_params
+
     @dynamo_endpoint()
     async def generate(self, request: PreprocessedRequest):
-        # TODO: maintain a mapping from PreprocessedRequest to SGLang's SamplingParams
         # TODO: maintain a mapping from SGLang's Ouput struct to LLMEngineOuput
-        sampling_params = {}
-        if request.sampling_options.temperature is not None:
-            sampling_params["temperature"] = request.sampling_options.temperature
-        sampling_params["max_new_tokens"] = request.stop_conditions.max_tokens
+        sampling_params = self._build_sampling_params(request)
         g = await self.engine.async_generate(
             input_ids=request.token_ids,
             sampling_params=sampling_params,

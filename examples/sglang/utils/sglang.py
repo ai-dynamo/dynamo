@@ -14,14 +14,10 @@
 # limitations under the License.
 
 import argparse
-from typing import Union
 
 from sglang.srt.server_args import ServerArgs
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from dynamo.sdk.lib.config import ServiceConfig
-
-SGLANG_TOKENIZERS = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
 
 
 def parse_sglang_args(service_name, prefix) -> ServerArgs:
