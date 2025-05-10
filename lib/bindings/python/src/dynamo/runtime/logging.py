@@ -104,6 +104,25 @@ def configure_dynamo_logging(
         logger.setLevel(logging.ERROR)
         logger.propagate = True
 
+    if os.environ.get("DYN_LOG_DIR") is not None:
+        log_dir = os.environ.get("DYN_LOG_DIR")
+        # check if its a proper path - if its not a path then use current working directory
+        if not os.path.isdir(log_dir):
+            log_dir = os.path.join(os.getcwd(), "dyn_logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        filename_parts = []
+        if service_name is not None:
+            filename_parts.append(service_name)
+        if worker_id is not None:
+            filename_parts.append(f"worker-{worker_id}")
+
+        filename = "_".join(filename_parts) if filename_parts else "dynamo"
+        log_file = os.path.join(log_dir, f"{filename}.log")
+
+        file_handler = logging.FileHandler(log_file)
+        root_logger.addHandler(file_handler)
+
 
 def log_level_mapping(level: str) -> int:
     """
