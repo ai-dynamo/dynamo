@@ -71,7 +71,7 @@ class Processor(Protocol):
             async for route_response in self.router.check_hit_rate(raw_request.prompt):
                 worker_id, prefix_hit_rate = route_response.split("_")
                 prefix_hit_rate = float(prefix_hit_rate)
-                print(
+                logger.info(
                     f"Worker ID: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
                 )
                 break

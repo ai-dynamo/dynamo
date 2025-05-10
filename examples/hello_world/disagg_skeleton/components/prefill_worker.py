@@ -60,46 +60,52 @@ class PrefillWorker:
         def prefill_queue_handler_cb(fut):
             try:
                 fut.result()
-                print("prefill queue handler exited successfully")
+                logger.info("prefill queue handler exited successfully")
             except Exception as e:
-                print(f"[ERROR] prefill queue handler failed: {e!r}")
+                logger.info(f"[ERROR] prefill queue handler failed: {e!r}")
                 sys.exit(1)
 
         task.add_done_callback(prefill_queue_handler_cb)
-        print("PrefillWorker initialized")
+        logger.info("PrefillWorker initialized")
 
     async def prefill_queue_handler(self):
-        print("Prefill queue handler entered")
+        logger.info("Prefill queue handler entered")
         prefill_queue_nats_server = os.getenv("NATS_SERVER", "nats://localhost:4222")
         prefill_queue_stream_name = "DummyLLM"
-        print(f"Prefill queue: {prefill_queue_nats_server}:{prefill_queue_stream_name}")
+        logger.info(
+            f"Prefill queue: {prefill_queue_nats_server}:{prefill_queue_stream_name}"
+        )
         self.initialized = True
         # TODO: integrate prefill_queue to a dynamo endpoint
         async with PrefillQueue.get_instance(
             nats_server=prefill_queue_nats_server,
             stream_name=prefill_queue_stream_name,
         ) as prefill_queue:
-            print("prefill queue handler started")
+            logger.info("prefill queue handler started")
             while True:
                 # TODO: this might add a small overhead to pull prefill from nats
                 # need to test and check how much overhead it is
                 prefill_request = await prefill_queue.dequeue_prefill_request()
                 if prefill_request is not None:
-                    print(f"Dequeued prefill request: {prefill_request.request_id}")
+                    logger.info(
+                        f"Dequeued prefill request: {prefill_request.request_id}"
+                    )
                     async for _ in self.prefill_generate(prefill_request):
                         pass
 
     async def prefill_generate(self, request: RemotePrefillRequest):
         # TODO check if metadata has changed
         # and reload - currently only loading once
-        print(f"prefill invoked {request.engine_id}{self._loaded_metadata=}")
+        logger.info(f"prefill invoked {request.engine_id}{self._loaded_metadata=}")
         if request.engine_id not in self._loaded_metadata:
             remote_metadata = await self._metadata_store.get(request.engine_id)
             # await self.engine_client.add_remote_nixl_metadata(remote_metadata)
-            print(f"Received nixl metadata from host {remote_metadata.engine_id}")
+            logger.info(f"Received nixl metadata from host {remote_metadata.engine_id}")
             self._loaded_metadata.add(remote_metadata.engine_id)
 
-        print("Prefill invoked and will read KV cache from worker and write it back")
+        logger.info(
+            "Prefill invoked and will read KV cache from worker and write it back"
+        )
         yield "prefill invoked"
 
     @dynamo_endpoint()

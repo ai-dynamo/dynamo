@@ -281,7 +281,7 @@ async def check_required_workers(
     while num_workers < required_workers:
         if (not on_change) or new_count != num_workers:
             num_workers = new_count if new_count >= 0 else num_workers
-            print(
+            logger.info(
                 f" {tag} Waiting for more workers to be ready.\n"
                 f" Current: {num_workers},"
                 f" Required: {required_workers}"
