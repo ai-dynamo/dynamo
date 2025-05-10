@@ -98,6 +98,14 @@ pub async fn run(
             manager.add_completions_model(model.service_name(), cmpl_pipeline)?;
         }
     }
+    tracing::debug!(
+        "Supported routes: {:?}",
+        http_service
+            .route_docs()
+            .iter()
+            .map(|rd| rd.to_string())
+            .collect::<Vec<String>>()
+    );
     http_service.run(runtime.primary_token()).await?;
     runtime.shutdown(); // Cancel primary token
     Ok(())
