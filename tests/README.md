@@ -15,7 +15,7 @@ in a minimal ubuntu:24.04 image.
 #### Build `dynamo_pip_all`
 
 ```
-docker run -it --name dynamo_pip_install -v$PWD/container/deps:/deps ubuntu:24.04 bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0 && python3 -m venv /venv && /venv/bin/pip install --extra-index-url https://urm.nvidia.com/artifactory/api/pypi/sw-dl-triton-pypi/simple ai-dynamo[all] && /venv/bin/pip install -r /deps/requirements.test.txt " && docker commit dynamo_pip_all dynamo:latest-pip-all && docker rm dynamo_pip_all
+docker run -it --name dynamo_pip_install -v$PWD/container/deps:/deps ubuntu:24.04 bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0 && python3 -m venv /venv && /venv/bin/pip install --extra-index-url https://urm.nvidia.com/artifactory/api/pypi/sw-dl-triton-pypi/simple ai-dynamo[all] && /venv/bin/pip install -r /deps/requirements.test.txt " && docker commit dynamo_pip_install dynamo:latest-pip-all && docker rm dynamo_pip_install
 ```
 
 
@@ -23,7 +23,7 @@ docker run -it --name dynamo_pip_install -v$PWD/container/deps:/deps ubuntu:24.0
 
 
 ```
-docker run -it --name dynamo_pip_install -v$PWD/container/deps:/deps ubuntu:24.04 bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0 && python3 -m venv /venv && /venv/bin/pip install --extra-index-url https://urm.nvidia.com/artifactory/api/pypi/sw-dl-triton-pypi/simple ai-dynamo && /venv/bin/pip install -r /deps/requirements.test.txt " && docker commit dynamo_pip_base dynamo:latest-pip-base && docker rm dynamo_pip_base
+docker run -it --name dynamo_pip_install -v$PWD/container/deps:/deps ubuntu:24.04 bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0 && python3 -m venv /venv && /venv/bin/pip install --extra-index-url https://urm.nvidia.com/artifactory/api/pypi/sw-dl-triton-pypi/simple ai-dynamo && /venv/bin/pip install -r /deps/requirements.test.txt " && docker commit dynamo_pip_install dynamo:latest-pip-base && docker rm dynamo_pip_install
 ```
 
 
@@ -31,7 +31,7 @@ docker run -it --name dynamo_pip_install -v$PWD/container/deps:/deps ubuntu:24.0
 
 
 ```
-docker run -it --name dynamo_pip_install -v$PWD/container/deps:/deps ubuntu:24.04 bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0 && python3 -m venv /venv && /venv/bin/pip install --extra-index-url https://urm.nvidia.com/artifactory/api/pypi/sw-dl-triton-pypi/simple ai-dynamo && /venv/bin/pip install -r /deps/requirements.test.txt && /venv/bin/pip install sglang[all]==0.4.6.post2 " && docker commit dynamo_pip_sglang dynamo:latest-pip-sglang && docker rm dynamo_pip_sglang
+docker run -it --name dynamo_pip_install -v$PWD/container/deps:/deps ubuntu:24.04 bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0 && python3 -m venv /venv && /venv/bin/pip install --extra-index-url https://urm.nvidia.com/artifactory/api/pypi/sw-dl-triton-pypi/simple ai-dynamo && /venv/bin/pip install -r /deps/requirements.test.txt && /venv/bin/pip install sglang[all]==0.4.6.post2 " && docker commit dynamo_pip_install dynamo:latest-pip-sglang && docker rm dynamo_pip_install
 ```
 
 
