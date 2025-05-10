@@ -40,6 +40,7 @@ use std::{sync::Mutex, time::Duration};
 use tokio::{signal, task::JoinHandle};
 
 static RT: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
+static RTHANDLE: OnceCell<tokio::runtime::Handle> = OnceCell::new();
 static INIT: OnceCell<Mutex<Option<tokio::task::JoinHandle<Result<()>>>>> = OnceCell::new();
 
 const SHUTDOWN_MESSAGE: &str =
@@ -71,7 +72,7 @@ impl Worker {
     /// Create a new [`Worker`] instance from a provided [`RuntimeConfig`]
     pub fn from_config(config: RuntimeConfig) -> Result<Worker> {
         // if the runtime is already initialized, return an error
-        if RT.get().is_some() {
+        if RT.get().is_some() || RTHANDLE.get().is_some() {
             return Err(error!("Worker already initialized"));
         }
 
@@ -94,15 +95,37 @@ impl Worker {
         &self.runtime
     }
 
-    /// Executes the provided application/closure on the [`Runtime`].
-    /// This is designed to be called once from main and will block the calling thread until the application completes.
     pub fn execute<F, Fut>(self, f: F) -> Result<()>
     where
         F: FnOnce(Runtime) -> Fut + Send + 'static,
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
-        let runtime = self.runtime;
-        let local_runtime = runtime.clone();
+        let runtime = self.runtime.clone();
+        runtime.secondary().block_on(self.execute_internal(f))??;
+        runtime.shutdown();
+        Ok(())
+    }
+
+    pub async fn execute_async<F, Fut>(self, f: F) -> Result<()>
+    where
+        F: FnOnce(Runtime) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        let runtime = self.runtime.clone();
+        let task = self.execute_internal(f);
+        task.await??;
+        runtime.shutdown();
+        Ok(())
+    }
+
+    /// Executes the provided application/closure on the [`Runtime`].
+    /// This is designed to be called once from main and will block the calling thread until the application completes.
+    fn execute_internal<F, Fut>(self, f: F) -> JoinHandle<Result<()>>
+    where
+        F: FnOnce(Runtime) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        let runtime = self.runtime.clone();
         let primary = runtime.primary();
         let secondary = runtime.secondary();
 
@@ -162,7 +185,7 @@ impl Worker {
 
             result
         }))))
-        .map_err(|e| error!("Failed to spawn application task: {:?}", e))?;
+        .expect("Failed to spawn application task");
 
         let task = INIT
             .get()
@@ -171,10 +194,15 @@ impl Worker {
             .unwrap()
             .take()
             .expect("Application initialized; but another thread is awaiting it; Worker.execute() can only be called once");
+        task
+    }
 
-        secondary.block_on(task)??;
-        local_runtime.shutdown();
-        Ok(())
+    pub fn from_current() -> Result<Worker> {
+        if RT.get().is_some() || RTHANDLE.get().is_some() {
+            return Err(error!("Worker already initialized"));
+        }
+        let runtime = Runtime::from_current()?;
+        Ok(Worker { runtime })
     }
 }
 

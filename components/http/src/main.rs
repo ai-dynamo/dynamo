@@ -47,10 +47,11 @@ struct Args {
     component: String,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     logging::init();
-    let worker = Worker::from_settings()?;
-    worker.execute(app)
+    let worker = Worker::from_current()?;
+    worker.execute_async(app).await
 }
 
 async fn app(runtime: Runtime) -> Result<()> {
