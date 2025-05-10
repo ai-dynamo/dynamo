@@ -74,6 +74,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::KvMetricsAggregator>()?;
     m.add_class::<llm::kv::KvEventPublisher>()?;
     m.add_class::<llm::kv::KvRecorder>()?;
+    m.add_class::<llm::kv::Block>()?;
+    m.add_class::<llm::kv::BlockList>()?;
+    m.add_class::<llm::kv::BlockManager>()?;
     m.add_class::<llm::nats::NatsQueue>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpError>()?;

@@ -13,7 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import AsyncGenerator, AsyncIterator, Callable, Dict, List, Optional, Union
+from typing import (
+    Any,
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Union,
+)
 
 def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
     """
@@ -663,3 +672,53 @@ class NatsQueue:
         """
         ...
 
+class Block:
+    """
+    A KV cache block
+    """
+
+    ...
+
+    def __dlpack__(self, stream: Optional[Any], max_version: Optional[Any], dl_device: Optional[Any], copy: Optional[bool]) -> Any:
+        """
+        Get a dlpack capsule from the block
+        """
+        ...
+
+    def __dlpack_device__(self) -> Any:
+        """
+        Get the dlpack device of the block
+        """
+        ...
+
+class BlockList:
+    """
+    A list of KV cache blocks
+    """
+
+    ...
+
+    def to_list(self) -> Any:
+        """
+        Get a list of blocks
+        """
+        ...
+
+
+class BlockManager:
+    """
+    A KV cache block manager
+    """
+
+    ...
+
+    def __init__(self, device: str, pin_memory: bool) -> None:
+        """
+        Create a `BlockManager` object
+        """
+
+    def allocate_blocks(self, count: int) -> BlockList:
+        """
+        Allocate a list of blocks
+        """
+        ...

@@ -22,6 +22,15 @@ use tracing;
 
 use llm_rs::kv_router::{indexer::compute_block_hash_for_seq, protocols::*};
 
+mod block;
+pub use block::Block;
+
+mod block_list;
+pub use block_list::BlockList;
+
+mod block_manager;
+pub use block_manager::BlockManager;
+
 #[pyclass]
 pub(crate) struct KvRouter {
     inner: Arc<llm_rs::kv_router::KvRouter>,

@@ -621,6 +621,32 @@ impl<S: Storage, M: BlockMetadata> DerefMut for MutableBlock<S, M> {
     }
 }
 
+impl<S: Storage + NixlDescriptor, M: BlockMetadata> BlockDataExt<S> for MutableBlock<S, M> {
+    fn is_fully_contiguous(&self) -> bool {
+        self.data.is_fully_contiguous()
+    }
+
+    fn num_layers(&self) -> usize {
+        self.data.num_layers()
+    }
+
+    fn layer_view(&self, layer_idx: usize) -> BlockResult<view::LayerView<S>> {
+        self.data.layer_view(layer_idx)
+    }
+
+    fn layer_view_mut(&mut self, layer_idx: usize) -> BlockResult<view::LayerViewMut<S>> {
+        self.data.layer_view_mut(layer_idx)
+    }
+
+    fn block_view(&self) -> BlockResult<view::BlockView<S>> {
+        self.data.block_view()
+    }
+
+    fn block_view_mut(&mut self) -> BlockResult<view::BlockViewMut<S>> {
+        self.data.block_view_mut()
+    }
+}
+
 impl<S: Storage + NixlDescriptor, M: BlockMetadata> BlockDataProvider for MutableBlock<S, M> {
     type StorageType = S;
 
@@ -1679,5 +1705,58 @@ mod tests {
 
         // drop(layout);
         tracing::info!("Layout dropped");
+    }
+
+    #[test]
+    fn test_mutable_block_data_ext() {
+        init_logging();
+
+        // Create a layout with multiple layers and blocks for testing all methods
+        let config = LayoutConfig::builder()
+            .num_blocks(10)
+            .num_layers(2)
+            .page_size(4)
+            .inner_dim(13)
+            .build()
+            .unwrap();
+
+        let layout = FullyContiguous::allocate(config, &SystemAllocator).unwrap();
+        let layout = Arc::new(layout);
+
+        // Create a channel for returning blocks
+        let (return_tx, _return_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Create a block and wrap it in a MutableBlock
+        let block_data = BlockData::new(layout.clone(), 0, 42, 0);
+        let block = Block::new(block_data, BasicMetadata::default()).unwrap();
+        let mut mutable_block = MutableBlock::new(block, return_tx.clone());
+
+        // Test is_fully_contiguous()
+        assert!(mutable_block.is_fully_contiguous());
+
+        // Test num_layers()
+        assert_eq!(mutable_block.num_layers(), 2);
+
+        // Test layer_view()
+        let layer_view = mutable_block.layer_view(0).unwrap();
+        assert_eq!(layer_view.size(), 4 * 13 * 2); // page_size x inner_dim x dtype_bytes
+        assert!(!unsafe { layer_view.as_ptr() }.is_null());
+
+        // Test layer_view_mut()
+        let mut layer_view_mut = mutable_block.layer_view_mut(1).unwrap();
+        assert_eq!(layer_view_mut.size(), 4 * 13 * 2); // page_size x inner_dim x dtype_bytes
+        assert!(!unsafe { layer_view_mut.as_mut_ptr() }.is_null());
+
+        // Test block_view()
+        let block_view = mutable_block.block_view().unwrap();
+        assert_eq!(block_view.size(), 2 * 4 * 13 * 2); // num_layers x page_size x inner_dim x dtype_bytes
+        assert!(!unsafe { block_view.as_ptr() }.is_null());
+
+        // Test block_view_mut()
+        let mut block_view_mut = mutable_block.block_view_mut().unwrap();
+        assert_eq!(block_view_mut.size(), 2 * 4 * 13 * 2); // num_layers x page_size x inner_dim x dtype_bytes
+        assert!(!unsafe { block_view_mut.as_mut_ptr() }.is_null());
+
+        tracing::info!("MutableBlock BlockDataExt tests completed successfully");
     }
 }

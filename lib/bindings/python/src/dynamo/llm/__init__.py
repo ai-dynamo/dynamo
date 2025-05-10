@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from dynamo._core import AggregatedMetrics as AggregatedMetrics
+from dynamo._core import BlockManager as BlockManager
 from dynamo._core import DisaggregatedRouter as DisaggregatedRouter
 from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
 from dynamo._core import HttpError as HttpError
