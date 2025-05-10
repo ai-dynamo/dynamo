@@ -35,11 +35,10 @@ docker run -it --name dynamo_pip_install -v$PWD/container/deps:/deps ubuntu:24.0
 ```
 
 
-#### Run
-
+#### Run (Replace `X` with `sglang`, `all` or `base`)
 
 ```
-./container/run.sh --image dynamo:latest-pip --mount-workspace -it -- bash -c "source /venv/bin/activate && bash"
+./container/run.sh --image dynamo:latest-X --mount-workspace -it -- bash -c "source /venv/bin/activate && bash"
 ```
 
 #### Run
