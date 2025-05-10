@@ -24,7 +24,7 @@ use nixl_sys::NixlDescriptor;
 pub use state::{BlockState, BlockStateInvalid};
 
 use crate::block_manager::{
-    state::{KvBlockManagerState as BlockManager, TransferContext},
+    state::KvBlockManagerState as BlockManager,
     storage::{Local, Remote, Storage},
     CacheLevel,
 };
@@ -100,10 +100,6 @@ pub trait ReadableBlock: BlockDataProvider {
 
     fn storage_type_id(&self) -> std::any::TypeId {
         std::any::TypeId::of::<<Self as ReadableBlock>::StorageType>()
-    }
-
-    fn transfer_context(&self) -> &TransferContext {
-        unimplemented!()
     }
 }
 
@@ -691,7 +687,7 @@ impl<S: Storage, M: BlockMetadata> ImmutableBlock<S, M> {
 
     pub fn manager(&self) -> Option<&Arc<BlockManager<M>>> {
         // Access the underlying Block's manager field directly through deref
-        (*self).manager.as_ref()
+        self.manager.as_ref()
     }
 
     pub fn mutable_block(&self) -> &Arc<MutableBlock<S, M>> {
@@ -763,9 +759,6 @@ impl<S: Storage, M: BlockMetadata> ImmutableBlock<S, M> {
 }
 
 pub mod nixl {
-    use crate::block_manager::storage::SystemStorage;
-    use crate::block_manager::{DeviceStorage, PinnedStorage};
-
     use super::*;
 
     use super::view::{BlockKind, Kind, LayerKind};

@@ -30,6 +30,7 @@ use cudarc::driver::CudaStream;
 
 use std::ops::Range;
 
+pub use crate::block_manager::state::TransferContext;
 pub use crate::block_manager::storage::{CudaAccessible, Local, Remote};
 pub use async_trait::async_trait;
 
@@ -129,15 +130,24 @@ where
 }
 
 pub trait WriteTo<Target> {
-    fn write_to(&self, dst: &mut Target, notify: Option<String>) -> Result<(), TransferError>;
+    fn write_to(
+        &self,
+        dst: &mut Target,
+        notify: Option<String>,
+        ctx: &TransferContext,
+    ) -> Result<(), TransferError>;
 }
 
 impl<RB: ReadableBlock, WB: WritableBlock> WriteTo<WB> for RB
 where
     RB: WriteToStrategy<WB> + Local,
 {
-    fn write_to(&self, dst: &mut WB, notify: Option<String>) -> Result<(), TransferError> {
-        let ctx = self.transfer_context();
+    fn write_to(
+        &self,
+        dst: &mut WB,
+        notify: Option<String>,
+        ctx: &TransferContext,
+    ) -> Result<(), TransferError> {
         match Self::write_to_strategy() {
             TransferStrategy::Memcpy => memcpy::copy_block(self, dst),
             TransferStrategy::CudaAsyncH2D

@@ -149,7 +149,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
             local_block_set.set_nixl_metadata(nixl_agent.get_local_md()?);
         }
 
-        let offload_manager = OffloadManager::new(host_pool.clone(), device_pool.clone());
+        let offload_manager = OffloadManager::new(device_pool.clone(), host_pool.clone());
 
         let state = Arc::new(Self {
             worker_id,
