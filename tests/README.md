@@ -2,18 +2,41 @@
 
 ## Installation
 
-### Pip install
+There are two primary ways of installing and running the dynamo framework.
 
-#### Build
+Installation via pip wheel and installation via docker.
 
+### Testing Pip Installation
 
-Build:
+To test installing and running via pip we install the ai-dynamo wheel
+with only required packages and install it with all optional packages
+in a minimal ubuntu:24.04 image.
+
+#### Build `dynamo_pip_all`
 
 ```
-docker run -it --name dynamo_pip_install -v$PWD/container/deps:/deps ubuntu:24.04 bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0 && python3 -m venv /venv && /venv/bin/pip install --extra-index-url https://urm.nvidia.com/artifactory/api/pypi/sw-dl-triton-pypi/simple ai-dynamo[all] && /venv/bin/pip install -r /deps/requirements.test.txt " && docker commit dynamo_pip_install dynamo:latest-pip && docker rm dynamo_pip_install
+docker run -it --name dynamo_pip_install -v$PWD/container/deps:/deps ubuntu:24.04 bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0 && python3 -m venv /venv && /venv/bin/pip install --extra-index-url https://urm.nvidia.com/artifactory/api/pypi/sw-dl-triton-pypi/simple ai-dynamo[all] && /venv/bin/pip install -r /deps/requirements.test.txt " && docker commit dynamo_pip_all dynamo:latest-pip-all && docker rm dynamo_pip_all
 ```
 
-Run:
+
+#### Build `dynamo_pip`
+
+
+```
+docker run -it --name dynamo_pip_install -v$PWD/container/deps:/deps ubuntu:24.04 bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0 && python3 -m venv /venv && /venv/bin/pip install --extra-index-url https://urm.nvidia.com/artifactory/api/pypi/sw-dl-triton-pypi/simple ai-dynamo && /venv/bin/pip install -r /deps/requirements.test.txt " && docker commit dynamo_pip_base dynamo:latest-pip-base && docker rm dynamo_pip_base
+```
+
+
+#### Build `dynamo_pip_sglang`
+
+
+```
+docker run -it --name dynamo_pip_install -v$PWD/container/deps:/deps ubuntu:24.04 bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0 && python3 -m venv /venv && /venv/bin/pip install --extra-index-url https://urm.nvidia.com/artifactory/api/pypi/sw-dl-triton-pypi/simple ai-dynamo && /venv/bin/pip install -r /deps/requirements.test.txt && /venv/bin/pip install sglang[all]==0.4.6.post2 " && docker commit dynamo_pip_sglang dynamo:latest-pip-sglang && docker rm dynamo_pip_sglang
+```
+
+
+#### Run
+
 
 ```
 ./container/run.sh --image dynamo:latest-pip --mount-workspace -it -- bash -c "source /venv/bin/activate && bash"
