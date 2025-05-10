@@ -14,19 +14,21 @@
 # limitations under the License.
 
 [package]
-name = "dynamo-tokens"
+name = "dynamo-logging"
 version = "0.2.1"
 edition = "2021"
-description = "Dynamo Tokens Library"
+description = "Dynamo Logging Library"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
 license = "Apache-2.0"
 homepage = "https://github.com/ai-dynamo/dynamo"
 repository = "https://github.com/ai-dynamo/dynamo.git"
 
 [dependencies]
-derive-getters = { workspace = true }
-xxhash-rust = { workspace = true }
-thiserror = { workspace = true }
-
-bytemuck = "1.22"
-rayon = "1"
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["alloc", "std", "clock", "now", "serde"] }
+figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }

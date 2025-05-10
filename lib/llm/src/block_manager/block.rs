@@ -18,8 +18,8 @@ pub mod state;
 pub mod transfer;
 pub mod view;
 
-pub use crate::tokens::TokenBlockError;
 pub use anyhow::Result;
+pub use dynamo_tokens::TokenBlockError;
 use nixl_sys::NixlDescriptor;
 pub use state::{BlockState, BlockStateInvalid};
 
@@ -27,7 +27,7 @@ use crate::block_manager::{
     state::{KvBlockManagerState as BlockManager, TransferContext},
     storage::{Local, Remote, Storage},
 };
-use crate::tokens::{SaltHash, SequenceHash, Token, TokenBlock, Tokens};
+use dynamo_tokens::{SaltHash, SequenceHash, Token, TokenBlock, Tokens};
 
 use transfer::{Immutable, Mutable, Readable, Writable};
 
@@ -1423,7 +1423,7 @@ mod tests {
         FullyContiguous, LayoutConfig,
     };
     use crate::block_manager::storage::SystemAllocator;
-    use crate::tokens::TokenBlockSequence;
+    use dynamo_tokens::TokenBlockSequence;
 
     use dynamo_runtime::logging::init as init_logging;
     use nixl_sys::Agent as NixlAgent;

@@ -34,7 +34,6 @@ pub mod protocols;
 pub mod recorder;
 pub mod request_template;
 pub mod tokenizers;
-pub mod tokens;
 pub mod types;
 
 mod local_model;

@@ -74,7 +74,7 @@ use super::block::{
 use super::events::{EventManager, NullEventManager};
 use super::storage::Storage;
 
-use crate::tokens::{SequenceHash, TokenBlock};
+use dynamo_tokens::{SequenceHash, TokenBlock};
 
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},

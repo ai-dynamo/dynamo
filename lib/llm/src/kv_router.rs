@@ -34,18 +34,16 @@ pub mod recorder;
 pub mod scheduler;
 pub mod scoring;
 
-use crate::{
-    kv_router::{
-        indexer::{KvIndexer, KvIndexerInterface, RouterEvent},
-        metrics_aggregator::KvMetricsAggregator,
-        protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
-        scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
-        scoring::ProcessedEndpoints,
-    },
-    tokens::TokenBlockSequence,
+use crate::kv_router::{
+    indexer::{KvIndexer, KvIndexerInterface, RouterEvent},
+    metrics_aggregator::KvMetricsAggregator,
+    protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
+    scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
+    scoring::ProcessedEndpoints,
 };
 
 use dynamo_runtime::traits::events::EventSubscriber;
+use dynamo_tokens::TokenBlockSequence;
 
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component

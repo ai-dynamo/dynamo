@@ -21,7 +21,7 @@ use std::{
 use super::super::events::{EventManager, EventReleaseManager, PublishHandle};
 use super::state::BlockState;
 
-use crate::tokens::{BlockHash, SequenceHash, TokenBlock};
+use dynamo_tokens::{BlockHash, SequenceHash, TokenBlock};
 
 use derive_getters::Getters;
 
@@ -177,7 +177,7 @@ mod tests {
     use super::*;
 
     use crate::block_manager::events::tests::{EventType, MockEventManager};
-    use crate::tokens::{TokenBlockSequence, Tokens};
+    use dynamo_tokens::{TokenBlockSequence, Tokens};
 
     fn create_sequence() -> TokenBlockSequence {
         let tokens = Tokens::from(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
