@@ -1,4 +1,3 @@
-#  SPDX-FileCopyrightText: Copyright (c) 2020 Atalaya Tech. Inc
 #  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 #  #
@@ -18,13 +17,20 @@
 import json
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, ClassVar, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 
 class ServiceMixin:
     """Mixin for Dynamo services to inject configuration from environment."""
+
+    # Class variable to store service configurations
+    _global_service_configs: ClassVar[Dict[str, Dict[str, Any]]] = {}
+
+    def all_services(self) -> Dict[str, Any]:
+        """Return all services in the dependency chain."""
+        raise NotImplementedError("")
 
     def inject_config(self) -> None:
         """Inject configuration from environment into service configs.
@@ -103,3 +109,31 @@ class ServiceMixin:
                 logger.debug(f"Built config for {name}: {config}")
 
         return result
+
+    def _remove_service_args(self, service_name: str):
+        """Remove ServiceArgs from the environment config after using them, preserving envs"""
+        logger.debug(f"Removing service args for {service_name}")
+        config_str = os.environ.get("DYNAMO_SERVICE_CONFIG")
+        if config_str:
+            config = json.loads(config_str)
+            if service_name in config and "ServiceArgs" in config[service_name]:
+                # Save envs to separate env var before removing ServiceArgs
+                service_args = config[service_name]["ServiceArgs"]
+                if "envs" in service_args:
+                    service_envs = os.environ.get("DYNAMO_SERVICE_ENVS", "{}")
+                    envs_config = json.loads(service_envs)
+                    if service_name not in envs_config:
+                        envs_config[service_name] = {}
+                    envs_config[service_name]["ServiceArgs"] = {
+                        "envs": service_args["envs"]
+                    }
+                    os.environ["DYNAMO_SERVICE_ENVS"] = json.dumps(envs_config)
+
+    def _get_service_args(self, service_name: str) -> Optional[dict]:
+        """Get ServiceArgs from environment config if specified"""
+        config_str = os.environ.get("DYNAMO_SERVICE_CONFIG")
+        if config_str:
+            config = json.loads(config_str)
+            service_config = config.get(service_name, {})
+            return service_config.get("ServiceArgs")
+        return None

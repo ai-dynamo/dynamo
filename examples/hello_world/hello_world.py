@@ -60,6 +60,8 @@ class ResponseType(BaseModel):
     dynamo={
         "namespace": "inference",
     },
+    resource={"cpu": 1, "memory": "500Mi"},
+    workers=2,
     image=DYNAMO_IMAGE,
 )
 class Backend:

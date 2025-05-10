@@ -159,24 +159,23 @@ class LeaseConfig:
     ttl: int = 1  # seconds
 
 
+class ComponentType(str, Enum):
+    """Types of Dynamo components"""
+
+    PLANNER = "planner"
+
+
+@dataclass
 class DynamoConfig:
     """Configuration for Dynamo components"""
 
-    def __init__(
-        self,
-        enabled: bool = False,
-        name: Optional[str] = None,
-        namespace: Optional[str] = None,
-        custom_lease: Optional[LeaseConfig] = None,
-        **kwargs,
-    ):
-        self.enabled = enabled
-        self.name = name
-        self.namespace = namespace
-        self.custom_lease = custom_lease
-        # Store any additional configuration options
-        for key, value in kwargs.items():
-            setattr(self, key, value)
+    enabled: bool = True
+    name: str | None = None
+    namespace: str | None = None
+    custom_lease: LeaseConfig | None = None
+    component_type: ComponentType | None = (
+        None  # Indicates if this is a meta/system component
+    )
 
 
 class DeploymentTarget(ABC):

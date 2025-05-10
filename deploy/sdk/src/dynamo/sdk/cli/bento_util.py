@@ -116,8 +116,8 @@ class Bento(BaseBento):
             )
             # build_config.envs.extend(svc.envs)
             # build_config.labels.update(svc.labels)
-            # if svc.image is not None:
-            #     image = Image(base_image=svc.image)
+            if svc.image is not None:
+                image = Image(base_image=svc.image)
         if not disable_image:
             image = populate_image_from_build_config(image, build_config, build_ctx)
         build_config = build_config.with_defaults()
