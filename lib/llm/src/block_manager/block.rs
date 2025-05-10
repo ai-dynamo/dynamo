@@ -1732,30 +1732,30 @@ mod tests {
         let mut mutable_block = MutableBlock::new(block, return_tx.clone());
 
         // Test is_fully_contiguous()
-        assert!(mutable_block.is_fully_contiguous(), "fully contiguous");
+        assert!(mutable_block.is_fully_contiguous());
 
         // Test num_layers()
-        assert_eq!(mutable_block.num_layers(), 2, "2 layers");
+        assert_eq!(mutable_block.num_layers(), 2);
 
         // Test layer_view()
         let layer_view = mutable_block.layer_view(0).unwrap();
-        assert_eq!(layer_view.size(), 4 * 13 * 2, "page_size x inner_dim x dtype_bytes");
-        assert!(!unsafe { layer_view.as_ptr() }.is_null(), "pointer should be valid");
+        assert_eq!(layer_view.size(), 4 * 13 * 2); // page_size x inner_dim x dtype_bytes
+        assert!(!unsafe { layer_view.as_ptr() }.is_null());
 
         // Test layer_view_mut()
         let mut layer_view_mut = mutable_block.layer_view_mut(1).unwrap();
-        assert_eq!(layer_view_mut.size(), 4 * 13 * 2, "page_size x inner_dim x dtype_bytes");
-        assert!(!unsafe { layer_view_mut.as_mut_ptr() }.is_null(), "pointer should be valid");
+        assert_eq!(layer_view_mut.size(), 4 * 13 * 2); // page_size x inner_dim x dtype_bytes
+        assert!(!unsafe { layer_view_mut.as_mut_ptr() }.is_null());
 
         // Test block_view()
         let block_view = mutable_block.block_view().unwrap();
-        assert_eq!(block_view.size(), 2 * 4 * 13 * 2, "num_layers x page_size x inner_dim x dtype_bytes");
-        assert!(!unsafe { block_view.as_ptr() }.is_null(), "pointer should be valid");
+        assert_eq!(block_view.size(), 2 * 4 * 13 * 2); // num_layers x page_size x inner_dim x dtype_bytes
+        assert!(!unsafe { block_view.as_ptr() }.is_null());
 
         // Test block_view_mut()
         let mut block_view_mut = mutable_block.block_view_mut().unwrap();
-        assert_eq!(block_view_mut.size(), 2 * 4 * 13 * 2, "num_layers x page_size x inner_dim x dtype_bytes");
-        assert!(!unsafe { block_view_mut.as_mut_ptr() }.is_null(), "pointer should be valid");
+        assert_eq!(block_view_mut.size(), 2 * 4 * 13 * 2); // num_layers x page_size x inner_dim x dtype_bytes
+        assert!(!unsafe { block_view_mut.as_mut_ptr() }.is_null());
 
         tracing::info!("MutableBlock BlockDataExt tests completed successfully");
     }
