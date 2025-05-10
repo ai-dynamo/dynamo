@@ -15,6 +15,7 @@
 #  limitations under the License.
 #  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
 
+from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Set, Type, TypeVar
 
 from _bentoml_sdk import Service as BentoService
@@ -70,8 +71,10 @@ class BentoMLService(ServiceMixin, ServiceInterface[T]):
         bentoml_service: BentoService,
         dynamo_config: Optional[DynamoConfig] = None,
         app: Optional[FastAPI] = None,
+        image: Optional[str] = None,
     ):
         self._bentoml_service = bentoml_service
+        self.image = image
         name = bentoml_service.inner.__name__
         self._dynamo_config = dynamo_config or DynamoConfig(
             name=name, namespace="default"
@@ -82,6 +85,7 @@ class BentoMLService(ServiceMixin, ServiceInterface[T]):
         else:
             self.app = app
         self._dependencies: Dict[str, "DependencyInterface"] = {}
+        self._bentoml_service.config["dynamo"] = asdict(self._dynamo_config)
         # Map BentoML endpoints to our generic interface
         for field_name in dir(bentoml_service.inner):
             field = getattr(bentoml_service.inner, field_name)
@@ -226,7 +230,7 @@ class BentoDeploymentTarget(DeploymentTarget):
         )
 
         # Wrap in our adapter
-        return BentoMLService(bentoml_service, dynamo_config, app)
+        return BentoMLService(bentoml_service, dynamo_config, app, image)
 
     def create_dependency(
         self, on: Optional[ServiceInterface[T]] = None, **kwargs
