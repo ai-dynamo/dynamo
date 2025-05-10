@@ -178,9 +178,17 @@ pip install .
 
 cd ../../../
 pip install ".[all]"
+```
+#### ARM64 Environment
 
-# To test
-docker compose -f deploy/metrics/docker-compose.yml up -d
-cd examples/llm
-dynamo serve graphs.agg:Frontend -f configs/agg.yaml
+Alternately, you can use [jetson-containers](https://github.com/dusty-nv/jetson-containers):
+
+Compatible with Jetson and SBSA (GH200/GB200):
+Ubuntu 22.04
+```bash
+jetson-containers build dynamo
+```
+Ubuntu 22.04
+```bash
+LSB_RELEASE=24.04 jetson-containers build dynamo
 ```
