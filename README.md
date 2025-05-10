@@ -183,12 +183,13 @@ pip install ".[all]"
 
 Alternately, you can use [jetson-containers](https://github.com/dusty-nv/jetson-containers):
 
-Compatible with Jetson and SBSA (GH200/GB200):
+Compatible with Jetson and SBSA (GH200/GB200):  
+
 Ubuntu 22.04
 ```bash
 jetson-containers build dynamo
 ```
-Ubuntu 22.04
+Ubuntu 24.04
 ```bash
 LSB_RELEASE=24.04 jetson-containers build dynamo
 ```
