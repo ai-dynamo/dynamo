@@ -35,6 +35,33 @@ impl HuggingFaceTokenizer {
     pub fn from_tokenizer(tokenizer: HfTokenizer) -> Self {
         HuggingFaceTokenizer { tokenizer }
     }
+
+    pub async fn from_repo_id(repo_id: &str, revision: Option<&str>) -> Result<Self> {
+        use hf_hub::{api::tokio::ApiBuilder, Repo, RepoType};
+
+        // Build the API client
+        let api = ApiBuilder::new().with_progress(false).build()?;
+
+        // Create the repository reference
+        let repo = match revision {
+            Some(rev) => Repo::with_revision(repo_id.to_string(), RepoType::Model, rev.to_string()),
+            None => Repo::with_revision(repo_id.to_string(), RepoType::Model, "main".to_string()),
+        };
+
+        // Download the tokenizer.json file
+        let repo_builder = api.repo(repo);
+        let file_path = repo_builder
+            .get("tokenizer.json")
+            .await
+            .map_err(|err| Error::msg(format!("Failed to download tokenizer.json: {}", err)))?;
+
+        // Load the tokenizer from the downloaded file
+        Self::from_file(
+            file_path
+                .to_str()
+                .ok_or_else(|| Error::msg("Invalid path".to_string()))?,
+        )
+    }
 }
 
 impl Encoder for HuggingFaceTokenizer {
