@@ -116,8 +116,8 @@ class Bento(BaseBento):
             )
             # build_config.envs.extend(svc.envs)
             # build_config.labels.update(svc.labels)
-            # if svc.image is not None:
-            #     image = Image(base_image=svc.image)
+            if svc.image is not None:
+                image = Image(base_image=svc.image)
         if not disable_image:
             image = populate_image_from_build_config(image, build_config, build_ctx)
         build_config = build_config.with_defaults()
@@ -215,7 +215,6 @@ class Bento(BaseBento):
                         f.write(get_default_svc_readme(svc, version))
                     else:
                         f.write(build_config.description)
-
         if image is None:
             bento_info = BentoInfo(
                 tag=tag,
@@ -248,10 +247,11 @@ class Bento(BaseBento):
                 schema=svc.schema() if not is_legacy else {},
             )
         else:
-            svc = svc.get_bentoml_service()
             services = [
-                BentoServiceInfo.from_service(s) for s in svc.all_services().values()
+                BentoServiceInfo.from_service(s.get_bentoml_service())
+                for s in svc.all_services().values()
             ]
+            svc = svc.get_bentoml_service()
             bento_info = BentoInfoV2(
                 tag=tag,
                 service=svc,  # type: ignore # attrs converters do not typecheck

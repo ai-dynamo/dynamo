@@ -15,6 +15,7 @@
 #  limitations under the License.
 #  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
 
+from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Set, Type, TypeVar
 
 from _bentoml_sdk import Service as BentoService
@@ -32,6 +33,7 @@ from dynamo.sdk.core.protocol.interface import (
     ServiceConfig,
     ServiceInterface,
 )
+from dynamo.sdk.core.runner.common import ServiceMixin
 
 T = TypeVar("T", bound=object)
 
@@ -61,7 +63,7 @@ class BentoEndpoint(DynamoEndpoint):
         return self._transports
 
 
-class BentoMLService(ServiceInterface[T]):
+class BentoMLService(ServiceMixin, ServiceInterface[T]):
     """BentoML adapter implementing the ServiceInterface"""
 
     def __init__(
@@ -69,8 +71,10 @@ class BentoMLService(ServiceInterface[T]):
         bentoml_service: BentoService,
         dynamo_config: Optional[DynamoConfig] = None,
         app: Optional[FastAPI] = None,
+        image: Optional[str] = None,
     ):
         self._bentoml_service = bentoml_service
+        self.image = image
         name = bentoml_service.inner.__name__
         self._dynamo_config = dynamo_config or DynamoConfig(
             name=name, namespace="default"
@@ -81,6 +85,8 @@ class BentoMLService(ServiceInterface[T]):
         else:
             self.app = app
         self._dependencies: Dict[str, "DependencyInterface"] = {}
+        self._bentoml_service.config["dynamo"] = asdict(self._dynamo_config)
+        self._api_endpoints: list[str] = []
         # Map BentoML endpoints to our generic interface
         for field_name in dir(bentoml_service.inner):
             field = getattr(bentoml_service.inner, field_name)
@@ -88,8 +94,18 @@ class BentoMLService(ServiceInterface[T]):
                 self._endpoints[field.name] = BentoEndpoint(
                     field, field.name, field.transports
                 )
+                if DynamoTransport.HTTP in field.transports:
+                    # Ensure endpoint path starts with '/'
+                    path = (
+                        field.name if field.name.startswith("/") else f"/{field.name}"
+                    )
+                    self._api_endpoints.append(path)
             if isinstance(field, DependencyInterface):
                 self._dependencies[field_name] = field
+        # If any API endpoints exist, mark service as HTTP-exposed and list endpoints
+        if self._api_endpoints:
+            self._bentoml_service.config["http_exposed"] = True
+            self._bentoml_service.config["api_endpoints"] = self._api_endpoints.copy()
 
     @property
     def dependencies(self) -> dict[str, "DependencyInterface"]:
@@ -137,7 +153,6 @@ class BentoMLService(ServiceInterface[T]):
         instance = self.inner()
         return instance
 
-    # TODO: add attribution to bentoml
     def find_dependent_by_name(self, name: str) -> "ServiceInterface":
         """Find dynamo service by name"""
         return self.all_services()[name]
@@ -226,7 +241,7 @@ class BentoDeploymentTarget(DeploymentTarget):
         )
 
         # Wrap in our adapter
-        return BentoMLService(bentoml_service, dynamo_config, app)
+        return BentoMLService(bentoml_service, dynamo_config, app, image)
 
     def create_dependency(
         self, on: Optional[ServiceInterface[T]] = None, **kwargs

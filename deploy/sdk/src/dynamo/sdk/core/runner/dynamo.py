@@ -38,6 +38,7 @@ from dynamo.sdk.core.protocol.interface import (
     ServiceConfig,
     ServiceInterface,
 )
+from dynamo.sdk.core.runner.common import ServiceMixin
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ class LocalEndpoint(DynamoEndpoint):
         return self._name
 
 
-class LocalService(ServiceInterface[T]):
+class LocalService(ServiceMixin, ServiceInterface[T]):
     """Circus implementation of the ServiceInterface"""
 
     def __init__(
