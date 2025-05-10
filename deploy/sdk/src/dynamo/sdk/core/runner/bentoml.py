@@ -86,6 +86,7 @@ class BentoMLService(ServiceMixin, ServiceInterface[T]):
             self.app = app
         self._dependencies: Dict[str, "DependencyInterface"] = {}
         self._bentoml_service.config["dynamo"] = asdict(self._dynamo_config)
+        self._api_endpoints: list[str] = []
         # Map BentoML endpoints to our generic interface
         for field_name in dir(bentoml_service.inner):
             field = getattr(bentoml_service.inner, field_name)
@@ -93,8 +94,18 @@ class BentoMLService(ServiceMixin, ServiceInterface[T]):
                 self._endpoints[field.name] = BentoEndpoint(
                     field, field.name, field.transports
                 )
+                if DynamoTransport.HTTP in field.transports:
+                    # Ensure endpoint path starts with '/'
+                    path = (
+                        field.name if field.name.startswith("/") else f"/{field.name}"
+                    )
+                    self._api_endpoints.append(path)
             if isinstance(field, DependencyInterface):
                 self._dependencies[field_name] = field
+        # If any API endpoints exist, mark service as HTTP-exposed and list endpoints
+        if self._api_endpoints:
+            self._bentoml_service.config["http_exposed"] = True
+            self._bentoml_service.config["api_endpoints"] = self._api_endpoints.copy()
 
     @property
     def dependencies(self) -> dict[str, "DependencyInterface"]:
