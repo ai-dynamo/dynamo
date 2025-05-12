@@ -252,7 +252,6 @@ COPY --from=build /workspace /workspace
 COPY --from=build $VIRTUAL_ENV $VIRTUAL_ENV
 COPY --from=build /usr/local/nixl /opt/nvidia/nvda_nixl
 ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
-ENV LD_LIBRARY_PATH=/opt/nvidia/nvda_nixl/lib/aarch64-linux-gnu:$LD_LIBRARY_PATH
 
 # Copy configuration files
 COPY pyproject.toml /workspace/
