@@ -24,6 +24,7 @@ For now - the SGLangWorker will be responsible for aggreagted and prefill and we
 have a separate DecodeWorker.
 """
 
+import asyncio
 import logging
 import random
 import signal
@@ -120,24 +121,38 @@ class SGLangWorker:
         if self.engine_args.disaggregation_mode != "null":
             # we've already routed to a prefill worker so now we need to grab a decode id
             decode_id = self._select_random_decode_id()
+            bootstrap_room = self._generate_bootstrap_room()
 
             # we send this to the decode worker
             disagg_request = DisaggPreprocessedRequest(
                 request = request,
+                sampling_params = sampling_params,
                 bootstrap_host = self.bootstrap_host,
                 bootstrap_port = self.bootstrap_port,
-                bootstrap_room = self._generate_bootstrap_room(),
+                bootstrap_room = bootstrap_room,
             )
 
             # we don't care about the prefill response
-            _ = await self.engine.async_generate(
+            prefill = await self.engine.async_generate(
                 input_ids=request.token_ids,
                 sampling_params=sampling_params,
                 stream=True,
                 bootstrap_host=self.bootstrap_host,
                 bootstrap_port=self.bootstrap_port,
-                bootstrap_room=self._generate_bootstrap_room(),
+                bootstrap_room=bootstrap_room,
             )
+
+            async def consume_prefill_generator():
+                logger.info(f"Prefill consumption task started for room {bootstrap_room}")
+                async for _ in prefill:
+                    # This loop drives the SGLangWorker's engine to perform prefill
+                    # and send data to the bootstrap room.
+                    pass
+                logger.info(f"Prefill consumption task completed for room {bootstrap_room}")
+
+            prefill_task = asyncio.create_task(consume_prefill_generator())
+
+            logger.info(f"Sending decode request to decode worker")
 
             decode = await self.decode_client.direct(
                 disagg_request.model_dump_json(),
@@ -146,15 +161,18 @@ class SGLangWorker:
 
             num_output_tokens_so_far = 0
             async for res in decode:
-                finish_reason = res["meta_info"]["finish_reason"]
+                data = res.data()
+                finish_reason = data["meta_info"]["finish_reason"]
                 if finish_reason:
                     # Don't forward the stop token
                     out = {"token_ids": [], "finish_reason": finish_reason["type"]}
                 else:
-                    next_total_toks = len(res["output_ids"])
-                    out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}
+                    next_total_toks = len(data["output_ids"])
+                    out = {"token_ids": data["output_ids"][num_output_tokens_so_far:]}
                 yield out
                 num_output_tokens_so_far = next_total_toks
+
+            await prefill_task
         else:
             g = await self.engine.async_generate(
                 input_ids=request.token_ids,

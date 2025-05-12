@@ -37,6 +37,7 @@ class SGLangDecodeWorker:
 
     @dynamo_endpoint()
     async def generate(self, req: DisaggPreprocessedRequest):
+        logger.info(f"Received request: {req}")
         g = await self.engine.async_generate(
             input_ids=req.request.token_ids,
             sampling_params=req.sampling_params,
@@ -46,5 +47,8 @@ class SGLangDecodeWorker:
             bootstrap_room=req.bootstrap_room,
         )
 
+        logger.info(f"Received prefill response from worker")
+
         async for result in g:
+            logger.info(f"Received result: {result}")
             yield result
