@@ -102,12 +102,21 @@ SHELL ["/bin/bash", "-c"]
 # Copy nixl source, and use commit hash as cache hint
 COPY --from=nixl_base /opt/nixl /opt/nixl
 COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
-RUN cd /opt/nixl && \
-    mkdir build && \
-    meson setup build/ --prefix=/usr/local/nixl && \
-    cd build/ && \
-    ninja && \
-    ninja install
+RUN if [ "$ARCH" = "arm64" ]; then \
+        cd /opt/nixl && \
+        mkdir build && \
+        meson setup build/ --prefix=/usr/local/nixl --gds_path=/usr/local/cuda/targets/sbsa-linux && \
+        cd build/ && \
+        ninja && \
+        ninja install; \
+    else \
+        cd /opt/nixl && \
+        mkdir build && \
+        meson setup build/ --prefix=/usr/local/nixl && \
+        cd build/ && \
+        ninja && \
+        ninja install; \
+    fi
 
 ENV NIXL_PREFIX=/usr/local/nixl
 
