@@ -65,9 +65,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Name:      "service1",
 								},
 								Resources: &Resources{
-									CPU:    "1",
-									Memory: "1Gi",
-									GPU:    "0",
+									CPU:    &[]string{"1"}[0],
+									Memory: &[]string{"1Gi"}[0],
+									GPU:    &[]string{"0"}[0],
 									Custom: map[string]string{},
 								},
 								Autoscaling: &Autoscaling{
@@ -186,9 +186,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 							Config: Config{
 								HttpExposed: true,
 								Resources: &Resources{
-									CPU:    "1",
-									Memory: "1Gi",
-									GPU:    "0",
+									CPU:    &[]string{"1"}[0],
+									Memory: &[]string{"1Gi"}[0],
+									GPU:    &[]string{"0"}[0],
 									Custom: map[string]string{},
 								},
 								Autoscaling: &Autoscaling{
@@ -330,9 +330,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 							Config: Config{
 								HttpExposed: true,
 								Resources: &Resources{
-									CPU:    "1",
-									Memory: "1Gi",
-									GPU:    "0",
+									CPU:    &[]string{"1"}[0],
+									Memory: &[]string{"1Gi"}[0],
+									GPU:    &[]string{"0"}[0],
 									Custom: map[string]string{},
 								},
 								Autoscaling: &Autoscaling{
@@ -481,9 +481,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Name:      "service1",
 								},
 								Resources: &Resources{
-									CPU:    "1",
-									Memory: "1Gi",
-									GPU:    "0",
+									CPU:    &[]string{"1"}[0],
+									Memory: &[]string{"1Gi"}[0],
+									GPU:    &[]string{"0"}[0],
 									Custom: map[string]string{},
 								},
 								Autoscaling: &Autoscaling{
@@ -534,9 +534,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									ComponentType: ComponentTypePlanner,
 								},
 								Resources: &Resources{
-									CPU:    "1",
-									Memory: "1Gi",
-									GPU:    "0",
+									CPU:    &[]string{"1"}[0],
+									Memory: &[]string{"1Gi"}[0],
+									GPU:    &[]string{"0"}[0],
 									Custom: map[string]string{},
 								},
 							},
@@ -615,9 +615,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Name:      "service1",
 								},
 								Resources: &Resources{
-									CPU:    "1",
-									Memory: "1Gi",
-									GPU:    "0",
+									CPU:    &[]string{"1"}[0],
+									Memory: &[]string{"1Gi"}[0],
+									GPU:    &[]string{"0"}[0],
 									Custom: map[string]string{},
 								},
 								Autoscaling: &Autoscaling{

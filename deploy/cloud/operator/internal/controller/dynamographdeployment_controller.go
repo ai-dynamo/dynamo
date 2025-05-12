@@ -164,6 +164,11 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			logger.Error(err, fmt.Sprintf("Failed to update the %v env var", DYN_DEPLOYMENT_CONFIG_ENV_VAR))
 			return ctrl.Result{}, err
 		}
+		err = overrideWithDynDeploymentConfig(ctx, deployment)
+		if err != nil {
+			logger.Error(err, fmt.Sprintf("Failed to override the component config with the %v env var", DYN_DEPLOYMENT_CONFIG_ENV_VAR))
+			return ctrl.Result{}, err
+		}
 	}
 
 	// reconcile the dynamoComponent
@@ -303,6 +308,43 @@ func updateDynDeploymentConfig(dynamoDeploymentComponent *nvidiacomv1alpha1.Dyna
 				dynamoDeploymentComponent.Spec.Envs[i].Value = string(updated)
 				break
 			}
+		}
+	}
+	return nil
+}
+
+func overrideWithDynDeploymentConfig(ctx context.Context, dynamoDeploymentComponent *nvidiacomv1alpha1.DynamoComponentDeployment) error {
+	for _, env := range dynamoDeploymentComponent.Spec.Envs {
+		if env.Name == DYN_DEPLOYMENT_CONFIG_ENV_VAR {
+			dynDeploymentConfig, err := dynamo.ParseDynDeploymentConfig(ctx, []byte(env.Value))
+			if err != nil {
+				return fmt.Errorf("failed to parse %v: %w", DYN_DEPLOYMENT_CONFIG_ENV_VAR, err)
+			}
+			componentDynConfig := dynDeploymentConfig.Components[dynamoDeploymentComponent.Spec.ServiceName]
+			if componentDynConfig != nil {
+				if componentDynConfig.ServiceArgs != nil && componentDynConfig.ServiceArgs.Workers != nil {
+					dynamoDeploymentComponent.Spec.Replicas = componentDynConfig.ServiceArgs.Workers
+				}
+				if componentDynConfig.ServiceArgs != nil && componentDynConfig.ServiceArgs.Resources != nil {
+					if componentDynConfig.ServiceArgs.Resources.GPU != nil {
+						dynamoDeploymentComponent.Spec.Resources.Requests.GPU = *componentDynConfig.ServiceArgs.Resources.GPU
+						dynamoDeploymentComponent.Spec.Resources.Limits.GPU = *componentDynConfig.ServiceArgs.Resources.GPU
+					}
+					if componentDynConfig.ServiceArgs.Resources.CPU != nil {
+						dynamoDeploymentComponent.Spec.Resources.Requests.CPU = *componentDynConfig.ServiceArgs.Resources.CPU
+						dynamoDeploymentComponent.Spec.Resources.Limits.CPU = *componentDynConfig.ServiceArgs.Resources.CPU
+					}
+					if componentDynConfig.ServiceArgs.Resources.Memory != nil {
+						dynamoDeploymentComponent.Spec.Resources.Requests.Memory = *componentDynConfig.ServiceArgs.Resources.Memory
+						dynamoDeploymentComponent.Spec.Resources.Limits.Memory = *componentDynConfig.ServiceArgs.Resources.Memory
+					}
+					if componentDynConfig.ServiceArgs.Resources.Custom != nil {
+						dynamoDeploymentComponent.Spec.Resources.Requests.Custom = componentDynConfig.ServiceArgs.Resources.Custom
+						dynamoDeploymentComponent.Spec.Resources.Limits.Custom = componentDynConfig.ServiceArgs.Resources.Custom
+					}
+				}
+			}
+			break
 		}
 	}
 	return nil

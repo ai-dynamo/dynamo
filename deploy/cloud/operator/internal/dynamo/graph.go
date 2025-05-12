@@ -56,9 +56,9 @@ type DynamoConfig struct {
 }
 
 type Resources struct {
-	CPU    string            `yaml:"cpu,omitempty"`
-	Memory string            `yaml:"memory,omitempty"`
-	GPU    string            `yaml:"gpu,omitempty"`
+	CPU    *string           `yaml:"cpu,omitempty"`
+	Memory *string           `yaml:"memory,omitempty"`
+	GPU    *string           `yaml:"gpu,omitempty"`
 	Custom map[string]string `yaml:"custom,omitempty"`
 }
 
@@ -85,6 +85,22 @@ type ServiceConfig struct {
 	Name         string              `yaml:"name"`
 	Dependencies []map[string]string `yaml:"dependencies,omitempty"`
 	Config       Config              `yaml:"config"`
+}
+
+type DynDeploymentConfig struct {
+	Port       int                                    `json:"port"`
+	Components map[string]*DynDeploymentServiceConfig `yaml:"-"`
+}
+
+// ServiceConfig represents the configuration for a specific service
+type DynDeploymentServiceConfig struct {
+	ServiceArgs *ServiceArgs `yaml:"serviceArgs,omitempty"`
+}
+
+// ServiceArgs represents the arguments that can be passed to any service
+type ServiceArgs struct {
+	Workers   *int32     `yaml:"workers,omitempty"`
+	Resources *Resources `yaml:"resources,omitempty"`
 }
 
 func (s ServiceConfig) GetNamespace() *string {
@@ -221,6 +237,12 @@ func ParseDynamoGraphConfig(ctx context.Context, yamlContent *bytes.Buffer) (*Dy
 	return &config, err
 }
 
+func ParseDynDeploymentConfig(ctx context.Context, yamlContent []byte) (*DynDeploymentConfig, error) {
+	var config DynDeploymentConfig
+	err := yaml.Unmarshal(yamlContent, &config)
+	return &config, err
+}
+
 func GetDynamoGraphConfig(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, recorder EventRecorder) (*DynamoGraphConfig, error) {
 	dynamoGraphDownloadURL, err := RetrieveDynamoGraphDownloadURL(ctx, dynamoDeployment, recorder)
 	if err != nil {
@@ -283,17 +305,23 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		if service.Config.Resources != nil {
 			deployment.Spec.Resources = &common.Resources{
 				Requests: &common.ResourceItem{
-					CPU:    service.Config.Resources.CPU,
-					Memory: service.Config.Resources.Memory,
-					GPU:    service.Config.Resources.GPU,
 					Custom: service.Config.Resources.Custom,
 				},
 				Limits: &common.ResourceItem{
-					CPU:    service.Config.Resources.CPU,
-					Memory: service.Config.Resources.Memory,
-					GPU:    service.Config.Resources.GPU,
 					Custom: service.Config.Resources.Custom,
 				},
+			}
+			if service.Config.Resources.CPU != nil {
+				deployment.Spec.Resources.Requests.CPU = *service.Config.Resources.CPU
+				deployment.Spec.Resources.Limits.CPU = *service.Config.Resources.CPU
+			}
+			if service.Config.Resources.Memory != nil {
+				deployment.Spec.Resources.Requests.Memory = *service.Config.Resources.Memory
+				deployment.Spec.Resources.Limits.Memory = *service.Config.Resources.Memory
+			}
+			if service.Config.Resources.GPU != nil {
+				deployment.Spec.Resources.Requests.GPU = *service.Config.Resources.GPU
+				deployment.Spec.Resources.Limits.GPU = *service.Config.Resources.GPU
 			}
 		}
 		deployment.Spec.Autoscaling = &v1alpha1.Autoscaling{
