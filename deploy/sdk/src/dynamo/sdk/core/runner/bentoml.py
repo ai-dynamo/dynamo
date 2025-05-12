@@ -15,7 +15,6 @@
 #  limitations under the License.
 #  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
 
-from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Set, Type, TypeVar
 
 from _bentoml_sdk import Service as BentoService
@@ -33,7 +32,6 @@ from dynamo.sdk.core.protocol.interface import (
     ServiceConfig,
     ServiceInterface,
 )
-from dynamo.sdk.core.runner.common import ServiceMixin
 
 T = TypeVar("T", bound=object)
 
@@ -63,75 +61,35 @@ class BentoEndpoint(DynamoEndpoint):
         return self._transports
 
 
-class BentoServiceAdapter(ServiceMixin, ServiceInterface[T]):
+class BentoMLService(ServiceInterface[T]):
     """BentoML adapter implementing the ServiceInterface"""
 
     def __init__(
         self,
-        service_cls: Type[T],
-        config: ServiceConfig,
+        bentoml_service: BentoService,
         dynamo_config: Optional[DynamoConfig] = None,
         app: Optional[FastAPI] = None,
-        **kwargs,
     ):
-        name = service_cls.__name__
+        self._bentoml_service = bentoml_service
+        name = bentoml_service.inner.__name__
         self._dynamo_config = dynamo_config or DynamoConfig(
             name=name, namespace="default"
         )
-        image = kwargs.get("image")
-        envs = kwargs.get("envs", [])
-        self.image = image
-        # Get service args from environment if available
-        service_args = self._get_service_args(name)
-        if service_args:
-            # Update config with service args
-            for key, value in service_args.items():
-                if key not in config:
-                    config[key] = value
-
-            # Extract and apply specific args if needed
-            if "workers" in service_args:
-                config["workers"] = service_args["workers"]
-            if "envs" in service_args and envs:
-                envs.extend(service_args["envs"])
-            elif "envs" in service_args:
-                envs = service_args["envs"]
-
-        # Initialize BentoML service
-        self._bentoml_service = BentoService(
-            config=config,
-            inner=service_cls,
-            image=image,
-            envs=envs or [],
-        )
-
         self._endpoints: Dict[str, BentoEndpoint] = {}
         if not app:
             self.app = FastAPI(title=name)
         else:
             self.app = app
         self._dependencies: Dict[str, "DependencyInterface"] = {}
-        self._bentoml_service.config["dynamo"] = asdict(self._dynamo_config)
-        self._api_endpoints: list[str] = []
         # Map BentoML endpoints to our generic interface
-        for field_name in dir(service_cls):
-            field = getattr(service_cls, field_name)
+        for field_name in dir(bentoml_service.inner):
+            field = getattr(bentoml_service.inner, field_name)
             if isinstance(field, DynamoEndpoint):
                 self._endpoints[field.name] = BentoEndpoint(
                     field, field.name, field.transports
                 )
-                if DynamoTransport.HTTP in field.transports:
-                    # Ensure endpoint path starts with '/'
-                    path = (
-                        field.name if field.name.startswith("/") else f"/{field.name}"
-                    )
-                    self._api_endpoints.append(path)
             if isinstance(field, DependencyInterface):
                 self._dependencies[field_name] = field
-        # If any API endpoints exist, mark service as HTTP-exposed and list endpoints
-        if self._api_endpoints:
-            self._bentoml_service.config["http_exposed"] = True
-            self._bentoml_service.config["api_endpoints"] = self._api_endpoints.copy()
 
     @property
     def dependencies(self) -> dict[str, "DependencyInterface"]:
@@ -179,6 +137,7 @@ class BentoServiceAdapter(ServiceMixin, ServiceInterface[T]):
         instance = self.inner()
         return instance
 
+    # TODO: add attribution to bentoml
     def find_dependent_by_name(self, name: str) -> "ServiceInterface":
         """Find dynamo service by name"""
         return self.all_services()[name]
@@ -200,7 +159,7 @@ class BentoMLDependency(DependencyInterface[T]):
     def __init__(
         self,
         bentoml_dependency: BentoDependency,
-        on_service: Optional[BentoServiceAdapter[T]] = None,
+        on_service: Optional[BentoMLService[T]] = None,
     ):
         self._bentoml_dependency = bentoml_dependency
         self._on_service = on_service
@@ -255,14 +214,19 @@ class BentoDeploymentTarget(DeploymentTarget):
         app: Optional[FastAPI] = None,
         **kwargs,
     ) -> ServiceInterface[T]:
-        """Create a BentoServiceAdapter with the given parameters"""
-        return BentoServiceAdapter(
-            service_cls=service_cls,
+        # Create BentoML service
+        image = kwargs.get("image")
+        envs = kwargs.get("envs", [])
+
+        bentoml_service = BentoService(
             config=config,
-            dynamo_config=dynamo_config,
-            app=app,
-            **kwargs,
+            inner=service_cls,
+            image=image,
+            envs=envs,
         )
+
+        # Wrap in our adapter
+        return BentoMLService(bentoml_service, dynamo_config, app)
 
     def create_dependency(
         self, on: Optional[ServiceInterface[T]] = None, **kwargs
@@ -273,7 +237,7 @@ class BentoDeploymentTarget(DeploymentTarget):
 
         # Get the underlying BentoML service if available
         bentoml_service = None
-        if on is not None and isinstance(on, BentoServiceAdapter):
+        if on is not None and isinstance(on, BentoMLService):
             # this is underlying bentoml service
             bentoml_service = on.get_bentoml_service()
 

@@ -189,9 +189,21 @@ def main(
         component = runtime.namespace(namespace).component(component_name)
 
         try:
-            # Create service first
-            await component.create_service()
-            logger.info(f"Created {service.name} component")
+            # if a custom lease is specified we need to create the service with that lease
+            lease = None
+            if service._dynamo_config.custom_lease:
+                lease = await component.create_service_with_custom_lease(
+                    ttl=service._dynamo_config.custom_lease.ttl
+                )
+                lease_id = lease.id()
+                dynamo_context["lease"] = lease
+                logger.info(
+                    f"Created {service.name} component with custom lease id {lease_id}"
+                )
+            else:
+                # Create service first
+                await component.create_service()
+                logger.info(f"Created {service.name} component")
 
             # Set runtime on all dependencies
             for dep in service.dependencies.values():
