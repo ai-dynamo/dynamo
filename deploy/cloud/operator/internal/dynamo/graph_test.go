@@ -74,6 +74,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									MinReplicas: 1,
 									MaxReplicas: 5,
 								},
+								Workers: &[]int32{3}[0],
 							},
 						},
 						{
@@ -105,6 +106,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName:     "service1",
 							DynamoNamespace: &[]string{"default"}[0],
+							Replicas:        &[]int32{3}[0],
 							Resources: &compounaiCommon.Resources{
 								Requests: &compounaiCommon.ResourceItem{
 									CPU:    "1",

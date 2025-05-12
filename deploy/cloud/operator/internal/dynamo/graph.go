@@ -78,6 +78,7 @@ type Config struct {
 	Autoscaling  *Autoscaling  `yaml:"autoscaling,omitempty"`
 	HttpExposed  bool          `yaml:"http_exposed,omitempty"`
 	ApiEndpoints []string      `yaml:"api_endpoints,omitempty"`
+	Workers      *int32        `yaml:"workers,omitempty"`
 }
 
 type ServiceConfig struct {
@@ -244,6 +245,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		deployment.Spec.DynamoTag = config.DynamoTag
 		deployment.Spec.DynamoComponent = parentDynamoGraphDeployment.Spec.DynamoGraph
 		deployment.Spec.ServiceName = service.Name
+		deployment.Spec.Replicas = service.Config.Workers
 		labels := make(map[string]string)
 		// add the labels in the spec in order to label all sub-resources
 		deployment.Spec.Labels = labels
