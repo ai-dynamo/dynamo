@@ -82,7 +82,8 @@ class VllmWorker:
                 )
                 self.engine_args.enable_prefix_caching = True
 
-            os.environ["VLLM_WORKER_ID"] = str(dynamo_context.get("lease").id())
+            VLLM_WORKER_ID = dynamo_context["endpoints"][0].lease_id()
+            os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
             os.environ["VLLM_KV_NAMESPACE"] = "dynamo"
             os.environ["VLLM_KV_COMPONENT"] = class_name
 
