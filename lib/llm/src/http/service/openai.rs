@@ -410,7 +410,6 @@ async fn list_models_openai(
     Ok(Json(out).into_response())
 }
 
-
 #[derive(Serialize)]
 struct ListModelOpenAI {
     object: &'static str, // always "list"
