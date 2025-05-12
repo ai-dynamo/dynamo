@@ -105,7 +105,7 @@ COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
 RUN if [ "$ARCH" = "arm64" ]; then \
         cd /opt/nixl && \
         mkdir build && \
-        meson setup build/ --prefix=/usr/local/nixl --gds_path=/usr/local/cuda/targets/sbsa-linux && \
+        meson setup build/ --prefix=/usr/local/nixl -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
         cd build/ && \
         ninja && \
         ninja install; \
