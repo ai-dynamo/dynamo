@@ -33,7 +33,7 @@ import socket
 import sglang as sgl
 from components.decode_worker import SGLangDecodeWorker
 from sglang.srt.utils import get_ip
-from utils.protocol import BootstrapInfo, DisaggPreprocessedRequest, PreprocessedRequest
+from utils.protocol import DisaggPreprocessedRequest, PreprocessedRequest
 from utils.sglang import parse_sglang_args
 
 from dynamo.llm import ModelType, register_llm
@@ -88,7 +88,7 @@ class SGLangWorker:
         self.engine.shutdown()
         logger.info("SGLang engine shutdown")
 
-    def _get_bootstrap_info(self) -> BootstrapInfo:
+    def _get_bootstrap_info(self):
         inner_tm = self.engine.tokenizer_manager
         bootstrap_port = inner_tm.server_args.disaggregation_bootstrap_port
 
@@ -135,7 +135,7 @@ class SGLangWorker:
                 bootstrap_room=bootstrap_room,
             )
 
-            # prefill response is not needed
+            # prefill response is not used
             prefill = await self.engine.async_generate(
                 input_ids=request.token_ids,
                 sampling_params=sampling_params,
@@ -176,7 +176,6 @@ class SGLangWorker:
             async for res in g:
                 finish_reason = res["meta_info"]["finish_reason"]
                 if finish_reason:
-                    # Don't forward the stop token
                     out = {"token_ids": [], "finish_reason": finish_reason["type"]}
                 else:
                     next_total_toks = len(res["output_ids"])

@@ -54,11 +54,6 @@ class PreprocessedRequest(BaseModel):
     annotations: List[str] = Field(default_factory=list)
 
 
-class BootstrapInfo(BaseModel):
-    host: str
-    port: int
-
-
 class DisaggPreprocessedRequest(BaseModel):
     request: PreprocessedRequest
     sampling_params: dict
