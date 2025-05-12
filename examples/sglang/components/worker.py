@@ -25,6 +25,7 @@ have a separate DecodeWorker.
 """
 
 import logging
+import random
 import signal
 import socket
 from typing import Union
@@ -64,18 +65,20 @@ class SGLangWorker:
     @async_on_start
     async def async_init(self):
         runtime = dynamo_context["runtime"]
+        logger.info("Registering LLM for discovery")
+        comp_ns, comp_name = SGLangWorker.dynamo_address()  # type: ignore
+        endpoint = runtime.namespace(comp_ns).component(comp_name).endpoint("generate")
+        await register_llm(
+            ModelType.Backend,
+            endpoint,
+            self.engine_args.model_path,
+            self.engine_args.served_model_name,
+        )
         if self.engine_args.disaggregation_mode:
-            logger.info("Registering LLM for discovery")
-            comp_ns, comp_name = SGLangWorker.dynamo_address()  # type: ignore
-            endpoint = runtime.namespace(comp_ns).component(comp_name).endpoint("generate")
-            await register_llm(
-                ModelType.Backend,
-                endpoint,
-                self.engine_args.model_path,
-                self.engine_args.served_model_name,
-            )
-        else:
-            return
+            self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info()
+            comp_ns, comp_name = SGLangDecodeWorker.dynamo_address() # type: ignore
+            self.decode_client = await runtime.namespace(comp_ns).component(comp_name).endpoint("generate").client()
+
 
     def shutdown_sglang_engine(self, signum, frame):
         self.engine.shutdown()
@@ -93,7 +96,7 @@ class SGLangWorker:
         else:
             bootstrap_host = get_ip()
         
-        return BootstrapInfo(host=bootstrap_host, port=bootstrap_port)
+        return bootstrap_host, bootstrap_port
 
     def _build_sampling_params(self, request: PreprocessedRequest) -> dict:
         # TODO: maintain a full mapping from PreprocessedRequest to SGLang's SamplingParams
@@ -115,14 +118,43 @@ class SGLangWorker:
         sampling_params = self._build_sampling_params(request)
 
         if self.engine_args.disaggregation_mode:
-            g = await self.engine.async_generate(
+            # we've already routed to a prefill worker so now we need to grab a decode id
+            decode_id = self._select_random_decode_id()
+
+            # we send this to the decode worker
+            disagg_request = DisaggPreprocessedRequest(
+                request = request,
+                bootstrap_host = self.bootstrap_host,
+                bootstrap_port = self.bootstrap_port,
+                bootstrap_room = self._generate_bootstrap_room(),
+            )
+
+            # we don't care about the prefill response
+            _ = await self.engine.async_generate(
                 input_ids=request.token_ids,
                 sampling_params=sampling_params,
                 stream=True,
-                bootstrap_host=request.bootstrap_host,
-                bootstrap_port=request.bootstrap_port,
-                bootstrap_room=request.bootstrap_room,
+                bootstrap_host=self.bootstrap_host,
+                bootstrap_port=self.bootstrap_port,
+                bootstrap_room=self._generate_bootstrap_room(),
             )
+
+            decode = await self.decode_client.direct(
+                disagg_request.model_dump_json(),
+                decode_id,
+            )
+
+            num_output_tokens_so_far = 0
+            async for res in decode:
+                finish_reason = res["meta_info"]["finish_reason"]
+                if finish_reason:
+                    # Don't forward the stop token
+                    out = {"token_ids": [], "finish_reason": finish_reason["type"]}
+                else:
+                    next_total_toks = len(res["output_ids"])
+                    out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}
+                yield out
+                num_output_tokens_so_far = next_total_toks
         else:
             g = await self.engine.async_generate(
                 input_ids=request.token_ids,
@@ -130,21 +162,21 @@ class SGLangWorker:
                 stream=True,
             )
 
-        num_output_tokens_so_far = 0
-        async for res in g:
-            finish_reason = res["meta_info"]["finish_reason"]
-            if finish_reason:
-                # Don't forward the stop token
-                out = {"token_ids": [], "finish_reason": finish_reason["type"]}
-            else:
-                next_total_toks = len(res["output_ids"])
-                out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}
-            yield out
-            num_output_tokens_so_far = next_total_toks
+            num_output_tokens_so_far = 0
+            async for res in g:
+                finish_reason = res["meta_info"]["finish_reason"]
+                if finish_reason:
+                    # Don't forward the stop token
+                    out = {"token_ids": [], "finish_reason": finish_reason["type"]}
+                else:
+                    next_total_toks = len(res["output_ids"])
+                    out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}
+                yield out
+                num_output_tokens_so_far = next_total_toks
 
-    @dynamo_endpoint()
-    async def get_url(self, request: dict):
-        """
-        Get bootstrap info for disaggregation 
-        """
-        yield self._get_bootstrap_info().model_dump_json()
+    def _select_random_decode_id(self):
+        return random.choice(self.decode_client.endpoint_ids())
+    
+    def _generate_bootstrap_room(self):
+        return random.randint(0, 2**63 - 1)
+    

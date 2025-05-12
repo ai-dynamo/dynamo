@@ -17,6 +17,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
+
 TokenIdType = int
 
 
@@ -59,6 +60,7 @@ class BootstrapInfo(BaseModel):
 
 class DisaggPreprocessedRequest(BaseModel):
     request: PreprocessedRequest
+    sampling_params: dict 
     bootstrap_host: str
     bootstrap_port: int
     bootstrap_room: int
