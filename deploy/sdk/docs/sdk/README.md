@@ -33,7 +33,6 @@ A Service is a core building block for a project. You can think of it as a logic
 ```python
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "dynamo",
     },
     resources={"gpu": 2, "cpu": "10", "memory": "20Gi"},
@@ -53,7 +52,7 @@ Let's walk through an example to understand how you write a dynamo service.
 ```python
 import ServiceB
 
-@service(dynamo={"enabled": True, "namespace": "dynamo"}, resources={"gpu": 1})
+@service(dynamo={"namespace": "dynamo"}, resources={"gpu": 1})
 class ServiceA:
     # Define service dependencies
     service_b = depends(ServiceB)
@@ -182,7 +181,7 @@ The most basic method is to specify parameters directly in the service decorator
 
 ```python
 @service(
-    dynamo={"enabled": True, "namespace": "prod"},
+    dynamo={"namespace": "prod"},
     resources={"gpu": 2, "cpu": "4", "memory": "16Gi"},
     workers=2,
 )
@@ -346,7 +345,7 @@ Here's a comprehensive example showing how all these pieces fit together:
 
 ```python
 @service(
-    dynamo={"enabled": True, "namespace": "default"},
+    dynamo={"namespace": "default"},
     resources={"gpu": 1},
     workers=1,
 )

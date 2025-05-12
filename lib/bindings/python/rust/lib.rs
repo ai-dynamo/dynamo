@@ -74,6 +74,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::KvMetricsAggregator>()?;
     m.add_class::<llm::kv::KvEventPublisher>()?;
     m.add_class::<llm::kv::KvRecorder>()?;
+    m.add_class::<llm::nats::NatsQueue>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpError>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
@@ -100,12 +101,13 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
 }
 
 #[pyfunction]
-#[pyo3(text_signature = "(endpoint, path, model_type)")]
+#[pyo3(signature = (model_type, endpoint, model_path, model_name=None))]
 fn register_llm<'p>(
     py: Python<'p>,
-    endpoint: Endpoint,
-    path: &str,
     model_type: ModelType,
+    endpoint: Endpoint,
+    model_path: &str,
+    model_name: Option<&str>,
 ) -> PyResult<Bound<'p, PyAny>> {
     let model_type_obj = match model_type {
         ModelType::Chat => llm_rs::model_type::ModelType::Chat,
@@ -113,10 +115,11 @@ fn register_llm<'p>(
         ModelType::Backend => llm_rs::model_type::ModelType::Backend,
     };
 
-    let inner_path = path.to_string();
+    let inner_path = model_path.to_string();
+    let model_name = model_name.map(|n| n.to_string());
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         // Download from HF, load the ModelDeploymentCard
-        let mut local_model = llm_rs::LocalModel::prepare(&inner_path, None, None)
+        let mut local_model = llm_rs::LocalModel::prepare(&inner_path, None, model_name)
             .await
             .map_err(to_pyerr)?;
 
@@ -182,12 +185,6 @@ struct Client {
     router: rs::pipeline::PushRouter<serde_json::Value, serde_json::Value>,
 }
 
-#[pyclass]
-#[derive(Clone)]
-struct PyLease {
-    inner: rs::transports::etcd::Lease,
-}
-
 #[pyclass(eq, eq_int)]
 #[derive(Clone, PartialEq)]
 #[repr(i32)]
@@ -195,25 +192,6 @@ enum ModelType {
     Chat = 1,
     Completion = 2,
     Backend = 3,
-}
-
-#[pymethods]
-impl PyLease {
-    fn id(&self) -> i64 {
-        self.inner.id()
-    }
-
-    fn revoke(&self) {
-        self.inner.revoke();
-    }
-
-    fn is_valid<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let lease = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let is_valid = lease.is_valid().await.map_err(to_pyerr)?;
-            Ok(is_valid)
-        })
-    }
 }
 
 #[pymethods]
@@ -258,16 +236,6 @@ impl DistributedRuntime {
             Some(etcd_client) => Ok(Some(EtcdClient { inner: etcd_client })),
             None => Ok(None),
         }
-    }
-
-    fn primary_token(&self) -> CancellationToken {
-        let inner = self.inner.runtime().primary_token();
-        CancellationToken { inner }
-    }
-
-    fn child_token(&self) -> CancellationToken {
-        let inner = self.inner.runtime().child_token();
-        CancellationToken { inner }
     }
 
     fn shutdown(&self) {
@@ -389,6 +357,41 @@ impl EtcdKvCache {
             Ok(())
         })
     }
+
+    fn delete<'p>(&self, py: Python<'p>, key: String) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner.delete(&key).await.map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
+    fn clear_all<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            // Get all keys with the prefix
+            let all_keys = inner
+                .get_all()
+                .await
+                .keys()
+                .cloned()
+                .collect::<Vec<String>>();
+
+            // Delete each key
+            for key in all_keys {
+                // Strip the prefix from the key before deleting
+                if let Some(stripped_key) = key.strip_prefix(&inner.prefix) {
+                    inner.delete(stripped_key).await.map_err(to_pyerr)?;
+                } else {
+                    inner.delete(&key).await.map_err(to_pyerr)?;
+                }
+            }
+
+            Ok(())
+        })
+    }
 }
 
 #[pymethods]
@@ -423,61 +426,22 @@ impl Component {
             Ok(())
         })
     }
-
-    #[pyo3(signature = (ttl=1))]
-    fn create_service_with_custom_lease<'p>(
-        &self,
-        py: Python<'p>,
-        ttl: i64,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let component = self.inner.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Get the etcd client from the runtime
-            let etcd_client = component
-                .drt()
-                .etcd_client()
-                .ok_or_else(|| to_pyerr("etcd client not found"))?;
-
-            // Create a custom lease with the specified TTL
-            let custom_lease = etcd_client.create_lease(ttl).await.map_err(to_pyerr)?;
-
-            tracing::info!("created custom lease: {:?}", custom_lease);
-
-            // Create a service
-            // TODO: tie the lease to service instead of endpoint
-            let _service = component
-                .service_builder()
-                .create()
-                .await
-                .map_err(to_pyerr)?;
-
-            // Return the lease
-            Ok(PyLease {
-                inner: custom_lease,
-            })
-        })
-    }
 }
 
 #[pymethods]
 impl Endpoint {
-    #[pyo3(signature = (generator, lease=None))]
+    #[pyo3(signature = (generator))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
         generator: PyObject,
-        lease: Option<&PyLease>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
             self.event_loop.clone(),
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
-        let mut builder = self.inner.endpoint_builder().handler(ingress);
-        if lease.is_some() {
-            builder = builder.lease(lease.map(|l| l.inner.clone()));
-        }
+        let builder = self.inner.endpoint_builder().handler(ingress);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             builder.start().await.map_err(to_pyerr)?;
             Ok(())

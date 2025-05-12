@@ -14,14 +14,8 @@
 # limitations under the License.
 Frontend:
   served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  endpoint: dynamo.Processor.chat/completions
+  endpoint: dynamo.SGLangWorker.generate
   port: 8000
-
-Processor:
-  model-path: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  served-model-name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  trust-remote-code: true
-  skip-tokenizer-init: true
 
 SGLangWorker:
   model-path: deepseek-ai/DeepSeek-R1-Distill-Llama-8B

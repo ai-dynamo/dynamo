@@ -112,9 +112,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     await component.create_service()
 
     endpoint = component.endpoint(config.endpoint)
-    print("Started server instance")
-
-    await register_llm(endpoint, config.model, ModelType.Backend)
+    await register_llm(ModelType.Backend, endpoint, config.model)
 
     engine_args = AsyncEngineArgs(
         model=config.model,
@@ -127,7 +125,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
     # after the lease is revoked
-    await endpoint.serve_endpoint(RequestHandler(engine_client).generate, None)
+    await endpoint.serve_endpoint(RequestHandler(engine_client).generate)
 
 
 def cmd_line_args():

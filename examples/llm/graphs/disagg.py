@@ -14,8 +14,10 @@
 # limitations under the License.
 
 from components.frontend import Frontend
+from components.planner_service import Planner
 from components.prefill_worker import PrefillWorker
 from components.processor import Processor
 from components.worker import VllmWorker
 
 Frontend.link(Processor).link(VllmWorker).link(PrefillWorker)
+Frontend.link(Planner)

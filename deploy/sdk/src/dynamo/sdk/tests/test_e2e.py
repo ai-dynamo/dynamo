@@ -105,8 +105,8 @@ async def test_pipeline(setup_and_teardown):
                         in text
                     )
                     break
-        except Exception:
+        except Exception as e:
             if attempt == max_retries - 1:
                 raise
-            print(f"Attempt {attempt + 1} failed, retrying...")
+            print(f"Attempt {attempt + 1} failed, retrying... {e}")
             await asyncio.sleep(3)

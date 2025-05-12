@@ -36,3 +36,7 @@ VllmWorker:
     resources:
       gpu: 1
   common-configs: [model, block-size, max-model-len]
+
+Planner:
+  environment: local
+  no-operation: true

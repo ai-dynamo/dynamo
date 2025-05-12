@@ -33,6 +33,7 @@ from circus.watcher import Watcher
 from simple_di import inject
 
 from dynamo.sdk.cli.circus import CircusRunner
+from dynamo.sdk.core.runner import TargetEnum
 
 from .allocator import NVIDIA_GPU, ResourceAllocator
 from .circus import _get_server_socket
@@ -55,7 +56,9 @@ logger = logging.getLogger(__name__)
 _DYNAMO_WORKER_SCRIPT = "dynamo.sdk.cli.serve_dynamo"
 
 
-def _get_dynamo_worker_script(bento_identifier: str, svc_name: str) -> list[str]:
+def _get_dynamo_worker_script(
+    bento_identifier: str, svc_name: str, target: TargetEnum
+) -> list[str]:
     args = [
         "-m",
         _DYNAMO_WORKER_SCRIPT,
@@ -64,6 +67,8 @@ def _get_dynamo_worker_script(bento_identifier: str, svc_name: str) -> list[str]
         svc_name,
         "--worker-id",
         "$(CIRCUS.WID)",
+        "--target",
+        target,
     ]
     return args
 
@@ -75,19 +80,19 @@ def create_dynamo_watcher(
     scheduler: ResourceAllocator,
     working_dir: Optional[str] = None,
     env: Optional[Dict[str, str]] = None,
+    target: TargetEnum = TargetEnum.DYNAMO,
 ) -> tuple[Watcher, CircusSocket, str]:
     """Create a watcher for a Dynamo service in the dependency graph"""
     from dynamo.sdk.cli.circus import create_circus_watcher
 
     num_workers, resource_envs = scheduler.get_resource_envs(svc)
     uri, socket = _get_server_socket(svc, uds_path)
-    args = _get_dynamo_worker_script(bento_identifier, svc.name)
+    args = _get_dynamo_worker_script(bento_identifier, svc.name, target)
     if resource_envs:
         args.extend(["--worker-env", json.dumps(resource_envs)])
 
     # Update env to include ServiceConfig and service-specific environment variables
     worker_env = env.copy() if env else {}
-
     # Pass through the main service config
     if "DYNAMO_SERVICE_CONFIG" in os.environ:
         worker_env["DYNAMO_SERVICE_CONFIG"] = os.environ["DYNAMO_SERVICE_CONFIG"]
@@ -123,6 +128,37 @@ def create_dynamo_watcher(
     return watcher, socket, uri
 
 
+def clear_namespace(namespace: str) -> None:
+    """
+    Check if utils/clear_namespace.py exists and run it to clear the namespace.
+    """
+    import os.path
+    import subprocess
+
+    clear_script_path = "utils/clear_namespace.py"
+
+    if os.path.exists(clear_script_path):
+        logger.info(f"Clearing namespace {namespace} using {clear_script_path}")
+        try:
+            # Run the script and wait for it to complete
+            result = subprocess.run(
+                ["python", "-m", "utils.clear_namespace", "--namespace", namespace],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            logger.info(f"Clear namespace output: {result.stdout}")
+            logger.info(f"Successfully cleared namespace {namespace}")
+            if result.stderr:
+                logger.info(f"Clear namespace stderr: {result.stderr}")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to clear namespace {namespace}: {e.stderr}")
+    else:
+        logger.debug(
+            f"Script not found at {clear_script_path}, skip namespace clearing"
+        )
+
+
 @inject(squeeze_none=True)
 def serve_dynamo_graph(
     bento_identifier: str | AnyService,
@@ -130,6 +166,7 @@ def serve_dynamo_graph(
     dependency_map: dict[str, str] | None = None,
     service_name: str = "",
     enable_local_planner: bool = False,
+    target: TargetEnum = TargetEnum.DYNAMO,
 ) -> CircusRunner:
     from dynamo.runtime.logging import configure_dynamo_logging
     from dynamo.sdk.cli.circus import create_arbiter, create_circus_watcher
@@ -166,7 +203,6 @@ def serve_dynamo_graph(
     if service_name:
         logger.info(f"Service '{service_name}' running in standalone mode")
         standalone = True
-
     if service_name and service_name != svc.name:
         svc = svc.find_dependent_by_name(service_name)
     num_workers, resource_envs = allocator.get_resource_envs(svc)
@@ -174,18 +210,26 @@ def serve_dynamo_graph(
     try:
         if not service_name and not standalone:
             with contextlib.ExitStack() as port_stack:
+                # first check if all components has the same namespace
+                namespaces = set()
                 for name, dep_svc in svc.all_services().items():
-                    if name == svc.name:
+                    if name == svc.name or name in dependency_map:
                         continue
-                    if name in dependency_map:
+                    namespaces.add(dep_svc.dynamo_address()[0])
+                if len(namespaces) > 1:
+                    raise RuntimeError(
+                        f"All components must have the same namespace, got {namespaces}"
+                    )
+                else:
+                    namespace = namespaces.pop() if namespaces else ""
+                    logger.info(f"Serving dynamo graph with namespace {namespace}")
+                # clear residue etcd/nats entry (if any) under this namespace
+                logger.info(f"Clearing namespace {namespace} before serving")
+                clear_namespace(namespace)
+
+                for name, dep_svc in svc.all_services().items():
+                    if name == svc.name or name in dependency_map:
                         continue
-                    if not (
-                        hasattr(dep_svc, "is_dynamo_component")
-                        and dep_svc.is_dynamo_component()
-                    ):
-                        raise RuntimeError(
-                            f"Service {dep_svc.name} is not a Dynamo component"
-                        )
                     new_watcher, new_socket, uri = create_dynamo_watcher(
                         bento_id,
                         dep_svc,
@@ -193,8 +237,8 @@ def serve_dynamo_graph(
                         allocator,
                         str(bento_path.absolute()),
                         env=env,
+                        target=target,
                     )
-                    namespace, _ = dep_svc.dynamo_address()
                     watchers.append(new_watcher)
                     sockets.append(new_socket)
                     dependency_map[name] = uri
@@ -211,42 +255,39 @@ def serve_dynamo_graph(
             "$(CIRCUS.WID)",
         ]
 
-        if hasattr(svc, "is_dynamo_component") and svc.is_dynamo_component():
-            # resource_envs is the resource allocation (ie CUDA_VISIBLE_DEVICES) for each worker created by the allocator
-            # these resource_envs are passed to each individual worker's environment which is set in serve_dynamo
-            if resource_envs:
-                dynamo_args.extend(["--worker-env", json.dumps(resource_envs)])
-            # env is the base bentoml environment variables. We make a copy and update it to add any service configurations and additional env vars
-            worker_env = env.copy() if env else {}
+        # resource_envs is the resource allocation (ie CUDA_VISIBLE_DEVICES) for each worker created by the allocator
+        # these resource_envs are passed to each individual worker's environment which is set in serve_dynamo
+        if resource_envs:
+            dynamo_args.extend(["--worker-env", json.dumps(resource_envs)])
+        # env is the base bentoml environment variables. We make a copy and update it to add any service configurations and additional env vars
+        worker_env = env.copy() if env else {}
 
-            # Pass through the main service config
-            if "DYNAMO_SERVICE_CONFIG" in os.environ:
-                worker_env["DYNAMO_SERVICE_CONFIG"] = os.environ[
-                    "DYNAMO_SERVICE_CONFIG"
-                ]
+        # Pass through the main service config
+        if "DYNAMO_SERVICE_CONFIG" in os.environ:
+            worker_env["DYNAMO_SERVICE_CONFIG"] = os.environ["DYNAMO_SERVICE_CONFIG"]
 
-            # Get service-specific environment variables from DYNAMO_SERVICE_ENVS
-            if "DYNAMO_SERVICE_ENVS" in os.environ:
-                try:
-                    service_envs = json.loads(os.environ["DYNAMO_SERVICE_ENVS"])
-                    if svc.name in service_envs:
-                        service_args = service_envs[svc.name].get("ServiceArgs", {})
-                        if "envs" in service_args:
-                            worker_env.update(service_args["envs"])
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse DYNAMO_SERVICE_ENVS: {e}")
+        # Get service-specific environment variables from DYNAMO_SERVICE_ENVS
+        if "DYNAMO_SERVICE_ENVS" in os.environ:
+            try:
+                service_envs = json.loads(os.environ["DYNAMO_SERVICE_ENVS"])
+                if svc.name in service_envs:
+                    service_args = service_envs[svc.name].get("ServiceArgs", {})
+                    if "envs" in service_args:
+                        worker_env.update(service_args["envs"])
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse DYNAMO_SERVICE_ENVS: {e}")
 
-            watcher = create_circus_watcher(
-                name=f"{namespace}_{svc.name}",
-                args=dynamo_args,
-                numprocesses=num_workers,
-                working_dir=str(bento_path.absolute()),
-                env=worker_env,
-            )
-            watchers.append(watcher)
-            logger.info(
-                f"Created watcher for {svc.name} with {num_workers} workers in the {namespace} namespace"
-            )
+        watcher = create_circus_watcher(
+            name=f"{namespace}_{svc.name}",
+            args=dynamo_args,
+            numprocesses=num_workers,
+            working_dir=str(bento_path.absolute()),
+            env=worker_env,
+        )
+        watchers.append(watcher)
+        logger.info(
+            f"Created watcher for {svc.name} with {num_workers} workers in the {namespace} namespace"
+        )
 
         # inject runner map now
         inject_env = {"BENTOML_RUNNER_MAP": json.dumps(dependency_map)}
@@ -263,6 +304,7 @@ def serve_dynamo_graph(
         }
 
         arbiter = create_arbiter(**arbiter_kwargs)
+        arbiter.exit_stack.callback(clear_namespace, namespace)
         arbiter.exit_stack.callback(shutil.rmtree, uds_path, ignore_errors=True)
         if enable_local_planner:
             arbiter.exit_stack.callback(

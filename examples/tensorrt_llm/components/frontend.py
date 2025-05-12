@@ -48,7 +48,6 @@ class FrontendConfig(BaseModel):
 
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "dynamo",
     },
     resources={"cpu": "10", "memory": "20Gi"},

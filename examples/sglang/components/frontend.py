@@ -17,24 +17,24 @@ import logging
 import subprocess
 from pathlib import Path
 
-from components.processor import Processor
+from components.worker import SGLangWorker
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from dynamo import sdk
-from dynamo.sdk import async_on_shutdown, depends, service
+import dynamo.sdk as sdk
+from dynamo.sdk import depends, service
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
 
 logger = logging.getLogger(__name__)
 
 
-def get_http_binary_path():
-    """Find the HTTP binary path in SDK or fallback to 'http' command."""
+def get_dynamo_run_binary():
+    """Find the dynamo-run binary path in SDK or fallback to 'dynamo-run' command."""
     sdk_path = Path(sdk.__file__)
-    binary_path = sdk_path.parent / "cli/bin/http"
+    binary_path = sdk_path.parent / "cli/bin/dynamo-run"
     if not binary_path.exists():
-        return "http"
+        return "dynamo-run"
     else:
         return str(binary_path)
 
@@ -47,10 +47,8 @@ class FrontendConfig(BaseModel):
     port: int = 8080
 
 
-# todo this should be called ApiServer
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "dynamo",
     },
     workers=1,
@@ -58,7 +56,7 @@ class FrontendConfig(BaseModel):
     app=FastAPI(title="LLM Example"),
 )
 class Frontend:
-    processor = depends(Processor)
+    worker = depends(SGLangWorker)
 
     def __init__(self):
         """Initialize Frontend service with HTTP server and model configuration."""
@@ -67,56 +65,24 @@ class Frontend:
         self.frontend_config = frontend_config
         self.process = None
 
-        self.setup_model()
-        self.start_http_server()
+        self.start_ingress_and_processor()
 
-    def setup_model(self):
-        """Configure the model for HTTP service using llmctl."""
-        subprocess.run(
-            [
-                "llmctl",
-                "http",
-                "remove",
-                "chat-models",
-                self.frontend_config.served_model_name,
-            ],
-            check=False,
+    def start_ingress_and_processor(self):
+        """Starting dynamo-run based ingress and processor"""
+        logger.info(
+            f"Starting HTTP server and processor on port {self.frontend_config.port}"
         )
-        subprocess.run(
-            [
-                "llmctl",
-                "http",
-                "add",
-                "chat-models",
-                self.frontend_config.served_model_name,
-                self.frontend_config.endpoint,
-            ],
-            check=False,
-        )
-
-    def start_http_server(self):
-        """Start the HTTP server on the configured port."""
-        logger.info("Starting HTTP server")
-        http_binary = get_http_binary_path()
+        dynamo_run_binary = get_dynamo_run_binary()
+        endpoint = f"dyn://{self.frontend_config.endpoint}"
 
         self.process = subprocess.Popen(
-            [http_binary, "-p", str(self.frontend_config.port)],
+            [
+                dynamo_run_binary,
+                "in=http",
+                f"out={endpoint}",
+                "--http-port",
+                str(self.frontend_config.port),
+            ],
             stdout=None,
             stderr=None,
-        )
-
-    @async_on_shutdown
-    def cleanup(self):
-        """Clean up resources before shutdown."""
-
-        # circusd manages shutdown of http server process, we just need to remove the model using the on_shutdown hook
-        subprocess.run(
-            [
-                "llmctl",
-                "http",
-                "remove",
-                "chat-models",
-                self.frontend_config.served_model_name,
-            ],
-            check=False,
         )

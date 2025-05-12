@@ -22,6 +22,8 @@ import (
 	"sort"
 	"testing"
 
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	"github.com/bsm/gomega"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -77,6 +79,128 @@ func Test_mergeEnvs(t *testing.T) {
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("mergeEnvs() = %v, want %v", got, tt.want)
 			}
+		})
+	}
+}
+
+func Test_updateDynDeploymentConfig(t *testing.T) {
+	type args struct {
+		dynamoDeploymentComponent *nvidiacomv1alpha1.DynamoComponentDeployment
+		newPort                   int
+	}
+	tests := []struct {
+		name    string
+		args    args
+		want    []corev1.EnvVar
+		wantErr bool
+	}{
+		{
+			name: "main component",
+			args: args{
+				dynamoDeploymentComponent: &nvidiacomv1alpha1.DynamoComponentDeployment{
+					Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+						DynamoTag: "graphs.agg:Frontend",
+						DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+							ServiceName: "Frontend",
+							Envs: []corev1.EnvVar{
+								{
+									Name:  "DYN_DEPLOYMENT_CONFIG",
+									Value: `{"Frontend":{"port":8080},"Planner":{"environment":"kubernetes"}}`,
+								},
+								{
+									Name:  "OTHER",
+									Value: `value`,
+								},
+							},
+						},
+					},
+				},
+				newPort: 3000,
+			},
+			want: []corev1.EnvVar{
+				{
+					Name:  "DYN_DEPLOYMENT_CONFIG",
+					Value: `{"Frontend":{"port":3000},"Planner":{"environment":"kubernetes"}}`,
+				},
+				{
+					Name:  "OTHER",
+					Value: `value`,
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "not main component",
+			args: args{
+				dynamoDeploymentComponent: &nvidiacomv1alpha1.DynamoComponentDeployment{
+					Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+						DynamoTag: "graphs.agg:Frontend",
+						DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+							ServiceName: "Other",
+							Envs: []corev1.EnvVar{
+								{
+									Name:  "DYN_DEPLOYMENT_CONFIG",
+									Value: `{"Frontend":{"port":8080},"Planner":{"environment":"kubernetes"}}`,
+								},
+								{
+									Name:  "OTHER",
+									Value: `value`,
+								},
+							},
+						},
+					},
+				},
+				newPort: 3000,
+			},
+			want: []corev1.EnvVar{
+				{
+					Name:  "DYN_DEPLOYMENT_CONFIG",
+					Value: `{"Frontend":{"port":8080},"Planner":{"environment":"kubernetes"}}`,
+				},
+				{
+					Name:  "OTHER",
+					Value: `value`,
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "no DYN_DEPLOYMENT_CONFIG env variable",
+			args: args{
+				dynamoDeploymentComponent: &nvidiacomv1alpha1.DynamoComponentDeployment{
+					Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+						DynamoTag: "graphs.agg:Frontend",
+						DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+							ServiceName: "Frontend",
+							Envs: []corev1.EnvVar{
+								{
+									Name:  "OTHER",
+									Value: `value`,
+								},
+							},
+						},
+					},
+				},
+				newPort: 8080,
+			},
+			want: []corev1.EnvVar{
+				{
+					Name:  "OTHER",
+					Value: `value`,
+				},
+			},
+			wantErr: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := updateDynDeploymentConfig(tt.args.dynamoDeploymentComponent, tt.args.newPort)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("updateDynDeploymentConfig() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			g := gomega.NewGomegaWithT(t)
+			g.Expect(tt.args.dynamoDeploymentComponent.Spec.Envs).To(gomega.Equal(tt.want))
 		})
 	}
 }
