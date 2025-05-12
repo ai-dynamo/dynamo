@@ -60,7 +60,3 @@ class DisaggPreprocessedRequest(BaseModel):
     bootstrap_host: str
     bootstrap_port: int
     bootstrap_room: int
-
-
-class DisaggOutput(BaseModel):
-    res: dict
