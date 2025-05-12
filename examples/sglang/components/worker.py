@@ -26,13 +26,17 @@ have a separate DecodeWorker.
 
 import logging
 import signal
+import socket
+from typing import Union
 
 import sglang as sgl
-from utils.protocol import PreprocessedRequest
+from sglang.srt.utils import get_ip
+from utils.protocol import PreprocessedRequest, BootstrapInfo, DisaggPreprocessedRequest
+from components.decode_worker import SGLangDecodeWorker
 from utils.sglang import parse_sglang_args
 
 from dynamo.llm import ModelType, register_llm
-from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +49,8 @@ logger = logging.getLogger(__name__)
     workers=1,
 )
 class SGLangWorker:
+    decode_worker = depends(SGLangDecodeWorker)
+
     def __init__(self):
         class_name = self.__class__.__name__
         self.engine_args = parse_sglang_args(class_name, "")
@@ -58,19 +64,36 @@ class SGLangWorker:
     @async_on_start
     async def async_init(self):
         runtime = dynamo_context["runtime"]
-        logger.info("Registering LLM for discovery")
-        comp_ns, comp_name = SGLangWorker.dynamo_address()  # type: ignore
-        endpoint = runtime.namespace(comp_ns).component(comp_name).endpoint("generate")
-        await register_llm(
-            ModelType.Backend,
-            endpoint,
-            self.engine_args.model_path,
-            self.engine_args.served_model_name,
-        )
+        if self.engine_args.disaggregation_mode:
+            logger.info("Registering LLM for discovery")
+            comp_ns, comp_name = SGLangWorker.dynamo_address()  # type: ignore
+            endpoint = runtime.namespace(comp_ns).component(comp_name).endpoint("generate")
+            await register_llm(
+                ModelType.Backend,
+                endpoint,
+                self.engine_args.model_path,
+                self.engine_args.served_model_name,
+            )
+        else:
+            return
 
     def shutdown_sglang_engine(self, signum, frame):
         self.engine.shutdown()
         logger.info("SGLang engine shutdown")
+    
+    def _get_bootstrap_info(self) -> BootstrapInfo:
+        inner_tm = self.engine.tokenizer_manager
+        bootstrap_port = inner_tm.server_args.disaggregation_bootstrap_port
+
+        # multinode check
+        if inner_tm.server_args.dist_init_addr:
+            bootstrap_host = socket.gethostbyname(
+                inner_tm.server_args.dist_init_addr.split(":")[0]
+            )
+        else:
+            bootstrap_host = get_ip()
+        
+        return BootstrapInfo(host=bootstrap_host, port=bootstrap_port)
 
     def _build_sampling_params(self, request: PreprocessedRequest) -> dict:
         # TODO: maintain a full mapping from PreprocessedRequest to SGLang's SamplingParams
@@ -87,14 +110,26 @@ class SGLangWorker:
         return sampling_params
 
     @dynamo_endpoint()
-    async def generate(self, request: PreprocessedRequest):
+    async def generate(self, request: Union[PreprocessedRequest, DisaggPreprocessedRequest]):
         # TODO: maintain a mapping from SGLang's Ouput struct to LLMEngineOuput
         sampling_params = self._build_sampling_params(request)
-        g = await self.engine.async_generate(
-            input_ids=request.token_ids,
-            sampling_params=sampling_params,
-            stream=True,
-        )
+
+        if self.engine_args.disaggregation_mode:
+            g = await self.engine.async_generate(
+                input_ids=request.token_ids,
+                sampling_params=sampling_params,
+                stream=True,
+                bootstrap_host=request.bootstrap_host,
+                bootstrap_port=request.bootstrap_port,
+                bootstrap_room=request.bootstrap_room,
+            )
+        else:
+            g = await self.engine.async_generate(
+                input_ids=request.token_ids,
+                sampling_params=sampling_params,
+                stream=True,
+            )
+
         num_output_tokens_so_far = 0
         async for res in g:
             finish_reason = res["meta_info"]["finish_reason"]
@@ -106,3 +141,10 @@ class SGLangWorker:
                 out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}
             yield out
             num_output_tokens_so_far = next_total_toks
+
+    @dynamo_endpoint()
+    async def get_url(self, request: dict):
+        """
+        Get bootstrap info for disaggregation 
+        """
+        yield self._get_bootstrap_info().model_dump_json()

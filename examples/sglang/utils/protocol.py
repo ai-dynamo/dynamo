@@ -52,3 +52,13 @@ class PreprocessedRequest(BaseModel):
     eos_token_ids: List[TokenIdType] = Field(default_factory=list)
     mdc_sum: Optional[str] = None
     annotations: List[str] = Field(default_factory=list)
+
+class BootstrapInfo(BaseModel):
+    host: str
+    port: int
+
+class DisaggPreprocessedRequest(BaseModel):
+    request: PreprocessedRequest
+    bootstrap_host: str
+    bootstrap_port: int
+    bootstrap_room: int
