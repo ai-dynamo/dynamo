@@ -367,5 +367,5 @@ def configure_target_environment(target: TargetEnum):
         target = LocalDeploymentTarget()
     else:
         raise ValueError(f"Invalid target: {target}")
-    logger.info(f"Setting deployment target to {target}")
+    logger.debug(f"Setting deployment target to {target}")
     set_target(target)
