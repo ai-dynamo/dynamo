@@ -102,21 +102,6 @@ class VllmBaseWorker:
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
     workers=1,
 )
-class VllmWorker(VllmBaseWorker):
-    @async_on_start
-    async def async_init(self):
-        await super().async_init()
-        logger.info("VllmWorker has been initialized")
-
-
-@service(
-    dynamo={
-        "enabled": True,
-        "namespace": "dynamo",
-    },
-    resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
-    workers=1,
-)
 class VllmPrefillWorker(VllmBaseWorker):
     @async_on_start
     async def async_init(self):

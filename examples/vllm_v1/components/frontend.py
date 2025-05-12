@@ -76,6 +76,11 @@ class Frontend:
         dynamo_run_binary = get_dynamo_run_binary()
         endpoint = f"dyn://{self.frontend_config.endpoint}"
 
+        logger.info(
+            f"Starting HTTP server and processor on port {self.frontend_config.port}"
+        )
+        logger.info(f"Endpoint: {endpoint}")
+
         self.process = subprocess.Popen(
             [
                 dynamo_run_binary,
