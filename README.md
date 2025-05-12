@@ -26,9 +26,12 @@ limitations under the License.
 NVIDIA Dynamo is a high-throughput low-latency inference framework designed for serving generative AI and reasoning models in multi-node distributed environments. Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLang or others) and captures LLM-specific capabilities such as:
 
 - **Disaggregated prefill & decode inference** – Maximizes GPU throughput and facilitates trade off between throughput and latency.
-- **Dynamic GPU scheduling** – Optimizes performance based on fluctuating demand
 - **LLM-aware request routing** – Eliminates unnecessary KV cache re-computation
 - **Accelerated data transfer** – Reduces inference response time using NIXL.
+
+In the near future Dynamo will also feature:
+
+- **Dynamic GPU scheduling** – Optimizes performance based on fluctuating demand
 - **KV cache offloading** – Leverages multiple memory hierarchies for higher system throughput
 
 Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach.
