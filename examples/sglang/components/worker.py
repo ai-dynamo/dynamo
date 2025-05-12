@@ -113,11 +113,11 @@ class SGLangWorker:
         return sampling_params
 
     @dynamo_endpoint()
-    async def generate(self, request: Union[PreprocessedRequest, DisaggPreprocessedRequest]):
+    async def generate(self, request: PreprocessedRequest):
         # TODO: maintain a mapping from SGLang's Ouput struct to LLMEngineOuput
         sampling_params = self._build_sampling_params(request)
 
-        if self.engine_args.disaggregation_mode:
+        if self.engine_args.disaggregation_mode != "null":
             # we've already routed to a prefill worker so now we need to grab a decode id
             decode_id = self._select_random_decode_id()
 
