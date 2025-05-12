@@ -17,7 +17,6 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
-
 TokenIdType = int
 
 
@@ -54,13 +53,19 @@ class PreprocessedRequest(BaseModel):
     mdc_sum: Optional[str] = None
     annotations: List[str] = Field(default_factory=list)
 
+
 class BootstrapInfo(BaseModel):
     host: str
     port: int
 
+
 class DisaggPreprocessedRequest(BaseModel):
     request: PreprocessedRequest
-    sampling_params: dict 
+    sampling_params: dict
     bootstrap_host: str
     bootstrap_port: int
     bootstrap_room: int
+
+
+class DisaggOutput(BaseModel):
+    res: dict

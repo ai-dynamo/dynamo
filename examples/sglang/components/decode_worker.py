@@ -3,10 +3,10 @@ from __future__ import annotations
 import logging
 import signal
 
+import sglang as sgl
 from utils.protocol import DisaggPreprocessedRequest
 from utils.sglang import parse_sglang_args
 
-import sglang as sgl
 from dynamo.sdk import dynamo_endpoint, service
 
 logger = logging.getLogger(__name__)
@@ -47,8 +47,5 @@ class SGLangDecodeWorker:
             bootstrap_room=req.bootstrap_room,
         )
 
-        logger.info(f"Received prefill response from worker")
-
         async for result in g:
-            logger.info(f"Received result: {result}")
             yield result

@@ -29,12 +29,11 @@ import logging
 import random
 import signal
 import socket
-from typing import Union
 
 import sglang as sgl
-from sglang.srt.utils import get_ip
-from utils.protocol import PreprocessedRequest, BootstrapInfo, DisaggPreprocessedRequest
 from components.decode_worker import SGLangDecodeWorker
+from sglang.srt.utils import get_ip
+from utils.protocol import BootstrapInfo, DisaggPreprocessedRequest, PreprocessedRequest
 from utils.sglang import parse_sglang_args
 
 from dynamo.llm import ModelType, register_llm
@@ -77,14 +76,18 @@ class SGLangWorker:
         )
         if self.engine_args.disaggregation_mode:
             self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info()
-            comp_ns, comp_name = SGLangDecodeWorker.dynamo_address() # type: ignore
-            self.decode_client = await runtime.namespace(comp_ns).component(comp_name).endpoint("generate").client()
-
+            comp_ns, comp_name = SGLangDecodeWorker.dynamo_address()  # type: ignore
+            self.decode_client = (
+                await runtime.namespace(comp_ns)
+                .component(comp_name)
+                .endpoint("generate")
+                .client()
+            )
 
     def shutdown_sglang_engine(self, signum, frame):
         self.engine.shutdown()
         logger.info("SGLang engine shutdown")
-    
+
     def _get_bootstrap_info(self) -> BootstrapInfo:
         inner_tm = self.engine.tokenizer_manager
         bootstrap_port = inner_tm.server_args.disaggregation_bootstrap_port
@@ -96,7 +99,7 @@ class SGLangWorker:
             )
         else:
             bootstrap_host = get_ip()
-        
+
         return bootstrap_host, bootstrap_port
 
     def _build_sampling_params(self, request: PreprocessedRequest) -> dict:
@@ -123,16 +126,16 @@ class SGLangWorker:
             decode_id = self._select_random_decode_id()
             bootstrap_room = self._generate_bootstrap_room()
 
-            # we send this to the decode worker
+            # decode worker request
             disagg_request = DisaggPreprocessedRequest(
-                request = request,
-                sampling_params = sampling_params,
-                bootstrap_host = self.bootstrap_host,
-                bootstrap_port = self.bootstrap_port,
-                bootstrap_room = bootstrap_room,
+                request=request,
+                sampling_params=sampling_params,
+                bootstrap_host=self.bootstrap_host,
+                bootstrap_port=self.bootstrap_port,
+                bootstrap_room=bootstrap_room,
             )
 
-            # we don't care about the prefill response
+            # prefill response is not needed
             prefill = await self.engine.async_generate(
                 input_ids=request.token_ids,
                 sampling_params=sampling_params,
@@ -141,18 +144,7 @@ class SGLangWorker:
                 bootstrap_port=self.bootstrap_port,
                 bootstrap_room=bootstrap_room,
             )
-
-            async def consume_prefill_generator():
-                logger.info(f"Prefill consumption task started for room {bootstrap_room}")
-                async for _ in prefill:
-                    # This loop drives the SGLangWorker's engine to perform prefill
-                    # and send data to the bootstrap room.
-                    pass
-                logger.info(f"Prefill consumption task completed for room {bootstrap_room}")
-
-            prefill_task = asyncio.create_task(consume_prefill_generator())
-
-            logger.info(f"Sending decode request to decode worker")
+            prefill_task = asyncio.create_task(self._prefill_generator(prefill))
 
             decode = await self.decode_client.direct(
                 disagg_request.model_dump_json(),
@@ -194,7 +186,10 @@ class SGLangWorker:
 
     def _select_random_decode_id(self):
         return random.choice(self.decode_client.endpoint_ids())
-    
+
     def _generate_bootstrap_room(self):
         return random.randint(0, 2**63 - 1)
-    
+
+    async def _prefill_generator(self, prefill):
+        async for _ in prefill:
+            pass
