@@ -23,7 +23,7 @@ from typing_extensions import NotRequired
 from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
-from vllm.sampling_params import KVTransferParams, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import PromptLogprobs, RequestMetrics
 
 TokenIdType = int
@@ -81,11 +81,6 @@ SamplingParams.__get_pydantic_core_schema__ = classmethod(
 )
 
 
-KVTransferParams.__get_pydantic_core_schema__ = classmethod(
-    lambda cls, source, handler: core_schema.any_schema()
-)
-
-
 LoRARequest.__get_pydantic_core_schema__ = classmethod(
     lambda cls, source, handler: core_schema.any_schema()
 )
@@ -133,22 +128,9 @@ class MyRequestOutput(BaseModel):
     outputs: List[CompletionOutput]
     finished: bool
     metrics: Optional[RequestMetrics] = None
-    kv_transfer_params: Optional[KVTransferParams] = None
+    kv_transfer_params: Optional[dict[str, Any]] = None
     # lora_request: Optional[LoRARequest] = None
     # encoder_prompt: Optional[str] = None
     # encoder_prompt_token_ids: Optional[List[int]] = None
     # num_cached_tokens: Optional[int] = None
     # multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
-
-    @field_validator("kv_transfer_params", mode="before")
-    @classmethod
-    def parse_kv_transfer_params(cls, v: Any) -> KVTransferParams:
-        if isinstance(v, str):
-            v = json.loads(v)
-        if isinstance(v, dict):
-            return KVTransferParams(**v)
-        return v
-
-    model_config = ConfigDict(
-        json_encoders={KVTransferParams: lambda v: msgspec.json.encode(v)}
-    )

@@ -23,7 +23,7 @@ from components.worker import VllmDecodeWorker, VllmPrefillWorker, VllmWorker
 from utils.args import parse_vllm_args
 from utils.protocol import MyRequestOutput, PreprocessedRequest, vLLMGenerateRequest
 from vllm.inputs import TokensPrompt
-from vllm.sampling_params import KVTransferParams, SamplingParams
+from vllm.sampling_params import SamplingParams
 
 from dynamo.llm import ModelType, register_llm
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
@@ -76,7 +76,7 @@ class SimpleLoadBalancer:
         self, request: vLLMGenerateRequest
     ) -> MyRequestOutput:
         prefill_request = copy.deepcopy(request)
-        prefill_request.sampling_params.kv_transfer_params = KVTransferParams(
+        prefill_request.sampling_params.kv_transfer_params = dict(
             do_remote_decode=True,
         )
         prefill_request.sampling_params.max_tokens = 1
