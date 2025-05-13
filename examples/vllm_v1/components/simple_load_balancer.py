@@ -16,7 +16,6 @@
 import copy
 import logging
 import uuid
-from enum import Enum
 from typing import AsyncGenerator, Optional
 
 from components.worker import VllmDecodeWorker, VllmPrefillWorker
@@ -29,11 +28,6 @@ from dynamo.llm import ModelType, register_llm
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
 logger = logging.getLogger(__name__)
-
-
-class RequestType(Enum):
-    CHAT = "chat"
-    COMPLETION = "completion"
 
 
 @service(
@@ -52,30 +46,28 @@ class SimpleLoadBalancer:
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
         model_config = self.engine_args.create_model_config()
-        # Load default sampling params from `generation_config.json`
         self.default_sampling_params = model_config.get_diff_sampling_param()
+        self.enable_disagg = self.engine_args.enable_disagg
 
     @async_on_start
     async def async_init(self):
         runtime = dynamo_context["runtime"]
         logger.info("Registering LLM for discovery")
         comp_ns, comp_name = SimpleLoadBalancer.dynamo_address()  # type: ignore
-        for endpoint_name in ["generate_agg", "generate_disagg"]:
-            for served_model_name in self.engine_args.served_model_name:
-                logger.info(
-                    f"Registering endpoint {endpoint_name} with model {self.engine_args.model} and served_model_name {served_model_name}"
-                )
-                endpoint = (
-                    runtime.namespace(comp_ns)
-                    .component(comp_name)
-                    .endpoint(endpoint_name)
-                )
-                await register_llm(
-                    ModelType.Backend,
-                    endpoint,
-                    self.engine_args.model,
-                    served_model_name,
-                )
+        endpoint_name = "generate"
+        for served_model_name in self.engine_args.served_model_name:
+            logger.info(
+                f"Registering endpoint {endpoint_name} with model {self.engine_args.model} and served_model_name {served_model_name}"
+            )
+            endpoint = (
+                runtime.namespace(comp_ns).component(comp_name).endpoint(endpoint_name)
+            )
+            await register_llm(
+                ModelType.Backend,
+                endpoint,
+                self.engine_args.model,
+                served_model_name,
+            )
 
         comp_ns, comp_name = VllmDecodeWorker.dynamo_address()  # type: ignore
         self.decode_worker_client = (
@@ -98,6 +90,8 @@ class SimpleLoadBalancer:
     async def send_request_to_prefill(
         self, request: vLLMGenerateRequest
     ) -> MyRequestOutput:
+        logger.debug("Sending request to prefill")
+
         prefill_request = copy.deepcopy(request)
         prefill_request.sampling_params.kv_transfer_params = dict(
             do_remote_decode=True,
@@ -117,6 +111,8 @@ class SimpleLoadBalancer:
         request: vLLMGenerateRequest,
         prefill_response: Optional[MyRequestOutput] = None,
     ) -> AsyncGenerator[MyRequestOutput, None]:
+        logger.debug("Sending request to decode")
+
         decode_request = copy.deepcopy(request)
 
         if prefill_response:
@@ -131,7 +127,28 @@ class SimpleLoadBalancer:
         ):
             yield MyRequestOutput.model_validate_json(decode_response.data())
 
-    def create_vllm_request(self, request: PreprocessedRequest) -> vLLMGenerateRequest:
+    @dynamo_endpoint()
+    async def generate(self, request: PreprocessedRequest):
+        logger.debug(
+            "Processor received completion request: %s", request.model_dump_json()
+        )
+
+        vllm_request = self._create_vllm_request(request)
+
+        logger.debug("VLLM request: %s", vllm_request.model_dump_json())
+
+        if self.enable_disagg:
+            prefill_response = await self.send_request_to_prefill(vllm_request)
+
+            logger.debug("Prefill response: %s", prefill_response.model_dump_json())
+        else:
+            prefill_response = None
+
+        gen = self.send_request_to_decode(vllm_request, prefill_response)
+        async for res in self._stream_response(gen):
+            yield res
+
+    def _create_vllm_request(self, request: PreprocessedRequest) -> vLLMGenerateRequest:
         # logging.debug(f"Received request: {request}")
         request_id = str(uuid.uuid4().hex)
 
@@ -154,7 +171,7 @@ class SimpleLoadBalancer:
             request_id=request_id,
         )
 
-    async def stream_response(self, gen: AsyncGenerator[MyRequestOutput, None]):
+    async def _stream_response(self, gen: AsyncGenerator[MyRequestOutput, None]):
         num_output_tokens_so_far = 0
         async for res in gen:
             logger.debug("Decode response: %s", res.model_dump_json())
@@ -179,35 +196,3 @@ class SimpleLoadBalancer:
                 out["stop_reason"] = output.stop_reason
             yield out
             num_output_tokens_so_far = next_total_toks
-
-    @dynamo_endpoint()
-    async def generate_disagg(self, request: PreprocessedRequest):
-        logger.debug(
-            "Processor received completion request: %s", request.model_dump_json()
-        )
-
-        vllm_request = self.create_vllm_request(request)
-
-        logger.debug("VLLM request: %s", vllm_request.model_dump_json())
-
-        prefill_response = await self.send_request_to_prefill(vllm_request)
-
-        logger.debug("Prefill response: %s", prefill_response.model_dump_json())
-
-        gen = self.send_request_to_decode(vllm_request, prefill_response)
-        async for res in self.stream_response(gen):
-            yield res
-
-    @dynamo_endpoint()
-    async def generate_agg(self, request: PreprocessedRequest):
-        logger.debug(
-            "Processor received completion request: %s", request.model_dump_json()
-        )
-
-        vllm_request = self.create_vllm_request(request)
-
-        logger.debug("VLLM request: %s", vllm_request.model_dump_json())
-
-        gen = self.send_request_to_decode(vllm_request)
-        async for res in self.stream_response(gen):
-            yield res

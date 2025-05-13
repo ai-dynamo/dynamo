@@ -23,6 +23,7 @@ Frontend:
   served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
 SimpleLoadBalancer:
+  enable_disagg: true
   common-configs: [model, kv-transfer-config, served_model_name]
 
 VllmPrefillWorker:

@@ -24,7 +24,11 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     config = ServiceConfig.get_instance()
     vllm_args = config.as_args(service_name, prefix=prefix)
     parser = FlexibleArgumentParser()
+    parser.add_argument(
+        "--enable-disagg", action="store_true", help="Enable disaggregation"
+    )
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args(vllm_args)
     engine_args = AsyncEngineArgs.from_cli_args(args)
+    engine_args.enable_disagg = args.enable_disagg
     return engine_args
