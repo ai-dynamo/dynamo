@@ -14,12 +14,12 @@
 # limitations under the License.
 
 import asyncio
-import connect
 import logging
 import os
 import signal
 from typing import Optional
 
+import connect
 import torch
 from components.disagg_router import PyDisaggregatedRouter
 from components.encode_worker import VllmEncodeWorker
@@ -158,7 +158,9 @@ class VllmDecodeWorker:
             await self._connector.initialize()
 
             # Create a longer-lived buffer for receiving the image embeddings.
-            embeddings = torch.empty(EMBEDDINGS_SHAPE, dtype=EMBEDDINGS_DTYPE, device=EMBEDDINGS_DEVICE)
+            embeddings = torch.empty(
+                EMBEDDINGS_SHAPE, dtype=EMBEDDINGS_DTYPE, device=EMBEDDINGS_DEVICE
+            )
             descriptor = connect.Descriptor(embeddings)
             # Register the descriptor w/ NIXL (this is optional, if not done here the connect subsytem will take care of this automatically).
             descriptor.register_memory(self._connector)
@@ -279,8 +281,12 @@ class VllmDecodeWorker:
                 )
 
                 async for encode_response in encode_generator:
-                    encode_output = EncodeResponse.model_validate_json(encode_response.data())
-                    logger.info(f"Received response: {{ id: {encode_output.request_id} }}")
+                    encode_output = EncodeResponse.model_validate_json(
+                        encode_response.data()
+                    )
+                    logger.info(
+                        f"Received response: {{ id: {encode_output.request_id} }}"
+                    )
 
                 # Wait for the write operation to complete.
                 # This will block until the write operation is complete.
@@ -300,10 +306,14 @@ class VllmDecodeWorker:
         # When using aggregated serving, the encode worker will have provided the key-value cache updates via the prefill worker.
         # When using disaggregated serving, the encode worker will have provided the key-value cache updates via the encode worker.
         if embeddings is not None:
-            logger.debug("Aggregated: embedding data from encode worker provided via multi-modal data to decode model.")
+            logger.debug(
+                "Aggregated: embedding data from encode worker provided via multi-modal data to decode model."
+            )
             multi_modal_data = {"image": embeddings}
         else:
-            logger.debug("Disaggregated: no embedding data required as prefill will have provided key-value cache updates via encode worker.")
+            logger.debug(
+                "Disaggregated: no embedding data required as prefill will have provided key-value cache updates via encode worker."
+            )
             multi_modal_data = None
 
         async for response in self.engine_client.generate(
@@ -315,7 +325,9 @@ class VllmDecodeWorker:
             request_id=request.request_id,
             remote_prefill_params=remote_prefill_params,
         ):
-            logger.debug(f"Yeilding response {{ id: {response.request_id}, prompt: '{response.prompt}' }}")
+            logger.debug(
+                f"Yeilding response {{ id: {response.request_id}, prompt: '{response.prompt}' }}"
+            )
             yield MyRequestOutput(
                 request_id=response.request_id,
                 prompt=response.prompt,
