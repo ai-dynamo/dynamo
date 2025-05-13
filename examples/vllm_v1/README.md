@@ -20,8 +20,7 @@ limitations under the License.
 
 
 ```
-uv pip uninstall ai-dynamo-vllm
-git clone --branch upstream-nixl-clean https://github.com/robertgshaw2-redhat/vllm.git
+git clone https://github.com/vllm-project/vllm.git
 VLLM_USE_PRECOMPILED=1 uv pip install --editable ./vllm/
 
 Start required services (etcd and NATS) using [Docker Compose](../../deploy/docker-compose.yml)
