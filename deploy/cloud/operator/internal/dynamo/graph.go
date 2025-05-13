@@ -20,6 +20,7 @@ package dynamo
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -56,10 +57,10 @@ type DynamoConfig struct {
 }
 
 type Resources struct {
-	CPU    *string           `yaml:"cpu,omitempty"`
-	Memory *string           `yaml:"memory,omitempty"`
-	GPU    *string           `yaml:"gpu,omitempty"`
-	Custom map[string]string `yaml:"custom,omitempty"`
+	CPU    *string           `yaml:"cpu,omitempty" json:"cpu,omitempty"`
+	Memory *string           `yaml:"memory,omitempty" json:"memory,omitempty"`
+	GPU    *string           `yaml:"gpu,omitempty" json:"gpu,omitempty"`
+	Custom map[string]string `yaml:"custom,omitempty" json:"custom,omitempty"`
 }
 
 type Traffic struct {
@@ -87,20 +88,17 @@ type ServiceConfig struct {
 	Config       Config              `yaml:"config"`
 }
 
-type DynDeploymentConfig struct {
-	Port       int                                    `json:"port"`
-	Components map[string]*DynDeploymentServiceConfig `yaml:"-"`
-}
+type DynDeploymentConfig = map[string]*DynDeploymentServiceConfig
 
 // ServiceConfig represents the configuration for a specific service
 type DynDeploymentServiceConfig struct {
-	ServiceArgs *ServiceArgs `yaml:"serviceArgs,omitempty"`
+	ServiceArgs *ServiceArgs `json:"ServiceArgs,omitempty"`
 }
 
 // ServiceArgs represents the arguments that can be passed to any service
 type ServiceArgs struct {
-	Workers   *int32     `yaml:"workers,omitempty"`
-	Resources *Resources `yaml:"resources,omitempty"`
+	Workers   *int32     `json:"workers,omitempty"`
+	Resources *Resources `json:"resources,omitempty"`
 }
 
 func (s ServiceConfig) GetNamespace() *string {
@@ -237,10 +235,10 @@ func ParseDynamoGraphConfig(ctx context.Context, yamlContent *bytes.Buffer) (*Dy
 	return &config, err
 }
 
-func ParseDynDeploymentConfig(ctx context.Context, yamlContent []byte) (*DynDeploymentConfig, error) {
+func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeploymentConfig, error) {
 	var config DynDeploymentConfig
-	err := yaml.Unmarshal(yamlContent, &config)
-	return &config, err
+	err := json.Unmarshal(jsonContent, &config)
+	return config, err
 }
 
 func GetDynamoGraphConfig(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, recorder EventRecorder) (*DynamoGraphConfig, error) {
