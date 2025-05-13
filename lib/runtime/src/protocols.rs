@@ -173,6 +173,16 @@ impl FromStr for Endpoint {
     }
 }
 
+impl Endpoint {
+    /// As a String like dyn://dynamo.internal.worker
+    pub fn as_url(&self) -> String {
+        format!(
+            "{ENDPOINT_SCHEME}{}.{}.{}",
+            self.namespace, self.component, self.name
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum RouterType {

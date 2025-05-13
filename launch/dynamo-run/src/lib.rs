@@ -22,6 +22,9 @@ const CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(feature = "python")]
 const PYTHON_STR_SCHEME: &str = "pystr:";
 
+/// Where we will attach the vllm/sglang subprocess. Invisible to users.
+pub const INTERNAL_ENDPOINT: &str = "dyn://dynamo.internal.worker";
+
 pub enum EngineConfig {
     /// An remote networked engine we don't know about yet
     Dynamic(Endpoint),
@@ -45,6 +48,10 @@ pub async fn run(
     out_opt: Output,
     flags: Flags,
 ) -> anyhow::Result<()> {
+    if matches!(&in_opt, Input::Endpoint(_)) && matches!(&out_opt, Output::Endpoint(_)) {
+        anyhow::bail!("Cannot use endpoint for both in and out");
+    }
+
     let cancel_token = runtime.primary_token();
     let maybe_path = flags
         .model_path_pos
@@ -120,6 +127,14 @@ pub async fn run(
                 // TODO Does sglang support GGUF? Can we make it work?
                 anyhow::bail!("`--model-path should point at a HuggingFace repo checkout");
             }
+
+            // If `in=dyn` we want the sglang subprocess to listen on that endpoint.
+            // If not, then the endpoint isn't exposed so we invent an internal one.
+            let endpoint = match &in_opt {
+                Input::Endpoint(path) => path.parse()?,
+                _ => INTERNAL_ENDPOINT.parse()?,
+            };
+
             let multi_node_conf = dynamo_llm::engines::MultiNodeConfig {
                 num_nodes: flags.num_nodes,
                 node_rank: flags.node_rank,
@@ -128,6 +143,7 @@ pub async fn run(
             let (py_script, child) = match subprocess::start(
                 subprocess::sglang::PY,
                 &local_model,
+                &endpoint,
                 flags.tensor_parallel_size,
                 if flags.base_gpu_id == 0 {
                     None
@@ -154,16 +170,24 @@ pub async fn run(
             extra = Some(Box::pin(async move {
                 stopper(cancel_token, child, py_script).await;
             }));
-            let endpoint: Endpoint = subprocess::ENDPOINT.parse()?;
             EngineConfig::Dynamic(endpoint)
         }
         Output::Vllm => {
             if flags.base_gpu_id != 0 {
                 anyhow::bail!("vllm does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
             }
+
+            // If `in=dyn` we want the vllm subprocess to listen on that endpoint.
+            // If not, then the endpoint isn't exposed so we invent an internal one.
+            let endpoint = match &in_opt {
+                Input::Endpoint(path) => path.parse()?,
+                _ => INTERNAL_ENDPOINT.parse()?,
+            };
+
             let (py_script, child) = match subprocess::start(
                 subprocess::vllm::PY,
                 &local_model,
+                &endpoint,
                 flags.tensor_parallel_size,
                 None, // base_gpu_id. vllm uses CUDA_VISIBLE_DEVICES instead
                 None, // multi-node config. vllm uses `ray`, see guide
@@ -182,7 +206,6 @@ pub async fn run(
             extra = Some(Box::pin(async move {
                 stopper(cancel_token, child, py_script).await;
             }));
-            let endpoint: Endpoint = subprocess::ENDPOINT.parse()?;
             EngineConfig::Dynamic(endpoint)
         }
 

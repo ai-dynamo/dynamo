@@ -51,7 +51,6 @@ module-name = "dynamo._core"
 manifest-path = "Cargo.toml"
 python-packages = ["dynamo"]
 python-source = "src"
-features = ["dynamo-llm/block-manager"]
 
 [build-system]
 requires = ["maturin>=1.0,<2.0", "patchelf"]
