@@ -65,7 +65,42 @@ RUN apt-get update -y && \
     # Install utilities
     nvtop \
     tmux \
-    vim
+    vim \
+    autoconf \
+    libtool
+
+WORKDIR /workspace
+
+### UCX EFA Setup ###
+RUN rm -rf /opt/hpcx/ucx
+RUN rm -rf /usr/local/ucx
+RUN cd /usr/local/src && \
+    git clone https://github.com/openucx/ucx.git && \
+    cd ucx &&                   \
+    git checkout v1.19.x &&     \
+    ./autogen.sh && ./configure \
+    --prefix=/usr/local/ucx     \
+    --enable-shared             \
+    --disable-static            \
+    --disable-doxygen-doc       \
+    --enable-optimizations      \
+    --enable-cma                \
+    --enable-devel-headers      \
+    --with-cuda=/usr/local/cuda \
+    --with-verbs                \
+    --with-efa                  \
+    --with-dm                   \
+    --with-gdrcopy=/usr/local   \
+    --enable-mt &&              \
+    make -j &&                  \
+    make -j install-strip &&    \
+    ldconfig
+
+ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:/usr/local/cuda/compat/lib.real:$LD_LIBRARY_PATH
+ENV CPATH=/usr/include:$CPATH
+ENV PATH=/usr/bin:$PATH
+ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
+SHELL ["/bin/bash", "-c"]
 
 WORKDIR /workspace
 
@@ -73,6 +108,12 @@ WORKDIR /workspace
 # Copy nixl source, and use commit hash as cache hint
 COPY --from=nixl_base /opt/nixl /opt/nixl
 COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
+RUN cd /opt/nixl && \
+    mkdir build && \
+    meson setup build/ --prefix=/usr/local/nixl && \
+    cd build/ && \
+    ninja && \
+    ninja install
 
 ### NATS & ETCD SETUP ###
 # nats
@@ -101,7 +142,7 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # Install NIXL Python module
 # TODO: Move gds_path selection based on arch into NIXL build
 RUN if [ "$ARCH" = "arm64" ]; then \
-        cd /opt/nixl && uv pip install . --config-settings=setup-args="-Dgds_path=/usr/local/cuda/targets/sbsa-linux/"; \
+        cd /opt/nixl && uv pip install . --config-settings=setup-args="-Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
     else \
         cd /opt/nixl && uv pip install . ; \
     fi
@@ -111,7 +152,7 @@ RUN if [ "$ARCH" = "arm64" ]; then \
 ARG VLLM_REF="0.8.4"
 ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
 ARG VLLM_PATCHED_PACKAGE_NAME="ai_dynamo_vllm"
-ARG VLLM_PATCHED_PACKAGE_VERSION="0.8.4"
+ARG VLLM_PATCHED_PACKAGE_VERSION="0.8.4.post1"
 ARG VLLM_MAX_JOBS=4
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
@@ -275,6 +316,7 @@ ARG RELEASE_BUILD
 WORKDIR /workspace
 
 RUN yum update -y \
+    && yum install -y llvm-toolset \
     && yum install -y python3.12-devel \
     && yum install -y protobuf-compiler \
     && yum clean all \
@@ -287,6 +329,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
+COPY --from=base /usr/local/nixl /opt/nvidia/nvda_nixl
 COPY --from=base /workspace /workspace
 COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
 ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
@@ -307,7 +350,7 @@ COPY launch /workspace/launch
 COPY deploy/sdk /workspace/deploy/sdk
 
 # Build Rust crate binaries packaged with the wheel
-RUN cargo build --release --locked --features mistralrs,python \
+RUN cargo build --release --locked --features mistralrs,python,dynamo-llm/block-manager \
     -p dynamo-run \
     -p llmctl \
     # Multiple http named crates are present in dependencies, need to specify the path
@@ -335,6 +378,7 @@ WORKDIR /workspace
 
 COPY --from=wheel_builder /workspace/dist/ /workspace/dist/
 COPY --from=wheel_builder /workspace/target/ /workspace/target/
+COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
 # Copy Cargo cache to avoid re-downloading dependencies
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
@@ -342,7 +386,7 @@ COPY . /workspace
 
 # Build rest of the crates
 # Need to figure out rust caching to avoid rebuilding and remove exclude flags
-RUN cargo build --release --locked --workspace \
+RUN cargo build --release --locked --features block-manager --workspace \
     --exclude dynamo-run \
     --exclude llmctl \
     --exclude file://$PWD/components/http \
@@ -370,6 +414,7 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH=/opt/dynamo/bindings/lib/libdynamo_llm_capi.so
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/
 
 ##########################################
 ########## Perf Analyzer Image ###########

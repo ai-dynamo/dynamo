@@ -508,6 +508,141 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "Test GenerateDynamoComponentsDeployments planner",
+			args: args{
+				parentDynamoGraphDeployment: &v1alpha1.DynamoGraphDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dynamographdeployment",
+						Namespace: "default",
+					},
+					Spec: v1alpha1.DynamoGraphDeploymentSpec{
+						DynamoGraph: "dynamocomponent:ac4e234",
+					},
+				},
+				config: &DynamoGraphConfig{
+					DynamoTag: "dynamocomponent:MyService1",
+					Services: []ServiceConfig{
+						{
+							Name: "service1",
+							Config: Config{
+								Dynamo: &DynamoConfig{
+									Enabled:       true,
+									Namespace:     "default",
+									Name:          "service1",
+									ComponentType: ComponentTypePlanner,
+								},
+								Resources: &Resources{
+									CPU:    "1",
+									Memory: "1Gi",
+									GPU:    "0",
+									Custom: map[string]string{},
+								},
+							},
+						},
+					},
+				},
+				ingressSpec: &v1alpha1.IngressSpec{},
+			},
+			want: map[string]*v1alpha1.DynamoComponentDeployment{
+				"service1": {
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dynamographdeployment-service1",
+						Namespace: "default",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent: "service1",
+							commonconsts.KubeLabelDynamoNamespace: "default",
+						},
+					},
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponent: "dynamocomponent:ac4e234",
+						DynamoTag:       "dynamocomponent:MyService1",
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							ServiceName:     "service1",
+							DynamoNamespace: &[]string{"default"}[0],
+							Resources: &compounaiCommon.Resources{
+								Requests: &compounaiCommon.ResourceItem{
+									CPU:    "1",
+									Memory: "1Gi",
+									GPU:    "0",
+									Custom: map[string]string{},
+								},
+								Limits: &compounaiCommon.ResourceItem{
+									CPU:    "1",
+									Memory: "1Gi",
+									GPU:    "0",
+									Custom: map[string]string{},
+								},
+							},
+							Labels: map[string]string{
+								commonconsts.KubeLabelDynamoComponent: "service1",
+								commonconsts.KubeLabelDynamoNamespace: "default",
+							},
+							ExtraPodSpec: &compounaiCommon.ExtraPodSpec{
+								ServiceAccountName: PlannerServiceAccountName,
+							},
+							Autoscaling: &v1alpha1.Autoscaling{},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "Test GenerateDynamoComponentsDeployments dynamo dependency, different namespace",
+			args: args{
+				parentDynamoGraphDeployment: &v1alpha1.DynamoGraphDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dynamographdeployment",
+						Namespace: "default",
+					},
+					Spec: v1alpha1.DynamoGraphDeploymentSpec{
+						DynamoGraph: "dynamocomponent:ac4e234",
+					},
+				},
+				config: &DynamoGraphConfig{
+					DynamoTag:    "dynamocomponent:MyService2",
+					EntryService: "service1",
+					Services: []ServiceConfig{
+						{
+							Name:         "service1",
+							Dependencies: []map[string]string{{"service": "service2"}},
+							Config: Config{
+								Dynamo: &DynamoConfig{
+									Enabled:   true,
+									Namespace: "namespace1",
+									Name:      "service1",
+								},
+								Resources: &Resources{
+									CPU:    "1",
+									Memory: "1Gi",
+									GPU:    "0",
+									Custom: map[string]string{},
+								},
+								Autoscaling: &Autoscaling{
+									MinReplicas: 1,
+									MaxReplicas: 5,
+								},
+							},
+						},
+						{
+							Name:         "service2",
+							Dependencies: []map[string]string{},
+							Config: Config{
+								Dynamo: &DynamoConfig{
+									Enabled:   true,
+									Namespace: "namespace2",
+									Name:      "service2",
+								},
+							},
+						},
+					},
+				},
+				ingressSpec: &v1alpha1.IngressSpec{},
+			},
+			want:    nil,
+			wantErr: true,
+		},
+		{
 			name: "Test GenerateDynamoComponentsDeployments ingress enabled by default",
 			args: args{
 				parentDynamoGraphDeployment: &v1alpha1.DynamoGraphDeployment{

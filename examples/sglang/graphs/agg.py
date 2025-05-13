@@ -13,28 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from components.frontend import Frontend
+from components.worker import SGLangWorker
 
-import argparse
-import asyncio
-
-import uvloop
-
-from dynamo.runtime import DistributedRuntime, dynamo_worker
-
-
-@dynamo_worker(static=False)
-async def worker(runtime: DistributedRuntime):
-    parser = argparse.ArgumentParser()
-    parser.add_argument("lease_id", type=int, help="Lease ID to revoke")
-    args = parser.parse_args()
-    await init(runtime, args.lease_id)
-
-
-async def init(runtime: DistributedRuntime, lease_id: int):
-    client = runtime.etcd_client()
-    await client.revoke_lease(lease_id)
-
-
-if __name__ == "__main__":
-    uvloop.install()
-    asyncio.run(worker())
+Frontend.link(SGLangWorker)

@@ -52,6 +52,12 @@ jobs:
             - 'examples/python_rs/llm/**'
             - 'container/deps/requirements.vllm.txt'
             - 'container/deps/vllm/**'
+          trtllm:
+            - 'container/Dockerfile.tensorrt_llm'
+            - 'examples/tensorrt_llm/**'
+            - 'container/build.sh'
+            - 'container/build_trtllm_wheel.sh'
+            - 'container/deps/**'
           sdk:
             - 'deploy/**'
     - name: Check if Validation Workflow has run
@@ -90,6 +96,10 @@ jobs:
 
         if [ "${{ steps.src_changes.outputs.vllm }}" == "true" ]; then
           ci_variables["RUN_VLLM"]="true"
+        fi
+
+        if [ "${{ steps.src_changes.outputs.trtllm }}" == "true" ]; then
+          ci_variables["RUN_TENSORRTLLM"]="true"
         fi
 
         if [ "${{ steps.src_changes.outputs.sdk }}" == "true" ]; then

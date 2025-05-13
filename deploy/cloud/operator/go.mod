@@ -9,7 +9,6 @@ require (
 	emperror.dev/errors v0.8.1
 	github.com/apparentlymart/go-shquot v0.0.1
 	github.com/bsm/gomega v1.27.10
-	github.com/cisco-open/k8s-objectmatcher v1.9.0
 	github.com/huandu/xstrings v1.4.0
 	github.com/mitchellh/hashstructure/v2 v2.0.2
 	github.com/onsi/ginkgo/v2 v2.19.0
@@ -95,7 +94,6 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240701130421-f6361c86f094 // indirect
 	google.golang.org/grpc v1.65.0 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect
-	gopkg.in/evanphx/json-patch.v4 v4.12.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect

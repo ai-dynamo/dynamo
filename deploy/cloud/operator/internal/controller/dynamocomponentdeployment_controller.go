@@ -23,7 +23,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,14 +42,12 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
-	"github.com/cisco-open/k8s-objectmatcher/patch"
 	"github.com/huandu/xstrings"
 	istioNetworking "istio.io/api/networking/v1beta1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
@@ -58,7 +55,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -77,12 +73,12 @@ const (
 	DeploymentTargetTypeDebug                            = "debug"
 	HeaderNameDebug                                      = "X-Nvidia-Debug"
 	DefaultIngressSuffix                                 = "local"
+	KubernetesDeploymentStrategy                         = "kubernetes"
 )
 
 // DynamoComponentDeploymentReconciler reconciles a DynamoComponentDeployment object
 type DynamoComponentDeploymentReconciler struct {
 	client.Client
-	Scheme            *runtime.Scheme
 	Recorder          record.EventRecorder
 	Config            controller_common.Config
 	NatsAddr          string
@@ -257,10 +253,12 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	}
 
 	// create or update api-server hpa
-	modified_, _, err = createOrUpdateResource(ctx, r, generateResourceOption{
-		dynamoComponentDeployment: dynamoComponentDeployment,
-		dynamoComponent:           dynamoComponentCR,
-	}, r.generateHPA)
+	modified_, _, err = commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*autoscalingv2.HorizontalPodAutoscaler, bool, error) {
+		return r.generateHPA(generateResourceOption{
+			dynamoComponentDeployment: dynamoComponentDeployment,
+			dynamoComponent:           dynamoComponentCR,
+		})
+	})
 	if err != nil {
 		return
 	}
@@ -408,7 +406,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcilePVC(ctx context.Context, 
 			return nil, err
 		}
 		pvc = constructPVC(crd, pvcConfig)
-		if err := controllerutil.SetControllerReference(crd, pvc, r.Scheme); err != nil {
+		if err := controllerutil.SetControllerReference(crd, pvc, r.Client.Scheme()); err != nil {
 			logger.Error(err, "Failed to set controller reference", "pvc", pvc.Name)
 			return nil, err
 		}
@@ -458,156 +456,31 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditions(ctx context.Co
 func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteDeployments(ctx context.Context, opt generateResourceOption) (modified bool, depl *appsv1.Deployment, err error) {
 	containsStealingTrafficDebugModeEnabled := checkIfContainsStealingTrafficDebugModeEnabled(opt.dynamoComponentDeployment)
 	// create the main deployment
-	modified, depl, err = createOrUpdateResource(ctx, r, generateResourceOption{
-		dynamoComponentDeployment:               opt.dynamoComponentDeployment,
-		dynamoComponent:                         opt.dynamoComponent,
-		isStealingTrafficDebugModeEnabled:       false,
-		containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
-	}, r.generateDeployment)
+	modified, depl, err = commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*appsv1.Deployment, bool, error) {
+		return r.generateDeployment(ctx, generateResourceOption{
+			dynamoComponentDeployment:               opt.dynamoComponentDeployment,
+			dynamoComponent:                         opt.dynamoComponent,
+			isStealingTrafficDebugModeEnabled:       false,
+			containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
+		})
+	})
 	if err != nil {
 		err = errors.Wrap(err, "create or update deployment")
 		return
 	}
 	// create the debug deployment
-	modified2, _, err := createOrUpdateResource(ctx, r, generateResourceOption{
-		dynamoComponentDeployment:               opt.dynamoComponentDeployment,
-		dynamoComponent:                         opt.dynamoComponent,
-		isStealingTrafficDebugModeEnabled:       true,
-		containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
-	}, r.generateDeployment)
+	modified2, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*appsv1.Deployment, bool, error) {
+		return r.generateDeployment(ctx, generateResourceOption{
+			dynamoComponentDeployment:               opt.dynamoComponentDeployment,
+			dynamoComponent:                         opt.dynamoComponent,
+			isStealingTrafficDebugModeEnabled:       true,
+			containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
+		})
+	})
 	if err != nil {
 		err = errors.Wrap(err, "create or update debug deployment")
 	}
 	modified = modified || modified2
-	return
-}
-
-//nolint:nakedret
-func createOrUpdateResource[T client.Object](ctx context.Context, r *DynamoComponentDeploymentReconciler, opt generateResourceOption, generateResource func(ctx context.Context, opt generateResourceOption) (T, bool, error)) (modified bool, res T, err error) {
-	logs := log.FromContext(ctx)
-
-	resource, toDelete, err := generateResource(ctx, opt)
-	if err != nil {
-		return
-	}
-	resourceNamespace := resource.GetNamespace()
-	resourceName := resource.GetName()
-	resourceType := reflect.TypeOf(resource).Elem().Name()
-	logs = logs.WithValues("namespace", resourceNamespace, "resourceName", resourceName, "resourceType", resourceType)
-
-	// Retrieve the GroupVersionKind (GVK) of the desired object
-	gvk, err := apiutil.GVKForObject(resource, r.Client.Scheme())
-	if err != nil {
-		logs.Error(err, "Failed to get GVK for object")
-		return
-	}
-
-	// Create a new instance of the object
-	obj, err := r.Client.Scheme().New(gvk)
-	if err != nil {
-		logs.Error(err, "Failed to create a new object for GVK")
-		return
-	}
-
-	// Type assertion to ensure the object implements client.Object
-	oldResource, ok := obj.(T)
-	if !ok {
-		return
-	}
-
-	err = r.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: resourceNamespace}, oldResource)
-	oldResourceIsNotFound := k8serrors.IsNotFound(err)
-	if err != nil && !oldResourceIsNotFound {
-		r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeWarning, fmt.Sprintf("Get%s", resourceType), "Failed to get %s %s: %s", resourceType, resourceNamespace, err)
-		logs.Error(err, "Failed to get HPA.")
-		return
-	}
-	err = nil
-
-	if oldResourceIsNotFound {
-		if toDelete {
-			logs.Info("Resource not found. Nothing to do.")
-			return
-		}
-		logs.Info("Resource not found. Creating a new one.")
-
-		err = errors.Wrapf(patch.DefaultAnnotator.SetLastAppliedAnnotation(resource), "set last applied annotation for resource %s", resourceName)
-		if err != nil {
-			logs.Error(err, "Failed to set last applied annotation.")
-			r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for %s %s: %s", resourceType, resourceNamespace, err)
-			return
-		}
-
-		err = ctrl.SetControllerReference(opt.dynamoComponentDeployment, resource, r.Scheme)
-		if err != nil {
-			logs.Error(err, "Failed to set controller reference.")
-			r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeWarning, "SetControllerReference", "Failed to set controller reference for %s %s: %s", resourceType, resourceNamespace, err)
-			return
-		}
-
-		r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Creating a new %s %s", resourceType, resourceNamespace)
-		err = r.Create(ctx, resource)
-		if err != nil {
-			logs.Error(err, "Failed to create Resource.")
-			r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeWarning, fmt.Sprintf("Create%s", resourceType), "Failed to create %s %s: %s", resourceType, resourceNamespace, err)
-			return
-		}
-		logs.Info(fmt.Sprintf("%s created.", resourceType))
-		r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Created %s %s", resourceType, resourceNamespace)
-		modified = true
-		res = resource
-	} else {
-		logs.Info(fmt.Sprintf("%s found.", resourceType))
-		if toDelete {
-			logs.Info(fmt.Sprintf("%s not found. Deleting the existing one.", resourceType))
-			err = r.Delete(ctx, oldResource)
-			if err != nil {
-				logs.Error(err, fmt.Sprintf("Failed to delete %s.", resourceType))
-				r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeWarning, fmt.Sprintf("Delete%s", resourceType), "Failed to delete %s %s: %s", resourceType, resourceNamespace, err)
-				return
-			}
-			logs.Info(fmt.Sprintf("%s deleted.", resourceType))
-			r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeNormal, fmt.Sprintf("Delete%s", resourceType), "Deleted %s %s", resourceType, resourceNamespace)
-			modified = true
-			return
-		}
-
-		var patchResult *patch.PatchResult
-		patchResult, err = patch.DefaultPatchMaker.Calculate(oldResource, resource)
-		if err != nil {
-			logs.Error(err, "Failed to calculate patch.")
-			r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeWarning, fmt.Sprintf("CalculatePatch%s", resourceType), "Failed to calculate patch for %s %s: %s", resourceType, resourceNamespace, err)
-			return
-		}
-
-		if !patchResult.IsEmpty() {
-			logs.Info(fmt.Sprintf("%s spec is different. Updating %s. The patch result is: %s", resourceType, resourceType, patchResult.String()))
-
-			err = errors.Wrapf(patch.DefaultAnnotator.SetLastAppliedAnnotation(resource), "set last applied annotation for resource %s", resourceName)
-			if err != nil {
-				logs.Error(err, "Failed to set last applied annotation.")
-				r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeWarning, fmt.Sprintf("SetLastAppliedAnnotation%s", resourceType), "Failed to set last applied annotation for %s %s: %s", resourceType, resourceNamespace, err)
-				return
-			}
-
-			r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Updating %s %s", resourceType, resourceNamespace)
-			resource.SetResourceVersion(oldResource.GetResourceVersion())
-			err = r.Update(ctx, resource)
-			if err != nil {
-				logs.Error(err, fmt.Sprintf("Failed to update %s.", resourceType))
-				r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeWarning, fmt.Sprintf("Update%s", resourceType), "Failed to update %s %s: %s", resourceType, resourceNamespace, err)
-				return
-			}
-			logs.Info(fmt.Sprintf("%s updated.", resourceType))
-			r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Updated %s %s", resourceType, resourceNamespace)
-			modified = true
-			res = resource
-		} else {
-			logs.Info(fmt.Sprintf("%s spec is the same. Skipping update.", resourceType))
-			r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Skipping update %s %s", resourceType, resourceNamespace)
-			res = oldResource
-		}
-	}
 	return
 }
 
@@ -654,40 +527,46 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 	isDebugPodReceiveProductionTrafficEnabled := checkIfIsDebugPodReceiveProductionTrafficEnabled(resourceAnnotations)
 	containsStealingTrafficDebugModeEnabled := checkIfContainsStealingTrafficDebugModeEnabled(opt.dynamoComponentDeployment)
 	// main generic service
-	modified, _, err = createOrUpdateResource(ctx, r, generateResourceOption{
-		dynamoComponentDeployment:               opt.dynamoComponentDeployment,
-		dynamoComponent:                         opt.dynamoComponent,
-		isStealingTrafficDebugModeEnabled:       false,
-		isDebugPodReceiveProductionTraffic:      isDebugPodReceiveProductionTrafficEnabled,
-		containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
-		isGenericService:                        true,
-	}, r.generateService)
+	modified, _, err = commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
+		return r.generateService(ctx, generateResourceOption{
+			dynamoComponentDeployment:               opt.dynamoComponentDeployment,
+			dynamoComponent:                         opt.dynamoComponent,
+			isStealingTrafficDebugModeEnabled:       false,
+			isDebugPodReceiveProductionTraffic:      isDebugPodReceiveProductionTrafficEnabled,
+			containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
+			isGenericService:                        true,
+		})
+	})
 	if err != nil {
 		return
 	}
 
 	// debug production service (if enabled)
-	modified_, _, err := createOrUpdateResource(ctx, r, generateResourceOption{
-		dynamoComponentDeployment:               opt.dynamoComponentDeployment,
-		dynamoComponent:                         opt.dynamoComponent,
-		isStealingTrafficDebugModeEnabled:       false,
-		isDebugPodReceiveProductionTraffic:      isDebugPodReceiveProductionTrafficEnabled,
-		containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
-		isGenericService:                        false,
-	}, r.generateService)
+	modified_, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
+		return r.generateService(ctx, generateResourceOption{
+			dynamoComponentDeployment:               opt.dynamoComponentDeployment,
+			dynamoComponent:                         opt.dynamoComponent,
+			isStealingTrafficDebugModeEnabled:       false,
+			isDebugPodReceiveProductionTraffic:      isDebugPodReceiveProductionTrafficEnabled,
+			containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
+			isGenericService:                        false,
+		})
+	})
 	if err != nil {
 		return
 	}
 	modified = modified || modified_
 	// debug service (if enabled)
-	modified_, _, err = createOrUpdateResource(ctx, r, generateResourceOption{
-		dynamoComponentDeployment:               opt.dynamoComponentDeployment,
-		dynamoComponent:                         opt.dynamoComponent,
-		isStealingTrafficDebugModeEnabled:       true,
-		isDebugPodReceiveProductionTraffic:      isDebugPodReceiveProductionTrafficEnabled,
-		containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
-		isGenericService:                        false,
-	}, r.generateService)
+	modified_, _, err = commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
+		return r.generateService(ctx, generateResourceOption{
+			dynamoComponentDeployment:               opt.dynamoComponentDeployment,
+			dynamoComponent:                         opt.dynamoComponent,
+			isStealingTrafficDebugModeEnabled:       true,
+			isDebugPodReceiveProductionTraffic:      isDebugPodReceiveProductionTrafficEnabled,
+			containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
+			isGenericService:                        false,
+		})
+	})
 	if err != nil {
 		return
 	}
@@ -696,11 +575,15 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 }
 
 func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx context.Context, opt generateResourceOption) (modified bool, err error) {
-	modified, _, err = createOrUpdateResource(ctx, r, opt, r.generateIngress)
+	modified, _, err = commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1.Ingress, bool, error) {
+		return r.generateIngress(ctx, opt)
+	})
 	if err != nil {
 		return
 	}
-	modified_, _, err := createOrUpdateResource(ctx, r, opt, r.generateVirtualService)
+	modified_, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
+		return r.generateVirtualService(ctx, opt)
+	})
 	if err != nil {
 		return
 	}
@@ -964,7 +847,7 @@ type generateResourceOption struct {
 	isGenericService                        bool
 }
 
-func (r *DynamoComponentDeploymentReconciler) generateHPA(ctx context.Context, opt generateResourceOption) (*autoscalingv2.HorizontalPodAutoscaler, bool, error) {
+func (r *DynamoComponentDeploymentReconciler) generateHPA(opt generateResourceOption) (*autoscalingv2.HorizontalPodAutoscaler, bool, error) {
 	labels := r.getKubeLabels(opt.dynamoComponentDeployment, opt.dynamoComponent)
 
 	annotations := r.getKubeAnnotations(opt.dynamoComponentDeployment, opt.dynamoComponent)
@@ -1151,6 +1034,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		if opt.dynamoComponentDeployment.Spec.DynamoNamespace != nil && *opt.dynamoComponentDeployment.Spec.DynamoNamespace != "" {
 			args = append(args, fmt.Sprintf("--%s.ServiceArgs.dynamo.namespace=%s", opt.dynamoComponentDeployment.Spec.ServiceName, *opt.dynamoComponentDeployment.Spec.DynamoNamespace))
 		}
+		args = append(args, fmt.Sprintf("--%s.environment=%s", opt.dynamoComponentDeployment.Spec.ServiceName, KubernetesDeploymentStrategy))
 	}
 
 	if len(opt.dynamoComponentDeployment.Spec.Envs) > 0 {
@@ -1505,7 +1389,7 @@ func getResourcesConfig(resources *dynamoCommon.Resources) (corev1.ResourceRequi
 }
 
 //nolint:nakedret
-func (r *DynamoComponentDeploymentReconciler) generateService(ctx context.Context, opt generateResourceOption) (kubeService *corev1.Service, toDelete bool, err error) {
+func (r *DynamoComponentDeploymentReconciler) generateService(_ context.Context, opt generateResourceOption) (kubeService *corev1.Service, toDelete bool, err error) {
 	var kubeName string
 	if opt.isGenericService {
 		kubeName = r.getGenericServiceName(opt.dynamoComponentDeployment, opt.dynamoComponent)
@@ -1601,4 +1485,8 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 	}
 	m.Owns(&autoscalingv2.HorizontalPodAutoscaler{})
 	return m.Complete(r)
+}
+
+func (r *DynamoComponentDeploymentReconciler) GetRecorder() record.EventRecorder {
+	return r.Recorder
 }

@@ -26,7 +26,7 @@ Usage:
 dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn://<path> [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin]
 ```
 
-Example: `dynamo run Qwen/Qwen2.5-3B-Instruct`.
+Example: `dynamo run Qwen/Qwen3-0.6B`
 
 Set environment variable `DYN_LOG` to adjust logging level, e.g. `export DYN_LOG=debug`. It has the same syntax as `RUST_LOG`, ask AI for details.
 
@@ -38,9 +38,9 @@ The vllm and sglang engines require [etcd](https://etcd.io/) and [nats](https://
 
 ### Use model from Hugging Face
 
-This will automatically download Qwen2.5 3B from Hugging Face (6 GiB download) and start it in interactive text mode:
+This will automatically download Qwen3 4B from Hugging Face (16 GiB download) and start it in interactive text mode:
 ```
-dynamo run out=vllm Qwen/Qwen2.5-3B-Instruct
+dynamo run out=vllm Qwen/Qwen3-4B
 ```
 
 General format for HF download:
@@ -65,12 +65,12 @@ curl -L -o Llama-3.2-3B-Instruct-Q4_K_M.gguf "https://huggingface.co/bartowski/L
 #### Run model from local file
 **Text interface**
 ```
-dynamo run out=vllm Llama-3.2-3B-Instruct-Q4_K_M.gguf # or path to a Hugging Face repo checkout instead of the GGUF
+dynamo run Llama-3.2-3B-Instruct-Q4_K_M.gguf # or path to a Hugging Face repo checkout instead of the GGUF
 ```
 
 **HTTP interface**
 ```
-dynamo run in=http out=vllm Llama-3.2-3B-Instruct-Q4_K_M.gguf
+dynamo run in=http out=mistralrs Llama-3.2-3B-Instruct-Q4_K_M.gguf
 ```
 
 **List the models**
@@ -94,7 +94,7 @@ You will need [etcd](https://etcd.io/) and [nats](https://nats.io) with jetstrea
 OpenAI compliant HTTP server, optional pre-processing, worker discovery.
 
 ```
-dynamo run in=http out=dyn://llama3B_pool
+dynamo-run in=http out=dyn://llama3B_pool
 ```
 
 **Node 2:**
@@ -109,11 +109,11 @@ This will use etcd to auto-discover the model and NATS to talk to it. You can ru
 
 The `llama3B_pool` name is purely symbolic, pick anything as long as it matches the other node.
 
-Run `dynamo run --help` for more options.
+Run `dynamo-run --help` for more options.
 
 ## Full usage details
 
-`dynamo-run` is what `dynamo run` executes. It is an example of what you can build in Rust with the `dynamo-llm` and `dynamo-runtime`. The following guide demonstrates how you can build from source with all the features.
+`dynamo-run` is what `dynamo run` executes. It is also an example of what you can build in Rust with the `dynamo-llm` and `dynamo-runtime` crates. The following guide demonstrates how you can build from source with all the features.
 
 ### Setup
 
@@ -181,13 +181,13 @@ Build with `--release` for a smaller binary and better performance, but longer b
 [mistral.rs](https://github.com/EricLBuehler/mistral.rs) is a pure Rust engine that is fast to run, fast to load, supports GGUF as well as safetensors, and runs well on CPU as well as GPU. For those reasons it is the default engine.
 
 ```
-dynamo-run Qwen/Qwen2.5-3B-Instruct
+dynamo-run Qwen/Qwen3-4B
 ```
 
 is equivalent to
 
 ```
-dynamo-run in=text out=mistralrs Qwen/Qwen2.5-3B-Instruct
+dynamo-run in=text out=mistralrs Qwen/Qwen3-4B
 ```
 
 If you have multiple GPUs, mistral.rs does automatic tensor parallelism. You do not need to pass any extra flags to dynamo-run to enable it.
@@ -201,10 +201,16 @@ cargo build --features llamacpp[,cuda|metal|vulkan] -p dynamo-run
 ```
 
 ```
-dynamo-run out=llamacpp ~/llms/Llama-3.2-3B-Instruct-Q6_K.gguf
+dynamo-run out=llamacpp ~/llms/gemma-3-1b-it-q4_0.gguf
+dynamo-run out=llamacpp ~/llms/Qwen3-0.6B-Q8_0.gguf # From https://huggingface.co/ggml-org
 ```
 
-llamacpp is best for single-GPU inference with a quantized GGUF model file.
+Note that in some cases we are unable to extract the tokenizer from the GGUF, and so a Hugging Face checkout of a matching model must also be passed. Dynamo will use the weights from the GGUF and the pre-processor (`tokenizer.json`, etc) from the `--model-config`:
+```
+dynamo-run out=llamacpp ~/llms/Llama-4-Scout-17B-16E-Instruct-UD-IQ1_S.gguf --model-config ~/llms/Llama-4-Scout-17B-16E-Instruct
+```
+
+If you have multiple GPUs, llama.cpp does automatic tensor parallelism. You do not need to pass any extra flags to dynamo-run to enable it.
 
 ### sglang
 
@@ -233,9 +239,13 @@ To pass extra arguments to the sglang engine see *Extra engine arguments* below.
 
 **Multi-GPU**
 
-Pass `--tensor-parallel-size <NUM-GPUS>` to `dynamo-run`. To specify which GPU to start from pass `--base-gpu-id <num>`.
+Pass `--tensor-parallel-size <NUM-GPUS>` to `dynamo-run`.
 
-For example on a shared eight GPU machine where GPUs 0-3 are already in use:
+```
+dynamo-run out=sglang ~/llms/Llama-4-Scout-17B-16E-Instruct/ --tensor-parallel-size 8
+```
+
+To specify which GPU to start from pass `--base-gpu-id <num>`, for example on a shared eight GPU machine where GPUs 0-3 are already in use:
 ```
 dynamo-run out=sglang <model> --tensor-parallel-size 4 --base-gpu-id 4
 ```
@@ -428,7 +438,7 @@ async def worker(runtime: DistributedRuntime):
 
     # 3. Attach request handler
     #
-    await endpoint.serve_endpoint(RequestHandler(engine).generate, None)
+    await endpoint.serve_endpoint(RequestHandler(engine).generate)
 
 class RequestHandler:
 
@@ -457,8 +467,14 @@ The `model_type` can be:
 - ModelType.Completion. Your `generate` method receives a `request` and must return a response dict of the older [Completions](https://platform.openai.com/docs/api-reference/completions). Your engine handles pre-processing.
 
 Here are some example engines:
-- [vllm simple](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_vllm.py)
-- [sglang simple](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_sglang.py)
+
+- Backend:
+    * [vllm](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_vllm.py)
+    * [sglang](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_sglang.py)
+- Chat:
+    * [sglang](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_sglang_tok.py)
+
+More fully-featured Backend engines (used by `dynamo-run`):
 - [vllm](https://github.com/ai-dynamo/dynamo/blob/main/launch/dynamo-run/src/subprocess/vllm_inc.py)
 - [sglang](https://github.com/ai-dynamo/dynamo/blob/main/launch/dynamo-run/src/subprocess/sglang_inc.py)
 

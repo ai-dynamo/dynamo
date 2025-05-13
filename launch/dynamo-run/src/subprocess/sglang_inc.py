@@ -60,16 +60,12 @@ class RequestHandler:
 
     async def generate(self, request):
         sampling_params = {}
-        for key, value in request["sampling_options"].items():
-            if value:
-                # TODO: Do these always match? Maybe allow-list the fields that do match
-                sampling_params[key] = value
-
-        # sglang defaults this to 128
-        max_new_tokens = request["stop_conditions"]["max_tokens"]
-        if max_new_tokens:
-            sampling_params["max_new_tokens"] = max_new_tokens
-
+        if request["sampling_options"]["temperature"] is not None:
+            sampling_params["temperature"] = request["sampling_options"]["temperature"]
+        sampling_params = {
+            # sglang defaults this to 128
+            "max_new_tokens": request["stop_conditions"]["max_tokens"],
+        }
         num_output_tokens_so_far = 0
         gen = await self.engine_client.async_generate(
             input_ids=request["token_ids"], sampling_params=sampling_params, stream=True
@@ -138,7 +134,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
     # after the lease is revoked
-    await endpoint.serve_endpoint(RequestHandler(engine_client).generate, None)
+    await endpoint.serve_endpoint(RequestHandler(engine_client).generate)
 
 
 def cmd_line_args():

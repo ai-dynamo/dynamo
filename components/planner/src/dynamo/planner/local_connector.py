@@ -231,24 +231,6 @@ class LocalConnector(PlannerConnector):
         target_watcher = matching_components[highest_suffix]
         logger.info(f"Removing watcher {target_watcher}")
 
-        pre_remove_endpoint_ids = await self._get_endpoint_ids(component_name)
-
-        if component_name == "VllmWorker" or component_name == "PrefillWorker":
-            lease_id = state["components"][target_watcher]["lease"]
-            await self._revoke_lease(lease_id)
-
-            # Poll endpoint to ensure that worker has shut down gracefully and then remove the watcher
-            if blocking:
-                required_endpoint_ids = pre_remove_endpoint_ids - 1
-                while True:
-                    current_endpoint_ids = await self._get_endpoint_ids(component_name)
-                    if current_endpoint_ids == required_endpoint_ids:
-                        break
-                    logger.info(
-                        f"Waiting for {component_name} to shutdown. Current endpoint IDs: {current_endpoint_ids}, Required endpoint IDs: {required_endpoint_ids}"
-                    )
-                    await asyncio.sleep(5)
-
         success = await self.circus.remove_watcher(name=target_watcher)
         logger.info(
             f"Circus remove_watcher for {target_watcher} {'succeeded' if success else 'failed'}"

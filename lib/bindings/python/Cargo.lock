@@ -1007,7 +1007,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-python"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "akin",
  "anyhow",
@@ -1058,6 +1058,7 @@ dependencies = [
  "memmap2",
  "minijinja",
  "minijinja-contrib",
+ "oneshot",
  "prometheus",
  "rand 0.9.1",
  "rayon",
@@ -1083,7 +1084,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-py3"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "dynamo-engine-python",
  "dynamo-llm",
@@ -1104,7 +1105,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -2511,9 +2512,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja"
-version = "2.9.0"
+version = "2.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98642a6dfca91122779a307b77cd07a4aa951fbe32232aaf5bad9febc66be754"
+checksum = "dd72e8b4e42274540edabec853f607c015c73436159b06c39c7af85a20433155"
 dependencies = [
  "memo-map",
  "self_cell",
@@ -2522,9 +2523,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja-contrib"
-version = "2.9.0"
+version = "2.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd4a0f6e171c7bb92ed2caf446fa3de4e26561cea1d97085103e9cb42359dd59"
+checksum = "457f85f9c4c5b17d11fcf9bbe7c0dbba64843c5ee040005956f1a510b6679fe2"
 dependencies = [
  "minijinja",
  "serde",
@@ -2858,6 +2859,12 @@ name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
+
+[[package]]
+name = "oneshot"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ce411919553d3f9fa53a0880544cda985a112117a0444d5ff1e870a893d6ea"
 
 [[package]]
 name = "onig"
@@ -4563,8 +4570,10 @@ dependencies = [
  "percent-encoding",
  "pin-project",
  "prost",
+ "rustls-pemfile",
  "socket2",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower 0.4.13",
  "tower-layer",

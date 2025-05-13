@@ -28,7 +28,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -39,9 +39,9 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "0.2.0" }
-dynamo-llm = { path = "lib/llm", version = "0.2.0" }
-dynamo-tokens = { path = "lib/tokens", version = "0.2.0" }
+dynamo-runtime = { path = "lib/runtime", version = "0.2.1" }
+dynamo-llm = { path = "lib/llm", version = "0.2.1" }
+dynamo-tokens = { path = "lib/tokens", version = "0.2.1" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -55,11 +55,12 @@ chrono = { version = "0.4", default-features = false, features = ["alloc", "std"
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
 either = { version = "1.13", features = ["serde"] }
-etcd-client = { version = "0.14" }
+etcd-client = { version = "0.14", features = ["tls"] }
 futures = { version = "0.3" }
 hf-hub = { version = "0.4.2", default-features = false, features = ["tokio", "rustls-tls"] }
 humantime = { version = "2.2.0" }
 libc = { version = "0.2" }
+oneshot = { version = "0.1.11", features = ["std", "async"] }
 prometheus = { version = "0.14" }
 rand = { version = "0.9.0" }
 serde = { version = "1", features = ["derive"] }
@@ -76,6 +77,7 @@ validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 url = {version = "2.5", features = ["serde"]}
 xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
+
 
 [profile.dev.package]
 insta.opt-level = 3

@@ -182,7 +182,6 @@ func main() {
 	}
 	if err = (&controller.DynamoComponentDeploymentReconciler{
 		Client:            mgr.GetClient(),
-		Scheme:            mgr.GetScheme(),
 		Recorder:          mgr.GetEventRecorderFor("dynamocomponentdeployment"),
 		Config:            ctrlConfig,
 		NatsAddr:          natsAddr,
@@ -204,7 +203,6 @@ func main() {
 	}
 	if err = (&controller.DynamoGraphDeploymentReconciler{
 		Client:                     mgr.GetClient(),
-		Scheme:                     mgr.GetScheme(),
 		Recorder:                   mgr.GetEventRecorderFor("dynamographdeployment"),
 		Config:                     ctrlConfig,
 		VirtualServiceGateway:      istioVirtualServiceGateway,
