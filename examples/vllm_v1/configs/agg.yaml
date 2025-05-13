@@ -28,7 +28,7 @@ SimpleLoadBalancer:
 VllmDecodeWorker:
   enforce-eager: true
   ServiceArgs:
-    workers: 2
+    workers: 1
     resources:
       gpu: 1
   common-configs: [model, served_model_name]
