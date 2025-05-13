@@ -165,6 +165,7 @@ ARG VLLM_PATCHED_PACKAGE_VERSION="0.8.4.post1"
 ARG VLLM_MAX_JOBS=4
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
+    set -x && \
     mkdir /tmp/vllm && \
     uv pip install pip wheel && \
     # NOTE: vLLM build from source on ARM can take several hours, see VLLM_MAX_JOBS details.
