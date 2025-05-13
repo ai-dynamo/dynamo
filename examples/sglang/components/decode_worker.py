@@ -18,10 +18,10 @@ from __future__ import annotations
 import logging
 import signal
 
-import sglang as sgl
 from utils.protocol import DisaggPreprocessedRequest
 from utils.sglang import parse_sglang_args
 
+import sglang as sgl
 from dynamo.sdk import dynamo_endpoint, service
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,6 @@ class SGLangDecodeWorker:
 
     @dynamo_endpoint()
     async def generate(self, req: DisaggPreprocessedRequest):
-        logger.info(f"Received request: {req}")
         g = await self.engine.async_generate(
             input_ids=req.request.token_ids,
             sampling_params=req.sampling_params,

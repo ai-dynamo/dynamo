@@ -30,12 +30,12 @@ import random
 import signal
 import socket
 
-import sglang as sgl
 from components.decode_worker import SGLangDecodeWorker
 from sglang.srt.utils import get_ip
 from utils.protocol import DisaggPreprocessedRequest, PreprocessedRequest
 from utils.sglang import parse_sglang_args
 
+import sglang as sgl
 from dynamo.llm import ModelType, register_llm
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 

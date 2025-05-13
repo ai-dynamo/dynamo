@@ -17,6 +17,7 @@ import argparse
 
 from sglang.srt.server_args import ServerArgs
 
+from dynamo.sdk.cli.utils import reserve_free_port
 from dynamo.sdk.lib.config import ServiceConfig
 
 
@@ -24,9 +25,19 @@ def parse_sglang_args(service_name, prefix) -> ServerArgs:
     config = ServiceConfig.get_instance()
     sglang_args = config.as_args(service_name, prefix=prefix)
     parser = argparse.ArgumentParser()
+    bootstrap_port = _set_disaggregation_bootstrap_port()
 
     # add future dynamo arguments here
 
     ServerArgs.add_cli_args(parser)
     args = parser.parse_args(sglang_args)
+    vars(args)["disaggregation_bootstrap_port"] = bootstrap_port
     return ServerArgs.from_cli_args(args)
+
+
+def _set_disaggregation_bootstrap_port():
+    """
+    Each worker requires a unique port for disaggregation_bootstrap_port.
+    """
+    with reserve_free_port() as port:
+        return port

@@ -17,6 +17,7 @@ Frontend:
   endpoint: dynamo.SGLangWorker.generate
   port: 8000
 
+# We set disaggregation-bootstrap-port in utils/sglang.py to ensure unique ports for each replica
 SGLangWorker:
   model-path: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   served-model-name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
@@ -25,7 +26,6 @@ SGLangWorker:
   skip-tokenizer-init: true
   disaggregation-mode: prefill
   disaggregation-transfer-backend: nixl
-  disaggregation-bootstrap-port: 8998
   ServiceArgs:
     workers: 1
     resources:
@@ -39,7 +39,6 @@ SGLangDecodeWorker:
   skip-tokenizer-init: true
   disaggregation-mode: decode
   disaggregation-transfer-backend: nixl
-  disaggregation-bootstrap-port: 8998
   ServiceArgs:
     workers: 1
     resources:
