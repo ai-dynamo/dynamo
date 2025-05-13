@@ -15,42 +15,52 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
+# vLLM Deployment Examples
 
-## Setup
+This directory contains examples for deploying vLLM models in both aggregated and disaggregated configurations.
 
+## Prerequisites
 
-```
+1. Install vLLM:
+```bash
+# Note: Currently requires installation from main branch
+# From vLLM 0.8.6 onwards, you can install directly from wheel
 git clone https://github.com/vllm-project/vllm.git
 VLLM_USE_PRECOMPILED=1 uv pip install --editable ./vllm/
+```
 
-Start required services (etcd and NATS) using [Docker Compose](../../deploy/docker-compose.yml)
+2. Start required services:
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
+## Running the Server
 
-## Run server
-
-For aggregated:
-```
+### Aggregated Deployment
+```bash
 cd examples/vllm_v1
 dynamo serve graphs.agg:Frontend -f configs/agg.yaml
 ```
 
-
-For disaggregated:
-```
+### Disaggregated Deployment
+```bash
 cd examples/vllm_v1
 dynamo serve graphs.disagg:Frontend -f configs/disagg.yaml
 ```
 
-## Run client
+## Testing the API
 
-```
-curl eos0388:8000/v1/completions   -H "Content-Type: application/json"   -d '{
+Send a test request using curl:
+```bash
+curl localhost:8000/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    "prompt": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden.",
-    "stream":false,
+    "prompt": "In the heart of Eldoria...",
+    "stream": false,
     "max_tokens": 30
   }'
 ```
+
+For more detailed explenations, refer to the main [LLM examples README](../llm/README.md).
+
