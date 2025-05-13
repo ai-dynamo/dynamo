@@ -57,6 +57,7 @@ class SGLangWorker:
         self.engine_args = parse_sglang_args(class_name, "")
         self.engine = sgl.Engine(server_args=self.engine_args)
 
+        # ensure clean engine shutdown for when signal is propagated
         for sig in [signal.SIGINT, signal.SIGTERM]:
             signal.signal(sig, self.shutdown_sglang_engine)
 
