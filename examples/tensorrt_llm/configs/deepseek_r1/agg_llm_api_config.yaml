@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# NOTE: FP4 only supported starting with Blackwell GPUs.
 # https://huggingface.co/nvidia/DeepSeek-R1-FP4
-model_name: "deepseek-ai/DeepSeek-R1"
+# You can also specify the full path to locally downloaded weights
+# instead of a HuggingFace ID here.
+model_name: "nvidia/DeepSeek-R1-FP4"
 backend: pytorch
 
 tensor_parallel_size: 4
