@@ -18,7 +18,7 @@ import logging
 
 from pydantic import BaseModel
 
-from components.planner import start_planner  # type: ignore[attr-defined]
+from components.planner import start_planner, PlannerDefaults  # type: ignore[attr-defined]
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
@@ -50,26 +50,26 @@ class Planner:
 
         # Get namespace directly from dynamo_context as it contains the active namespace
         self.namespace = dynamo_context["namespace"]
-        self.environment = config.get("Planner", {}).get("environment", "local")
-        self.no_operation = config.get("Planner", {}).get("no-operation", True)
-
+        self.environment = config.get("Planner", {}).get("environment", PlannerDefaults.environment)
+        self.no_operation = config.get("Planner", {}).get("no-operation", PlannerDefaults.no_operation)
+        
         # Create args with all parameters from planner.py, using defaults except for namespace and environment
         self.args = argparse.Namespace(
             namespace=self.namespace,
             environment=self.environment,
-            served_model_name="vllm",
+            served_model_name=PlannerDefaults.served_model_name,
             no_operation=self.no_operation,
-            log_dir=None,
-            adjustment_interval=10,
-            metric_pulling_interval=1,
-            max_gpu_budget=8,
-            min_endpoint=1,
-            decode_kv_scale_up_threshold=0.9,
-            decode_kv_scale_down_threshold=0.5,
-            prefill_queue_scale_up_threshold=5,
-            prefill_queue_scale_down_threshold=0.2,
-            decode_engine_num_gpu=1,
-            prefill_engine_num_gpu=1,
+            log_dir=PlannerDefaults.log_dir,
+            adjustment_interval=PlannerDefaults.adjustment_interval,
+            metric_pulling_interval=PlannerDefaults.metric_pulling_interval,
+            max_gpu_budget=PlannerDefaults.max_gpu_budget,
+            min_endpoint=PlannerDefaults.min_endpoint,
+            decode_kv_scale_up_threshold=PlannerDefaults.decode_kv_scale_up_threshold,
+            decode_kv_scale_down_threshold=PlannerDefaults.decode_kv_scale_down_threshold,
+            prefill_queue_scale_up_threshold=PlannerDefaults.prefill_queue_scale_up_threshold,
+            prefill_queue_scale_down_threshold=PlannerDefaults.prefill_queue_scale_down_threshold,
+            decode_engine_num_gpu=PlannerDefaults.decode_engine_num_gpu,
+            prefill_engine_num_gpu=PlannerDefaults.prefill_engine_num_gpu,
         )
 
     @async_on_start

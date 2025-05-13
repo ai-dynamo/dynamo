@@ -37,6 +37,26 @@ from dynamo.runtime.logging import configure_dynamo_logging
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+# Source of truth for planner defaults
+class PlannerDefaults:
+    namespace = "dynamo"
+    served_model_name = "vllm"
+    environment = "local"
+    no_operation = False
+    log_dir = None
+    adjustment_interval = 10
+    metric_pulling_interval = 1
+    max_gpu_budget = 8
+    min_endpoint = 1
+    decode_kv_scale_up_threshold = 0.9
+    decode_kv_scale_down_threshold = 0.5
+    prefill_queue_scale_up_threshold = 5.0
+    prefill_queue_scale_down_threshold = 0.2
+    decode_engine_num_gpu = 1
+    prefill_engine_num_gpu = 1
+    NEW_DECODE_WORKER_GRACE_PERIOD = 3
+    NEW_PREFILL_WORKER_QUEUE_BUFFER_PERIOD = 3
+
 # will not decrease decode worker number within 3 adjustment interval after a new decode worker
 # is added. this is to leave time for the new decode worker to populate its kv cache.
 NEW_DECODE_WORKER_GRACE_PERIOD = 3
@@ -391,90 +411,91 @@ if __name__ == "__main__":
     parser.add_argument(
         "--namespace",
         type=str,
-        default="dynamo",
+        default=PlannerDefaults.namespace,
         help="Namespace planner will look at",
     )
     parser.add_argument(
         "--served-model-name",
         type=str,
-        default="vllm",
+        default=PlannerDefaults.served_model_name,
         help="Model name that is being served (used for prefill queue name)",
     )
     parser.add_argument(
         "--no-operation",
         action="store_true",
+        default=PlannerDefaults.no_operation,
         help="Do not make any adjustments, just observe the metrics",
     )
     parser.add_argument(
         "--log-dir",
         type=str,
-        default=None,
+        default=PlannerDefaults.log_dir,
         help="Tensorboard logging directory",
     )
     parser.add_argument(
         "--adjustment-interval",
         type=int,
-        default=10,
+        default=PlannerDefaults.adjustment_interval,
         help="Interval in seconds between scaling adjustments",
     )
     parser.add_argument(
         "--metric-pulling-interval",
         type=int,
-        default=1,
+        default=PlannerDefaults.metric_pulling_interval,
         help="Interval in seconds between metric pulls",
     )
     parser.add_argument(
         "--max-gpu-budget",
         type=int,
-        default=8,
+        default=PlannerDefaults.max_gpu_budget,
         help="Maximum number of GPUs to use",
     )
     parser.add_argument(
         "--min-endpoint",
         type=int,
-        default=1,
+        default=PlannerDefaults.min_endpoint,
         help="Minimum number of endpoints to keep for prefill/decode workers",
     )
     parser.add_argument(
         "--decode-kv-scale-up-threshold",
         type=float,
-        default=0.9,
+        default=PlannerDefaults.decode_kv_scale_up_threshold,
         help="KV cache utilization threshold to scale up decode workers",
     )
     parser.add_argument(
         "--decode-kv-scale-down-threshold",
         type=float,
-        default=0.5,
+        default=PlannerDefaults.decode_kv_scale_down_threshold,
         help="KV cache utilization threshold to scale down decode workers",
     )
     parser.add_argument(
         "--prefill-queue-scale-up-threshold",
         type=float,
-        default=5,
+        default=PlannerDefaults.prefill_queue_scale_up_threshold,
         help="Queue utilization threshold to scale up prefill workers",
     )
     parser.add_argument(
         "--prefill-queue-scale-down-threshold",
         type=float,
-        default=0.2,
+        default=PlannerDefaults.prefill_queue_scale_down_threshold,
         help="Queue utilization threshold to scale down prefill workers",
     )
     parser.add_argument(
         "--decode-engine-num-gpu",
         type=int,
-        default=1,
+        default=PlannerDefaults.decode_engine_num_gpu,
         help="Number of GPUs per decode engine",
     )
     parser.add_argument(
         "--prefill-engine-num-gpu",
         type=int,
-        default=1,
+        default=PlannerDefaults.prefill_engine_num_gpu,
         help="Number of GPUs per prefill engine",
     )
     parser.add_argument(
         "--environment",
         type=str,
-        default="local",
+        default=PlannerDefaults.environment,
         help="Environment to run the planner in (local, kubernetes)",
     )
     args = parser.parse_args()
