@@ -27,7 +27,10 @@ description = "Dynamo LLM Library"
 [features]
 default = []
 
-cuda_kv = ["dep:cudarc", "dep:ndarray"]
+testing-full  = ["testing-cuda", "testing-nixl"]
+testing-cuda  = ["dep:cudarc"]
+testing-nixl  = ["dep:nixl-sys"]
+block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray"]
 sentencepiece = ["dep:sentencepiece"]
 
 [dependencies]
@@ -48,6 +51,7 @@ etcd-client = { workspace = true }
 futures =  { workspace = true }
 hf-hub = { workspace = true }
 rand = { workspace = true }
+oneshot = { workspace = true }
 prometheus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -72,8 +76,9 @@ derive-getters = "0.5"
 regex = "1"
 rayon = "1"
 
-# kv_cuda
-cudarc = { version = "0.16.2", features = ["cuda-12040"], optional = true }
+# block_manager
+nixl-sys = { version = "0.2.1-rc.1", optional = true }
+cudarc = { version = "0.16.2", features = ["cuda-12020"], optional = true }
 ndarray = { version = "0.16", optional = true }
 
 # protocols
