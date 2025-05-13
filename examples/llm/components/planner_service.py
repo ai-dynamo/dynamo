@@ -18,7 +18,10 @@ import logging
 
 from pydantic import BaseModel
 
-from components.planner import start_planner, PlannerDefaults  # type: ignore[attr-defined]
+from components.planner import (  # type: ignore[attr-defined]
+    PlannerDefaults,
+    start_planner,
+)
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
@@ -50,9 +53,13 @@ class Planner:
 
         # Get namespace directly from dynamo_context as it contains the active namespace
         self.namespace = dynamo_context["namespace"]
-        self.environment = config.get("Planner", {}).get("environment", PlannerDefaults.environment)
-        self.no_operation = config.get("Planner", {}).get("no-operation", PlannerDefaults.no_operation)
-        
+        self.environment = config.get("Planner", {}).get(
+            "environment", PlannerDefaults.environment
+        )
+        self.no_operation = config.get("Planner", {}).get(
+            "no-operation", PlannerDefaults.no_operation
+        )
+
         # Create args with all parameters from planner.py, using defaults except for namespace and environment
         self.args = argparse.Namespace(
             namespace=self.namespace,

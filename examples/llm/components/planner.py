@@ -37,6 +37,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+
 # Source of truth for planner defaults
 class PlannerDefaults:
     namespace = "dynamo"
@@ -56,6 +57,7 @@ class PlannerDefaults:
     prefill_engine_num_gpu = 1
     NEW_DECODE_WORKER_GRACE_PERIOD = 3
     NEW_PREFILL_WORKER_QUEUE_BUFFER_PERIOD = 3
+
 
 # will not decrease decode worker number within 3 adjustment interval after a new decode worker
 # is added. this is to leave time for the new decode worker to populate its kv cache.

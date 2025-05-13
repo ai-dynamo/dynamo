@@ -30,11 +30,10 @@ from rich.console import Console
 from rich.panel import Panel
 
 from dynamo.sdk.cli.utils import (
-    resolve_service_config,
     is_local_planner_enabled,
     raise_local_planner_warning,
+    resolve_service_config,
 )
-
 from dynamo.sdk.core.runner import TargetEnum
 
 if t.TYPE_CHECKING:
