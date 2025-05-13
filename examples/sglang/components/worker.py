@@ -143,18 +143,8 @@ class SGLangWorker:
 
             decode = await self.decode_client.generate(disagg_request.model_dump_json())
 
-            num_output_tokens_so_far = 0
-            async for res in decode:
-                data = res.data()
-                finish_reason = data["meta_info"]["finish_reason"]
-                if finish_reason:
-                    # Don't forward the stop token
-                    out = {"token_ids": [], "finish_reason": finish_reason["type"]}
-                else:
-                    next_total_toks = len(data["output_ids"])
-                    out = {"token_ids": data["output_ids"][num_output_tokens_so_far:]}
+            async for out in self._process_stream(decode, unpack=True):
                 yield out
-                num_output_tokens_so_far = next_total_toks
 
             await prefill_task
         else:
@@ -164,16 +154,22 @@ class SGLangWorker:
                 stream=True,
             )
 
-            num_output_tokens_so_far = 0
-            async for res in g:
-                finish_reason = res["meta_info"]["finish_reason"]
-                if finish_reason:
-                    out = {"token_ids": [], "finish_reason": finish_reason["type"]}
-                else:
-                    next_total_toks = len(res["output_ids"])
-                    out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}
+            async for out in self._process_stream(g, unpack=False):
                 yield out
-                num_output_tokens_so_far = next_total_toks
+
+    async def _process_stream(self, stream_source, unpack: bool):
+        num_output_tokens_so_far = 0
+        async for res in stream_source:
+            data = res.data() if unpack else res
+            finish_reason = data["meta_info"]["finish_reason"]
+            if finish_reason:
+                # Don't forward the stop token
+                out = {"token_ids": [], "finish_reason": finish_reason["type"]}
+            else:
+                next_total_toks = len(data["output_ids"])
+                out = {"token_ids": data["output_ids"][num_output_tokens_so_far:]}
+            yield out
+            num_output_tokens_so_far = next_total_toks
 
     def _generate_bootstrap_room(self):
         return random.randint(0, 2**63 - 1)
