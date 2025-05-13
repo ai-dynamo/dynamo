@@ -32,6 +32,16 @@ ARG RELEASE_BUILD
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS nixl_base
+
+WORKDIR /opt/nixl
+# Add a cache hint that only changes when the nixl commit changes
+ARG NIXL_COMMIT
+# This line acts as a cache key - it only changes when NIXL_COMMIT changes
+RUN echo "NIXL commit: ${NIXL_COMMIT}" > /opt/nixl/commit.txt
+# Copy the nixl source
+COPY --from=nixl . .
+
 ##################################
 ########## Build Image ###########
 ##################################
@@ -45,7 +55,70 @@ ARG ARCH_ALT
 USER root
 
 # Install utilities
-RUN apt update -y && apt install -y git wget curl nvtop tmux vim
+RUN apt update -y && \
+    apt install -y \
+    git \
+    wget \
+    curl \
+    nvtop \
+    tmux \
+    vim \
+    ## NIXL dependencies
+    meson \
+    ninja-build
+
+### UCX EFA Setup ###
+RUN rm -rf /opt/hpcx/ucx
+RUN rm -rf /usr/local/ucx
+RUN cd /usr/local/src && \
+    git clone https://github.com/openucx/ucx.git && \
+    cd ucx &&                   \
+    git checkout v1.19.x &&     \
+    ./autogen.sh && ./configure \
+    --prefix=/usr/local/ucx     \
+    --enable-shared             \
+    --disable-static            \
+    --disable-doxygen-doc       \
+    --enable-optimizations      \
+    --enable-cma                \
+    --enable-devel-headers      \
+    --with-cuda=/usr/local/cuda \
+    --with-verbs                \
+    --with-efa                  \
+    --with-dm                   \
+    --with-gdrcopy=/usr/local   \
+    --enable-mt &&              \
+    make -j &&                  \
+    make -j install-strip &&    \
+    ldconfig
+
+ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:/usr/local/cuda/compat/lib.real:$LD_LIBRARY_PATH
+ENV CPATH=/usr/include:$CPATH
+ENV PATH=/usr/bin:$PATH
+ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
+SHELL ["/bin/bash", "-c"]
+
+# NIXL SETUP
+# Copy nixl source, and use commit hash as cache hint
+COPY --from=nixl_base /opt/nixl /opt/nixl
+COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
+RUN if [ "$ARCH" = "arm64" ]; then \
+        cd /opt/nixl && \
+        mkdir build && \
+        meson setup build/ --prefix=/usr/local/nixl -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
+        cd build/ && \
+        ninja && \
+        ninja install; \
+    else \
+        cd /opt/nixl && \
+        mkdir build && \
+        meson setup build/ --prefix=/usr/local/nixl && \
+        cd build/ && \
+        ninja && \
+        ninja install; \
+    fi
+
+ENV NIXL_PREFIX=/usr/local/nixl
 
 # nats
 RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-${ARCH}.deb && \
@@ -163,7 +236,7 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 WORKDIR /workspace
 
 RUN yum update -y \
-    && yum install -y python3.12-devel \
+    && yum install -y llvm-toolset python3.12-devel \
     && yum install -y protobuf-compiler \
     && yum clean all \
     && rm -rf /var/cache/yum
@@ -177,6 +250,7 @@ COPY --from=build $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=build $CARGO_HOME $CARGO_HOME
 COPY --from=build /workspace /workspace
 COPY --from=build $VIRTUAL_ENV $VIRTUAL_ENV
+COPY --from=build /usr/local/nixl /opt/nvidia/nvda_nixl
 ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
 
 # Copy configuration files

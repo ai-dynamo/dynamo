@@ -108,12 +108,21 @@ WORKDIR /workspace
 # Copy nixl source, and use commit hash as cache hint
 COPY --from=nixl_base /opt/nixl /opt/nixl
 COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
-RUN cd /opt/nixl && \
-    mkdir build && \
-    meson setup build/ --prefix=/usr/local/nixl && \
-    cd build/ && \
-    ninja && \
-    ninja install
+RUN if [ "$ARCH" = "arm64" ]; then \
+        cd /opt/nixl && \
+        mkdir build && \
+        meson setup build/ --prefix=/usr/local/nixl -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
+        cd build/ && \
+        ninja && \
+        ninja install; \
+    else \
+        cd /opt/nixl && \
+        mkdir build && \
+        meson setup build/ --prefix=/usr/local/nixl && \
+        cd build/ && \
+        ninja && \
+        ninja install; \
+    fi
 
 ### NATS & ETCD SETUP ###
 # nats
@@ -161,7 +170,8 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     # NOTE: vLLM build from source on ARM can take several hours, see VLLM_MAX_JOBS details.
     if [ "$ARCH" = "arm64" ]; then \
         # PyTorch 2.7 supports CUDA 12.8 and aarch64 installs
-        uv pip install torch==2.7.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 && \
+        # NIXL has a torch dependency, so need to force-reinstall to install the correct version
+        uv pip install torch==2.7.0 torchvision torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/cu128 && \
         # Download vLLM source with version matching patch
         git clone --branch v${VLLM_REF} --depth 1 https://github.com/vllm-project/vllm.git /tmp/vllm/vllm-${VLLM_REF} && \
         cd /tmp/vllm/vllm-${VLLM_REF}/ && \
