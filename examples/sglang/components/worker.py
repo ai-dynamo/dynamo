@@ -27,15 +27,14 @@ have a separate DecodeWorker.
 import asyncio
 import logging
 import random
-import signal
 import socket
 
+import sglang as sgl
 from components.decode_worker import SGLangDecodeWorker
 from sglang.srt.utils import get_ip
 from utils.protocol import DisaggPreprocessedRequest, PreprocessedRequest
 from utils.sglang import parse_sglang_args
 
-import sglang as sgl
 from dynamo.llm import ModelType, register_llm
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
 
@@ -83,7 +82,7 @@ class SGLangWorker:
 
     def _get_bootstrap_info(self):
         """
-        Bootstrap info is stored in the worker's tokenizer manager. We use it to 
+        Bootstrap info is stored in the worker's tokenizer manager. We use it to
         add servers to the bootstrap_room
         """
         inner_tm = self.engine.tokenizer_manager
