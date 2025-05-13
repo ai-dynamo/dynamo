@@ -15,13 +15,13 @@
 
 
 import asyncio
-import connect
 import logging
 import os
 import signal
 import sys
-import torch
 
+import connect
+import torch
 from components.encode_worker import VllmEncodeWorker
 from pydantic import BaseModel
 from utils.logging import check_required_workers
@@ -113,7 +113,11 @@ class VllmPrefillWorker:
         await self._connector.initialize()
 
         # Create a longer-lived buffer for receiving the image embeddings.
-        embeddings = torch.empty(EMBEDDINGS_SHAPE, dtype=EMBEDDINGS_DTYPE, device=EMBEDDINGS_DEVICE)
+        embeddings = torch.empty(
+            EMBEDDINGS_SHAPE,
+            dtype=EMBEDDINGS_DTYPE,
+            device=EMBEDDINGS_DEVICE,
+        )
         descriptor = connect.Descriptor(embeddings)
         # Register the descriptor w/ NIXL (this is optional, if not done here the connect subsytem will take care of this automatically).
         descriptor.register_memory(self._connector)
@@ -186,7 +190,9 @@ class VllmPrefillWorker:
         engine_id = request.engine_id
         image_url = request.multimodal_data_source["image_url"]
 
-        logger.info(f"Received prefill request {{ id: {request_id}, engine_id: {engine_id}, image_url: '{image_url}' }}.")
+        logger.info(
+            f"Received prefill request {{ id: {request_id}, engine_id: {engine_id}, image_url: '{image_url}' }}."
+        )
 
         # Extract the pre-allocated, reusable image embeddings tensor and its descriptor.
         # Doing this avoids unnessesary memory de/registration with NIXL.
@@ -204,7 +210,12 @@ class VllmPrefillWorker:
                 ).model_dump_json()
             )
             async for encode_response in encode_generator:
-                encode_output = EncodeResponse.model_validate_json(encode_response.data())
+                encode_output = EncodeResponse.model_validate_json(
+                    encode_response.data(),
+                )
+                logger.debug(
+                    f"Received response: {{ id: {encode_output.request_id} }}."
+                )
 
             # Wait for the write operation to complete.
             # This will block until the write operation is complete.

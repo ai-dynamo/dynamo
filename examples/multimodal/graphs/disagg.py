@@ -19,4 +19,6 @@ from components.frontend import Frontend
 from components.prefill_worker import VllmPrefillWorker
 from components.processor import Processor
 
-Frontend.link(Processor).link(VllmDecodeWorker).link(VllmPrefillWorker).link(VllmEncodeWorker)
+Frontend.link(Processor).link(VllmDecodeWorker).link(VllmPrefillWorker).link(
+    VllmEncodeWorker
+)

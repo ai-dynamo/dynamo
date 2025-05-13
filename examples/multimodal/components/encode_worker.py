@@ -16,8 +16,10 @@
 import asyncio
 import logging
 from io import BytesIO
+from queue import Queue
 from typing import AsyncIterator
 
+import connect
 import requests
 import torch
 from PIL import Image
@@ -25,12 +27,13 @@ from transformers import AutoImageProcessor, LlavaForConditionalGeneration
 from utils.protocol import EncodeRequest, EncodeResponse
 from utils.vllm import parse_vllm_args
 
-from dynamo.sdk import async_on_shutdown, async_on_start, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_shutdown, async_on_start, dynamo_endpoint, service
 
 logger = logging.getLogger(__name__)
 
 try:
     import cupy as array_module
+
     if not array_module.cuda.is_available():
         raise ImportError("CUDA is not available.")
     DEVICE = "cuda"
@@ -38,9 +41,10 @@ try:
 except ImportError as e:
     logger.warning(f"Failed to import cupy, falling back to numpy: {e}.")
     import numpy as array_module
+
     DEVICE = "cpu"
 
-import connect
+CACHE_SIZE_MAXIMUM = 8
 
 
 @service(
@@ -68,6 +72,9 @@ class VllmEncodeWorker:
         self._tasks: list[asyncio.Task] = []
         self._is_running = True
 
+        self._image_cache: dict[str, Image.Image] = {}
+        self._cache_queue: Queue[str] = Queue(maxsize=CACHE_SIZE_MAXIMUM)
+
         # Define a routine to clean up completed tasks.
         async def task_gc():
             # Pause the cleanup task at startup for 10 seconds to allow the worker to start.
@@ -92,10 +99,14 @@ class VllmEncodeWorker:
 
     @dynamo_endpoint()
     async def encode(self, request: EncodeRequest) -> AsyncIterator[EncodeResponse]:
-        logger.debug(f"Received encode request: {{ id: {request.request_id}, image_url: '{request.image_url}' }}.")
+        logger.debug(
+            f"Received encode request: {{ id: {request.request_id}, image_url: '{request.image_url}' }}."
+        )
 
         if not self._is_running:
-            logger.error(f"Cannot process request {{ id: {request.request_id}, image_url: '{request.image_url}' }} during shutdown.")
+            logger.error(
+                f"Cannot process request {{ id: {request.request_id}, image_url: '{request.image_url}' }} during shutdown."
+            )
             raise RuntimeError("Encode worker shutting down.")
 
         # The following steps encode the requested image and provided useful embeddings.
@@ -108,9 +119,28 @@ class VllmEncodeWorker:
         # 7. Await for the write operation to complete.
         # 8. Yield the encode response.
 
-        logger.debug(f"Downloading/opening image for request: {{ id: {request.request_id}, image_url: '{request.image_url}' }}.")
-        image = self.open_image(request.image_url)
-        logger.debug(f"Processing image for request: {{ id: {request.request_id}, image_url: '{request.image_url}' }}")
+        # Either retrieve the image from the cache or download it and then cache it.
+        if request.image_url in self._image_cache:
+            image = self._image_cache[request.image_url]
+            logger.debug(
+                f"Image found in cache for request: {{ id: {request.request_id}, image_url: '{request.image_url}' }}."
+            )
+        else:
+            image = self.open_image(request.image_url)
+            logger.debug(
+                f"Downloading/opening image for request: {{ id: {request.request_id}, image_url: '{request.image_url}' }}."
+            )
+            # Cache the image for future use, and evict the oldest image if the cache is full.
+            if self._cache_queue.full():
+                oldest_image_url = self._cache_queue.get()
+                del self._image_cache[oldest_image_url]
+
+            self._image_cache[request.image_url] = image
+            self._cache_queue.put(request.image_url)
+
+        logger.debug(
+            f"Processing image for request: {{ id: {request.request_id}, image_url: '{request.image_url}' }}"
+        )
         image_embeds = self.image_processor(images=image, return_tensors="pt")
 
         with torch.no_grad():
@@ -123,16 +153,23 @@ class VllmEncodeWorker:
             embeddings = vision_outputs.last_hidden_state
             embeddings = self.vision_model.multi_modal_projector(embeddings)
 
-            logger.debug(f"Embeddings: {{ shape: {embeddings.shape}, dtype: {embeddings.dtype}, device: {embeddings.device}, ptr: {embeddings.data_ptr()}, elements: {{ count: {embeddings.numel()}, size: {embeddings.element_size()} }} }}")
+            logger.debug(
+                f"Embeddings: {{ shape: {embeddings.shape}, dtype: {embeddings.dtype}, device: {embeddings.device}, ptr: {embeddings.data_ptr()}, elements: {{ count: {embeddings.numel()}, size: {embeddings.element_size()} }} }}."
+            )
 
             if request.serialized_request is None:
-                logger.error(f"Request serialized_request is None for request: {{ id: {request.request_id}, image_url: '{request.image_url}' }}")
+                logger.error(
+                    f"Request serialized_request is None for request: {{ id: {request.request_id}, image_url: '{request.image_url}' }}."
+                )
 
             # Create a descriptor for the embeddings, this will register the memory with the connector (and the NIXL runtime).
             descriptor = connect.Descriptor(embeddings)
             # Create a write operation using the serialized request and the descriptor.
             # This will begin the RDMA transfer of the embeddings to the remote worker.
-            write_op = await self._connector.begin_write(descriptor, request.serialized_request)
+            write_op = await self._connector.begin_write(
+                descriptor,
+                request.serialized_request,
+            )
             # Await for the write operation to complete.
             # This will block until the data has been written to the remote worker or an error occurs.
             await write_op.wait_for_completion()
@@ -146,7 +183,9 @@ class VllmEncodeWorker:
         logger.info("Shutdown started.")
         self._is_running = False
         # Given pending tasks 5 seconds to complete before cancelling them.
-        done, pending = await asyncio.wait(self._tasks, return_when=asyncio.ALL_COMPLETED, timeout=5)
+        done, pending = await asyncio.wait(
+            self._tasks, return_when=asyncio.ALL_COMPLETED, timeout=5
+        )
         logger.info(f"Completed tasks: {len(done)}, Pending tasks: {len(pending)}")
         for task in pending:
             logger.debug(f"Cancelling task: '{task.get_name()}'.")
