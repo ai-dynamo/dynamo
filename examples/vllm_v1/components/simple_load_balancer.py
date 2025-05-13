@@ -77,6 +77,22 @@ class SimpleLoadBalancer:
                     served_model_name,
                 )
 
+        comp_ns, comp_name = VllmDecodeWorker.dynamo_address()  # type: ignore
+        self.decode_worker_client = (
+            await runtime.namespace(comp_ns)
+            .component(comp_name)
+            .endpoint("generate")
+            .client()
+        )
+
+        comp_ns, comp_name = VllmPrefillWorker.dynamo_address()  # type: ignore
+        self.prefill_worker_client = (
+            await runtime.namespace(comp_ns)
+            .component(comp_name)
+            .endpoint("generate")
+            .client()
+        )
+
         logger.info("SimpleLoadBalancer has been initialized")
 
     async def send_request_to_prefill(
@@ -91,10 +107,10 @@ class SimpleLoadBalancer:
 
         logger.debug("Prefill request: %s", prefill_request.model_dump_json())
 
-        async for prefill_response in self.prefill_worker.generate(
+        async for prefill_response in await self.prefill_worker_client.round_robin(
             prefill_request.model_dump_json()
         ):
-            return MyRequestOutput.model_validate_json(prefill_response)
+            return MyRequestOutput.model_validate_json(prefill_response.data())
 
     async def send_request_to_decode(
         self,
@@ -110,10 +126,10 @@ class SimpleLoadBalancer:
 
         logger.debug("Decode request: %s", decode_request.model_dump_json())
 
-        async for decode_response in self.decode_worker.generate(
+        async for decode_response in await self.decode_worker_client.round_robin(
             decode_request.model_dump_json()
         ):
-            yield MyRequestOutput.model_validate_json(decode_response)
+            yield MyRequestOutput.model_validate_json(decode_response.data())
 
     def create_vllm_request(self, request: PreprocessedRequest) -> vLLMGenerateRequest:
         # logging.debug(f"Received request: {request}")
