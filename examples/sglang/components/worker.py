@@ -90,6 +90,10 @@ class SGLangWorker:
         logger.info("SGLang engine shutdown")
 
     def _get_bootstrap_info(self):
+        """
+        Bootstrap info is stored in the worker's tokenizer manager. We use it to 
+        add servers to the bootstrap_room
+        """
         inner_tm = self.engine.tokenizer_manager
         bootstrap_port = inner_tm.server_args.disaggregation_bootstrap_port
 
