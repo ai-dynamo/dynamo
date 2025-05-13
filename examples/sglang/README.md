@@ -35,6 +35,7 @@ See [deployment architectures](../llm/README.md#deployment-architectures) to lea
 ### Prerequisites
 
 Start required services (etcd and NATS) using [Docker Compose](../../deploy/docker-compose.yml)
+
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
@@ -60,14 +61,20 @@ docker compose -f deploy/docker-compose.yml up -d
 cd /workspace/examples/sglang
 dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
 ```
+
 #### Disaggregated
+
 As of `sglang==0.4.6.post4`, SGLang uses a mini load balancer to route requests to handle disaggregated serving. The load balancer functions as follows
+
 1. The load balancer receives a request from the client
 2. A random `(prefill, decode)` pair is selected from the pool of available workers
 3. Request is sent to both `prefill` and `decode` workers via asyncio tasks
 4. Internally disaggregation is done from prefill -> decode
 
 Because Dynamo has a discovery mechanism, we do not use a load balancer. Instead, we first route to a random prefill worker, select a random decode worker, and then send the request to both. Internally, SGLang's bootstrap server (which is a part of the `tokenizer_manager`) is used in conjuction with NIXL to handle the kv transfer.
+
+> [!IMPORTANT]
+> Disaggregated serving in SGLang currently requires each worker to have the same tensor parallel size [unless you are using an MLA based model](https://github.com/sgl-project/sglang/pull/5922)
 
 ```bash
 cd /workspace/examples/sglang
