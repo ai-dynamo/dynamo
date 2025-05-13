@@ -57,10 +57,6 @@ class SGLangWorker:
         self.engine_args = parse_sglang_args(class_name, "")
         self.engine = sgl.Engine(server_args=self.engine_args)
 
-        # ensure clean engine shutdown for when signal is propagated
-        for sig in [signal.SIGINT, signal.SIGTERM]:
-            signal.signal(sig, self.shutdown_sglang_engine)
-
         logger.info("SGLangWorker initialized")
 
     @async_on_start
@@ -84,10 +80,6 @@ class SGLangWorker:
                 .endpoint("generate")
                 .client()
             )
-
-    def shutdown_sglang_engine(self, signum, frame):
-        self.engine.shutdown()
-        logger.info("SGLang engine shutdown")
 
     def _get_bootstrap_info(self):
         """
@@ -127,8 +119,6 @@ class SGLangWorker:
         sampling_params = self._build_sampling_params(request)
 
         if self.engine_args.disaggregation_mode != "null":
-            # we've already routed to a prefill worker so now we need to grab a decode id
-            decode_id = self._select_random_decode_id()
             bootstrap_room = self._generate_bootstrap_room()
 
             # decode worker request
@@ -151,10 +141,7 @@ class SGLangWorker:
             )
             prefill_task = asyncio.create_task(self._prefill_generator(prefill))
 
-            decode = await self.decode_client.direct(
-                disagg_request.model_dump_json(),
-                decode_id,
-            )
+            decode = await self.decode_client.generate(disagg_request.model_dump_json())
 
             num_output_tokens_so_far = 0
             async for res in decode:
@@ -187,9 +174,6 @@ class SGLangWorker:
                     out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}
                 yield out
                 num_output_tokens_so_far = next_total_toks
-
-    def _select_random_decode_id(self):
-        return random.choice(self.decode_client.endpoint_ids())
 
     def _generate_bootstrap_room(self):
         return random.randint(0, 2**63 - 1)

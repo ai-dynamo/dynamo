@@ -41,14 +41,7 @@ class SGLangDecodeWorker:
         self.engine_args = parse_sglang_args(class_name, "")
         self.engine = sgl.Engine(server_args=self.engine_args)
 
-        for sig in [signal.SIGINT, signal.SIGTERM]:
-            signal.signal(sig, self.shutdown_sglang_engine)
-
         logger.warning("Decode worker initialized")
-
-    def shutdown_sglang_engine(self, signum, frame):
-        logger.info("Shutting down SGLang engine")
-        self.engine.shutdown()
 
     @dynamo_endpoint()
     async def generate(self, req: DisaggPreprocessedRequest):
