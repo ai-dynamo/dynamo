@@ -61,12 +61,12 @@ impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
     }
 }
 
-pub struct PendingTransferManager<Source: Storage, Target: Storage, Metadata: BlockMetadata> {
+pub struct TransferManager<Source: Storage, Target: Storage, Metadata: BlockMetadata> {
     pending_transfer_q: mpsc::Sender<PendingTransfer<Source, Target, Metadata>>,
 }
 
 impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
-    PendingTransferManager<Source, Target, Metadata>
+    TransferManager<Source, Target, Metadata>
 {
     pub fn new(max_depth: usize) -> Self {
         let (tx, mut rx) = mpsc::channel::<PendingTransfer<Source, Target, Metadata>>(max_depth);

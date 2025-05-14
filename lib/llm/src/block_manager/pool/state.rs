@@ -181,7 +181,7 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
 
             // TODO: Make a way to set meaningful priority values, and maybe don't enqueue offloads for every registered block.
             if offload {
-                immutable.enqueue_offload_to(0).await.unwrap();
+                immutable.enqueue_offload(0).await.unwrap();
             }
 
             immutable_blocks.push(immutable);

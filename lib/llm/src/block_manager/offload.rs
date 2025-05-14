@@ -34,7 +34,7 @@ use std::collections::BTreeSet;
 mod pending;
 mod request;
 
-use pending::{PendingTransfer, PendingTransferManager};
+use pending::{PendingTransfer, TransferManager};
 use request::{OffloadRequest, OffloadRequestKey, OnboardRequest};
 
 const MAX_OFFLOAD_STREAM_DEPTH: usize = 4;
@@ -126,7 +126,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
 
         // We don't want to hold too many strong references to blocks in the device pool, since it would limit our effective KV Cache capacity.
         // In this case, we limit it to just enough to ensure that a transfer is always occurring.
-        let dtoh_pending_offload_manager = PendingTransferManager::new(MAX_OFFLOAD_STREAM_DEPTH);
+        let dtoh_pending_offload_manager = TransferManager::new(MAX_OFFLOAD_STREAM_DEPTH);
 
         loop {
             // Try to check the offload queue.
@@ -202,7 +202,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let transfer_ctx = TransferContext::new(None, cuda_ctx.new_stream()?);
 
         // For the onboarding manager, we can get away with a much bigger queue, since any onboardings would get triggered by an upcoming prefill.
-        let htod_pending_onboard_manager = PendingTransferManager::new(16384);
+        let htod_pending_onboard_manager = TransferManager::new(16384);
         let device = self.device.as_ref().as_ref().unwrap();
 
         while let Some(request) = htod_onboard_rx.recv().await {
@@ -340,7 +340,7 @@ mod tests {
 
     fn build_pools(
         device_blocks: usize,
-        host_blocks: usize,
+        host_blocks: Option<usize>,
     ) -> Result<(Arc<OffloadManager<BasicMetadata>>, DevicePool, HostPool)> {
         let mut config = LayoutConfig {
             num_blocks: device_blocks,
@@ -352,17 +352,17 @@ mod tests {
         };
 
         let device = FullyContiguous::allocate(config.clone(), &DeviceAllocator::default())?;
-
-        config.num_blocks = host_blocks;
-
-        let host = FullyContiguous::allocate(config, &PinnedAllocator::default())?;
-
         let device_blocks = Blocks::<_, BasicMetadata>::new(device, 42, 0)?.into_blocks()?;
-        let host_blocks = Blocks::<_, BasicMetadata>::new(host, 42, 0)?.into_blocks()?;
-
         let device_pool = Arc::new(Some(BlockPool::builder().blocks(device_blocks).build()?));
 
-        let host_pool = Arc::new(Some(BlockPool::builder().blocks(host_blocks).build()?));
+        let host_pool = if let Some(host_blocks) = host_blocks {
+            config.num_blocks = host_blocks;
+            let host = FullyContiguous::allocate(config, &PinnedAllocator::default())?;
+            let host_blocks = Blocks::<_, BasicMetadata>::new(host, 42, 0)?.into_blocks()?;
+            Arc::new(Some(BlockPool::builder().blocks(host_blocks).build()?))
+        } else {
+            Arc::new(None)
+        };
 
         let manager = OffloadManager::new(device_pool.clone(), host_pool.clone())?;
 
@@ -456,7 +456,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_offload_invalid_blocks() -> Result<()> {
-        let (offload_manager, device_pool, _) = build_pools(4, 4)?;
+        let (offload_manager, device_pool, _) = build_pools(4, Some(4))?;
 
         let device_pool = device_pool.as_ref().as_ref().unwrap();
 
@@ -489,7 +489,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_offload_registered_blocks() -> Result<()> {
-        let (offload_manager, device_pool, host_pool) = build_pools(4, 4)?;
+        let (offload_manager, device_pool, host_pool) = build_pools(4, Some(4))?;
 
         let device_pool = device_pool.as_ref().as_ref().unwrap();
         let host_pool = host_pool.as_ref().as_ref().unwrap();
@@ -532,7 +532,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_host_blocks_available() -> Result<()> {
-        let (offload_manager, device_pool, host_pool) = build_pools(4, 4)?;
+        let (offload_manager, device_pool, host_pool) = build_pools(4, Some(4))?;
 
         let device_pool = device_pool.as_ref().as_ref().unwrap();
         let host_pool = host_pool.as_ref().as_ref().unwrap();
@@ -580,7 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_onboard() -> Result<()> {
-        let (offload_manager, device_pool, host_pool) = build_pools(4, 4)?;
+        let (offload_manager, device_pool, host_pool) = build_pools(4, Some(4))?;
 
         let device_pool = device_pool.as_ref().as_ref().unwrap();
         let host_pool = host_pool.as_ref().as_ref().unwrap();
@@ -634,7 +634,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_offload_onboard() -> Result<()> {
-        let (offload_manager, device_pool, host_pool) = build_pools(4, 4)?;
+        let (offload_manager, device_pool, host_pool) = build_pools(4, Some(4))?;
 
         let device_pool = device_pool.as_ref().as_ref().unwrap();
         let host_pool = host_pool.as_ref().as_ref().unwrap();
@@ -703,7 +703,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_onboard_err_handling() -> Result<()> {
-        let (offload_manager, device_pool, host_pool) = build_pools(4, 4)?;
+        let (offload_manager, device_pool, host_pool) = build_pools(4, Some(4))?;
 
         let device_pool = device_pool.as_ref().as_ref().unwrap();
         let host_pool = host_pool.as_ref().as_ref().unwrap();
@@ -726,6 +726,25 @@ mod tests {
             res.err().unwrap(),
             BlockPoolError::NotEnoughBlocksAvailable(_, _)
         ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_offload_onboard_no_host_blocks() -> Result<()> {
+        let (offload_manager, device_pool, _) = build_pools(4, None)?;
+
+        let device_pool = device_pool.as_ref().as_ref().unwrap();
+
+        let device_block = completed_block(device_pool, [0, 1, 2, 3]).await?;
+        let immutable_device_block = device_pool
+            .register_blocks(vec![device_block])
+            .await?
+            .into_iter()
+            .next()
+            .unwrap();
+
+        offload_manager.offload(&immutable_device_block, 0).await?;
 
         Ok(())
     }

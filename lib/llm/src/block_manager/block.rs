@@ -757,7 +757,7 @@ impl<'a, S: Storage, M: BlockMetadata> AsBlockSlice<'a, ImmutableBlock<S, M>>
 }
 
 impl<S: Storage, M: BlockMetadata> ImmutableBlock<S, M> {
-    pub async fn enqueue_offload_to(&self, priority: u64) -> Result<()> {
+    pub async fn enqueue_offload(&self, priority: u64) -> Result<()> {
         // TODO: Is it ok to silently fail if the block is not managed?
         if let Some(manager) = self.manager() {
             manager.enqueue_offload_block(self, priority).await?;
