@@ -58,7 +58,6 @@ use std::{
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing as log;
 use xxhash_rust::xxh3;
 
 pub const XXH3_SEED: u64 = 1337;
@@ -160,6 +159,7 @@ impl RouterEvent {
 }
 
 /// A block in the Radix Tree.
+#[derive(Debug)]
 struct RadixBlock {
     /// A map of child blocks, keyed by their local block hash.
     children: HashMap<LocalBlockHash, SharedRadixBlock>,
@@ -245,7 +245,6 @@ impl RadixTree {
                 let current_borrow = current.borrow();
                 current_borrow.children.get(&block_hash).cloned()
             };
-
             if let Some(block) = next_block {
                 scores.update_scores(&block.borrow().workers);
 
@@ -284,7 +283,7 @@ impl RadixTree {
     pub fn apply_event(&mut self, event: RouterEvent) {
         let (worker_id, event) = (event.worker_id, event.event);
         let (id, op) = (event.event_id, event.data);
-        log::debug!(id, "Store operation: {:?}", op);
+        tracing::trace!(id, "Store operation: {:?}", op);
 
         let worker_lookup = self.lookup.entry(worker_id).or_default();
 
@@ -301,7 +300,7 @@ impl RadixTree {
                 let mut current = match current {
                     Some(current) => current.clone(),
                     None => {
-                        log::warn!(
+                        tracing::warn!(
                             worker_id = worker_id.to_string(),
                             id,
                             parent_hash = ?op.parent_hash,
@@ -344,7 +343,7 @@ impl RadixTree {
                 }
             }
             KvCacheEventData::Removed(remove) => {
-                // log::trace!(id, "KV Remove Operation: {:?}", op);
+                // tracing::trace!(id, "KV Remove Operation: {:?}", op);
                 // let mut worker_lookup = self.lookup.get(&worker_id).expect("Worker not found");
 
                 for block in remove.block_hashes {
@@ -355,7 +354,7 @@ impl RadixTree {
                     let entry = match worker_lookup.get(&block) {
                         Some(entry) => entry.clone(),
                         None => {
-                            log::warn!(
+                            tracing::warn!(
                                 worker_id = worker_id.to_string(),
                                 id,
                                 "Failed to find block to remove; skipping remove operation"
@@ -562,7 +561,7 @@ impl KvIndexer {
                             }
 
                             _ = cancel.cancelled() => {
-                                log::debug!("KvCacheIndexer progress loop shutting down");
+                                tracing::debug!("KvCacheIndexer progress loop shutting down");
                                 return;
                             }
 
@@ -576,7 +575,7 @@ impl KvIndexer {
                 .unwrap()
             }));
 
-            log::debug!("KvCacheIndexer task completed");
+            tracing::debug!("KvCacheIndexer task completed");
         });
 
         let once = OnceLock::new();
@@ -624,7 +623,7 @@ impl KvIndexerInterface for KvIndexer {
         };
 
         if let Err(e) = self.match_tx.send(req).await {
-            log::error!(
+            tracing::error!(
                 "Failed to send match request: {:?}; the indexer maybe offline",
                 e
             );
@@ -640,13 +639,13 @@ impl KvIndexerInterface for KvIndexer {
         &self,
         tokens: &[u32],
     ) -> Result<OverlapScores, KvRouterError> {
-        log::debug!(
+        tracing::debug!(
             "Finding matches for request tokens: {:?} / len: {}",
             tokens,
             tokens.len()
         );
         let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size);
-        log::debug!("Computed sequence: {:?}", sequence);
+        tracing::debug!("Computed sequence: {:?}", sequence);
         self.find_matches(sequence).await
     }
 
@@ -748,12 +747,12 @@ impl KvIndexerSharded {
                                 Ok(req) = shard_broadcast_rx.recv() => {
                                     let matches = trie.find_matches(req.sequence, req.early_exit);
                                     if let Err(e) = req.resp.send(matches).await {
-                                        log::trace!("Failed to send match response: {:?}", e);
+                                        tracing::trace!("Failed to send match response: {:?}", e);
                                     }
                                 }
 
                                 _ = cancel.cancelled() => {
-                                    log::debug!("KvCacheIndexer progress loop shutting down");
+                                    tracing::debug!("KvCacheIndexer progress loop shutting down");
                                     return;
                                 }
 
@@ -767,7 +766,7 @@ impl KvIndexerSharded {
                     .unwrap()
                 }));
 
-                log::debug!("KvCacheIndexer task completed");
+                tracing::debug!("KvCacheIndexer task completed");
             }));
         }
 

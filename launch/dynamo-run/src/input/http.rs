@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use crate::input::common;
 use crate::{EngineConfig, Flags};
+use dynamo_llm::http::service::discovery::LLMRouterMode;
 use dynamo_llm::http::service::ModelManager;
 use dynamo_llm::{
     engines::StreamingEngineAdapter,
@@ -29,6 +30,7 @@ use dynamo_llm::{
         openai::completions::{CompletionRequest, CompletionResponse},
     },
 };
+use dynamo_runtime::component::Component;
 use dynamo_runtime::transports::etcd;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
@@ -59,10 +61,11 @@ pub async fn run(
 
                     // Listen for models registering themselves in etcd, add them to HTTP service
                     run_watcher(
-                        distributed_runtime.clone(),
+                        component.clone(),
                         http_service.model_manager().clone(),
                         etcd_client.clone(),
                         &network_prefix,
+                        flags.router_mode.as_llm(),
                     )
                     .await?;
                 }
@@ -114,19 +117,18 @@ pub async fn run(
 /// Spawns a task that watches for new models in etcd at network_prefix,
 /// and registers them with the ModelManager so that the HTTP service can use them.
 async fn run_watcher(
-    distributed_runtime: DistributedRuntime,
+    component: Component,
     model_manager: ModelManager,
     etcd_client: etcd::Client,
     network_prefix: &str,
+    router_mode: LLMRouterMode,
 ) -> anyhow::Result<()> {
-    let state = Arc::new(discovery::ModelWatchState {
-        prefix: network_prefix.to_string(),
-        manager: model_manager,
-        drt: distributed_runtime.clone(),
-    });
+    let watch_obj = Arc::new(
+        discovery::ModelWatcher::new(component, model_manager, network_prefix, router_mode).await?,
+    );
     tracing::info!("Watching for remote model at {network_prefix}");
     let models_watcher = etcd_client.kv_get_and_watch_prefix(network_prefix).await?;
     let (_prefix, _watcher, receiver) = models_watcher.dissolve();
-    let _watcher_task = tokio::spawn(discovery::model_watcher(state, receiver));
+    let _watcher_task = tokio::spawn(watch_obj.watch(receiver));
     Ok(())
 }

@@ -37,7 +37,9 @@ impl KvRouter {
                 llm_rs::kv_router::KvRouter::new(component.inner.clone(), kv_block_size, None)
                     .await
                     .map_err(to_pyerr)?;
-            Ok(Self { inner })
+            Ok(Self {
+                inner: Arc::new(inner),
+            })
         })
     }
 

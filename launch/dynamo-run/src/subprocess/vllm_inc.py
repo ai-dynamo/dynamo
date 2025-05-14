@@ -1,18 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# A very basic example of vllm worker handling pre-processed requests.
-#
-# Dynamo does the HTTP handling, prompt templating and tokenization, then forwards the
-# request via NATS to this python script, which runs vllm.
-#
-# Setup a virtualenv with dynamo.llm, dynamo.runtime and vllm installed
-#  in lib/bindings/python `maturin develop` and `pip install -e .` should do it
-# Start nats and etcd:
-#  - nats-server -js
-#
-# Window 1: `python vllm_inc.py`. Wait for log "Starting endpoint".
-# Window 2: `dynamo-run out=dyn://dynamo.backend.generate`
+# `dynamo-run out=vllm` runs this script
+# Can also be used standalone: `python3 vllm_inc.py` - lots of optional cmd line params
+
+# Setup checklist:
+# - We are in a virtualenv with vllm installed - and patched if using kv routing.
+# - `libdynamo_llm_capi.so` is in system lib path or it's containing folder is in LD_LIBRARY_PATH
+#   It builds in target/debug/ by default.
 
 import argparse
 import asyncio
@@ -30,11 +25,12 @@ from vllm.entrypoints.openai.api_server import (
 )
 from vllm.inputs import TokensPrompt
 
-from dynamo.llm import ModelType, register_llm
+from dynamo.llm import KvMetricsPublisher, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
+# Only used if you run it manually from the command line
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
-DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -48,6 +44,7 @@ class Config:
     model_path: str
     model_name: Optional[str]
     tensor_parallel_size: int
+    kv_block_size: int
     extra_engine_args: str
 
 
@@ -56,9 +53,37 @@ class RequestHandler:
     Request handler for the generate endpoint
     """
 
-    def __init__(self, engine, default_sampling_params):
+    def __init__(self, component, engine, default_sampling_params):
+        self.component = component
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
+        self.metrics_publisher = KvMetricsPublisher()
+
+    def setup_kv_metrics(self):
+        if not hasattr(self.engine_client, "set_metrics_publisher"):
+            logging.debug("VLLM version does not support KV metrics")
+            return
+
+        self.engine_client.set_metrics_publisher(self.metrics_publisher)
+        # Initially send dummy metrics to kick start,
+        # vLLM will not update stat until forward pass is triggered
+        self.metrics_publisher.publish(
+            0,  # request_active_slots
+            1024,  # request_total_slots
+            0,  # kv_active_blocks
+            1024,  # kv_total_blocks
+            0,  # num_requests_waiting
+            0.0,  # gpu_cache_usage_perc
+            0.0,  # gpu_prefix_cache_hit_rate
+        )
+        task = asyncio.create_task(self.create_metrics_publisher_endpoint())
+        task.add_done_callback(
+            lambda _: logging.debug("metrics publisher endpoint created")
+        )
+
+    async def create_metrics_publisher_endpoint(self):
+        logging.debug("Creating metrics publisher endpoint")
+        await self.metrics_publisher.create_endpoint(self.component)
 
     async def generate(self, request):
         # logging.debug(f"Received request: {request}")
@@ -126,6 +151,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         "tensor_parallel_size": config.tensor_parallel_size,
         "skip_tokenizer_init": True,
         "disable_log_requests": True,
+        "enable_prefix_caching": True,
+        "block_size": config.kv_block_size,
         # KV routing relies on logging KV metrics
         "disable_log_stats": False,
     }
@@ -142,6 +169,14 @@ async def init(runtime: DistributedRuntime, config: Config):
         logging.debug(f"Adding extra engine arguments: {json_map}")
         arg_map = {**arg_map, **json_map}  # json_map gets precedence
 
+    # Patch won't start KVCacheEventManager unless these four are set
+    os.environ["VLLM_WORKER_ID"] = str(endpoint.lease_id())
+    os.environ[
+        "VLLM_KV_CAPI_PATH"
+    ] = "libdynamo_llm_capi.so"  # Must be on LD_LIBRARY_PATH
+    os.environ["VLLM_KV_NAMESPACE"] = config.namespace
+    os.environ["VLLM_KV_COMPONENT"] = config.component
+
     os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
     engine_args = AsyncEngineArgs(**arg_map)
     model_config = engine_args.create_model_config()
@@ -151,11 +186,12 @@ async def init(runtime: DistributedRuntime, config: Config):
     engine_context = build_async_engine_client_from_engine_args(engine_args)
     engine_client = await engine_context.__aenter__()
 
+    handler = RequestHandler(component, engine_client, default_sampling_params)
+    handler.setup_kv_metrics()
+
     # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
     # after the lease is revoked
-    await endpoint.serve_endpoint(
-        RequestHandler(engine_client, default_sampling_params).generate
-    )
+    await endpoint.serve_endpoint(handler.generate)
 
 
 def cmd_line_args():
@@ -182,6 +218,9 @@ def cmd_line_args():
     )
     parser.add_argument(
         "--tensor-parallel-size", type=int, default=1, help="Number of GPUs to use."
+    )
+    parser.add_argument(
+        "--kv-block-size", type=int, default=16, help="Size of a KV cache block."
     )
     parser.add_argument(
         "--extra-engine-args",
@@ -213,6 +252,7 @@ def cmd_line_args():
     config.component = parsed_component_name
     config.endpoint = parsed_endpoint_name
     config.tensor_parallel_size = args.tensor_parallel_size
+    config.kv_block_size = args.kv_block_size
     config.extra_engine_args = args.extra_engine_args
 
     return config

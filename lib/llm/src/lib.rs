@@ -27,6 +27,7 @@ pub mod http;
 pub mod hub;
 pub mod key_value_store;
 pub mod kv_router;
+pub use kv_router::DEFAULT_KV_BLOCK_SIZE;
 pub mod model_card;
 pub mod model_type;
 pub mod preprocessor;
