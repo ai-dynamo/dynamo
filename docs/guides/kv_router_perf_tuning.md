@@ -77,14 +77,16 @@ Check the total number of KV blocks allocated for your backend engine. For small
 Consider the expected theoretical hit rate of your dataset (assuming perfect caching):
 
 - More formally, consider the depth of your core prefix tree (nodes visited at least twice)
-- For lower hit rates, reduce the overlap score weight
+- For lower hit rates, or if the core prefix tree depth is short compared to the ISL, 
+reduce the overlap score weight
 - Alternatively, normalize the overlap score with the input sequence length (ISL)
 
 ### 3. Consider Prefix Tree Breadth
 
 The breadth of your prefix tree can be proxied by how many unique context prompts you expect:
 
-- If you can identify distinct "buckets" of similar prompts, consider using multiple routers
+- If you can identify distinct "buckets" of similar prompts, each containing roughly equal number of prompts,
+consider using multiple KV routers, one for each bucket
 - Use a meta-router to direct requests to specialized KV routers for different prompt categories
 - For very diverse context prompts, overlap scores should probably be prioritized
 
