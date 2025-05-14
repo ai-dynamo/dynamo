@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
 )
+
 class Processor(ChatProcessorMixin):
     worker = depends(TensorRTLLMWorker)
     router = depends(Router)
