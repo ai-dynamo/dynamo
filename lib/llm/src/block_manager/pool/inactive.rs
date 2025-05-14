@@ -487,15 +487,14 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::{
-        block_manager::{
-            block::{registry::BlockRegistry, state::CompleteState, Blocks, PrivateBlockExt},
-            events::NullEventManager,
-            layout::{BlockLayout, FullyContiguous, LayoutConfigBuilder},
-            storage::tests::{NullDeviceAllocator, NullDeviceStorage},
-        },
-        tokens::{Token, Tokens},
+    use crate::block_manager::{
+        block::{registry::BlockRegistry, state::CompleteState, Blocks, PrivateBlockExt},
+        events::NullEventManager,
+        layout::{BlockLayout, FullyContiguous, LayoutConfigBuilder},
+        storage::tests::{NullDeviceAllocator, NullDeviceStorage},
     };
+
+    use dynamo_tokens::{Token, Tokens};
 
     use super::*;
 

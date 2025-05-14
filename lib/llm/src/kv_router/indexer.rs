@@ -59,7 +59,8 @@ use std::{
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing as log;
-use xxhash_rust::xxh3;
+
+use dynamo_tokens::compute_hash_v2;
 
 pub const XXH3_SEED: u64 = 1337;
 
@@ -84,10 +85,6 @@ pub type WorkerId = i64;
 /// A shared reference to a [`RadixBlock`].
 type SharedRadixBlock = Rc<RefCell<RadixBlock>>;
 
-pub fn compute_hash(data: &[u8]) -> u64 {
-    xxh3::xxh3_64_with_seed(data, XXH3_SEED)
-}
-
 /// Compute the hash of a local block.
 ///
 /// ### Arguments
@@ -98,7 +95,7 @@ pub fn compute_hash(data: &[u8]) -> u64 {
 ///
 /// A `LocalBlockHash` representing the computed hash.
 pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
-    LocalBlockHash(compute_hash(data))
+    LocalBlockHash(compute_hash_v2(data, XXH3_SEED))
 }
 
 // /// Updated version of the `compute_block_hash` function that included the lora_id

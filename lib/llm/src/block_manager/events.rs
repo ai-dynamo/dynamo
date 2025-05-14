@@ -155,7 +155,7 @@ impl EventReleaseManager for NullEventManager {
 
 #[cfg(test)]
 pub mod tests {
-    use crate::tokens::SequenceHash;
+    use dynamo_tokens::SequenceHash;
 
     use super::*;
 

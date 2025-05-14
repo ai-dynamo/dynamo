@@ -32,7 +32,7 @@ pub use config::RuntimeConfig;
 pub mod component;
 pub mod discovery;
 pub mod engine;
-pub mod logging;
+pub use dynamo_logging as logging;
 pub mod pipeline;
 pub mod prelude;
 pub mod protocols;

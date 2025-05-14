@@ -19,7 +19,7 @@ use derive_getters::Getters;
 
 use super::registry::RegistrationHandle;
 use super::Result;
-use crate::tokens::{PartialTokenBlock, SaltHash, Token, TokenBlock, Tokens};
+use dynamo_tokens::{PartialTokenBlock, SaltHash, Token, TokenBlock, Tokens};
 
 #[derive(Debug, thiserror::Error)]
 #[error("Block state is invalid: {0}")]

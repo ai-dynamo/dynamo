@@ -20,6 +20,7 @@ members = [
     "components/router",
     "launch/*",
     "lib/llm",
+    "lib/logging",
     "lib/runtime",
     "lib/tokens",
     "lib/bindings/c",
@@ -41,6 +42,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "0.2.1" }
 dynamo-llm = { path = "lib/llm", version = "0.2.1" }
+dynamo-logging = { path = "lib/logging", version = "0.2.1" }
 dynamo-tokens = { path = "lib/tokens", version = "0.2.1" }
 
 # External dependencies

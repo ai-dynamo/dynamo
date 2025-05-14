@@ -36,6 +36,7 @@ sentencepiece = ["dep:sentencepiece"]
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true }
+dynamo-tokens = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }

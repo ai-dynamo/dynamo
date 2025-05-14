@@ -48,15 +48,15 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::fmt::time::FormatTime;
-use tracing_subscriber::fmt::time::LocalTime;
-use tracing_subscriber::fmt::time::SystemTime;
-use tracing_subscriber::fmt::time::UtcTime;
 use tracing_subscriber::fmt::{format::Writer, FormattedFields};
 use tracing_subscriber::fmt::{FmtContext, FormatFields};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::{filter::Directive, fmt};
+
+// Import the config module
+use crate::config;
 
 /// ENV used to set the log level
 const FILTER_ENV: &str = "DYN_LOG";
@@ -121,7 +121,7 @@ pub fn init() {
             }
         }
 
-        if crate::config::jsonl_logging_enabled() {
+        if config::jsonl_logging_enabled() {
             let l = fmt::layer()
                 .with_ansi(false) // ansi terminal escapes and colors always disabled
                 .event_format(CustomJsonFormatter::new())
@@ -130,7 +130,7 @@ pub fn init() {
             tracing_subscriber::registry().with(l).init();
         } else {
             let l = fmt::layer()
-                .with_ansi(!crate::config::disable_ansi_logging())
+                .with_ansi(!config::disable_ansi_logging())
                 .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
                 .with_writer(std::io::stderr)
                 .with_filter(filter_layer);
