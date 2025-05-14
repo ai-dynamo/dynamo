@@ -1045,7 +1045,7 @@ index 000000000..a2f9ce99e
 \ No newline at end of file
 diff --git a/vllm/distributed/device_communicators/nixl.py b/vllm/distributed/device_communicators/nixl.py
 new file mode 100644
-index 000000000..8f773b8f8
+index 000000000..bd4ac984e
 --- /dev/null
 +++ b/vllm/distributed/device_communicators/nixl.py
 @@ -0,0 +1,445 @@
@@ -1309,24 +1309,21 @@ index 000000000..8f773b8f8
 +            return
 +
 +        start_time = time.perf_counter()
-++
-+        tp_multiplier = self._tp_size[dst_engine_id] // self._tp_size[self.engine_id]
-+        remote_block_descs_ids = self._get_block_descs_ids(dst_engine_id, "all", remote_block_ids)
-+        local_xfer_side_handle = self.src_xfer_side_handles[tp_multiplier]
-+        handles = []
 +
 +        if self._is_mla:
 +            # TODO ptarasiewicz: we skip staging when is_mla is true, we shouldn't assign staging blocks at all
 +            staging_rearranging_ranges = None
 +            staging_block_ids = local_block_ids
-+        elif tp_multiplier == 1:
-+            staging_block_ids = local_block_ids
-+            staging_rearranging_ranges = self._get_ranges(staging_block_ids)
 +        else:
 +            local_ranges = self._get_ranges(local_block_ids)
 +            staging_ranges = self._get_ranges(staging_block_ids)
 +
 +            local_rearranging_ranges, staging_rearranging_ranges = self._get_same_length_ranges(local_ranges, staging_ranges)
++
++        tp_multiplier = self._tp_size[dst_engine_id] // self._tp_size[self.engine_id]
++        remote_block_descs_ids = self._get_block_descs_ids(dst_engine_id, "all", remote_block_ids)
++        local_xfer_side_handle = self.src_xfer_side_handles[tp_multiplier]
++        handles = []
 +
 +        logger.debug("Time to get block descs ids: %s ms", (time.perf_counter() - start_time) * 1000)
 +        create_xfer_start_time = time.perf_counter()
@@ -1357,7 +1354,7 @@ index 000000000..8f773b8f8
 +
 +        rearrange_start_time = time.perf_counter()
 +
-+        if not self._is_mla and tp_multiplier != 1:
++        if not self._is_mla:
 +            for local_range, staging_range in zip(local_rearranging_ranges, staging_rearranging_ranges):
 +                logger.debug("Rearranging tensors for cache: %s, local_range: %s, staging_range: %s", self.kv_caches[0].shape, local_range, staging_range)
 +                for kv_cache in self.kv_caches:
@@ -1391,9 +1388,6 @@ index 000000000..8f773b8f8
 +            # TODO ptarasiewicz: we skip staging when is_mla is true, we shouldn't assign staging blocks at all
 +            staging_rearranging_ranges = None
 +            staging_block_ids = local_block_ids
-+        elif tp_multiplier == 1:
-+            staging_block_ids = local_block_ids
-+            staging_rearranging_ranges = self._get_ranges(staging_block_ids)
 +        else:
 +            local_ranges = self._get_ranges(local_block_ids)
 +            staging_ranges = self._get_ranges(staging_block_ids)
@@ -1494,6 +1488,12 @@ index 000000000..8f773b8f8
 +                if xfer_state == "PROC":
 +                    running_reqs.append(handle)
 +                else:
++                    raise RuntimeError("Transfer failed with state %s", xfer_state)
++            if len(running_reqs) == 0:
++                done_req_ids.append(req_id)
++            else:
++                self._transfers[req_id] = running_reqs
++        return done_req_ids
 diff --git a/vllm/distributed/kv_transfer/kv_connector/dynamo_connector.py b/vllm/distributed/kv_transfer/kv_connector/dynamo_connector.py
 new file mode 100644
 index 000000000..418fc7154
