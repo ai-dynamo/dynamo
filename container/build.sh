@@ -89,6 +89,7 @@ TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
 TRTLLM_COMMIT=83f37614ef735d251281136c3c05b1fecf8ef68b
+
 # TensorRT-LLM PyPI index URL
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
 TENSORRTLLM_PIP_WHEEL=""
@@ -96,7 +97,11 @@ TENSORRTLLM_PIP_WHEEL=""
 
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-VLLM_BASE_IMAGE_TAG="25.03-cuda12.8-devel-ubuntu24.04"
+# FIXME: NCCL will hang with 25.03, so use 25.01 for now
+# Please check https://github.com/ai-dynamo/dynamo/pull/1065
+# for details and reproducer to manually test if the image
+# can be updated to later versions.
+VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 NONE_BASE_IMAGE="ubuntu"
 NONE_BASE_IMAGE_TAG="24.04"
