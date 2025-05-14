@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -162,6 +163,11 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		err := updateDynDeploymentConfig(deployment, consts.DynamoServicePort)
 		if err != nil {
 			logger.Error(err, fmt.Sprintf("Failed to update the %v env var", DYN_DEPLOYMENT_CONFIG_ENV_VAR))
+			return ctrl.Result{}, err
+		}
+		err = overrideWithDynDeploymentConfig(ctx, deployment)
+		if err != nil {
+			logger.Error(err, fmt.Sprintf("Failed to override the component config with the %v env var", DYN_DEPLOYMENT_CONFIG_ENV_VAR))
 			return ctrl.Result{}, err
 		}
 	}
@@ -303,6 +309,62 @@ func updateDynDeploymentConfig(dynamoDeploymentComponent *nvidiacomv1alpha1.Dyna
 				dynamoDeploymentComponent.Spec.Envs[i].Value = string(updated)
 				break
 			}
+		}
+	}
+	return nil
+}
+
+func overrideWithDynDeploymentConfig(ctx context.Context, dynamoDeploymentComponent *nvidiacomv1alpha1.DynamoComponentDeployment) error {
+	for _, env := range dynamoDeploymentComponent.Spec.Envs {
+		if env.Name == DYN_DEPLOYMENT_CONFIG_ENV_VAR {
+			dynDeploymentConfig, err := dynamo.ParseDynDeploymentConfig(ctx, []byte(env.Value))
+			if err != nil {
+				return fmt.Errorf("failed to parse %v: %w", DYN_DEPLOYMENT_CONFIG_ENV_VAR, err)
+			}
+			componentDynConfig := dynDeploymentConfig[dynamoDeploymentComponent.Spec.ServiceName]
+			if componentDynConfig != nil {
+				if componentDynConfig.ServiceArgs != nil && componentDynConfig.ServiceArgs.Workers != nil {
+					dynamoDeploymentComponent.Spec.Replicas = componentDynConfig.ServiceArgs.Workers
+				}
+				if componentDynConfig.ServiceArgs != nil && componentDynConfig.ServiceArgs.Resources != nil {
+					requests := &dynamoCommon.ResourceItem{}
+					limits := &dynamoCommon.ResourceItem{}
+					if dynamoDeploymentComponent.Spec.Resources == nil {
+						dynamoDeploymentComponent.Spec.Resources = &dynamoCommon.Resources{
+							Requests: requests,
+							Limits:   limits,
+						}
+					} else {
+						if dynamoDeploymentComponent.Spec.Resources.Requests != nil {
+							requests = dynamoDeploymentComponent.Spec.Resources.Requests
+						} else {
+							dynamoDeploymentComponent.Spec.Resources.Requests = requests
+						}
+						if dynamoDeploymentComponent.Spec.Resources.Limits != nil {
+							limits = dynamoDeploymentComponent.Spec.Resources.Limits
+						} else {
+							dynamoDeploymentComponent.Spec.Resources.Limits = limits
+						}
+					}
+					if componentDynConfig.ServiceArgs.Resources.GPU != nil {
+						requests.GPU = *componentDynConfig.ServiceArgs.Resources.GPU
+						limits.GPU = *componentDynConfig.ServiceArgs.Resources.GPU
+					}
+					if componentDynConfig.ServiceArgs.Resources.CPU != nil {
+						requests.CPU = *componentDynConfig.ServiceArgs.Resources.CPU
+						limits.CPU = *componentDynConfig.ServiceArgs.Resources.CPU
+					}
+					if componentDynConfig.ServiceArgs.Resources.Memory != nil {
+						requests.Memory = *componentDynConfig.ServiceArgs.Resources.Memory
+						limits.Memory = *componentDynConfig.ServiceArgs.Resources.Memory
+					}
+					if componentDynConfig.ServiceArgs.Resources.Custom != nil {
+						requests.Custom = componentDynConfig.ServiceArgs.Resources.Custom
+						limits.Custom = componentDynConfig.ServiceArgs.Resources.Custom
+					}
+				}
+			}
+			break
 		}
 	}
 	return nil
