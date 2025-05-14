@@ -133,4 +133,4 @@ Note that we keep the initial non-suffix entry in order to know what cmd we will
 
 ### Kubernetes Backend
 
-The Kubernetes backend works by updating the replicas count of the DynamoGraphDeployment custom resource. When the planner detects the need to scale up or down a specific worker type, it uses the Kubernetes API to patch the DynamoGraphDeployment resource, modifying the replicas count for the appropriate component. The Kubernetes operator then reconciles this change by creating or removing the necessary pods. This provides a seamless scaling experience in Kubernetes environments without requiring manual intervention. 
+The Kubernetes backend works by updating the replicas count of the DynamoGraphDeployment custom resource. When the planner detects the need to scale up or down a specific worker type, it uses the Kubernetes API to patch the DynamoGraphDeployment resource, modifying the replicas count for the appropriate component. The Kubernetes operator then reconciles this change by creating or removing the necessary pods. This provides a seamless scaling experience in Kubernetes environments without requiring manual intervention.

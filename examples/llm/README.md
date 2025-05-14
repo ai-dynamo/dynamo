@@ -133,7 +133,7 @@ _Note_: For a non-dockerized deployment, first export `DYNAMO_HOME` to point to 
 
 #### Aggregated serving
 ```bash
-cd $DYNAMO_HOME/examples/llm
+cd /workspace/examples/llm
 dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
 ```
 
