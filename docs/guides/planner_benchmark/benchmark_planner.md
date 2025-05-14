@@ -48,14 +48,7 @@ To measure the performance of dynamo with planner, we start from a 1p1d deployme
 
 ```bash
 cd examples/llm
-dynamo serve graphs.disagg:Frontend -f disagg_1p1d.yml \
-    --Planner.metric-pulling-interval 1 \
-    --Planner.adjustment-interval 10 \
-    --Planner.prefill-queue-scale-down-threshold 0.2 \
-    --Planner.prefill-queue-scale-up-threshold 10 \
-    --Planner.decode-kv-scale-down-threshold 0.3 \
-    --Planner.decode-kv-scale-up-threshold 0.6 \
-    --Planner.log-dir log/planner
+dynamo serve graphs.disagg:Frontend -f disagg_1p1d.yml
 
 # in terminal 2
 genai-perf profile \
