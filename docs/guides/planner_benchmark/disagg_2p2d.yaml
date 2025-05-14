@@ -46,4 +46,4 @@ PrefillWorker:
 
 Planner:
   environment: local
-  no-operation: false
+  no-operation: true

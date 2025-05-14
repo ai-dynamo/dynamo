@@ -48,19 +48,16 @@ To measure the performance of dynamo with planner, we start from a 1p1d deployme
 
 ```bash
 cd examples/llm
-dynamo serve graphs.disagg:Frontend -f disagg_1p1d.yml
+dynamo serve graphs.disagg:Frontend -f disagg_1p1d.yml \
+    --Planner.metric-pulling-interval 1 \
+    --Planner.adjustment-interval 10 \
+    --Planner.prefill-queue-scale-down-threshold 0.2 \
+    --Planner.prefill-queue-scale-up-threshold 10 \
+    --Planner.decode-kv-scale-down-threshold 0.3 \
+    --Planner.decode-kv-scale-up-threshold 0.6 \
+    --Planner.log-dir log/planner
 
 # in terminal 2
-PYTHONPATH=/workspace/examples/llm python components/planner.py \
-    --metric-pulling-interval 1 \
-    --adjustment-interval 10 \
-    --prefill-queue-scale-down-threshold 0.2 \
-    --prefill-queue-scale-up-threshold 10 \
-    --decode-kv-scale-down-threshold 0.3 \
-    --decode-kv-scale-up-threshold 0.6 \
-    --log-dir log/planner
-
-# in terminal 3
 genai-perf profile \
     --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     -m deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
@@ -92,12 +89,10 @@ In this example, we use a fixed 2p2d engine as baseline. Planner provides a `--n
 
 ```bash
 # in terminal 1
-dynamo serve graphs.disagg:Frontend -f disagg_2p2d.yml
+dynamo serve graphs.disagg:Frontend -f disagg_2p2d.yml \
+    --Planner.log-dir log/2p2d
 
-# in terminal 2 (optional)
-PYTHONPATH=/workspace/examples/llm python components/planner.py --no-operation --log-dir log/2p2d
-
-# in terminal 3
+# in terminal 2
 genai-perf profile --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B -m deepseek-ai/DeepSeek-R1-Distill-Llama-8B --service-kind openai --endpoint-type chat --url http://localhost:8000 --streaming --input-file payload:sin_b512_t600_rr5.0-20.0-150.0_io3000150-3000150-0.2-0.8-10.jsonl
 ```
 
