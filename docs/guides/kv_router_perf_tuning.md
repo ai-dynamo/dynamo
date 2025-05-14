@@ -77,7 +77,7 @@ Check the total number of KV blocks allocated for your backend engine. For small
 Consider the expected theoretical hit rate of your dataset (assuming perfect caching):
 
 - More formally, consider the depth of your core prefix tree (nodes visited at least twice)
-- For lower hit rates, or if the core prefix tree depth is short compared to the ISL, 
+- For lower hit rates, or if the core prefix tree depth is short compared to the ISL,
 reduce the overlap score weight
 - Alternatively, normalize the overlap score with the input sequence length (ISL)
 
