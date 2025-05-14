@@ -78,8 +78,9 @@ tensorboard --logdir=<path-to-tensorboard-log-dir>
 ```
 
 ## Backends
-We currently only support one backend:
+We currently support two backends:
 1. `local` - uses circus to start/stop worker subprocesses
+2. `kubernetes` - uses kubernetes to scale up/down the number of worker pods by updating the replicas count of the DynamoGraphDeployment resource
 
 ### Local Backend
 
@@ -129,3 +130,7 @@ Note that we keep the initial non-suffix entry in order to know what cmd we will
 
 > [!NOTE]
 > At the moment - planner work best if your initial replicas per worker are 1. This is because if you specify replicas > 1 when you initially start `dynamo serve`, the current implementation in `serving.py` starts each process in the same watcher.
+
+### Kubernetes Backend
+
+The Kubernetes backend works by updating the replicas count of the DynamoGraphDeployment custom resource. When the planner detects the need to scale up or down a specific worker type, it uses the Kubernetes API to patch the DynamoGraphDeployment resource, modifying the replicas count for the appropriate component. The Kubernetes operator then reconciles this change by creating or removing the necessary pods. This provides a seamless scaling experience in Kubernetes environments without requiring manual intervention. 

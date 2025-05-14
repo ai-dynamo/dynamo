@@ -136,7 +136,12 @@ class Planner:
         self.last_adjustment_time = time.time()
 
     async def collect_metrics(self):
-        logger.info(f"Collecting metrics at t={time.time() - self.init_time:.1f}s")
+        if self.args.no_operation:
+            logger.info(f"Collecting metrics in no-operation mode at t={time.time() - self.init_time:.1f}s - detailed logs will be at DEBUG level")
+            log_func = logger.debug
+        else:
+            logger.info(f"Collecting metrics at t={time.time() - self.init_time:.1f}s")
+            log_func = logger.info
 
         # collect prefill queue load
         try:
@@ -147,14 +152,14 @@ class Planner:
                 prefill_queue_size = await prefill_queue.get_queue_size()
                 measure_time = time.time() - self.init_time
             self.prefill_queue_load.append(prefill_queue_size)
-            logger.info(
+            log_func(
                 f"Collected prefill queue size at t={measure_time:.1f}s: {int(prefill_queue_size)}"
             )
             self.writer.add_scalar(
                 "prefill_queue_size", prefill_queue_size, measure_time
             )
         except Exception as e:
-            logger.info(f"Failed to collect prefill queue size metrics: {e}")
+            log_func(f"Failed to collect prefill queue size metrics: {e}")
 
         # collect kv load
         total_active_requests: int = 0
@@ -177,7 +182,7 @@ class Planner:
                         kv_load = kv_load + 0.02 * num_requests_waiting
                 self.kv_load.append(kv_load)
             measure_time = time.time() - self.init_time
-            logger.info(
+            log_func(
                 f"Collected kv load at t={measure_time:.1f}s: {self.kv_load[prev_kv_load_len:]} (act/pnd req: {total_active_requests}/{total_queued_requests})"
             )
             average_kv_load = np.mean(self.kv_load[prev_kv_load_len:])
@@ -186,7 +191,7 @@ class Planner:
                 "total_queued_requests", total_queued_requests, measure_time
             )
         except Exception as e:
-            logger.info(f"Failed to collect kv load metrics: {e}")
+            log_func(f"Failed to collect kv load metrics: {e}")
 
         p_endpoints, d_endpoints = await self.get_workers_info()
         self.writer.add_scalar(

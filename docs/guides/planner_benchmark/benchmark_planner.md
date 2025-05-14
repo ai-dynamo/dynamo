@@ -48,7 +48,7 @@ To measure the performance of dynamo with planner, we start from a 1p1d deployme
 
 ```bash
 cd examples/llm
-dynamo serve graphs.disagg:Frontend -f <path to disagg_1p1d.yml in this folder> --enable-local-planner
+dynamo serve graphs.disagg:Frontend -f disagg_1p1d.yml
 
 # in terminal 2
 PYTHONPATH=/workspace/examples/llm python components/planner.py \
@@ -92,7 +92,7 @@ In this example, we use a fixed 2p2d engine as baseline. Planner provides a `--n
 
 ```bash
 # in terminal 1
-dynamo serve --enable-local-planner graphs.disagg:Frontend -f disagg_2p2d.yml
+dynamo serve graphs.disagg:Frontend -f disagg_2p2d.yml
 
 # in terminal 2 (optional)
 PYTHONPATH=/workspace/examples/llm python components/planner.py --no-operation --log-dir log/2p2d
