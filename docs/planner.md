@@ -49,26 +49,48 @@ There are two additional rules set by planner to prevent over-compensation:
 1. We do not scale up prefill worker if the prefill queue size is estimated to reduce below the `--prefill-queue-scale-up-threshold` within the next `NEW_PREFILL_WORKER_QUEUE_BUFFER_PERIOD=3` adjustment intervals following the trend observed in the current adjustment interval.
 
 ## Usage
-After you've deployed a dynamo graph - you can start the planner with the following command:
+The planner is started automatically as part of Dynamo pipelines when running `dynamo serve`. You can configure the planner just as you would any other component in your pipeline either via YAML configuration or through CLI arguments.
+
+Usage:
 ```bash
-PYTHONPATH=/workspace/examples/llm python components/planner.py <arguments>
+# Configure the planner through YAML configuration
+dynamo serve graphs.disagg:Frontend -f disagg.yaml
+
+# disagg.yaml
+# ...
+# Planner:
+#   environment: local
+#   no-operation: false
+#   log-dir: log/planner
+
+# Configure the planner through CLI arguments
+dynamo serve graphs.disagg:Frontend -f disagg.yaml --Planner.environment=local --Planner.no-operation=false --Planner.log-dir=log/planner
 ```
 
-Planner takes the following arguments:
-* `--namespace` (str, default: "dynamo"): Namespace planner will look at
-* `--served-model-name` (str, default: "vllm"): Model name that is being served`
-* `--no-operation` (flag): Do not make any adjustments, just observe the metrics and log to tensorboard
-* `--log-dir` (str, default: None): Tensorboard logging directory
-* `--adjustment-interval` (int, default: 30): Interval in seconds between scaling adjustments
-* `--metric-pulling-interval` (int, default: 1): Interval in seconds between metric pulls
-* `--max-gpu-budget` (int, default: 8): Maximum number of GPUs to use, planner will not scale up more than this number of GPUs for prefill plus decode workers
-* `--min-gpu-budget` (int, default: 1): Minimum number of GPUs to use, planner will not scale down below this number of GPUs for prefill or decode workers
-* `--decode-kv-scale-up-threshold` (float, default: 0.9): KV cache utilization threshold to scale up decode workers
-* `--decode-kv-scale-down-threshold` (float, default: 0.5): KV cache utilization threshold to scale down decode workers
-* `--prefill-queue-scale-up-threshold` (float, default: 0.5): Queue utilization threshold to scale up prefill workers
-* `--prefill-queue-scale-down-threshold` (float, default: 0.2): Queue utilization threshold to scale down prefill workers
-* `--decode-engine-num-gpu` (int, default: 1): Number of GPUs per decode engine
-* `--prefill-engine-num-gpu` (int, default: 1): Number of GPUs per prefill engine
+The planner accepts the following configuration options:
+* `namespace` (str, default: "dynamo"): Namespace planner will look at
+* `served-model-name` (str, default: "vllm"): Model name that is being served`
+* `no-operation` (bool, default: false): Do not make any adjustments, just observe the metrics and log to tensorboard.
+* `log-dir` (str, default: None): Tensorboard logging directory
+* `adjustment-interval` (int, default: 30): Interval in seconds between scaling adjustments
+* `metric-pulling-interval` (int, default: 1): Interval in seconds between metric pulls
+* `max-gpu-budget` (int, default: 8): Maximum number of GPUs to use, planner will not scale up more than this number of GPUs for prefill plus decode workers
+* `min-gpu-budget` (int, default: 1): Minimum number of GPUs to use, planner will not scale down below this number of GPUs for prefill or decode workers
+* `decode-kv-scale-up-threshold` (float, default: 0.9): KV cache utilization threshold to scale up decode workers
+* `decode-kv-scale-down-threshold` (float, default: 0.5): KV cache utilization threshold to scale down decode workers
+* `prefill-queue-scale-up-threshold` (float, default: 0.5): Queue utilization threshold to scale up prefill workers
+* `prefill-queue-scale-down-threshold` (float, default: 0.2): Queue utilization threshold to scale down prefill workers
+* `decode-engine-num-gpu` (int, default: 1): Number of GPUs per decode engine
+* `prefill-engine-num-gpu` (int, default: 1): Number of GPUs per prefill engine
+
+Alternatively, you can run the planner as a standalone python process. The configuration options above can be directly passed in as CLI arguments.
+```bash
+PYTHONPATH=/workspace/examples/llm python components/planner.py <arguments>
+
+# Example
+# PYTHONPATH=/workspace/examples/llm python components/planner.py --namespace=dynamo --served-model-name=vllm --no-operation --log-dir=log/planner
+```
+
 
 ### Tensorboard
 
