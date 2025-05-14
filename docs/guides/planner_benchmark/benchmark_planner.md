@@ -82,8 +82,7 @@ In this example, we use a fixed 2p2d engine as baseline. Planner provides a `--n
 
 ```bash
 # in terminal 1
-dynamo serve graphs.disagg:Frontend -f disagg_2p2d.yml \
-    --Planner.log-dir log/2p2d
+dynamo serve graphs.disagg:Frontend -f disagg_2p2d.yml
 
 # in terminal 2
 genai-perf profile --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B -m deepseek-ai/DeepSeek-R1-Distill-Llama-8B --service-kind openai --endpoint-type chat --url http://localhost:8000 --streaming --input-file payload:sin_b512_t600_rr5.0-20.0-150.0_io3000150-3000150-0.2-0.8-10.jsonl

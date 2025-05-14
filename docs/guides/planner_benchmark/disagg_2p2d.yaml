@@ -47,3 +47,4 @@ PrefillWorker:
 Planner:
   environment: local
   no-operation: true
+  log-dir: log/2p2d
