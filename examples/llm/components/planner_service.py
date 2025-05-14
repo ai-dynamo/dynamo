@@ -18,12 +18,11 @@ import logging
 
 from pydantic import BaseModel
 
-from components.planner import (  # type: ignore[attr-defined]
-    PlannerDefaults,
-    start_planner,
-)
+from components.planner import start_planner  # type: ignore[attr-defined]
+from dynamo.planner.defaults import PlannerDefaults
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk.core.protocol.interface import ComponentType
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
 
@@ -37,7 +36,7 @@ class RequestType(BaseModel):
 @service(
     dynamo={
         "namespace": "dynamo",
-        "component_type": "planner",
+        "component_type": ComponentType.PLANNER,
     },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -83,7 +82,7 @@ class Planner:
     async def async_init(self):
         import asyncio
 
-        await asyncio.sleep(60)
+        await asyncio.sleep(30)
         logger.info("Calling start_planner")
         await start_planner(self.runtime, self.args)
         logger.info("Planner started")

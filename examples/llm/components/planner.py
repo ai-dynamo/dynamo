@@ -31,33 +31,12 @@ from utils.prefill_queue import PrefillQueue
 
 from dynamo.llm import KvMetricsAggregator
 from dynamo.planner import KubernetesConnector, LocalConnector
+from dynamo.planner.defaults import PlannerDefaults
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-
-
-# Source of truth for planner defaults
-class PlannerDefaults:
-    namespace = "dynamo"
-    served_model_name = "vllm"
-    environment = "local"
-    no_operation = False
-    log_dir = None
-    adjustment_interval = 10
-    metric_pulling_interval = 1
-    max_gpu_budget = 8
-    min_endpoint = 1
-    decode_kv_scale_up_threshold = 0.9
-    decode_kv_scale_down_threshold = 0.5
-    prefill_queue_scale_up_threshold = 5.0
-    prefill_queue_scale_down_threshold = 0.2
-    decode_engine_num_gpu = 1
-    prefill_engine_num_gpu = 1
-    NEW_DECODE_WORKER_GRACE_PERIOD = 3
-    NEW_PREFILL_WORKER_QUEUE_BUFFER_PERIOD = 3
-
 
 # will not decrease decode worker number within 3 adjustment interval after a new decode worker
 # is added. this is to leave time for the new decode worker to populate its kv cache.
