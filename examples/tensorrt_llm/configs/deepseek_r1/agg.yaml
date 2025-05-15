@@ -14,8 +14,10 @@
 # limitations under the License.
 
 Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1
-  endpoint: dynamo.Processor.chat/completions
+  # This is the client-facing model name, you can set this to anything you'd like.
+  served_model_name: "nvidia/DeepSeek-R1-FP4"
+  endpoint_chat: dynamo.Processor.chat/completions
+  endpoint_completions: dynamo.Processor.completions
   port: 8000
 
 Processor:

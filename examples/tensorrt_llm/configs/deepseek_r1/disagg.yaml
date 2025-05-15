@@ -14,8 +14,10 @@
 # limitations under the License.
 
 Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1
-  endpoint: dynamo.Processor.chat/completions
+  # This is the client-facing model name, you can set this to anything you'd like.
+  served_model_name: "nvidia/DeepSeek-R1-FP4"
+  endpoint_chat: dynamo.Processor.chat/completions
+  endpoint_completions: dynamo.Processor.completions
   port: 8000
 
 Processor:
@@ -28,10 +30,12 @@ Processor:
 
 TensorRTLLMWorker:
   engine_args: "configs/deepseek_r1/agg_llm_api_config.yaml"
-  # TODO: We should simplify this to provide one or the other, and not require both
-  # with disagg overwriting agg under the hood.
   llmapi-disaggregated-config: "configs/deepseek_r1/disagg_llm_api_config.yaml"
   remote-prefill: true
+  # NOTE: When testing/benchmarking multiple prefill workers, you can set
+  # this number to the exact amount of prefill workers if you want Dynamo to
+  # wait until all the prefill workers are ready before marking the decode
+  # worker ready.
   min-prefill-workers: 1
   router: round-robin
   ServiceArgs:

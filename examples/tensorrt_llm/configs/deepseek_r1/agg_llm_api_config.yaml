@@ -13,13 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-model_name: "deepseek-ai/DeepSeek-R1"
+# NOTE: FP4 only supported starting with Blackwell GPUs.
+# https://huggingface.co/nvidia/DeepSeek-R1-FP4
+# You can also specify the full path to locally downloaded weights
+# instead of a HuggingFace ID here.
+model_name: "nvidia/DeepSeek-R1-FP4"
 backend: pytorch
 
 tensor_parallel_size: 4
 moe_expert_parallel_size: 4
 pipeline_parallel_size: 1
-enable_attention_dp: true
+enable_attention_dp: false
 
 max_batch_size: 256
 # 8448 = 8192 ISL + 256 OSL
@@ -27,15 +31,17 @@ max_num_tokens: 8448
 max_seq_len: 8448
 
 kv_cache_config:
-  # With dp attention disabled: 0.80 is fine
-  #free_gpu_memory_fraction: 0.80
-  # With dp attention enabled: can OOM with 8K ISL at concurrency 256 at high
-  # free_gpu_memory_fraction values, so keep it low.
-  free_gpu_memory_fraction: 0.30
+  # With dp attention disabled: high free_gpu_memory_fraction is fine.
+  free_gpu_memory_fraction: 0.80
+  # With dp attention enabled: large ISL at high concurrency may need
+  # free_gpu_memory_fraction low to have enough available memory.
+  # free_gpu_memory_fraction: 0.30
 
 pytorch_backend_config:
   use_cuda_graph: true
   cuda_graph_padding_enabled: true
+  # NOTE: For larger max batch size, you may want to add larger cuda graph
+  # batch sizes below to match.
   cuda_graph_batch_sizes:
   - 1
   - 2
