@@ -31,7 +31,7 @@ VLLM_USE_PRECOMPILED=1 uv pip install --editable ./vllm/
 
 2. Start required services:
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
 ## Running the Server
