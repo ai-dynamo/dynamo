@@ -35,6 +35,8 @@ For detailed instructions on using the Dynamo Cloud Platform, see:
 - [Dynamo Cloud Platform Guide](dynamo_cloud.md): walks through installing and configuring the Dynamo cloud components on your Kubernetes cluster.
 - [Operator Deployment Guide](operator_deployment.md)
 
+For more information on the operator, see the [Dynamo Operator Page](dynamo_operator.md).
+
 ### 2. Manual Deployment with Helm Charts
 
 The manual deployment path (`deploy/helm/`) is available for users who need more control over their deployments:
