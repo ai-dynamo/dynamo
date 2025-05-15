@@ -5,11 +5,11 @@ it via `dynamo serve` or `dynamo deploy`, covering basic concepts as well as
 advanced features like enabling KV routing and disaggregated serving.
 
 For detailed information about `dynamo serve` infrastructure, see the
-[Dynamo SDK Docs](../deploy/sdk/docs/sdk/README.md).
+[Dynamo SDK Docs](../API/sdk.md).
 
 For a guide that walks through how to launch a vLLM-based worker with
 implementation of Disaggregated Serving and KV-Aware Routing included,
-see the [Dynamo Serve Guide](../docs/guides/dynamo_serve.md).
+see the [Dynamo Serve Guide](../../docs/guides/dynamo_serve.md).
 
 ## Basic Concepts
 
@@ -19,7 +19,7 @@ a Python class based definition that requires a few key decorators to get going:
 - `@dynamo_endpoint`: marks methods that can be called by other workers or clients
 
 For more detailed information on these concepts, see the
-[Dynamo SDK Docs](../deploy/sdk/docs/sdk/README.md).
+[Dynamo SDK Docs](../API/sdk.md).
 
 ### Worker Skeleton
 
@@ -51,7 +51,7 @@ based on the definitions above, it would be: `your_namespace/YourWorker/your_end
 - `endpoint="your_endpoint"`: Defined by the `@dynamo_endpoint` decorator, or by default the name of the function being decorated.
 
 For more details about service configuration, resource management, and dynamo endpoints,
-see the [Dynamo SDK Docs](../deploy/sdk/docs/README.md).
+see the [Dynamo SDK Docs](../API/sdk.md).
 
 ### Request/Response Types
 
@@ -125,7 +125,7 @@ class YourWorker:
 
 To see a minimal worker example like the above used in a larger pipeline of
 components, see the `dynamo serve`
-[Hello World example](../examples/hello_world).
+[Hello World example](../../examples/hello_world).
 
 ### Client Example
 
@@ -176,13 +176,13 @@ that does something like the following:
 - Forward responses back to client
 
 This advanced scenario of a separate
-[OpenAI Processor worker](../examples/llm/components/processor.py)
+[OpenAI Processor worker](https://github.com/ai-dynamo/dynamo/blob/main/examples/llm/components/processor.py)
 is demonstrated in this
-[vLLM example](../examples/llm/).
+[vLLM example](https://github.com/ai-dynamo/dynamo/tree/main/examples/llm).
 
 For a more minimal example of deploying a pipeline of components with a custom
 API that your client can communicate with, see the
-[Hello World example](../examples/hello_world).
+[Hello World example](../../examples/hello_world).
 
 ## Advanced Features
 
@@ -300,7 +300,7 @@ to a KV Router through the `KvMetricsAggregator`.
 These metrics can then be inputs to a cost function to determine which
 of the available worker's the request should be routed to.
 
-For a [python-based KV Router](../examples/llm/components/kv_router.py)
+For a [python-based KV Router](../../examples/llm/components/kv_router.py)
 implementation, the router is like any other worker, and it can expose
 an endpoint that can do arbitrary things based on your use case.
 
@@ -414,11 +414,11 @@ class Router:
 
 Similarly, for running a Rust-based Router as a standalone binary
 rather than as a Python Worker, see the
-[WorkerSelector Trait](../lib/llm/src/kv_router.rs) trait, and the
-[Router Component](../components/router/src/main.rs).
+[WorkerSelector Trait](../../lib/llm/src/kv_router.rs) trait, and the
+[Router Component](../../components/router/src/main.rs).
 
 For more details on receiving and routing based on the worker's published KV
-metrics, see the [KV Cache Routing Guide](../docs/kv_cache_routing.md).
+metrics, see the [KV Cache Routing Guide](../../docs/architecture/kv_cache_routing.md).
 
 ### Disaggregated Serving
 
@@ -520,7 +520,7 @@ The NIXL connector provides:
 - Efficient block-based KV cache transfers
 - Asynchronous transfer notifications
 
-For a complete implementation example using NIXL for disaggregated serving, see the [vLLM example](../examples/llm/README.md).
+For a complete implementation example using NIXL for disaggregated serving, see the [vLLM example](../examples/llm_deployment.md).
 
 #### Disaggregation in Dynamo
 
@@ -589,13 +589,13 @@ Depending on the load distribution of requests and number of Prefill/Decode
 worker instances, instead of directly forwarding requests to the Prefill
 worker endpoint, it may be advantageous to send Prefill requests into a queue
 that the Prefill workers can pull from on-demand instead. You can see an example
-of that [here](../examples/hello_world/disagg_skeleton/components/prefill_worker.py).
+of that [here](https://github.com/ai-dynamo/dynamo/blob/main/examples/hello_world/disagg_skeleton/components/prefill_worker.py).
 
 For an introductory example on doing disaggregation with Dynamo using simple models, see
-[this example](../examples/hello_world/disagg_skeleton).
+[this example](../examples/disagg_skeleton.md).
 
 For more information on Disaggregated Serving, see the
-[general guide](../docs/disagg_serving.md) and [performance tuning guide](../docs/guides/disagg_perf_tuning.md).
+[general guide](../architecture/disagg_serving.md) and [performance tuning guide](disagg_perf_tuning.md).
 
 ## Best Practices
 
@@ -620,6 +620,6 @@ For more information on Disaggregated Serving, see the
 
 ## Additional Resources
 
-- Check the [examples](../examples/) directory for more detailed implementations
-- Refer to the [Dynamo SDK Docs](../deploy/sdk/docs/sdk/README.md) for API details.
-- For Disaggregated Serving, see the [general guide](../docs/disagg_serving.md) and [performance tuning guide](../docs/guides/disagg_perf_tuning.md).
+- Check the [examples](https://github.com/ai-dynamo/dynamo/tree/main/examples) directory for more detailed implementations
+- Refer to the [Dynamo SDK Docs](../API/sdk.md) for API details.
+- For Disaggregated Serving, see the [general guide](../architecture/disagg_serving.md) and [performance tuning guide](disagg_perf_tuning.md).

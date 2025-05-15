@@ -15,6 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
+<a id="k8-helm-deploy"></a>
 # Deploying Dynamo Inference Graphs to Kubernetes using Helm
 
 This guide will walk you through the process of deploying an inference graph created using the Dynamo SDK onto a Kubernetes cluster.
@@ -113,8 +114,9 @@ Follow these steps to containerize and deploy your inference pipeline:
 
 1. Build and containerize the pipeline:
 
-> [!NOTE]
-> For instructions on building and pushing the Dynamo base image, see the [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image) section in the main README.
+``` {note}
+For instructions on building and pushing the Dynamo base image, see [Building the Dynamo Base Image](../../get_started.md#building-the-dynamo-base-image).
+```
 
 ```bash
 # Navigate to example directory

@@ -105,7 +105,7 @@ genai-perf profile --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B -m deeps
 
 The below two figures show the performance comparison between planner and the baseline 2p2d deployment. Planner achieves 1.5x speedup while using 7.4% less GPU resources.
 
-![Planner Performance Comparison](./images/planner_perf.png)
+![Two bar charts comparing 2P2D and Planner. Planner shows lower GPU usage and lower average sequence latency.](../../images/planner_perf.png)
 
-![Planner Tensorboard](./images/planner_tensorboard.png)
+![Planner Tensorboard; four line graphs comparing two runs: 2p2d_rr5-20_2 and planner_rr5-20.](../../images/planner_tensorboard.png)
 

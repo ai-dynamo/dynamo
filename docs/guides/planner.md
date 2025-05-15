@@ -17,7 +17,7 @@ limitations under the License.
 
 # Planner
 
-The planner is a component that monitors the state of the system and makes adjustments to workers to ensure that the system is running efficiently. Currently, planner can scale up and down the number of vllm workers based on the kv cache load and prefill queue size:
+The planner monitors the state of the system and adjusts workers to ensure that the system runs efficiently. Currently, the planner can scale the number of vllm workers up and down based on the kv cache load and prefill queue size:
 * Backend:
   * local ✅
   * kubernetes ✅
@@ -85,8 +85,9 @@ We currently only support one backend:
 
 Circus is a Python program which can be used to monitor and control processes and sockets. Dynamo serve uses circus to start each node in a graph and monitors each subprocesses. We leverage a core feature to do this called `Watcher`. A `Watcher` is the target program that you would like to run (which in our case is `serve_dynamo.py`). When planner decides to scale up or down, it will either add or remove a watcher from the existing `circus`.
 
-> [!NOTE]
-> Although circus allows you to `increment` an existing watcher, it was not designed to allow variables to be passed in which does not allow us to schedule on a GPU. So instead we start a new watcher per process. When planner decides to add or remove a worker, we have logic to handle this adding/removing and incrementing/decrementing the workers.
+``` {note}
+Although circus allows you to `increment` an existing watcher, it was not designed to allow variables to be passed in which does not allow us to schedule on a GPU. So instead we start a new watcher per process. When planner decides to add or remove a worker, we have logic to handle this adding/removing and incrementing/decrementing the workers.
+```
 
 #### Statefile
 
@@ -94,7 +95,7 @@ The statefile is a json file created when initially running `dynamo serve` and i
 
 When one Decode worker is spun up, the statefile looks like:
 
-```json
+```none
 {
   "dynamo_VllmWorker": {..., resources={...}},
 }
@@ -102,7 +103,7 @@ When one Decode worker is spun up, the statefile looks like:
 
 Now another decode worker is added:
 
-```json
+```none
 {
   "dynamo_VllmWorker": {..., resources={...}},
   "dynamo_VllmWorker_1": {..., resources={...}},
@@ -111,7 +112,7 @@ Now another decode worker is added:
 
 Then one decode worker is removed:
 
-```json
+```none
 {
   "dynamo_VllmWorker": {..., resources={...}},
 }
@@ -119,13 +120,14 @@ Then one decode worker is removed:
 
 If the last decode worker is removed, the statefile looks like:
 
-```json
+```none
 {
   "dynamo_VllmWorker": {...},
 }
 ```
 
-Note that we keep the initial non-suffix entry in order to know what cmd we will need to spin up another worker. This is the same for prefill workers as well.
+We keep the initial non-suffix entry in order to know what cmd we'll need to spin up another worker. This is the same for prefill workers as well.
 
-> [!NOTE]
-> At the moment - planner work best if your initial replicas per worker are 1. This is because if you specify replicas > 1 when you initially start `dynamo serve`, the current implementation in `serving.py` starts each process in the same watcher.
+``` {note}
+At the moment - planner work best if your initial replicas per worker are 1. This is because if you specify replicas > 1 when you initially start `dynamo serve`, the current implementation in `serving.py` starts each process in the same watcher.
+```

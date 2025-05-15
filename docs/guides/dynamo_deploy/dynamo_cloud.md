@@ -29,7 +29,7 @@ The Dynamo cloud platform consists of several key components:
 
 These components work together to provide a seamless deployment experience, handling everything from containerization to scaling and monitoring.
 
-![Dynamo Deploy](../../images/dynamo-deploy.png)
+![Dynamo Deploy system deployment diagram.](../../images/dynamo-deploy.png)
 
 ## 🎯 Prerequisites
 
@@ -42,8 +42,9 @@ Before getting started with the Dynamo cloud platform, ensure you have:
 - `kubectl` configured to access your cluster
 - Helm installed (version 3.0 or later)
 
-> [!TIP]
-> Don't have a Kubernetes cluster? Check out our [Minikube setup guide](./minikube.md) to set up a local environment! 🏠
+```{tip}
+Don't have a Kubernetes cluster? Check out our [Minikube setup guide](./minikube.md) to set up a local environment! 🏠
+```
 
 ## 🏗️ Building Docker Images for Dynamo Cloud Components
 
@@ -64,11 +65,11 @@ Where:
 - `<CONTAINER_REGISTRY>`: Your container registry (e.g., `nvcr.io`, `docker.io/<your-username>`, etc.)
 - `<TAG>`: The version tag for your images (e.g., `latest`, `0.0.1`, `v1.0.0`)
 
-> [!IMPORTANT]
-> Make sure you're logged in to your container registry before pushing images:
-> ```bash
-> docker login <CONTAINER_REGISTRY>
-> ```
+```{important}
+Make sure you're logged in to your container registry before pushing images:
+```bash
+docker login <CONTAINER_REGISTRY>
+```
 
 ### 🛠️ Building Components
 
@@ -110,9 +111,10 @@ export IMAGE_TAG=<TAG>  # Use the same tag you used when building the images
 export NAMESPACE=dynamo-cloud    # change this to whatever you want!
 ```
 
-> [!NOTE]
-> DOCKER_USERNAME and DOCKER_PASSWORD are optional and only needed if you want to pull docker images from a private registry.
-> A docker image pull secret will be created automatically if these variables are set. Its name will be `docker-imagepullsecret` unless overridden by the `DOCKER_SECRET_NAME` environment variable.
+``` {note}
+DOCKER_USERNAME and DOCKER_PASSWORD are optional and only needed if you want to pull docker images from a private registry.
+A docker image pull secret will be created automatically if these variables are set. Its name will be `docker-imagepullsecret` unless overridden by the `DOCKER_SECRET_NAME` environment variable.
+```
 
 The Dynamo Cloud Platform auto-generates docker images for pipelines and pushes them to a container registry.
 By default, the platform will use the same container registry as the platform components (specified by `DOCKER_SERVER`).
@@ -160,8 +162,9 @@ if you wish to be guided through the deployment process, you can run the deploy 
 
 4. 🌐 **Expose Dynamo Cloud Externally**
 
-> [!NOTE]
-> The script will automatically display information about the endpoint you can use to access Dynamo Cloud. In our docs, we refer to this externally available endpoint as `DYNAMO_CLOUD`.
+``` {note}
+The script will automatically display information about the endpoint you can use to access Dynamo Cloud. In our docs, we refer to this externally available endpoint as `DYNAMO_CLOUD`.
+```
 
 The simplest way to expose the `dynamo-store` service within the namespace externally is to use a port-forward:
 
@@ -175,7 +178,7 @@ export DYNAMO_CLOUD=http://localhost:<local-port>
 After deploying the Dynamo cloud platform, you can:
 
 1. Deploy your first inference graph using the [Dynamo CLI](operator_deployment.md)
-2. Deploy Dynamo LLM pipelines to Kubernetes using the [Dynamo CLI](../../../examples/llm/README.md)!
+2. Deploy Dynamo LLM pipelines to Kubernetes using the [Dynamo CLI](../../examples/llm_deployment.md)!
 3. Manage your deployments using the Dynamo CLI
 
 For more detailed information about deploying inference graphs, see the [Dynamo Deploy Guide](README.md).

@@ -19,13 +19,6 @@ limitations under the License.
 
 This guide explains how to create, configure, and deploy inference graphs for large language models using the `dynamo serve` command.
 
-## Table of Contents
-
-- [What are inference graphs?](#what-are-inference-graphs)
-- [Creating an inference graph](#creating-an-inference-graph)
-- [Serving the inference graph](#deploying-the-inference-graph)
-- [Guided Example](#guided-example)
-
 ## What are inference graphs?
 
 Inference graphs are compositions of service components that work together to handle LLM inference. A typical graph might include:
@@ -37,7 +30,7 @@ Inference graphs are compositions of service components that work together to ha
 
 ## Creating an inference graph
 
-Once you've written your various Dynamo services (docs on how to write these can be found [here](../../deploy/sdk/docs/sdk/README.md)), you can create an inference graph by composing these services together using the following two mechanisms:
+Once you've written your various Dynamo services (docs on how to write these can be found [here](https://github.com/ai-dynamo/dynamo/blob/main/deploy/dynamo/sdk/docs/sdk/README.md)), you can create an inference graph by composing these services together using the following two mechanisms:
 
 ### 1. Dependencies with `depends()`
 
@@ -88,7 +81,7 @@ Lets walk through an example.
 
 ## Guided Example
 
-The files referenced here can be found [here](../../examples/llm/components/). You will need 1 GPU minimum to run this example. This example can be run from the `examples/llm` directory
+The files referenced here can be found [here](https://github.com/ai-dynamo/dynamo/blob/main/examples/llm/components). You will need 1 GPU minimum to run this example. This example can be run from the `examples/llm` directory
 
 ### 1. Define your components
 
@@ -140,11 +133,11 @@ Frontend.link(Processor).link(VllmWorker)
 
 ### 3. Define your configuration
 
-We've provided a set of basic configurations for this example [here](../../examples/llm/configs/agg.yaml). All of these can be changed and also be overridden by passing in CLI flags to serve!
+We've provided a set of basic configurations for this example [here](https://github.com/ai-dynamo/dynamo/blob/main/examples/llm/configs/agg.yaml). All of these can be changed and also be overridden by passing in CLI flags to serve!
 
 ### 4. Serve your graph
 
-As a prerequisite, ensure you have NATS and etcd running by running the docker compose in the deploy directory. You can find it [here](../../deploy/metrics/docker-compose.yml).
+As a prerequisite, ensure you have NATS and etcd running by running the docker compose in the deploy directory. You can find it [here](https://github.com/ai-dynamo/dynamo/blob/main/deploy/metrics/docker-compose.yml).
 
 ```bash
 docker compose up -d
@@ -237,8 +230,8 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ## Close deployment
 
-> [!IMPORTANT]
-> We are aware of an issue where vLLM subprocesses might not be killed when `ctrl-c` is pressed.
-> We are working on addressing this. Relevant vLLM issues can be found [here](https://github.com/vllm-project/vllm/pull/8492) and [here](https://github.com/vllm-project/vllm/issues/6219#issuecomment-2439257824).
+```{important}
+We are aware of an issue where vLLM subprocesses might not be killed when `ctrl-c` is pressed.
+We are working on addressing this. Relevant vLLM issues can be found [here](https://github.com/vllm-project/vllm/pull/8492) and [here](https://github.com/vllm-project/vllm/issues/6219#issuecomment-2439257824).
 
 To stop the serve, you can press `ctrl-c` which will kill the different components. In order to kill the remaining vLLM subprocesses you can run `nvidia-smi` and `kill -9` the remaining processes or run `pkill python3` from inside of the container.

@@ -27,8 +27,9 @@ First things first! You'll need to install Minikube. Follow the official [Miniku
 ### 2. Configure GPU Support (Optional)
 Planning to use GPU-accelerated workloads? You'll need to configure GPU support in Minikube. Follow the [Minikube GPU guide](https://minikube.sigs.k8s.io/docs/tutorials/nvidia/) to set up NVIDIA GPU support before proceeding.
 
-> [!TIP]
-> Make sure to configure GPU support before starting Minikube if you plan to use GPU workloads!
+```{tip}
+Make sure to configure GPU support before starting Minikube if you plan to use GPU workloads!
+```
 
 ### 3. Start Minikube
 Time to launch your local cluster!
