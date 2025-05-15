@@ -65,8 +65,8 @@ where
 #[derive(Default, Debug, Clone, Copy, PartialEq)]
 pub enum RouterMode {
     #[default]
-    RoundRobin,
     Random,
+    RoundRobin,
     Direct(i64),
     // Marker value, KV routing itself is in dynamo-llm
     KV,
