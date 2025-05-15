@@ -20,7 +20,8 @@ use crate::protocols::TokenIdType;
 pub type TokenType = Option<String>;
 pub type LogProbs = Vec<f64>;
 
-pub use super::preprocessor::PreprocessedRequest as BackendInput;
+pub use super::preprocessor::PreprocessedRequest as BackendInput; // TODO stop renaming this
+pub use super::preprocessor::PreprocessedRequest;
 pub use super::FinishReason;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

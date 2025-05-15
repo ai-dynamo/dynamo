@@ -26,12 +26,9 @@ description = "Dynamo Run CLI"
 
 [features]
 # Build with `--no-default-features` to disable these defaults
-# We don't include llamacpp by default until we figure out when it needs external libraries
-default = ["mistralrs", "vllm", "sglang"]
+default = ["mistralrs"]
 mistralrs = ["dep:dynamo-engine-mistralrs"]
 llamacpp = ["dep:dynamo-engine-llamacpp"]
-vllm = ["dep:dynamo-engine-vllm0_7", "dep:dynamo-engine-vllm0_8", "dep:netlink-packet-route", "dep:rtnetlink"]
-sglang = ["dep:dynamo-engine-sglang", "dep:netlink-packet-route", "dep:rtnetlink"]
 python = ["dep:dynamo-engine-python"]
 
 cuda = ["dynamo-engine-llamacpp/cuda", "dynamo-engine-mistralrs/cuda"]
@@ -44,17 +41,14 @@ dynamo-runtime = { workspace = true }
 
 dynamo-engine-llamacpp = { path = "../../lib/engines/llamacpp", optional = true }
 dynamo-engine-mistralrs = { path = "../../lib/engines/mistralrs", optional = true }
-dynamo-engine-sglang = { path = "../../lib/engines/sglang", optional = true }
-dynamo-engine-vllm0_7 = { path = "../../lib/engines/vllm0_7", optional = true }
-dynamo-engine-vllm0_8 = { path = "../../lib/engines/vllm0_8", optional = true }
 dynamo-engine-python = { path = "../../lib/engines/python", optional = true }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
-hf-hub = { workspace = true }
 humantime = { workspace = true }
+libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
@@ -67,15 +61,4 @@ async-openai = { version = "0.27.2" }
 clap = { version = "4.5", features = ["derive", "env"] }
 dialoguer = { version = "0.11", default-features = false, features = ["editor", "history"] }
 futures-util = { version = "0.3" }
-
-[target.x86_64-unknown-linux-gnu.dependencies]
-netlink-packet-route = { version = "0.19", optional = true }
-rtnetlink = { version = "0.14", optional = true }
-
-[target.x86_64-unknown-linux-musl.dependencies]
-netlink-packet-route = { version = "0.19", optional = true }
-rtnetlink = { version = "0.14", optional = true }
-
-[target.aarch64-unknown-linux-gnu.dependencies]
-netlink-packet-route = { version = "0.19", optional = true }
-rtnetlink = { version = "0.14", optional = true }
+regex = "1"

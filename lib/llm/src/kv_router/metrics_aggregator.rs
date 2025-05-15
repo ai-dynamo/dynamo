@@ -13,6 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Once;
+
 pub use crate::kv_router::protocols::ForwardPassMetrics;
 use crate::kv_router::KV_METRICS_ENDPOINT;
 
@@ -22,6 +24,9 @@ use dynamo_runtime::component::Component;
 use dynamo_runtime::{service::EndpointInfo, utils::Duration, Result};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+
+static METRICS_WAITING_MESSAGE: Once = Once::new();
+static METRICS_FOUND_MESSAGE: Once = Once::new();
 
 pub struct KvMetricsAggregator {
     pub service_name: String,
@@ -70,10 +75,15 @@ pub async fn collect_endpoints(
         .into_endpoints()
         .filter(|e| e.subject.starts_with(subject))
         .collect::<Vec<_>>();
-    tracing::debug!("Endpoints: {endpoints:?}");
-
     if endpoints.is_empty() {
-        tracing::warn!("No endpoints found matching subject {subject}");
+        // Only print it once, we poll while the worker starts
+        METRICS_WAITING_MESSAGE.call_once(|| {
+            tracing::debug!("Waiting for metrics endpoint..");
+        });
+    } else {
+        METRICS_FOUND_MESSAGE.call_once(|| {
+            tracing::debug!("Found metrics endpoint");
+        });
     }
 
     Ok(endpoints)
@@ -92,7 +102,6 @@ pub async fn collect_endpoints_task(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
-                tracing::debug!("cancellation token triggered");
                 break;
             }
             _ = tokio::time::sleep(backoff_delay) => {
@@ -106,8 +115,6 @@ pub async fn collect_endpoints_task(
                             continue;
                         }
                     };
-                tracing::debug!("unfiltered endpoints: {:?}", unfiltered_endpoints);
-
                 let endpoints: Vec<Endpoint> = unfiltered_endpoints
                     .into_iter()
                     .filter(|s| s.data.is_some())
@@ -125,13 +132,7 @@ pub async fn collect_endpoints_task(
                         }
                     )
                     .collect();
-                tracing::debug!("endpoints: {:?}", endpoints);
-
-                tracing::trace!(
-                    "found {} endpoints for service: {}",
-                    endpoints.len(),
-                    service_subject
-                );
+                tracing::trace!("Found {} endpoints for service: {service_subject}", endpoints.len());
 
                 let processed = ProcessedEndpoints::new(endpoints);
 

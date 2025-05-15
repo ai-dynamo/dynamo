@@ -21,7 +21,7 @@ from argparse import Namespace
 from typing import AsyncIterator, Tuple
 
 from components.worker import VllmWorker
-from utils.logging import check_required_workers
+from utils.check_worker import check_required_workers
 from utils.protocol import Tokens
 from utils.vllm import RouterType
 
@@ -76,7 +76,6 @@ def parse_args(service_name, prefix) -> Namespace:
 
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "dynamo",
     },
     resources={"cpu": "10", "memory": "20Gi"},

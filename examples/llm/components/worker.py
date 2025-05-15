@@ -33,16 +33,13 @@ from vllm.sampling_params import RequestOutputKind
 
 from dynamo.llm import KvMetricsPublisher
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
-from dynamo.sdk.lib.service import LeaseConfig
 
 logger = logging.getLogger(__name__)
 
 
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "dynamo",
-        "custom_lease": LeaseConfig(ttl=1),  # 1 second
     },
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
     workers=1,
@@ -56,15 +53,11 @@ class VllmWorker:
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
         self.do_remote_prefill = self.engine_args.remote_prefill
-        self.model_name = (
-            self.engine_args.served_model_name
-            if self.engine_args.served_model_name is not None
-            else "vllm"
-        )
         self._prefill_queue_nats_server = os.getenv(
             "NATS_SERVER", "nats://localhost:4222"
         )
-        self._prefill_queue_stream_name = self.model_name
+        self.namespace, _ = VllmWorker.dynamo_address()  # type: ignore
+        self._prefill_queue_stream_name = f"{self.namespace}_prefill_queue"
         logger.info(
             f"Prefill queue: {self._prefill_queue_nats_server}:{self._prefill_queue_stream_name}"
         )
@@ -89,7 +82,8 @@ class VllmWorker:
                 )
                 self.engine_args.enable_prefix_caching = True
 
-            os.environ["VLLM_WORKER_ID"] = str(dynamo_context.get("lease").id())
+            VLLM_WORKER_ID = dynamo_context["endpoints"][0].lease_id()
+            os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
             os.environ["VLLM_KV_NAMESPACE"] = "dynamo"
             os.environ["VLLM_KV_COMPONENT"] = class_name
 
@@ -134,7 +128,7 @@ class VllmWorker:
         if self.engine_args.conditional_disagg:
             self.disaggregated_router = PyDisaggregatedRouter(
                 runtime,
-                self.model_name,
+                self.namespace,
                 max_local_prefill_length=self.engine_args.max_local_prefill_length,
                 max_prefill_queue_size=self.engine_args.max_prefill_queue_size,
             )
@@ -142,7 +136,23 @@ class VllmWorker:
         else:
             self.disaggregated_router = None
 
+        # Set up signal handler for graceful shutdown
+        # TODO: move to dynamo sdk
+        loop = asyncio.get_running_loop()
+
+        def signal_handler():
+            # Schedule the shutdown coroutine instead of calling it directly
+            asyncio.create_task(self.graceful_shutdown(runtime))
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, signal_handler)
+
         logger.info("VllmWorker has been initialized")
+
+    async def graceful_shutdown(self, runtime):
+        logger.info("Received shutdown signal, shutting down DistributedRuntime")
+        runtime.shutdown()
+        logger.info("DistributedRuntime shutdown complete")
 
     def shutdown_vllm_engine(self, signum, frame):
         """Shutdown the background loop"""
@@ -158,12 +168,8 @@ class VllmWorker:
 
     async def create_metrics_publisher_endpoint(self):
         component = dynamo_context["component"]
-        lease = dynamo_context["lease"]
-        if lease is None:
-            logger.info("Creating metrics publisher endpoint with primary lease")
-        else:
-            logger.info(f"Creating metrics publisher endpoint with lease: {lease}")
-        await self.metrics_publisher.create_endpoint(component, lease)
+        logger.info("Creating metrics publisher endpoint with primary lease")
+        await self.metrics_publisher.create_endpoint(component)
 
     def get_remote_prefill_request_callback(self):
         # TODO: integrate prefill_queue to dynamo endpoint

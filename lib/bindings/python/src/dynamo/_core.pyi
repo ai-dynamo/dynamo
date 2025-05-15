@@ -49,35 +49,29 @@ class DistributedRuntime:
         """
         ...
 
-class PyLease:
-    """
-    A lease object
-    """
-
-    def id(self) -> int:
+    def shutdown(self) -> None:
         """
-        Return the id of the lease
-        Refer to https://etcd.io/docs/v3.4/learning/api/ for examples on how to use the lease id
+        Shutdown the runtime by triggering the cancellation token
         """
         ...
-
-    def revoke(self) -> None:
-        """
-        Revoke the lease by triggering the cancellation token
-        This will invalidate the kv pairs associated with this lease
-        """
-        ...
-
-    def is_valid(self) -> bool:
-        """
-        Check if the lease is still valid (not revoked)
-        """
-        ...
-
 class EtcdClient:
     """
     Etcd is used for discovery in the DistributedRuntime
     """
+
+    def primary_lease_id(self) -> int:
+        """
+        return the primary lease id.
+        """
+        ...
+
+    async def kv_create(
+        self, key: str, value: bytes, lease_id: Optional[int] = None
+    ) -> None:
+        """
+        Atomically create a key in etcd, fail if the key already exists.
+        """
+        ...
 
     async def kv_create_or_validate(
         self, key: str, value: bytes, lease_id: Optional[int] = None
@@ -174,6 +168,18 @@ class EtcdKvCache:
         """
         ...
 
+    async def delete(self, key: str) -> None:
+        """
+        Delete a key-value pair from the cache and etcd.
+        """
+        ...
+
+    async def clear_all(self) -> None:
+        """
+        Delete all key-value pairs from the cache and etcd.
+        """
+        ...
+
 class Namespace:
     """
     A namespace is a collection of components
@@ -203,14 +209,6 @@ class Component:
     def endpoint(self, name: str) -> Endpoint:
         """
         Create an endpoint
-        """
-        ...
-
-    def create_service_with_custom_lease(self, ttl: int) -> PyLease:
-        """
-        Create a service with a custom lease
-        The lease needs to be tied to the endpoint of this services when creating the endpoints later
-        TODO: tie the lease to the service instead of the endpoint
         """
         ...
 
@@ -591,3 +589,77 @@ class HttpAsyncEngine:
     """
 
     ...
+
+class ModelType:
+    """What type of request this model needs: Chat, Component or Backend (pre-processed)"""
+    ...
+
+async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str]) -> None:
+    """Attach the model at path to the given endpoint, and advertise it as model_type"""
+    ...
+
+class NatsQueue:
+    """
+    A queue implementation using NATS JetStream for task distribution
+    """
+
+    def __init__(self, stream_name: str, nats_server: str, dequeue_timeout: float) -> None:
+        """
+        Create a new NatsQueue instance.
+
+        Args:
+            stream_name: Name of the NATS JetStream stream
+            nats_server: URL of the NATS server
+            dequeue_timeout: Default timeout in seconds for dequeue operations
+        """
+        ...
+
+    async def connect(self) -> None:
+        """
+        Connect to the NATS server
+        """
+        ...
+
+    async def ensure_connection(self) -> None:
+        """
+        Ensure connection to the NATS server, connecting if not already connected
+        """
+        ...
+
+    async def close(self) -> None:
+        """
+        Close the connection to the NATS server
+        """
+        ...
+
+    async def enqueue_task(self, task_data: bytes) -> None:
+        """
+        Enqueue a task to the NATS JetStream
+
+        Args:
+            task_data: The task data as bytes
+        """
+        ...
+
+    async def dequeue_task(self, timeout: Optional[float] = None) -> Optional[bytes]:
+        """
+        Dequeue a task from the NATS JetStream
+
+        Args:
+            timeout: Optional timeout in seconds for this specific dequeue operation.
+                    If None, uses the default timeout specified during initialization.
+
+        Returns:
+            The task data as bytes if available, None if no task is available
+        """
+        ...
+
+    async def get_queue_size(self) -> int:
+        """
+        Get the current size of the queue
+
+        Returns:
+            The number of messages in the queue
+        """
+        ...
+

@@ -46,7 +46,7 @@ Grafana is pre-configured with:
 ## Required Files
 
 The following configuration files should be present in this directory:
-- `..\docker-compose.yml`: Defines the Prometheus and Grafana services
+- `docker-compose.yml`: Defines the Prometheus and Grafana services
 - `prometheus.yml`: Contains Prometheus scraping configuration
 - `grafana.json`: Contains Grafana dashboard configuration
 - `grafana-datasources.yml`: Contains Grafana datasource configuration

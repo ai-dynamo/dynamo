@@ -41,3 +41,7 @@ VllmWorker:
     resources:
       gpu: 1
   common-configs: [model, block-size, max-model-len, router, kv-transfer-config]
+
+Planner:
+  environment: local
+  no-operation: true

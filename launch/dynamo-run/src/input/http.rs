@@ -29,6 +29,8 @@ use dynamo_llm::{
         openai::completions::{CompletionRequest, CompletionResponse},
     },
 };
+use dynamo_runtime::component::Component;
+use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::transports::etcd;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
@@ -59,10 +61,11 @@ pub async fn run(
 
                     // Listen for models registering themselves in etcd, add them to HTTP service
                     run_watcher(
-                        distributed_runtime.clone(),
+                        component.clone(),
                         http_service.model_manager().clone(),
                         etcd_client.clone(),
                         &network_prefix,
+                        flags.router_mode.into(),
                     )
                     .await?;
                 }
@@ -71,58 +74,61 @@ pub async fn run(
                 }
             }
         }
-        EngineConfig::StaticFull {
-            service_name,
-            engine,
-            ..
-        } => {
+        EngineConfig::StaticFull { engine, model } => {
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = http_service.model_manager();
-            manager.add_completions_model(&service_name, engine.clone())?;
-            manager.add_chat_completions_model(&service_name, engine)?;
+            manager.add_completions_model(model.service_name(), engine.clone())?;
+            manager.add_chat_completions_model(model.service_name(), engine)?;
         }
         EngineConfig::StaticCore {
-            service_name,
             engine: inner_engine,
-            card,
+            model,
         } => {
             let manager = http_service.model_manager();
 
             let chat_pipeline = common::build_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(&card, inner_engine.clone())
+            >(model.card(), inner_engine.clone())
             .await?;
-            manager.add_chat_completions_model(&service_name, chat_pipeline)?;
+            manager.add_chat_completions_model(model.service_name(), chat_pipeline)?;
 
             let cmpl_pipeline = common::build_pipeline::<CompletionRequest, CompletionResponse>(
-                &card,
+                model.card(),
                 inner_engine,
             )
             .await?;
-            manager.add_completions_model(&service_name, cmpl_pipeline)?;
+            manager.add_completions_model(model.service_name(), cmpl_pipeline)?;
         }
-        EngineConfig::None => unreachable!(),
     }
-    http_service.run(runtime.primary_token()).await
+    tracing::debug!(
+        "Supported routes: {:?}",
+        http_service
+            .route_docs()
+            .iter()
+            .map(|rd| rd.to_string())
+            .collect::<Vec<String>>()
+    );
+    http_service.run(runtime.primary_token()).await?;
+    runtime.shutdown(); // Cancel primary token
+    Ok(())
 }
 
 /// Spawns a task that watches for new models in etcd at network_prefix,
 /// and registers them with the ModelManager so that the HTTP service can use them.
 async fn run_watcher(
-    distributed_runtime: DistributedRuntime,
+    component: Component,
     model_manager: ModelManager,
     etcd_client: etcd::Client,
     network_prefix: &str,
+    router_mode: RouterMode,
 ) -> anyhow::Result<()> {
-    let state = Arc::new(discovery::ModelWatchState {
-        prefix: network_prefix.to_string(),
-        manager: model_manager,
-        drt: distributed_runtime.clone(),
-    });
+    let watch_obj = Arc::new(
+        discovery::ModelWatcher::new(component, model_manager, network_prefix, router_mode).await?,
+    );
     tracing::info!("Watching for remote model at {network_prefix}");
     let models_watcher = etcd_client.kv_get_and_watch_prefix(network_prefix).await?;
     let (_prefix, _watcher, receiver) = models_watcher.dissolve();
-    let _watcher_task = tokio::spawn(discovery::model_watcher(state, receiver));
+    let _watcher_task = tokio::spawn(watch_obj.watch(receiver));
     Ok(())
 }

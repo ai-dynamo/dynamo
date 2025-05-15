@@ -341,6 +341,154 @@ pub fn url_to_bucket_and_key(url: &Url) -> anyhow::Result<(String, String)> {
     Ok((bucket.to_string(), key.to_string()))
 }
 
+/// A queue implementation using NATS JetStream
+pub struct NatsQueue {
+    /// The name of the stream to use for the queue
+    stream_name: String,
+    /// The NATS server URL
+    nats_server: String,
+    /// Timeout for dequeue operations in seconds
+    dequeue_timeout: time::Duration,
+    /// The NATS client
+    client: Option<Client>,
+    /// The subject pattern used for this queue
+    subject: String,
+    /// The subscriber for pull-based consumption
+    subscriber: Option<jetstream::consumer::PullConsumer>,
+}
+
+impl NatsQueue {
+    /// Create a new NatsQueue with the given configuration
+    pub fn new(stream_name: String, nats_server: String, dequeue_timeout: time::Duration) -> Self {
+        // Sanitize stream name to remove path separators (like in Python version)
+        let sanitized_stream_name = stream_name.replace(['/', '\\'], "_");
+
+        let subject = format!("{}.*", sanitized_stream_name);
+
+        Self {
+            stream_name: sanitized_stream_name,
+            nats_server,
+            dequeue_timeout,
+            client: None,
+            subject,
+            subscriber: None,
+        }
+    }
+
+    /// Connect to the NATS server and set up the stream and consumer
+    pub async fn connect(&mut self) -> Result<()> {
+        if self.client.is_none() {
+            // Create a new client
+            let client_options = Client::builder().server(self.nats_server.clone()).build()?;
+
+            let client = client_options.connect().await?;
+
+            // Check if stream exists, if not create it
+            let streams = client.list_streams().await?;
+            if !streams.contains(&self.stream_name) {
+                log::debug!("Creating NATS stream {}", self.stream_name);
+                let stream_config = jetstream::stream::Config {
+                    name: self.stream_name.clone(),
+                    subjects: vec![self.subject.clone()],
+                    max_age: time::Duration::from_secs(60 * 10), // 10 min
+                    ..Default::default()
+                };
+                client.jetstream().create_stream(stream_config).await?;
+            }
+
+            // Create persistent subscriber
+            let consumer_config = jetstream::consumer::pull::Config {
+                durable_name: Some("worker-group".to_string()),
+                ..Default::default()
+            };
+
+            let stream = client.jetstream().get_stream(&self.stream_name).await?;
+            let subscriber = stream.create_consumer(consumer_config).await?;
+
+            self.subscriber = Some(subscriber);
+            self.client = Some(client);
+        }
+
+        Ok(())
+    }
+
+    /// Ensure we have an active connection
+    pub async fn ensure_connection(&mut self) -> Result<()> {
+        if self.client.is_none() {
+            self.connect().await?;
+        }
+        Ok(())
+    }
+
+    /// Close the connection when done
+    pub async fn close(&mut self) -> Result<()> {
+        self.subscriber = None;
+        self.client = None;
+        Ok(())
+    }
+
+    /// Enqueue a task using the provided data
+    pub async fn enqueue_task(&mut self, task_data: Bytes) -> Result<()> {
+        self.ensure_connection().await?;
+
+        if let Some(client) = &self.client {
+            let subject = format!("{}.queue", self.stream_name);
+            client.jetstream().publish(subject, task_data).await?;
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Client not connected"))
+        }
+    }
+
+    /// Dequeue and return a task as raw bytes
+    pub async fn dequeue_task(&mut self, timeout: Option<time::Duration>) -> Result<Option<Bytes>> {
+        self.ensure_connection().await?;
+
+        if let Some(subscriber) = &self.subscriber {
+            let timeout_duration = timeout.unwrap_or(self.dequeue_timeout);
+            let mut batch = subscriber
+                .fetch()
+                .expires(timeout_duration)
+                .max_messages(1)
+                .messages()
+                .await?;
+
+            if let Some(message) = batch.next().await {
+                let message =
+                    message.map_err(|e| anyhow::anyhow!("Failed to get message: {}", e))?;
+                message
+                    .ack()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to ack message: {}", e))?;
+                Ok(Some(message.payload.clone()))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Err(anyhow::anyhow!("Subscriber not initialized"))
+        }
+    }
+
+    /// Get the number of messages currently in the queue
+    pub async fn get_queue_size(&mut self) -> Result<u64> {
+        self.ensure_connection().await?;
+
+        if let Some(client) = &self.client {
+            // Get consumer info to get pending messages count
+            let stream = client.jetstream().get_stream(&self.stream_name).await?;
+            let mut consumer: jetstream::consumer::PullConsumer = stream
+                .get_consumer("worker-group")
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to get consumer: {}", e))?;
+            let info = consumer.info().await?;
+
+            Ok(info.num_pending)
+        } else {
+            Err(anyhow::anyhow!("Client not connected"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
 

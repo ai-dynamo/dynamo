@@ -25,8 +25,8 @@ use tokio::sync::{mpsc, RwLock};
 use validator::Validate;
 
 use etcd_client::{
-    Compare, CompareOp, DeleteOptions, GetOptions, PutOptions, PutResponse, Txn, TxnOp,
-    TxnOpResponse, WatchOptions, Watcher,
+    Certificate, Compare, CompareOp, DeleteOptions, GetOptions, Identity, PutOptions, PutResponse,
+    TlsOptions, Txn, TxnOp, TxnOpResponse, WatchOptions, Watcher,
 };
 
 pub use etcd_client::{ConnectOptions, KeyValue, LeaseClient};
@@ -413,9 +413,32 @@ pub struct ClientOptions {
 
 impl Default for ClientOptions {
     fn default() -> Self {
+        let mut connect_options = None;
+
+        if let (Ok(username), Ok(password)) = (
+            std::env::var("ETCD_AUTH_USERNAME"),
+            std::env::var("ETCD_AUTH_PASSWORD"),
+        ) {
+            // username and password are set
+            connect_options = Some(ConnectOptions::new().with_user(username, password));
+        } else if let (Ok(ca), Ok(cert), Ok(key)) = (
+            std::env::var("ETCD_AUTH_CA"),
+            std::env::var("ETCD_AUTH_CLIENT_CERT"),
+            std::env::var("ETCD_AUTH_CLIENT_KEY"),
+        ) {
+            // TLS is set
+            connect_options = Some(
+                ConnectOptions::new().with_tls(
+                    TlsOptions::new()
+                        .ca_certificate(Certificate::from_pem(ca))
+                        .identity(Identity::from_pem(cert, key)),
+                ),
+            );
+        }
+
         ClientOptions {
             etcd_url: default_servers(),
-            etcd_connect_options: None,
+            etcd_connect_options: connect_options,
             attach_lease: true,
         }
     }
@@ -551,7 +574,19 @@ impl KvCache {
         Ok(())
     }
 
-    // TODO: add a method to create/delete keys
+    /// Delete a key from both the cache and etcd
+    pub async fn delete(&self, key: &str) -> Result<()> {
+        let full_key = format!("{}{}", self.prefix, key);
+
+        // Delete from etcd first
+        self.client.kv_delete(full_key.clone(), None).await?;
+
+        // Then remove from local cache
+        let mut cache_write = self.cache.write().await;
+        cache_write.remove(&full_key);
+
+        Ok(())
+    }
 }
 
 #[cfg(feature = "integration")]

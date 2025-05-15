@@ -19,6 +19,7 @@ use dynamo_llm::{
     backend::{Backend, ExecutionContext},
     engines::StreamingEngineAdapter,
     http::service::discovery::ModelNetworkName,
+    kv_router::{scheduler::DefaultWorkerSelector, KvPushRouter, KvRouter},
     model_card::ModelDeploymentCard,
     model_type::ModelType,
     preprocessor::OpenAIPreprocessor,
@@ -67,82 +68,91 @@ pub async fn prepare_engine(
 
             let client = endpoint.client().await?;
             let mut cache_dir = None;
-            let engine: OpenAIChatCompletionsStreamingEngine = match &flags.router_mode {
-                RouterMode::Random | RouterMode::RoundRobin => {
-                    tracing::info!("Waiting for remote model..");
 
-                    let remote_endpoints = client.wait_for_endpoints().await?;
-                    debug_assert!(!remote_endpoints.is_empty());
-                    tracing::info!(count = remote_endpoints.len(), "Model(s) discovered");
+            tracing::info!("Waiting for remote model..");
 
-                    let network_name: ModelNetworkName = (&remote_endpoints[0]).into();
-                    let Some(etcd_client) = distributed_runtime.etcd_client() else {
-                        anyhow::bail!("Cannot run distributed components without etcd");
-                    };
-                    let network_entry = network_name.load_entry(etcd_client.clone()).await?;
-                    let mut card = network_entry.load_mdc(endpoint_id, etcd_client).await?;
+            let remote_endpoints = client.wait_for_endpoints().await?;
+            debug_assert!(!remote_endpoints.is_empty());
+            tracing::info!(count = remote_endpoints.len(), "Model(s) discovered");
 
-                    match network_entry.model_type {
-                        ModelType::Backend => {
-                            // Download tokenizer.json etc to local disk
-                            cache_dir = Some(
-                                card.move_from_nats(distributed_runtime.nats_client())
-                                    .await?,
-                            );
-
-                            // The backend doesn't mind what we expose to the user (chat or
-                            // completions), and this function is only used by text and batch input so
-                            // the user doesn't see the HTTP request. So use Chat.
-                            let frontend = SegmentSource::<
-                                SingleIn<NvCreateChatCompletionRequest>,
-                                ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-                            >::new();
-                            let preprocessor =
-                                OpenAIPreprocessor::new(card.clone()).await?.into_operator();
-                            let backend = Backend::from_mdc(card.clone()).await?.into_operator();
-                            let router =
-                                PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
-                                    client,
-                                    flags.router_mode.into(),
-                                )
-                                .await?;
-
-                            frontend
-                                .link(preprocessor.forward_edge())?
-                                .link(backend.forward_edge())?
-                                .link(ServiceBackend::from_engine(Arc::new(router)))?
-                                .link(backend.backward_edge())?
-                                .link(preprocessor.backward_edge())?
-                                .link(frontend)?
-                        }
-                        ModelType::Chat => Arc::new(
-                            PushRouter::<
-                                NvCreateChatCompletionRequest,
-                                Annotated<NvCreateChatCompletionStreamResponse>,
-                            >::from_client(
-                                client, flags.router_mode.into()
-                            )
-                            .await?,
-                        ),
-                        ModelType::Completion => {
-                            anyhow::bail!("text and batch input only accept remote Chat models, not Completion");
-                            /*
-                            Arc::new(
-                                PushRouter::<
-                                    CompletionRequest,
-                                    Annotated<CompletionResponse>,
-                                >::from_client(
-                                    client, flags.router_mode.into()
-                                )
-                                .await?,
-                            )
-                            */
-                        }
-                    }
-                }
-                RouterMode::KV => todo!(),
+            let network_name: ModelNetworkName = (&remote_endpoints[0]).into();
+            let Some(etcd_client) = distributed_runtime.etcd_client() else {
+                anyhow::bail!("Cannot run distributed components without etcd");
             };
+            let network_entry = network_name.load_entry(etcd_client.clone()).await?;
+            let mut card = network_entry.load_mdc(endpoint_id, etcd_client).await?;
 
+            let engine: OpenAIChatCompletionsStreamingEngine = match network_entry.model_type {
+                ModelType::Backend => {
+                    // Download tokenizer.json etc to local disk
+                    cache_dir = Some(
+                        card.move_from_nats(distributed_runtime.nats_client())
+                            .await?,
+                    );
+
+                    // The backend doesn't mind what we expose to the user (chat or
+                    // completions), and this function is only used by text and batch input so
+                    // the user doesn't see the HTTP request. So use Chat.
+                    let frontend = SegmentSource::<
+                        SingleIn<NvCreateChatCompletionRequest>,
+                        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+                    >::new();
+                    let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
+                    let backend = Backend::from_mdc(card.clone()).await?.into_operator();
+                    let router =
+                        PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
+                            client,
+                            flags.router_mode.into(),
+                        )
+                        .await?;
+                    let service_backend = match &flags.router_mode {
+                        RouterMode::Random | RouterMode::RoundRobin => {
+                            ServiceBackend::from_engine(Arc::new(router))
+                        }
+                        RouterMode::KV => {
+                            let selector = Box::new(DefaultWorkerSelector {});
+                            let chooser = KvRouter::new(
+                                endpoint.component().clone(),
+                                dynamo_llm::DEFAULT_KV_BLOCK_SIZE,
+                                Some(selector),
+                            )
+                            .await?;
+                            let kv_push_router = KvPushRouter::new(router, Arc::new(chooser));
+                            ServiceBackend::from_engine(Arc::new(kv_push_router))
+                        }
+                    };
+                    frontend
+                        .link(preprocessor.forward_edge())?
+                        .link(backend.forward_edge())?
+                        .link(service_backend)?
+                        .link(backend.backward_edge())?
+                        .link(preprocessor.backward_edge())?
+                        .link(frontend)?
+                }
+                ModelType::Chat => Arc::new(
+                    PushRouter::<
+                        NvCreateChatCompletionRequest,
+                        Annotated<NvCreateChatCompletionStreamResponse>,
+                    >::from_client(client, flags.router_mode.into())
+                    .await?,
+                ),
+                ModelType::Completion => {
+                    anyhow::bail!(
+                        "text and batch input only accept remote Chat models, not Completion"
+                    );
+                    /*
+                    Arc::new(
+                        PushRouter::<
+                            CompletionRequest,
+                            Annotated<CompletionResponse>,
+                        >::from_client(
+                            client, flags.router_mode.into()
+                        )
+                        .await?,
+                    )
+                    */
+                }
+            };
             // The service_name isn't used for text chat outside of logs,
             // so use the path. That avoids having to listen on etcd for model registration.
             let service_name = endpoint.subject();
@@ -153,11 +163,8 @@ pub async fn prepare_engine(
                 _cache_dir: cache_dir,
             })
         }
-        EngineConfig::StaticFull {
-            service_name,
-            engine,
-            card: _card,
-        } => {
+        EngineConfig::StaticFull { engine, model } => {
+            let service_name = model.service_name().to_string();
             tracing::debug!("Model: {service_name} with engine pre-processing");
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             Ok(PreparedEngine {
@@ -168,16 +175,16 @@ pub async fn prepare_engine(
             })
         }
         EngineConfig::StaticCore {
-            service_name,
             engine: inner_engine,
-            card,
+            model,
         } => {
             let pipeline = build_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(&card, inner_engine)
+            >(model.card(), inner_engine)
             .await?;
 
+            let service_name = model.service_name().to_string();
             tracing::debug!("Model: {service_name} with Dynamo pre-processing");
             Ok(PreparedEngine {
                 service_name,
@@ -186,7 +193,6 @@ pub async fn prepare_engine(
                 _cache_dir: None,
             })
         }
-        EngineConfig::None => unreachable!(),
     }
 }
 
@@ -236,7 +242,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_chat_completions_pipeline_core_engine_succeeds() -> anyhow::Result<()> {
         // Create test model card
-        let card = ModelDeploymentCard::from_local_path(HF_PATH, None).await?;
+        let card = ModelDeploymentCard::load(HF_PATH).await?;
         let engine = dynamo_llm::engines::make_engine_core();
 
         // Build pipeline for chat completions
@@ -255,7 +261,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_completions_pipeline_core_engine_succeeds() -> anyhow::Result<()> {
         // Create test model card
-        let card = ModelDeploymentCard::from_local_path(HF_PATH, None).await?;
+        let card = ModelDeploymentCard::load(HF_PATH).await?;
         let engine = dynamo_llm::engines::make_engine_core();
 
         // Build pipeline for completions

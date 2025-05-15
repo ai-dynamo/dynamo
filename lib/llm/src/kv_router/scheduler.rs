@@ -112,12 +112,11 @@ impl KvScheduler {
 
         // Channel to accept new scheduling requests
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
-        tracing::debug!("scheduler starting");
         // Background task to handle scheduling requests
         tokio::spawn(async move {
             let mut request: SchedulingRequest;
             let mut request_rx = request_rx;
-            tracing::debug!("scheduler background task started");
+            tracing::trace!("scheduler background task started");
 
             'outer: loop {
                 request = tokio::select! {
@@ -141,7 +140,6 @@ impl KvScheduler {
                         continue 'outer;
                     }
                 };
-                tracing::debug!("selected");
                 loop {
                     match selector.select_worker(&endpoints, &request, block_size) {
                         Ok(selection) => {
@@ -189,17 +187,13 @@ impl KvScheduler {
             overlap,
             resp_tx,
         };
-        tracing::debug!("before sending request");
         self.request_tx
             .send(request)
             .await
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
-        tracing::debug!("after sending request");
-
         let res = resp_rx
             .await
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
-        tracing::debug!("after receiving response");
         Ok(res)
     }
 }
@@ -215,9 +209,14 @@ pub fn process_worker_selection(
         .get_mut(&selection.worker_id)
         .expect("worker not found");
 
-    // Update worker state
-    worker.data.request_active_slots += 1;
-    worker.data.kv_active_blocks += selection.required_blocks - selection.overlap_blocks as u64;
+    // Update worker state predictively
+    // Will be overwritten on next polling of metrics
+    worker.data.num_requests_waiting += 1;
+    // Assumes radix attention so KV load is only incremented by uncached blocks
+    // overlap_blocks can be bigger than required_blocks. I don't know if that's a bug or not.
+    worker.data.kv_active_blocks += selection
+        .required_blocks
+        .saturating_sub(selection.overlap_blocks as u64);
 
     // Emit event
     if let Err(e) = event_tx.send(KVHitRateEvent {
@@ -244,8 +243,12 @@ impl WorkerSelector for DefaultWorkerSelector {
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         assert!(request.isl_tokens > 0);
 
+        if workers.endpoints.is_empty() {
+            return Err(KvSchedulerError::NoEndpoints);
+        }
+
         let mut worker_scores = HashMap::new();
-        let mut max_active = 0.0;
+        let mut max_waiting = 0.0;
 
         // Calculate worker scores and find max waiting requests
         for (worker_id, ep) in workers.endpoints.iter() {
@@ -256,16 +259,12 @@ impl WorkerSelector for DefaultWorkerSelector {
             }
 
             // Track max waiting requests
-            max_active = f64::max(max_active, ep.data.request_active_slots as f64);
-        }
-
-        if max_active == 0.0 {
-            return Err(KvSchedulerError::NoEndpoints);
+            max_waiting = f64::max(max_waiting, ep.data.num_requests_waiting as f64);
         }
 
         // make immutable
         let worker_scores = worker_scores;
-        let max_active = max_active;
+        let max_waiting = max_waiting;
 
         // Calculate logits for each worker
         let mut best_logit = f64::NEG_INFINITY;
@@ -280,22 +279,17 @@ impl WorkerSelector for DefaultWorkerSelector {
             // Calculate normalized metrics
             assert!(ep.data.kv_total_blocks > 0);
             let gpu_cache_usage = ep.data.kv_active_blocks as f64 / ep.data.kv_total_blocks as f64;
-            let normalized_active = if max_active > 0.0 {
-                ep.data.request_active_slots as f64 / max_active
+            let normalized_waiting = if max_waiting > 0.0 {
+                ep.data.num_requests_waiting as f64 / max_waiting
             } else {
                 0.0
             };
 
             // Calculate logit using same formula as Python
-            let logit = 2.0 * score - gpu_cache_usage - normalized_active;
+            let logit = 2.0 * score - gpu_cache_usage - normalized_waiting;
 
-            tracing::info!(
-                "Formula for {}: {:.3} = 2.0 * {:.3} - {:.3} - {:.3}",
-                worker_id,
-                logit,
-                score,
-                gpu_cache_usage,
-                normalized_active
+            tracing::trace!(
+                "Formula for {worker_id}: {logit:.3} = 2.0 * {score:.3} - {gpu_cache_usage:.3} - {normalized_waiting:.3}",
             );
 
             // Track best workers
@@ -313,8 +307,10 @@ impl WorkerSelector for DefaultWorkerSelector {
         }
 
         // Return early if no valid workers found
-        if best_workers.is_empty() || best_logit == 0.0 {
+        if best_workers.is_empty() {
             return Err(KvSchedulerError::NoEndpoints);
+        } else if best_logit == 0.0 {
+            tracing::debug!("best worker logit is 0");
         }
 
         let worker_id = if best_workers.len() == 1 {
@@ -325,9 +321,10 @@ impl WorkerSelector for DefaultWorkerSelector {
             best_workers[rng.random_range(0..best_workers.len())]
         };
 
-        // Log selection metrics
-        tracing::info!("Selected worker: {}, logit: {:.3}", worker_id, best_logit);
+        // Lower to trace level eventually. Nice to see KV routing working for now.
+        tracing::debug!("Selected worker: {worker_id}, logit: {best_logit:.3}");
 
+        // Log selection metrics
         let total_blocks = std::cmp::min(request.isl_tokens / block_size, 1) as u64;
         let overlap_blocks = request.overlap.scores.get(&worker_id).copied().unwrap_or(0) as usize;
 

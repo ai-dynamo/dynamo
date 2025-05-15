@@ -14,7 +14,9 @@
 # limitations under the License.
 
 from components.frontend import Frontend
+from components.planner_service import Planner
 from components.processor import Processor
 from components.worker import VllmWorker
 
 Frontend.link(Processor).link(VllmWorker)
+Frontend.link(Planner)

@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 use url::Url;
 
-use crate::gguf::{Content, ContentConfig};
+use crate::gguf::{Content, ContentConfig, ModelConfigLike};
 use crate::key_value_store::Versioned;
 use crate::protocols::TokenIdType;
 
@@ -125,12 +125,6 @@ pub struct ModelDeploymentCard {
     /// Incrementing count of how many times we published this card
     #[serde(default, skip_serializing)]
     pub revision: u64,
-
-    /// Does this model expect preprocessing (tokenization, etc) to be already done?
-    /// If this is true they get a BackendInput JSON. If this is false they get
-    /// an NvCreateChatCompletionRequest JSON.
-    #[serde(default)]
-    pub requires_preprocessing: bool,
 }
 
 impl ModelDeploymentCard {
@@ -171,9 +165,7 @@ impl ModelDeploymentCard {
 
     /// Load a model deployment card from a JSON file
     pub fn load_from_json_file<P: AsRef<Path>>(file: P) -> std::io::Result<Self> {
-        let mut card: ModelDeploymentCard = serde_json::from_str(&std::fs::read_to_string(file)?)?;
-        card.requires_preprocessing = false;
-        Ok(card)
+        Ok(serde_json::from_str(&std::fs::read_to_string(file)?)?)
     }
 
     /// Load a model deployment card from a JSON string
@@ -216,6 +208,12 @@ impl ModelDeploymentCard {
         } else {
             false
         }
+    }
+
+    /// Is this a full model card with tokenizer?
+    /// There are cases where we have a placeholder card (see `with_name_only`).
+    pub fn has_tokenizer(&self) -> bool {
+        self.tokenizer.is_some()
     }
 
     pub fn tokenizer_hf(&self) -> anyhow::Result<HfTokenizer> {
@@ -388,17 +386,22 @@ impl ModelInfoType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HFConfig {
-    bos_token_id: TokenIdType,
-
-    #[serde(with = "either::serde_untagged")]
-    eos_token_id: Either<TokenIdType, Vec<TokenIdType>>,
-
     /// denotes the mixin to the flattened data model which can be present
     /// in the config.json file
     architectures: Vec<String>,
 
     /// general model type
     model_type: String,
+
+    text_config: Option<HFTextConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HFTextConfig {
+    bos_token_id: TokenIdType,
+
+    #[serde(with = "either::serde_untagged")]
+    eos_token_id: Either<TokenIdType, Vec<TokenIdType>>,
 
     /// max sequence length
     max_position_embeddings: usize,
@@ -414,9 +417,13 @@ struct HFConfig {
 }
 
 impl HFConfig {
-    async fn from_json_file(file: &String) -> Result<Arc<dyn ModelInfo>> {
+    async fn from_json_file(file: &str) -> Result<Arc<dyn ModelInfo>> {
         let contents = std::fs::read_to_string(file)?;
-        let config: Self = serde_json::from_str(&contents)?;
+        let mut config: Self = serde_json::from_str(&contents)?;
+        if config.text_config.is_none() {
+            let text_config: HFTextConfig = serde_json::from_str(&contents)?;
+            config.text_config = Some(text_config);
+        }
         Ok(Arc::new(config))
     }
     fn from_gguf(gguf_file: &Path) -> Result<Arc<dyn ModelInfo>> {
@@ -435,19 +442,21 @@ impl HFConfig {
 
         let arch = content.arch().to_string();
         Ok(Arc::new(HFConfig {
-            bos_token_id,
-            eos_token_id: Either::Left(eos_token_id),
             architectures: vec![format!("{}ForCausalLM", capitalize(&arch))],
             // "general.architecture"
             model_type: arch,
-            // "llama.context_length"
-            max_position_embeddings: model_config_metadata.max_seq_len(),
-            // "llama.block_count"
-            num_hidden_layers,
-            // "llama.attention.head_count"
-            num_attention_heads: model_config_metadata.num_attn_heads(),
-            // "tokenizer.ggml.tokens".len()
-            vocab_size,
+            text_config: Some(HFTextConfig {
+                bos_token_id,
+                eos_token_id: Either::Left(eos_token_id),
+                // "llama.context_length"
+                max_position_embeddings: model_config_metadata.max_seq_len(),
+                // "llama.block_count"
+                num_hidden_layers,
+                // "llama.attention.head_count"
+                num_attention_heads: model_config_metadata.num_attn_heads(),
+                // "tokenizer.ggml.tokens".len()
+                vocab_size,
+            }),
         }))
     }
 }
@@ -458,22 +467,22 @@ impl ModelInfo for HFConfig {
     }
 
     fn bos_token_id(&self) -> TokenIdType {
-        self.bos_token_id
+        self.text_config.as_ref().unwrap().bos_token_id
     }
 
     fn eos_token_ids(&self) -> Vec<TokenIdType> {
-        match &self.eos_token_id {
+        match &self.text_config.as_ref().unwrap().eos_token_id {
             Either::Left(eos_token_id) => vec![*eos_token_id],
             Either::Right(eos_token_ids) => eos_token_ids.clone(),
         }
     }
 
     fn max_position_embeddings(&self) -> usize {
-        self.max_position_embeddings
+        self.text_config.as_ref().unwrap().max_position_embeddings
     }
 
     fn vocab_size(&self) -> usize {
-        self.vocab_size
+        self.text_config.as_ref().unwrap().vocab_size
     }
 }
 
@@ -505,4 +514,28 @@ fn capitalize(s: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HFConfig;
+    use std::path::Path;
+
+    #[tokio::test]
+    pub async fn test_config_json_llama3() -> anyhow::Result<()> {
+        let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct/config.json");
+        let config = HFConfig::from_json_file(&config_file.display().to_string()).await?;
+        assert_eq!(config.bos_token_id(), 128000);
+        Ok(())
+    }
+
+    #[tokio::test]
+    pub async fn test_config_json_llama4() -> anyhow::Result<()> {
+        let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/Llama-4-Scout-17B-16E-Instruct/config.json");
+        let config = HFConfig::from_json_file(&config_file.display().to_string()).await?;
+        assert_eq!(config.bos_token_id(), 200000);
+        Ok(())
+    }
 }
