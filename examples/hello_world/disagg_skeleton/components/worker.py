@@ -15,6 +15,7 @@
 
 import logging
 import os
+import random
 import socket
 
 from components.utils import (
@@ -26,6 +27,7 @@ from components.utils import (
 )
 from vllm.distributed.device_communicators.nixl import NixlMetadata
 
+from dynamo.llm import KvMetricsPublisher
 from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,31 @@ class DummyWorker:
         logger.info(
             f"Prefill queue: {self._prefill_queue_nats_server}:{self._prefill_queue_stream_name}"
         )
+        self.component = dynamo_context["component"]
+        self.metrics_publisher = KvMetricsPublisher()
+        # Register an endpoint for consumers of the KV Metrics
+        # (KvMetricsAggregator in kv_router) to listen/gather on.
+        self.metrics_publisher.create_endpoint(self.component)
+        # Initialize some metrics for the worker/class to track
+        self.request_active_slots = 0
+        self.request_total_slots = 1024
+        self.kv_active_blocks = 0
+        self.kv_total_blocks = 1024
+        self.num_requests_waiting = 0
+        self.gpu_cache_usage_perc = 0.0
+        self.gpu_prefix_cache_hit_rate = 0.0
+
+        # Publish some initial metrics to register
+        # this worker as a candidate for KV Routing.
+        self.metrics_publisher.publish(
+            self.request_active_slots,
+            self.request_total_slots,
+            self.kv_active_blocks,
+            self.kv_total_blocks,
+            self.num_requests_waiting,
+            self.gpu_cache_usage_perc,
+            self.gpu_prefix_cache_hit_rate,
+        )
 
     @async_on_start
     async def async_init(self):
@@ -69,12 +96,12 @@ class DummyWorker:
             await metadata_store.put(metadata.engine_id, metadata)
 
         self.disaggregated_router = "DummyDisaggregateRouter"
-        logger.info("VllmWorker has been initialized")
+        logger.info("DummyWorker has been initialized")
 
     def get_remote_prefill_request_callback(self):
         # TODO: integrate prefill_queue to dynamo endpoint
         async def callback(request: RemotePrefillRequest):
-            print(
+            logger.info(
                 f"enqueue request {self._prefill_queue_nats_server}, \
                   {self._prefill_queue_stream_name},{request.engine_id=}"
             )
@@ -85,6 +112,26 @@ class DummyWorker:
                 await prefill_queue.enqueue_prefill_request(request)
 
         return callback
+
+    def publish_kv_metrics(self):
+        # Populate the frequently changing metrics with random data for
+        # demonstration. These values should be tracked by the implementation,
+        # or queried from the underlying inference framework.
+        self.kv_active_blocks = random.randint(0, 1024)
+        self.num_requests_waiting = random.randint(0, 100)
+        self.gpu_cache_usage_perc = random.uniform(0, 1.0)
+        self.gpu_prefix_cache_hit_rate = random.uniform(0, 1.0)
+
+        # Publish the metrics with the current state
+        self.metrics_publisher.publish(
+            self.request_active_slots,
+            self.request_total_slots,
+            self.kv_active_blocks,
+            self.kv_total_blocks,
+            self.num_requests_waiting,
+            self.gpu_cache_usage_perc,
+            self.gpu_prefix_cache_hit_rate,
+        )
 
     @dynamo_endpoint()
     async def worker_generate(self, request: GeneralRequest):
@@ -109,7 +156,8 @@ class DummyWorker:
             callback = self.get_remote_prefill_request_callback()
             await callback(prefill_request)
 
-        print(f"{self.hostname}: Worker invoked")
+        logger.info(f"{self.hostname}: Worker invoked")
+        self.publish_kv_metrics()
         yield GeneralResponse(
             request_id=request.request_id,
             worker_output=request.prompt + "_GeneratedBy_" + self.hostname,
