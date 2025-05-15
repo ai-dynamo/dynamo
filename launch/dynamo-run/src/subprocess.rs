@@ -143,13 +143,11 @@ static LOG_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Strips the log level, date, and time from the start of a log line.
 ///
 /// # Examples
-/// ```
 /// let line = "INFO 05-06 09:38:50 [async_llm.py:252] Added request 1";
 /// assert_eq!(strip_log_prefix(line), "[async_llm.py:252] Added request 1");
 ///
 /// let line_no_prefix = "This is a normal line.";
 /// assert_eq!(strip_log_prefix(line_no_prefix), "This is a normal line.");
-/// ```
 fn strip_log_prefix(line: &str) -> Cow<'_, str> {
     if let Some(captures) = LOG_PREFIX_RE.captures(line) {
         // `captures.get(0)` would be the entire matched prefix + message.
