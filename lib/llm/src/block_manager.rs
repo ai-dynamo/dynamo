@@ -25,6 +25,7 @@ mod state;
 pub mod block;
 pub mod events;
 pub mod layout;
+pub mod offload;
 pub mod pool;
 pub mod storage;
 
@@ -61,6 +62,7 @@ pub type WorkerID = u64;
 pub type ReferenceBlockManager = KvBlockManager<BasicMetadata>;
 
 /// Represents the different cache levels for KV blocks
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub enum CacheLevel {
     /// Represents KV blocks in GPU memory
     G1,

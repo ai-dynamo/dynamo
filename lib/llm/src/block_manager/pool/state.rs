@@ -147,6 +147,8 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
                 continue;
             }
 
+            let mut offload = true;
+
             let mutable = if let Some(raw_block) = self.inactive.match_sequence_hash(sequence_hash)
             {
                 assert!(matches!(raw_block.state(), BlockState::Registered(_)));
@@ -164,6 +166,7 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
                     }
                     Err(BlockRegistationError::BlockAlreadyRegistered(_)) => {
                         // Block is already registered, wait for it to be returned
+                        offload = false;
                         let raw_block =
                             self.wait_for_returned_block(sequence_hash, return_rx).await;
                         MutableBlock::new(raw_block, self.return_tx.clone())
@@ -175,6 +178,11 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
             };
 
             let immutable = self.active.register(mutable)?;
+
+            // TODO: Make a way to set meaningful priority values, and maybe don't enqueue offloads for every registered block.
+            if offload {
+                immutable.enqueue_offload(0).await.unwrap();
+            }
 
             immutable_blocks.push(immutable);
         }

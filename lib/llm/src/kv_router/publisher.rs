@@ -28,7 +28,6 @@ use dynamo_runtime::{
 use futures::stream;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing as log;
 
 pub struct KvEventPublisher {
     tx: mpsc::UnboundedSender<KvCacheEvent>,
@@ -45,7 +44,7 @@ impl KvEventPublisher {
     }
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
-        log::debug!("Publish event: {:?}", event);
+        tracing::debug!("Publish event: {:?}", event);
         self.tx.send(event)
     }
 
@@ -60,7 +59,7 @@ fn start_publish_task(
     mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
 ) {
     let component_clone = component.clone();
-    log::info!("Publishing KV Events to subject: {}", KV_EVENT_SUBJECT);
+    tracing::info!("Publishing KV Events to subject: {}", KV_EVENT_SUBJECT);
 
     _ = component.drt().runtime().secondary().spawn(async move {
         while let Some(event) = rx.recv().await {
@@ -88,7 +87,7 @@ impl KvMetricsPublisher {
         &self,
         metrics: Arc<ForwardPassMetrics>,
     ) -> Result<(), tokio::sync::watch::error::SendError<Arc<ForwardPassMetrics>>> {
-        log::debug!("Publish metrics: {:?}", metrics);
+        tracing::trace!("Publish metrics: {metrics:?}");
         self.tx.send(metrics)
     }
 

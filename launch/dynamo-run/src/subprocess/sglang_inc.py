@@ -1,19 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-#
-# A very basic example of sglang worker handling pre-processed requests.
-#
-# Dynamo does the HTTP handling, prompt templating and tokenization, then forwards the
-# request via NATS to this python script, which runs sglang.
-#
-# Setup a virtualenv with dynamo.llm, dynamo.runtime and sglang[all] installed
-#  in lib/bindings/python `maturin develop` and `pip install -e .` should do it
-# Start nats and etcd:
-#  - nats-server -js
-#
-# Window 1: `python server_sglang.py`. Wait for log "Starting endpoint".
-# Window 2: `dynamo-run out=dyn://dynamo.backend.generate`
+# `dynamo-run out=sglang` runs this script
+# Can also be used standalone: `python3 sglang_inc.py` - lots of optional cmd line params
 
 import argparse
 import asyncio
@@ -28,8 +17,9 @@ from sglang.srt.server_args import ServerArgs
 from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
+# Only used if you run it manually from the command line
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
-DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -44,6 +34,7 @@ class Config:
     model_name: Optional[str]
     base_gpu_id: int
     tensor_parallel_size: int
+    kv_block_size: int
     nnodes: int
     node_rank: int
     dist_init_addr: str
@@ -106,6 +97,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         "skip_tokenizer_init": True,
         "tp_size": config.tensor_parallel_size,
         "base_gpu_id": config.base_gpu_id,
+        "page_size": config.kv_block_size,
     }
     if config.dist_init_addr != "":
         arg_map["trust_remote_code"] = True
@@ -169,6 +161,9 @@ def cmd_line_args():
         "--tensor-parallel-size", type=int, default=1, help="Number of GPUs to use."
     )
     parser.add_argument(
+        "--kv-block-size", type=int, default=16, help="Size of a KV cache block."
+    )
+    parser.add_argument(
         "--nnodes", type=int, default=1, help="The number of machines SGLang will use"
     )
     parser.add_argument(
@@ -214,6 +209,7 @@ def cmd_line_args():
     config.endpoint = parsed_endpoint_name
     config.base_gpu_id = args.base_gpu_id
     config.tensor_parallel_size = args.tensor_parallel_size
+    config.kv_block_size = args.kv_block_size
     config.nnodes = args.nnodes
     config.node_rank = args.node_rank
     config.dist_init_addr = args.dist_init_addr
