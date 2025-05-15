@@ -15,8 +15,12 @@
 
 use super::*;
 
-use super::{block::Block, config::NixlOptions};
-
+use super::offload::OffloadManager;
+use super::{
+    block::{Block, ImmutableBlock},
+    config::NixlOptions,
+    pool::BlockPoolError,
+};
 use cudarc::driver::CudaStream;
 use std::sync::Arc;
 
@@ -47,11 +51,13 @@ pub struct KvBlockManagerState<Metadata: BlockMetadata> {
     nixl_agent: Option<NixlAgent>,
     nixl_backends: HashMap<String, Arc<nixl_sys::Backend>>,
 
-    host_pool: Option<BlockPool<PinnedStorage, Metadata>>,
-    device_pool: Option<BlockPool<DeviceStorage, Metadata>>,
+    host_pool: Arc<Option<BlockPool<PinnedStorage, Metadata>>>,
+    device_pool: Arc<Option<BlockPool<DeviceStorage, Metadata>>>,
 
     local_block_set: NixlBlockSet,
     remote_block_sets: RwLock<HashMap<WorkerID, HashMap<usize, RemoteBlocks>>>,
+
+    offload_manager: Arc<OffloadManager<Metadata>>,
 }
 
 impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
@@ -114,10 +120,10 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 cancellation_token.clone(),
                 worker_id,
             )?;
-            (Some(pool), Some(blocks))
+            (Arc::new(Some(pool)), Some(blocks))
         } else {
             tracing::debug!("No host layout provided; will not allocate host blocks.");
-            (None, None)
+            (Arc::new(None), None)
         };
 
         // Create the device block pool if a device layout is provided
@@ -132,10 +138,10 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 cancellation_token.clone(),
                 worker_id,
             )?;
-            (Some(pool), Some(blocks))
+            (Arc::new(Some(pool)), Some(blocks))
         } else {
             tracing::debug!("No device layout provided; will not allocate device blocks.");
-            (None, None)
+            (Arc::new(None), None)
         };
 
         // Finalize the local block set by adding NIXL metadata
@@ -143,6 +149,8 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
             tracing::debug!("Finalize NixlBlockSet: adding NIXL metadata.");
             local_block_set.set_nixl_metadata(nixl_agent.get_local_md()?);
         }
+
+        let offload_manager = OffloadManager::new(device_pool.clone(), host_pool.clone())?;
 
         let state = Arc::new(Self {
             worker_id,
@@ -153,6 +161,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
             device_pool,
             local_block_set,
             remote_block_sets: RwLock::new(HashMap::new()),
+            offload_manager,
         });
 
         if let Some(mut blocks) = host_blocks {
@@ -162,6 +171,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
 
             state
                 .host_pool
+                .as_ref()
                 .as_ref()
                 .unwrap()
                 .add_blocks_blocking(blocks)?;
@@ -174,6 +184,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
 
             state
                 .device_pool
+                .as_ref()
                 .as_ref()
                 .unwrap()
                 .add_blocks_blocking(blocks)?;
@@ -334,15 +345,32 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
     }
 
     pub fn host(&self) -> Option<&BlockPool<PinnedStorage, Metadata>> {
-        self.host_pool.as_ref()
+        self.host_pool.as_ref().as_ref()
     }
 
     pub fn device(&self) -> Option<&BlockPool<DeviceStorage, Metadata>> {
-        self.device_pool.as_ref()
+        self.device_pool.as_ref().as_ref()
     }
 
     pub fn worker_id(&self) -> WorkerID {
         self.worker_id
+    }
+
+    pub(crate) async fn enqueue_offload_block<S: Storage + 'static>(
+        &self,
+        block: &ImmutableBlock<S, Metadata>,
+        priority: u64,
+    ) -> Result<()> {
+        self.offload_manager.offload(block, priority).await?;
+
+        Ok(())
+    }
+
+    pub async fn onboard_blocks(
+        &self,
+        blocks: Vec<ImmutableBlock<PinnedStorage, Metadata>>,
+    ) -> core::result::Result<Vec<ImmutableBlock<DeviceStorage, Metadata>>, BlockPoolError> {
+        self.offload_manager.onboard(blocks).await
     }
 }
 

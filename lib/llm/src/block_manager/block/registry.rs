@@ -140,6 +140,8 @@ pub struct RegistrationHandle {
 
     #[getter(skip)]
     release_manager: Arc<dyn EventReleaseManager>,
+
+    token_block: TokenBlock,
 }
 
 impl RegistrationHandle {
@@ -152,6 +154,7 @@ impl RegistrationHandle {
             sequence_hash: token_block.sequence_hash(),
             parent_sequence_hash: token_block.parent_sequence_hash(),
             release_manager,
+            token_block: token_block.clone(),
         }
     }
 }

@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use clap::ValueEnum;
+use dynamo_llm::http::service::discovery::LLMRouterMode;
 use dynamo_runtime::pipeline::RouterMode as RuntimeRouterMode;
 
 /// Required options depend on the in and out choices
@@ -184,7 +185,7 @@ impl Flags {
     }
 }
 
-#[derive(Default, PartialEq, Eq, ValueEnum, Clone, Debug)]
+#[derive(Default, PartialEq, Eq, ValueEnum, Clone, Debug, Copy)]
 pub enum RouterMode {
     #[default]
     Random,
@@ -198,14 +199,21 @@ impl RouterMode {
     pub fn is_kv_routing(&self) -> bool {
         *self == RouterMode::KV
     }
-}
 
-impl From<RouterMode> for RuntimeRouterMode {
-    fn from(r: RouterMode) -> RuntimeRouterMode {
-        match r {
-            RouterMode::RoundRobin => RuntimeRouterMode::RoundRobin,
-            RouterMode::KV => todo!("KV not implemented yet"),
-            _ => RuntimeRouterMode::Random,
+    pub fn as_runtime(&self) -> Option<RuntimeRouterMode> {
+        match self {
+            RouterMode::RoundRobin => Some(RuntimeRouterMode::RoundRobin),
+            RouterMode::Random => Some(RuntimeRouterMode::Random),
+            // Runtime router does not have KV, it's a dynamo-llm thing, not dynamo-runtime
+            RouterMode::KV => None,
+        }
+    }
+
+    pub fn as_llm(&self) -> LLMRouterMode {
+        match self {
+            RouterMode::RoundRobin => LLMRouterMode::RoundRobin,
+            RouterMode::Random => LLMRouterMode::Random,
+            RouterMode::KV => LLMRouterMode::KV,
         }
     }
 }

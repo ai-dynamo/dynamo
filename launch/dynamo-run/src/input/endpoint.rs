@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{pin::Pin, sync::Arc};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use dynamo_llm::{
     backend::Backend,
@@ -52,7 +52,8 @@ pub async fn run(
         .await?
         .endpoint(&endpoint_id.name);
 
-    let (rt_fut, mut card) = match engine_config {
+    let (rt_fut, card): (Pin<Box<dyn Future<Output = _> + Send + 'static>>, _) = match engine_config
+    {
         EngineConfig::StaticFull { engine, mut model } => {
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let ingress_chat = Ingress::<
@@ -63,7 +64,7 @@ pub async fn run(
             model.attach(&endpoint, ModelType::Chat).await?;
             let fut_chat = endpoint.endpoint_builder().handler(ingress_chat).start();
 
-            (fut_chat, model.card().clone())
+            (Box::pin(fut_chat), Some(model.card().clone()))
         }
         EngineConfig::StaticCore {
             engine: inner_engine,
@@ -86,10 +87,13 @@ pub async fn run(
             model.attach(&endpoint, ModelType::Backend).await?;
             let fut = endpoint.endpoint_builder().handler(ingress).start();
 
-            (fut, model.card().clone())
+            (Box::pin(fut), Some(model.card().clone()))
         }
         EngineConfig::Dynamic(_) => {
-            anyhow::bail!("Cannot use endpoint for both in and out");
+            // We can only get here for in=dyn out=vllm|sglang`, because vllm and sglang are a
+            // subprocess that we talk to like a remote endpoint.
+            // That means the vllm/sglang subprocess is doing all the work, we are idle.
+            (never_ready(), None)
         }
     };
 
@@ -102,12 +106,18 @@ pub async fn run(
     }
 
     // Cleanup on shutdown
-    if let Err(err) = card
-        .delete_from_nats(distributed_runtime.nats_client())
-        .await
-    {
-        tracing::error!(%err, "delete_from_nats error on shutdown");
+    if let Some(mut card) = card {
+        if let Err(err) = card
+            .delete_from_nats(distributed_runtime.nats_client())
+            .await
+        {
+            tracing::error!(%err, "delete_from_nats error on shutdown");
+        }
     }
 
     Ok(())
+}
+
+fn never_ready() -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'static>> {
+    Box::pin(std::future::pending::<anyhow::Result<()>>())
 }

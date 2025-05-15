@@ -13,18 +13,18 @@ use tokio::io::AsyncBufReadExt;
 
 use dynamo_llm::engines::MultiNodeConfig;
 use dynamo_llm::LocalModel;
+use dynamo_runtime::protocols::Endpoint as EndpointId;
 
 pub mod sglang;
 pub mod vllm;
-
-/// Internal endpoint to connect the subprocess over etcd/nats
-pub const ENDPOINT: &str = "dyn://dynamo.internal.worker";
 
 pub async fn start(
     // The Python code to run
     py_script: &'static str,
     // Model info
     local_model: &LocalModel,
+    // Endpoint to connect the subprocess over etcd/nats
+    endpoint: &EndpointId,
     // How many GPUs to use
     tensor_parallel_size: u32,
     // sglang which GPU to start from, on a multi-GPU system
@@ -43,13 +43,15 @@ pub async fn start(
     let mut args = vec![
         script_path.to_string_lossy().to_string(),
         "--endpoint".to_string(),
-        ENDPOINT.to_string(),
+        endpoint.as_url(),
         "--model-path".to_string(),
         local_model.path().to_string_lossy().to_string(),
         "--model-name".to_string(),
         local_model.display_name().to_string(),
         "--tensor-parallel-size".to_string(),
         tensor_parallel_size.to_string(),
+        "--kv-block-size".to_string(),
+        dynamo_llm::DEFAULT_KV_BLOCK_SIZE.to_string(),
     ];
     // sglang only
     if let Some(base_gpu_id) = base_gpu_id {

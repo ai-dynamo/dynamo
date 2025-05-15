@@ -390,6 +390,7 @@ impl NatsQueue {
                 let stream_config = jetstream::stream::Config {
                     name: self.stream_name.clone(),
                     subjects: vec![self.subject.clone()],
+                    max_age: time::Duration::from_secs(60 * 10), // 10 min
                     ..Default::default()
                 };
                 client.jetstream().create_stream(stream_config).await?;
