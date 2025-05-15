@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::sync::Arc;
 
@@ -22,8 +10,8 @@ use tokio::sync::mpsc::Receiver;
 use dynamo_runtime::{
     component::{self, Component, ComponentEndpointInfo},
     pipeline::{
-        network::egress::push_router::PushRouter, ManyOut, Operator,
-        RouterMode as RuntimeRouterMode, SegmentSource, ServiceBackend, SingleIn, Source,
+        network::egress::push_router::PushRouter, ManyOut, Operator, RouterMode, SegmentSource,
+        ServiceBackend, SingleIn, Source,
     },
     protocols::{self, annotated::Annotated},
     slug::Slug,
@@ -165,33 +153,11 @@ impl std::fmt::Display for ModelNetworkName {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum LLMRouterMode {
-    Random,
-    RoundRobin,
-    KV,
-}
-
-impl LLMRouterMode {
-    pub fn is_kv_routing(&self) -> bool {
-        *self == LLMRouterMode::KV
-    }
-
-    pub fn as_runtime(&self) -> Option<RuntimeRouterMode> {
-        match self {
-            LLMRouterMode::RoundRobin => Some(RuntimeRouterMode::RoundRobin),
-            LLMRouterMode::Random => Some(RuntimeRouterMode::Random),
-            // Runtime router does not have KV, it's a dynamo-llm thing, not dynamo-runtime
-            LLMRouterMode::KV => None,
-        }
-    }
-}
-
 pub struct ModelWatcher {
     prefix: String,
     manager: ModelManager,
     drt: DistributedRuntime,
-    router_mode: LLMRouterMode,
+    router_mode: RouterMode,
     kv_chooser: Option<Arc<KvRouter>>,
 }
 
@@ -200,7 +166,7 @@ impl ModelWatcher {
         component: Component,
         model_manager: ModelManager,
         network_prefix: &str,
-        router_mode: LLMRouterMode,
+        router_mode: RouterMode,
     ) -> anyhow::Result<ModelWatcher> {
         let kv_chooser = if router_mode.is_kv_routing() {
             let selector = Box::new(DefaultWorkerSelector {});
@@ -329,14 +295,14 @@ impl ModelWatcher {
                 let backend = Backend::from_mdc(card.clone()).await?.into_operator();
                 let router = PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
                     client.clone(),
-                    self.router_mode.as_runtime(),
+                    self.router_mode,
                 )
                 .await?;
                 let service_backend = match self.router_mode {
-                    LLMRouterMode::Random | LLMRouterMode::RoundRobin => {
+                    RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
                         ServiceBackend::from_engine(Arc::new(router))
                     }
-                    LLMRouterMode::KV => {
+                    RouterMode::KV => {
                         let Some(kv_chooser) = self.kv_chooser.clone() else {
                             anyhow::bail!("KV routing mode with no chooser, should be unreachable");
                         };
@@ -363,14 +329,14 @@ impl ModelWatcher {
                 let backend = Backend::from_mdc(card.clone()).await?.into_operator();
                 let router = PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
                     client,
-                    self.router_mode.as_runtime(),
+                    self.router_mode,
                 )
                 .await?;
                 let service_backend = match self.router_mode {
-                    LLMRouterMode::Random | LLMRouterMode::RoundRobin => {
+                    RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
                         ServiceBackend::from_engine(Arc::new(router))
                     }
-                    LLMRouterMode::KV => {
+                    RouterMode::KV => {
                         let Some(kv_chooser) = self.kv_chooser.clone() else {
                             anyhow::bail!("KV routing mode with no chooser, should be unreachable");
                         };

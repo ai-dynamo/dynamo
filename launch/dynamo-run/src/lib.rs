@@ -76,7 +76,10 @@ pub async fn run(
                 }
                 None => {
                     // echo_full engine doesn't need a path
-                    Default::default()
+                    match &flags.model_name {
+                        Some(name) => LocalModel::with_name_only(name),
+                        None => Default::default(),
+                    }
                 }
             }
         }

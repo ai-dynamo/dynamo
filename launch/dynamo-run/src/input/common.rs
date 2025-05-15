@@ -102,7 +102,7 @@ pub async fn prepare_engine(
                     let router =
                         PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
                             client,
-                            flags.router_mode.as_runtime(),
+                            flags.router_mode.into(),
                         )
                         .await?;
                     let service_backend = match &flags.router_mode {
@@ -133,7 +133,7 @@ pub async fn prepare_engine(
                     PushRouter::<
                         NvCreateChatCompletionRequest,
                         Annotated<NvCreateChatCompletionStreamResponse>,
-                    >::from_client(client, flags.router_mode.as_runtime())
+                    >::from_client(client, flags.router_mode.into())
                     .await?,
                 ),
                 ModelType::Completion => {

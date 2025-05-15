@@ -36,6 +36,13 @@ impl Default for LocalModel {
 }
 
 impl LocalModel {
+    pub fn with_name_only(name: &str) -> Self {
+        LocalModel {
+            card: ModelDeploymentCard::with_name_only(name),
+            ..Default::default()
+        }
+    }
+
     pub fn card(&self) -> &ModelDeploymentCard {
         &self.card
     }
