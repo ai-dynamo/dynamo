@@ -93,9 +93,11 @@ class SimpleLoadBalancer:
         logger.debug("Sending request to prefill")
 
         prefill_request = copy.deepcopy(request)
-        prefill_request.sampling_params.kv_transfer_params = dict(
-            do_remote_decode=True,
-        )
+        extra_args = prefill_request.sampling_params.extra_args or {}
+        extra_args["kv_transfer_params"] = {
+            "do_remote_decode": True,
+        }
+        prefill_request.sampling_params.extra_args = extra_args
         prefill_request.sampling_params.max_tokens = 1
         prefill_request.sampling_params.min_tokens = 1
 
@@ -116,9 +118,9 @@ class SimpleLoadBalancer:
         decode_request = copy.deepcopy(request)
 
         if prefill_response:
-            decode_request.sampling_params.kv_transfer_params = (
-                prefill_response.kv_transfer_params
-            )
+            extra_args = decode_request.sampling_params.extra_args or {}
+            extra_args["kv_transfer_params"] = prefill_response.kv_transfer_params
+            decode_request.sampling_params.extra_args = extra_args
 
         logger.debug("Decode request: %s", decode_request.model_dump_json())
 
@@ -149,7 +151,6 @@ class SimpleLoadBalancer:
             yield res
 
     def _create_vllm_request(self, request: PreprocessedRequest) -> vLLMGenerateRequest:
-        # logging.debug(f"Received request: {request}")
         request_id = str(uuid.uuid4().hex)
 
         prompt = TokensPrompt(prompt_token_ids=request.token_ids)
