@@ -38,7 +38,7 @@ jobs:
   pre-merge-rust:
     runs-on: ubuntu-latest
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run'] }
     permissions:
       contents: read
     steps:
