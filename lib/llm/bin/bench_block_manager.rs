@@ -15,7 +15,6 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use dynamo_llm::block_manager::block::BlockState;
 use dynamo_llm::{
     block_manager::{
         block::BlockExt,
@@ -23,7 +22,7 @@ use dynamo_llm::{
         BasicMetadata, KvBlockManager, KvBlockManagerConfig, KvManagerLayoutConfig,
         KvManagerModelConfig, KvManagerRuntimeConfig,
     },
-    tokens::{PartialTokenBlock, SequenceHash, Tokens},
+    tokens::{TokenBlockSequence, Tokens},
 };
 use indicatif::ProgressIterator;
 use ordered_float::NotNan;
@@ -285,6 +284,7 @@ async fn scatter(
     file_name: &str,
     latencies: Arc<Mutex<Vec<EventStats>>>,
 ) -> Result<()> {
+    // TODO: We need to handle outliers better.
     let drawing_area = BitMapBackend::new(file_name, (1920, 1080)).into_drawing_area();
     drawing_area.fill(&WHITE)?;
 
@@ -347,21 +347,16 @@ async fn benchmark(
 
     // Generating our inputs can be quite slow, so we do this ahead of time.
     let block_size = args.block_size;
-    let inputs: Vec<(Tokens, Vec<SequenceHash>)> = (0..args.requests_per_second * args.duration_s)
+    let inputs: Vec<TokenBlockSequence> = (0..args.requests_per_second * args.duration_s)
         .progress()
         .map(|_| {
             let input_tokens = token_generator.next(&mut rng).unwrap();
             let tokens = Tokens::from(input_tokens);
 
-            let sequence = tokens.clone().into_sequence(block_size, Some(0));
             // Break up the sequence into blocks and get the sequence hashes.
-            let sequence_hashes: Vec<SequenceHash> = sequence
-                .blocks()
-                .iter()
-                .map(|block| block.sequence_hash())
-                .collect();
+            
 
-            (tokens, sequence_hashes)
+            tokens.into_sequence(block_size, Some(0))
         })
         .collect();
 
@@ -392,7 +387,7 @@ async fn benchmark(
 
     // Block manager worker.
     let block_manager_worker = tokio::spawn(async move {
-        while let Some((tokens, sequence_hashes)) = req_rx.recv().await {
+        while let Some(sequence) = req_rx.recv().await {
             let manager = manager.clone();
             let stats = stats_clone.clone();
 
@@ -404,6 +399,12 @@ async fn benchmark(
                 let host = manager.host().unwrap();
 
                 let mut sequence_blocks = Vec::new();
+
+                let sequence_hashes = sequence
+                    .blocks()
+                    .iter()
+                    .map(|block| block.sequence_hash())
+                    .collect::<Vec<_>>();
 
                 // First, check for matching blocks on the device, and log the lookup latency.
                 let (device_blocks, device_match_latency) =
@@ -456,50 +457,12 @@ async fn benchmark(
                         .await
                         .push(EventStats::new(allocate_latency, allocated_blocks.len()));
 
-                    // To link our blocks together to make our full sequence, track the current leaf block of our sequence.
-                    let mut prev_token_block = if let Some(last) = sequence_blocks.last() {
-                        if let BlockState::Registered(state) = last.state() {
-                            Some(state.token_block().clone())
-                        } else {
-                            panic!("Last block is not registered!");
-                        }
-                    } else {
-                        // If we couldn't find any blocks on the device and host, initialize one
-                        // of the allocated blocks as the root of our sequence.
-                        None
-                    };
-
-                    allocated_blocks
-                        .iter_mut()
-                        .enumerate()
-                        .for_each(|(i, block)| {
-                            let offset = (sequence_blocks.len() + i) * args.block_size;
-
-                            // For now, we don't bother with filling in the partial blocks, since they don't get registered anyways.
-                            if offset + args.block_size > tokens.len() {
-                                return;
-                            }
-
-                            // If we have a previous block, use it to create a new partial block.
-                            // Otherwise, create a new sequence root.
-                            let mut partial_block = if let Some(prev) = prev_token_block.as_ref() {
-                                prev.next_block()
-                            } else {
-                                PartialTokenBlock::create_sequence_root(args.block_size, 0)
-                            };
-
-                            for token in &tokens[offset..offset + args.block_size] {
-                                partial_block.push_token(*token).unwrap();
-                            }
-
-                            let new_token_block = partial_block.commit().unwrap();
-
-                            // Update our leaf.
-                            prev_token_block = Some(new_token_block.clone());
-
-                            // Apply the token block. This moves the block to the completed state.
-                            block.apply_token_block(new_token_block).unwrap();
-                        });
+                    for (block, allocated_block) in sequence.blocks()[sequence_blocks.len()..]
+                        .iter()
+                        .zip(allocated_blocks.iter_mut())
+                    {
+                        allocated_block.apply_token_block(block.clone()).unwrap();
+                    }
 
                     // Register any newly allocated blocks.
                     let (registered_blocks, register_latency) =
