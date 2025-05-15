@@ -20,6 +20,7 @@
 model_name: "nvidia/DeepSeek-R1-FP4"
 backend: pytorch
 
+# TP/EP/PP/DP
 tensor_parallel_size: 4
 moe_expert_parallel_size: 4
 pipeline_parallel_size: 1
@@ -32,7 +33,7 @@ max_seq_len: 8448
 
 kv_cache_config:
   # With dp attention disabled: high free_gpu_memory_fraction is fine.
-  free_gpu_memory_fraction: 0.80
+  free_gpu_memory_fraction: 0.85
   # With dp attention enabled: large ISL at high concurrency may need
   # free_gpu_memory_fraction low to have enough available memory.
   # free_gpu_memory_fraction: 0.30
@@ -55,4 +56,3 @@ pytorch_backend_config:
   print_iter_log: true
   enable_overlap_scheduler: true
   kv_cache_dtype: fp8
-
