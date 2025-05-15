@@ -79,8 +79,8 @@ pub async fn prepare_engine(
             let Some(etcd_client) = distributed_runtime.etcd_client() else {
                 anyhow::bail!("Cannot run distributed components without etcd");
             };
-            let network_entry = network_name.load_entry(etcd_client.clone()).await?;
-            let mut card = network_entry.load_mdc(endpoint_id, etcd_client).await?;
+            let network_entry = network_name.load_entry(&etcd_client).await?;
+            let mut card = network_entry.load_mdc(endpoint_id, &etcd_client).await?;
 
             let engine: OpenAIChatCompletionsStreamingEngine = match network_entry.model_type {
                 ModelType::Backend => {
