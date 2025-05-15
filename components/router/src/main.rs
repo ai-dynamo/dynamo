@@ -20,6 +20,8 @@
 // 2. Update the backend component to produce a config in a standard location.
 // 3. Update the KvRouter to read the config from the backend component.
 
+use std::sync::Arc;
+
 use clap::Parser;
 
 use dynamo_llm::kv_router::{
@@ -65,7 +67,7 @@ async fn app(runtime: Runtime) -> Result<()> {
     let selector = Box::new(CustomWorkerSelector::default());
 
     let router = KvRouter::new(component.clone(), args.block_size, Some(selector)).await?;
-    let router = Ingress::for_engine(router)?;
+    let router = Ingress::for_engine(Arc::new(router))?;
 
     component
         .service_builder()

@@ -35,7 +35,6 @@ logger = logging.getLogger(__name__)
 
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "dynamo",
     },
     resources={"cpu": "10", "memory": "20Gi"},
@@ -156,10 +155,37 @@ class Processor(ChatProcessorMixin):
                     raise ValueError(
                         "max_tokens and max_completion_tokens must be the same"
                     )
+
+        # min_tokens isn't currently propagated through the Rust OpenAI HTTP frontend,
+        # and ignore_eos is passed through the 'nvext' field, so set both when found.
+        if raw_request.nvext:
+            ignore_eos = raw_request.nvext.get("ignore_eos")
+            raw_request.ignore_eos = ignore_eos
+            # If ignore_eos is True, set min_tokens to max_tokens to guarantee
+            # the full expected OSL for consistent benchmarking purposes.
+            if ignore_eos:
+                logger.debug(
+                    f"[preprocessor] `ignore_eos` detected, setting `min_tokens` to `max_completion_tokens`: {raw_request.max_completion_tokens}"
+                )
+                raw_request.min_tokens = raw_request.max_completion_tokens
+
         async for response in self._generate(raw_request, RequestType.CHAT):
             yield response
 
     @dynamo_endpoint(name="completions")
     async def completions(self, raw_request: DynamoTRTLLMCompletionRequest):
+        # min_tokens isn't currently propagated through the Rust OpenAI HTTP frontend,
+        # and ignore_eos is passed through the 'nvext' field, so set both when found.
+        if raw_request.nvext:
+            ignore_eos = raw_request.nvext.get("ignore_eos")
+            raw_request.ignore_eos = ignore_eos
+            # If ignore_eos is True, set min_tokens to max_tokens to guarantee
+            # the full expected OSL for consistent benchmarking purposes.
+            if ignore_eos:
+                logger.debug(
+                    f"[preprocessor] `ignore_eos` detected, setting `min_tokens` to `max_tokens`: {raw_request.max_tokens}"
+                )
+                raw_request.min_tokens = raw_request.max_tokens
+
         async for response in self._generate(raw_request, RequestType.COMPLETION):
             yield response

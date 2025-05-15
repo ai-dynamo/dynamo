@@ -92,7 +92,9 @@ def configure_dynamo_logging(
     dyn_var = os.environ.get("DYN_LOG", "info")
     dyn_level = log_level_mapping(dyn_var)
 
+    # configure inference engine loggers
     configure_vllm_logging(dyn_level)
+    configure_sglang_logging(dyn_level)
 
     # loggers that should be configured to ERROR
     error_loggers = ["bentoml", "tag"]
@@ -123,6 +125,38 @@ def log_level_mapping(level: str) -> int:
         return logging.INFO
     else:
         return logging.INFO
+
+
+def configure_sglang_logging(dyn_level: int):
+    """
+    SGLang allows us to create a custom logging config file
+    """
+
+    sglang_level = logging.getLevelName(dyn_level)
+
+    sglang_config = {
+        "formatters": {"simple": {"format": "%(message)s"}},
+        "handlers": {
+            "dynamo": {
+                "class": "dynamo.runtime.logging.LogHandler",
+                "formatter": "simple",
+                "level": sglang_level,
+            }
+        },
+        "loggers": {
+            "sglang": {
+                "handlers": ["dynamo"],
+                "level": sglang_level,
+                "propagate": False,
+            }
+        },
+        "version": 1,
+        "disable_existing_loggers": False,
+    }
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(sglang_config, f)
+        os.environ["SGLANG_LOGGING_CONFIG_PATH"] = f.name
 
 
 def configure_vllm_logging(dyn_level: int):

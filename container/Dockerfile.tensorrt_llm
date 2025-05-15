@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG BASE_IMAGE="tensorrt_llm/release"
-ARG BASE_IMAGE_TAG="latest_squashed"
+ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
+ARG BASE_IMAGE_TAG="25.03-py3"
 ARG RELEASE_BUILD
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -32,6 +32,16 @@ ARG RELEASE_BUILD
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS nixl_base
+
+WORKDIR /opt/nixl
+# Add a cache hint that only changes when the nixl commit changes
+ARG NIXL_COMMIT
+# This line acts as a cache key - it only changes when NIXL_COMMIT changes
+RUN echo "NIXL commit: ${NIXL_COMMIT}" > /opt/nixl/commit.txt
+# Copy the nixl source
+COPY --from=nixl . .
+
 ##################################
 ########## Build Image ###########
 ##################################
@@ -45,7 +55,70 @@ ARG ARCH_ALT
 USER root
 
 # Install utilities
-RUN apt update -y && apt install -y git wget curl nvtop tmux vim
+RUN apt update -y && \
+    apt install -y \
+    git \
+    wget \
+    curl \
+    nvtop \
+    tmux \
+    vim \
+    ## NIXL dependencies
+    meson \
+    ninja-build
+
+### UCX EFA Setup ###
+RUN rm -rf /opt/hpcx/ucx
+RUN rm -rf /usr/local/ucx
+RUN cd /usr/local/src && \
+    git clone https://github.com/openucx/ucx.git && \
+    cd ucx &&                   \
+    git checkout v1.19.x &&     \
+    ./autogen.sh && ./configure \
+    --prefix=/usr/local/ucx     \
+    --enable-shared             \
+    --disable-static            \
+    --disable-doxygen-doc       \
+    --enable-optimizations      \
+    --enable-cma                \
+    --enable-devel-headers      \
+    --with-cuda=/usr/local/cuda \
+    --with-verbs                \
+    --with-efa                  \
+    --with-dm                   \
+    --with-gdrcopy=/usr/local   \
+    --enable-mt &&              \
+    make -j &&                  \
+    make -j install-strip &&    \
+    ldconfig
+
+ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:/usr/local/cuda/compat/lib.real:$LD_LIBRARY_PATH
+ENV CPATH=/usr/include:$CPATH
+ENV PATH=/usr/bin:$PATH
+ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
+SHELL ["/bin/bash", "-c"]
+
+# NIXL SETUP
+# Copy nixl source, and use commit hash as cache hint
+COPY --from=nixl_base /opt/nixl /opt/nixl
+COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
+RUN if [ "$ARCH" = "arm64" ]; then \
+        cd /opt/nixl && \
+        mkdir build && \
+        meson setup build/ --prefix=/usr/local/nixl -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
+        cd build/ && \
+        ninja && \
+        ninja install; \
+    else \
+        cd /opt/nixl && \
+        mkdir build && \
+        meson setup build/ --prefix=/usr/local/nixl && \
+        cd build/ && \
+        ninja && \
+        ninja install; \
+    fi
+
+ENV NIXL_PREFIX=/usr/local/nixl
 
 # nats
 RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-${ARCH}.deb && \
@@ -59,10 +132,31 @@ RUN wget https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$E
     rm /tmp/etcd.tar.gz
 ENV PATH=/usr/local/bin/etcd/:$PATH
 
-# TODO: Try using uv to install tensorrtllm
-ARG TENSORRTLLM_PIP_WHEEL_PATH=""
-COPY ${TENSORRTLLM_PIP_WHEEL_PATH}/*.whl /tmp/
-RUN find /tmp -name "*.whl" -exec pip install {} +
+ARG HAS_TRTLLM_CONTEXT=0
+ARG TENSORRTLLM_PIP_WHEEL="tensorrt-llm"
+ARG TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
+
+COPY --from=trtllm_wheel . /trtllm_wheel/
+
+# TODO: Currently, ABI compatibility issues with TRTLLM wheel and NGC PyTorch prevent us
+# from using the TRTLLM wheel in a uv venv. Once the issues are resolved, we can
+# use uv to install TensorRT-LLM wheel within the uv venv.
+RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
+    if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
+        # Install from local wheel directory in build context
+        WHEEL_FILE=$(find /trtllm_wheel -name "*.whl" | head -n 1); \
+        if [ -n "$WHEEL_FILE" ]; then \
+            pip install "$WHEEL_FILE"; \
+        else \
+            echo "No wheel file found in /trtllm_wheel directory."; \
+            exit 1; \
+        fi; \
+    else \
+         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
+         pip install --index-url "${TENSORRTLLM_INDEX_URL}" \
+         --extra-index-url https://pypi.org/simple \
+         "${TENSORRTLLM_PIP_WHEEL}" ; \
+    fi
 
 # Install genai-perf for benchmarking
 # TODO: Move to published pypi tags
@@ -90,7 +184,8 @@ RUN apt-get update && \
     protobuf-compiler \
     cmake \
     libssl-dev \
-    pkg-config
+    pkg-config \
+    libclang-dev
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
@@ -141,7 +236,7 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 WORKDIR /workspace
 
 RUN yum update -y \
-    && yum install -y python3.12-devel \
+    && yum install -y llvm-toolset python3.12-devel \
     && yum install -y protobuf-compiler \
     && yum clean all \
     && rm -rf /var/cache/yum
@@ -155,6 +250,7 @@ COPY --from=build $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=build $CARGO_HOME $CARGO_HOME
 COPY --from=build /workspace /workspace
 COPY --from=build $VIRTUAL_ENV $VIRTUAL_ENV
+COPY --from=build /usr/local/nixl /opt/nvidia/nvda_nixl
 ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
 
 # Copy configuration files
@@ -170,10 +266,10 @@ COPY hatch_build.py /workspace/
 COPY lib/ /workspace/lib/
 COPY components /workspace/components
 COPY launch /workspace/launch
-COPY deploy/dynamo/sdk /workspace/deploy/dynamo/sdk
+COPY deploy/sdk /workspace/deploy/sdk
 
 # Build Rust crate binaries packaged with the wheel
-RUN cargo build --release --locked --features mistralrs,sglang,vllm,python \
+RUN cargo build --release --locked --features mistralrs,python \
     -p dynamo-run \
     -p llmctl \
     # Multiple http named crates are present in dependencies, need to specify the path
@@ -237,12 +333,7 @@ ENV DYNAMO_HOME=/workspace
 
 # Use UCX for TRTLLM KV Cache Transfer
 ENV TRTLLM_USE_UCX_KVCACHE=1
-# Needed to use NVLink for TRTLLM KV Cache Transfer
-# https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/advanced/disaggregated-service.md
-ENV UCX_CUDA_COPY_ASYNC_MEM_TYPE=cuda
-ENV UCX_CUDA_COPY_DMABUF=no
-ENV UCX_MEMTYPE_CACHE=no
-ENV UCX_RNDV_PIPELINE_ERROR_HANDLING=y
+
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \

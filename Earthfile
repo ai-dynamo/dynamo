@@ -26,7 +26,7 @@ golang-base:
 
 operator-src:
     FROM +golang-base
-    COPY ./deploy/dynamo/operator /artifacts/operator
+    COPY ./deploy/cloud/operator /artifacts/operator
     SAVE ARTIFACT /artifacts/operator
 
 
@@ -75,18 +75,18 @@ rust-base:
     RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb && \
         apt install -y ./cuda-keyring_1.1-1_all.deb && \
         apt update && \
-        apt install -y cuda-toolkit nvidia-utils-535 nvidia-driver-535 && \
+        apt install -y cuda-toolkit-12-8 nvidia-utils-535 nvidia-driver-535 && \
         rm cuda-keyring_1.1-1_all.deb
 
     # Set CUDA compute capability explicitly
     ENV CUDA_COMPUTE_CAP=80
 
-    ENV CUDA_HOME=/usr/local/cuda
-    ENV CUDA_ROOT=/usr/local/cuda
-    ENV CUDA_PATH=/usr/local/cuda
-    ENV CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda
-    ENV PATH=$CUDA_HOME/bin:$PATH
-    ENV LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+    ENV CUDA_HOME=/usr/local/cuda-12.8
+    ENV CUDA_ROOT=/usr/local/cuda-12.8
+    ENV CUDA_PATH=/usr/local/cuda-12.8
+    ENV CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda-12.8
+    ENV PATH=/usr/local/cuda-12.8/bin:$PATH
+    ENV LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH
 
     ENV RUSTUP_HOME=/usr/local/rustup
     ENV CARGO_HOME=/usr/local/cargo
@@ -116,13 +116,13 @@ dynamo-build:
         cargo doc --no-deps
 
     # Create symlinks for wheel building
-    RUN mkdir -p /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/ && \
+    RUN mkdir -p /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/ && \
         # Remove existing symlinks
-        rm -f /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/* && \
+        rm -f /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/* && \
         # Create new symlinks pointing to the correct location
-        ln -sf /workspace/target/release/dynamo-run /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/dynamo-run && \
-        ln -sf /workspace/target/release/http /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/http && \
-        ln -sf /workspace/target/release/llmctl /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/llmctl
+        ln -sf /workspace/target/release/dynamo-run /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/dynamo-run && \
+        ln -sf /workspace/target/release/http /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/http && \
+        ln -sf /workspace/target/release/llmctl /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/llmctl
 
 
     RUN cd /workspace/lib/bindings/python && \
@@ -174,16 +174,16 @@ dynamo-base-docker:
 
 ############### ALL TARGETS ##############################
 all-test:
-    BUILD ./deploy/dynamo/operator+test
+    BUILD ./deploy/cloud/operator+test
 
 all-docker:
     ARG DOCKER_SERVER=my-registry
     ARG IMAGE_TAG=latest
-    BUILD ./deploy/dynamo/operator+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
-    BUILD ./deploy/dynamo/api-store+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+    BUILD ./deploy/cloud/operator+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+    BUILD ./deploy/cloud/api-store+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 
 all-lint:
-    BUILD ./deploy/dynamo/operator+lint
+    BUILD ./deploy/cloud/operator+lint
 
 all:
     BUILD +all-test

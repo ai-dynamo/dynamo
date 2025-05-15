@@ -25,7 +25,7 @@ Dynamo provides two distinct deployment paths, each serving different use cases:
 
 ### 1. 🚀 Dynamo Cloud Kubernetes Platform [PREFERRED]
 
-The Dynamo Cloud Platform (`deploy/dynamo/helm/`) provides a managed deployment experience:
+The Dynamo Cloud Platform (`deploy/cloud/`) provides a managed deployment experience:
 
 - Contains the infrastructure components required for the Dynamo cloud platform
 - Used when deploying with the `dynamo deploy` CLI commands
@@ -37,15 +37,15 @@ For detailed instructions on using the Dynamo Cloud Platform, see:
 
 ### 2. Manual Deployment with Helm Charts
 
-The manual deployment path (`deploy/Kubernetes/`) is available for users who need more control over their deployments:
+The manual deployment path (`deploy/helm/`) is available for users who need more control over their deployments:
 
 - Used for manually deploying inference graphs to Kubernetes
 - Contains Helm charts and configurations for deploying individual inference pipelines
 - Provides full control over deployment parameters
 - Requires manual management of infrastructure components
 - Documentation:
-  - [Deploying Dynamo Inference Graphs to Kubernetes using Helm](../../Kubernetes/pipeline/README.md): all-in-one script
-  - [Manual Helm Deployment Guide](manual_helm_deployment.md): detailed instructions on manual deployment
+  - [Using the Deployment Script](manual_helm_deployment.md#using-the-deployment-script): all-in-one script for manual deployment
+  - [Helm Deployment Guide](manual_helm_deployment.md#helm-deployment-guide): detailed instructions for manual deployment
 
 ## Getting Started
 

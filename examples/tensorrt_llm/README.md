@@ -35,37 +35,17 @@ Note: TensorRT-LLM disaggregation does not support conditional disaggregation ye
 
 ### Prerequisites
 
-Start required services (etcd and NATS) using [Docker Compose](../../deploy/docker-compose.yml)
+Start required services (etcd and NATS) using [Docker Compose](../../deploy/metrics/docker-compose.yml)
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
 ### Build docker
-
-#### Step 1: Build TensorRT-LLM base container image
-
-Because of the known issue of C++11 ABI compatibility within the NGC pytorch container, we rebuild TensorRT-LLM from source.
-See [here](https://nvidia.github.io/TensorRT-LLM/installation/linux.html) for more informantion.
-
-Use the helper script to build a TensorRT-LLM container base image. The script uses a specific commit id from TensorRT-LLM main branch.
 
 ```bash
 # TensorRT-LLM uses git-lfs, which needs to be installed in advance.
 apt-get update && apt-get -y install git git-lfs
 
-# The script uses python packages like docker-squash to squash image
-# layers within trtllm base image
-DEBIAN_FRONTEND=noninteractive TZ=America/Los_Angeles apt-get -y install python3 python3-pip python3-venv
-
-./container/build_trtllm_base_image.sh
-```
-
-For more information see [here](https://nvidia.github.io/TensorRT-LLM/installation/build-from-source-linux.html#option-1-build-tensorrt-llm-in-one-step) for more details on building from source.
-If you already have a TensorRT-LLM container image, you can skip this step.
-
-#### Step 2: Build the Dynamo container
-
-```
 # On an x86 machine:
 ./container/build.sh --framework tensorrtllm
 
@@ -73,13 +53,14 @@ If you already have a TensorRT-LLM container image, you can skip this step.
 ./container/build.sh --framework tensorrtllm --platform linux/arm64
 ```
 
-This build script internally points to the base container image built with step 1. If you skipped previous step because you already have the container image available, you can run the build script with that image as a base.
+> [!NOTE]
+> Because of a known issue of C++11 ABI compatibility within the NGC pytorch container,
+> we rebuild TensorRT-LLM from source. See [here](https://nvidia.github.io/TensorRT-LLM/installation/linux.html)
+> for more informantion.
+>
+> Hence, when running this script for the first time, the time taken by this script can be
+> quite long.
 
-
-```bash
-# Build dynamo image with other TRTLLM base image.
-./container/build.sh --framework TENSORRTLLM --base-image <trtllm-base-image> --base-image-tag <trtllm-base-image-tag>
-```
 
 ### Run container
 
@@ -215,6 +196,14 @@ Notes:
   # Example: deploy decode worker only
   cd /workspace/examples/tensorrt_llm
   dynamo serve components.worker:TensorRTLLMWorker -f ./configs/disagg.yaml --service-name TensorRTLLMWorker &
+  ```
+- If you see an error about MPI Spawn failing during TRTLLM Worker initialziation on a Slurm-based cluster,
+  try unsetting the following environment variables before launching the TRTLLM worker. If you intend to
+  run other slurm-based commands or processes on the same node after deploying the TRTLLM worker, you may
+  want to save these values into temporary variables and then restore them afterwards.
+  ```bash
+  # Workaround for error: `mpi4py.MPI.Exception: MPI_ERR_SPAWN: could not spawn processes`
+  unset SLURM_JOBID SLURM_JOB_ID SLURM_NODELIST
   ```
 
 ### Client

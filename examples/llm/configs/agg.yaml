@@ -24,16 +24,19 @@ Frontend:
 
 Processor:
   router: round-robin
+  router-num-threads: 4
   common-configs: [model, block-size, max-model-len]
 
 VllmWorker:
   enforce-eager: true
   max-num-batched-tokens: 16384
   enable-prefix-caching: true
-  router: random
-  tensor-parallel-size: 1
   ServiceArgs:
     workers: 1
     resources:
       gpu: 1
   common-configs: [model, block-size, max-model-len]
+
+Planner:
+  environment: local
+  no-operation: true

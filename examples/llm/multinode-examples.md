@@ -17,7 +17,7 @@ Note that this can be easily extended to more nodes. You can also run the Fronte
 **Step 1**: Start NATS/ETCD on your head node. Ensure you have the correct firewall rules to allow communication between the nodes as you will need the NATS/ETCD endpoints to be accessible by all other nodes.
 ```bash
 # node 1
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
 **Step 2**: Create the inference graph for this node. Here we will use the `agg_router.py` (even though we are doing disaggregated serving) graph because we want the `Frontend`, `Processor`, `Router`, and `VllmWorker` to spin up (we will spin up the other decode worker and prefill worker separately on different nodes later).

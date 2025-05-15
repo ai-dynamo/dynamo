@@ -70,10 +70,8 @@ pub async fn collect_endpoints(
         .into_endpoints()
         .filter(|e| e.subject.starts_with(subject))
         .collect::<Vec<_>>();
-    tracing::debug!("Endpoints: {endpoints:?}");
-
     if endpoints.is_empty() {
-        tracing::warn!("No endpoints found matching subject {subject}");
+        tracing::debug!("Metrics endpoint not visible yet");
     }
 
     Ok(endpoints)
@@ -92,7 +90,6 @@ pub async fn collect_endpoints_task(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
-                tracing::debug!("cancellation token triggered");
                 break;
             }
             _ = tokio::time::sleep(backoff_delay) => {
@@ -106,8 +103,6 @@ pub async fn collect_endpoints_task(
                             continue;
                         }
                     };
-                tracing::debug!("unfiltered endpoints: {:?}", unfiltered_endpoints);
-
                 let endpoints: Vec<Endpoint> = unfiltered_endpoints
                     .into_iter()
                     .filter(|s| s.data.is_some())
@@ -125,13 +120,7 @@ pub async fn collect_endpoints_task(
                         }
                     )
                     .collect();
-                tracing::debug!("endpoints: {:?}", endpoints);
-
-                tracing::trace!(
-                    "found {} endpoints for service: {}",
-                    endpoints.len(),
-                    service_subject
-                );
+                tracing::trace!("Found {} endpoints for service: {service_subject}", endpoints.len());
 
                 let processed = ProcessedEndpoints::new(endpoints);
 
