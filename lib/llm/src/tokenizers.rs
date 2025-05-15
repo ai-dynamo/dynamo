@@ -87,6 +87,11 @@ impl Tokenizer {
         Ok(Tokenizer(create_tokenizer_from_file(file_path)?))
     }
 
+    pub async fn from_hf_repo_id(repo_id: &str, revision: Option<&str>) -> Result<Tokenizer> {
+        let hf_tokenizer = HuggingFaceTokenizer::from_repo_id(repo_id, revision).await?;
+        Ok(Tokenizer(Arc::new(hf_tokenizer)))
+    }
+
     /// Create a stateful sequence object for decoding token_ids into text
     pub fn decode_stream(&self, skip_special_tokens: bool) -> DecodeStream {
         DecodeStream::new(self.0.clone(), skip_special_tokens)
@@ -566,5 +571,30 @@ impl StopSequenceDecoderBuilder {
             stopped: false,
             state: String::new(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_from_hf() {
+        // Use a small, public model to test the functionality
+        let repo_id = "gpt2";
+
+        // Download and load the tokenizer
+        let tokenizer = Tokenizer::from_hf_repo_id(repo_id, None).await.unwrap();
+
+        // Test encoding and decoding
+        let test_text = "Hello, world!";
+        let encoding = tokenizer.encode(test_text).unwrap();
+
+        // Ensure we got some tokens
+        assert!(!encoding.token_ids.is_empty());
+
+        // Test decoding
+        let decoded = tokenizer.decode(&encoding.token_ids, false).unwrap();
+        assert_eq!(decoded, test_text);
     }
 }
