@@ -192,7 +192,7 @@ pub enum RouterType {
 
 impl Default for RouterType {
     fn default() -> Self {
-        Self::PushRandom
+        Self::PushRoundRobin
     }
 }
 
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn test_router_type_default() {
         let default_router = RouterType::default();
-        assert_eq!(default_router, RouterType::PushRandom);
+        assert_eq!(default_router, RouterType::PushRoundRobin);
     }
 
     #[test]
