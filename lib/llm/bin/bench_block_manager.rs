@@ -37,31 +37,40 @@ use tokio::time::{interval, Duration, Instant};
 
 #[derive(Parser)]
 struct Args {
+    /// Amount of device blocks
     #[clap(short = 'd', long, default_value_t = 512)]
     num_device_blocks: usize,
 
+    /// Amount of host blocks
     #[clap(short = 'n', long, default_value_t = 512)]
     num_host_blocks: usize,
 
+    /// Amount of layers
     #[clap(long, default_value_t = 24)]
     num_layers: usize,
 
+    /// Inner dimension
     #[clap(long, default_value_t = 4096)]
     inner_dim: usize,
 
+    /// Block size
     #[clap(long, default_value_t = 32)]
     block_size: usize,
 
+    /// Duration of the benchmark in seconds.
     #[clap(short = 't', long, default_value_t = 60)]
     duration_s: usize,
 
+    /// Amount of simulated inference requests per second.
     #[clap(short = 'r', long, default_value_t = 10)]
     requests_per_second: usize,
 
+    /// Token generator to use.
     #[command(subcommand)]
     command: Commands,
 }
 
+/// A trait for objects which generate simulated inference requests following some pattern.
 trait TokenGenerator: Send + Sync {
     fn next(&self, rng: &mut ThreadRng) -> Result<Vec<u32>>;
 }
@@ -73,6 +82,8 @@ struct RandomTokenGeneratorArgs {
     num_tokens: usize,
 }
 
+/// A token generator which generates random tokens.
+/// Useful as a sanity test and for testing offloading and allocations.
 struct RandomTokenGenerator {
     num_tokens: usize,
 }
@@ -87,6 +98,7 @@ impl From<RandomTokenGeneratorArgs> for RandomTokenGenerator {
 
 impl TokenGenerator for RandomTokenGenerator {
     fn next(&self, rng: &mut ThreadRng) -> Result<Vec<u32>> {
+        // Just generate a random vector of specific length.
         Ok((0..self.num_tokens)
             .map(|_| rng.random_range(0..1024))
             .collect())
@@ -108,6 +120,11 @@ struct HierarchicalTokenGeneratorArgs {
     variations_per_group: usize,
 }
 
+/// A token generator which generates simulated requests conducive to a lot of reuse.
+/// We split the tokens into 'num_groups' groups of 'group_size' tokens each.
+/// Each group can take on 'variations_per_group' different token sequences.
+/// The variations of the first group will likely stay on device (and be reused),
+/// while the later groups may move back and forth between device and host, or even be evicted.
 struct HierarchicalTokenGenerator {
     num_groups: usize,
     group_size: usize,
@@ -127,8 +144,10 @@ impl From<HierarchicalTokenGeneratorArgs> for HierarchicalTokenGenerator {
 impl TokenGenerator for HierarchicalTokenGenerator {
     fn next(&self, rng: &mut ThreadRng) -> Result<Vec<u32>> {
         let mut tokens = Vec::new();
+        // Generate each group.
         for _ in 0..self.num_groups {
             let variant = rng.random_range(0..self.variations_per_group as u32);
+            // Generate each token in the group. For now, just use a fixed token id for all tokens.
             for _ in 0..self.group_size {
                 tokens.push(variant);
             }
@@ -200,6 +219,7 @@ pub async fn main() -> Result<()> {
     Ok(())
 }
 
+/// A helper function to time the execution of a future.
 async fn time<T, E: std::fmt::Debug>(f: impl Future<Output = Result<T, E>>) -> (T, Duration) {
     let start = Instant::now();
     let result = f.await.unwrap();
@@ -207,6 +227,9 @@ async fn time<T, E: std::fmt::Debug>(f: impl Future<Output = Result<T, E>>) -> (
     (result, duration)
 }
 
+/// A struct for storing timing data for some action.
+/// Generally, we'd expect that the time to perform some action on a set of blocks
+/// is composed of a fixed latency, as well as some per-block latency, hence the blocks parameter.
 struct EventStats {
     time: Duration,
     num_blocks: usize,
@@ -245,6 +268,7 @@ fn make_range(seq: Vec<f64>) -> Range<f64> {
         .min()
         .unwrap()
         .into_inner();
+
     let max = seq
         .iter()
         .map(|x| NotNan::new(*x).unwrap())
@@ -264,6 +288,7 @@ async fn scatter(
     let drawing_area = BitMapBackend::new(file_name, (1920, 1080)).into_drawing_area();
     drawing_area.fill(&WHITE)?;
 
+    // Gather up our data.
     let data = latencies
         .lock()
         .await
@@ -319,6 +344,8 @@ async fn benchmark(
     let mut rng = rand::rng();
 
     println!("Generating inputs...");
+
+    // Generating our inputs can be quite slow, so we do this ahead of time.
     let block_size = args.block_size;
     let inputs: Vec<(Tokens, Vec<SequenceHash>)> = (0..args.requests_per_second * args.duration_s)
         .progress()
@@ -327,6 +354,7 @@ async fn benchmark(
             let tokens = Tokens::from(input_tokens);
 
             let sequence = tokens.clone().into_sequence(block_size, Some(0));
+            // Break up the sequence into blocks and get the sequence hashes.
             let sequence_hashes: Vec<SequenceHash> = sequence
                 .blocks()
                 .iter()
@@ -337,9 +365,10 @@ async fn benchmark(
         })
         .collect();
 
-    // Enqueue worker.
     println!("Beginning benchmark...");
+    // Enqueue worker.
     let enqueue_worker = tokio::spawn(async move {
+        // Send a request every 1 / requests_per_second seconds.
         let mut interval = interval(Duration::from_micros(
             1000000 / args.requests_per_second as u64,
         ));
@@ -349,6 +378,7 @@ async fn benchmark(
 
             tokio::select! {
                 _ = interval.tick() => {}
+                // Wait for signal to stop.
                 _ = tokio::signal::ctrl_c() => {
                     break;
                 },
@@ -356,19 +386,26 @@ async fn benchmark(
         }
     });
 
-    // Block manager worker.
+    // A global object to aggregate timing data.
     let stats = Arc::new(Stats::new());
     let stats_clone = stats.clone();
+
+    // Block manager worker.
     let block_manager_worker = tokio::spawn(async move {
         while let Some((tokens, sequence_hashes)) = req_rx.recv().await {
             let manager = manager.clone();
             let stats = stats_clone.clone();
+
+            // We don't necessarily want to finish one request before starting the next.
+            // So we spawn a new task for each request.
+            // TODO: Could this be a bottleneck for very high request rates?
             tokio::spawn(async move {
                 let device = manager.device().unwrap();
                 let host = manager.host().unwrap();
 
                 let mut sequence_blocks = Vec::new();
 
+                // First, check for matching blocks on the device, and log the lookup latency.
                 let (device_blocks, device_match_latency) =
                     time(device.match_sequence_hashes(sequence_hashes.as_slice())).await;
                 stats
@@ -379,6 +416,7 @@ async fn benchmark(
 
                 sequence_blocks.extend(device_blocks);
 
+                // If we weren't able to find all our blocks on the device, check the host.
                 if sequence_blocks.len() < sequence_hashes.len() {
                     let (host_blocks, host_match_latency) =
                         time(host.match_sequence_hashes(&sequence_hashes[sequence_blocks.len()..]))
@@ -390,6 +428,7 @@ async fn benchmark(
                         .await
                         .push(EventStats::new(host_match_latency, host_blocks.len()));
 
+                    // For any host blocks we found, onboard them to the device.
                     if !host_blocks.is_empty() {
                         let (onboard_blocks, onboard_latency) =
                             time(manager.onboard_blocks(host_blocks)).await;
@@ -406,6 +445,7 @@ async fn benchmark(
 
                 let remaining = sequence_hashes.len() - sequence_blocks.len();
 
+                // If we still need more blocks, allocate them.
                 if remaining > 0 {
                     let (mut allocated_blocks, allocate_latency) =
                         time(device.allocate_blocks(remaining)).await;
@@ -416,6 +456,7 @@ async fn benchmark(
                         .await
                         .push(EventStats::new(allocate_latency, allocated_blocks.len()));
 
+                    // To link our blocks together to make our full sequence, track the current leaf block of our sequence.
                     let mut prev_token_block = if let Some(last) = sequence_blocks.last() {
                         if let BlockState::Registered(state) = last.state() {
                             Some(state.token_block().clone())
@@ -423,6 +464,8 @@ async fn benchmark(
                             panic!("Last block is not registered!");
                         }
                     } else {
+                        // If we couldn't find any blocks on the device and host, initialize one
+                        // of the allocated blocks as the root of our sequence.
                         None
                     };
 
@@ -432,10 +475,13 @@ async fn benchmark(
                         .for_each(|(i, block)| {
                             let offset = (sequence_blocks.len() + i) * args.block_size;
 
+                            // For now, we don't bother with filling in the partial blocks, since they don't get registered anyways.
                             if offset + args.block_size > tokens.len() {
                                 return;
                             }
 
+                            // If we have a previous block, use it to create a new partial block.
+                            // Otherwise, create a new sequence root.
                             let mut partial_block = if let Some(prev) = prev_token_block.as_ref() {
                                 prev.next_block()
                             } else {
@@ -448,11 +494,14 @@ async fn benchmark(
 
                             let new_token_block = partial_block.commit().unwrap();
 
+                            // Update our leaf.
                             prev_token_block = Some(new_token_block.clone());
 
+                            // Apply the token block. This moves the block to the completed state.
                             block.apply_token_block(new_token_block).unwrap();
                         });
 
+                    // Register any newly allocated blocks.
                     let (registered_blocks, register_latency) =
                         time(device.register_blocks(allocated_blocks)).await;
 
@@ -479,6 +528,7 @@ async fn benchmark(
     )
     .await
     .unwrap();
+
     scatter(
         "Host Match Latency",
         "host_match_latency.png",
@@ -486,6 +536,7 @@ async fn benchmark(
     )
     .await
     .unwrap();
+
     scatter(
         "Onboard Latency",
         "onboard_latency.png",
@@ -493,6 +544,7 @@ async fn benchmark(
     )
     .await
     .unwrap();
+
     scatter(
         "Device Allocate Latency",
         "device_allocate_latency.png",
@@ -500,6 +552,7 @@ async fn benchmark(
     )
     .await
     .unwrap();
+
     scatter(
         "Register Latency",
         "register_latency.png",
