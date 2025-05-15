@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use crate::input::common;
 use crate::{EngineConfig, Flags};
-use dynamo_llm::http::service::discovery::LLMRouterMode;
 use dynamo_llm::http::service::ModelManager;
 use dynamo_llm::{
     engines::StreamingEngineAdapter,
@@ -31,6 +30,7 @@ use dynamo_llm::{
     },
 };
 use dynamo_runtime::component::Component;
+use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::transports::etcd;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
@@ -65,7 +65,7 @@ pub async fn run(
                         http_service.model_manager().clone(),
                         etcd_client.clone(),
                         &network_prefix,
-                        flags.router_mode.as_llm(),
+                        flags.router_mode.into(),
                     )
                     .await?;
                 }
@@ -121,7 +121,7 @@ async fn run_watcher(
     model_manager: ModelManager,
     etcd_client: etcd::Client,
     network_prefix: &str,
-    router_mode: LLMRouterMode,
+    router_mode: RouterMode,
 ) -> anyhow::Result<()> {
     let watch_obj = Arc::new(
         discovery::ModelWatcher::new(component, model_manager, network_prefix, router_mode).await?,

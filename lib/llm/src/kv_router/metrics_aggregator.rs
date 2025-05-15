@@ -13,6 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Once;
+
 pub use crate::kv_router::protocols::ForwardPassMetrics;
 use crate::kv_router::KV_METRICS_ENDPOINT;
 
@@ -22,6 +24,9 @@ use dynamo_runtime::component::Component;
 use dynamo_runtime::{service::EndpointInfo, utils::Duration, Result};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+
+static METRICS_WAITING_MESSAGE: Once = Once::new();
+static METRICS_FOUND_MESSAGE: Once = Once::new();
 
 pub struct KvMetricsAggregator {
     pub service_name: String,
@@ -71,7 +76,14 @@ pub async fn collect_endpoints(
         .filter(|e| e.subject.starts_with(subject))
         .collect::<Vec<_>>();
     if endpoints.is_empty() {
-        tracing::debug!("Metrics endpoint not visible yet");
+        // Only print it once, we poll while the worker starts
+        METRICS_WAITING_MESSAGE.call_once(|| {
+            tracing::debug!("Waiting for metrics endpoint..");
+        });
+    } else {
+        METRICS_FOUND_MESSAGE.call_once(|| {
+            tracing::debug!("Found metrics endpoint");
+        });
     }
 
     Ok(endpoints)
