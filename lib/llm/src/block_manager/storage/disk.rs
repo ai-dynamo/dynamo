@@ -15,10 +15,10 @@
 
 use super::*;
 
-use std::fs::File;
-use std::os::unix::io::{AsRawFd, FromRawFd};
 use nix::fcntl::{fallocate, FallocateFlags};
 use std::ffi::CString;
+use std::fs::File;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 
 #[derive(Debug)]
 pub struct DiskStorage {
@@ -40,7 +40,10 @@ impl DiskStorage {
         let mut template_bytes = template.into_bytes_with_nul();
 
         let raw_fd = unsafe {
-            nix::libc::mkostemp(template_bytes.as_mut_ptr() as *mut i8, nix::libc::O_RDWR | nix::libc::O_DIRECT)
+            nix::libc::mkostemp(
+                template_bytes.as_mut_ptr() as *mut i8,
+                nix::libc::O_RDWR | nix::libc::O_DIRECT,
+            )
         };
 
         let file = unsafe { File::from_raw_fd(raw_fd) };
@@ -121,4 +124,3 @@ impl StorageAllocator<DiskStorage> for DiskAllocator {
         DiskStorage::new(size)
     }
 }
-

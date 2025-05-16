@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::thread::spawn;
 use tokio::sync::mpsc;
@@ -30,6 +31,7 @@ use crate::block_manager::BlockPool;
 use anyhow::Result;
 use async_trait::async_trait;
 use cudarc::driver::{sys::CUevent_flags, CudaEvent};
+use futures::{future::join_all, stream::FuturesUnordered, StreamExt};
 
 type BlockResult<Target, Metadata> = Result<Vec<ImmutableBlock<Target, Metadata>>, BlockPoolError>;
 /// Manage a set of pending transfers.
@@ -121,7 +123,7 @@ pub struct CudaTransferManager<Source: Storage, Target: Storage, Metadata: Block
 impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
     CudaTransferManager<Source, Target, Metadata>
 {
-    pub fn new(max_depth: usize, transfer_ctx: Arc<TransferContext>) -> Self {
+    pub fn new(transfer_ctx: Arc<TransferContext>, max_depth: usize) -> Self {
         let (tx, mut rx) =
             mpsc::channel::<(PendingTransfer<Source, Target, Metadata>, CudaEvent)>(max_depth);
 
@@ -165,7 +167,7 @@ where
             .zip(pending_transfer.targets.iter_mut())
         {
             transfer_metadata(source, target)?;
-            source.write_to(target, None, self.transfer_ctx.as_ref())?;
+            source.write_to(target, None, self.transfer_ctx.clone())?;
         }
 
         let event = self
@@ -182,12 +184,39 @@ where
 }
 
 pub struct DiskTransferManager {
+    futures_tx: mpsc::Sender<Pin<Box<dyn std::future::Future<Output = ()> + Send + Sync>>>,
     transfer_ctx: Arc<TransferContext>,
 }
 
 impl DiskTransferManager {
-    pub fn new(transfer_ctx: Arc<TransferContext>) -> Self {
-        Self { transfer_ctx }
+    pub fn new(transfer_ctx: Arc<TransferContext>, max_size: usize) -> Self {
+        let (futures_tx, mut futures_rx) = mpsc::channel(1);
+
+        tokio::spawn(async move {
+            let mut pending_transfers = FuturesUnordered::new();
+            loop {
+                tokio::select! {
+                    Some(future) = futures_rx.recv() => {
+                        while pending_transfers.len() >= max_size {
+                            pending_transfers.next().await;
+                        }
+                        pending_transfers.push(future);
+                    }
+                    Some(_) = pending_transfers.next(), if !pending_transfers.is_empty() => {
+                        // A transfer completed, just continue to process more
+                    }
+                    else => {
+                        // Both branches are pending, wait for one to become ready
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+        });
+
+        Self {
+            futures_tx,
+            transfer_ctx,
+        }
     }
 }
 
@@ -208,16 +237,24 @@ where
         &self,
         mut pending_transfer: PendingTransfer<Source, Target, Metadata>,
     ) -> Result<()> {
-        for (source, target) in pending_transfer
+        let futures = pending_transfer
             .sources
             .iter()
             .zip(pending_transfer.targets.iter_mut())
-        {
-            transfer_metadata(source, target)?;
-            source.write_to(target, None, self.transfer_ctx.as_ref())?;
-        }
+            .map(|(source, target)| {
+                transfer_metadata(source, target).unwrap();
+                source
+                    .nixl_write_to(target, None, self.transfer_ctx.clone())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
 
-        pending_transfer.handle_complete()?;
+        let completion_future = async move {
+            let _ = join_all(futures).await;
+            pending_transfer.handle_complete().unwrap();
+        };
+
+        self.futures_tx.send(Box::pin(completion_future)).await?;
 
         Ok(())
     }

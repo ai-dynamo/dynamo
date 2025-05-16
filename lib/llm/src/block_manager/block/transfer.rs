@@ -28,6 +28,7 @@ use crate::block_manager::storage::{
 
 use cudarc::driver::CudaStream;
 
+use std::future::Future;
 use std::ops::Range;
 
 pub use crate::block_manager::state::TransferContext;
@@ -134,8 +135,15 @@ pub trait WriteTo<Target> {
         &self,
         dst: &mut Target,
         notify: Option<String>,
-        ctx: &TransferContext,
+        ctx: Arc<TransferContext>,
     ) -> Result<(), TransferError>;
+
+    fn nixl_write_to(
+        &self,
+        dst: &mut Target,
+        notify: Option<String>,
+        ctx: Arc<TransferContext>,
+    ) -> Result<Box<dyn Future<Output = ()> + Send + Sync + Unpin>, TransferError>;
 }
 
 impl<RB: ReadableBlock, WB: WritableBlock> WriteTo<WB> for RB
@@ -146,7 +154,7 @@ where
         &self,
         dst: &mut WB,
         notify: Option<String>,
-        ctx: &TransferContext,
+        ctx: Arc<TransferContext>,
     ) -> Result<(), TransferError> {
         match Self::write_to_strategy() {
             TransferStrategy::Memcpy => memcpy::copy_block(self, dst),
@@ -155,13 +163,32 @@ where
             | TransferStrategy::CudaAsyncD2D => {
                 cuda::copy_block(self, dst, ctx.stream().as_ref(), RB::write_to_strategy())
             }
-            TransferStrategy::NixlWrite => Ok(nixl::write_block_to(self, dst, ctx, notify)?),
+            TransferStrategy::NixlWrite => {
+                std::mem::drop(nixl::write_block_to(self, dst, ctx, notify)?);
+                Ok(())
+            }
             _ => Err(TransferError::IncompatibleTypes(format!(
                 "Unsupported copy strategy: {:?}",
                 RB::write_to_strategy()
             ))),
         }
         // dispatch_copy_to(self, dst, self.transfer_context())
+    }
+
+    fn nixl_write_to(
+        &self,
+        dst: &mut WB,
+        notify: Option<String>,
+        ctx: Arc<TransferContext>,
+    ) -> Result<Box<dyn Future<Output = ()> + Send + Sync + Unpin>, TransferError> {
+        if let TransferStrategy::NixlWrite = RB::write_to_strategy() {
+            Ok(nixl::write_block_to(self, dst, ctx, notify)?)
+        } else {
+            Err(TransferError::IncompatibleTypes(format!(
+                "Unsupported copy strategy: {:?}",
+                RB::write_to_strategy()
+            )))?
+        }
     }
 }
 

@@ -17,15 +17,17 @@ use super::*;
 
 use anyhow::Result;
 use nixl_sys::{MemoryRegion, NixlDescriptor, OptArgs, XferDescList, XferOp};
+use std::future::{poll_fn, Future};
 use std::ops::Range;
+use std::task::Poll;
 
 /// Copy a block from a source to a destination using CUDA memcpy
 pub fn write_block_to<'a, Source, Destination>(
     src: &'a Source,
     dst: &'a mut Destination,
-    ctx: &TransferContext,
+    ctx: Arc<TransferContext>,
     notify: Option<String>,
-) -> Result<()>
+) -> Result<Box<dyn Future<Output = ()> + Send + Sync + Unpin>>
 where
     Source: BlockDataProvider,
     Destination: BlockDataProviderMut,
@@ -34,7 +36,11 @@ where
     let dst_data = dst.block_data_mut(private::PrivateToken);
 
     if src_data.is_fully_contiguous() && dst_data.is_fully_contiguous() {
-        let nixl_agent = ctx.nixl_agent().expect("NIXL agent not found");
+        let nixl_agent_arc = ctx.as_ref().nixl_agent();
+        let nixl_agent = nixl_agent_arc
+            .as_ref()
+            .as_ref()
+            .expect("NIXL agent not found");
 
         let mut src_dl = XferDescList::new(src_data.storage_type().nixl_mem_type())?;
         let mut dst_dl = XferDescList::new(dst_data.storage_type().nixl_mem_type())?;
@@ -54,9 +60,7 @@ where
                 dst_desc.size(),
                 dst_desc.device_id(),
             )?;
-
         }
-
 
         let xfer_req = nixl_agent
             .create_xfer_req(XferOp::Write, &src_dl, &dst_dl, &nixl_agent.name(), None)
@@ -69,19 +73,23 @@ where
             xfer_args.set_notification_message(notify.as_bytes())?;
         }
 
-        let mut status = nixl_agent.post_xfer_req(&xfer_req, Some(&xfer_args))?;
+        let _ = nixl_agent.post_xfer_req(&xfer_req, Some(&xfer_args))?;
 
-        // TODO: This seems very inefficient
-        tracing::span!(tracing::Level::DEBUG, "Waiting for transfer to complete").in_scope(|| {
-            while status {
-                status = nixl_agent.get_xfer_status(&xfer_req).unwrap();
+        Ok(Box::new(poll_fn(move |_cx| {
+            let nixl_agent = nixl_agent_arc
+                .as_ref()
+                .as_ref()
+                .expect("NIXL agent not found");
+            if !nixl_agent.get_xfer_status(&xfer_req).unwrap() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
             }
-        });
+        })))
     } else {
         assert_eq!(src_data.num_layers(), dst_data.num_layers());
-        write_layers_to(0..src_data.num_layers(), src, dst, ctx, notify)?;
+        write_layers_to(0..src_data.num_layers(), src, dst, ctx, notify)
     }
-    Ok(())
 }
 
 /// Copy a range of layers from a source to a destination using CUDA memcpy
@@ -89,9 +97,9 @@ pub fn write_layers_to<'a, Source, Destination>(
     layer_range: Range<usize>,
     src: &'a Source,
     dst: &'a mut Destination,
-    ctx: &TransferContext,
+    ctx: Arc<TransferContext>,
     notify: Option<String>,
-) -> Result<()>
+) -> Result<Box<dyn Future<Output = ()> + Send + Sync + Unpin>>
 where
     Source: BlockDataProvider,
     Destination: BlockDataProviderMut,
@@ -99,9 +107,13 @@ where
     let src_data = src.block_data(private::PrivateToken);
     let dst_data = dst.block_data_mut(private::PrivateToken);
 
-    let nixl_agent = ctx.nixl_agent().expect("NIXL agent not found");
-    let remote_worker_id = dst_data.worker_id.to_string();
+    let nixl_agent_arc = ctx.as_ref().nixl_agent();
+    let nixl_agent = nixl_agent_arc
+        .as_ref()
+        .as_ref()
+        .expect("NIXL agent not found");
 
+    let remote_worker_id = dst_data.worker_id.to_string();
     let mut src_dl = XferDescList::new(src_data.storage_type().nixl_mem_type())?;
     let mut dst_dl = XferDescList::new(dst_data.storage_type().nixl_mem_type())?;
 
@@ -152,13 +164,17 @@ where
         Some(&xfer_args),
     )?;
 
-    let mut status = nixl_agent.post_xfer_req(&xfer_req, Some(&xfer_args))?;
+    let _ = nixl_agent.post_xfer_req(&xfer_req, Some(&xfer_args))?;
 
-    tracing::span!(tracing::Level::DEBUG, "Waiting for transfer to complete").in_scope(|| {
-        while status {
-            status = nixl_agent.get_xfer_status(&xfer_req).unwrap();
+    Ok(Box::new(poll_fn(move |_cx| {
+        let nixl_agent = nixl_agent_arc
+            .as_ref()
+            .as_ref()
+            .expect("NIXL agent not found");
+        if !nixl_agent.get_xfer_status(&xfer_req).unwrap() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
         }
-    });
-
-    Ok(())
+    })))
 }

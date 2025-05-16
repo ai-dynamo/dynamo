@@ -94,8 +94,10 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let this_clone = this.clone();
 
         let cuda_ctx = Cuda::device_or_create(0)?;
-        let device_offload_transfer_ctx =
-            Arc::new(TransferContext::new(nixl_agent.clone(), cuda_ctx.new_stream()?));
+        let device_offload_transfer_ctx = Arc::new(TransferContext::new(
+            nixl_agent.clone(),
+            cuda_ctx.new_stream()?,
+        ));
 
         // Device -> Host offload
         let device_clone = this.device.clone();
@@ -110,11 +112,12 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                 device_offload_queue,
                 device_offload_notify,
                 Arc::new(CudaTransferManager::new(
-                    MAX_OFFLOAD_STREAM_DEPTH,
                     device_offload_transfer_ctx,
+                    MAX_OFFLOAD_STREAM_DEPTH,
                 )),
             )
             .await
+            .unwrap()
         });
 
         let transfer_ctx = Arc::new(TransferContext::new(
@@ -134,9 +137,13 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                 disk_clone,
                 host_offload_queue,
                 host_offload_notify,
-                Arc::new(DiskTransferManager::new(transfer_ctx_clone)),
+                Arc::new(DiskTransferManager::new(
+                    transfer_ctx_clone,
+                    MAX_OFFLOAD_STREAM_DEPTH,
+                )),
             )
             .await
+            .unwrap()
         });
 
         // Host -> Device onboarding
@@ -148,9 +155,25 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                 host_clone,
                 device_clone,
                 host_onboard_rx,
-                Arc::new(CudaTransferManager::new(16384, transfer_ctx_clone)),
+                Arc::new(CudaTransferManager::new(transfer_ctx_clone, 16384)),
             )
             .await
+            .unwrap()
+        });
+
+        // Disk -> Device onboarding
+        let disk_clone = this.disk.clone();
+        let device_clone = this.device.clone();
+        let transfer_ctx_clone = transfer_ctx.clone();
+        tokio::spawn(async move {
+            OffloadManager::onboard_worker(
+                disk_clone,
+                device_clone,
+                disk_onboard_rx,
+                Arc::new(DiskTransferManager::new(transfer_ctx_clone, 16384)),
+            )
+            .await
+            .unwrap()
         });
 
         Ok(this_clone)
@@ -332,9 +355,9 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         Ok(())
     }
 
-    pub async fn onboard(
+    pub async fn onboard<S: Storage>(
         &self,
-        blocks: Vec<ImmutableBlock<PinnedStorage, Metadata>>,
+        blocks: Vec<ImmutableBlock<S, Metadata>>,
     ) -> core::result::Result<Vec<ImmutableBlock<DeviceStorage, Metadata>>, BlockPoolError> {
         for block in &blocks {
             match block.state() {
@@ -347,11 +370,49 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             }
         }
 
+        if blocks.is_empty() {
+            return Ok(vec![]);
+        }
+
         let (tx, rx) = oneshot::channel();
 
-        self.host_onboard_tx
-            .send(OnboardRequest::new(blocks, tx))
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
+        let any_block = blocks.first().unwrap() as &dyn Any;
+
+        if any_block
+            .downcast_ref::<ImmutableBlock<PinnedStorage, Metadata>>()
+            .is_some()
+        {
+            let host_blocks = blocks
+                .iter()
+                .map(|b| {
+                    (b as &dyn Any)
+                        .downcast_ref::<ImmutableBlock<PinnedStorage, Metadata>>()
+                        .unwrap()
+                        .clone()
+                })
+                .collect();
+
+            self.host_onboard_tx
+                .send(OnboardRequest::new(host_blocks, tx))
+                .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
+        } else if any_block
+            .downcast_ref::<ImmutableBlock<DiskStorage, Metadata>>()
+            .is_some()
+        {
+            let disk_blocks = blocks
+                .iter()
+                .map(|b| {
+                    (b as &dyn Any)
+                        .downcast_ref::<ImmutableBlock<DiskStorage, Metadata>>()
+                        .unwrap()
+                        .clone()
+                })
+                .collect();
+            self.disk_onboard_tx
+                .send(OnboardRequest::new(disk_blocks, tx))
+                .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
+        }
+
         match rx.await {
             Ok(res) => res,
             Err(_) => Err(BlockPoolError::ProgressEngineShutdown),
@@ -366,7 +427,7 @@ mod tests {
 
     use crate::block_manager::{
         block::{BasicMetadata, BlockDataExt, BlockDataProvider, BlockExt, Blocks, MutableBlock},
-        layout::{FullyContiguous, nixl::NixlLayout},
+        layout::{nixl::NixlLayout, FullyContiguous},
         pool::BlockPool,
         storage::{
             cuda::CudaAccessible, DeviceAllocator, DeviceStorage, DiskAllocator, DiskStorage,
@@ -410,7 +471,6 @@ mod tests {
         agent.create_backend("UCX", &ucx_params)?;
         agent.create_backend("GDS", &gds_params)?;
 
-
         let mut device = FullyContiguous::allocate(config.clone(), &DeviceAllocator::default())?;
 
         device.nixl_register(&agent, None)?;
@@ -438,8 +498,12 @@ mod tests {
             Arc::new(None)
         };
 
-        let manager =
-            OffloadManager::new(disk_pool.clone(), host_pool.clone(), device_pool.clone(), Arc::new(Some(agent)))?;
+        let manager = OffloadManager::new(
+            disk_pool.clone(),
+            host_pool.clone(),
+            device_pool.clone(),
+            Arc::new(Some(agent)),
+        )?;
 
         Ok((manager, device_pool, host_pool, disk_pool))
     }
@@ -841,7 +905,7 @@ mod tests {
 
         offload_manager.offload(&immutable_host_block, 0).await?;
 
-        tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         let disk_blocks = disk_pool
             .match_sequence_hashes(vec![immutable_host_block.sequence_hash()?].as_slice())
@@ -850,6 +914,41 @@ mod tests {
         assert_eq!(
             disk_blocks[0].sequence_hash()?,
             immutable_host_block.sequence_hash()?
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_onboard_disk() -> Result<()> {
+        let (offload_manager, device_pool, _, disk_pool) = build_pools(4, None, Some(4))?;
+
+        let device_pool = device_pool.as_ref().as_ref().unwrap();
+        let disk_pool = disk_pool.as_ref().as_ref().unwrap();
+
+        let disk_block = completed_block(disk_pool, [0, 1, 2, 3]).await?;
+        let immutable_disk_block = disk_pool
+            .register_blocks(vec![disk_block])
+            .await?
+            .into_iter()
+            .next()
+            .unwrap();
+
+        let device_block = offload_manager
+            .onboard(vec![immutable_disk_block.clone()])
+            .await?;
+
+        assert_eq!(device_block.len(), 1);
+        assert_eq!(
+            device_block[0].sequence_hash()?,
+            immutable_disk_block.sequence_hash()?
+        );
+        assert_eq!(
+            device_pool
+                .match_sequence_hashes(vec![immutable_disk_block.sequence_hash()?].as_slice())
+                .await?
+                .len(),
+            1
         );
 
         Ok(())
