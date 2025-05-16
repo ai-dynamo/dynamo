@@ -28,17 +28,23 @@ import socket
 from typing import Any, DefaultDict, Dict, Iterator, Optional, Protocol, TextIO, Union
 
 import click
+import typer
 import yaml
 from click import Command, Context
+from rich.console import Console
 
+from dynamo.planner.defaults import PlannerDefaults  # type: ignore[attr-defined]
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sdk.core.protocol.interface import ComponentType
 from dynamo.sdk.core.runner import TargetEnum
 
 configure_dynamo_logging()
 
 logger = logging.getLogger(__name__)
+console = Console()
 
 DYN_LOCAL_STATE_DIR = "DYN_LOCAL_STATE_DIR"
+PLANNER_SERVICE_NAME = "Planner"
 
 
 # Define a Protocol for services to ensure type safety
@@ -369,3 +375,65 @@ def configure_target_environment(target: TargetEnum):
         raise ValueError(f"Invalid target: {target}")
     logger.debug(f"Setting deployment target to {target}")
     set_target(target)
+
+
+def is_local_planner_enabled(svc: Any, service_configs: dict) -> bool:
+    """Check if local planner is enabled.
+
+    Args:
+        svc: The entrypoint service instance
+        service_configs: Dictionary of service configurations
+
+    Returns:
+        bool: True if local planner is enabled, False otherwise
+    """
+    # Check all nodes to find planner
+    nodes = [dep for dep in svc.all_services().values()]
+    nodes.append(svc)
+    planners = [
+        node
+        for node in nodes
+        if node.config.get("dynamo", {}).get("component_type") == ComponentType.PLANNER
+    ]
+
+    if len(planners) > 1:
+        console.print(
+            "[bold red]Error:[/bold red] More than one planner found in the pipeline"
+        )
+        raise typer.Exit(code=1)
+
+    # Exactly one planner
+    if planners:
+        # Get the config for the planner and check environment
+        planner_config = service_configs.get(PLANNER_SERVICE_NAME, {})
+        environment = planner_config.get("environment", PlannerDefaults.environment)
+        return environment == "local"
+
+    return False
+
+
+def raise_local_planner_warning(svc: Any, service_configs: dict) -> None:
+    """Warn if local planner is enabled and active (not set to no-op), but workers for prefill or decode is > 1. This is currently not supported.
+
+    Args:
+        svc: The service instance
+        service_configs: Dictionary of service configurations
+    """
+    planner_config = service_configs.get(PLANNER_SERVICE_NAME, {})
+
+    # Resolve no-op setting
+    no_op = planner_config.get("no-operation", PlannerDefaults.no_operation)
+
+    # Check worker counts across nodes
+    nodes = [dep for dep in svc.all_services().values()]
+    nodes.append(svc)
+    worker_names = ("PrefillWorker", "VllmWorker")
+    worker_counts_greater_than_one = [
+        node.config.get("workers", 1) > 1 for node in nodes if node.name in worker_names
+    ]
+
+    if any(worker_counts_greater_than_one) and not no_op:
+        logger.error(
+            "Local planner is enabled, but workers for prefill or decode is > 1. Local planner must be started with prefill and decode workers set to 1."
+        )
+        raise typer.Exit(code=1)

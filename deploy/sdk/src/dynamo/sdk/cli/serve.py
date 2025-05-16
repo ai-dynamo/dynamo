@@ -29,7 +29,11 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-from dynamo.sdk.cli.utils import resolve_service_config
+from dynamo.sdk.cli.utils import (
+    is_local_planner_enabled,
+    raise_local_planner_warning,
+    resolve_service_config,
+)
 from dynamo.sdk.core.runner import TargetEnum
 
 if t.TYPE_CHECKING:
@@ -81,10 +85,6 @@ def serve(
     dry_run: bool = typer.Option(
         False,
         help="Print the final service configuration and exit without starting the server",
-    ),
-    enable_local_planner: bool = typer.Option(
-        False,
-        help="Save a snapshot of your service state to a file that allows planner to edit your deployment configuration",
     ),
     target: TargetEnum = typer.Option(
         TargetEnum.DYNAMO,
@@ -148,6 +148,12 @@ def serve(
     logger.info(f"Loaded service: {svc.name}")
     logger.debug("Dependencies: %s", [dep.on.name for dep in svc.dependencies.values()])
     LinkedServices.remove_unused_edges()
+
+    # Check if local planner is enabled
+    enable_local_planner = is_local_planner_enabled(svc, service_configs)
+    if enable_local_planner:
+        # Raise warning if local planner is enabled, but workers for prefill or decode is > 1. Not supported.
+        raise_local_planner_warning(svc, service_configs)
 
     from dynamo.sdk.cli.serving import serve_dynamo_graph  # type: ignore
 

@@ -12,39 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-Common:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  block-size: 64
-  max-model-len: 16384
-  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
 
-Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  endpoint: dynamo.Processor.chat/completions
-  port: 8000
-
-Processor:
-  router: kv-load
-  common-configs: [model, block-size]
-
-VllmWorker:
-  remote-prefill: true
-  conditional-disagg: false
+Middle:
   ServiceArgs:
     workers: 2
     resources:
-      gpu: 1
-  common-configs: [model, block-size, max-model-len, kv-transfer-config]
+      cpu: "1"
 
-PrefillWorker:
-  max-num-batched-tokens: 16384
+Backend:
   ServiceArgs:
-    workers: 2
+    workers: 3
     resources:
-      gpu: 1
-  common-configs: [model, block-size, max-model-len, kv-transfer-config]
-
-Planner:
-  environment: local
-  no-operation: true
-  log-dir: log/2p2d
+      cpu: "1"

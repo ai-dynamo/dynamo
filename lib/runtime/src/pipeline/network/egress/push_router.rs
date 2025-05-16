@@ -43,11 +43,11 @@ where
 
     /// How we choose which endpoint to send traffic to.
     ///
-    /// Setting this to None means we never intend to call `generate` on this PushRouter. We are
+    /// Setting this to KV means we never intend to call `generate` on this PushRouter. We are
     /// not using it as an AsyncEngine.
     /// Instead we will decide whether to call random/round_robin/direct ourselves and call them directly.
     /// dynamo-llm's KV Routing does this.
-    router_mode: Option<RouterMode>,
+    router_mode: RouterMode,
 
     /// Number of round robin requests handled. Used to decide which server is next.
     round_robin_counter: Arc<AtomicU64>,
@@ -62,14 +62,20 @@ where
     _phantom: PhantomData<(T, U)>,
 }
 
-// Note there's no KV router in here because we are in dynamo-runtime. The KvRouter is in
-// dynamo-llm.
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, Copy, PartialEq)]
 pub enum RouterMode {
     #[default]
-    Random,
     RoundRobin,
+    Random,
     Direct(i64),
+    // Marker value, KV routing itself is in dynamo-llm
+    KV,
+}
+
+impl RouterMode {
+    pub fn is_kv_routing(&self) -> bool {
+        *self == RouterMode::KV
+    }
 }
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
@@ -84,10 +90,7 @@ where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de>,
 {
-    pub async fn from_client(
-        client: Client,
-        router_mode: Option<RouterMode>,
-    ) -> anyhow::Result<Self> {
+    pub async fn from_client(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
         let addressed = addressed_router(&client.endpoint).await?;
         Ok(PushRouter {
             client,
@@ -189,10 +192,10 @@ where
         match &self.client.endpoints {
             EndpointSource::Static => self.r#static(request).await,
             EndpointSource::Dynamic(_) => match self.router_mode {
-                Some(RouterMode::Random) => self.random(request).await,
-                Some(RouterMode::RoundRobin) => self.round_robin(request).await,
-                Some(RouterMode::Direct(endpoint_id)) => self.direct(request, endpoint_id).await,
-                None => {
+                RouterMode::Random => self.random(request).await,
+                RouterMode::RoundRobin => self.round_robin(request).await,
+                RouterMode::Direct(endpoint_id) => self.direct(request, endpoint_id).await,
+                RouterMode::KV => {
                     anyhow::bail!("KV routing should not call generate on PushRouter");
                 }
             },

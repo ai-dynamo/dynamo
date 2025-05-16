@@ -79,8 +79,8 @@ pub async fn prepare_engine(
             let Some(etcd_client) = distributed_runtime.etcd_client() else {
                 anyhow::bail!("Cannot run distributed components without etcd");
             };
-            let network_entry = network_name.load_entry(etcd_client.clone()).await?;
-            let mut card = network_entry.load_mdc(endpoint_id, etcd_client).await?;
+            let network_entry = network_name.load_entry(&etcd_client).await?;
+            let mut card = network_entry.load_mdc(endpoint_id, &etcd_client).await?;
 
             let engine: OpenAIChatCompletionsStreamingEngine = match network_entry.model_type {
                 ModelType::Backend => {
@@ -102,7 +102,7 @@ pub async fn prepare_engine(
                     let router =
                         PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
                             client,
-                            flags.router_mode.as_runtime(),
+                            flags.router_mode.into(),
                         )
                         .await?;
                     let service_backend = match &flags.router_mode {
@@ -133,7 +133,7 @@ pub async fn prepare_engine(
                     PushRouter::<
                         NvCreateChatCompletionRequest,
                         Annotated<NvCreateChatCompletionStreamResponse>,
-                    >::from_client(client, flags.router_mode.as_runtime())
+                    >::from_client(client, flags.router_mode.into())
                     .await?,
                 ),
                 ModelType::Completion => {

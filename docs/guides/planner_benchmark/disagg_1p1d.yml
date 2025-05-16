@@ -43,3 +43,14 @@ PrefillWorker:
     resources:
       gpu: 1
   common-configs: [model, block-size, max-model-len, kv-transfer-config]
+
+Planner:
+  environment: local
+  no-operation: false
+  metric-pulling-interval: 1
+  adjustment-interval: 10
+  prefill-queue-scale-down-threshold: 0.2
+  prefill-queue-scale-up-threshold: 10
+  decode-kv-scale-down-threshold: 0.3
+  decode-kv-scale-up-threshold: 0.6
+  log-dir: log/planner

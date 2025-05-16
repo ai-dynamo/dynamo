@@ -106,7 +106,9 @@ Vllm engine. Receives and returns requests over the network.
 dynamo-run in=dyn://llama3B_pool out=vllm ~/llms/Llama-3.2-3B-Instruct
 ```
 
-This will use etcd to auto-discover the model and NATS to talk to it. You can run multiple workers on the same endpoint and it will pick one at random each time.
+This will use etcd to auto-discover the model and NATS to talk to it. You can
+run multiple workers on the same endpoint and it will pick one based on the
+`--router-mode` (round-robin by default if left unspecified).
 
 The `llama3B_pool` name is purely symbolic, pick anything as long as it matches the other node.
 
