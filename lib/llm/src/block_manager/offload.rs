@@ -431,19 +431,35 @@ mod tests {
         pool::BlockPool,
         storage::{
             cuda::CudaAccessible, DeviceAllocator, DeviceStorage, DiskAllocator, DiskStorage,
-            PinnedAllocator, PinnedStorage,
+            PinnedAllocator, PinnedStorage, StorageType,
         },
         DType, LayoutConfig,
     };
-    use nixl_sys::NixlDescriptor;
+    use nixl_sys::{MemoryRegion, NixlDescriptor};
 
+    use aligned_vec::avec;
     use cudarc::runtime::sys::{cudaMemcpy, cudaMemcpyKind, cudaMemset};
+    use std::fs::File;
+    use std::io::{Read, Seek, SeekFrom};
+    use std::mem::ManuallyDrop;
+    use std::os::unix::io::FromRawFd;
 
     const BLOCK_SIZE: usize = 4;
 
     type DevicePool = Arc<Option<BlockPool<DeviceStorage, BasicMetadata>>>;
     type HostPool = Arc<Option<BlockPool<PinnedStorage, BasicMetadata>>>;
     type DiskPool = Arc<Option<BlockPool<DiskStorage, BasicMetadata>>>;
+
+    lazy_static::lazy_static! {
+        static ref NIXL_AGENT: Arc<Option<NixlAgent>> = {
+            let agent = NixlAgent::new("offload-manager").unwrap();
+            let (_, ucx_params) = agent.get_plugin_params("UCX").unwrap();
+            let (_, gds_params) = agent.get_plugin_params("GDS").unwrap();
+            agent.create_backend("UCX", &ucx_params).unwrap();
+            agent.create_backend("GDS", &gds_params).unwrap();
+            Arc::new(Some(agent))
+        };
+    }
 
     fn build_pools(
         device_blocks: usize,
@@ -464,16 +480,12 @@ mod tests {
             dtype: DType::FP16,
         };
 
-        let agent = NixlAgent::new("offload-manager")?;
-        // Create our backends.
-        let (_, ucx_params) = agent.get_plugin_params("UCX")?;
-        let (_, gds_params) = agent.get_plugin_params("GDS")?;
-        agent.create_backend("UCX", &ucx_params)?;
-        agent.create_backend("GDS", &gds_params)?;
+        let agent_arc = NIXL_AGENT.clone();
+        let agent = agent_arc.as_ref().as_ref().unwrap();
 
         let mut device = FullyContiguous::allocate(config.clone(), &DeviceAllocator::default())?;
 
-        device.nixl_register(&agent, None)?;
+        device.nixl_register(agent, None)?;
 
         let device_blocks = Blocks::<_, BasicMetadata>::new(device, 42, 0)?.into_blocks()?;
         let device_pool = Arc::new(Some(BlockPool::builder().blocks(device_blocks).build()?));
@@ -481,7 +493,7 @@ mod tests {
         let host_pool = if let Some(host_blocks) = host_blocks {
             config.num_blocks = host_blocks;
             let mut host = FullyContiguous::allocate(config.clone(), &PinnedAllocator::default())?;
-            host.nixl_register(&agent, None)?;
+            host.nixl_register(agent, None)?;
             let host_blocks = Blocks::<_, BasicMetadata>::new(host, 42, 0)?.into_blocks()?;
             Arc::new(Some(BlockPool::builder().blocks(host_blocks).build()?))
         } else {
@@ -491,7 +503,7 @@ mod tests {
         let disk_pool = if let Some(disk_blocks) = disk_blocks {
             config.num_blocks = disk_blocks;
             let mut disk = FullyContiguous::allocate(config, &DiskAllocator)?;
-            disk.nixl_register(&agent, None)?;
+            disk.nixl_register(agent, None)?;
             let disk_blocks = Blocks::<_, BasicMetadata>::new(disk, 42, 0)?.into_blocks()?;
             Arc::new(Some(BlockPool::builder().blocks(disk_blocks).build()?))
         } else {
@@ -502,7 +514,7 @@ mod tests {
             disk_pool.clone(),
             host_pool.clone(),
             device_pool.clone(),
-            Arc::new(Some(agent)),
+            agent_arc,
         )?;
 
         Ok((manager, device_pool, host_pool, disk_pool))
@@ -562,33 +574,54 @@ mod tests {
         Ok(())
     }
 
-    /// Compare the contents of a device block and a host block.
-    async fn compare_block_contents(
-        device_block: &impl BlockDataProvider<StorageType = DeviceStorage>,
-        host_block: &impl BlockDataProvider<StorageType = PinnedStorage>,
-    ) -> Result<()> {
-        let host_data = host_block.block_data(get_private_token()).block_view()?;
-        let device_data = device_block.block_data(get_private_token()).block_view()?;
+    fn get_block_contents<S: Storage + NixlDescriptor>(
+        block: &impl BlockDataProvider<StorageType = S>,
+    ) -> Result<Vec<u8>> {
+        let block_data = block.block_data(get_private_token());
+        let block_view = block_data.block_view()?;
+        let size = block_view.size();
 
-        let size = host_data.size();
+        let mut contents: Vec<u8> = vec![0; size];
 
-        assert_eq!(size, device_data.size());
+        match block_data.storage_type() {
+            StorageType::Device(_) => unsafe {
+                cudaMemcpy(
+                    contents.as_mut_ptr() as *mut std::ffi::c_void,
+                    block_view.as_ptr() as *const std::ffi::c_void,
+                    size,
+                    cudaMemcpyKind::cudaMemcpyDeviceToHost,
+                )
+                .result()?;
+            },
+            StorageType::Pinned => unsafe {
+                contents = std::slice::from_raw_parts(block_view.as_ptr(), size).to_vec();
+            },
+            StorageType::Disk => {
+                let nixl_desc = block_view.as_nixl_descriptor();
+                let mut file: ManuallyDrop<File>;
+                let mut aligned = avec![[4096] | 0; size];
 
-        let mut host_buffer = vec![0u8; size];
-        let host_slice;
-
-        unsafe {
-            cudaMemcpy(
-                host_buffer.as_mut_ptr() as *mut std::ffi::c_void,
-                device_data.as_ptr() as *const std::ffi::c_void,
-                size,
-                cudaMemcpyKind::cudaMemcpyDeviceToHost,
-            )
-            .result()?;
-            host_slice = std::slice::from_raw_parts(host_buffer.as_ptr(), size);
+                unsafe {
+                    file = ManuallyDrop::new(File::from_raw_fd(nixl_desc.device_id() as i32));
+                    file.seek(SeekFrom::Start(nixl_desc.as_ptr() as u64))?;
+                }
+                file.read_exact(&mut aligned)?;
+                contents = aligned.to_vec();
+            }
+            _ => {
+                panic!();
+            }
         }
 
-        assert_eq!(host_buffer, host_slice);
+        Ok(contents.to_vec())
+    }
+
+    /// Compare the contents of a device block and a host block.
+    fn compare_block_contents(
+        block1: &impl BlockDataProvider<StorageType = impl Storage + NixlDescriptor>,
+        block2: &impl BlockDataProvider<StorageType = impl Storage + NixlDescriptor>,
+    ) -> Result<()> {
+        assert_eq!(get_block_contents(block1)?, get_block_contents(block2)?);
 
         Ok(())
     }
@@ -664,7 +697,7 @@ mod tests {
             immutable_device_block.sequence_hash()?
         );
 
-        compare_block_contents(&immutable_device_block, &host_blocks[0]).await?;
+        compare_block_contents(&immutable_device_block, &host_blocks[0])?;
 
         Ok(())
     }
@@ -752,7 +785,7 @@ mod tests {
             BlockState::Registered(_)
         ));
 
-        compare_block_contents(&onboarded_blocks[0], &immutable_host_block).await?;
+        compare_block_contents(&onboarded_blocks[0], &immutable_host_block)?;
 
         // Wait for the new value to show up in the device pool.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -766,7 +799,7 @@ mod tests {
         );
 
         // Check that this is the same block.
-        compare_block_contents(&device_blocks[0], &immutable_host_block).await?;
+        compare_block_contents(&device_blocks[0], &immutable_host_block)?;
 
         Ok(())
     }
@@ -801,7 +834,7 @@ mod tests {
             .next()
             .unwrap();
 
-        compare_block_contents(&immutable_device_block, &immutable_host_block).await?;
+        compare_block_contents(&immutable_device_block, &immutable_host_block)?;
 
         // Remove the device block from the pool by dropping it and allocating more blocks.
         drop(immutable_device_block);
@@ -835,7 +868,7 @@ mod tests {
             BlockState::Registered(_)
         ));
 
-        compare_block_contents(&onboarded_blocks[0], &immutable_host_block).await?;
+        compare_block_contents(&onboarded_blocks[0], &immutable_host_block)?;
 
         Ok(())
     }
@@ -903,6 +936,8 @@ mod tests {
             .next()
             .unwrap();
 
+        populate_cuda_block(&immutable_host_block, 42)?;
+
         offload_manager.offload(&immutable_host_block, 0).await?;
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -915,6 +950,8 @@ mod tests {
             disk_blocks[0].sequence_hash()?,
             immutable_host_block.sequence_hash()?
         );
+
+        compare_block_contents(&disk_blocks[0], &immutable_host_block)?;
 
         Ok(())
     }
@@ -950,6 +987,56 @@ mod tests {
                 .len(),
             1
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_bulk_transfer_disk() -> Result<()> {
+        let (offload_manager, device_pool, host_pool, disk_pool) =
+            build_pools(8, Some(8), Some(8))?;
+
+        let disk_pool = disk_pool.as_ref().as_ref().unwrap();
+        let host_pool = host_pool.as_ref().as_ref().unwrap();
+        let device_pool = device_pool.as_ref().as_ref().unwrap();
+
+        let mut host_blocks = Vec::new();
+
+        for i in 0..8 {
+            let block = completed_block(host_pool, [i; 4]).await?;
+            populate_cuda_block(&block, i as i32)?;
+            host_blocks.push(block);
+        }
+
+        let immutable_host_blocks = host_pool.register_blocks(host_blocks).await?;
+
+        for block in &immutable_host_blocks {
+            offload_manager.offload(block, 0).await?;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let mut disk_blocks = Vec::new();
+
+        for host_block in &immutable_host_blocks {
+            let blocks = disk_pool
+                .match_sequence_hashes(vec![host_block.sequence_hash()?].as_slice())
+                .await?;
+            assert_eq!(blocks.len(), 1);
+            compare_block_contents(&blocks[0], host_block)?;
+            disk_blocks.push(blocks[0].clone());
+        }
+
+        let device_blocks = offload_manager.onboard(disk_blocks.clone()).await?;
+        assert_eq!(device_blocks.len(), disk_blocks.len());
+
+        for disk_block in &disk_blocks {
+            let blocks = device_pool
+                .match_sequence_hashes(vec![disk_block.sequence_hash()?].as_slice())
+                .await?;
+            assert_eq!(blocks.len(), 1);
+            compare_block_contents(&blocks[0], disk_block)?;
+        }
 
         Ok(())
     }
