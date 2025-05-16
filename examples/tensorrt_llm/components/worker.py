@@ -71,10 +71,10 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
                 .endpoint("generate")
                 .client()
             )
-            while len(self._prefill_client.endpoint_ids()) < self._min_prefill_workers:
+            while len(self._prefill_client.instance_ids()) < self._min_prefill_workers:
                 logger.info(
                     f"Waiting for prefill workers to be ready.\n"
-                    f" Current: {len(self._prefill_client.endpoint_ids())},"
+                    f" Current: {len(self._prefill_client.instance_ids())},"
                     f" Required: {self._min_prefill_workers}"
                 )
                 await asyncio.sleep(30)

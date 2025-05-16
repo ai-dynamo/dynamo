@@ -42,12 +42,16 @@ pub mod service_v2;
 
 pub use async_trait::async_trait;
 pub use axum;
+use discovery::ModelEntry;
 pub use error::ServiceHttpError;
 pub use metrics::Metrics;
 
-use crate::types::openai::{
-    chat_completions::OpenAIChatCompletionsStreamingEngine,
-    completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
+use crate::{
+    kv_router::KvRouter,
+    types::openai::{
+        chat_completions::OpenAIChatCompletionsStreamingEngine,
+        completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
+    },
 };
 use std::{
     collections::HashMap,
@@ -208,6 +212,8 @@ pub struct DeploymentState {
     embeddings_engines: Arc<Mutex<ModelEngines<OpenAIEmbeddingsStreamingEngine>>>,
     metrics: Arc<Metrics>,
     sse_keep_alive: Option<Duration>,
+    entries: Arc<Mutex<HashMap<String, ModelEntry>>>,
+    kv_choosers: Arc<Mutex<HashMap<String, Arc<KvRouter>>>>,
 }
 
 impl DeploymentState {
@@ -218,6 +224,8 @@ impl DeploymentState {
             embeddings_engines: Arc::new(Mutex::new(ModelEngines::default())),
             metrics: Arc::new(Metrics::default()),
             sse_keep_alive: None,
+            entries: Arc::new(Mutex::new(HashMap::new())),
+            kv_choosers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -235,7 +243,7 @@ impl DeploymentState {
             .ok_or(ServiceHttpError::ModelNotFound(model.to_string()))
     }
 
-    fn get_completions_engine(
+    pub fn get_completions_engine(
         &self,
         model: &str,
     ) -> Result<OpenAICompletionsStreamingEngine, ServiceHttpError> {
@@ -247,7 +255,7 @@ impl DeploymentState {
             .ok_or(ServiceHttpError::ModelNotFound(model.to_string()))
     }
 
-    fn get_chat_completions_engine(
+    pub fn get_chat_completions_engine(
         &self,
         model: &str,
     ) -> Result<OpenAIChatCompletionsStreamingEngine, ServiceHttpError> {

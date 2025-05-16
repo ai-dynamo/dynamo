@@ -275,7 +275,7 @@ async def check_required_workers(
     tag="",
 ):
     """Wait until the minimum number of workers are ready."""
-    worker_ids = workers_client.endpoint_ids()
+    worker_ids = workers_client.instance_ids()
     num_workers = len(worker_ids)
     new_count = -1  # Force to print "waiting for worker" once
     while num_workers < required_workers:
@@ -287,7 +287,7 @@ async def check_required_workers(
                 f" Required: {required_workers}"
             )
         await asyncio.sleep(poll_interval)
-        worker_ids = workers_client.endpoint_ids()
+        worker_ids = workers_client.instance_ids()
         new_count = len(worker_ids)
 
     print(f"Workers ready: {worker_ids}")

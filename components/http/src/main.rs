@@ -4,13 +4,10 @@
 use clap::Parser;
 use std::sync::Arc;
 
-use dynamo_llm::{
-    http::service::{discovery::ModelWatcher, service_v2::HttpService},
-    model_type::ModelType,
-};
+use dynamo_llm::http::service::{discovery::ModelWatcher, service_v2::HttpService};
 use dynamo_runtime::{
-    logging, pipeline::RouterMode, transports::etcd::PrefixWatcher, DistributedRuntime, Result,
-    Runtime, Worker,
+    component, logging, pipeline::RouterMode, transports::etcd::PrefixWatcher, DistributedRuntime,
+    Result, Runtime, Worker,
 };
 
 #[derive(Parser)]
@@ -58,35 +55,18 @@ async fn app(runtime: Runtime) -> Result<()> {
     // written to etcd
     // the cli when operating on an `http` component will validate the namespace.component is
     // registered with HttpServiceComponentDefinition
-    let component = distributed
-        .namespace(&args.namespace)?
-        .component(&args.component)?;
-    let etcd_root = component.etcd_path();
 
-    // TODO: A single watcher already watches all model types and does the right thing.
-    // The paths need change here and in llmctl to not include the model_type
+    let watch_obj = Arc::new(
+        ModelWatcher::new(distributed.clone(), manager.clone(), RouterMode::Random).await?,
+    );
 
-    // Create watchers for `Chat`, `Completion`, and `Embedding` model types
-    for model_type in [ModelType::Chat, ModelType::Completion, ModelType::Embedding] {
-        let etcd_path = format!("{}/models/{}/", etcd_root, model_type.as_str());
+    if let Some(etcd_client) = distributed.etcd_client() {
+        let models_watcher: PrefixWatcher = etcd_client
+            .kv_get_and_watch_prefix(component::MODEL_ROOT_PATH)
+            .await?;
 
-        let watch_obj = Arc::new(
-            ModelWatcher::new(
-                component.clone(),
-                manager.clone(),
-                &etcd_path,
-                RouterMode::Random,
-            )
-            .await?,
-        );
-
-        if let Some(etcd_client) = distributed.etcd_client() {
-            let models_watcher: PrefixWatcher =
-                etcd_client.kv_get_and_watch_prefix(etcd_path).await?;
-
-            let (_prefix, _watcher, receiver) = models_watcher.dissolve();
-            tokio::spawn(watch_obj.watch(receiver));
-        }
+        let (_prefix, _watcher, receiver) = models_watcher.dissolve();
+        tokio::spawn(watch_obj.watch(receiver));
     }
 
     // Run the service

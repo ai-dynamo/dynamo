@@ -158,7 +158,7 @@ class LocalConnector(PlannerConnector):
         # We add a custom component name to ensure that the lease is attatched to this specific watcher
         full_cmd = f"{base_cmd} --worker-env '{worker_env_arg}' --custom-component-name '{watcher_name}'"
 
-        pre_add_endpoint_ids = await self._get_endpoint_ids(component_name)
+        pre_add_endpoint_ids = await self._count_instance_ids(component_name)
         logger.info(f"Pre-add endpoint IDs: {pre_add_endpoint_ids}")
 
         logger.info(f"Adding watcher {watcher_name}")
@@ -184,7 +184,7 @@ class LocalConnector(PlannerConnector):
         if blocking:
             required_endpoint_ids = pre_add_endpoint_ids + 1
             while True:
-                current_endpoint_ids = await self._get_endpoint_ids(component_name)
+                current_endpoint_ids = await self._count_instance_ids(component_name)
                 if current_endpoint_ids == required_endpoint_ids:
                     break
                 logger.info(
@@ -248,9 +248,9 @@ class LocalConnector(PlannerConnector):
 
         return success
 
-    async def _get_endpoint_ids(self, component_name: str) -> int:
+    async def _count_instance_ids(self, component_name: str) -> int:
         """
-        Get the endpoint IDs for a component.
+        Count the instance IDs for the 'generate' endpoint of given component.
 
         Args:
             component_name: Name of the component
@@ -266,7 +266,7 @@ class LocalConnector(PlannerConnector):
                     .endpoint("generate")
                     .client()
                 )
-            worker_ids = self.worker_client.endpoint_ids()
+            worker_ids = self.worker_client.instance_ids()
             return len(worker_ids)
         elif component_name == "PrefillWorker":
             if self.prefill_client is None:
@@ -276,7 +276,7 @@ class LocalConnector(PlannerConnector):
                     .endpoint("mock")
                     .client()
                 )
-            prefill_ids = self.prefill_client.endpoint_ids()
+            prefill_ids = self.prefill_client.instance_ids()
             return len(prefill_ids)
         else:
             raise ValueError(f"Component {component_name} not supported")

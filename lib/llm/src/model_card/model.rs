@@ -44,8 +44,6 @@ use crate::gguf::{Content, ContentConfig, ModelConfigLike};
 use crate::key_value_store::Versioned;
 use crate::protocols::TokenIdType;
 
-pub const BUCKET_NAME: &str = "mdc";
-
 /// Delete model deployment cards that haven't been re-published after this long.
 /// Cleans up if the worker stopped.
 pub const BUCKET_TTL: Duration = Duration::from_secs(5 * 60);
