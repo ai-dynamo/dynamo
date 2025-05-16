@@ -66,3 +66,4 @@ cd $HOME/dynamo && retry env DYNAMO_BIN_PATH=$HOME/dynamo/.build/target/debug uv
 echo "source /opt/dynamo/venv/bin/activate" >> ~/.bashrc
 echo "export VLLM_KV_CAPI_PATH=$HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so" >> ~/.bashrc
 echo "export GPG_TTY=$(tty)" >> ~/.bashrc
+echo "export PYTHONPATH=$HOME/dynamo/components/planner/src:$PYTHONPATH" >> ~/.bashrc
