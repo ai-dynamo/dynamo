@@ -138,7 +138,7 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
                 block.reset();
                 self.uninitialized_set.push_back(block);
             }
-            BlockState::Registered(state) => {
+            BlockState::Registered(state, _) => {
                 let sequence_hash = state.sequence_hash();
                 self.insert_with_sequence_hash(block, sequence_hash);
             }
@@ -499,6 +499,8 @@ pub(crate) mod tests {
 
     use super::*;
 
+    use std::sync::Mutex;
+
     #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Ord, PartialOrd)]
     pub struct TestMetadata {
         priority: u32,
@@ -615,7 +617,10 @@ pub(crate) mod tests {
         let mut blocks = create_block_collection(num_blocks).into_blocks().unwrap();
 
         let event_manager = NullEventManager::new();
-        let mut registry = BlockRegistry::new(event_manager);
+        let mut registry = BlockRegistry::new(
+            event_manager,
+            GlobalRegistry::new(Mutex::new(HashMap::new())),
+        );
 
         // Iterate through the generated TokenBlocks and the template Blocks,
         // setting the state and registering each one.
@@ -657,7 +662,7 @@ pub(crate) mod tests {
         let matched_block_count = matched_blocks.len();
 
         let event_manager = NullEventManager::new();
-        let mut registry = BlockRegistry::new(event_manager);
+        let mut registry = BlockRegistry::new(event_manager, Arc::new(Mutex::new(HashMap::new())));
 
         // all matched blocks should be in the complete or registered state
         for block in &mut matched_blocks {
