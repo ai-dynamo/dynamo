@@ -68,6 +68,71 @@ def raise_deployment_config_error(err: BentoMLException, action: str) -> t.NoRet
     ) from None
 
 
+def _get_urls(deployment: Deployment) -> List[str]:
+    """Get URLs from deployment."""
+    latest = deployment._client.v2.get_deployment(deployment.name, deployment.cluster)
+    urls = latest.urls if hasattr(latest, "urls") else None
+    return urls if urls is not None else []
+
+
+def _display_deployment_info(spinner: Spinner, deployment: Deployment) -> None:
+    """Helper function to display deployment status and URLs consistently."""
+    # Get status directly from schema and escape any Rich markup
+    status = deployment._schema.status if deployment._schema.status else "unknown"
+    # Escape any characters that are interpreted as markup
+    reformatted_status = status.replace("[", "\\[")
+    spinner.log(f"[bold]Status:[/] {reformatted_status}")
+
+    # Get URLs directly from schema
+    spinner.log("[bold]Ingress URLs:[/]")
+    try:
+        # Get latest deployment info for URLs
+        urls = _get_urls(deployment)
+        if urls:
+            for url in urls:
+                spinner.log(f"  - {url}")
+        else:
+            spinner.log("    No URLs available")
+    except Exception:
+        # If refresh fails, fall back to existing URLs
+        if deployment._urls:
+            for url in deployment._urls:
+                spinner.log(f"  - {url}")
+        else:
+            spinner.log("    No URLs available")
+
+
+def _build_env_dicts(
+    config_file: Optional[TextIO] = None,
+    args: Optional[list[str]] = None,
+    envs: Optional[list[str]] = None,
+) -> list[dict]:
+    """
+    Build a list of environment variable dicts from config file, args, and env strings.
+
+    Args:
+        config_file: Optional configuration file
+        args: Optional list of extra arguments
+        envs: Optional list of environment variable strings (KEY=VALUE)
+
+    Returns:
+        List of dicts suitable for use as envs
+    """
+    service_configs = resolve_service_config(config_file=config_file, args=args)
+    env_dicts = []
+    if service_configs:
+        config_json = json.dumps(service_configs)
+        logger.info(f"Deployment service configuration: {config_json}")
+        env_dicts.append({"name": "DYN_DEPLOYMENT_CONFIG", "value": config_json})
+    if envs:
+        for env in envs:
+            if "=" not in env:
+                raise CLIException(f"Invalid env format: {env}. Use KEY=VALUE.")
+            key, value = env.split("=", 1)
+            env_dicts.append({"name": key, "value": value})
+    return env_dicts
+
+
 @inject
 def create_deployment(
     pipeline: Optional[str] = None,
@@ -80,21 +145,8 @@ def create_deployment(
     envs: Optional[List[str]] = None,
     _cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
 ) -> Deployment:
-    # Load config from file and serialize to env
-    service_configs = resolve_service_config(config_file=config_file, args=args)
-    env_dicts = []
-    if service_configs:
-        config_json = json.dumps(service_configs)
-        logger.info(f"Deployment service configuration: {config_json}")
-        env_dicts.append({"name": "DYN_DEPLOYMENT_CONFIG", "value": config_json})
-
-    # Add user-supplied envs
-    if envs:
-        for env in envs:
-            if "=" not in env:
-                raise CLIException(f"Invalid env format: {env}. Use KEY=VALUE.")
-            key, value = env.split("=", 1)
-            env_dicts.append({"name": key, "value": value})
+    # Build env_dicts from config_file, args, and envs
+    env_dicts = _build_env_dicts(config_file=config_file, args=args, envs=envs)
 
     config_params = DeploymentConfigParameters(
         name=name,
@@ -152,38 +204,54 @@ def create_deployment(
             sys.exit(1)
 
 
-def _get_urls(deployment: Deployment) -> List[str]:
-    """Get URLs from deployment."""
-    latest = deployment._client.v2.get_deployment(deployment.name, deployment.cluster)
-    urls = latest.urls if hasattr(latest, "urls") else None
-    return urls if urls is not None else []
+@inject
+def update_deployment(
+    name: str,
+    config_file: Optional[TextIO] = None,
+    args: Optional[List[str]] = None,
+    envs: Optional[List[str]] = None,
+    _cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
+) -> Deployment:
+    """Update an existing deployment on Dynamo Cloud.
 
+    Args:
+        name: The name of the deployment to update
+        config_file: Optional configuration file for the update
+        args: Optional extra arguments for config
+        envs: Optional list of environment variables (KEY=VALUE)
 
-def _display_deployment_info(spinner: Spinner, deployment: Deployment) -> None:
-    """Helper function to display deployment status and URLs consistently."""
-    # Get status directly from schema and escape any Rich markup
-    status = deployment._schema.status if deployment._schema.status else "unknown"
-    # Escape any characters that are interpreted as markup
-    reformatted_status = status.replace("[", "\\[")
-    spinner.log(f"[bold]Status:[/] {reformatted_status}")
-
-    # Get URLs directly from schema
-    spinner.log("[bold]Ingress URLs:[/]")
+    Returns:
+        Deployment: The updated deployment object
+    """
+    # Build env_dicts from config_file, args, and envs
+    env_dicts = _build_env_dicts(config_file=config_file, args=args, envs=envs)
+    config_params = DeploymentConfigParameters(
+        name=name,
+        envs=env_dicts,
+        cli=True,
+    )
     try:
-        # Get latest deployment info for URLs
-        urls = _get_urls(deployment)
-        if urls:
-            for url in urls:
-                spinner.log(f"  - {url}")
-        else:
-            spinner.log("    No URLs available")
-    except Exception:
-        # If refresh fails, fall back to existing URLs
-        if deployment._urls:
-            for url in deployment._urls:
-                spinner.log(f"  - {url}")
-        else:
-            spinner.log("    No URLs available")
+        config_params.verify(create=False)
+    except BentoMLException as e:
+        print(f"Error: {str(e)}")
+        sys.exit(1)
+    with Spinner(console=console) as spinner:
+        try:
+            spinner.update(f'Updating deployment "{name}" on Dynamo Cloud...')
+            deployment = _cloud_client.deployment.update(
+                deployment_config_params=config_params
+            )
+            spinner.log(
+                f':white_check_mark: Updated deployment "{deployment.name}" in cluster "{deployment.cluster}"'
+            )
+            spinner.log(
+                "[yellow]Update submitted. It may take a short time for the new pods to become active. Please wait a bit before accessing the deployment to ensure your changes are live.[/yellow]"
+            )
+            _display_deployment_info(spinner, deployment)
+            return deployment
+        except BentoMLException as e:
+            spinner.log(f"[red]:x: Error:[/] Failed to update deployment: {str(e)}")
+            sys.exit(1)
 
 
 @inject
@@ -343,8 +411,8 @@ def get(
     get_deployment(name, cluster=cluster)
 
 
-@app.command()
-def list(
+@app.command("list")
+def list_deployments_command(
     cluster: Optional[str] = typer.Option(None, "--cluster", help="Cluster name"),
     search: Optional[str] = typer.Option(None, "--search", help="Search query"),
     dev: bool = typer.Option(False, "--dev", help="List development deployments"),
@@ -365,6 +433,33 @@ def list(
     """
     login_to_cloud(endpoint)
     list_deployments(cluster=cluster, search=search, dev=dev, q=query)
+
+
+@app.command()
+def update(
+    name: str = typer.Argument(..., help="Deployment name to update"),
+    config_file: Optional[typer.FileText] = typer.Option(
+        None, "--config-file", "-f", help="Configuration file path"
+    ),
+    envs: Optional[List[str]] = typer.Option(
+        None,
+        "--env",
+        help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo pipeline.",
+    ),
+    endpoint: str = typer.Option(
+        ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD"
+    ),
+) -> None:
+    """Update an existing deployment on Dynamo Cloud.
+
+    Update a deployment using parameters or a config yaml file.
+    """
+    login_to_cloud(endpoint)
+    update_deployment(
+        name=name,
+        config_file=config_file,
+        envs=envs,
+    )
 
 
 @app.command()

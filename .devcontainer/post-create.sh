@@ -62,6 +62,8 @@ ln -sf $HOME/dynamo/.build/target/debug/llmctl $HOME/dynamo/deploy/sdk/src/dynam
 cd $HOME/dynamo/lib/bindings/python && retry uv pip install -e .
 cd $HOME/dynamo && retry env DYNAMO_BIN_PATH=$HOME/dynamo/.build/target/debug uv pip install -e .
 
+export PYTHONPATH=/home/ubuntu/dynamo/components/planner/src:$PYTHONPATH
+
 # source the venv and set the VLLM_KV_CAPI_PATH in bashrc
 echo "source /opt/dynamo/venv/bin/activate" >> ~/.bashrc
 echo "export VLLM_KV_CAPI_PATH=$HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so" >> ~/.bashrc
