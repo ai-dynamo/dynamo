@@ -437,6 +437,10 @@ where
     pub fn storage_type(&self) -> StorageType {
         self.layout.storage_type()
     }
+
+    pub fn storage(&self) -> &S {
+        self.layout.storage().into_iter().next().unwrap()
+    }
 }
 
 impl<S: Storage + NixlDescriptor> BlockDataExt<S> for BlockData<S>

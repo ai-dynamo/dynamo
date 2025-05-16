@@ -17,28 +17,31 @@ use std::sync::Arc;
 use std::thread::spawn;
 use tokio::sync::mpsc;
 
-use crate::block_manager::block::{BlockMetadata, ImmutableBlock, MutableBlock};
+use crate::block_manager::block::{
+    transfer::{WriteTo, WriteToStrategy},
+    BlockError, BlockExt, BlockMetadata, BlockState, ImmutableBlock, MutableBlock, ReadableBlock,
+    WritableBlock,
+};
 use crate::block_manager::pool::BlockPoolError;
-use crate::block_manager::storage::Storage;
+use crate::block_manager::state::TransferContext;
+use crate::block_manager::storage::{Local, Storage};
 use crate::block_manager::BlockPool;
+
 use anyhow::Result;
-use cudarc::driver::CudaEvent;
+use async_trait::async_trait;
+use cudarc::driver::{sys::CUevent_flags, CudaEvent};
 
-type OnboardResult<Target, Metadata> =
-    Result<Vec<ImmutableBlock<Target, Metadata>>, BlockPoolError>;
-
+type BlockResult<Target, Metadata> = Result<Vec<ImmutableBlock<Target, Metadata>>, BlockPoolError>;
 /// Manage a set of pending transfers.
 pub struct PendingTransfer<Source: Storage, Target: Storage, Metadata: BlockMetadata> {
     /// The block being copied from.
-    _sources: Vec<Arc<MutableBlock<Source, Metadata>>>,
+    sources: Vec<Arc<MutableBlock<Source, Metadata>>>,
     /// The block being copied to.
     targets: Vec<MutableBlock<Target, Metadata>>,
-    /// The Cuda event that indicates the completion of the transfer.
-    event: CudaEvent,
     /// The oneshot sender that optionally returns the registered blocks once the transfer is complete.
-    completion_indicator: Option<oneshot::Sender<OnboardResult<Target, Metadata>>>,
+    completion_indicator: Option<oneshot::Sender<BlockResult<Target, Metadata>>>,
     /// The target pool that will receive the registered block.
-    target_pool: Arc<Option<BlockPool<Target, Metadata>>>,
+    target_registration_pool: Arc<Option<BlockPool<Target, Metadata>>>,
 }
 
 impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
@@ -47,65 +50,174 @@ impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
     pub fn new(
         sources: Vec<Arc<MutableBlock<Source, Metadata>>>,
         targets: Vec<MutableBlock<Target, Metadata>>,
-        event: CudaEvent,
-        completion_indicator: Option<oneshot::Sender<OnboardResult<Target, Metadata>>>,
-        target_pool: Arc<Option<BlockPool<Target, Metadata>>>,
+        completion_indicator: Option<oneshot::Sender<BlockResult<Target, Metadata>>>,
+        target_registration_pool: Arc<Option<BlockPool<Target, Metadata>>>,
     ) -> Self {
         Self {
-            _sources: sources,
+            sources,
             targets,
-            event,
             completion_indicator,
-            target_pool,
+            target_registration_pool,
         }
+    }
+
+    fn handle_complete(self) -> Result<()> {
+        let Self {
+            targets,
+            target_registration_pool,
+            completion_indicator,
+            ..
+        } = self;
+
+        if let Some(target_registration_pool) = target_registration_pool.as_ref() {
+            let blocks = target_registration_pool.register_blocks_blocking(targets)?;
+
+            if let Some(completion_indicator) = completion_indicator {
+                completion_indicator.send(Ok(blocks))?;
+            }
+        }
+
+        Ok(())
     }
 }
 
-pub struct TransferManager<Source: Storage, Target: Storage, Metadata: BlockMetadata> {
-    pending_transfer_q: mpsc::Sender<PendingTransfer<Source, Target, Metadata>>,
+fn transfer_metadata<Source: Storage, Target: Storage, Metadata: BlockMetadata>(
+    source: &Arc<MutableBlock<Source, Metadata>>,
+    target: &mut MutableBlock<Target, Metadata>,
+) -> Result<()> {
+    // Only registered blocks can be transferred. There are upstream checks for this, so this shouldn't ever fail.
+    if let BlockState::Registered(reg_handle) = source.state() {
+        // Bring the block back to the 'Reset' state.
+        target.reset();
+        // Transfer metadata.
+        target.update_metadata(source.metadata().clone());
+        // Copy tokens
+        target.apply_token_block(reg_handle.token_block().clone())?;
+    } else {
+        Err(BlockPoolError::BlockError(BlockError::InvalidState(
+            "Block is not registered.".to_string(),
+        )))?;
+    }
+
+    Ok(())
+}
+
+#[async_trait]
+pub trait TransferManager<Source: Storage, Target: Storage, Metadata: BlockMetadata>:
+    Send + Sync
+{
+    /// Begin a transfer. Blocks if the pending queue is full.
+    async fn begin_transfer(
+        &self,
+        pending_transfer: PendingTransfer<Source, Target, Metadata>,
+    ) -> Result<()>;
+}
+
+pub struct CudaTransferManager<Source: Storage, Target: Storage, Metadata: BlockMetadata> {
+    pending_transfer_q: mpsc::Sender<(PendingTransfer<Source, Target, Metadata>, CudaEvent)>,
+    transfer_ctx: Arc<TransferContext>,
 }
 
 impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
-    TransferManager<Source, Target, Metadata>
+    CudaTransferManager<Source, Target, Metadata>
 {
-    pub fn new(max_depth: usize) -> Self {
-        let (tx, mut rx) = mpsc::channel::<PendingTransfer<Source, Target, Metadata>>(max_depth);
+    pub fn new(max_depth: usize, transfer_ctx: Arc<TransferContext>) -> Self {
+        let (tx, mut rx) =
+            mpsc::channel::<(PendingTransfer<Source, Target, Metadata>, CudaEvent)>(max_depth);
 
         spawn(move || {
-            while let Some(pending_transfer) = rx.blocking_recv() {
+            while let Some((pending_transfer, event)) = rx.blocking_recv() {
                 // Wait for the event.
-                pending_transfer.event.synchronize()?;
-
-                let PendingTransfer {
-                    targets,
-                    target_pool,
-                    ..
-                } = pending_transfer;
-
-                if let Some(target_pool) = target_pool.as_ref() {
-                    // Register the blocks in the new pool only AFTER the transfers have been completed.
-                    // This way, we maintain the invariant that blocks that are registered in a pool
-                    // are always available in that pool.
-                    let blocks = target_pool.register_blocks_blocking(targets)?;
-
-                    if let Some(completion_indicator) = pending_transfer.completion_indicator {
-                        completion_indicator.send(Ok(blocks))?;
-                    }
-                }
+                event.synchronize()?;
+                pending_transfer.handle_complete()?;
             }
             Ok::<(), anyhow::Error>(())
         });
 
         Self {
             pending_transfer_q: tx,
+            transfer_ctx,
         }
     }
+}
 
-    pub async fn handle_pending_transfer(
+#[async_trait]
+impl<Source, Target, Metadata> TransferManager<Source, Target, Metadata>
+    for CudaTransferManager<Source, Target, Metadata>
+where
+    Source: Storage,
+    Target: Storage,
+    Metadata: BlockMetadata,
+    // Check that the source block is readable, local, and writable to the target block.
+    MutableBlock<Source, Metadata>: ReadableBlock<StorageType = Source>
+        + Local
+        + WriteToStrategy<MutableBlock<Target, Metadata>>,
+    // Check that the target block is writable.
+    MutableBlock<Target, Metadata>: WritableBlock<StorageType = Target>,
+{
+    async fn begin_transfer(
         &self,
-        pending_transfer: PendingTransfer<Source, Target, Metadata>,
+        mut pending_transfer: PendingTransfer<Source, Target, Metadata>,
     ) -> Result<()> {
-        self.pending_transfer_q.send(pending_transfer).await?;
+        for (source, target) in pending_transfer
+            .sources
+            .iter()
+            .zip(pending_transfer.targets.iter_mut())
+        {
+            transfer_metadata(source, target)?;
+            source.write_to(target, None, self.transfer_ctx.as_ref())?;
+        }
+
+        let event = self
+            .transfer_ctx
+            .stream()
+            .record_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))?;
+
+        self.pending_transfer_q
+            .send((pending_transfer, event))
+            .await?;
+
+        Ok(())
+    }
+}
+
+pub struct DiskTransferManager {
+    transfer_ctx: Arc<TransferContext>,
+}
+
+impl DiskTransferManager {
+    pub fn new(transfer_ctx: Arc<TransferContext>) -> Self {
+        Self { transfer_ctx }
+    }
+}
+
+#[async_trait]
+impl<Source, Target, Metadata> TransferManager<Source, Target, Metadata> for DiskTransferManager
+where
+    Source: Storage,
+    Target: Storage,
+    Metadata: BlockMetadata,
+    // Check that the source block is readable, local, and writable to the target block.
+    MutableBlock<Source, Metadata>: ReadableBlock<StorageType = Source>
+        + Local
+        + WriteToStrategy<MutableBlock<Target, Metadata>>,
+    // Check that the target block is writable.
+    MutableBlock<Target, Metadata>: WritableBlock<StorageType = Target>,
+{
+    async fn begin_transfer(
+        &self,
+        mut pending_transfer: PendingTransfer<Source, Target, Metadata>,
+    ) -> Result<()> {
+        for (source, target) in pending_transfer
+            .sources
+            .iter()
+            .zip(pending_transfer.targets.iter_mut())
+        {
+            transfer_metadata(source, target)?;
+            source.write_to(target, None, self.transfer_ctx.as_ref())?;
+        }
+
+        pending_transfer.handle_complete()?;
 
         Ok(())
     }

@@ -42,7 +42,8 @@ pub use config::*;
 pub use layout::{nixl::NixlLayout, LayoutConfig, LayoutConfigBuilder, LayoutError, LayoutType};
 pub use pool::BlockPool;
 pub use storage::{
-    nixl::NixlRegisterableStorage, DeviceStorage, PinnedStorage, Storage, StorageAllocator,
+    nixl::NixlRegisterableStorage, DeviceStorage, DiskStorage, PinnedStorage, Storage,
+    StorageAllocator,
 };
 pub use tokio_util::sync::CancellationToken;
 
@@ -141,6 +142,11 @@ impl<Metadata: BlockMetadata> KvBlockManager<Metadata> {
         bds: &BlockDescriptorList,
     ) -> Result<Vec<RemoteBlock<IsMutable>>> {
         self.state.get_remote_blocks_mutable(bds)
+    }
+
+    /// Get a reference to the disk block pool
+    pub fn disk(&self) -> Option<&BlockPool<DiskStorage, Metadata>> {
+        self.state.disk()
     }
 
     /// Get a reference to the host block pool

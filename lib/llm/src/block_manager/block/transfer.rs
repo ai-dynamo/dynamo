@@ -23,7 +23,7 @@ use super::*;
 
 use crate::block_manager::storage::{
     nixl::{NixlRegisterableStorage, NixlStorage},
-    DeviceStorage, PinnedStorage, SystemStorage,
+    DeviceStorage, DiskStorage, PinnedStorage, SystemStorage,
 };
 
 use cudarc::driver::CudaStream;

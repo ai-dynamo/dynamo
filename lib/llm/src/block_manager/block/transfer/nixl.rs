@@ -35,7 +35,6 @@ where
 
     if src_data.is_fully_contiguous() && dst_data.is_fully_contiguous() {
         let nixl_agent = ctx.nixl_agent().expect("NIXL agent not found");
-        let remote_worker_id = dst_data.worker_id.to_string();
 
         let mut src_dl = XferDescList::new(src_data.storage_type().nixl_mem_type())?;
         let mut dst_dl = XferDescList::new(dst_data.storage_type().nixl_mem_type())?;
@@ -55,10 +54,13 @@ where
                 dst_desc.size(),
                 dst_desc.device_id(),
             )?;
+
         }
 
-        let xfer_req =
-            nixl_agent.create_xfer_req(XferOp::Write, &src_dl, &dst_dl, &remote_worker_id, None)?;
+
+        let xfer_req = nixl_agent
+            .create_xfer_req(XferOp::Write, &src_dl, &dst_dl, &nixl_agent.name(), None)
+            .unwrap();
 
         let mut xfer_args = OptArgs::new()?;
 
@@ -69,6 +71,7 @@ where
 
         let mut status = nixl_agent.post_xfer_req(&xfer_req, Some(&xfer_args))?;
 
+        // TODO: This seems very inefficient
         tracing::span!(tracing::Level::DEBUG, "Waiting for transfer to complete").in_scope(|| {
             while status {
                 status = nixl_agent.get_xfer_status(&xfer_req).unwrap();

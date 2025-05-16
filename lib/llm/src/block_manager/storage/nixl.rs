@@ -82,8 +82,8 @@ use derive_getters::Getters;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CudaContextProivder, DeviceStorage, PinnedStorage, RegistationHandle, RegisterableStorage,
-    Remote, Storage, StorageError, StorageType, SystemStorage,
+    CudaContextProivder, DeviceStorage, DiskStorage, PinnedStorage, RegistationHandle,
+    RegisterableStorage, Remote, Storage, StorageError, StorageType, SystemStorage,
 };
 
 /// Marker trait for storage types that can be accessed by NIXL.
@@ -104,17 +104,7 @@ impl StorageType {
             StorageType::Device(_) => MemType::Vram,
             StorageType::Nixl => MemType::Unknown,
             StorageType::Null => MemType::Unknown,
-        }
-    }
-
-    /// Get the NIXL device ID for a given storage type.
-    pub fn nixl_device_id(&self) -> u64 {
-        match self {
-            StorageType::System => 0,
-            StorageType::Pinned => 0,
-            StorageType::Device(id) => *id as u64,
-            StorageType::Nixl => 0,
-            StorageType::Null => 0,
+            StorageType::Disk => MemType::File,
         }
     }
 }
@@ -309,5 +299,28 @@ impl NixlDescriptor for DeviceStorage {
 
     fn device_id(&self) -> u64 {
         CudaContextProivder::cuda_context(self).cu_device() as u64
+    }
+}
+
+impl NixlAccessible for DiskStorage {}
+impl NixlRegisterableStorage for DiskStorage {}
+
+impl MemoryRegion for DiskStorage {
+    unsafe fn as_ptr(&self) -> *const u8 {
+        Storage::as_ptr(self)
+    }
+
+    fn size(&self) -> usize {
+        Storage::size(self)
+    }
+}
+
+impl NixlDescriptor for DiskStorage {
+    fn mem_type(&self) -> MemType {
+        MemType::File
+    }
+
+    fn device_id(&self) -> u64 {
+        self.fd()
     }
 }
