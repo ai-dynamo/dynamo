@@ -60,6 +60,9 @@ pub enum Endpoint {
 
     /// OAI Chat Completions
     ChatCompletions,
+
+    /// OAI Embeddings
+    Embeddings,
 }
 
 /// Metrics for the HTTP service
@@ -276,6 +279,7 @@ impl std::fmt::Display for Endpoint {
         match self {
             Endpoint::Completions => write!(f, "completions"),
             Endpoint::ChatCompletions => write!(f, "chat_completions"),
+            Endpoint::Embeddings => write!(f, "embeddings"),
         }
     }
 }
@@ -285,6 +289,7 @@ impl Endpoint {
         match self {
             Endpoint::Completions => "completions",
             Endpoint::ChatCompletions => "chat_completions",
+            Endpoint::Embeddings => "embeddings",
         }
     }
 }

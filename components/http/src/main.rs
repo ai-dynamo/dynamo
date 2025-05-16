@@ -66,8 +66,8 @@ async fn app(runtime: Runtime) -> Result<()> {
     // TODO: A single watcher already watches all model types and does the right thing.
     // The paths need change here and in llmctl to not include the model_type
 
-    // Create watchers for `Chat` and `Completion` model types
-    for model_type in [ModelType::Chat, ModelType::Completion] {
+    // Create watchers for `Chat`, `Completion`, and `Embedding` model types
+    for model_type in [ModelType::Chat, ModelType::Completion, ModelType::Embedding] {
         let etcd_path = format!("{}/models/{}/", etcd_root, model_type.as_str());
 
         let watch_obj = Arc::new(

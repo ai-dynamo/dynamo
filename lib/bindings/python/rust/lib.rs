@@ -113,6 +113,7 @@ fn register_llm<'p>(
         ModelType::Chat => llm_rs::model_type::ModelType::Chat,
         ModelType::Completion => llm_rs::model_type::ModelType::Completion,
         ModelType::Backend => llm_rs::model_type::ModelType::Backend,
+        ModelType::Embedding => llm_rs::model_type::ModelType::Embedding,
     };
 
     let inner_path = model_path.to_string();
@@ -192,6 +193,7 @@ enum ModelType {
     Chat = 1,
     Completion = 2,
     Backend = 3,
+    Embedding = 4,
 }
 
 #[pymethods]

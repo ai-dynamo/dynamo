@@ -92,6 +92,12 @@ define_type_subcommands!(
         "Add a completion model"
     ),
     // Add new model types here:
+    (
+        Embedding,
+        "embedding",
+        ["embeddings", "embedding-model"],
+        "Add an embedding model"
+    )
 );
 
 #[derive(Parser)]

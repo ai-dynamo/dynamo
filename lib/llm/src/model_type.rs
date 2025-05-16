@@ -22,6 +22,8 @@ pub enum ModelType {
     Chat,
     /// Older completions API
     Completion,
+    /// Embeddings API
+    Embedding,
     // Pre-processed requests
     Backend,
 }
@@ -31,11 +33,12 @@ impl ModelType {
         match self {
             Self::Chat => "chat",
             Self::Completion => "completion",
+            Self::Embedding => "embedding",
             Self::Backend => "backend",
         }
     }
 
     pub fn all() -> Vec<Self> {
-        vec![Self::Chat, Self::Completion, Self::Backend]
+        vec![Self::Chat, Self::Completion, Self::Embedding, Self::Backend]
     }
 }
