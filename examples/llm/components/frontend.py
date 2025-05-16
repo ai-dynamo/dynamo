@@ -97,7 +97,7 @@ class Frontend:
             ],
             check=False,
         )
-        
+
         # Completions Endpoint
         subprocess.run(
             [
