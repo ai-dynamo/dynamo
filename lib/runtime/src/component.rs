@@ -179,10 +179,28 @@ impl Component {
         }
     }
 
-    /// Get keys from etcd on the slug, splitting the endpoints and only returning the
-    /// set of unique endpoints.
-    pub async fn list_endpoints(&self) -> Vec<Endpoint> {
-        unimplemented!("endpoints")
+    pub async fn list_endpoints(&self) -> anyhow::Result<Vec<ComponentEndpointInfo>> {
+        let Some(etcd_client) = self.drt.etcd_client() else {
+            return Ok(vec![]);
+        };
+        let mut out = vec![];
+        // The extra slash is important to only list exact component matches, not substrings.
+        for kv in etcd_client
+            .kv_get_prefix(format!("{}/", self.etcd_path()))
+            .await?
+        {
+            let val = match serde_json::from_slice::<ComponentEndpointInfo>(kv.value()) {
+                Ok(val) => val,
+                Err(err) => {
+                    anyhow::bail!(
+                        "Error converting etcd response to ComponentEndpointInfo: {err}. {}",
+                        kv.value_str()?
+                    );
+                }
+            };
+            out.push(val);
+        }
+        Ok(out)
     }
 
     pub async fn scrape_stats(&self, timeout: Duration) -> Result<ServiceSet> {

@@ -13,17 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__all__ = [
-    "CircusController",
-    "LocalConnector",
-    "PlannerConnector",
-    "KubernetesConnector",
-    "PlannerDefaults",
-]
 
-# Import the classes
-from dynamo.planner.circusd import CircusController
-from dynamo.planner.defaults import PlannerDefaults
-from dynamo.planner.kubernetes_connector import KubernetesConnector
-from dynamo.planner.local_connector import LocalConnector
-from dynamo.planner.planner_connector import PlannerConnector
+# Source of truth for planner defaults
+class PlannerDefaults:
+    namespace = "dynamo"
+    served_model_name = "vllm"
+    environment = "local"
+    no_operation = False
+    log_dir = None
+    adjustment_interval = 10
+    metric_pulling_interval = 1
+    max_gpu_budget = 8
+    min_endpoint = 1
+    decode_kv_scale_up_threshold = 0.9
+    decode_kv_scale_down_threshold = 0.5
+    prefill_queue_scale_up_threshold = 5.0
+    prefill_queue_scale_down_threshold = 0.2
+    decode_engine_num_gpu = 1
+    prefill_engine_num_gpu = 1

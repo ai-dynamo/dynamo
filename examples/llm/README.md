@@ -125,6 +125,9 @@ This figure shows an overview of the major components to deploy:
 
 ```
 
+> [!NOTE]
+> The planner component is enabled by default for all deployment architectures but is set to no-op mode. This means the planner observes metrics but doesn't take scaling actions. To enable active scaling, you can add `--Planner.no-operation=false` to your `dynamo serve` command. For more details, see the [Planner documentation](../../components/planner/README.md).
+
 ### Example architectures
 _Note_: For a non-dockerized deployment, first export `DYNAMO_HOME` to point to the dynamo repository root, e.g. `export DYNAMO_HOME=$(pwd)`
 
@@ -215,6 +218,8 @@ DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk
 export DEPLOYMENT_NAME=llm-agg
 dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
 ```
+
+**Note**: Optionally add `--Planner.no-operation=false` at the end of the deployment command to enable the planner component to take scaling actions on your deployment.
 
 ### Testing the Deployment
 

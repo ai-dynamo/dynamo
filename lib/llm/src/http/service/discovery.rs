@@ -66,7 +66,7 @@ impl ModelEntry {
     pub async fn load_mdc(
         &self,
         endpoint_id: protocols::Endpoint,
-        etcd_client: etcd::Client,
+        etcd_client: &etcd::Client,
     ) -> anyhow::Result<ModelDeploymentCard> {
         let kvstore: Box<dyn KeyValueStore> =
             Box::new(EtcdStorage::new(etcd_client.clone(), endpoint_id));
@@ -114,7 +114,7 @@ impl ModelNetworkName {
     }
 
     /// Fetch the ModelEntry from etcd.
-    pub async fn load_entry(&self, etcd_client: etcd::Client) -> anyhow::Result<ModelEntry> {
+    pub async fn load_entry(&self, etcd_client: &etcd::Client) -> anyhow::Result<ModelEntry> {
         let mut model_entries = etcd_client.kv_get(self.to_string(), None).await?;
         if model_entries.is_empty() {
             anyhow::bail!("No ModelEntry in etcd for key {self}");
@@ -134,9 +134,9 @@ impl ModelNetworkName {
     pub async fn load_mdc(
         &self,
         endpoint_id: protocols::Endpoint,
-        etcd_client: etcd::Client,
+        etcd_client: &etcd::Client,
     ) -> anyhow::Result<ModelDeploymentCard> {
-        let entry = self.load_entry(etcd_client.clone()).await?;
+        let entry = self.load_entry(etcd_client).await?;
         entry.load_mdc(endpoint_id, etcd_client).await
     }
 }
@@ -262,7 +262,7 @@ impl ModelWatcher {
             // Should be impossible because we only get here on an etcd event
             anyhow::bail!("Missing etcd_client");
         };
-        let card = match model_entry.load_mdc(endpoint_id, etcd_client).await {
+        let card = match model_entry.load_mdc(endpoint_id, &etcd_client).await {
             Ok(card) => {
                 tracing::debug!(card.display_name, "adding model");
                 Some(card)

@@ -187,9 +187,9 @@ impl Flags {
 #[derive(Default, PartialEq, Eq, ValueEnum, Clone, Debug, Copy)]
 pub enum RouterMode {
     #[default]
-    Random,
     #[value(name = "round-robin")]
     RoundRobin,
+    Random,
     #[value(name = "kv")]
     KV,
 }
