@@ -346,6 +346,10 @@ COPY --from=base $CARGO_HOME $CARGO_HOME
 COPY --from=base /usr/local/nixl /opt/nvidia/nvda_nixl
 COPY --from=base /workspace /workspace
 COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
+COPY --from=base /usr/local/ucx /usr/local/ucx
+RUN echo "/usr/local/ucx/lib" >> /etc/ld.so.conf.d/hpcx.conf && \
+    ldconfig
+COPY --from=base /opt/nixl /opt/nixl
 ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
 
 # Copy configuration files
@@ -379,6 +383,9 @@ RUN uv build --wheel --out-dir /workspace/dist && \
         uv build --wheel --out-dir /workspace/dist --python 3.11 && \
         uv build --wheel --out-dir /workspace/dist --python 3.10; \
     fi
+
+# Build NIXL wheel
+RUN cd /opt/nixl && uv build . --out-dir /workspace/dist --config-settings=setup-args="-Ducx_path=/usr/local/ucx"
 
 #######################################
 ########## CI Minimum Image ###########
@@ -479,8 +486,15 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 WORKDIR /workspace
 ENV DYNAMO_HOME=/workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+### COPY BINDINGS ###
+# Copy all bindings (wheels, lib, include) from ci_minimum
+COPY --from=ci_minimum /opt/dynamo/bindings /opt/dynamo/bindings
+### COPY NATS & ETCD ###
+# Copy nats and etcd from base image
+COPY --from=base /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 
+ENV PATH="${VIRTUAL_ENV}/bin:/usr/local/bin/etcd/:${PATH}"
 # Setup the python environment
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN apt-get update && \
@@ -491,10 +505,16 @@ RUN apt-get update && \
 
 # Install the wheels and symlink executables to /usr/local/bin so dynamo components can use them
 # Dynamo components currently do not have the VIRTUAL_ENV in their PATH, so we need to symlink the executables
+#Copy NIXL and Dynamo wheels into wheelhouse
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
+    uv pip install nixl --find-links wheelhouse && \
     ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
     rm -r wheelhouse
+
+# Common dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
