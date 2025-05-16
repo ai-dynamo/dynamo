@@ -13,17 +13,45 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! # Offload Manager
+//! The offload manager is responsible for handling all block transfers between different cache levels.
+//!
+//! ## Offloading
+//! Offloading is the process of moving blocks to a cache level further away from the device.
+//! When blocks are registered (via [`BlockPool::register_blocks`]), they are automatically sent to the offload manager.
+//! Due to limited bandwidth, the offload manager must prioritize which offloads to perform.
+//! This is indicated by the `priority` parameter to [`OffloadManager::offload`].
+//! When a offload request is received, the offload manager will enqueue it into a priority queue.
+//! This priority queue is keyed by the `priority` parameter, where blocks with lower priority values are processed first.
+//! Within the same priority, blocks that were sent to the offload manager earlier are processed first.
+//!
+//! ## Onboarding
+//! Onboarding is the process of moving blocks to a cache level closer to the device.
+//! All onboardings are manually triggered through the [`OffloadManager::onboard`] method.
+//!
+//! ## Transfer Managers
+//! The offload manager uses two transfer managers to handle the offloading and onboarding of blocks.
+//!
+//! The [`CudaTransferManager`] is responsible for transfers between the device and host.
+//! The [`DiskTransferManager`] is responsible for transfers from host to disk and disk to device.
+//!
+//! ## Worker Threads
+//! The offload manager uses two kinds of worker threads to handle the offloading and onboarding of blocks.
+//!
+//! The [`OffloadManager::offload_worker`] is responsible for offloading blocks.
+//! The [`OffloadManager::onboard_worker`] is responsible for onboarding blocks.
+//!
+//! The kind of offloads/onboards they perform is dictated by the source and target arguments
+//! of the [`OffloadManager::offload`] and [`OffloadManager::onboard`] methods.
+
 use nixl_sys::Agent as NixlAgent;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, Notify};
 
-use super::block::{
-    transfer::WriteToStrategy, BlockError, BlockMetadata, BlockState, ImmutableBlock, MutableBlock,
-    ReadableBlock, WritableBlock,
-};
+use super::block::{BlockError, BlockMetadata, BlockState, ImmutableBlock};
 use super::pool::BlockPoolError;
 use super::state::TransferContext;
-use super::storage::{Cuda, Local, Storage};
+use super::storage::{Cuda, Storage};
 use super::{BlockPool, DeviceStorage, DiskStorage, PinnedStorage};
 
 use anyhow::Result;
@@ -32,11 +60,12 @@ use std::any::Any;
 use std::collections::BTreeSet;
 
 mod pending;
-mod request;
+pub mod request;
 
 use pending::{CudaTransferManager, DiskTransferManager, PendingTransfer, TransferManager};
-use request::{OffloadRequest, OffloadRequestKey, OnboardRequest};
+use request::{BlockResult, OffloadRequest, OffloadRequestKey, OnboardRequest};
 
+// TODO: This should be dynamic
 const MAX_OFFLOAD_STREAM_DEPTH: usize = 4;
 
 /// The offload manager handles all block transfers between different cache levels.
@@ -94,6 +123,8 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let this_clone = this.clone();
 
         let cuda_ctx = Cuda::device_or_create(0)?;
+
+        // We want cuda offloads to happen in parallel with host onboards, so we need to use a different stream.
         let device_offload_transfer_ctx = Arc::new(TransferContext::new(
             nixl_agent.clone(),
             cuda_ctx.new_stream()?,
@@ -104,7 +135,6 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let host_clone = this.host.clone();
         let device_offload_queue = this.device_offload_queue.clone();
         let device_offload_notify = this.device_offload_notify.clone();
-
         tokio::spawn(async move {
             OffloadManager::offload_worker(
                 device_clone,
@@ -179,24 +209,13 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         Ok(this_clone)
     }
 
-    async fn offload_worker<Source, Target>(
+    async fn offload_worker<Source: Storage, Target: Storage>(
         source_pool_arc: Arc<Option<BlockPool<Source, Metadata>>>,
         target_pool_arc: Arc<Option<BlockPool<Target, Metadata>>>,
         offload_queue: Arc<Mutex<BTreeSet<OffloadRequest<Source, Metadata>>>>,
         offload_notify: Arc<Notify>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Metadata>>,
-    ) -> Result<()>
-    where
-        Source: Storage,
-        Target: Storage,
-        Metadata: BlockMetadata,
-        // Check that the source block is readable, local, and writable to the target block.
-        MutableBlock<Source, Metadata>: ReadableBlock<StorageType = Source>
-            + Local
-            + WriteToStrategy<MutableBlock<Target, Metadata>>,
-        // Check that the target block is writable.
-        MutableBlock<Target, Metadata>: WritableBlock<StorageType = Target>,
-    {
+    ) -> Result<()> {
         if source_pool_arc.is_none() || target_pool_arc.is_none() {
             return Ok(());
         }
@@ -251,30 +270,21 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         }
     }
 
-    async fn onboard_worker<Source, Target>(
+    async fn onboard_worker<Source: Storage, Target: Storage>(
         source_pool_arc: Arc<Option<BlockPool<Source, Metadata>>>,
         target_pool_arc: Arc<Option<BlockPool<Target, Metadata>>>,
         mut onboard_rx: mpsc::UnboundedReceiver<OnboardRequest<Source, Target, Metadata>>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Metadata>>,
-    ) -> Result<()>
-    where
-        Source: Storage,
-        Target: Storage,
-        Metadata: BlockMetadata,
-        // Check that the source block is readable, local, and writable to the target block.
-        MutableBlock<Source, Metadata>: ReadableBlock<StorageType = Source>
-            + Local
-            + WriteToStrategy<MutableBlock<Target, Metadata>>,
-        // Check that the target block is writable.
-        MutableBlock<Target, Metadata>: WritableBlock<StorageType = Target>,
-    {
+    ) -> Result<()> {
         if source_pool_arc.is_none() || target_pool_arc.is_none() {
             return Ok(());
         }
 
         let target_pool = target_pool_arc.as_ref().as_ref().unwrap();
 
+        // Loop on incoming requests
         while let Some(request) = onboard_rx.recv().await {
+            // Try to allocate blocks on the device.
             let target_blocks = match target_pool.allocate_blocks(request.blocks.len()).await {
                 Ok(blocks) => blocks,
                 Err(err) => {
@@ -300,6 +310,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         }
         Ok(())
     }
+
     pub async fn offload<S: Storage>(
         &self,
         block: &ImmutableBlock<S, Metadata>,
@@ -327,7 +338,6 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         // Because of this, we need to check the block type here.
         let any_block = block as &dyn Any;
 
-        // For now, only consider offloads from G1 (device) to G2 (host).
         // TODO: What's the performance penalty of this runtime type-checking?
         if let Some(device_block) =
             any_block.downcast_ref::<ImmutableBlock<DeviceStorage, Metadata>>()
@@ -352,13 +362,14 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             self.host_offload_queue.lock().await.insert(request);
             self.host_offload_notify.notify_one();
         }
+
         Ok(())
     }
 
     pub async fn onboard<S: Storage>(
         &self,
         blocks: Vec<ImmutableBlock<S, Metadata>>,
-    ) -> core::result::Result<Vec<ImmutableBlock<DeviceStorage, Metadata>>, BlockPoolError> {
+    ) -> BlockResult<DeviceStorage, Metadata> {
         for block in &blocks {
             match block.state() {
                 BlockState::Registered(_) => {}
@@ -378,6 +389,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
 
         let any_block = blocks.first().unwrap() as &dyn Any;
 
+        // TODO: This is really ugly.
         if any_block
             .downcast_ref::<ImmutableBlock<PinnedStorage, Metadata>>()
             .is_some()
@@ -408,6 +420,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                         .clone()
                 })
                 .collect();
+
             self.disk_onboard_tx
                 .send(OnboardRequest::new(disk_blocks, tx))
                 .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;

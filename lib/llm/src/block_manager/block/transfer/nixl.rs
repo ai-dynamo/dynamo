@@ -36,7 +36,9 @@ where
     let dst_data = dst.block_data_mut(private::PrivateToken);
 
     if src_data.is_fully_contiguous() && dst_data.is_fully_contiguous() {
+        // Keep the arc to use in the returned future.
         let nixl_agent_arc = ctx.as_ref().nixl_agent();
+
         let nixl_agent = nixl_agent_arc
             .as_ref()
             .as_ref()
@@ -75,11 +77,15 @@ where
 
         let _ = nixl_agent.post_xfer_req(&xfer_req, Some(&xfer_args))?;
 
+        // Return a future that completes when the transfer is complete.
+        // TODO: How efficient is this? Can we do better?
         Ok(Box::new(poll_fn(move |_cx| {
             let nixl_agent = nixl_agent_arc
                 .as_ref()
                 .as_ref()
                 .expect("NIXL agent not found");
+
+            // The nixl agent returns true if the transfer is still in progress.
             if !nixl_agent.get_xfer_status(&xfer_req).unwrap() {
                 Poll::Ready(())
             } else {

@@ -320,6 +320,7 @@ impl NixlDescriptor for DiskStorage {
         MemType::File
     }
 
+    /// Nixl treats the file descriptor as the device ID.
     fn device_id(&self) -> u64 {
         self.fd()
     }

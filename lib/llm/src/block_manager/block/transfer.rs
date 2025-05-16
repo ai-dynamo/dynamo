@@ -138,6 +138,9 @@ pub trait WriteTo<Target> {
         ctx: Arc<TransferContext>,
     ) -> Result<(), TransferError>;
 
+    /// A write_to implementation that expects a NIXL transfer.
+    /// If the transfer strategy is not NIXL, this method will return an error.
+    /// Returns a future that will complete when the transfer is complete.
     fn nixl_write_to(
         &self,
         dst: &mut Target,
@@ -185,7 +188,7 @@ where
             Ok(nixl::write_block_to(self, dst, ctx, notify)?)
         } else {
             Err(TransferError::IncompatibleTypes(format!(
-                "Unsupported copy strategy: {:?}",
+                "Expected NIXL transfer strategy, got: {:?}",
                 RB::write_to_strategy()
             )))?
         }

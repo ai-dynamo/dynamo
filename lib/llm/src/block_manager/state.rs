@@ -19,7 +19,6 @@ use super::offload::OffloadManager;
 use super::{
     block::{Block, ImmutableBlock},
     config::NixlOptions,
-    pool::BlockPoolError,
 };
 use cudarc::driver::CudaStream;
 use std::sync::Arc;
@@ -416,10 +415,10 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
         Ok(())
     }
 
-    pub async fn onboard_blocks(
+    pub async fn onboard_blocks<S: Storage>(
         &self,
-        blocks: Vec<ImmutableBlock<PinnedStorage, Metadata>>,
-    ) -> core::result::Result<Vec<ImmutableBlock<DeviceStorage, Metadata>>, BlockPoolError> {
+        blocks: Vec<ImmutableBlock<S, Metadata>>,
+    ) -> BlockResult<DeviceStorage, Metadata> {
         self.offload_manager.onboard(blocks).await
     }
 }

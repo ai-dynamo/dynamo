@@ -42,17 +42,21 @@ impl DiskStorage {
         let raw_fd = unsafe {
             nix::libc::mkostemp(
                 template_bytes.as_mut_ptr() as *mut i8,
+                // For maximum performance, GPU DirectStorage requires O_DIRECT.
+                // This allows transfers to bypass the kernel page cache.
+                // It also introduces the restriction that all accesses must be page-aligned.
                 nix::libc::O_RDWR | nix::libc::O_DIRECT,
             )
         };
 
         let file = unsafe { File::from_raw_fd(raw_fd) };
 
-        // Expand the file to the desired size, and allocate all blocks of the file.
         file.set_len(size as u64).map_err(|_| {
             StorageError::AllocationFailed("Failed to set temp file size".to_string())
         })?;
 
+        // File::set_len() only updates the metadata of the file, it does not allocate the underlying storage.
+        // We need to use fallocate to actually allocate the storage and create the blocks on disk.
         fallocate(file.as_raw_fd(), FallocateFlags::empty(), 0, size as i64).map_err(|_| {
             StorageError::AllocationFailed("Failed to allocate temp file".to_string())
         })?;
@@ -71,6 +75,7 @@ impl DiskStorage {
 }
 
 impl Drop for DiskStorage {
+    // TODO: How robust is this actually?
     fn drop(&mut self) {
         std::fs::remove_file(self.file_name.clone()).unwrap();
     }

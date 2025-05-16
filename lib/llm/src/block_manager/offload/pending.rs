@@ -13,6 +13,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! # Transfer Managers
+//!
+//! Transfer managers are responsible for multiple things:
+//! - Before the transfer:
+//!     - Rate-limiting the number of transfers that can be initiated concurrently. This is implemented through bounded channels.
+//!         - Due to the nature of the [`super::OffloadManager`], we only apply this rate-limiting to offloads.
+//! - During the transfer:
+//!     - Initiating the transfer
+//!     - Holding strong references to blocks being transfered.
+//! - After the transfer:
+//!     - Dropping these references once the transfer is complete.
+//!     - Registering the blocks with the target pool.
+//!     - Returning the registered blocks to the caller.
+//!
+//! This is implemented through the [`TransferManager`] trait, which takes a single [`PendingTransfer`]
+//! and initiates the transfer.
+//!
+//! Since CUDA and NIXL transfers use completely different semantics, we implement two separate transfer managers.
+//!
+//! ## Workflow
+//! 1. A transfer request is made by calling [`TransferManager::begin_transfer`]
+//! 2. [`TransferManager::begin_transfer`] performs the transfer, and enqueues relevant data into a bounded channel.
+//! 3. A worker thread (consuming this bounded channel and enforcing rate limiting) awaits the incoming transfers.
+//! 4. After a transfer is complete, the worker thread registers the blocks with the target pool, and returns the registered blocks to the caller.
+
 use std::pin::Pin;
 use std::sync::Arc;
 use std::thread::spawn;
@@ -20,8 +45,7 @@ use tokio::sync::mpsc;
 
 use crate::block_manager::block::{
     transfer::{WriteTo, WriteToStrategy},
-    BlockError, BlockExt, BlockMetadata, BlockState, ImmutableBlock, MutableBlock, ReadableBlock,
-    WritableBlock,
+    BlockError, BlockExt, BlockMetadata, BlockState, MutableBlock, ReadableBlock, WritableBlock,
 };
 use crate::block_manager::pool::BlockPoolError;
 use crate::block_manager::state::TransferContext;
@@ -33,7 +57,8 @@ use async_trait::async_trait;
 use cudarc::driver::{sys::CUevent_flags, CudaEvent};
 use futures::{future::join_all, stream::FuturesUnordered, StreamExt};
 
-type BlockResult<Target, Metadata> = Result<Vec<ImmutableBlock<Target, Metadata>>, BlockPoolError>;
+use super::BlockResult;
+
 /// Manage a set of pending transfers.
 pub struct PendingTransfer<Source: Storage, Target: Storage, Metadata: BlockMetadata> {
     /// The block being copied from.
@@ -131,6 +156,7 @@ impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
             while let Some((pending_transfer, event)) = rx.blocking_recv() {
                 // Wait for the event.
                 event.synchronize()?;
+                // Only finalize the transfer after the event is signaled.
                 pending_transfer.handle_complete()?;
             }
             Ok::<(), anyhow::Error>(())
@@ -170,11 +196,14 @@ where
             source.write_to(target, None, self.transfer_ctx.clone())?;
         }
 
+        // Use a cuda event to record the completion of the transfers.
         let event = self
             .transfer_ctx
             .stream()
             .record_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))?;
 
+        // Send the pending transfer and event to the worker thread.
+        // If the queue is full, we block the worker until space becomes available.
         self.pending_transfer_q
             .send((pending_transfer, event))
             .await?;
@@ -193,13 +222,18 @@ impl DiskTransferManager {
         let (futures_tx, mut futures_rx) = mpsc::channel(1);
 
         tokio::spawn(async move {
+            // Keep track of our pending transfers.
+            // Consume the futures as they complete, while also receiving new ones.
+
             let mut pending_transfers = FuturesUnordered::new();
             loop {
                 tokio::select! {
                     Some(future) = futures_rx.recv() => {
+                        // If we're at max size, block the worker thread on the next() call until we have capacity.
                         while pending_transfers.len() >= max_size {
                             pending_transfers.next().await;
                         }
+                        // Once we have capacity, push the new future onto the queue.
                         pending_transfers.push(future);
                     }
                     Some(_) = pending_transfers.next(), if !pending_transfers.is_empty() => {
@@ -243,6 +277,7 @@ where
             .zip(pending_transfer.targets.iter_mut())
             .map(|(source, target)| {
                 transfer_metadata(source, target).unwrap();
+                // Initiate the transfer, and get a future indicating completion.
                 source
                     .nixl_write_to(target, None, self.transfer_ctx.clone())
                     .unwrap()
@@ -254,6 +289,8 @@ where
             pending_transfer.handle_complete().unwrap();
         };
 
+        // Futures_(tx/rx) has a capacity of 1. If the queue worker has received another future and is awaiting next() due to a full `FuturesUnordered`,
+        // this call will block until the worker has processed the prior future.
         self.futures_tx.send(Box::pin(completion_future)).await?;
 
         Ok(())
