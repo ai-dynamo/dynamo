@@ -296,6 +296,7 @@ COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
 
 USER $USERNAME
 ENV HOME=/home/$USERNAME
+ENV PYTHONPATH=$HOME/dynamo/deploy/sdk/src:$PYTHONPATH:$HOME/dynamo/components/planner/src:$PYTHONPATH
 WORKDIR $HOME
 
 # https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
