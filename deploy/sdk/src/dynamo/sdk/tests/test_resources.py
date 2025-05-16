@@ -30,6 +30,8 @@ def setup_and_teardown():
 
 def test_gpu_resources(setup_and_teardown):
     """Test resource configurations"""
+    from _bentoml_sdk import Service as BentoService
+
     from dynamo.sdk import service
 
     @service(
@@ -40,6 +42,7 @@ def test_gpu_resources(setup_and_teardown):
         def __init__(self) -> None:
             pass
 
-    assert MyService.get_bentoml_service().config["resources"]["cpu"] == "2"
-    assert MyService.get_bentoml_service().config["resources"]["gpu"] == "1"
-    assert MyService.get_bentoml_service().config["resources"]["memory"] == "4Gi"
+    svc: BentoService = MyService.get_bentoml_service()  # type: ignore
+    assert svc.config["resources"]["cpu"] == "2"
+    assert svc.config["resources"]["gpu"] == "1"
+    assert svc.config["resources"]["memory"] == "4Gi"

@@ -1,0 +1,11 @@
+Middle:
+  ServiceArgs:
+    workers: 2
+    resources:
+      cpu: "1"
+
+Backend:
+  ServiceArgs:
+    workers: 3
+    resources:
+      cpu: "1"
