@@ -44,7 +44,8 @@ class FrontendConfig(BaseModel):
     """Configuration for the Frontend service including model and HTTP server settings."""
 
     served_model_name: str
-    endpoint: str
+    endpoint_chat: str
+    endpoint_completions: str
     port: int = 8080
 
 
@@ -73,6 +74,8 @@ class Frontend:
 
     def setup_model(self):
         """Configure the model for HTTP service using llmctl."""
+
+        # Chat/completions Endpoint
         subprocess.run(
             [
                 "llmctl",
@@ -90,9 +93,30 @@ class Frontend:
                 "add",
                 "chat-models",
                 self.frontend_config.served_model_name,
-                self.frontend_config.endpoint,
+                self.frontend_config.endpoint_chat,
             ],
             check=False,
+        )
+        
+        # Completions Endpoint
+        subprocess.run(
+            [
+                "llmctl",
+                "http",
+                "remove",
+                "completions",
+                self.frontend_config.served_model_name,
+            ]
+        )
+        subprocess.run(
+            [
+                "llmctl",
+                "http",
+                "add",
+                "completions",
+                self.frontend_config.served_model_name,
+                self.frontend_config.endpoint_completions,
+            ]
         )
 
     def start_http_server(self):
@@ -111,6 +135,8 @@ class Frontend:
         """Clean up resources before shutdown."""
 
         # circusd manages shutdown of http server process, we just need to remove the model using the on_shutdown hook
+
+        # Chat/completions Endpoint
         subprocess.run(
             [
                 "llmctl",
@@ -120,4 +146,15 @@ class Frontend:
                 self.frontend_config.served_model_name,
             ],
             check=False,
+        )
+
+        # Completions Endpoint
+        subprocess.run(
+            [
+                "llmctl",
+                "http",
+                "remove",
+                "completions",
+                self.frontend_config.served_model_name,
+            ]
         )

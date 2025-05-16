@@ -18,7 +18,8 @@
 
 Frontend:
   served_model_name: nvidia/Llama-3.1-405B-Instruct-FP8
-  endpoint: dynamo.Processor.chat/completions
+  endpoint_chat: dynamo.Processor.chat/completions
+  endpoint_completions: dynamo.Processor.completions
   port: 8000
 
 Processor:
