@@ -19,7 +19,7 @@ from typing import Any, Dict, Optional, Type, TypeVar, Union
 
 from fastapi import FastAPI
 
-from dynamo.sdk.core.protocol.interface import (
+from dynamo.core_sdk.protocol.interface import (
     DependencyInterface,
     DeploymentTarget,
     DynamoConfig,

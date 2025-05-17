@@ -33,10 +33,10 @@ import yaml
 from click import Command, Context
 from rich.console import Console
 
+from dynamo.core_sdk.protocol.interface import ComponentType
+from dynamo.core_sdk.runner import TargetEnum
 from dynamo.planner.defaults import PlannerDefaults  # type: ignore[attr-defined]
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sdk.core.protocol.interface import ComponentType
-from dynamo.sdk.core.runner import TargetEnum
 
 configure_dynamo_logging()
 
@@ -361,14 +361,14 @@ def resolve_service_config(
 
 
 def configure_target_environment(target: TargetEnum):
-    from dynamo.sdk.core.lib import set_target
+    from dynamo.core_sdk.lib import set_target
 
     if target == TargetEnum.BENTO:
-        from dynamo.sdk.core.runner.bentoml import BentoDeploymentTarget
+        from dynamo.sdk.targets.bentoml import BentoDeploymentTarget
 
         target = BentoDeploymentTarget()
     elif target == TargetEnum.DYNAMO:
-        from dynamo.sdk.core.runner.dynamo import LocalDeploymentTarget
+        from dynamo.core_sdk.runner.dynamo import LocalDeploymentTarget
 
         target = LocalDeploymentTarget()
     else:

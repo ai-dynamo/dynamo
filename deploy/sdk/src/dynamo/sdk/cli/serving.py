@@ -32,8 +32,8 @@ from circus.sockets import CircusSocket
 from circus.watcher import Watcher
 from simple_di import inject
 
+from dynamo.core_sdk.runner import TargetEnum
 from dynamo.sdk.cli.circus import CircusRunner
-from dynamo.sdk.core.runner import TargetEnum
 
 from .allocator import NVIDIA_GPU, ResourceAllocator
 from .circus import _get_server_socket

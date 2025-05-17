@@ -51,7 +51,7 @@ from fs.copy import copy_file
 from fs.tempfs import TempFS
 from simple_di import Provide, inject
 
-from dynamo.sdk.core.protocol.interface import LinkedServices
+from dynamo.core_sdk.protocol.interface import LinkedServices
 
 logger = logging.getLogger(__name__)
 

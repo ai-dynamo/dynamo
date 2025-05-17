@@ -21,7 +21,7 @@ from typing import Any, get_type_hints
 
 from pydantic import BaseModel
 
-from dynamo.sdk.core.protocol.interface import DynamoTransport
+from dynamo.core_sdk.protocol.interface import DynamoTransport
 
 
 class DynamoEndpoint:

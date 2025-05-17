@@ -22,8 +22,8 @@ from _bentoml_sdk import Service as BentoService
 from _bentoml_sdk.service.dependency import Dependency as BentoDependency
 from fastapi import FastAPI
 
-from dynamo.sdk.core.decorators.endpoint import DynamoClient, DynamoEndpoint
-from dynamo.sdk.core.protocol.interface import (
+from dynamo.core_sdk.decorators.endpoint import DynamoClient, DynamoEndpoint
+from dynamo.core_sdk.protocol.interface import (
     DependencyInterface,
     DeploymentTarget,
     DynamoConfig,
@@ -33,7 +33,7 @@ from dynamo.sdk.core.protocol.interface import (
     ServiceConfig,
     ServiceInterface,
 )
-from dynamo.sdk.core.runner.common import ServiceMixin
+from dynamo.core_sdk.runner.common import ServiceMixin
 
 T = TypeVar("T", bound=object)
 

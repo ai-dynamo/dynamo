@@ -27,7 +27,7 @@ from _bentoml_sdk.images import Image
 from _bentoml_sdk.service.config import validate
 from fastapi import FastAPI
 
-from dynamo.sdk.core.protocol.interface import DynamoTransport, LinkedServices
+from dynamo.core_sdk.protocol.interface import DynamoTransport, LinkedServices
 from dynamo.sdk.lib.decorators import DynamoEndpoint
 
 T = TypeVar("T", bound=object)

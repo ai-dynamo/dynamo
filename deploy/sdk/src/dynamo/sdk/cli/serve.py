@@ -29,12 +29,12 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
+from dynamo.core_sdk.runner import TargetEnum
 from dynamo.sdk.cli.utils import (
     is_local_planner_enabled,
     raise_local_planner_warning,
     resolve_service_config,
 )
-from dynamo.sdk.core.runner import TargetEnum
 
 if t.TYPE_CHECKING:
     P = t.ParamSpec("P")  # type: ignore
@@ -97,9 +97,9 @@ def serve(
 
     Starts a local server for the specified Dynamo pipeline.
     """
+    from dynamo.core_sdk.protocol.interface import LinkedServices
     from dynamo.runtime.logging import configure_dynamo_logging
     from dynamo.sdk.cli.utils import configure_target_environment
-    from dynamo.sdk.core.protocol.interface import LinkedServices
     from dynamo.sdk.lib.loader import find_and_load_service
 
     configure_target_environment(target)

@@ -15,7 +15,7 @@
 
 import pytest
 
-from dynamo.sdk.core.protocol.interface import LinkedServices
+from dynamo.core_sdk.protocol.interface import LinkedServices
 
 pytestmark = pytest.mark.pre_merge
 
