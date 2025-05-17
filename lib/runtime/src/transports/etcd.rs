@@ -28,8 +28,8 @@ use etcd_client::{
     Certificate, Compare, CompareOp, DeleteOptions, GetOptions, Identity, PutOptions, PutResponse,
     TlsOptions, Txn, TxnOp, TxnOpResponse, WatchOptions, Watcher,
 };
-
 pub use etcd_client::{ConnectOptions, KeyValue, LeaseClient};
+use tokio::time::{interval, Duration};
 
 mod lease;
 use lease::*;
@@ -340,38 +340,55 @@ impl Client {
         let kvs = get_response.take_kvs();
         tracing::trace!("initial kv count: {:?}", kvs.len());
 
-        let (tx, rx) = mpsc::channel(32);
+        let (tx, rx) = mpsc::channel(2048);
 
         self.runtime.secondary().spawn(async move {
             for kv in kvs {
                 if tx.send(WatchEvent::Put(kv)).await.is_err() {
-                    // receiver is closed
-                    break;
+                    // receiver is already closed
+                    return;
                 }
             }
 
-            while let Some(Ok(response)) = watch_stream.next().await {
-                for event in response.events() {
-                    match event.event_type() {
-                        etcd_client::EventType::Put => {
-                            if let Some(kv) = event.kv() {
-                                if let Err(err) = tx.send(WatchEvent::Put(kv.clone())).await {
-                                    tracing::error!(
-                                        "kv watcher error forwarding WatchEvent::Put: {err}"
-                                    );
-                                    // receiver is closed
-                                    break;
+            loop {
+                tokio::select! {
+                    maybe_resp = watch_stream.next() => {
+                        // Early return for None or Err cases
+                        let response = match maybe_resp {
+                            Some(Ok(response)) => response,
+                            _ => {
+                                tracing::info!("kv watch stream closed");
+                                return;
+                            }
+                        };
+
+                        // Process events
+                        for event in response.events() {
+                            // Extract the KeyValue if it exists
+                            let kv = match event.kv() {
+                                Some(kv) => kv.clone(),
+                                None => continue, // Skip events with no KV
+                            };
+
+                            // Handle based on event type
+                            match event.event_type() {
+                                etcd_client::EventType::Put => {
+                                    if let Err(err) = tx.send(WatchEvent::Put(kv)).await {
+                                        tracing::error!("kv watcher error forwarding WatchEvent::Put: {err}");
+                                        return;
+                                    }
+                                }
+                                etcd_client::EventType::Delete => {
+                                    if tx.send(WatchEvent::Delete(kv)).await.is_err() {
+                                        return;
+                                    }
                                 }
                             }
                         }
-                        etcd_client::EventType::Delete => {
-                            if let Some(kv) = event.kv() {
-                                if tx.send(WatchEvent::Delete(kv.clone())).await.is_err() {
-                                    // receiver is closed
-                                    break;
-                                }
-                            }
-                        }
+                    }
+                    _ = tx.closed() => {
+                        tracing::debug!("no more receivers, stopping watcher");
+                        return;
                     }
                 }
             }
