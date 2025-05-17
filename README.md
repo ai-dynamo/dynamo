@@ -109,9 +109,27 @@ components including:
 To run a minimal configuration you can use a pre-configured
 example.
 
-#### Start Dynamo Distributed Runtime Services
+#### Build the runtime 
 
-First start the Dynamo Distributed Runtime services:
+```bash
+cargo build --release  
+
+cd lib/bindings/python
+pip install .  
+
+cd ../../..
+pip install ".[all]" 
+```
+> [!NOTE]
+> If the wheel fails to build on your platform use maturin instead:
+
+```bash
+uv pip install maturin
+cd lib/bindings/python
+maturin develop
+uv pip install -e .
+```
+#### Start Dynamo Distributed Runtime Services
 
 ```bash
 docker compose -f deploy/metrics/docker-compose.yml up -d
