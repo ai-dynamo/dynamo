@@ -100,7 +100,7 @@ RUN cd /usr/local/src && \
     make -j install-strip &&    \
     ldconfig
 
-ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:/usr/local/cuda/compat/lib.real:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
 ENV CPATH=/usr/include:$CPATH
 ENV PATH=/usr/bin:$PATH
 ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
