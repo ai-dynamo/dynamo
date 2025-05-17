@@ -203,7 +203,7 @@ impl PartialTokenBlock {
     ///
     /// * `block_size` - The fixed size for blocks in this sequence.
     /// * `salt_hash` - The [`SaltHash`] for the sequence.
-    pub(crate) fn create_sequence_root(block_size: usize, salt_hash: SaltHash) -> Self {
+    pub fn create_sequence_root(block_size: usize, salt_hash: SaltHash) -> Self {
         Self {
             tokens: Tokens::default(),
             block_size,
@@ -222,7 +222,7 @@ impl PartialTokenBlock {
     ///
     /// * `Ok(())` - If the token was successfully added.
     /// * `Err(TokenBlockError::Full)` - If the block already contains `block_size` tokens.
-    pub(crate) fn push_token(&mut self, token: Token) -> Result<(), TokenBlockError> {
+    pub fn push_token(&mut self, token: Token) -> Result<(), TokenBlockError> {
         if self.tokens.0.len() >= self.block_size {
             return Err(TokenBlockError::Full);
         }
@@ -242,7 +242,7 @@ impl PartialTokenBlock {
     ///
     /// A new [`Tokens`] object containing any tokens that did not fit,
     /// if all tokens were added, the returned object will be empty.
-    pub(crate) fn push_tokens(&mut self, tokens: Tokens) -> Tokens {
+    pub fn push_tokens(&mut self, tokens: Tokens) -> Tokens {
         let remaining_space = self.remaining();
 
         if remaining_space == 0 {
@@ -267,7 +267,7 @@ impl PartialTokenBlock {
     ///
     /// * `Ok(())` - If a token was successfully removed.
     /// * `Err(TokenBlockError::Empty)` - If the block was already empty.
-    pub(crate) fn pop_token(&mut self) -> Result<(), TokenBlockError> {
+    pub fn pop_token(&mut self) -> Result<(), TokenBlockError> {
         if self.tokens.0.is_empty() {
             return Err(TokenBlockError::Empty);
         }
@@ -285,7 +285,7 @@ impl PartialTokenBlock {
     ///
     /// * `Ok(())` - If the specified number of tokens were successfully removed.
     /// * `Err(TokenBlockError::InsufficientTokens)` - If `count` is greater than the number of tokens in the block.
-    pub(crate) fn pop_tokens(&mut self, count: usize) -> Result<(), TokenBlockError> {
+    pub fn pop_tokens(&mut self, count: usize) -> Result<(), TokenBlockError> {
         if self.tokens.0.len() < count {
             return Err(TokenBlockError::InsufficientTokens);
         }
@@ -304,7 +304,7 @@ impl PartialTokenBlock {
     ///
     /// * `Ok(TokenBlock)` - The newly created full [`TokenBlock`].
     /// * `Err(TokenBlockError::Incomplete)` - If the block does not contain exactly `block_size` tokens.
-    pub(crate) fn commit(&mut self) -> Result<TokenBlock, TokenBlockError> {
+    pub fn commit(&mut self) -> Result<TokenBlock, TokenBlockError> {
         if self.tokens.0.len() != self.block_size {
             // Check for exact size match for committing
             return Err(TokenBlockError::Incomplete);

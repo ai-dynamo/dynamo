@@ -36,11 +36,12 @@ pub use block::{
         RemoteBlock,
     },
     transfer::{BlockTransferEngineV1, TransferRequestPut},
-    BasicMetadata, BlockMetadata, Blocks,
+    BasicMetadata, BlockMetadata, Blocks, ImmutableBlock,
 };
 pub use config::*;
 pub use layout::{nixl::NixlLayout, LayoutConfig, LayoutConfigBuilder, LayoutError, LayoutType};
 pub use pool::BlockPool;
+use pool::BlockPoolError;
 pub use storage::{
     nixl::NixlRegisterableStorage, DeviceStorage, PinnedStorage, Storage, StorageAllocator,
 };
@@ -151,6 +152,13 @@ impl<Metadata: BlockMetadata> KvBlockManager<Metadata> {
     /// Get a reference to the device block pool
     pub fn device(&self) -> Option<&BlockPool<DeviceStorage, Metadata>> {
         self.state.device()
+    }
+
+    pub async fn onboard_blocks(
+        &self,
+        blocks: Vec<ImmutableBlock<PinnedStorage, Metadata>>,
+    ) -> std::result::Result<Vec<ImmutableBlock<DeviceStorage, Metadata>>, BlockPoolError> {
+        self.state.onboard_blocks(blocks).await
     }
 
     /// Get the worker ID
