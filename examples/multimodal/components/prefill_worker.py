@@ -21,7 +21,7 @@ import signal
 import sys
 
 import torch
-from components.encode_worker import EncodeWorker
+from components.encode_worker_loader import EncodeWorker
 from pydantic import BaseModel
 from utils.logging import check_required_workers
 from utils.nixl import NixlMetadataStore
