@@ -109,16 +109,16 @@ components including:
 To run a minimal configuration you can use a pre-configured
 example.
 
-#### Build the runtime 
+#### Build the runtime
 
 ```bash
-cargo build --release  
+cargo build --release
 
 cd lib/bindings/python
-pip install .  
+pip install .
 
 cd ../../..
-pip install ".[all]" 
+pip install ".[all]"
 ```
 > [!NOTE]
 > If the wheel fails to build on your platform use maturin instead:
