@@ -108,6 +108,7 @@ impl HttpServiceConfigBuilder {
         let mut routes = vec![
             metrics::router(registry, None),
             super::openai::list_models_router(model_manager.state(), None),
+            super::health::health_check_router(model_manager.state(), None),
         ];
 
         if config.enable_chat_endpoints {
