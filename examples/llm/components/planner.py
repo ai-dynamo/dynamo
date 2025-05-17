@@ -232,7 +232,9 @@ class Planner:
         )
         logger.info(f"Current engines use {curr_gpu_usage} GPUs")
 
-        avg_prefill_queue_load = np.mean(self.prefill_queue_load)
+        avg_prefill_queue_load = np.mean(self.prefill_queue_load) / len(
+            self.p_endpoints
+        )
         avg_kv_load = np.mean(self.kv_load)
         # first check if we need to scale down any workers
         if (
@@ -467,13 +469,13 @@ if __name__ == "__main__":
         "--prefill-queue-scale-up-threshold",
         type=float,
         default=PlannerDefaults.prefill_queue_scale_up_threshold,
-        help="Queue utilization threshold to scale up prefill workers",
+        help="Queue utilization threshold to scale up prefill workers, this threshold is per prefill worker",
     )
     parser.add_argument(
         "--prefill-queue-scale-down-threshold",
         type=float,
         default=PlannerDefaults.prefill_queue_scale_down_threshold,
-        help="Queue utilization threshold to scale down prefill workers",
+        help="Queue utilization threshold to scale down prefill workers, this threshold is per prefill worker",
     )
     parser.add_argument(
         "--decode-engine-num-gpu",
