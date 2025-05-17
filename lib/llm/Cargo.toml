@@ -145,6 +145,6 @@ aligned-vec = "0.6.4"
 lazy_static = "1.4"
 
 [[bin]]
-name = "bench_block_manager"
+name = "block_manager_bench"
 path = "bin/bench_block_manager.rs"
 required-features = ["block-manager-bench"]

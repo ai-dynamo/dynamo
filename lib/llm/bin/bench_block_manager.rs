@@ -37,11 +37,11 @@ use tokio::time::{interval, Duration, Instant};
 #[derive(Parser)]
 struct Args {
     /// Amount of device blocks
-    #[clap(short = 'd', long, default_value_t = 512)]
+    #[clap(short = 'd', long, default_value_t = 2048)]
     num_device_blocks: usize,
 
     /// Amount of host blocks
-    #[clap(short = 'n', long, default_value_t = 512)]
+    #[clap(short = 'n', long, default_value_t = 2048)]
     num_host_blocks: usize,
 
     /// Amount of layers
@@ -63,6 +63,14 @@ struct Args {
     /// Amount of simulated inference requests per second.
     #[clap(short = 'r', long, default_value_t = 10)]
     requests_per_second: usize,
+
+    /// Simulated OSL.
+    #[clap(short = 'o', long, default_value_t = 128)]
+    osl: usize,
+
+    /// Simulated ITL (in milliseconds)
+    #[clap(short = 'i', long, default_value_t = 16)]
+    itl_ms: usize,
 
     /// Token generator to use.
     #[command(subcommand)]
@@ -115,7 +123,7 @@ struct HierarchicalTokenGeneratorArgs {
     group_size: usize,
 
     /// Amount of different sequences per group
-    #[clap(short, long, default_value_t = 10)]
+    #[clap(short, long, default_value_t = 24)]
     variations_per_group: usize,
 }
 
@@ -244,8 +252,10 @@ struct Stats {
     pub device_match_latency: Arc<Mutex<Vec<EventStats>>>,
     pub host_match_latency: Arc<Mutex<Vec<EventStats>>>,
     pub onboard_latency: Arc<Mutex<Vec<EventStats>>>,
-    pub device_allocate_latency: Arc<Mutex<Vec<EventStats>>>,
-    pub register_latency: Arc<Mutex<Vec<EventStats>>>,
+    pub prefill_allocate_latency: Arc<Mutex<Vec<EventStats>>>,
+    pub prefill_register_latency: Arc<Mutex<Vec<EventStats>>>,
+    pub decode_allocate_latency: Arc<Mutex<Vec<EventStats>>>,
+    pub decode_register_latency: Arc<Mutex<Vec<EventStats>>>,
 }
 
 impl Stats {
@@ -254,8 +264,10 @@ impl Stats {
             device_match_latency: Arc::new(Mutex::new(Vec::new())),
             host_match_latency: Arc::new(Mutex::new(Vec::new())),
             onboard_latency: Arc::new(Mutex::new(Vec::new())),
-            device_allocate_latency: Arc::new(Mutex::new(Vec::new())),
-            register_latency: Arc::new(Mutex::new(Vec::new())),
+            prefill_allocate_latency: Arc::new(Mutex::new(Vec::new())),
+            prefill_register_latency: Arc::new(Mutex::new(Vec::new())),
+            decode_allocate_latency: Arc::new(Mutex::new(Vec::new())),
+            decode_register_latency: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -354,7 +366,6 @@ async fn benchmark(
             let tokens = Tokens::from(input_tokens);
 
             // Break up the sequence into blocks and get the sequence hashes.
-            
 
             tokens.into_sequence(block_size, Some(0))
         })
@@ -387,7 +398,7 @@ async fn benchmark(
 
     // Block manager worker.
     let block_manager_worker = tokio::spawn(async move {
-        while let Some(sequence) = req_rx.recv().await {
+        while let Some(mut sequence) = req_rx.recv().await {
             let manager = manager.clone();
             let stats = stats_clone.clone();
 
@@ -452,7 +463,7 @@ async fn benchmark(
                         time(device.allocate_blocks(remaining)).await;
 
                     stats
-                        .device_allocate_latency
+                        .prefill_allocate_latency
                         .lock()
                         .await
                         .push(EventStats::new(allocate_latency, allocated_blocks.len()));
@@ -465,16 +476,51 @@ async fn benchmark(
                     }
 
                     // Register any newly allocated blocks.
-                    let (registered_blocks, register_latency) =
+                    let (registered_blocks, prefill_register_latency) =
                         time(device.register_blocks(allocated_blocks)).await;
 
                     stats
-                        .register_latency
+                        .prefill_register_latency
                         .lock()
                         .await
-                        .push(EventStats::new(register_latency, registered_blocks.len()));
+                        .push(EventStats::new(
+                            prefill_register_latency,
+                            registered_blocks.len(),
+                        ));
 
                     sequence_blocks.extend(registered_blocks);
+                }
+
+                // Simulate the decode phase.
+                let mut itl_interval = interval(Duration::from_millis(args.itl_ms as u64));
+                for _ in 0..args.osl {
+                    itl_interval.tick().await;
+                    if let Ok(Some(_)) = sequence.append(0) {
+                        let block = sequence.blocks().last().unwrap();
+
+                        let (device_block, allocate_latency) =
+                            time(device.allocate_blocks(1)).await;
+                        let mut device_block = device_block.into_iter().next().unwrap();
+
+                        stats
+                            .decode_allocate_latency
+                            .lock()
+                            .await
+                            .push(EventStats::new(allocate_latency, 1));
+
+                        device_block.apply_token_block(block.clone()).unwrap();
+                        let (device_block, decode_register_latency) =
+                            time(device.register_blocks(vec![device_block])).await;
+                        let device_block = device_block.into_iter().next().unwrap();
+
+                        stats
+                            .decode_register_latency
+                            .lock()
+                            .await
+                            .push(EventStats::new(decode_register_latency, 1));
+
+                        sequence_blocks.push(device_block);
+                    }
                 }
             });
         }
@@ -509,19 +555,36 @@ async fn benchmark(
     .unwrap();
 
     scatter(
-        "Device Allocate Latency",
-        "device_allocate_latency.png",
-        stats.device_allocate_latency.clone(),
+        "Prefill Allocate Latency",
+        "prefill_allocate_latency.png",
+        stats.prefill_allocate_latency.clone(),
     )
     .await
     .unwrap();
 
     scatter(
-        "Register Latency",
-        "register_latency.png",
-        stats.register_latency.clone(),
+        "Prefill Register Latency",
+        "prefill_register_latency.png",
+        stats.prefill_register_latency.clone(),
     )
     .await
     .unwrap();
+
+    scatter(
+        "Decode Allocate Latency",
+        "decode_allocate_latency.png",
+        stats.decode_allocate_latency.clone(),
+    )
+    .await
+    .unwrap();
+
+    scatter(
+        "Decode Register Latency",
+        "decode_register_latency.png",
+        stats.decode_register_latency.clone(),
+    )
+    .await
+    .unwrap();
+
     Ok(())
 }
