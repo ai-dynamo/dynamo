@@ -242,6 +242,15 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
 
                 // If we've found the block, offload it.
                 if let Some(block) = block {
+                    // If the block is already in the target, don't offload it.
+                    if let Ok(blocks) = target_pool
+                        .match_sequence_hashes_blocking(vec![request.sequence_hash].as_slice())
+                    {
+                        if !blocks.is_empty() {
+                            continue;
+                        }
+                    }
+
                     // Allocate a block from the host pool.
                     // TODO: The most likely error here is that the host pool is full.
                     // It's probably not a good idea to keep consuming queue elements in the meantime.
