@@ -19,6 +19,7 @@ use crate::mocker::protocols::DirectRequest;
 use crate::mocker::protocols::PrefillCost;
 use crate::mocker::sequence::ActiveSequence;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -34,8 +35,9 @@ pub enum Request {
 }
 
 struct SchedulerState {
-    waiting_requests: VecDeque<(Uuid, Request)>,
-    running_requests: HashMap<Uuid, ActiveSequence>,
+    waiting_requests: VecDeque<Uuid>,
+    running_requests: HashSet<Uuid>,
+    requests: HashMap<Uuid, Request>,
 }
 
 /// Manages scheduling of requests using KvManager resources
@@ -67,7 +69,8 @@ impl Scheduler {
         let token_capacity: usize = 8192;
         let state = Arc::new(Mutex::new(SchedulerState {
             waiting_requests: VecDeque::new(),
-            running_requests: HashMap::new(),
+            running_requests: HashSet::new(),
+            requests: HashMap::new(),
         }));
 
         let kv_manager = Arc::new(Mutex::new(kv_manager));
@@ -104,7 +107,8 @@ impl Scheduler {
                     Some(request) = request_rx.recv() => {
                         let uuid = Uuid::new_v4();
                         let mut state = state_clone.lock().await;
-                        state.waiting_requests.push_back((uuid, Request::Direct(request)));
+                        state.requests.insert(uuid, Request::Direct(request));
+                        state.waiting_requests.push_back(uuid);
                     }
 
                     // Try Scheduling Requests
@@ -117,7 +121,10 @@ impl Scheduler {
                         // schedule anymore. Once a request can't be scheduled, it remains at the front of the waiting queue
                         // as an ActiveSequence for future scheduling attempts. This implements First-Come-First-Served (FCFS)
                         // scheduling, as future requests cannot be processed until the request at the front of the queue is scheduled.
-                        while let Some((_, request)) = state_guard.waiting_requests.front() {
+                        while let Some(uuid) = state_guard.waiting_requests.front().copied() {
+                            // Get the request for this UUID
+                            let request = state_guard.requests.get(&uuid).expect("UUID in waiting queue must have a corresponding request");
+
                             // Process the request regardless of its type
                             let active_sequence = match request {
                                 Request::Direct(direct_request) => {
@@ -135,6 +142,9 @@ impl Scheduler {
                                 }
                             };
 
+                            // Update the requests map with the ActiveSequence
+                            state_guard.requests.insert(uuid, Request::Active(active_sequence.clone()));
+
                             // Calculate token budget using new_tokens from PrefillCost or treating None as 1
                             let prefill_tokens = prefill_costs_guard.values().map(|cost| {
                                 match cost {
@@ -147,7 +157,7 @@ impl Scheduler {
                             // Check if it can be scheduled
                             if let Some(prefill_cost) = kv_manager_guard.try_schedule(&active_sequence, watermark_clone, tokens_budget) {
                                 // Remove from waiting queue
-                                let (uuid, _) = state_guard.waiting_requests.pop_front().unwrap();
+                                state_guard.waiting_requests.pop_front();
 
                                 // Send create signal to KvManager
                                 if let Some(signal) = active_sequence.creation_signal() {
@@ -155,16 +165,10 @@ impl Scheduler {
                                 }
 
                                 // Add to running requests with the PrefillCost
-                                state_guard.running_requests.insert(uuid, active_sequence);
+                                state_guard.running_requests.insert(uuid);
                                 // Store the PrefillCost in active_tokens
                                 prefill_costs_guard.insert(uuid, Some(prefill_cost));
                             } else {
-                                // Check if this was a direct request that needs conversion
-                                if let Some((_, Request::Direct(_))) = state_guard.waiting_requests.front() {
-                                    // Only convert DirectRequest to ActiveSequence once
-                                    let (uuid, _) = state_guard.waiting_requests.pop_front().unwrap();
-                                    state_guard.waiting_requests.push_front((uuid, Request::Active(active_sequence)));
-                                }
                                 break;
                             }
                         }
@@ -186,9 +190,14 @@ impl Scheduler {
                         // Accumulate total sleep duration
                         let mut total_sleep_duration = Duration::from_millis(0);
 
-                        for (uuid, sequence) in state_guard.running_requests.iter_mut() {
+                        for uuid in state_guard.running_requests.clone() {
+                            // Get the active sequence for this UUID
+                            let sequence = state_guard.requests.get_mut(&uuid)
+                                .and_then(|req| if let Request::Active(seq) = req { Some(seq) } else { None })
+                                .expect("UUID in running_requests must have a corresponding active sequence");
+
                             // Get the prefill cost for sleep calculation if available
-                            let prefill_cost = prefill_costs_guard.get(uuid).and_then(|cost| cost.as_ref());
+                            let prefill_cost = prefill_costs_guard.get(&uuid).and_then(|cost| cost.as_ref());
 
                             // Generate token and get signals
                             let signals = sequence.generate();
@@ -208,23 +217,24 @@ impl Scheduler {
 
                             // Send UUID notification for each generated token
                             if let Some(tx) = &output_tx_clone {
-                                let _ = tx.try_send(*uuid);
+                                let _ = tx.try_send(uuid);
                             }
 
                             // Set active_tokens to None after a token is generated
                             if sequence.generated_tokens == 1 {
-                                prefill_costs_guard.insert(*uuid, None);
+                                prefill_costs_guard.insert(uuid, None);
                             }
 
                             // Check if we're done after generating
                             if sequence.generated_tokens >= sequence.max_output_tokens {
-                                uuids_to_remove.push(*uuid);
+                                uuids_to_remove.push(uuid);
                             }
                         }
 
                         // Remove completed sequences
                         for uuid in uuids_to_remove {
                             state_guard.running_requests.remove(&uuid);
+                            state_guard.requests.remove(&uuid);
                             prefill_costs_guard.remove(&uuid);
                         }
 

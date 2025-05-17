@@ -261,11 +261,11 @@ impl ActiveSequence {
         }
 
         // Free all blocks when we reach max tokens
-        self.free()
+        self.free_signal()
     }
 
     /// Free all blocks, generating appropriate signals for each block type
-    fn free(&self) -> Vec<MoveBlock> {
+    fn free_signal(&self) -> Vec<MoveBlock> {
         let mut signals = Vec::new();
 
         // Collect blocks to deref based on type
@@ -312,7 +312,7 @@ impl ActiveSequence {
         );
 
         // Free current blocks and collect signals
-        let signals = self.free();
+        let signals = self.free_signal();
 
         (new_sequence, signals)
     }
