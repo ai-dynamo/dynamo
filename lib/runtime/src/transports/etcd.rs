@@ -28,7 +28,7 @@ use etcd_client::{
     Certificate, Compare, CompareOp, DeleteOptions, GetOptions, Identity, PutOptions, PutResponse,
     TlsOptions, Txn, TxnOp, TxnOpResponse, WatchOptions, Watcher,
 };
-
+use tokio::time::{interval, Duration};
 pub use etcd_client::{ConnectOptions, KeyValue, LeaseClient};
 
 mod lease;
@@ -340,37 +340,58 @@ impl Client {
         let kvs = get_response.take_kvs();
         tracing::trace!("initial kv count: {:?}", kvs.len());
 
-        let (tx, rx) = mpsc::channel(32);
+        let (tx, rx) = mpsc::channel(2048);
 
         self.runtime.secondary().spawn(async move {
             for kv in kvs {
                 if tx.send(WatchEvent::Put(kv)).await.is_err() {
-                    // receiver is closed
-                    break;
+                    // receiver is already closed
+                    return;
                 }
             }
-
-            while let Some(Ok(response)) = watch_stream.next().await {
-                for event in response.events() {
-                    match event.event_type() {
-                        etcd_client::EventType::Put => {
-                            if let Some(kv) = event.kv() {
-                                if let Err(err) = tx.send(WatchEvent::Put(kv.clone())).await {
-                                    tracing::error!(
-                                        "kv watcher error forwarding WatchEvent::Put: {err}"
-                                    );
-                                    // receiver is closed
-                                    break;
+        
+            let mut ticker = interval(Duration::from_secs(15));
+        
+            loop {
+                tokio::select! {
+                    maybe_resp = watch_stream.next() => {
+                        match maybe_resp {
+                            Some(Ok(response)) => {
+                                for event in response.events() {
+                                    match event.event_type() {
+                                        etcd_client::EventType::Put => {
+                                            if let Some(kv) = event.kv() {
+                                                if let Err(err) = tx.send(WatchEvent::Put(kv.clone())).await {
+                                                    tracing::error!(
+                                                        "kv watcher error forwarding WatchEvent::Put: {err}"
+                                                    );
+                                                    // receiver is closed → shut everything down
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                        etcd_client::EventType::Delete => {
+                                            if let Some(kv) = event.kv() {
+                                                if tx.send(WatchEvent::Delete(kv.clone())).await.is_err() {
+                                                    // receiver is closed
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
+                            }
+                            // the stream ended or errored out
+                            _ => {
+                                tracing::info!("kv watch stream closed");
+                                return;
                             }
                         }
-                        etcd_client::EventType::Delete => {
-                            if let Some(kv) = event.kv() {
-                                if tx.send(WatchEvent::Delete(kv.clone())).await.is_err() {
-                                    // receiver is closed
-                                    break;
-                                }
-                            }
+                    }
+                    _ = ticker.tick() => {
+                        if tx.is_closed() {
+                            tracing::debug!("no more receivers, stopping watcher");
+                            return;
                         }
                     }
                 }
