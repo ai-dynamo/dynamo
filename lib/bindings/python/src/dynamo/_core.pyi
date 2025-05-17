@@ -13,7 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import AsyncGenerator, AsyncIterator, Callable, Dict, List, Optional, Union
+from typing import (
+    Any,
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Union,
+)
 
 def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
     """
@@ -663,3 +672,130 @@ class NatsQueue:
         """
         ...
 
+class Block:
+    """
+    A KV cache block
+    """
+
+    ...
+
+    def __dlpack__(self, stream: Optional[Any] = None, max_version: Optional[Any] = None, dl_device: Optional[Any] = None, copy: Optional[bool] = None) -> Any:
+        """
+        Get a dlpack capsule from the block
+        """
+        ...
+
+    def __dlpack_device__(self) -> Any:
+        """
+        Get the dlpack device of the block
+        """
+        ...
+
+class BlockList:
+    """
+    A list of KV cache blocks
+    """
+
+    ...
+
+    def __len__(self) -> int:
+        """
+        Get the number of blocks in the list
+        """
+        ...
+
+    def __getitem__(self, index: int) -> Block:
+        """
+        Get a block by index
+        """
+        ...
+
+    def __iter__(self) -> 'BlockList':
+        """
+        Get an iterator over the blocks
+        """
+        ...
+
+    def __next__(self) -> Block:
+        """
+        Get the next block in the iterator
+        """
+        ...
+
+    def to_list(self) -> List[Block]:
+        """
+        Get a list of blocks
+        """
+        ...
+
+class BlockManager:
+    """
+    A KV cache block manager
+    """
+
+    def __init__(
+        self,
+        worker_id: int,
+        num_layer: int,
+        page_size: int,
+        inner_dim: int,
+        dtype: Optional[str] = None,
+        host_num_blocks: Optional[int] = None,
+        device_num_blocks: Optional[int] = None,
+        device_id: int = 0
+    ) -> None:
+        """
+        Create a `BlockManager` object
+
+        Parameters:
+        -----------
+        worker_id: int
+            The worker ID for this block manager
+        num_layer: int
+            Number of layers in the model
+        page_size: int
+            Page size for blocks
+        inner_dim: int
+            Inner dimension size
+        dtype: Optional[str]
+            Data type (e.g., 'fp16', 'bf16', 'fp32'), defaults to 'fp16' if None
+        host_num_blocks: Optional[int]
+            Number of host blocks to allocate, None means no host blocks
+        device_num_blocks: Optional[int]
+            Number of device blocks to allocate, None means no device blocks
+        device_id: int
+            CUDA device ID, defaults to 0
+        """
+        ...
+
+    def allocate_host_blocks_blocking(self, count: int) -> BlockList:
+        """
+        Allocate a list of host blocks (blocking call)
+
+        Parameters:
+        -----------
+        count: int
+            Number of blocks to allocate
+
+        Returns:
+        --------
+        BlockList
+            List of allocated blocks
+        """
+        ...
+
+    def allocate_device_blocks_blocking(self, count: int) -> BlockList:
+        """
+        Allocate a list of device blocks (blocking call)
+
+        Parameters:
+        -----------
+        count: int
+            Number of blocks to allocate
+
+        Returns:
+        --------
+        BlockList
+            List of allocated blocks
+        """
+        ...
