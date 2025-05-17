@@ -18,8 +18,9 @@ from __future__ import annotations
 import logging
 
 import sglang as sgl
+from sglang.srt.server_args import ServerArgs
 from utils.protocol import DisaggPreprocessedRequest
-from utils.sglang import parse_sglang_args
+from utils.args import parse_sglang_args
 
 from dynamo.sdk import dynamo_endpoint, service
 
@@ -35,12 +36,11 @@ logger = logging.getLogger(__name__)
     workers=1,
 )
 class SGLangDecodeWorker:
-    def __init__(self):
-        class_name = self.__class__.__name__
-        self.engine_args = parse_sglang_args(class_name, "")
+    def __init__(self, engine_args: ServerArgs):
+        self.engine_args = engine_args
         self.engine = sgl.Engine(server_args=self.engine_args)
 
-        logger.warning("Decode worker initialized")
+        logger.info("Decode worker initialized")
 
     @dynamo_endpoint()
     async def generate(self, req: DisaggPreprocessedRequest):
@@ -55,3 +55,25 @@ class SGLangDecodeWorker:
 
         async for result in g:
             yield result
+
+if __name__ == "__main__":
+    import asyncio
+    import uvloop
+    from dynamo.runtime import DistributedRuntime, dynamo_worker
+
+    engine_args: ServerArgs = parse_sglang_args()
+
+    @dynamo_worker()
+    async def worker(runtime: DistributedRuntime, engine_args):
+        worker = SGLangDecodeWorker(engine_args)
+
+        component = runtime.namespace("dynamo").component(SGLangDecodeWorker.__name__)
+        await component.create_service()
+
+        # serve endpoint
+        endpoint = component.endpoint("generate")
+        await endpoint.serve_endpoint(worker.generate)
+
+
+    uvloop.install()
+    asyncio.run(worker(engine_args))

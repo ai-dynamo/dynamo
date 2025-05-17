@@ -30,10 +30,12 @@ import random
 import socket
 
 import sglang as sgl
+from sglang.srt.server_args import ServerArgs
 from components.decode_worker import SGLangDecodeWorker
 from sglang.srt.utils import get_ip
+from dynamo.runtime import DistributedRuntime, dynamo_worker
 from utils.protocol import DisaggPreprocessedRequest, PreprocessedRequest
-from utils.sglang import parse_sglang_args
+from utils.args import parse_sglang_args
 
 from dynamo.llm import ModelType, register_llm
 from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
@@ -51,34 +53,16 @@ logger = logging.getLogger(__name__)
 class SGLangWorker:
     decode_worker = depends(SGLangDecodeWorker)
 
-    def __init__(self):
-        class_name = self.__class__.__name__
-        self.engine_args = parse_sglang_args(class_name, "")
+    def __init__(self, engine_args: ServerArgs, decode_client=None):
+        self.engine_args = engine_args
         self.engine = sgl.Engine(server_args=self.engine_args)
-
-        logger.info("SGLangWorker initialized")
-
-    @async_on_start
-    async def async_init(self):
-        runtime = dynamo_context["runtime"]
-        logger.info("Registering LLM for discovery")
-        comp_ns, comp_name = SGLangWorker.dynamo_address()  # type: ignore
-        endpoint = runtime.namespace(comp_ns).component(comp_name).endpoint("generate")
-        await register_llm(
-            ModelType.Backend,
-            endpoint,
-            self.engine_args.model_path,
-            self.engine_args.served_model_name,
-        )
+        self.decode_client = decode_client
+        
+        # Initialize bootstrap info if needed
         if self.engine_args.disaggregation_mode:
             self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info()
-            comp_ns, comp_name = SGLangDecodeWorker.dynamo_address()  # type: ignore
-            self.decode_client = (
-                await runtime.namespace(comp_ns)
-                .component(comp_name)
-                .endpoint("generate")
-                .client()
-            )
+        
+        logger.info("SGLangWorker initialized")
 
     def _get_bootstrap_info(self):
         """
@@ -114,13 +98,12 @@ class SGLangWorker:
 
     @dynamo_endpoint()
     async def generate(self, request: PreprocessedRequest):
-        # TODO: maintain a mapping from SGLang's Ouput struct to LLMEngineOuput
         sampling_params = self._build_sampling_params(request)
 
         if self.engine_args.disaggregation_mode != "null":
             bootstrap_room = self._generate_bootstrap_room()
 
-            # decode worker request
+            # Create disaggregation request
             disagg_request = DisaggPreprocessedRequest(
                 request=request,
                 sampling_params=sampling_params,
@@ -147,6 +130,7 @@ class SGLangWorker:
 
             await prefill_task
         else:
+            print("Generating without disaggregation")
             g = await self.engine.async_generate(
                 input_ids=request.token_ids,
                 sampling_params=sampling_params,
@@ -176,3 +160,41 @@ class SGLangWorker:
     async def _prefill_generator(self, prefill):
         async for _ in prefill:
             pass
+
+if __name__ == "__main__":
+    import asyncio
+    import uvloop
+    from dynamo.runtime import DistributedRuntime, dynamo_worker
+
+    engine_args: ServerArgs = parse_sglang_args()
+
+    @dynamo_worker()
+    async def worker(runtime: DistributedRuntime, engine_args):
+        component = runtime.namespace("dynamo").component(SGLangWorker.__name__)
+        await component.create_service()
+
+        endpoint = component.endpoint("generate")
+
+        if engine_args.disaggregation_mode:
+            decode_client = (
+                await runtime.namespace("dynamo")
+                .component(SGLangDecodeWorker.__name__)
+                .endpoint("generate")
+                .client()
+            )
+        else:
+            decode_client = None
+
+        worker = SGLangWorker(engine_args, decode_client)
+
+        await register_llm(
+            ModelType.Backend,
+            endpoint,
+            engine_args.model_path,
+            engine_args.served_model_name,
+        )
+
+        await endpoint.serve_endpoint(worker.generate)
+
+    uvloop.install()
+    asyncio.run(worker(engine_args))
