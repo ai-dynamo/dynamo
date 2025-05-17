@@ -39,6 +39,7 @@ MOUNT_WORKSPACE=
 ENVIRONMENT_VARIABLES=
 REMAINING_ARGS=
 INTERACTIVE=
+USE_NIXL_GDS=
 
 get_options() {
     while :; do
@@ -142,6 +143,9 @@ get_options() {
 	--mount-workspace)
 	    MOUNT_WORKSPACE=TRUE
 	    ;;
+        --use-nixl-gds)
+            USE_NIXL_GDS=TRUE
+            ;;
         --dry-run)
             RUN_PREFIX="echo"
             echo ""
@@ -251,6 +255,12 @@ get_options() {
 	RM_STRING=" --rm "
     fi
 
+    if [ -n "$USE_NIXL_GDS" ]; then
+        VOLUME_MOUNTS+=" -v /run/udev:/run/udev:ro "
+        NIXL_GDS_CAPS="--cap-add=IPC_LOCK"
+    else
+        NIXL_GDS_CAPS=""
+    fi
 
     REMAINING_ARGS=("$@")
 }
@@ -264,6 +274,7 @@ show_help() {
     echo "  [--dry-run print docker commands without running]"
     echo "  [--hf-cache directory to volume mount as the hf cache, default is NONE unless mounting workspace]"
     echo "  [--gpus gpus to enable, default is 'all', 'none' disables gpu support]"
+    echo "  [--use-nixl-gds add volume mounts and capabilities needed for NVIDIA GPUDirect Storage]"
     echo "  [-v add volume mount]"
     echo "  [-e add environment variable]"
     echo "  [--mount-workspace set up for local development]"
@@ -301,6 +312,7 @@ ${RUN_PREFIX} docker run \
     ${VOLUME_MOUNTS} \
     -w /workspace \
     --cap-add CAP_SYS_PTRACE \
+    ${NIXL_GDS_CAPS} \
     --ipc host \
     ${PRIVILEGED_STRING} \
     ${NAME_STRING} \

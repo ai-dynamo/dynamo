@@ -160,7 +160,13 @@ mod nixl {
         }
 
         fn device_id(&self) -> u64 {
-            self._block_data.layout.storage_type().nixl_device_id()
+            self._block_data
+                .layout
+                .storage()
+                .into_iter()
+                .next()
+                .unwrap()
+                .device_id()
         }
     }
 
@@ -184,7 +190,13 @@ mod nixl {
         }
 
         fn device_id(&self) -> u64 {
-            self._block_data.layout.storage_type().nixl_device_id()
+            self._block_data
+                .layout
+                .storage()
+                .into_iter()
+                .next()
+                .unwrap()
+                .device_id()
         }
     }
 

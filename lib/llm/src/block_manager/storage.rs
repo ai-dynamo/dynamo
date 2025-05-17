@@ -78,9 +78,11 @@
 //! - [`StorageAllocator`] - Factory for creating storage instances
 
 pub mod cuda;
+pub mod disk;
 pub mod nixl;
 
 pub use cuda::*;
+pub use disk::*;
 
 use std::{
     alloc::{alloc_zeroed, dealloc, Layout},
@@ -106,6 +108,9 @@ pub enum StorageType {
 
     /// CUDA page-locked host memory
     Pinned,
+
+    /// Disk memory
+    Disk,
 
     /// Remote memory accessible through NIXL
     Nixl,

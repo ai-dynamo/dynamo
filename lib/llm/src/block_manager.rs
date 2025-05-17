@@ -36,13 +36,15 @@ pub use block::{
         RemoteBlock,
     },
     transfer::{BlockTransferEngineV1, TransferRequestPut},
-    BasicMetadata, BlockMetadata, Blocks,
+    BasicMetadata, BlockMetadata, Blocks, ImmutableBlock,
 };
 pub use config::*;
 pub use layout::{nixl::NixlLayout, LayoutConfig, LayoutConfigBuilder, LayoutError, LayoutType};
+use offload::request::BlockResult;
 pub use pool::BlockPool;
 pub use storage::{
-    nixl::NixlRegisterableStorage, DeviceStorage, PinnedStorage, Storage, StorageAllocator,
+    nixl::NixlRegisterableStorage, DeviceStorage, DiskStorage, PinnedStorage, Storage,
+    StorageAllocator,
 };
 pub use tokio_util::sync::CancellationToken;
 
@@ -143,6 +145,11 @@ impl<Metadata: BlockMetadata> KvBlockManager<Metadata> {
         self.state.get_remote_blocks_mutable(bds)
     }
 
+    /// Get a reference to the disk block pool
+    pub fn disk(&self) -> Option<&BlockPool<DiskStorage, Metadata>> {
+        self.state.disk()
+    }
+
     /// Get a reference to the host block pool
     pub fn host(&self) -> Option<&BlockPool<PinnedStorage, Metadata>> {
         self.state.host()
@@ -156,6 +163,13 @@ impl<Metadata: BlockMetadata> KvBlockManager<Metadata> {
     /// Get the worker ID
     pub fn worker_id(&self) -> WorkerID {
         self.state.worker_id()
+    }
+
+    pub async fn onboard_blocks<S: Storage>(
+        &self,
+        blocks: Vec<ImmutableBlock<S, Metadata>>,
+    ) -> BlockResult<DeviceStorage, Metadata> {
+        self.state.onboard_blocks(blocks).await
     }
 }
 
