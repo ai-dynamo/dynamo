@@ -166,9 +166,8 @@ class BentoServiceAdapter(ServiceMixin, ServiceInterface[T]):
         return list(self._endpoints.keys())
 
     def link(self, next_service: "ServiceInterface") -> "ServiceInterface":
-        # Check if the next service is a BentoML service adapter
-        LinkedServices.add((self, next_service))
-        return next_service
+        # Call the base implementation which handles AbstractDynamoService dependencies
+        return super().link(next_service)
 
     def remove_unused_edges(self, used_edges: Set["ServiceInterface"]) -> None:
         current_deps = dict(self._dependencies)
