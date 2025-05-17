@@ -22,7 +22,7 @@ from sqlalchemy import Column, DateTime
 from sqlmodel import Field as SQLField
 from sqlmodel import UniqueConstraint
 
-from .components import DynamoNimBase, DynamoNimVersionBase
+from .components import DynamoComponentBase, DynamoComponentVersionBase
 
 """
 This file stores all of the models/tables stored in the SQL database.
@@ -72,12 +72,14 @@ def make_aware(dt: Optional[datetime]) -> Optional[datetime]:
     return dt
 
 
-class DynamoNimVersion(DynamoNimVersionBase, table=True):
+class DynamoComponentVersion(DynamoComponentVersionBase, table=True):
     """A row in the dynamo nim table."""
 
     __tablename__ = "dynamonimversion"
     __table_args__ = (
-        UniqueConstraint("dynamo_nim_id", "version", name="version_unique_per_nim"),
+        UniqueConstraint(
+            "dynamo_component_id", "version", name="version_unique_per_nim"
+        ),
     )
 
     id: str = SQLField(default_factory=new_compound_entity_id, primary_key=True)
@@ -95,10 +97,10 @@ class DynamoNimVersion(DynamoNimVersionBase, table=True):
     # upload_finished_at: datetime = SQLField(sa_column=Column(DateTime, nullable=True))
     build_at: datetime = SQLField(sa_column=Column(DateTime, nullable=False))
 
-    dynamo_nim_id: str = SQLField(foreign_key="dynamonim.id")
+    dynamo_component_id: str = SQLField(foreign_key="dynamonim.id")
 
 
-class DynamoNim(DynamoNimBase, table=True):
+class DynamoComponent(DynamoComponentBase, table=True):
     """A row in the dynamo nim table."""
 
     __tablename__ = "dynamonim"

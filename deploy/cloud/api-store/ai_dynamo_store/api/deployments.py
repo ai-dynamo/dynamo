@@ -37,13 +37,13 @@ from .k8s import (
 router = APIRouter(prefix="/api/v2/deployments", tags=["deployments"])
 
 
-def sanitize_deployment_name(name: Optional[str], dynamo_nim: str) -> str:
+def sanitize_deployment_name(name: Optional[str], dynamo_component: str) -> str:
     """
     Resolve a name for the DynamoGraphDeployment that will work safely in k8s
 
     Args:
         name: Optional custom name
-        dynamo_nim: Bento name and version (format: name:version)
+        dynamo_component: Component name and version (format: name:version)
 
     Returns:
         A unique deployment name that is at most 63 characters
@@ -52,11 +52,11 @@ def sanitize_deployment_name(name: Optional[str], dynamo_nim: str) -> str:
         # If name is provided, truncate it to 63
         base_name = name[:63]
     else:
-        # Generate base name from dynamoNim
-        dynamo_nim_parts = dynamo_nim.split(":")
-        if len(dynamo_nim_parts) != 2:
-            raise ValueError("Invalid dynamoNim format, expected 'name:version'")
-        base_name = f"dep-{dynamo_nim_parts[0]}-{dynamo_nim_parts[1]}"
+        # Generate base name from dynamo_component
+        dynamo_component_parts = dynamo_component.split(":")
+        if len(dynamo_component_parts) != 2:
+            raise ValueError("Invalid dynamo_component format, expected 'name:version'")
+        base_name = f"dep-{dynamo_component_parts[0]}-{dynamo_component_parts[1]}"
         # Truncate to 63 chars
         base_name = base_name[:63]
 
@@ -88,7 +88,7 @@ async def create_deployment(deployment: CreateDeploymentSchema):
         created_crd = create_dynamo_deployment(
             name=deployment_name,
             namespace=kube_namespace,
-            dynamo_nim=deployment.bento,
+            dynamo_component=deployment.bento or deployment.component,
             labels={
                 "ngc-organization": ownership["organization_id"],
                 "ngc-user": ownership["user_id"],

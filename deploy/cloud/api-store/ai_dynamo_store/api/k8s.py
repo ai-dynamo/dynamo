@@ -64,7 +64,7 @@ def create_custom_resource(
 def create_dynamo_deployment(
     name: str,
     namespace: str,
-    dynamo_nim: str,
+    dynamo_component: str,
     labels: Dict[str, str],
     envs: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
@@ -74,7 +74,7 @@ def create_dynamo_deployment(
     Args:
         name: Deployment name
         namespace: Target namespace
-        dynamo_nim: Bento name and version (format: name:version)
+        dynamo_component: Bento name and version (format: name:version)
         labels: Resource labels
         envs: Optional list of environment variables
 
@@ -86,7 +86,7 @@ def create_dynamo_deployment(
         "kind": "DynamoGraphDeployment",
         "metadata": {"name": name, "namespace": namespace, "labels": labels},
         "spec": {
-            "dynamoGraph": dynamo_nim,
+            "dynamoGraph": dynamo_component,
             "services": {},
             "envs": envs if envs else [],
         },

@@ -91,18 +91,25 @@ class ScalingPolicy:
 
 
 @dataclass
+class Env:
+    name: str
+    value: str = ""
+
+
+@dataclass
 class Service:
     """A single component."""
 
     name: str
     namespace: str
-    class_name: str
     id: str | None = None
     cmd: list[str] = field(default_factory=list)
     resources: Resources | None = None
-    environment: dict[str, str] = field(default_factory=dict)
+    envs: list[Env] = field(default_factory=list)
     secrets: list[str] = field(default_factory=list)
     scaling: ScalingPolicy = field(default_factory=lambda: ScalingPolicy(policy="none"))
+    apis: dict = field(default_factory=dict)
+    size_bytes: int = 0
 
 
 @dataclass
@@ -118,11 +125,12 @@ class DeploymentManager(ABC):
     """Interface for managing dynamo graph deployments."""
 
     @abstractmethod
-    def create_deployment(self, deployment: Deployment) -> str:
+    def create_deployment(self, deployment: Deployment, **kwargs) -> str:
         """Create new deployment.
 
         Args:
             deployment: Deployment configuration
+            **kwargs: Additional backend-specific arguments
 
         Returns:
             The ID of the created deployment
@@ -130,21 +138,25 @@ class DeploymentManager(ABC):
         pass
 
     @abstractmethod
-    def update_deployment(self, deployment_id: str, deployment: Deployment) -> None:
+    def update_deployment(
+        self, deployment_id: str, deployment: Deployment, **kwargs
+    ) -> None:
         """Update an existing deployment.
 
         Args:
             deployment_id: The ID of the deployment to update
             deployment: New deployment configuration
+            **kwargs: Additional backend-specific arguments
         """
         pass
 
     @abstractmethod
-    def get_deployment(self, deployment_id: str) -> dict[str, t.Any]:
+    def get_deployment(self, deployment_id: str, **kwargs) -> dict[str, t.Any]:
         """Get deployment details.
 
         Args:
             deployment_id: The ID of the deployment
+            **kwargs: Additional backend-specific arguments
 
         Returns:
             Dictionary containing deployment details
@@ -152,8 +164,11 @@ class DeploymentManager(ABC):
         pass
 
     @abstractmethod
-    def list_deployments(self) -> list[dict[str, t.Any]]:
+    def list_deployments(self, **kwargs) -> list[dict[str, t.Any]]:
         """List all deployments.
+
+        Args:
+            **kwargs: Additional backend-specific arguments
 
         Returns:
             List of dictionaries containing deployment id and details
@@ -161,20 +176,22 @@ class DeploymentManager(ABC):
         pass
 
     @abstractmethod
-    def delete_deployment(self, deployment_id: str) -> None:
+    def delete_deployment(self, deployment_id: str, **kwargs) -> None:
         """Delete a deployment.
 
         Args:
             deployment_id: The ID of the deployment to delete
+            **kwargs: Additional backend-specific arguments
         """
         pass
 
     @abstractmethod
-    def get_status(self, deployment_id: str) -> DeploymentStatus:
+    def get_status(self, deployment_id: str, **kwargs) -> DeploymentStatus:
         """Get the current status of a deployment.
 
         Args:
             deployment_id: The ID of the deployment
+            **kwargs: Additional backend-specific arguments
 
         Returns:
             The current status of the deployment
@@ -182,12 +199,15 @@ class DeploymentManager(ABC):
         pass
 
     @abstractmethod
-    def wait_until_ready(self, deployment_id: str, timeout: int = 3600) -> bool:
+    def wait_until_ready(
+        self, deployment_id: str, timeout: int = 3600, **kwargs
+    ) -> bool:
         """Wait until a deployment is ready.
 
         Args:
             deployment_id: The ID of the deployment
             timeout: Maximum time to wait in seconds
+            **kwargs: Additional backend-specific arguments
 
         Returns:
             True if deployment became ready, False if timed out
@@ -195,11 +215,12 @@ class DeploymentManager(ABC):
         pass
 
     @abstractmethod
-    def get_endpoint_urls(self, deployment_id: str) -> list[str]:
+    def get_endpoint_urls(self, deployment_id: str, **kwargs) -> list[str]:
         """Get the list of endpoint urls attached to a deployment.
 
         Args:
             deployment_id: The ID of the deployment
+            **kwargs: Additional backend-specific arguments
 
         Returns:
             List of deployment's endpoint urls

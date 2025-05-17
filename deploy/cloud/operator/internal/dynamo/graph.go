@@ -151,7 +151,7 @@ func RetrieveDynamoGraphDownloadURL(ctx context.Context, dynamoDeployment *v1alp
 		recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for dynamo graph %s from api store service", dynamoDeployment.Spec.DynamoGraph)
 		dynamoGraphDownloadURL = dynamoComponent_.PresignedDownloadUrl
 	} else {
-		dynamoGraphDownloadURL = fmt.Sprintf("%s/api/v1/dynamo_nims/%s/versions/%s/download", apiStoreConf.Endpoint, dynamoComponentRepositoryName, dynamoComponentVersion)
+		dynamoGraphDownloadURL = fmt.Sprintf("%s/api/v1/dynamo_components/%s/versions/%s/download", apiStoreConf.Endpoint, dynamoComponentRepositoryName, dynamoComponentVersion)
 	}
 
 	return &dynamoGraphDownloadURL, nil
