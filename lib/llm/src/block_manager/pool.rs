@@ -70,6 +70,7 @@ pub use super::block::{ImmutableBlock, MutableBlock};
 
 use super::block::{
     nixl::short_type_name, registry::BlockRegistry, Block, BlockError, BlockMetadata,
+    GlobalRegistry,
 };
 use super::events::{EventManager, NullEventManager};
 use super::storage::Storage;
@@ -116,15 +117,18 @@ pub struct BlockPoolArgs<S: Storage, M: BlockMetadata> {
 
     #[builder(default)]
     blocks: Vec<Block<S, M>>,
+
+    #[builder(default)]
+    global_pool: GlobalRegistry,
 }
 
 impl<S: Storage, M: BlockMetadata> BlockPoolArgsBuilder<S, M> {
     pub fn build(self) -> anyhow::Result<BlockPool<S, M>> {
         let args = self.build_internal()?;
-        let (event_manager, cancel_token, blocks) = args.dissolve();
+        let (event_manager, cancel_token, blocks, global_pool) = args.dissolve();
 
         tracing::info!("building block pool");
-        let pool = BlockPool::new(event_manager, cancel_token, blocks);
+        let pool = BlockPool::new(event_manager, cancel_token, blocks, global_pool);
 
         Ok(pool)
     }
@@ -200,9 +204,10 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
         event_manager: Arc<dyn EventManager>,
         cancel_token: CancellationToken,
         blocks: Vec<Block<S, M>>,
+        global_pool: GlobalRegistry,
     ) -> Self {
         let (pool, progress_engine) =
-            Self::with_progress_engine(event_manager, cancel_token, blocks);
+            Self::with_progress_engine(event_manager, cancel_token, blocks, global_pool);
 
         // pool.runtime.handle().spawn(async move {
         //     let mut progress_engine = progress_engine;
@@ -239,12 +244,19 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
         event_manager: Arc<dyn EventManager>,
         cancel_token: CancellationToken,
         blocks: Vec<Block<S, M>>,
+        global_pool: GlobalRegistry,
     ) -> (Self, ProgressEngine<S, M>) {
         let (priority_tx, priority_rx) = tokio::sync::mpsc::unbounded_channel();
         let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let progress_engine =
-            ProgressEngine::<S, M>::new(event_manager, priority_rx, ctrl_rx, cancel_token, blocks);
+        let progress_engine = ProgressEngine::<S, M>::new(
+            event_manager,
+            priority_rx,
+            ctrl_rx,
+            cancel_token,
+            blocks,
+            global_pool,
+        );
 
         (
             Self {
@@ -468,9 +480,9 @@ mod tests {
             self,
         ) -> anyhow::Result<(BlockPool<S, M>, ProgressEngine<S, M>)> {
             let args = self.build_internal()?;
-            let (event_manager, cancel_token, blocks) = args.dissolve();
+            let (event_manager, cancel_token, blocks, global_pool) = args.dissolve();
             let (pool, progress_engine) =
-                BlockPool::with_progress_engine(event_manager, cancel_token, blocks);
+                BlockPool::with_progress_engine(event_manager, cancel_token, blocks, global_pool);
 
             Ok((pool, progress_engine))
         }

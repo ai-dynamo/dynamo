@@ -30,7 +30,7 @@ pub enum BlockState {
     Reset,
     Partial(PartialState),
     Complete(CompleteState),
-    Registered(Arc<RegistrationHandle>),
+    Registered(Arc<RegistrationHandle>, Arc<()>),
 }
 
 impl BlockState {
@@ -109,7 +109,7 @@ impl BlockState {
             BlockState::Reset => Some(0),
             BlockState::Partial(state) => Some(state.block.len()),
             BlockState::Complete(state) => Some(state.token_block.tokens().len()),
-            BlockState::Registered(_) => None,
+            BlockState::Registered(_, _) => None,
         }
     }
 
@@ -126,15 +126,15 @@ impl BlockState {
         match self {
             BlockState::Reset => true,
             BlockState::Partial(state) => state.block.is_empty(),
-            BlockState::Complete(_) => false,   // Always full
-            BlockState::Registered(_) => false, // Always full
+            BlockState::Complete(_) => false,      // Always full
+            BlockState::Registered(_, _) => false, // Always full
         }
     }
 
     /// Returns a reference to the underlying TokenBlock if the state is Complete or Registered.
     pub fn tokens(&self) -> Option<&Tokens> {
         match self {
-            BlockState::Reset | BlockState::Registered(_) => None,
+            BlockState::Reset | BlockState::Registered(_, _) => None,
             BlockState::Partial(state) => Some(state.block.tokens()),
             BlockState::Complete(state) => Some(state.token_block.tokens()),
         }
@@ -147,12 +147,12 @@ impl BlockState {
 
     /// Returns true if the block is in the complete or registered state
     pub fn is_complete(&self) -> bool {
-        matches!(self, BlockState::Complete(_) | BlockState::Registered(_))
+        matches!(self, BlockState::Complete(_) | BlockState::Registered(_, _))
     }
 
     /// Returns true if the block is in the registered state
     pub fn is_registered(&self) -> bool {
-        matches!(self, BlockState::Registered(_state))
+        matches!(self, BlockState::Registered(_state, _))
     }
 }
 

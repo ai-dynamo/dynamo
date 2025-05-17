@@ -24,11 +24,12 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
     fn new(
         event_manager: Arc<dyn EventManager>,
         return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, M>>,
+        global_pool: GlobalRegistry,
     ) -> Self {
         Self {
             active: ActiveBlockPool::new(),
             inactive: InactiveBlockPool::new(),
-            registry: BlockRegistry::new(event_manager.clone()),
+            registry: BlockRegistry::new(event_manager.clone(), global_pool),
             return_tx,
             event_manager,
         }
@@ -88,7 +89,7 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
         return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, M>>,
     ) -> Block<S, M> {
         while let Some(block) = return_rx.recv().await {
-            if matches!(block.state(), BlockState::Registered(handle) if handle.sequence_hash() == sequence_hash)
+            if matches!(block.state(), BlockState::Registered(handle, _) if handle.sequence_hash() == sequence_hash)
             {
                 return block;
             }
@@ -151,7 +152,7 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
 
             let mutable = if let Some(raw_block) = self.inactive.match_sequence_hash(sequence_hash)
             {
-                assert!(matches!(raw_block.state(), BlockState::Registered(_)));
+                assert!(matches!(raw_block.state(), BlockState::Registered(_, _)));
                 MutableBlock::new(raw_block, self.return_tx.clone())
             } else {
                 // Attempt to register the block
@@ -161,7 +162,10 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
 
                 match result {
                     Ok(handle) => {
-                        publish_handles.take_handle(handle);
+                        // Only create our publish handle if this block is new, and not transfered.
+                        if let Some(handle) = handle {
+                            publish_handles.take_handle(handle);
+                        }
                         block
                     }
                     Err(BlockRegistationError::BlockAlreadyRegistered(_)) => {
@@ -221,7 +225,7 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
                 };
 
             // this assert allows us to skip the error checking on the active pool registration step
-            assert!(matches!(raw_block.state(), BlockState::Registered(_)));
+            assert!(matches!(raw_block.state(), BlockState::Registered(_, _)));
 
             let mutable = MutableBlock::new(raw_block, self.return_tx.clone());
 
@@ -254,9 +258,10 @@ impl<S: Storage, M: BlockMetadata> ProgressEngine<S, M> {
         ctrl_rx: tokio::sync::mpsc::UnboundedReceiver<ControlRequest<S, M>>,
         cancel_token: CancellationToken,
         blocks: Vec<Block<S, M>>,
+        global_pool: GlobalRegistry,
     ) -> Self {
         let (return_tx, return_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = State::<S, M>::new(event_manager, return_tx);
+        let mut state = State::<S, M>::new(event_manager, return_tx, global_pool);
 
         tracing::debug!(count = blocks.len(), "adding blocks to inactive pool");
         state.inactive.add_blocks(blocks);

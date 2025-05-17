@@ -17,12 +17,12 @@ use super::*;
 
 use super::offload::OffloadManager;
 use super::{
-    block::{Block, ImmutableBlock},
+    block::{Block, GlobalRegistry, ImmutableBlock},
     config::NixlOptions,
     pool::BlockPoolError,
 };
 use cudarc::driver::CudaStream;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub struct TransferContext {
     nixl_agent: Option<NixlAgent>,
@@ -75,6 +75,8 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
         // Create a map of NIXL backends
         let mut nixl_backends: HashMap<String, Arc<nixl_sys::Backend>> = HashMap::new();
 
+        let global_pool = Arc::new(Mutex::new(HashMap::new()));
+
         // Create a NIXL agent if NIXL is enabled and instantiate requested backends
         // TODO: Build a map of NIXL backends to block pools/sets
         let nixl_agent = match config.runtime.nixl {
@@ -119,6 +121,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 next_block_set_idx,
                 cancellation_token.clone(),
                 worker_id,
+                global_pool.clone(),
             )?;
             (Arc::new(Some(pool)), Some(blocks))
         } else {
@@ -137,6 +140,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 next_block_set_idx,
                 cancellation_token.clone(),
                 worker_id,
+                global_pool.clone(),
             )?;
             (Arc::new(Some(pool)), Some(blocks))
         } else {
@@ -411,10 +415,12 @@ fn create_block_pool<S: Storage + NixlRegisterableStorage, M: BlockMetadata>(
     block_set_idx: usize,
     cancellation_token: CancellationToken,
     worker_id: WorkerID,
+    global_pool: GlobalRegistry,
 ) -> Result<(BlockPool<S, M>, Vec<Block<S, M>>)> {
     let blocks = block::layout_to_blocks::<_, M>(layout, block_set_idx, worker_id)?;
     let pool = BlockPool::<S, M>::builder()
         .cancel_token(cancellation_token)
+        .global_pool(global_pool)
         .build()?;
     Ok((pool, blocks))
 }

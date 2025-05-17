@@ -13,9 +13,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! # KV Cache Block Registration
+//!
+//! - This module is responsible for maintaining a registry of all blocks currently within a pool.
+//!   This consists of two components: A global registry of all blocks, and a per-pool registry of blocks.
+//! - The global registry is a mapping of sequences hashes to registration handles. If two blocks in different pools
+//!   have the same sequence hash, then they will share the same registration handle. The global registry is shared across all pools.
+//! - The per-pool registry is a mapping of sequence hashes to block handles. This is used to track which blocks are
+//!   currently within a specific pool. The block handle is unique across pools, and is used to track the block's lifetime.
+//! - When a block is in the registered state, it has a unique block handle and a possibly shared registration handle.
+//!
+//! ## Workflow
+//!
+//! 1. When a block is registered into a pool, we create a unique block handle.
+//! 2. We then check the global registry to see if the block already exists in any other pool.
+//! 3. If it does, we use the existing registration handle. Otherwise, we create a new one.
+//! 4. When the block handle is dropped, it means that the block is no longer in the pool.
+//! 5. When the registration handle is dropped, it means that the block is no longer in any pool.
+
 use std::{
     collections::HashMap,
-    sync::{Arc, Weak},
+    sync::{Arc, Mutex, Weak},
 };
 
 use super::super::events::{EventManager, EventReleaseManager, PublishHandle};
@@ -39,17 +57,21 @@ pub enum BlockRegistationError {
 #[error("Failed to unregister block: {0}")]
 pub struct UnregisterFailure(SequenceHash);
 
+pub type GlobalRegistry = Arc<Mutex<HashMap<SequenceHash, Weak<RegistrationHandle>>>>;
+
 #[derive()]
 pub struct BlockRegistry {
-    blocks: HashMap<SequenceHash, Weak<RegistrationHandle>>,
+    blocks: HashMap<SequenceHash, Weak<()>>,
     event_manager: Arc<dyn EventManager>,
+    global_pool: GlobalRegistry,
 }
 
 impl BlockRegistry {
-    pub fn new(event_manager: Arc<dyn EventManager>) -> Self {
+    pub fn new(event_manager: Arc<dyn EventManager>, global_pool: GlobalRegistry) -> Self {
         Self {
             blocks: HashMap::new(),
             event_manager,
+            global_pool,
         }
     }
 
@@ -65,7 +87,7 @@ impl BlockRegistry {
     pub fn register_block(
         &mut self,
         block_state: &mut BlockState,
-    ) -> Result<PublishHandle, BlockRegistationError> {
+    ) -> Result<Option<PublishHandle>, BlockRegistationError> {
         match block_state {
             BlockState::Reset => Err(BlockRegistationError::InvalidState(
                 "Block is in Reset state".to_string(),
@@ -76,27 +98,54 @@ impl BlockRegistry {
 
             BlockState::Complete(state) => {
                 let sequence_hash = state.token_block().sequence_hash();
+                // If an identical block already exists in this pool, return an error.
                 if let Some(handle) = self.blocks.get(&sequence_hash) {
                     if let Some(_handle) = handle.upgrade() {
                         return Err(BlockRegistationError::BlockAlreadyRegistered(sequence_hash));
                     }
                 }
 
-                // Create the [RegistrationHandle] and [PublishHandle]
-                let publish_handle =
-                    Self::create_publish_handle(state.token_block(), self.event_manager.clone());
-                let reg_handle = publish_handle.remove_handle();
+                let mut publish_handle = None;
 
-                // Insert the [RegistrationHandle] into the registry
+                let block_handle = Arc::new(());
+
+                let reg_handle = 'reg_block: {
+                    // Now, check the global registry.
+                    let mut global_pool = self.global_pool.lock().unwrap();
+
+                    // If an identical block exists in other pool, use the same registration handle.
+                    if let Some(handle) = global_pool.get(&sequence_hash) {
+                        if let Some(handle) = handle.upgrade() {
+                            break 'reg_block handle;
+                        }
+                    }
+
+                    // Otherwise, create a new registration handle.
+                    publish_handle = Some(Self::create_publish_handle(
+                        state.token_block(),
+                        self.event_manager.clone(),
+                    ));
+                    let reg_handle = publish_handle.as_ref().unwrap().remove_handle();
+
+                    // Insert the registration handle into the global registry.
+                    global_pool.insert(sequence_hash, Arc::downgrade(&reg_handle));
+
+                    reg_handle
+                };
+
+                // Insert our block handle into the per-pool registry.
                 self.blocks
-                    .insert(sequence_hash, Arc::downgrade(&reg_handle));
+                    .insert(sequence_hash, Arc::downgrade(&block_handle));
 
                 // Update the [BlockState] to [BlockState::Registered]
-                let _ = std::mem::replace(block_state, BlockState::Registered(reg_handle));
+                let _ = std::mem::replace(
+                    block_state,
+                    BlockState::Registered(reg_handle, block_handle),
+                );
 
                 Ok(publish_handle)
             }
-            BlockState::Registered(registered) => Err(
+            BlockState::Registered(registered, _) => Err(
                 BlockRegistationError::BlockAlreadyRegistered(registered.sequence_hash()),
             ),
         }

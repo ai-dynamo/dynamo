@@ -90,7 +90,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         target: &mut MutableBlock<Target, Metadata>,
     ) -> Result<()> {
         // Only registered blocks can be transferred. There are upstream checks for this, so this shouldn't ever fail.
-        if let BlockState::Registered(reg_handle) = source.state() {
+        if let BlockState::Registered(reg_handle, _) = source.state() {
             // Bring the block back to the 'Reset' state.
             target.reset();
             // Transfer metadata.
@@ -250,7 +250,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         priority: u64,
     ) -> core::result::Result<(), BlockPoolError> {
         match block.state() {
-            BlockState::Registered(_) => {}
+            BlockState::Registered(_, _) => {}
             _ => {
                 return Err(BlockPoolError::BlockError(BlockError::InvalidState(
                     "Block is not registered.".to_string(),
@@ -294,7 +294,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
     ) -> core::result::Result<Vec<ImmutableBlock<DeviceStorage, Metadata>>, BlockPoolError> {
         for block in &blocks {
             match block.state() {
-                BlockState::Registered(_) => {}
+                BlockState::Registered(_, _) => {}
                 _ => {
                     return Err(BlockPoolError::BlockError(BlockError::InvalidState(
                         "Block is not registered.".to_string(),
@@ -610,7 +610,7 @@ mod tests {
         // Check that the block is registered.
         assert!(matches!(
             onboarded_blocks[0].state(),
-            BlockState::Registered(_)
+            BlockState::Registered(_, _)
         ));
 
         compare_block_contents(&onboarded_blocks[0], &immutable_host_block).await?;
@@ -693,7 +693,7 @@ mod tests {
         );
         assert!(matches!(
             onboarded_blocks[0].state(),
-            BlockState::Registered(_)
+            BlockState::Registered(_, _)
         ));
 
         compare_block_contents(&onboarded_blocks[0], &immutable_host_block).await?;

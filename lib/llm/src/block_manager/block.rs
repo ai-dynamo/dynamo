@@ -21,6 +21,8 @@ pub mod view;
 pub use crate::tokens::TokenBlockError;
 pub use anyhow::Result;
 use nixl_sys::NixlDescriptor;
+
+pub use registry::{GlobalRegistry, RegistrationHandle};
 pub use state::{BlockState, BlockStateInvalid};
 
 use crate::block_manager::{
@@ -172,7 +174,7 @@ impl<S: Storage, M: BlockMetadata> Block<S, M> {
     pub fn sequence_hash(&self) -> Result<SequenceHash, BlockError> {
         match self.state() {
             BlockState::Complete(state) => Ok(state.token_block().sequence_hash()),
-            BlockState::Registered(state) => Ok(state.sequence_hash()),
+            BlockState::Registered(state, _) => Ok(state.sequence_hash()),
             _ => Err(BlockError::InvalidState(
                 "Block is not complete".to_string(),
             )),
@@ -248,14 +250,14 @@ pub(crate) trait PrivateBlockExt {
     fn register(
         &mut self,
         registry: &mut registry::BlockRegistry,
-    ) -> Result<PublishHandle, registry::BlockRegistationError>;
+    ) -> Result<Option<PublishHandle>, registry::BlockRegistationError>;
 }
 
 impl<S: Storage, M: BlockMetadata> PrivateBlockExt for Block<S, M> {
     fn register(
         &mut self,
         registry: &mut registry::BlockRegistry,
-    ) -> Result<PublishHandle, registry::BlockRegistationError> {
+    ) -> Result<Option<PublishHandle>, registry::BlockRegistationError> {
         registry.register_block(&mut self.state)
     }
 }
