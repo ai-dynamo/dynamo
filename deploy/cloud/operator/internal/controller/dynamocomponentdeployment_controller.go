@@ -59,6 +59,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+
+	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
+	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
 
 const (
@@ -74,6 +77,11 @@ const (
 	HeaderNameDebug                                      = "X-Nvidia-Debug"
 	DefaultIngressSuffix                                 = "local"
 	KubernetesDeploymentStrategy                         = "kubernetes"
+
+	KubeAnnotationDeploymentType = "nvidia.com/deployment-type"
+	KubeAnnotationLWSSize        = "nvidia.com/lws-size"
+	DeploymentTypeStandard       = "standard"
+	DeploymentTypeLeaderWorker   = "leader-worker"
 )
 
 // DynamoComponentDeploymentReconciler reconciles a DynamoComponentDeployment object
@@ -103,6 +111,9 @@ type DynamoComponentDeploymentReconciler struct {
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=networking.istio.io,resources=virtualservices,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;create;delete
+
+// +kubebuilder:rbac:groups=scheduling.volcano.sh,resources=podgroups,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -239,36 +250,144 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		return ctrl.Result{}, err
 	}
 
-	// create or update api-server deployment
-	modified_, deployment, err := r.createOrUpdateOrDeleteDeployments(ctx, generateResourceOption{
-		dynamoComponentDeployment: dynamoComponentDeployment,
-		dynamoComponent:           dynamoComponentCR,
-	})
-	if err != nil {
-		return
-	}
+	// Determine deployment type
+	deploymentType := GetDeploymentType(dynamoComponentDeployment)
 
-	if modified_ {
-		modified = true
-	}
+	logs.Info("Using deployment type", "type", deploymentType)
 
-	// create or update api-server hpa
-	modified_, _, err = commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*autoscalingv2.HorizontalPodAutoscaler, bool, error) {
-		return r.generateHPA(generateResourceOption{
+	// Create the appropriate workload resource based on deployment type
+	var leaderWorkerSets []*leaderworkersetv1.LeaderWorkerSet
+	var deployment *appsv1.Deployment
+	if r.Config.EnableLWS && deploymentType == DeploymentTypeLeaderWorker {
+		desiredReplicas := int32(1)
+		if dynamoComponentDeployment.Spec.Replicas != nil {
+			desiredReplicas = *dynamoComponentDeployment.Spec.Replicas
+		}
+
+		anyModified := false
+
+		for i := range int(desiredReplicas) {
+
+			modified_, _, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*volcanov1beta1.PodGroup, bool, error) {
+				return r.generateVolcanoPodGroup(ctx, generateResourceOption{
+					dynamoComponentDeployment:               dynamoComponentDeployment,
+					dynamoComponent:                         dynamoComponentCR,
+					isStealingTrafficDebugModeEnabled:       false,
+					containsStealingTrafficDebugModeEnabled: false,
+					instanceID:                              &i,
+				})
+			})
+
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+
+			if modified_ {
+				anyModified = true
+			}
+
+			modified_, lwsObj, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*leaderworkersetv1.LeaderWorkerSet, bool, error) {
+				return r.generateLeaderWorkerSet(ctx, generateResourceOption{
+					dynamoComponentDeployment:               dynamoComponentDeployment,
+					dynamoComponent:                         dynamoComponentCR,
+					isStealingTrafficDebugModeEnabled:       false,
+					containsStealingTrafficDebugModeEnabled: false,
+					instanceID:                              &i,
+				})
+			})
+
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+
+			if modified_ {
+				anyModified = true
+			}
+
+			leaderWorkerSets = append(leaderWorkerSets, lwsObj)
+		}
+
+		// Clean up any excess LeaderWorkerSets (if replicas were decreased)
+		baseKubeName := r.getKubeName(dynamoComponentDeployment, dynamoComponentCR, false)
+		for i := int(desiredReplicas); ; i++ {
+			// Try to find a LeaderWorkerSet with the next index
+			nextLWSName := fmt.Sprintf("%s-%d", baseKubeName, i)
+			lwsToDelete := &leaderworkersetv1.LeaderWorkerSet{}
+			err := r.Get(ctx, types.NamespacedName{
+				Name:      nextLWSName,
+				Namespace: dynamoComponentDeployment.Namespace,
+			}, lwsToDelete)
+
+			if err != nil {
+				if k8serrors.IsNotFound(err) {
+					break
+				}
+				return ctrl.Result{}, err
+			}
+
+			err = r.Delete(ctx, lwsToDelete)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+
+			podGroupName := nextLWSName
+			podGroupToDelete := &volcanov1beta1.PodGroup{}
+			err = r.Get(ctx, types.NamespacedName{
+				Name:      podGroupName,
+				Namespace: dynamoComponentDeployment.Namespace,
+			}, podGroupToDelete)
+
+			if err != nil {
+				if !k8serrors.IsNotFound(err) {
+					logs.Error(err, "Failed to get PodGroup for deletion", "podGroupName", podGroupName)
+				}
+			} else {
+				err = r.Delete(ctx, podGroupToDelete)
+				if err != nil {
+					logs.Error(err, "Failed to delete PodGroup", "podGroupName", podGroupName)
+				}
+			}
+
+			anyModified = true
+		}
+
+		modified = anyModified
+
+	} else {
+		modified_, obj, err := r.createOrUpdateOrDeleteDeployments(ctx, generateResourceOption{
 			dynamoComponentDeployment: dynamoComponentDeployment,
 			dynamoComponent:           dynamoComponentCR,
 		})
-	})
-	if err != nil {
-		return
-	}
 
-	if modified_ {
-		modified = true
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		if modified_ {
+			modified = true
+		}
+
+		deployment = obj
+
+		// create or update api-server hpa
+		modified_, _, err = commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*autoscalingv2.HorizontalPodAutoscaler, bool, error) {
+			return r.generateHPA(generateResourceOption{
+				dynamoComponentDeployment: dynamoComponentDeployment,
+				dynamoComponent:           dynamoComponentCR,
+			})
+		})
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		if modified_ {
+			modified = true
+		}
+
 	}
 
 	// create or update api-server service
-	modified_, err = r.createOrUpdateOrDeleteServices(ctx, generateResourceOption{
+	modified_, err := r.createOrUpdateOrDeleteServices(ctx, generateResourceOption{
 		dynamoComponentDeployment: dynamoComponentDeployment,
 		dynamoComponent:           dynamoComponentCR,
 	})
@@ -299,8 +418,303 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 
 	logs.Info("Finished reconciling.")
 	r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeNormal, "Update", "All resources updated!")
-	err = r.computeAvailableStatusCondition(ctx, req, deployment)
+
+	if deploymentType == DeploymentTypeLeaderWorker {
+		err = r.computeAvailableStatusConditionForLeaderWorkerSets(ctx, req, leaderWorkerSets)
+	} else {
+		err = r.computeAvailableStatusCondition(ctx, req, deployment)
+	}
+
 	return
+}
+
+// computeAvailableStatusConditionForLeaderWorkerSet updates the status condition based on LeaderWorkerSet readiness
+func (r *DynamoComponentDeploymentReconciler) computeAvailableStatusConditionForLeaderWorkerSets(ctx context.Context, req ctrl.Request, leaderWorkerSets []*leaderworkersetv1.LeaderWorkerSet) error {
+	logs := log.FromContext(ctx)
+
+	allReady := true
+	for _, leaderWorkerSet := range leaderWorkerSets {
+		if !IsLeaderWorkerSetReady(leaderWorkerSet) {
+			allReady = false
+			break
+		}
+	}
+
+	if allReady {
+		logs.Info("All LeaderWorkerSets are ready. Setting available status condition to true.")
+		_, err := r.setStatusConditions(ctx, req,
+			metav1.Condition{
+				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+				Status:  metav1.ConditionTrue,
+				Reason:  "AllLeaderWorkerSetsReady",
+				Message: "All LeaderWorkerSets are ready",
+			},
+		)
+		return err
+	} else {
+		logs.Info("Not all LeaderWorkerSets are ready. Setting available status condition to false.")
+		_, err := r.setStatusConditions(ctx, req,
+			metav1.Condition{
+				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+				Status:  metav1.ConditionFalse,
+				Reason:  "LeaderWorkerSetsNotReady",
+				Message: "Not all LeaderWorkerSets are ready",
+			},
+		)
+		return err
+	}
+}
+
+// GetDeploymentType returns the deployment type from the annotations
+// If not set, it returns the default DeploymentTypeStandard
+func GetDeploymentType(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) string {
+	resourceAnnotations := getResourceAnnotations(dynamoComponentDeployment)
+	deploymentType := resourceAnnotations[KubeAnnotationDeploymentType]
+	if deploymentType == "" {
+		deploymentType = DeploymentTypeStandard
+	}
+	return deploymentType
+}
+
+// IsLeaderWorkerSetReady determines if a LeaderWorkerSet is fully ready and available
+func IsLeaderWorkerSetReady(leaderWorkerSet *leaderworkersetv1.LeaderWorkerSet) bool {
+	if leaderWorkerSet == nil {
+		return false
+	}
+
+	desiredReplicas := int32(1)
+	if leaderWorkerSet.Spec.Replicas != nil {
+		desiredReplicas = *leaderWorkerSet.Spec.Replicas
+	}
+
+	// Special case: if no replicas are desired, the LeaderWorkerSet is considered ready
+	if desiredReplicas == 0 {
+		return true
+	}
+
+	status := leaderWorkerSet.Status
+
+	if status.ReadyReplicas < desiredReplicas {
+		return false
+	}
+
+	// Look for the Available condition specifically - this is defined in the CRD for LeaderWorkerSet
+	for _, cond := range leaderWorkerSet.Status.Conditions {
+		if cond.Type == string(leaderworkersetv1.LeaderWorkerSetAvailable) {
+			return cond.Status == metav1.ConditionTrue
+		}
+	}
+
+	return false
+}
+
+func (r *DynamoComponentDeploymentReconciler) generateVolcanoPodGroup(ctx context.Context, opt generateResourceOption) (*volcanov1beta1.PodGroup, bool, error) {
+	logs := log.FromContext(ctx)
+	logs.Info("Generating Volcano PodGroup")
+
+	if opt.instanceID == nil {
+		return nil, false, errors.New("generateVolcanoPodGroup: instanceID cannot be nil")
+	}
+	instanceID := *opt.instanceID
+
+	if instanceID < 0 {
+		return nil, false, fmt.Errorf("generateVolcanoPodGroup: instanceID cannot be negative, got %d", instanceID)
+	}
+
+	podGroupName := r.getKubeName(opt.dynamoComponentDeployment, opt.dynamoComponent, opt.isStealingTrafficDebugModeEnabled)
+	podGroupName = fmt.Sprintf("%s-%d", podGroupName, instanceID)
+
+	kubeNs := opt.dynamoComponentDeployment.Namespace
+
+	labels := make(map[string]string)
+	labels["instance-id"] = fmt.Sprintf("%d", instanceID)
+
+	lwsSizeStr, ok := opt.dynamoComponentDeployment.Spec.Annotations[KubeAnnotationLWSSize]
+	if !ok {
+		return nil, false, fmt.Errorf("generateVolcanoPodGroup: missing required annotation %s", KubeAnnotationLWSSize)
+	}
+	lwsSize, err := strconv.ParseInt(lwsSizeStr, 10, 32)
+	if err != nil {
+		return nil, false, fmt.Errorf("generateVolcanoPodGroup: invalid value for annotation %s: %v", KubeAnnotationLWSSize, err)
+	}
+	if lwsSize <= 0 {
+		return nil, false, fmt.Errorf("generateVolcanoPodGroup: LWS size must be greater than 0, got %d", lwsSize)
+	}
+	if lwsSize == 1 {
+		return nil, false, errors.New("generateVolcanoPodGroup: LWS size of 1 means that the LWS is not needed, change 'nvidia.com/deployment-type' to 'standard'/disable whatever flag you used to enable LWS")
+	}
+	minMember := int32(lwsSize)
+
+	podGroup := &volcanov1beta1.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      podGroupName,
+			Namespace: kubeNs,
+			Labels:    labels,
+		},
+		Spec: volcanov1beta1.PodGroupSpec{
+			MinMember: minMember,
+		},
+	}
+
+	return podGroup, false, nil
+}
+
+func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx context.Context, opt generateResourceOption, kubeName string, labels map[string]string, instanceID int) (*corev1.PodTemplateSpec, error) {
+	leaderPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to generate leader pod template")
+	}
+
+	if labels != nil {
+		leaderPodTemplateSpec.ObjectMeta.Labels = labels
+	} else {
+		leaderPodTemplateSpec.ObjectMeta.Labels = make(map[string]string)
+	}
+	leaderPodTemplateSpec.ObjectMeta.Labels["role"] = "leader"
+	leaderPodTemplateSpec.ObjectMeta.Labels["instance-id"] = fmt.Sprintf("%d", instanceID)
+	delete(leaderPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
+
+	if leaderPodTemplateSpec.ObjectMeta.Annotations == nil {
+		leaderPodTemplateSpec.ObjectMeta.Annotations = make(map[string]string)
+	}
+	leaderPodTemplateSpec.ObjectMeta.Annotations["scheduling.k8s.io/group-name"] = kubeName
+
+	leaderPodTemplateSpec.Spec.SchedulerName = "volcano"
+
+	if leaderPodTemplateSpec.Spec.Containers[0].Command == nil {
+		return nil, errors.New("generateLeaderPodTemplateSpec: container Command cannot be nil for Ray leader pod")
+	}
+
+	if len(leaderPodTemplateSpec.Spec.Containers[0].Args) == 0 {
+		return nil, errors.New("generateLeaderPodTemplateSpec: container Args cannot be empty for Ray leader pod")
+	}
+
+	currentArgs := leaderPodTemplateSpec.Spec.Containers[0].Args[0]
+	if opt.dynamoComponentDeployment.Spec.Resources == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits.GPU == "" {
+		return nil, fmt.Errorf("generateLeaderPodTemplateSpec: GPU limit is not set for Ray leader pod")
+	}
+
+	leaderPodTemplateSpec.Spec.Containers[0].Args[0] = fmt.Sprintf("ray start --head --port=6379 && %s", currentArgs)
+
+	return leaderPodTemplateSpec, nil
+}
+
+func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx context.Context, opt generateResourceOption, kubeName string, labels map[string]string, instanceID int) (*corev1.PodTemplateSpec, error) {
+	workerPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to generate worker pod template")
+	}
+
+	if labels != nil {
+		workerPodTemplateSpec.ObjectMeta.Labels = labels
+	} else {
+		workerPodTemplateSpec.ObjectMeta.Labels = make(map[string]string)
+	}
+	workerPodTemplateSpec.ObjectMeta.Labels["role"] = "worker"
+	workerPodTemplateSpec.ObjectMeta.Labels["instance-id"] = fmt.Sprintf("%d", instanceID)
+	delete(workerPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
+
+	workerPodTemplateSpec.Spec.SchedulerName = "volcano"
+
+	if workerPodTemplateSpec.ObjectMeta.Annotations == nil {
+		workerPodTemplateSpec.ObjectMeta.Annotations = make(map[string]string)
+	}
+	workerPodTemplateSpec.ObjectMeta.Annotations["scheduling.k8s.io/group-name"] = kubeName
+
+	if workerPodTemplateSpec.Spec.Containers[0].Command == nil {
+		return nil, errors.New("generateWorkerPodTemplateSpec: container Command cannot be nil for Ray worker pod")
+	}
+
+	if len(workerPodTemplateSpec.Spec.Containers[0].Args) == 0 {
+		return nil, errors.New("generateWorkerPodTemplateSpec: container Args cannot be empty for Ray worker pod")
+	}
+
+	if opt.dynamoComponentDeployment.Spec.Resources == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits.GPU == "" {
+		return nil, fmt.Errorf("generateWorkerPodTemplateSpec: GPU limit is not set for Ray worker pod")
+	}
+
+	workerPodTemplateSpec.Spec.Containers[0].Args[0] = "ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"
+
+	return workerPodTemplateSpec, nil
+}
+
+// generateLeaderWorkerSet creates a LeaderWorkerSet resource from the DynamoComponentDeployment
+func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx context.Context, opt generateResourceOption) (*leaderworkersetv1.LeaderWorkerSet, bool, error) {
+	logs := log.FromContext(ctx)
+	logs.Info("Generating LeaderWorkerSet")
+
+	if opt.instanceID == nil {
+		return nil, false, errors.New("generateLeaderWorkerSet: instanceID cannot be nil")
+	}
+	instanceID := *opt.instanceID
+
+	if instanceID < 0 {
+		return nil, false, fmt.Errorf("generateLeaderWorkerSet: instanceID cannot be negative, got %d", instanceID)
+	}
+
+	kubeName := r.getKubeName(opt.dynamoComponentDeployment, opt.dynamoComponent, opt.isStealingTrafficDebugModeEnabled)
+	kubeName = fmt.Sprintf("%s-%d", kubeName, instanceID)
+
+	kubeNs := opt.dynamoComponentDeployment.Namespace
+	labels := r.getKubeLabels(opt.dynamoComponentDeployment, opt.dynamoComponent)
+
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	labels["instance-id"] = fmt.Sprintf("%d", instanceID)
+
+	leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      kubeName,
+			Namespace: kubeNs,
+			Labels:    labels,
+		},
+	}
+
+	leaderPodLabels := make(map[string]string)
+	for k, v := range labels {
+		leaderPodLabels[k] = v
+	}
+	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, opt, kubeName, leaderPodLabels, instanceID)
+	if err != nil {
+		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to generate leader pod template")
+	}
+
+	workerPodLabels := make(map[string]string)
+	for k, v := range labels {
+		workerPodLabels[k] = v
+	}
+	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, opt, kubeName, workerPodLabels, instanceID)
+	if err != nil {
+		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to generate worker pod template")
+	}
+
+	// Each individual LeaderWorkerSet always has exactly 1 replica
+	singleReplica := int32(1)
+	size, ok := opt.dynamoComponentDeployment.Spec.Annotations[KubeAnnotationLWSSize]
+	if !ok {
+		return nil, false, fmt.Errorf("generateLeaderWorkerSet: LWS size annotation '%s' is required", KubeAnnotationLWSSize)
+	}
+	sizeInt, err := strconv.ParseInt(size, 10, 32)
+	if err != nil {
+		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: LWS size annotation value must be an integer")
+	}
+	if sizeInt < 1 {
+		return nil, false, fmt.Errorf("generateLeaderWorkerSet: LWS size must be greater than 0, got %d", sizeInt)
+	}
+	groupSize := int32(sizeInt)
+
+	leaderWorkerSet.Spec = leaderworkersetv1.LeaderWorkerSetSpec{
+		Replicas:      &singleReplica,
+		StartupPolicy: leaderworkersetv1.LeaderCreatedStartupPolicy,
+		LeaderWorkerTemplate: leaderworkersetv1.LeaderWorkerTemplate{
+			LeaderTemplate: leaderPodTemplateSpec,
+			WorkerTemplate: *workerPodTemplateSpec,
+			Size:           &groupSize,
+		},
+	}
+
+	return leaderWorkerSet, false, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) error {
@@ -528,7 +942,7 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 	containsStealingTrafficDebugModeEnabled := checkIfContainsStealingTrafficDebugModeEnabled(opt.dynamoComponentDeployment)
 	// main generic service
 	modified, _, err = commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
-		return r.generateService(ctx, generateResourceOption{
+		return r.generateService(generateResourceOption{
 			dynamoComponentDeployment:               opt.dynamoComponentDeployment,
 			dynamoComponent:                         opt.dynamoComponent,
 			isStealingTrafficDebugModeEnabled:       false,
@@ -543,7 +957,7 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 
 	// debug production service (if enabled)
 	modified_, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
-		return r.generateService(ctx, generateResourceOption{
+		return r.generateService(generateResourceOption{
 			dynamoComponentDeployment:               opt.dynamoComponentDeployment,
 			dynamoComponent:                         opt.dynamoComponent,
 			isStealingTrafficDebugModeEnabled:       false,
@@ -558,7 +972,7 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 	modified = modified || modified_
 	// debug service (if enabled)
 	modified_, _, err = commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
-		return r.generateService(ctx, generateResourceOption{
+		return r.generateService(generateResourceOption{
 			dynamoComponentDeployment:               opt.dynamoComponentDeployment,
 			dynamoComponent:                         opt.dynamoComponent,
 			isStealingTrafficDebugModeEnabled:       true,
@@ -845,6 +1259,7 @@ type generateResourceOption struct {
 	containsStealingTrafficDebugModeEnabled bool
 	isDebugPodReceiveProductionTraffic      bool
 	isGenericService                        bool
+	instanceID                              *int
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateHPA(opt generateResourceOption) (*autoscalingv2.HorizontalPodAutoscaler, bool, error) {
@@ -917,7 +1332,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		podLabels[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
 	}
 
-	podAnnotations := r.getKubeAnnotations(opt.dynamoComponentDeployment, opt.dynamoComponent)
+	podAnnotations := make(map[string]string)
 
 	kubeName := r.getKubeName(opt.dynamoComponentDeployment, opt.dynamoComponent, opt.isStealingTrafficDebugModeEnabled)
 
@@ -1388,8 +1803,7 @@ func getResourcesConfig(resources *dynamoCommon.Resources) (corev1.ResourceRequi
 	return currentResources, nil
 }
 
-//nolint:nakedret
-func (r *DynamoComponentDeploymentReconciler) generateService(_ context.Context, opt generateResourceOption) (kubeService *corev1.Service, toDelete bool, err error) {
+func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResourceOption) (*corev1.Service, bool, error) {
 	var kubeName string
 	if opt.isGenericService {
 		kubeName = r.getGenericServiceName(opt.dynamoComponentDeployment, opt.dynamoComponent)
@@ -1399,7 +1813,7 @@ func (r *DynamoComponentDeploymentReconciler) generateService(_ context.Context,
 
 	kubeNs := opt.dynamoComponentDeployment.Namespace
 
-	kubeService = &corev1.Service{
+	kubeService := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      kubeName,
 			Namespace: kubeNs,
@@ -1417,6 +1831,14 @@ func (r *DynamoComponentDeploymentReconciler) generateService(_ context.Context,
 
 	for k, v := range labels {
 		selector[k] = v
+	}
+
+	// Check if we're using LeaderWorkerSet
+	deploymentType := GetDeploymentType(opt.dynamoComponentDeployment)
+
+	// If using LeaderWorkerSet, modify selector to only target leaders
+	if deploymentType == DeploymentTypeLeaderWorker {
+		selector["role"] = "leader"
 	}
 
 	if opt.isStealingTrafficDebugModeEnabled {
@@ -1443,7 +1865,7 @@ func (r *DynamoComponentDeploymentReconciler) generateService(_ context.Context,
 	kubeService.ObjectMeta.Labels = labels
 	kubeService.Spec = spec
 
-	return
+	return kubeService, false, nil
 }
 
 type TLSModeOpt string
@@ -1465,7 +1887,6 @@ type IngressConfig struct {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
-
 	m := ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&appsv1.Deployment{}, builder.WithPredicates(predicate.Funcs{
@@ -1479,6 +1900,23 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		WithEventFilter(controller_common.EphemeralDeploymentEventFilter(r.Config))
+
+	if r.Config.EnableLWS {
+		m.Owns(&leaderworkersetv1.LeaderWorkerSet{}, builder.WithPredicates(predicate.Funcs{
+			// ignore creation cause we don't want to be called again after we create the LeaderWorkerSet
+			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
+			GenericFunc: func(ge event.GenericEvent) bool { return true },
+		})).
+			Owns(&volcanov1beta1.PodGroup{}, builder.WithPredicates(predicate.Funcs{
+				// ignore creation cause we don't want to be called again after we create the LeaderWorkerSet
+				CreateFunc:  func(ce event.CreateEvent) bool { return false },
+				DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+				UpdateFunc:  func(de event.UpdateEvent) bool { return true },
+				GenericFunc: func(ge event.GenericEvent) bool { return true },
+			}))
+	}
 
 	if r.UseVirtualService {
 		m.Owns(&networkingv1beta1.VirtualService{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))

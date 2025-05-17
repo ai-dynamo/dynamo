@@ -21,8 +21,8 @@ VERSION 0.8
 
 ############### SHARED LIBRARY TARGETS ##############################
 golang-base:
-    FROM golang:1.23
-    RUN apt-get update && apt-get install -y git && apt-get clean && rm -rf /var/lib/apt/lists/* && curl -sSfL https://github.com/golangci/golangci-lint/releases/download/v1.61.0/golangci-lint-1.61.0-linux-amd64.tar.gz | tar -xzv && mv golangci-lint-1.61.0-linux-amd64/golangci-lint /usr/local/bin/
+    FROM golang:1.24
+    RUN apt-get update && apt-get install -y git && apt-get clean && rm -rf /var/lib/apt/lists/* && go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
 
 operator-src:
     FROM +golang-base

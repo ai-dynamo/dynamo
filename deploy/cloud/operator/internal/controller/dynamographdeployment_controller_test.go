@@ -26,6 +26,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/bsm/gomega"
+	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -269,7 +270,7 @@ func Test_overrideWithDynDeploymentConfig(t *testing.T) {
 									Value: `{"Frontend":{"port":8080,"ServiceArgs":{"Workers":3, "Resources":{"CPU":"2", "Memory":"2Gi", "GPU":"2"}}},"Planner":{"environment":"kubernetes"}}`,
 								},
 							},
-							Replicas: &[]int32{1}[0],
+							Replicas: nil,
 							Resources: &common.Resources{
 								Requests: &common.ResourceItem{
 									CPU:    "1",
@@ -310,6 +311,64 @@ func Test_overrideWithDynDeploymentConfig(t *testing.T) {
 			},
 		},
 		{
+			name: "override workers and resources with gpusPerNode",
+			args: args{
+				ctx: context.Background(),
+				dynamoDeploymentComponent: &nvidiacomv1alpha1.DynamoComponentDeployment{
+					Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+							ServiceName: "Frontend",
+							Envs: []corev1.EnvVar{
+								{
+									Name:  "DYN_DEPLOYMENT_CONFIG",
+									Value: `{"Frontend":{"port":8080,"ServiceArgs":{"Workers":3, "Resources":{"CPU":"2", "Memory":"2Gi", "GPU":"8"}, "total_gpus":16}},"Planner":{"environment":"kubernetes"}}`,
+								},
+							},
+							Replicas: nil,
+							Resources: &common.Resources{
+								Requests: &common.ResourceItem{
+									CPU:    "1",
+									Memory: "1Gi",
+									GPU:    "1",
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+			expected: &nvidiacomv1alpha1.DynamoComponentDeployment{
+				Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						ServiceName: "Frontend",
+						Envs: []corev1.EnvVar{
+							{
+								Name:  "DYN_DEPLOYMENT_CONFIG",
+								Value: `{"Frontend":{"port":8080,"ServiceArgs":{"Workers":3, "Resources":{"CPU":"2", "Memory":"2Gi", "GPU":"8"}, "total_gpus":16}},"Planner":{"environment":"kubernetes"}}`,
+							},
+						},
+						Replicas: &[]int32{3}[0],
+						Resources: &common.Resources{
+							Requests: &common.ResourceItem{
+								CPU:    "2",
+								Memory: "2Gi",
+								GPU:    "8",
+							},
+							Limits: &common.ResourceItem{
+								CPU:    "2",
+								Memory: "2Gi",
+								GPU:    "8",
+							},
+						},
+						Annotations: map[string]string{
+							"nvidia.com/deployment-type": "leader-worker",
+							"nvidia.com/lws-size":        "2",
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "override subset of resources",
 			args: args{
 				ctx: context.Background(),
@@ -323,7 +382,7 @@ func Test_overrideWithDynDeploymentConfig(t *testing.T) {
 									Value: `{"Frontend":{"port":8080,"ServiceArgs":{"Workers":3, "Resources":{"GPU":"2"}}},"Planner":{"environment":"kubernetes"}}`,
 								},
 							},
-							Replicas: &[]int32{1}[0],
+							Replicas: nil,
 							Resources: &common.Resources{
 								Requests: &common.ResourceItem{
 									CPU:    "1",
@@ -363,14 +422,64 @@ func Test_overrideWithDynDeploymentConfig(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "do not override replicas if explicitly set in the CRD !",
+			args: args{
+				ctx: context.Background(),
+				dynamoDeploymentComponent: &nvidiacomv1alpha1.DynamoComponentDeployment{
+					Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+							ServiceName: "Frontend",
+							Envs: []corev1.EnvVar{
+								{
+									Name:  "DYN_DEPLOYMENT_CONFIG",
+									Value: `{"Frontend":{"port":8080,"ServiceArgs":{"Workers":3}},"Planner":{"environment":"kubernetes"}}`,
+								},
+							},
+							Replicas: &[]int32{1}[0],
+							Resources: &common.Resources{
+								Requests: &common.ResourceItem{
+									CPU:    "1",
+									Memory: "1Gi",
+									GPU:    "1",
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+			expected: &nvidiacomv1alpha1.DynamoComponentDeployment{
+				Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						ServiceName: "Frontend",
+						Envs: []corev1.EnvVar{
+							{
+								Name:  "DYN_DEPLOYMENT_CONFIG",
+								Value: `{"Frontend":{"port":8080,"ServiceArgs":{"Workers":3}},"Planner":{"environment":"kubernetes"}}`,
+							},
+						},
+						Replicas: &[]int32{1}[0],
+						Resources: &common.Resources{
+							Requests: &common.ResourceItem{
+								CPU:    "1",
+								Memory: "1Gi",
+								GPU:    "1",
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := gomega.NewGomegaWithT(t)
 			if err := overrideWithDynDeploymentConfig(tt.args.ctx, tt.args.dynamoDeploymentComponent); (err != nil) != tt.wantErr {
 				t.Errorf("overrideWithDynDeploymentConfig() error = %v, wantErr %v", err, tt.wantErr)
 			}
-			g.Expect(tt.args.dynamoDeploymentComponent).To(gomega.Equal(tt.expected))
+			if diff := cmp.Diff(tt.args.dynamoDeploymentComponent, tt.expected); diff != "" {
+				t.Errorf("overrideWithDynDeploymentConfig() mismatch (-want +got):\n%s", diff)
+			}
 		})
 	}
 }

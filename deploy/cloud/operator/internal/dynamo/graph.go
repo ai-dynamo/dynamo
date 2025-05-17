@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"emperror.dev/errors"
@@ -80,6 +81,7 @@ type Config struct {
 	HttpExposed  bool          `yaml:"http_exposed,omitempty"`
 	ApiEndpoints []string      `yaml:"api_endpoints,omitempty"`
 	Workers      *int32        `yaml:"workers,omitempty"`
+	TotalGpus    *int32        `yaml:"total_gpus,omitempty"`
 }
 
 type ServiceConfig struct {
@@ -99,6 +101,7 @@ type DynDeploymentServiceConfig struct {
 type ServiceArgs struct {
 	Workers   *int32     `json:"workers,omitempty"`
 	Resources *Resources `json:"resources,omitempty"`
+	TotalGpus *int32     `json:"total_gpus,omitempty"`
 }
 
 func (s ServiceConfig) GetNamespace() *string {
@@ -253,6 +256,31 @@ func GetDynamoGraphConfig(ctx context.Context, dynamoDeployment *v1alpha1.Dynamo
 	return ParseDynamoGraphConfig(ctx, yamlContent)
 }
 
+func SetLwsAnnotations(serviceArgs *ServiceArgs, deployment *v1alpha1.DynamoComponentDeployment) error {
+	if serviceArgs.Resources != nil &&
+		serviceArgs.Resources.GPU != nil && *serviceArgs.Resources.GPU != "" && *serviceArgs.Resources.GPU != "0" &&
+		serviceArgs.TotalGpus != nil && *serviceArgs.TotalGpus > 0 {
+
+		gpusPerNodeStr := *serviceArgs.Resources.GPU
+		gpusPerNode, errGpusPerNode := strconv.Atoi(gpusPerNodeStr)
+
+		if errGpusPerNode != nil {
+			return fmt.Errorf("failed to parse GPUs per node value '%s' for service %s: %w", gpusPerNodeStr, deployment.Spec.ServiceName, errGpusPerNode)
+		}
+
+		// Calculate lwsSize using ceiling division to ensure enough nodes for all GPUs
+		lwsSize := (int(*serviceArgs.TotalGpus) + gpusPerNode - 1) / gpusPerNode
+		if lwsSize > 1 {
+			if deployment.Spec.Annotations == nil {
+				deployment.Spec.Annotations = make(map[string]string)
+			}
+			deployment.Spec.Annotations["nvidia.com/lws-size"] = strconv.Itoa(lwsSize)
+			deployment.Spec.Annotations["nvidia.com/deployment-type"] = "leader-worker"
+		}
+	}
+	return nil
+}
+
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig
 func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, config *DynamoGraphConfig, ingressSpec *v1alpha1.IngressSpec) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	dynamoServices := make(map[string]string)
@@ -320,6 +348,15 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			if service.Config.Resources.GPU != nil {
 				deployment.Spec.Resources.Requests.GPU = *service.Config.Resources.GPU
 				deployment.Spec.Resources.Limits.GPU = *service.Config.Resources.GPU
+			}
+
+			serviceArgs := ServiceArgs{
+				Resources: service.Config.Resources,
+				TotalGpus: service.Config.TotalGpus,
+				Workers:   service.Config.Workers,
+			}
+			if err := SetLwsAnnotations(&serviceArgs, deployment); err != nil {
+				return nil, err
 			}
 		}
 		deployment.Spec.Autoscaling = &v1alpha1.Autoscaling{

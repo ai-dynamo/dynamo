@@ -27,6 +27,7 @@ dynamo-operator:
     - name: ${DOCKER_SECRET_NAME}
 
   dynamo:
+    enableLWS: ${ENABLE_LWS}
     ingress:
       enabled: ${INGRESS_ENABLED}
       className: ${INGRESS_CLASS}

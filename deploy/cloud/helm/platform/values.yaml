@@ -37,6 +37,7 @@ dynamo-operator:
         - --health-probe-bind-address=:8081
         - --metrics-bind-address=127.0.0.1:8080
   dynamo:
+    enableLWS: false
     apiStore:
       endpoint: http://dynamo-store
       clusterName: default
