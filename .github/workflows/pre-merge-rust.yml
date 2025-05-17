@@ -83,6 +83,10 @@ jobs:
       run: |
         cargo-deny --version || cargo install cargo-deny@0.16.4
         cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config ${{ github.workspace }}/deny.toml
+    - name: Run Doc Tests
+      working-directory: ${{ matrix.dir }}
+      run: cargo doc --no-deps && cargo test --locked --doc
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
+      # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
