@@ -24,7 +24,7 @@ pub struct ActiveSequence {
     unique_blocks: Vec<UniqueBlock>,
     tokens: Vec<u32>,
     block_size: usize,
-    chunk_size: usize,
+    chunk_size: usize, // TODO: not actually used
     max_output_tokens: usize,
     generated_tokens: usize,
     num_input_tokens: usize,
@@ -298,7 +298,7 @@ impl ActiveSequence {
     }
 
     /// Free all blocks, generating appropriate signals for each block type
-    fn free_signal(&self) -> Vec<MoveBlock> {
+    pub fn free_signal(&self) -> Vec<MoveBlock> {
         let mut signals = Vec::new();
 
         // Collect blocks to deref based on type

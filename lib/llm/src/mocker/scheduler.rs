@@ -16,7 +16,7 @@
 use crate::kv_router::protocols::ForwardPassMetrics;
 use crate::mocker::kv_manager::KvManager;
 use crate::mocker::protocols::DirectRequest;
-use crate::mocker::protocols::PrefillCost;
+use crate::mocker::protocols::{MoveBlock, MoveBlockResponse, PrefillCost, UniqueBlock};
 use crate::mocker::sequence::ActiveSequence;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -60,7 +60,7 @@ impl Scheduler {
         kv_capacity: usize,
         watermark: f64,
         block_size: usize,
-        chunk_size: Option<usize>,
+        chunk_size: Option<usize>, // TODO: not actually used
         output_tx: Option<mpsc::Sender<Uuid>>,
         cancellation_token: Option<CancellationToken>,
     ) -> Self {
@@ -127,21 +127,7 @@ impl Scheduler {
                             let request = state_guard.requests.get(&uuid).expect("UUID in waiting queue must have a corresponding request");
 
                             // Process the request regardless of its type
-                            let active_sequence = match request {
-                                Request::Direct(direct_request) => {
-                                    // Convert DirectRequest to ActiveSequence
-                                    ActiveSequence::new(
-                                        direct_request.tokens.clone(),
-                                        direct_request.max_output_tokens,
-                                        Some(block_size_clone),
-                                        Some(chunk_size_clone),
-                                    )
-                                },
-                                Request::Active(active_seq) => {
-                                    // Use existing ActiveSequence
-                                    active_seq.clone()
-                                }
-                            };
+                            let active_sequence = get_active_sequence(request, block_size_clone, chunk_size_clone);
 
                             // Update the requests map with the ActiveSequence
                             state_guard.requests.insert(uuid, Request::Active(active_sequence.clone()));
@@ -205,16 +191,16 @@ impl Scheduler {
 
                             // Accumulate sleep duration based on prefill_compute if available
                             if let Some(cost) = prefill_cost {
+                                // TODO: A magic number to model prefill compute
                                 let sleep_ms = (cost.prefill_compute / 131072.0) as u64;
                                 total_sleep_duration += Duration::from_millis(sleep_ms);
                             } else {
+                                // TODO: A magic number to simulate ITL
                                 total_sleep_duration += Duration::from_millis(1);
                             }
 
                             // Process all signals with the KvManager
-                            for signal in signals {
-                                kv_manager_guard.process(&signal);
-                            }
+                            let _response = process_signals(&mut kv_manager_guard, &signals);
 
                             // Send UUID notification for each generated token
                             if let Some(tx) = &output_tx_clone {
@@ -348,6 +334,70 @@ impl Drop for Scheduler {
             handle.abort();
         }
     }
+}
+
+/// Convert a Request to an ActiveSequence
+fn get_active_sequence(request: &Request, block_size: usize, chunk_size: usize) -> ActiveSequence {
+    match request {
+        Request::Direct(direct_request) => {
+            // Convert DirectRequest to ActiveSequence
+            ActiveSequence::new(
+                direct_request.tokens.clone(),
+                direct_request.max_output_tokens,
+                Some(block_size),
+                Some(chunk_size),
+            )
+        }
+        Request::Active(active_seq) => {
+            // Use existing ActiveSequence
+            active_seq.clone()
+        }
+    }
+}
+
+/// Processes MoveBlock signals with the KvManager.
+///
+/// When a signal fails, this function verifies that the failure is for an expected case:
+/// specifically a single signal attempting to create a single partial (generation) block.
+/// This validation is important because in normal operation, the only legitimate failure
+/// case should be when trying to acquire a new generation block - any other failures would
+/// indicate an unexpected state in the system.
+fn process_signals(
+    kv_manager_guard: &mut tokio::sync::MutexGuard<'_, KvManager>,
+    signals: &[MoveBlock],
+) -> MoveBlockResponse {
+    for signal in signals {
+        let response = kv_manager_guard.process(signal);
+        // Break out early on failure
+        if response == MoveBlockResponse::Failure {
+            // Verify we have exactly one signal
+            if signals.len() != 1 {
+                println!("Warning: Cannot acquire new generation block");
+                return MoveBlockResponse::Failure;
+            }
+
+            if let MoveBlock::Use(blocks, _) = &signal {
+                // Verify the signal contains exactly one block
+                if blocks.len() != 1 {
+                    println!("Warning: Cannot acquire new generation block");
+                    return MoveBlockResponse::Failure;
+                }
+
+                // Verify the block is a PartialBlock (generation block)
+                if !matches!(blocks[0], UniqueBlock::PartialBlock(_)) {
+                    println!("Warning: Cannot acquire new generation block");
+                    return MoveBlockResponse::Failure;
+                }
+            } else {
+                println!("Warning: Cannot acquire new generation block");
+                return MoveBlockResponse::Failure;
+            }
+
+            return MoveBlockResponse::Failure;
+        }
+    }
+
+    MoveBlockResponse::Success
 }
 
 #[cfg(test)]
