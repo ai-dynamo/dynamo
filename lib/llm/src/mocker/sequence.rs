@@ -184,6 +184,7 @@ impl ActiveSequence {
     /// Push a token to the sequence
     pub fn push(&mut self, token: u32) -> Option<MoveBlock> {
         self.tokens.push(token);
+        self.generated_tokens += 1;
         let mut signal = None;
 
         // Add a partial block if this is the first token in a new partial sequence
@@ -287,9 +288,6 @@ impl ActiveSequence {
             signals.push(signal);
         }
 
-        // Increment the generated tokens counter
-        self.generated_tokens += 1;
-
         // Check if we've reached the limit after pushing
         if self.generated_tokens != self.max_output_tokens {
             return signals;
@@ -350,6 +348,42 @@ impl ActiveSequence {
         let signals = self.free_signal();
 
         (new_sequence, signals)
+    }
+
+    /// Resets the last partial block in the sequence.
+    ///
+    /// This function:
+    /// - Asserts that the last block is a PartialBlock
+    /// - Removes the last PartialBlock
+    /// - Decrements the generated_tokens counter by the number of tokens in the partial block
+    /// - Removes the corresponding tokens from the end of the sequence
+    ///
+    /// # Panics
+    ///
+    /// Panics if the last block is not a PartialBlock.
+    pub fn partial_reset(&mut self) {
+        // Assert that the last block is a PartialBlock
+        match self.unique_blocks.last() {
+            Some(UniqueBlock::PartialBlock(_)) => {
+                // Calculate how many tokens are in the partial block
+                let partial_block_size = self.tokens.len() % self.block_size;
+                if partial_block_size == 0 {
+                    // This shouldn't happen - if tokens.len() is a multiple of block_size,
+                    // we should have no partial block
+                    panic!("Expected tokens.len() to not be a multiple of block_size when a PartialBlock exists");
+                }
+
+                // Remove the last partial_block_size tokens
+                self.tokens.truncate(self.tokens.len() - partial_block_size);
+
+                // Decrement the generated tokens counter
+                self.generated_tokens = self.generated_tokens.saturating_sub(partial_block_size);
+
+                // Remove the PartialBlock
+                self.unique_blocks.pop();
+            }
+            _ => panic!("Expected last block to be a PartialBlock"),
+        }
     }
 }
 
@@ -427,6 +461,10 @@ mod tests {
             }
             _ => panic!("Expected PartialBlock for the second blocks"),
         }
+
+        // Reset partial block on seq1 and push back token 16
+        seq1.partial_reset();
+        seq1.push(16);
 
         // Now push tokens 17..32 to both sequences
         for token in 17..32 {
