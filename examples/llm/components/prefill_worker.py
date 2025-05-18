@@ -39,6 +39,9 @@ class RequestType(BaseModel):
     text: str
 
 
+# Comment added to trigger CI from Github.
+
+
 @service(
     dynamo={
         "namespace": "dynamo",
