@@ -21,13 +21,13 @@ use std::cmp::PartialEq;
 /// A sequence that is actively being built, with the ability to add tokens and commit to hashes
 #[derive(Debug, Clone)]
 pub struct ActiveSequence {
-    pub unique_blocks: Vec<UniqueBlock>,
-    pub tokens: Vec<u32>,
-    pub block_size: usize,
-    pub chunk_size: usize,
-    pub max_output_tokens: usize,
-    pub generated_tokens: usize,
-    pub num_input_tokens: usize,
+    unique_blocks: Vec<UniqueBlock>,
+    tokens: Vec<u32>,
+    block_size: usize,
+    chunk_size: usize,
+    max_output_tokens: usize,
+    generated_tokens: usize,
+    num_input_tokens: usize,
     creation_signal: Option<MoveBlock>,
 }
 
@@ -127,6 +127,41 @@ impl ActiveSequence {
             num_input_tokens,
             creation_signal: signal,
         }
+    }
+
+    /// Returns a reference to the unique blocks
+    pub fn unique_blocks(&self) -> &Vec<UniqueBlock> {
+        &self.unique_blocks
+    }
+
+    /// Returns a reference to the tokens
+    pub fn tokens(&self) -> &Vec<u32> {
+        &self.tokens
+    }
+
+    /// Returns the block size
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    /// Returns the chunk size
+    pub fn chunk_size(&self) -> usize {
+        self.chunk_size
+    }
+
+    /// Returns the maximum output tokens
+    pub fn max_output_tokens(&self) -> usize {
+        self.max_output_tokens
+    }
+
+    /// Returns the number of generated tokens
+    pub fn generated_tokens(&self) -> usize {
+        self.generated_tokens
+    }
+
+    /// Returns the number of input tokens
+    pub fn num_input_tokens(&self) -> usize {
+        self.num_input_tokens
     }
 
     /// Returns a reference to the creation signal
@@ -328,7 +363,7 @@ mod tests {
         let initial_tokens: Vec<u32> = (0..15).collect();
         let (mut seq1, signal1) =
             ActiveSequence::new_with_signal(initial_tokens, 100, Some(16), Some(256));
-        assert_eq!(seq1.num_input_tokens, 15);
+        assert_eq!(seq1.num_input_tokens(), 15);
 
         // Clone seq1 before making any changes
         let seq1_clone = seq1.clone();
@@ -361,9 +396,9 @@ mod tests {
         }
 
         // Verify state after pushing tokens
-        assert_eq!(seq1.unique_blocks.len(), 2); // One full block and one partial block
-        assert_eq!(seq1.tokens.len(), 17);
-        assert_eq!(seq1.tokens.len() % seq1.block_size, 1);
+        assert_eq!(seq1.unique_blocks().len(), 2); // One full block and one partial block
+        assert_eq!(seq1.tokens().len(), 17);
+        assert_eq!(seq1.tokens().len() % seq1.block_size(), 1);
 
         // Create another sequence with block size 16 initialized with tokens [0..17]
         let extended_tokens: Vec<u32> = (0..17).collect();
@@ -371,7 +406,7 @@ mod tests {
             ActiveSequence::new_with_signal(extended_tokens, 100, Some(16), Some(256));
 
         // Assert that the first block (full block) has the same hash in both sequences
-        match (&seq1.unique_blocks[0], &seq2.unique_blocks[0]) {
+        match (&seq1.unique_blocks()[0], &seq2.unique_blocks()[0]) {
             (UniqueBlock::FullBlock(hash1), UniqueBlock::FullBlock(hash2)) => {
                 assert_eq!(hash1, hash2, "First blocks should have the same hash");
             }
@@ -380,12 +415,13 @@ mod tests {
 
         // Assert that the second blocks are different (both are partial blocks with different UUIDs)
         assert_ne!(
-            seq1.unique_blocks[1], seq2.unique_blocks[1],
+            seq1.unique_blocks()[1],
+            seq2.unique_blocks()[1],
             "Second blocks should be different"
         );
 
         // Verify types of second blocks
-        match (&seq1.unique_blocks[1], &seq2.unique_blocks[1]) {
+        match (&seq1.unique_blocks()[1], &seq2.unique_blocks()[1]) {
             (UniqueBlock::PartialBlock(_), UniqueBlock::PartialBlock(_)) => {
                 // Both are partial blocks but should have different UUIDs
             }
@@ -403,41 +439,42 @@ mod tests {
         // 2. FullBlock for tokens 16-31
         // 3. No partial block since there are no remaining tokens
         assert_eq!(
-            seq1.unique_blocks.len(),
+            seq1.unique_blocks().len(),
             2,
             "seq1 should have exactly 2 blocks"
         );
         assert_eq!(
-            seq2.unique_blocks.len(),
+            seq2.unique_blocks().len(),
             2,
             "seq2 should have exactly 2 blocks"
         );
         assert_eq!(
-            seq1.tokens.len() % seq1.block_size,
+            seq1.tokens().len() % seq1.block_size(),
             0,
             "seq1 should have no partial tokens"
         );
         assert_eq!(
-            seq2.tokens.len() % seq2.block_size,
+            seq2.tokens().len() % seq2.block_size(),
             0,
             "seq2 should have no partial tokens"
         );
 
         // Verify that both sequences now have identical blocks
         assert_eq!(
-            seq1.unique_blocks, seq2.unique_blocks,
+            seq1.unique_blocks(),
+            seq2.unique_blocks(),
             "After pushing tokens 17-31, both sequences should have identical blocks"
         );
 
         // Verify both blocks in detail
-        match (&seq1.unique_blocks[0], &seq2.unique_blocks[0]) {
+        match (&seq1.unique_blocks()[0], &seq2.unique_blocks()[0]) {
             (UniqueBlock::FullBlock(hash1), UniqueBlock::FullBlock(hash2)) => {
                 assert_eq!(hash1, hash2, "First blocks should have the same hash");
             }
             _ => panic!("Expected FullBlock for the first blocks"),
         }
 
-        match (&seq1.unique_blocks[1], &seq2.unique_blocks[1]) {
+        match (&seq1.unique_blocks()[1], &seq2.unique_blocks()[1]) {
             (UniqueBlock::FullBlock(hash1), UniqueBlock::FullBlock(hash2)) => {
                 assert_eq!(hash1, hash2, "Second blocks should have the same hash");
             }

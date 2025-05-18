@@ -21,12 +21,12 @@ use std::time::Instant;
 
 /// Mock implementation of worker for testing and simulation
 pub struct KvManager {
-    pub max_capacity: usize,
-    pub block_size: usize,
-    pub active_blocks: HashMap<UniqueBlock, usize>,
-    pub inactive_blocks: LRUEvictor<UniqueBlock>,
-    pub start_time: Instant,
-    pub all_blocks: HashSet<UniqueBlock>,
+    max_capacity: usize,
+    block_size: usize,
+    active_blocks: HashMap<UniqueBlock, usize>,
+    inactive_blocks: LRUEvictor<UniqueBlock>,
+    start_time: Instant,
+    all_blocks: HashSet<UniqueBlock>,
 }
 
 impl KvManager {
@@ -44,6 +44,31 @@ impl KvManager {
             start_time,
             all_blocks,
         }
+    }
+
+    /// Get the maximum capacity
+    pub fn max_capacity(&self) -> usize {
+        self.max_capacity
+    }
+
+    /// Get the block size
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    /// Get a reference to the active blocks
+    pub fn active_blocks(&self) -> &HashMap<UniqueBlock, usize> {
+        &self.active_blocks
+    }
+
+    /// Get a reference to the inactive blocks
+    pub fn inactive_blocks(&self) -> &LRUEvictor<UniqueBlock> {
+        &self.inactive_blocks
+    }
+
+    /// Get a reference to all blocks
+    pub fn all_blocks(&self) -> &HashSet<UniqueBlock> {
+        &self.all_blocks
     }
 
     /// Process a MoveBlock instruction synchronously
@@ -174,7 +199,7 @@ impl KvManager {
         }
 
         // Get unique blocks from the sequence
-        let unique_blocks = &sequence.unique_blocks;
+        let unique_blocks = sequence.unique_blocks();
 
         // Get the count of new blocks
         let new_blocks = self.probe_new_blocks(unique_blocks);
@@ -191,12 +216,12 @@ impl KvManager {
         let overlap_blocks = unique_blocks.len() - new_blocks;
 
         // Calculate new tokens
-        let new_tokens = sequence.num_input_tokens - overlap_blocks * self.block_size;
+        let new_tokens = sequence.num_input_tokens() - overlap_blocks * self.block_size;
 
         // // Print the full equation with actual values substituted
         // println!("{} = {} - ({} * {}) (new_tokens = num_input_tokens - overlap_blocks * block_size)",
         //     new_tokens,
-        //     sequence.num_input_tokens,
+        //     sequence.num_input_tokens(),
         //     overlap_blocks,
         //     self.block_size);
 
@@ -219,34 +244,31 @@ impl KvManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::panic;
 
     #[test]
-    fn test_panic_on_max_capacity() {
+    fn test_failure_on_max_capacity() {
         // Create a KvManager with 10 blocks capacity
         let mut manager = KvManager::new(10, 16);
 
-        // Helper function to use multiple blocks
-        fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) {
+        // Helper function to use multiple blocks that returns the response
+        fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) -> MoveBlockResponse {
             let blocks = ids.into_iter().map(UniqueBlock::FullBlock).collect();
-            manager.process(&MoveBlock::Use(blocks, None));
+            manager.process(&MoveBlock::Use(blocks, None))
         }
 
         // First use 10 blocks (0 to 9) in a batch
-        use_blocks(&mut manager, (0..10).collect());
+        let response = use_blocks(&mut manager, (0..10).collect());
+        assert_eq!(response, MoveBlockResponse::Success);
 
         // Verify we are at capacity
         assert_eq!(manager.current_capacity(), 10);
 
-        // The 11th block should cause a panic
-        let result = panic::catch_unwind(move || {
-            use_blocks(&mut manager, vec![10]);
-        });
-
-        // Verify that a panic occurred
-        assert!(
-            result.is_err(),
-            "Expected a panic when exceeding max capacity"
+        // The 11th block should return Failure, not panic
+        let response = use_blocks(&mut manager, vec![10]);
+        assert_eq!(
+            response,
+            MoveBlockResponse::Failure,
+            "Expected Failure response when exceeding max capacity"
         );
     }
 
@@ -276,7 +298,7 @@ mod tests {
         // Helper function to check if active blocks contain expected blocks with expected ref counts
         fn assert_active_blocks(manager: &KvManager, expected_blocks: &[(u64, usize)]) {
             assert_eq!(
-                manager.active_blocks.len(),
+                manager.active_blocks().len(),
                 expected_blocks.len(),
                 "Active blocks count doesn't match expected"
             );
@@ -284,12 +306,12 @@ mod tests {
             for &(id, ref_count) in expected_blocks {
                 let block = UniqueBlock::FullBlock(id);
                 assert!(
-                    manager.active_blocks.contains_key(&block),
+                    manager.active_blocks().contains_key(&block),
                     "Block {} not found in active blocks",
                     id
                 );
                 assert_eq!(
-                    manager.active_blocks.get(&block),
+                    manager.active_blocks().get(&block),
                     Some(&ref_count),
                     "Block {} has wrong reference count",
                     id
@@ -304,7 +326,7 @@ mod tests {
             expected_blocks: &[u64],
         ) {
             let inactive_blocks = manager.get_inactive_blocks();
-            let inactive_blocks_count = manager.inactive_blocks.num_objects();
+            let inactive_blocks_count = manager.inactive_blocks().num_objects();
 
             assert_eq!(
                 inactive_blocks_count, expected_size,

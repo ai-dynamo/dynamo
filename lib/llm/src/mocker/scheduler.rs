@@ -62,6 +62,7 @@ impl Scheduler {
         block_size: usize,
         chunk_size: Option<usize>,
         output_tx: Option<mpsc::Sender<Uuid>>,
+        cancellation_token: Option<CancellationToken>,
     ) -> Self {
         // Create KvManager internally
         let kv_manager = KvManager::new(kv_capacity, block_size);
@@ -81,8 +82,8 @@ impl Scheduler {
         // Create channel for request handling
         let (request_tx, mut request_rx) = mpsc::channel::<DirectRequest>(1024);
 
-        // Create cancellation token
-        let cancellation_token = CancellationToken::new();
+        // Use provided cancellation token or create new one
+        let cancellation_token = cancellation_token.unwrap_or_default();
         let token_clone = cancellation_token.clone();
 
         // Create a clone for the background task
@@ -221,12 +222,12 @@ impl Scheduler {
                             }
 
                             // Set active_tokens to None after a token is generated
-                            if sequence.generated_tokens == 1 {
+                            if sequence.generated_tokens() == 1 {
                                 prefill_costs_guard.insert(uuid, None);
                             }
 
                             // Check if we're done after generating
-                            if sequence.generated_tokens >= sequence.max_output_tokens {
+                            if sequence.generated_tokens() >= sequence.max_output_tokens() {
                                 uuids_to_remove.push(uuid);
                             }
                         }
@@ -261,6 +262,11 @@ impl Scheduler {
         }
     }
 
+    /// Returns a clone of the request sender channel
+    pub fn event_sender(&self) -> mpsc::Sender<DirectRequest> {
+        self.request_tx.clone()
+    }
+
     /// Add a new request to the waiting queue
     pub async fn receive_request(&self, request: DirectRequest) {
         let _ = self.request_tx.send(request).await;
@@ -290,8 +296,8 @@ impl Scheduler {
         let kv_manager = self.kv_manager.lock().await;
 
         // Get the active blocks and total capacity from KvManager
-        let active_blocks_count = kv_manager.active_blocks.len() as u64;
-        let total_capacity = kv_manager.max_capacity as u64;
+        let active_blocks_count = kv_manager.active_blocks().len() as u64;
+        let total_capacity = kv_manager.max_capacity() as u64;
 
         // Calculate GPU cache usage percentage
         let gpu_cache_usage_perc = if total_capacity > 0 {
@@ -371,6 +377,7 @@ mod tests {
             block_size,
             Some(chunk_size),
             Some(output_tx),
+            None,
         );
 
         // Create test requests
