@@ -47,13 +47,6 @@ pub enum MoveBlock {
     Promote(Uuid, GlobalHash),
 }
 
-/// Response to block movement operations in the cache
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum MoveBlockResponse {
-    Success,
-    Failure,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectRequest {
     pub tokens: Vec<Token>,

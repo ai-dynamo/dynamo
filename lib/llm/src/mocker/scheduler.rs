@@ -17,7 +17,7 @@ use crate::kv_router::protocols::ForwardPassMetrics;
 use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::kv_manager::KvManager;
 use crate::mocker::protocols::DirectRequest;
-use crate::mocker::protocols::{MoveBlock, MoveBlockResponse, PrefillCost, UniqueBlock};
+use crate::mocker::protocols::{MoveBlock, PrefillCost, UniqueBlock};
 use crate::mocker::sequence::ActiveSequence;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -288,7 +288,8 @@ impl Scheduler {
                             total_sleep_duration += Duration::from_millis(sleep_ms);
 
                             // Process all signals with the KvManager
-                            if process_signals(&mut kv_manager_guard, &signals) == MoveBlockResponse::Failure {
+                            // Handling of preemption on failure
+                            if !process_signals(&mut kv_manager_guard, &signals) {
                                 sequence.partial_reset();
 
                                 // free_signal derefs the preempted blocks
@@ -452,9 +453,9 @@ fn get_active_sequence(request: Request, block_size: usize, chunk_size: usize) -
 fn process_signals(
     kv_manager_guard: &mut tokio::sync::MutexGuard<'_, KvManager>,
     signals: &[MoveBlock],
-) -> MoveBlockResponse {
+) -> bool {
     for signal in signals {
-        if kv_manager_guard.process(signal) == MoveBlockResponse::Success {
+        if kv_manager_guard.process(signal) {
             continue;
         }
 
@@ -478,10 +479,10 @@ fn process_signals(
             panic!("Failed signal is Invalid. Generation block has to be partial.");
         }
 
-        return MoveBlockResponse::Failure;
+        return false;
     }
 
-    MoveBlockResponse::Success
+    true
 }
 
 #[cfg(test)]

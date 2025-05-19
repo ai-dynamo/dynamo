@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use crate::mocker::evictor::LRUEvictor;
-use crate::mocker::protocols::{MoveBlock, MoveBlockResponse, PrefillCost, UniqueBlock};
+use crate::mocker::protocols::{MoveBlock, PrefillCost, UniqueBlock};
 use crate::mocker::sequence::ActiveSequence;
 use derive_getters::Getters;
 use std::collections::{HashMap, HashSet};
@@ -51,7 +51,7 @@ impl KvManager {
     }
 
     /// Process a MoveBlock instruction synchronously
-    pub fn process(&mut self, event: &MoveBlock) -> MoveBlockResponse {
+    pub fn process(&mut self, event: &MoveBlock) -> bool {
         match event {
             MoveBlock::Use(hashes, _) => {
                 for hash in hashes {
@@ -79,8 +79,8 @@ impl KvManager {
                             // Remove evicted block from all_blocks
                             self.all_blocks.remove(&evicted);
                         } else {
-                            // Return failure instead of panicking
-                            return MoveBlockResponse::Failure;
+                            // Return false instead of panicking
+                            return false;
                         }
                     }
 
@@ -131,8 +131,8 @@ impl KvManager {
             }
         }
 
-        // Return success if we made it this far
-        MoveBlockResponse::Success
+        // Return true if we made it this far
+        true
     }
 
     /// Get the count of blocks in the input list that aren't in all_blocks
@@ -231,24 +231,23 @@ mod tests {
         let mut manager = KvManager::new(10, 16);
 
         // Helper function to use multiple blocks that returns the response
-        fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) -> MoveBlockResponse {
+        fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) -> bool {
             let blocks = ids.into_iter().map(UniqueBlock::FullBlock).collect();
             manager.process(&MoveBlock::Use(blocks, None))
         }
 
         // First use 10 blocks (0 to 9) in a batch
         let response = use_blocks(&mut manager, (0..10).collect());
-        assert_eq!(response, MoveBlockResponse::Success);
+        assert_eq!(response, true, "Expected success response");
 
         // Verify we are at capacity
         assert_eq!(manager.current_capacity(), 10);
 
-        // The 11th block should return Failure, not panic
+        // The 11th block should return false, not panic
         let response = use_blocks(&mut manager, vec![10]);
         assert_eq!(
-            response,
-            MoveBlockResponse::Failure,
-            "Expected Failure response when exceeding max capacity"
+            response, false,
+            "Expected failure response when exceeding max capacity"
         );
     }
 
