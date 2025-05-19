@@ -77,6 +77,9 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let this_clone = this.clone();
         // The offload and onboard workers must run in separate streams.
         // Otherwise, we'd only be doing either an offload or onboard at a time, cutting our effective transfer bandwidth in half.
+
+        // todo: we will want to define an essential task struct which holds a cancellation token for the component or runtime
+        // and hard fail the entire runtime if any of these tasks fail.
         tokio::spawn(async move { this_clone.offload_worker().await });
 
         let this_clone = this.clone();
@@ -342,9 +345,11 @@ mod tests {
         device_blocks: usize,
         host_blocks: Option<usize>,
     ) -> Result<(Arc<OffloadManager<BasicMetadata>>, DevicePool, HostPool)> {
+        // todo: update to use builder pattern
         let mut config = LayoutConfig {
             num_blocks: device_blocks,
             num_layers: 8,
+            outer_dim: 1,
             page_size: BLOCK_SIZE,
             inner_dim: 1024,
             alignment: 1,
