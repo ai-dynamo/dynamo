@@ -115,7 +115,7 @@ impl SchedulerState {
             .map(|cost| cost.prefill_compute)
     }
 
-    /// Calculate the total prefill tokens
+    /// Calculate the current running batched tokens
     fn num_batched_tokens(&self) -> usize {
         self.prefill_costs
             .values()
@@ -282,11 +282,11 @@ impl Scheduler {
 
                             // Accumulate sleep duration based on prefill_compute if available
                             if let Some(compute) = prefill_compute {
-                                // TODO: A magic number to model prefill compute
+                                // TODO: A magic scaling to model prefill compute (quadratic form)
                                 let sleep_ms = (compute / 131072.0) as u64;
                                 total_sleep_duration += Duration::from_millis(sleep_ms);
                             } else {
-                                // TODO: A magic number to simulate ITL
+                                // FIXME: A dummy number to simulate ITL. Need some work.
                                 total_sleep_duration += Duration::from_millis(1);
                             }
 
@@ -294,6 +294,7 @@ impl Scheduler {
                             if process_signals(&mut kv_manager_guard, &signals) == MoveBlockResponse::Failure {
                                 sequence.partial_reset();
 
+                                // free_signal derefs the preempted blocks
                                 if let Some(free_signal) = state_guard.preempt() {
                                     for signal in free_signal {
                                         kv_manager_guard.process(&signal);
@@ -305,16 +306,16 @@ impl Scheduler {
                             }
 
                             // Send UUID notification for each generated token
+                            // TODO: hook this up to an AsyncEngine
                             if let Some(tx) = &output_tx_clone {
                                 let _ = tx.try_send(uuid);
                             }
 
                             // Check if we're done after generating
                             if sequence.generated_tokens() >= sequence.max_output_tokens() {
-                                // Remove completed sequence immediately
                                 state_guard.remove(&uuid);
+                            // Transition to decode (no prefill cost)
                             } else if sequence.generated_tokens() == 1 {
-                                // Apply the reset outside of sequence borrow - only for sequences that are continuing
                                 state_guard.set_prefill_cost(uuid, None);
                             }
                         }
