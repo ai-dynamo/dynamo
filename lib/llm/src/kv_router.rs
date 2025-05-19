@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use dynamo_runtime::{
-    component::{Component, EndpointSource},
+    component::{Component, InstanceSource},
     pipeline::{
         async_trait, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
         ResponseStream, SingleIn,
@@ -199,11 +199,11 @@ impl AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<LLMEngineOutput>>, Er
         &self,
         request: SingleIn<BackendInput>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        match &self.inner.client.endpoints {
-            EndpointSource::Static => self.inner.r#static(request).await,
-            EndpointSource::Dynamic(_) => {
-                let worker_id = self.chooser.find_best_match(&request.token_ids).await?;
-                self.inner.direct(request, worker_id).await
+        match &self.inner.client.instances {
+            InstanceSource::Static => self.inner.r#static(request).await,
+            InstanceSource::Dynamic(_) => {
+                let instance_id = self.chooser.find_best_match(&request.token_ids).await?;
+                self.inner.direct(request, instance_id).await
             }
         }
     }

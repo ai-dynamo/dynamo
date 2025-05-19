@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use async_stream::stream;
 use async_trait::async_trait;
-use dynamo_runtime::{protocols::Endpoint, slug::Slug, transports::etcd::Client};
+use dynamo_runtime::{slug::Slug, transports::etcd::Client};
 use etcd_client::{EventType, PutOptions, WatchOptions};
 
 use super::{KeyValueBucket, KeyValueStore, StorageError, StorageOutcome};
@@ -27,12 +27,11 @@ use super::{KeyValueBucket, KeyValueStore, StorageError, StorageOutcome};
 #[derive(Clone)]
 pub struct EtcdStorage {
     client: Client,
-    endpoint: Endpoint,
 }
 
 impl EtcdStorage {
-    pub fn new(client: Client, endpoint: Endpoint) -> Self {
-        Self { client, endpoint }
+    pub fn new(client: Client) -> Self {
+        Self { client }
     }
 }
 
@@ -55,7 +54,6 @@ impl KeyValueStore for EtcdStorage {
     ) -> Result<Option<Box<dyn KeyValueBucket>>, StorageError> {
         Ok(Some(Box::new(EtcdBucket {
             client: self.client.clone(),
-            endpoint: self.endpoint.clone(),
             bucket_name: bucket_name.to_string(),
         })))
     }
@@ -63,7 +61,6 @@ impl KeyValueStore for EtcdStorage {
 
 pub struct EtcdBucket {
     client: Client,
-    endpoint: Endpoint,
     bucket_name: String,
 }
 
@@ -85,7 +82,7 @@ impl KeyValueBucket for EtcdBucket {
     }
 
     async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, StorageError> {
-        let k = make_key(&self.endpoint, &self.bucket_name, key);
+        let k = make_key(&self.bucket_name, key);
         tracing::trace!("etcd get: {k}");
 
         let mut kvs = self
@@ -113,7 +110,7 @@ impl KeyValueBucket for EtcdBucket {
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = bytes::Bytes> + Send + 'life0>>, StorageError>
     {
-        let k = make_key(&self.endpoint, &self.bucket_name, "");
+        let k = make_key(&self.bucket_name, "");
         tracing::trace!("etcd watch: {k}");
         let (_watcher, mut watch_stream) = self
             .client
@@ -136,7 +133,7 @@ impl KeyValueBucket for EtcdBucket {
     }
 
     async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StorageError> {
-        let k = make_key(&self.endpoint, &self.bucket_name, "");
+        let k = make_key(&self.bucket_name, "");
         tracing::trace!("etcd entries: {k}");
 
         let resp = self
@@ -158,7 +155,7 @@ impl KeyValueBucket for EtcdBucket {
 
 impl EtcdBucket {
     async fn create(&self, key: &str, value: &str) -> Result<StorageOutcome, StorageError> {
-        let k = make_key(&self.endpoint, &self.bucket_name, key);
+        let k = make_key(&self.bucket_name, key);
         tracing::trace!("etcd create: {k}");
 
         // Does it already exists? For 'create' it shouldn't.
@@ -195,7 +192,7 @@ impl EtcdBucket {
         revision: u64,
     ) -> Result<StorageOutcome, StorageError> {
         let version = revision;
-        let k = make_key(&self.endpoint, &self.bucket_name, key);
+        let k = make_key(&self.bucket_name, key);
         tracing::trace!("etcd update: {k}");
 
         let kvs = self
@@ -237,9 +234,8 @@ impl EtcdBucket {
     }
 }
 
-fn make_key(endpoint: &Endpoint, bucket_name: &str, key: &str) -> String {
+fn make_key(bucket_name: &str, key: &str) -> String {
     [
-        endpoint.namespace.to_string(),
         Slug::slugify(bucket_name).to_string(),
         Slug::slugify(key).to_string(),
     ]

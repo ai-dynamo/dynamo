@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! The [Component] module defines the top-level API for building distributed applications.
 //!
@@ -69,7 +57,14 @@ mod namespace;
 mod registry;
 pub mod service;
 
-pub use client::{Client, EndpointSource};
+pub use client::{Client, InstanceSource};
+
+/// The root etcd path where each instance registers itself in etcd.
+/// An instance is namespace+component+endpoint+lease_id and must be unique.
+pub const INSTANCE_ROOT_PATH: &str = "instances";
+
+/// The root etcd path for ModelEntry
+pub const MODEL_ROOT_PATH: &str = "models";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -89,17 +84,17 @@ pub struct Registry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComponentEndpointInfo {
+pub struct Instance {
     pub component: String,
     pub endpoint: String,
     pub namespace: String,
-    pub lease_id: i64,
+    pub instance_id: i64,
     pub transport: TransportType,
 }
 
-impl ComponentEndpointInfo {
+impl Instance {
     pub fn id(&self) -> i64 {
-        self.lease_id
+        self.instance_id
     }
 }
 
@@ -150,8 +145,11 @@ impl RuntimeProvider for Component {
 }
 
 impl Component {
-    pub fn etcd_path(&self) -> String {
-        format!("{}/components/{}", self.namespace.name(), self.name)
+    /// The component part of an instance path in etcd.
+    pub fn etcd_root(&self) -> String {
+        let ns = self.namespace.name();
+        let cp = &self.name;
+        format!("{INSTANCE_ROOT_PATH}/{ns}/{cp}")
     }
 
     pub fn service_name(&self) -> String {
@@ -179,21 +177,21 @@ impl Component {
         }
     }
 
-    pub async fn list_endpoints(&self) -> anyhow::Result<Vec<ComponentEndpointInfo>> {
+    pub async fn list_instances(&self) -> anyhow::Result<Vec<Instance>> {
         let Some(etcd_client) = self.drt.etcd_client() else {
             return Ok(vec![]);
         };
         let mut out = vec![];
         // The extra slash is important to only list exact component matches, not substrings.
         for kv in etcd_client
-            .kv_get_prefix(format!("{}/", self.etcd_path()))
+            .kv_get_prefix(format!("{}/", self.etcd_root()))
             .await?
         {
-            let val = match serde_json::from_slice::<ComponentEndpointInfo>(kv.value()) {
+            let val = match serde_json::from_slice::<Instance>(kv.value()) {
                 Ok(val) => val,
                 Err(err) => {
                     anyhow::bail!(
-                        "Error converting etcd response to ComponentEndpointInfo: {err}. {}",
+                        "Error converting etcd response to Instance: {err}. {}",
                         kv.value_str()?
                     );
                 }
@@ -276,15 +274,20 @@ impl Endpoint {
         format!("{}/{}", self.component.path(), self.name)
     }
 
-    pub fn etcd_path(&self) -> String {
-        format!("{}/{}", self.component.etcd_path(), self.name)
+    /// The endpoint part of an instance path in etcd
+    pub fn etcd_root(&self) -> String {
+        let component_path = self.component.etcd_root();
+        let endpoint_name = &self.name;
+        format!("{component_path}/{endpoint_name}")
     }
 
-    pub fn etcd_path_with_id(&self, lease_id: i64) -> String {
+    /// The fully path of an instance in etcd
+    pub fn etcd_path(&self, lease_id: i64) -> String {
+        let endpoint_root = self.etcd_root();
         if self.is_static {
-            self.etcd_path()
+            endpoint_root
         } else {
-            format!("{}:{:x}", self.etcd_path(), lease_id)
+            format!("{endpoint_root}:{lease_id:x}")
         }
     }
 

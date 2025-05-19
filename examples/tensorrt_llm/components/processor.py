@@ -78,10 +78,10 @@ class Processor(ChatProcessorMixin):
                 .client()
             )
 
-        while len(self.worker_client.endpoint_ids()) < self.min_workers:
+        while len(self.worker_client.instance_ids()) < self.min_workers:
             logger.info(
                 f"Waiting for workers to be ready.\n"
-                f" Current: {len(self.worker_client.endpoint_ids())},"
+                f" Current: {len(self.worker_client.instance_ids())},"
                 f" Required: {self.min_workers}"
             )
             await asyncio.sleep(30)

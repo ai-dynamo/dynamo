@@ -98,7 +98,7 @@ pub struct Flags {
     #[arg(long)]
     pub leader_addr: Option<String>,
 
-    /// If using `out=dyn://..` with multiple backends, this says how to route the requests.
+    /// If using `out=dyn` with multiple instances, this says how to route the requests.
     ///
     /// Mostly interesting for KV-aware routing.
     /// Defaults to RouterMode::RoundRobin

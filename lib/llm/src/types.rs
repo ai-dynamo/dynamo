@@ -52,4 +52,20 @@ pub mod openai {
             Annotated<NvCreateChatCompletionStreamResponse>,
         >;
     }
+
+    pub mod embeddings {
+        use super::*;
+
+        pub use protocols::openai::embeddings::{
+            NvCreateEmbeddingRequest, NvCreateEmbeddingResponse,
+        };
+
+        /// A [`UnaryEngine`] implementation for the OpenAI Embeddings API
+        pub type OpenAIEmbeddingsUnaryEngine =
+            UnaryEngine<NvCreateEmbeddingRequest, NvCreateEmbeddingResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the OpenAI Embeddings API
+        pub type OpenAIEmbeddingsStreamingEngine =
+            ServerStreamingEngine<NvCreateEmbeddingRequest, Annotated<NvCreateEmbeddingResponse>>;
+    }
 }

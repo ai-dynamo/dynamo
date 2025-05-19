@@ -18,6 +18,41 @@
 
 use super::*;
 
+impl WriteToStrategy<DiskStorage> for DiskStorage {
+    #[inline(always)]
+    fn write_to_strategy() -> TransferStrategy {
+        TransferStrategy::NixlWrite
+    }
+}
+
+impl WriteToStrategy<SystemStorage> for DiskStorage {
+    #[inline(always)]
+    fn write_to_strategy() -> TransferStrategy {
+        TransferStrategy::NixlWrite
+    }
+}
+
+impl WriteToStrategy<PinnedStorage> for DiskStorage {
+    #[inline(always)]
+    fn write_to_strategy() -> TransferStrategy {
+        TransferStrategy::NixlWrite
+    }
+}
+
+impl WriteToStrategy<DeviceStorage> for DiskStorage {
+    #[inline(always)]
+    fn write_to_strategy() -> TransferStrategy {
+        TransferStrategy::NixlWrite
+    }
+}
+
+impl WriteToStrategy<DiskStorage> for SystemStorage {
+    #[inline(always)]
+    fn write_to_strategy() -> TransferStrategy {
+        TransferStrategy::NixlWrite
+    }
+}
+
 impl WriteToStrategy<SystemStorage> for SystemStorage {
     #[inline(always)]
     fn write_to_strategy() -> TransferStrategy {
@@ -39,6 +74,13 @@ impl WriteToStrategy<DeviceStorage> for SystemStorage {
     }
 }
 
+impl WriteToStrategy<DiskStorage> for PinnedStorage {
+    #[inline(always)]
+    fn write_to_strategy() -> TransferStrategy {
+        TransferStrategy::NixlWrite
+    }
+}
+
 impl WriteToStrategy<SystemStorage> for PinnedStorage {
     #[inline(always)]
     fn write_to_strategy() -> TransferStrategy {
@@ -57,6 +99,13 @@ impl WriteToStrategy<DeviceStorage> for PinnedStorage {
     #[inline(always)]
     fn write_to_strategy() -> TransferStrategy {
         TransferStrategy::CudaAsyncH2D
+    }
+}
+
+impl WriteToStrategy<DiskStorage> for DeviceStorage {
+    #[inline(always)]
+    fn write_to_strategy() -> TransferStrategy {
+        TransferStrategy::NixlWrite
     }
 }
 

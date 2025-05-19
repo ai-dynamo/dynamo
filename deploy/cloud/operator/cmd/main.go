@@ -40,6 +40,9 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
+	volcanoscheme "volcano.sh/apis/pkg/client/clientset/versioned/scheme"
+
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -57,6 +60,10 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(nvidiacomv1alpha1.AddToScheme(scheme))
+
+	utilruntime.Must(lwsscheme.AddToScheme(scheme))
+
+	utilruntime.Must(volcanoscheme.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -75,6 +82,7 @@ func main() {
 	var ingressControllerClassName string
 	var ingressControllerTLSSecretName string
 	var ingressHostSuffix string
+	var enableLWS bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -100,6 +108,8 @@ func main() {
 		"The name of the ingress controller TLS secret to use")
 	flag.StringVar(&ingressHostSuffix, "ingress-host-suffix", "",
 		"The suffix to use for the ingress host")
+	flag.BoolVar(&enableLWS, "enable-lws", false,
+		"If set, enable leader worker set")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -111,6 +121,7 @@ func main() {
 	ctrlConfig := commonController.Config{
 		RestrictedNamespace:         restrictedNamespace,
 		VirtualServiceSupportsHTTPS: virtualServiceSupportsHTTPS,
+		EnableLWS:                   enableLWS,
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))

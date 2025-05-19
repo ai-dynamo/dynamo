@@ -35,7 +35,7 @@ async fn app(runtime: Runtime) -> Result<()> {
 
     let client = component.endpoint("generate").client().await?;
 
-    client.wait_for_endpoints().await?;
+    client.wait_for_instances().await?;
     let router =
         PushRouter::<String, Annotated<String>>::from_client(client, Default::default()).await?;
 
