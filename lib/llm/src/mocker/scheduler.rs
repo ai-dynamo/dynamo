@@ -116,12 +116,12 @@ impl SchedulerState {
     }
 
     /// Calculate the total prefill tokens
-    fn total_prefill_tokens(&self) -> usize {
+    fn num_batched_tokens(&self) -> usize {
         self.prefill_costs
             .values()
             .map(|cost| match cost {
                 Some(cost) => cost.new_tokens,
-                None => 0,
+                None => 1,
             })
             .sum()
     }
@@ -234,7 +234,7 @@ impl Scheduler {
                             let active_sequence = get_active_sequence(request, block_size, chunk_size);
 
                             // Calculate token budget using new_tokens from PrefillCost
-                            let total_prefill_tokens = state_guard.total_prefill_tokens();
+                            let total_prefill_tokens = state_guard.num_batched_tokens();
                             let tokens_budget = token_capacity.saturating_sub(total_prefill_tokens);
 
                             // Check if it can be scheduled
