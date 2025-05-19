@@ -33,24 +33,14 @@ pub enum Request {
     Direct(DirectRequest),
     Active(ActiveSequence),
 }
+
+#[derive(Default)]
 struct SchedulerState {
     waiting: VecDeque<Uuid>,
     ready: VecDeque<Uuid>,
     running: LRUEvictor<Uuid>,
     requests: HashMap<Uuid, Request>,
     prefill_costs: HashMap<Uuid, Option<PrefillCost>>,
-}
-
-impl Default for SchedulerState {
-    fn default() -> Self {
-        Self {
-            waiting: VecDeque::new(),
-            ready: VecDeque::new(),
-            running: LRUEvictor::new(),
-            requests: HashMap::new(),
-            prefill_costs: HashMap::new(),
-        }
-    }
 }
 
 impl SchedulerState {

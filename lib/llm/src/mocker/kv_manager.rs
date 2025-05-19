@@ -38,7 +38,7 @@ pub struct KvManager {
 impl KvManager {
     pub fn new(max_capacity: usize, block_size: usize) -> Self {
         let active_blocks = HashMap::new();
-        let inactive_blocks = LRUEvictor::new();
+        let inactive_blocks = LRUEvictor::default();
         let all_blocks = HashSet::new();
 
         KvManager {

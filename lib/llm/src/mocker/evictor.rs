@@ -33,19 +33,23 @@ pub struct LRUEvictor<T: Clone + Eq + Hash> {
     start_time: Instant,
 }
 
-impl<T: Clone + Eq + Hash> LRUEvictor<T> {
-    /// Create a new LRUEvictor with the default cleanup threshold
-    pub fn new() -> Self {
-        Self::with_cleanup_threshold(50)
-    }
-
-    /// Create a new LRUEvictor with a custom cleanup threshold
-    fn with_cleanup_threshold(cleanup_threshold: usize) -> Self {
-        LRUEvictor {
+impl<T: Clone + Eq + Hash> Default for LRUEvictor<T> {
+    fn default() -> Self {
+        Self {
             free_table: HashMap::new(),
             priority_queue: VecDeque::new(),
-            cleanup_threshold,
+            cleanup_threshold: 50,
             start_time: Instant::now(),
+        }
+    }
+}
+
+impl<T: Clone + Eq + Hash> LRUEvictor<T> {
+    /// Create a new LRUEvictor with the default cleanup threshold
+    pub fn new(cleanup_threshold: usize) -> Self {
+        Self {
+            cleanup_threshold,
+            ..Default::default()
         }
     }
 
@@ -149,7 +153,7 @@ mod tests {
     #[case(3)]
     fn test_lru_evictor_eviction_order(#[case] threshold: usize) {
         // Create a new LRUEvictor with the given cleanup threshold
-        let mut evictor = LRUEvictor::<i32>::with_cleanup_threshold(threshold);
+        let mut evictor = LRUEvictor::<i32>::new(threshold);
 
         // Add items in the specified order with small delays between each
         evictor.insert(4);
