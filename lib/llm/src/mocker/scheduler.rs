@@ -562,7 +562,8 @@ mod tests {
         assert!(
             received_tokens > expected_tokens,
             "Received {} tokens but expected more than {}",
-            received_tokens, expected_tokens
+            received_tokens,
+            expected_tokens
         );
     }
 }
