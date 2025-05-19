@@ -23,7 +23,7 @@ pub use model::ModelDeploymentCard;
 // network module?
 
 /// Identify model deployment cards in the key-value store
-pub const BUCKET_NAME: &str = "mdc";
+pub const ROOT_PATH: &str = "mdc";
 
 /// Delete model deployment cards that haven't been re-published after this long.
 /// Cleans up if the worker stopped.

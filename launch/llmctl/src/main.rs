@@ -271,7 +271,7 @@ async fn add_model(
     let component = distributed.namespace(&namespace)?.component("http")?;
     let path = format!(
         "{}/models/{}/{}",
-        component.etcd_path(),
+        component.etcd_root(),
         model_type.as_str(),
         model_name
     );
@@ -323,7 +323,7 @@ async fn list_single_model(
     let component = distributed.namespace(&namespace)?.component("http")?;
     let path = format!(
         "{}/models/{}/{}",
-        component.etcd_path(),
+        component.etcd_root(),
         model_type.as_str(),
         model_name
     );
@@ -374,7 +374,7 @@ async fn list_models(
     // TODO: Do we need the model_type in etcd key?
 
     for mt in model_types {
-        let prefix = format!("{}/models/{}/", component.etcd_path(), mt.as_str(),);
+        let prefix = format!("{}/models/{}/", component.etcd_root(), mt.as_str(),);
 
         let etcd_client = distributed
             .etcd_client()
@@ -430,7 +430,7 @@ async fn remove_model(
     let component = distributed.namespace(&namespace)?.component("http")?;
     let prefix = format!(
         "{}/models/{}/{}",
-        component.etcd_path(),
+        component.etcd_root(),
         model_type.as_str(),
         name
     );

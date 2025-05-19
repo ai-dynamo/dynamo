@@ -101,6 +101,18 @@ rules:
   - update
   - watch
 - apiGroups:
+  - leaderworkerset.x-k8s.io
+  resources:
+  - leaderworkersets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - networking.istio.io
   resources:
   - virtualservices
@@ -157,3 +169,15 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - scheduling.volcano.sh
+  resources:
+  - podgroups
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch

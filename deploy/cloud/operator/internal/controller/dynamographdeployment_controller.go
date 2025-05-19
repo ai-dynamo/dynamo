@@ -323,7 +323,9 @@ func overrideWithDynDeploymentConfig(ctx context.Context, dynamoDeploymentCompon
 			}
 			componentDynConfig := dynDeploymentConfig[dynamoDeploymentComponent.Spec.ServiceName]
 			if componentDynConfig != nil {
-				if componentDynConfig.ServiceArgs != nil && componentDynConfig.ServiceArgs.Workers != nil {
+				if componentDynConfig.ServiceArgs != nil && componentDynConfig.ServiceArgs.Workers != nil && dynamoDeploymentComponent.Spec.Replicas == nil {
+					// we only override the replicas if it is not set in the CRD.
+					// replicas, if set in the CRD set in the CRD must always be the source of truth.
 					dynamoDeploymentComponent.Spec.Replicas = componentDynConfig.ServiceArgs.Workers
 				}
 				if componentDynConfig.ServiceArgs != nil && componentDynConfig.ServiceArgs.Resources != nil {
@@ -361,6 +363,9 @@ func overrideWithDynDeploymentConfig(ctx context.Context, dynamoDeploymentCompon
 					if componentDynConfig.ServiceArgs.Resources.Custom != nil {
 						requests.Custom = componentDynConfig.ServiceArgs.Resources.Custom
 						limits.Custom = componentDynConfig.ServiceArgs.Resources.Custom
+					}
+					if err := dynamo.SetLwsAnnotations(componentDynConfig.ServiceArgs, dynamoDeploymentComponent); err != nil {
+						return err
 					}
 				}
 			}
