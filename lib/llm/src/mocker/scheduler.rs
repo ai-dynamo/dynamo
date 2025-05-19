@@ -528,7 +528,7 @@ mod tests {
         let start_time = std::time::Instant::now();
 
         // Collect all generated tokens (should be num_requests * max_output_tokens)
-        let expected_tokens = num_requests * max_output_tokens as usize;
+        let expected_tokens = num_requests * max_output_tokens;
         let mut received_tokens = 0;
 
         // Set up a timeout that causes the test to panic if no tokens are received for 5 consecutive seconds.
