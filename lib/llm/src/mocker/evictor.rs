@@ -84,15 +84,14 @@ impl<T: Clone + Eq + Hash> LRUEvictor<T> {
         }
 
         while let Some((object, last_accessed)) = self.priority_queue.pop_front() {
-            // Check if the entry is still valid (not outdated)
-            if let Some(&current_last_accessed) = self.free_table.get(&object) {
-                if current_last_accessed == last_accessed {
-                    // The entry is valid, remove it from the free table
-                    self.free_table.remove(&object);
-                    return Some(object);
-                }
-                // Otherwise, this is an outdated entry and we skip it
-            }
+            let Some(&current_last_accessed) = self.free_table.get(&object) else {
+                continue; // entry is already removed
+            };
+
+            if current_last_accessed == last_accessed {
+                self.free_table.remove(&object);
+                return Some(object);
+            } // otherwise entry is stale
         }
 
         None
@@ -133,10 +132,12 @@ impl<T: Clone + Eq + Hash> LRUEvictor<T> {
     fn cleanup(&mut self) {
         let mut new_priority_queue = VecDeque::new();
         for (object, timestamp) in self.priority_queue.drain(..) {
-            if let Some(&current_timestamp) = self.free_table.get(&object) {
-                if current_timestamp == timestamp {
-                    new_priority_queue.push_back((object, timestamp));
-                }
+            let Some(&current_timestamp) = self.free_table.get(&object) else {
+                continue;
+            };
+
+            if current_timestamp == timestamp {
+                new_priority_queue.push_back((object, timestamp));
             }
         }
         self.priority_queue = new_priority_queue;
