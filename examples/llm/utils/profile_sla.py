@@ -297,16 +297,17 @@ def wait_for_server_ready(model_name: str, port: int, timeout: int = 300):
                 },
                 timeout=5,
             )
-            if response.status_code == 200:
-                logger.info(
-                    f"Server is ready after {time.time() - start_time:.2f} seconds"
-                )
-                server_ready = True
-                break
-            else:
+            if response.status_code != 200:
                 logger.info(
                     f"Server returned status code {response.status_code}, waiting..."
                 )
+                continue
+            logger.info(
+                f"Server is ready after {time.time() - start_time:.2f} seconds"
+            )
+            server_ready = True
+            break
+                
         except (requests.RequestException, ConnectionError) as e:
             logger.info(f"Server not ready yet: {e}")
 
