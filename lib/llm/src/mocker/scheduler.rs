@@ -14,12 +14,12 @@
 // limitations under the License.
 
 use crate::kv_router::protocols::ForwardPassMetrics;
+use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::kv_manager::KvManager;
 use crate::mocker::protocols::DirectRequest;
 use crate::mocker::protocols::{MoveBlock, MoveBlockResponse, PrefillCost, UniqueBlock};
 use crate::mocker::sequence::ActiveSequence;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -36,7 +36,7 @@ pub enum Request {
 struct SchedulerState {
     waiting: VecDeque<Uuid>,
     ready: VecDeque<Uuid>,
-    running: HashSet<Uuid>,
+    running: LRUEvictor<Uuid>,
     requests: HashMap<Uuid, Request>,
 }
 
@@ -45,7 +45,7 @@ impl Default for SchedulerState {
         Self {
             waiting: VecDeque::new(),
             ready: VecDeque::new(),
-            running: HashSet::new(),
+            running: LRUEvictor::new(),
             requests: HashMap::new(),
         }
     }
@@ -96,12 +96,45 @@ impl SchedulerState {
 
         panic!("Failed to get creation signal from ActiveSequence");
     }
+
+    /// Remove a UUID and its associated Request from both running and requests collections.
+    fn remove(&mut self, uuid: &Uuid) {
+        self.running.remove(uuid);
+        self.requests.remove(uuid);
+    }
+
+    /// Preempt the oldest running request by evicting it from running, resetting the sequence,
+    /// and adding it back to the waiting queue.
+    /// Returns the signal from reset_with_signal or None if no requests are running.
+    fn preempt(&mut self) -> Option<Vec<MoveBlock>> {
+        // Evict the oldest UUID from running
+        let uuid = self.running.evict()?;
+        eprintln!("Request {} will be preempted", uuid);
+
+        // Remove the request from the requests HashMap and ensure it's an ActiveSequence
+        let request = self.requests.remove(&uuid)?;
+
+        // Extract the ActiveSequence from the Request enum
+        let active_sequence = match request {
+            Request::Active(seq) => seq,
+            _ => panic!("Expected ActiveSequence in running queue"),
+        };
+
+        // Reset the sequence and get the new sequence and signal
+        let (new_sequence, signals) = active_sequence.reset_with_signal();
+
+        // Insert the new sequence back into the requests map and add to waiting queue
+        self.requests.insert(uuid, Request::Active(new_sequence));
+        self.waiting.push_back(uuid);
+
+        Some(signals)
+    }
 }
 
 /// Manages scheduling of requests using KvManager resources
 pub struct Scheduler {
     state: Arc<Mutex<SchedulerState>>,
-    kv_manager: Arc<Mutex<KvManager>>, // Now need to protect KvManager with Mutex for thread safety
+    kv_manager: Arc<Mutex<KvManager>>,
     prefill_costs: Arc<Mutex<HashMap<Uuid, Option<PrefillCost>>>>,
     token_capacity: usize,
     watermark: f64,
@@ -210,7 +243,13 @@ impl Scheduler {
                         // Accumulate total sleep duration
                         let mut total_sleep_duration = Duration::from_millis(0);
 
-                        for uuid in state_guard.running.clone() {
+                        let uuids: Vec<Uuid> = state_guard.running.keys().cloned().collect();
+                        for uuid in uuids {
+                            // Check if UUID is still in running_requests, if not skip this iteration
+                            if !state_guard.running.contains(&uuid) {
+                                continue;
+                            }
+
                             // Get the active sequence for this UUID
                             let sequence = state_guard.requests.get_mut(&uuid)
                                 .and_then(|req| if let Request::Active(seq) = req { Some(seq) } else { None })
@@ -233,7 +272,18 @@ impl Scheduler {
                             }
 
                             // Process all signals with the KvManager
-                            let _response = process_signals(&mut kv_manager_guard, &signals);
+                            if process_signals(&mut kv_manager_guard, &signals) == MoveBlockResponse::Failure {
+                                sequence.partial_reset();
+
+                                if let Some(free_signal) = state_guard.preempt() {
+                                    for signal in free_signal {
+                                        kv_manager_guard.process(&signal);
+                                    }
+                                } else {
+                                    panic!("Failed to acquire signal to free KV blocks from preemption");
+                                }
+                                continue;
+                            }
 
                             // Send UUID notification for each generated token
                             if let Some(tx) = &output_tx_clone {
@@ -253,8 +303,7 @@ impl Scheduler {
 
                         // Remove completed sequences
                         for uuid in uuids_to_remove {
-                            state_guard.running.remove(&uuid);
-                            state_guard.requests.remove(&uuid);
+                            state_guard.remove(&uuid);
                             prefill_costs_guard.remove(&uuid);
                         }
 
@@ -402,25 +451,21 @@ fn process_signals(
         if response == MoveBlockResponse::Failure {
             // Verify we have exactly one signal
             if signals.len() != 1 {
-                println!("Warning: Cannot acquire new generation block");
-                return MoveBlockResponse::Failure;
+                panic!("Falied signal is Invalid");
             }
 
             if let MoveBlock::Use(blocks, _) = &signal {
                 // Verify the signal contains exactly one block
                 if blocks.len() != 1 {
-                    println!("Warning: Cannot acquire new generation block");
-                    return MoveBlockResponse::Failure;
+                    panic!("Falied signal is Invalid");
                 }
 
                 // Verify the block is a PartialBlock (generation block)
                 if !matches!(blocks[0], UniqueBlock::PartialBlock(_)) {
-                    println!("Warning: Cannot acquire new generation block");
-                    return MoveBlockResponse::Failure;
+                    panic!("Falied signal is Invalid");
                 }
             } else {
-                println!("Warning: Cannot acquire new generation block");
-                return MoveBlockResponse::Failure;
+                panic!("Falied signal is Invalid");
             }
 
             return MoveBlockResponse::Failure;
@@ -514,9 +559,9 @@ mod tests {
         println!("Test completed in: {:?}", elapsed);
 
         // Assert that we received the expected number of tokens
-        assert_eq!(
-            received_tokens, expected_tokens,
-            "Received {} tokens but expected {}",
+        assert!(
+            received_tokens > expected_tokens,
+            "Received {} tokens but expected more than {}",
             received_tokens, expected_tokens
         );
     }

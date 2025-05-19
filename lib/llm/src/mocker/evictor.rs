@@ -46,7 +46,7 @@ impl<T: Clone + Eq + Hash> LRUEvictor<T> {
     }
 
     /// Create a new LRUEvictor with a custom cleanup threshold
-    pub fn with_cleanup_threshold(cleanup_threshold: usize) -> Self {
+    fn with_cleanup_threshold(cleanup_threshold: usize) -> Self {
         LRUEvictor {
             free_table: HashMap::new(),
             priority_queue: VecDeque::new(),
@@ -113,8 +113,13 @@ impl<T: Clone + Eq + Hash> LRUEvictor<T> {
     }
 
     /// Get the number of objects in the evictor
-    pub fn num_objects(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.free_table.len()
+    }
+
+    /// Check if the evictor is empty
+    pub fn is_empty(&self) -> bool {
+        self.free_table.is_empty()
     }
 
     /// Check if cleanup is necessary and perform it if needed
@@ -182,6 +187,6 @@ mod tests {
         assert_eq!(evicted, 2);
         let evicted = evictor.evict();
         assert_eq!(evicted, None);
-        assert_eq!(evictor.num_objects(), 0);
+        assert_eq!(evictor.len(), 0);
     }
 }

@@ -88,7 +88,7 @@ impl KvManager {
 
                     // Get counts for capacity check
                     let active_count = self.active_blocks.len();
-                    let inactive_count = self.inactive_blocks.num_objects();
+                    let inactive_count = self.inactive_blocks.len();
 
                     // If at max capacity, evict the oldest entry from inactive blocks
                     if active_count + inactive_count >= self.max_capacity {
@@ -162,7 +162,7 @@ impl KvManager {
     /// Get the current capacity (active blocks + inactive blocks)
     pub fn current_capacity(&self) -> usize {
         let active = self.active_blocks.len();
-        let inactive = self.inactive_blocks.num_objects();
+        let inactive = self.inactive_blocks.len();
         active + inactive
     }
 
@@ -322,7 +322,7 @@ mod tests {
             expected_blocks: &[u64],
         ) {
             let inactive_blocks = manager.get_inactive_blocks();
-            let inactive_blocks_count = manager.inactive_blocks().num_objects();
+            let inactive_blocks_count = manager.inactive_blocks().len();
 
             assert_eq!(
                 inactive_blocks_count, expected_size,
