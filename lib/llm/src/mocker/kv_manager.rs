@@ -173,13 +173,13 @@ impl KvManager {
     }
 
     /// Get the keys of inactive blocks
-    pub fn get_inactive_blocks(&self) -> Vec<UniqueBlock> {
-        self.inactive_blocks.free_table.keys().cloned().collect()
+    pub fn get_inactive_blocks(&self) -> Vec<&UniqueBlock> {
+        self.inactive_blocks.keys().collect()
     }
 
     /// Get the keys of active blocks
-    pub fn get_active_blocks(&self) -> Vec<UniqueBlock> {
-        self.active_blocks.keys().cloned().collect()
+    pub fn get_active_blocks(&self) -> Vec<&UniqueBlock> {
+        self.active_blocks.keys().collect()
     }
 
     /// Check if a sequence can be scheduled and calculate cost if possible
@@ -332,7 +332,7 @@ mod tests {
             for &id in expected_blocks {
                 let block = UniqueBlock::FullBlock(id);
                 assert!(
-                    inactive_blocks.contains(&block),
+                    inactive_blocks.iter().any(|&b| *b == block),
                     "Block {} not found in inactive blocks",
                     id
                 );

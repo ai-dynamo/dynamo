@@ -27,7 +27,7 @@ use std::time::Instant;
 ///    they are either evicted or cleaned up during maintenance
 #[derive(Debug)]
 pub struct LRUEvictor<T: Clone + Eq + Hash> {
-    pub free_table: HashMap<T, f64>,
+    free_table: HashMap<T, f64>,
     priority_queue: VecDeque<(T, f64)>,
     cleanup_threshold: usize,
     start_time: Instant,
@@ -58,6 +58,11 @@ impl<T: Clone + Eq + Hash> LRUEvictor<T> {
     /// Get the current timestamp as seconds since initialization
     pub fn current_timestamp(&self) -> f64 {
         self.start_time.elapsed().as_secs_f64()
+    }
+
+    /// Get an iterator over the keys in the evictor
+    pub fn keys(&self) -> std::collections::hash_map::Keys<'_, T, f64> {
+        self.free_table.keys()
     }
 
     /// Insert or update an object in the evictor with current timestamp
@@ -94,7 +99,7 @@ impl<T: Clone + Eq + Hash> LRUEvictor<T> {
     }
 
     /// Insert or update an object in the evictor
-    pub fn _insert(&mut self, object: T, last_accessed: f64) {
+    fn _insert(&mut self, object: T, last_accessed: f64) {
         self.free_table.insert(object.clone(), last_accessed);
         self.priority_queue.push_back((object, last_accessed));
         self.cleanup_if_necessary();
