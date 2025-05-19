@@ -89,17 +89,17 @@ impl SchedulerState {
         // Insert the request into the map
         self.requests.insert(uuid, Request::Active(active_seq));
 
-        // Get the request and extract the ActiveSequence
-        if let Some(Request::Active(sequence)) = self.requests.get(&uuid) {
-            // Get the creation signal
-            if let Some(signal) = sequence.creation_signal() {
-                // Add to running requests
-                self.running.insert(uuid);
-                return signal.clone();
-            }
-        }
+        // Get the creation signal
+        let Some(Request::Active(sequence)) = self.requests.get(&uuid) else {
+            panic!("Failed to get ActiveSequence for UUID");
+        };
+        let Some(signal) = sequence.creation_signal() else {
+            panic!("Failed to get creation signal from ActiveSequence");
+        };
 
-        panic!("Failed to get creation signal from ActiveSequence");
+        // Add to running requests
+        self.running.insert(uuid);
+        signal.clone()
     }
 
     /// Set the prefill cost for a UUID
@@ -127,7 +127,7 @@ impl SchedulerState {
     }
 
     /// Remove a UUID and its associated Request from collections.
-    fn remove(&mut self, uuid: &Uuid) {
+    fn complete(&mut self, uuid: &Uuid) {
         self.running.remove(uuid);
         self.requests.remove(uuid);
         self.prefill_costs.remove(uuid);
@@ -148,9 +148,8 @@ impl SchedulerState {
         self.prefill_costs.remove(&uuid);
 
         // Extract the ActiveSequence from the Request enum
-        let active_sequence = match request {
-            Request::Active(seq) => seq,
-            _ => panic!("Expected ActiveSequence in running queue"),
+        let Request::Active(active_sequence) = request else {
+            panic!("Expected ActiveSequence in running queue")
         };
 
         // Reset the sequence and get the new sequence and signal
@@ -238,15 +237,15 @@ impl Scheduler {
                             let tokens_budget = token_capacity.saturating_sub(total_prefill_tokens);
 
                             // Check if it can be scheduled
-                            if let Some(prefill_cost) = kv_manager_guard.try_schedule(&active_sequence, watermark, tokens_budget) {
-                                // Get creation signal and schedule the request
-                                let signal = state_guard.run(uuid, active_sequence);
-                                kv_manager_guard.process(&signal);
-                                state_guard.set_prefill_cost(uuid, Some(prefill_cost));
-                            } else {
+                            let Some(prefill_cost) = kv_manager_guard.try_schedule(&active_sequence, watermark, tokens_budget) else {
                                 state_guard.make_ready(uuid, active_sequence);
                                 break;
-                            }
+                            };
+
+                            // Get creation signal and schedule the request
+                            let signal = state_guard.run(uuid, active_sequence);
+                            kv_manager_guard.process(&signal);
+                            state_guard.set_prefill_cost(uuid, Some(prefill_cost));
                         }
                     }
 
@@ -281,26 +280,24 @@ impl Scheduler {
                             let signals = sequence.generate();
 
                             // Accumulate sleep duration based on prefill_compute if available
-                            if let Some(compute) = prefill_compute {
-                                // TODO: A magic scaling to model prefill compute (quadratic form)
-                                let sleep_ms = (compute / 131072.0) as u64;
-                                total_sleep_duration += Duration::from_millis(sleep_ms);
+                            let sleep_ms = if let Some(compute) = prefill_compute {
+                                (compute / 131072.0) as u64  // TODO: A magic scaling to model prefill compute
                             } else {
-                                // FIXME: A dummy number to simulate ITL. Need some work.
-                                total_sleep_duration += Duration::from_millis(1);
-                            }
+                                1  // FIXME: A dummy number to simulate ITL. Need some work.
+                            };
+                            total_sleep_duration += Duration::from_millis(sleep_ms);
 
                             // Process all signals with the KvManager
                             if process_signals(&mut kv_manager_guard, &signals) == MoveBlockResponse::Failure {
                                 sequence.partial_reset();
 
                                 // free_signal derefs the preempted blocks
-                                if let Some(free_signal) = state_guard.preempt() {
-                                    for signal in free_signal {
-                                        kv_manager_guard.process(&signal);
-                                    }
-                                } else {
+                                let Some(free_signal) = state_guard.preempt() else {
                                     panic!("Failed to acquire signal to free KV blocks from preemption");
+                                };
+
+                                for signal in free_signal {
+                                    kv_manager_guard.process(&signal);
                                 }
                                 continue;
                             }
@@ -313,9 +310,12 @@ impl Scheduler {
 
                             // Check if we're done after generating
                             if sequence.generated_tokens() >= sequence.max_output_tokens() {
-                                state_guard.remove(&uuid);
+                                state_guard.complete(&uuid);
+                                continue;
+                            }
+
                             // Transition to decode (no prefill cost)
-                            } else if sequence.generated_tokens() == 1 {
+                            if sequence.generated_tokens() == 1 {
                                 state_guard.set_prefill_cost(uuid, None);
                             }
                         }
@@ -426,18 +426,20 @@ impl Drop for Scheduler {
 
 /// Convert a Request to an ActiveSequence
 fn get_active_sequence(request: Request, block_size: usize, chunk_size: usize) -> ActiveSequence {
-    match request {
-        Request::Direct(direct_request) => {
-            // Convert DirectRequest to ActiveSequence
-            ActiveSequence::new(
-                direct_request.tokens,
-                direct_request.max_output_tokens,
-                Some(block_size),
-                Some(chunk_size),
-            )
-        }
-        Request::Active(active_seq) => active_seq,
+    if let Request::Active(active_seq) = request {
+        return active_seq;
     }
+
+    let Request::Direct(direct_request) = request else {
+        unreachable!("Request must be either Direct or Active");
+    };
+
+    ActiveSequence::new(
+        direct_request.tokens,
+        direct_request.max_output_tokens,
+        Some(block_size),
+        Some(chunk_size),
+    )
 }
 
 /// Processes MoveBlock signals with the KvManager.
@@ -452,30 +454,31 @@ fn process_signals(
     signals: &[MoveBlock],
 ) -> MoveBlockResponse {
     for signal in signals {
-        let response = kv_manager_guard.process(signal);
-        // Break out early on failure
-        if response == MoveBlockResponse::Failure {
-            // Verify we have exactly one signal
-            if signals.len() != 1 {
-                panic!("Falied signal is Invalid");
-            }
-
-            if let MoveBlock::Use(blocks, _) = &signal {
-                // Verify the signal contains exactly one block
-                if blocks.len() != 1 {
-                    panic!("Falied signal is Invalid");
-                }
-
-                // Verify the block is a PartialBlock (generation block)
-                if !matches!(blocks[0], UniqueBlock::PartialBlock(_)) {
-                    panic!("Falied signal is Invalid");
-                }
-            } else {
-                panic!("Falied signal is Invalid");
-            }
-
-            return MoveBlockResponse::Failure;
+        if kv_manager_guard.process(signal) == MoveBlockResponse::Success {
+            continue;
         }
+
+        // Verify we have exactly one signal
+        if signals.len() != 1 {
+            panic!("Failed signal is Invalid");
+        }
+
+        // Check we have a Use signal with blocks
+        let MoveBlock::Use(blocks, _) = signal else {
+            panic!("Failed signal is Invalid. Has to fail on generation signal.");
+        };
+
+        // Verify the signal contains exactly one block
+        if blocks.len() != 1 {
+            panic!("Failed signal is Invalid. Can have only one generation signal.");
+        }
+
+        // Verify the block is a PartialBlock (generation block)
+        if !matches!(blocks[0], UniqueBlock::PartialBlock(_)) {
+            panic!("Failed signal is Invalid. Generation block has to be partial.");
+        }
+
+        return MoveBlockResponse::Failure;
     }
 
     MoveBlockResponse::Success

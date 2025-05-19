@@ -185,7 +185,6 @@ impl ActiveSequence {
     pub fn push(&mut self, token: u32) -> Option<MoveBlock> {
         self.tokens.push(token);
         self.generated_tokens += 1;
-        let mut signal = None;
 
         // Add a partial block if this is the first token in a new partial sequence
         let remainder = self.tokens.len() % self.block_size;
@@ -201,9 +200,7 @@ impl ActiveSequence {
             self.unique_blocks.push(partial_block.clone());
 
             // Return Use signal for the new partial block
-            signal = Some(MoveBlock::Use(vec![partial_block], None));
-
-            return signal;
+            return Some(MoveBlock::Use(vec![partial_block], None));
         }
 
         // Not enough tokens to complete a block
@@ -238,25 +235,24 @@ impl ActiveSequence {
         let new_global_hash = compute_seq_hash_for_blocks(&local_hash, parent_hash);
 
         // Ensure the last block is a partial block
-        match self.unique_blocks.last() {
-            Some(UniqueBlock::PartialBlock(uuid)) => {
-                let uuid_copy = *uuid;
+        let Some(UniqueBlock::PartialBlock(uuid)) = self.unique_blocks.last() else {
+            panic!("Expected last block to be a PartialBlock");
+        };
 
-                // Replace the partial block with the full block
-                self.unique_blocks.pop();
+        let uuid_copy = *uuid;
 
-                if let Some(hash) = new_global_hash.first() {
-                    // Add the new full block
-                    self.unique_blocks.push(UniqueBlock::FullBlock(*hash));
+        // Replace the partial block (if exists) with the full block
+        self.unique_blocks.pop();
 
-                    // Return Promote signal
-                    signal = Some(MoveBlock::Promote(uuid_copy, *hash));
-                }
-            }
-            _ => panic!("Expected last block to be a PartialBlock"),
-        }
+        let hash = new_global_hash
+            .first()
+            .expect("Expected non-empty global hash for promotion");
 
-        signal
+        // Add the new full block
+        self.unique_blocks.push(UniqueBlock::FullBlock(*hash));
+
+        // Return Promote signal
+        Some(MoveBlock::Promote(uuid_copy, *hash))
     }
 
     /// Generate a random token, push it to the sequence, and increment generation count.
@@ -351,39 +347,28 @@ impl ActiveSequence {
     }
 
     /// Resets the last partial block in the sequence.
-    ///
-    /// This function:
-    /// - Asserts that the last block is a PartialBlock
-    /// - Removes the last PartialBlock
-    /// - Decrements the generated_tokens counter by the number of tokens in the partial block
-    /// - Removes the corresponding tokens from the end of the sequence
-    ///
-    /// # Panics
-    ///
-    /// Panics if the last block is not a PartialBlock.
     pub fn partial_reset(&mut self) {
-        // Assert that the last block is a PartialBlock
-        match self.unique_blocks.last() {
-            Some(UniqueBlock::PartialBlock(_)) => {
-                // Calculate how many tokens are in the partial block
-                let partial_block_size = self.tokens.len() % self.block_size;
-                if partial_block_size == 0 {
-                    // This shouldn't happen - if tokens.len() is a multiple of block_size,
-                    // we should have no partial block
-                    panic!("Expected tokens.len() to not be a multiple of block_size when a PartialBlock exists");
-                }
+        // Use let else pattern to simplify structure
+        let Some(UniqueBlock::PartialBlock(_)) = self.unique_blocks.last() else {
+            panic!("Expected last block to be a PartialBlock");
+        };
 
-                // Remove the last partial_block_size tokens
-                self.tokens.truncate(self.tokens.len() - partial_block_size);
-
-                // Decrement the generated tokens counter
-                self.generated_tokens = self.generated_tokens.saturating_sub(partial_block_size);
-
-                // Remove the PartialBlock
-                self.unique_blocks.pop();
-            }
-            _ => panic!("Expected last block to be a PartialBlock"),
+        // Calculate how many tokens are in the partial block
+        let partial_block_size = self.tokens.len() % self.block_size;
+        if partial_block_size == 0 {
+            // This shouldn't happen - if tokens.len() is a multiple of block_size,
+            // we should have no partial block
+            panic!("Expected tokens.len() to not be a multiple of block_size when a PartialBlock exists");
         }
+
+        // Remove the last partial_block_size tokens
+        self.tokens.truncate(self.tokens.len() - partial_block_size);
+
+        // Decrement the generated tokens counter
+        self.generated_tokens = self.generated_tokens.saturating_sub(partial_block_size);
+
+        // Remove the PartialBlock
+        self.unique_blocks.pop();
     }
 }
 
