@@ -269,6 +269,7 @@ mod tests {
     }
 
     #[test]
+    // This is taken directly from the example in the vllm v1 prefix caching docs
     fn test_block_lifecycle_stringent() {
         // Create a KvManager with 10 blocks capacity
         let mut manager = KvManager::new(10, 16);
