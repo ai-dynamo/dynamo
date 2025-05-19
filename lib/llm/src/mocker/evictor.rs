@@ -33,12 +33,6 @@ pub struct LRUEvictor<T: Clone + Eq + Hash> {
     start_time: Instant,
 }
 
-impl<T: Clone + Eq + Hash> Default for LRUEvictor<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl<T: Clone + Eq + Hash> LRUEvictor<T> {
     /// Create a new LRUEvictor with the default cleanup threshold
     pub fn new() -> Self {
