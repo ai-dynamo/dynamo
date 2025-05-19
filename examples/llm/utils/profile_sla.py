@@ -522,7 +522,7 @@ if __name__ == "__main__":
             # first warm-up the engine by pre-computing all prefill tokens
             # we use the same random seed to make sure the prompt is the same
             seed = random.randint(0, 1000000)
-            genai_perf_artifact_dir = f"{work_dir}/gap_request{num_request}_isl{args.isl}_osl{args.osl}_warmup"
+            genai_perf_artifact_dir = f"{work_dir}/gap_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}_warmup"
             genai_perf_cmd = get_decode_genai_perf_cmd(
                 args.isl,
                 args.osl,
@@ -541,7 +541,7 @@ if __name__ == "__main__":
             gap_process.communicate()
             # then send out the real requests, hopefully, this will skip all prefill computation
             genai_perf_artifact_dir = (
-                f"{work_dir}/gap_request{num_request}_isl{args.isl}_osl{args.osl}"
+                f"{work_dir}/gap_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
             )
             genai_perf_cmd = get_decode_genai_perf_cmd(
                 args.isl,
