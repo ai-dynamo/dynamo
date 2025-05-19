@@ -147,10 +147,15 @@ pub async fn prepare_engine(
                             Annotated<CompletionResponse>,
                         >::from_client(
                             client, flags.router_mode.into()
-                        )
-                        .await?,
-                    )
-                    */
+                            )
+                            .await?,
+                            )
+                            */
+                }
+                ModelType::Embedding => {
+                    anyhow::bail!(
+                        "text and batch input only accept remote Chat models, not Embedding"
+                    );
                 }
             };
             // The service_name isn't used for text chat outside of logs,

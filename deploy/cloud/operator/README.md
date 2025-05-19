@@ -13,7 +13,7 @@ Built with [Kubebuilder](https://book.kubebuilder.io/), it follows Kubernetes be
 
 ### Pre-requisites
 
-- [Go](https://go.dev/doc/install) >= 1.23
+- [Go](https://go.dev/doc/install) >= 1.24
 - [Kubebuilder](https://book.kubebuilder.io/quick-start.html)
 
 ### Build

@@ -89,6 +89,9 @@ spec:
         {{- if .Values.dynamo.virtualServiceSupportsHTTPS }}
           - --virtual-service-supports-https={{ .Values.dynamo.virtualServiceSupportsHTTPS }}
         {{- end }}
+        {{- if .Values.dynamo.enableLWS }}
+          - --enable-lws
+        {{- end }}
 
         command:
         - /manager
