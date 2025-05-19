@@ -15,19 +15,33 @@
 
 use crate::mocker::protocols::{MoveBlock, UniqueBlock};
 use crate::mocker::tokens::{compute_block_hash_for_seq, compute_seq_hash_for_blocks};
+use derive_getters::Getters;
 use rand::random;
 use std::cmp::PartialEq;
 
 /// A sequence that is actively being built, with the ability to add tokens and commit to hashes
-#[derive(Debug, Clone)]
+/// TODO: reuse tokens
+#[derive(Debug, Clone, Getters)]
 pub struct ActiveSequence {
     unique_blocks: Vec<UniqueBlock>,
+
     tokens: Vec<u32>,
+
+    #[getter(copy)]
     block_size: usize,
+
+    #[getter(copy)]
     chunk_size: usize, // TODO: not actually used
+
+    #[getter(copy)]
     max_output_tokens: usize,
+
+    #[getter(copy)]
     generated_tokens: usize,
+
+    #[getter(copy)]
     num_input_tokens: usize,
+
     creation_signal: Option<MoveBlock>,
 }
 
@@ -127,46 +141,6 @@ impl ActiveSequence {
             num_input_tokens,
             creation_signal: signal,
         }
-    }
-
-    /// Returns a reference to the unique blocks
-    pub fn unique_blocks(&self) -> &Vec<UniqueBlock> {
-        &self.unique_blocks
-    }
-
-    /// Returns a reference to the tokens
-    pub fn tokens(&self) -> &Vec<u32> {
-        &self.tokens
-    }
-
-    /// Returns the block size
-    pub fn block_size(&self) -> usize {
-        self.block_size
-    }
-
-    /// Returns the chunk size
-    pub fn chunk_size(&self) -> usize {
-        self.chunk_size
-    }
-
-    /// Returns the maximum output tokens
-    pub fn max_output_tokens(&self) -> usize {
-        self.max_output_tokens
-    }
-
-    /// Returns the number of generated tokens
-    pub fn generated_tokens(&self) -> usize {
-        self.generated_tokens
-    }
-
-    /// Returns the number of input tokens
-    pub fn num_input_tokens(&self) -> usize {
-        self.num_input_tokens
-    }
-
-    /// Returns a reference to the creation signal
-    pub fn creation_signal(&self) -> &Option<MoveBlock> {
-        &self.creation_signal
     }
 
     /// Create a new ActiveSequence instance and return the creation signal

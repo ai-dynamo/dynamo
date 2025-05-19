@@ -16,14 +16,22 @@
 use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::protocols::{MoveBlock, MoveBlockResponse, PrefillCost, UniqueBlock};
 use crate::mocker::sequence::ActiveSequence;
+use derive_getters::Getters;
 use std::collections::{HashMap, HashSet};
 
 /// Mock implementation of worker for testing and simulation
+#[derive(Getters)]
 pub struct KvManager {
+    #[getter(copy)]
     max_capacity: usize,
+
+    #[getter(copy)]
     block_size: usize,
+
     active_blocks: HashMap<UniqueBlock, usize>,
+
     inactive_blocks: LRUEvictor<UniqueBlock>,
+
     all_blocks: HashSet<UniqueBlock>,
 }
 
@@ -40,31 +48,6 @@ impl KvManager {
             inactive_blocks,
             all_blocks,
         }
-    }
-
-    /// Get the maximum capacity
-    pub fn max_capacity(&self) -> usize {
-        self.max_capacity
-    }
-
-    /// Get the block size
-    pub fn block_size(&self) -> usize {
-        self.block_size
-    }
-
-    /// Get a reference to the active blocks
-    pub fn active_blocks(&self) -> &HashMap<UniqueBlock, usize> {
-        &self.active_blocks
-    }
-
-    /// Get a reference to the inactive blocks
-    pub fn inactive_blocks(&self) -> &LRUEvictor<UniqueBlock> {
-        &self.inactive_blocks
-    }
-
-    /// Get a reference to all blocks
-    pub fn all_blocks(&self) -> &HashSet<UniqueBlock> {
-        &self.all_blocks
     }
 
     /// Process a MoveBlock instruction synchronously
