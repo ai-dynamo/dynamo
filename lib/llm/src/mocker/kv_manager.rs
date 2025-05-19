@@ -238,15 +238,15 @@ mod tests {
 
         // First use 10 blocks (0 to 9) in a batch
         let response = use_blocks(&mut manager, (0..10).collect());
-        assert_eq!(response, true, "Expected success response");
+        assert!(response, "Expected success response");
 
         // Verify we are at capacity
         assert_eq!(manager.current_capacity(), 10);
 
         // The 11th block should return false, not panic
         let response = use_blocks(&mut manager, vec![10]);
-        assert_eq!(
-            response, false,
+        assert!(
+            !response,
             "Expected failure response when exceeding max capacity"
         );
     }

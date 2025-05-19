@@ -23,7 +23,6 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -154,16 +153,11 @@ impl SchedulerState {
 }
 
 /// Manages scheduling of requests using KvManager resources
+#[derive(Clone)]
 pub struct Scheduler {
     state: Arc<Mutex<SchedulerState>>,
     kv_manager: Arc<Mutex<KvManager>>,
-    token_capacity: usize,
-    watermark: f64,
-    block_size: usize,
-    chunk_size: usize,
-    background_handle: Option<JoinHandle<()>>,
     request_tx: mpsc::Sender<DirectRequest>,
-    cancellation_token: CancellationToken,
 }
 
 impl Scheduler {
@@ -198,7 +192,7 @@ impl Scheduler {
         let output_tx_clone = output_tx.clone();
 
         // Spawn main background task with cancellation token
-        let background_handle = tokio::spawn(async move {
+        tokio::spawn(async move {
             let mut schedule_interval = interval(Duration::from_millis(5));
             let mut simulate_interval = interval(Duration::from_millis(1));
 
@@ -323,13 +317,7 @@ impl Scheduler {
         Self {
             state,
             kv_manager,
-            token_capacity,
-            watermark,
-            block_size,
-            chunk_size,
-            background_handle: Some(background_handle),
             request_tx,
-            cancellation_token,
         }
     }
 
@@ -380,37 +368,6 @@ impl Scheduler {
             num_requests_waiting: state.waiting.len() as u64,
             gpu_cache_usage_perc,
             gpu_prefix_cache_hit_rate: 0.0, // Placeholder value as specified
-        }
-    }
-}
-
-// Implement Clone for Scheduler to support sharing between tasks
-impl Clone for Scheduler {
-    fn clone(&self) -> Self {
-        Self {
-            state: self.state.clone(),
-            kv_manager: self.kv_manager.clone(),
-            token_capacity: self.token_capacity,
-            watermark: self.watermark,
-            block_size: self.block_size,
-            chunk_size: self.chunk_size,
-            background_handle: None,
-            request_tx: self.request_tx.clone(),
-            cancellation_token: self.cancellation_token.clone(),
-        }
-    }
-}
-
-impl Drop for Scheduler {
-    fn drop(&mut self) {
-        // Only the original instance should cancel
-        if self.background_handle.is_some() {
-            self.cancellation_token.cancel();
-        }
-
-        // Abort the background task if this is the original instance
-        if let Some(handle) = self.background_handle.take() {
-            handle.abort();
         }
     }
 }
