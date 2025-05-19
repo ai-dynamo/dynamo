@@ -302,12 +302,10 @@ def wait_for_server_ready(model_name: str, port: int, timeout: int = 300):
                     f"Server returned status code {response.status_code}, waiting..."
                 )
                 continue
-            logger.info(
-                f"Server is ready after {time.time() - start_time:.2f} seconds"
-            )
+            logger.info(f"Server is ready after {time.time() - start_time:.2f} seconds")
             server_ready = True
             break
-                
+
         except (requests.RequestException, ConnectionError) as e:
             logger.info(f"Server not ready yet: {e}")
 
@@ -540,9 +538,7 @@ if __name__ == "__main__":
             )
             gap_process.communicate()
             # then send out the real requests, hopefully, this will skip all prefill computation
-            genai_perf_artifact_dir = (
-                f"{work_dir}/gap_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
-            )
+            genai_perf_artifact_dir = f"{work_dir}/gap_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
             genai_perf_cmd = get_decode_genai_perf_cmd(
                 args.isl,
                 args.osl,
