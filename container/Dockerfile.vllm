@@ -375,6 +375,7 @@ RUN cargo build --release --locked --features mistralrs,python,dynamo-llm/block-
 # Build dynamo wheel
 RUN uv build --wheel --out-dir /workspace/dist && \
     cd /workspace/lib/bindings/python && \
+    sed -i 's/features = \[""\]/features = \["block-manager"\]/' pyproject.toml && \
     uv build --wheel --out-dir /workspace/dist --python 3.12 && \
     if [ "$RELEASE_BUILD" = "true" ]; then \
         uv build --wheel --out-dir /workspace/dist --python 3.11 && \
