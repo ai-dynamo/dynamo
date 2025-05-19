@@ -17,10 +17,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dynamo_llm::{
     block_manager::{
-        block::BlockExt,
-        storage::cuda::{DeviceAllocator, PinnedAllocator},
-        BasicMetadata, KvBlockManager, KvBlockManagerConfig, KvManagerLayoutConfig,
-        KvManagerModelConfig, KvManagerRuntimeConfig,
+        block::{BlockExt, ImmutableBlock},
+        storage::{DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator, Storage},
+        BasicMetadata, BlockMetadata, BlockPool, KvBlockManager, KvBlockManagerConfig,
+        KvManagerLayoutConfig, KvManagerModelConfig, KvManagerRuntimeConfig,
     },
     tokens::{TokenBlockSequence, Tokens},
 };
@@ -43,6 +43,10 @@ struct Args {
     /// Amount of host blocks
     #[clap(short = 'n', long, default_value_t = 2048)]
     num_host_blocks: usize,
+
+    /// Amount of disk blocks
+    #[clap(short = 'D', long, default_value_t = 2048)]
+    num_disk_blocks: usize,
 
     /// Amount of layers
     #[clap(long, default_value_t = 24)]
@@ -183,24 +187,27 @@ fn build_manager(args: &Args) -> Result<KvBlockManager<BasicMetadata>> {
         .allocator(DeviceAllocator::default())
         .build()?;
 
-    let host_layout = if args.num_host_blocks > 0 {
-        Some(
-            KvManagerLayoutConfig::builder()
-                .num_blocks(args.num_host_blocks)
-                .allocator(PinnedAllocator::default())
-                .build()?,
-        )
-    } else {
-        None
-    };
-
     let mut config_build = KvBlockManagerConfig::builder()
         .runtime(runtime_config)
         .model(model_config)
         .device_layout(device_layout);
 
-    if let Some(host_layout) = host_layout {
-        config_build = config_build.host_layout(host_layout);
+    if args.num_host_blocks > 0 {
+        config_build = config_build.host_layout(
+            KvManagerLayoutConfig::builder()
+                .num_blocks(args.num_host_blocks)
+                .allocator(PinnedAllocator::default())
+                .build()?,
+        );
+    }
+
+    if args.num_disk_blocks > 0 {
+        config_build = config_build.disk_layout(
+            KvManagerLayoutConfig::builder()
+                .num_blocks(args.num_disk_blocks)
+                .allocator(DiskAllocator)
+                .build()?,
+        );
     }
 
     let config = config_build.build()?;
@@ -220,7 +227,7 @@ pub async fn main() -> Result<()> {
             Arc::new(HierarchicalTokenGenerator::from(token_gen.clone()))
         }
     };
-
+    println!("Starting benchmark...");
     benchmark(manager, token_generator, args).await?;
 
     Ok(())
@@ -251,7 +258,9 @@ impl EventStats {
 struct Stats {
     pub device_match_latency: Arc<Mutex<Vec<EventStats>>>,
     pub host_match_latency: Arc<Mutex<Vec<EventStats>>>,
-    pub onboard_latency: Arc<Mutex<Vec<EventStats>>>,
+    pub host_onboard_latency: Arc<Mutex<Vec<EventStats>>>,
+    pub disk_match_latency: Arc<Mutex<Vec<EventStats>>>,
+    pub disk_onboard_latency: Arc<Mutex<Vec<EventStats>>>,
     pub prefill_allocate_latency: Arc<Mutex<Vec<EventStats>>>,
     pub prefill_register_latency: Arc<Mutex<Vec<EventStats>>>,
     pub decode_allocate_latency: Arc<Mutex<Vec<EventStats>>>,
@@ -263,7 +272,9 @@ impl Stats {
         Self {
             device_match_latency: Arc::new(Mutex::new(Vec::new())),
             host_match_latency: Arc::new(Mutex::new(Vec::new())),
-            onboard_latency: Arc::new(Mutex::new(Vec::new())),
+            host_onboard_latency: Arc::new(Mutex::new(Vec::new())),
+            disk_match_latency: Arc::new(Mutex::new(Vec::new())),
+            disk_onboard_latency: Arc::new(Mutex::new(Vec::new())),
             prefill_allocate_latency: Arc::new(Mutex::new(Vec::new())),
             prefill_register_latency: Arc::new(Mutex::new(Vec::new())),
             decode_allocate_latency: Arc::new(Mutex::new(Vec::new())),
@@ -296,8 +307,13 @@ async fn scatter(
     file_name: &str,
     latencies: Arc<Mutex<Vec<EventStats>>>,
 ) -> Result<()> {
+    if latencies.lock().await.is_empty() {
+        println!("Skipping {} because no data was collected.", name);
+        return Ok(());
+    }
+
     // TODO: We need to handle outliers better.
-    let drawing_area = BitMapBackend::new(file_name, (1920, 1080)).into_drawing_area();
+    let drawing_area = BitMapBackend::new(file_name, (2560, 1440)).into_drawing_area();
     drawing_area.fill(&WHITE)?;
 
     // Gather up our data.
@@ -343,6 +359,35 @@ async fn scatter(
     drawing_area.present()?;
 
     Ok(())
+}
+
+async fn match_and_onboard<S: Storage, M: BlockMetadata>(
+    manager: &KvBlockManager<M>,
+    pool: &BlockPool<S, M>,
+    sequence_hashes: &[u64],
+    match_stats: Arc<Mutex<Vec<EventStats>>>,
+    onboard_stats: Arc<Mutex<Vec<EventStats>>>,
+) -> Result<Vec<ImmutableBlock<DeviceStorage, M>>> {
+    let (blocks, match_latency) = time(pool.match_sequence_hashes(sequence_hashes)).await;
+
+    match_stats
+        .lock()
+        .await
+        .push(EventStats::new(match_latency, blocks.len()));
+
+    // For any host blocks we found, onboard them to the device.
+    if !blocks.is_empty() {
+        let (onboard_blocks, onboard_latency) = time(manager.onboard_blocks(blocks)).await;
+
+        onboard_stats
+            .lock()
+            .await
+            .push(EventStats::new(onboard_latency, onboard_blocks.len()));
+
+        Ok(onboard_blocks)
+    } else {
+        Ok(vec![])
+    }
 }
 
 async fn benchmark(
@@ -407,7 +452,8 @@ async fn benchmark(
             // TODO: Could this be a bottleneck for very high request rates?
             tokio::spawn(async move {
                 let device = manager.device().unwrap();
-                let host = manager.host().unwrap();
+                let host = manager.host();
+                let disk = manager.disk();
 
                 let mut sequence_blocks = Vec::new();
 
@@ -429,30 +475,33 @@ async fn benchmark(
                 sequence_blocks.extend(device_blocks);
 
                 // If we weren't able to find all our blocks on the device, check the host.
-                if sequence_blocks.len() < sequence_hashes.len() {
-                    let (host_blocks, host_match_latency) =
-                        time(host.match_sequence_hashes(&sequence_hashes[sequence_blocks.len()..]))
-                            .await;
-
-                    stats
-                        .host_match_latency
-                        .lock()
+                if sequence_blocks.len() < sequence_hashes.len() && host.is_some() {
+                    sequence_blocks.extend(
+                        match_and_onboard(
+                            &manager,
+                            host.unwrap(),
+                            &sequence_hashes[sequence_blocks.len()..],
+                            stats.host_match_latency.clone(),
+                            stats.host_onboard_latency.clone(),
+                        )
                         .await
-                        .push(EventStats::new(host_match_latency, host_blocks.len()));
+                        .unwrap(),
+                    );
+                }
 
-                    // For any host blocks we found, onboard them to the device.
-                    if !host_blocks.is_empty() {
-                        let (onboard_blocks, onboard_latency) =
-                            time(manager.onboard_blocks(host_blocks)).await;
-
-                        stats
-                            .onboard_latency
-                            .lock()
-                            .await
-                            .push(EventStats::new(onboard_latency, onboard_blocks.len()));
-
-                        sequence_blocks.extend(onboard_blocks);
-                    }
+                // If we weren't able to find all our blocks on the device and host, check the disk.
+                if sequence_blocks.len() < sequence_hashes.len() && disk.is_some() {
+                    sequence_blocks.extend(
+                        match_and_onboard(
+                            &manager,
+                            disk.unwrap(),
+                            &sequence_hashes[sequence_blocks.len()..],
+                            stats.disk_match_latency.clone(),
+                            stats.disk_onboard_latency.clone(),
+                        )
+                        .await
+                        .unwrap(),
+                    );
                 }
 
                 let remaining = sequence_hashes.len() - sequence_blocks.len();
@@ -547,9 +596,25 @@ async fn benchmark(
     .unwrap();
 
     scatter(
-        "Onboard Latency",
-        "onboard_latency.png",
-        stats.onboard_latency.clone(),
+        "Host Onboard Latency",
+        "host_onboard_latency.png",
+        stats.host_onboard_latency.clone(),
+    )
+    .await
+    .unwrap();
+
+    scatter(
+        "Disk Match Latency",
+        "disk_match_latency.png",
+        stats.disk_match_latency.clone(),
+    )
+    .await
+    .unwrap();
+
+    scatter(
+        "Disk Onboard Latency",
+        "disk_onboard_latency.png",
+        stats.disk_onboard_latency.clone(),
     )
     .await
     .unwrap();
