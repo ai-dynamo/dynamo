@@ -46,10 +46,11 @@ pub struct BlockManager {
 #[pymethods]
 impl BlockManager {
     #[new]
-    #[pyo3(signature = (worker_id, num_layer, page_size, inner_dim, dtype=None, host_num_blocks=None, device_num_blocks=None, device_id=0))]
+    #[pyo3(signature = (worker_id, num_layer, outer_dim, page_size, inner_dim, dtype=None, host_num_blocks=None, device_num_blocks=None, device_id=0))]
     fn new(
         worker_id: u64,
         num_layer: usize,
+        outer_dim: usize,
         page_size: usize,
         inner_dim: usize,
         dtype: Option<String>,
@@ -65,6 +66,7 @@ impl BlockManager {
         );
         let mut model_config = dynamo_llm::block_manager::KvManagerModelConfig::builder()
             .num_layers(num_layer)
+            .outer_dim(outer_dim)
             .page_size(page_size)
             .inner_dim(inner_dim);
         let mut dtype_ = dynamo_llm::common::dtype::DType::FP16; // Default in block_manager config
