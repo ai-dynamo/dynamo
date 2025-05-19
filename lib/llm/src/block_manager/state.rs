@@ -22,6 +22,7 @@ use super::{
 };
 use cudarc::driver::CudaStream;
 use std::sync::Arc;
+use tokio::runtime::Handle;
 
 pub struct TransferContext {
     nixl_agent: Arc<Option<NixlAgent>>,
@@ -91,11 +92,13 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                     tracing::warn!("No UCX plugin found; will not create UCX backend");
                 }
 
-                if let Ok((_, gds_params)) = agent.get_plugin_params("GDS") {
-                    let backend = agent.create_backend("GDS", &gds_params)?;
-                    nixl_backends.insert("GDS".to_string(), Arc::new(backend));
-                } else {
-                    tracing::warn!("No GDS plugin found; will not create GDS backend");
+                if config.disk_layout.is_some() {
+                    if let Ok((_, gds_params)) = agent.get_plugin_params("GDS") {
+                        let backend = agent.create_backend("GDS", &gds_params)?;
+                        nixl_backends.insert("GDS".to_string(), Arc::new(backend));
+                    } else {
+                        tracing::warn!("No GDS plugin found; will not create GDS backend");
+                    }
                 }
 
                 Some(agent)
@@ -186,11 +189,20 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
             local_block_set.set_nixl_metadata(nixl_agent.get_local_md()?);
         }
 
+        let offload_async_rt_handle = match config.runtime.async_runtime {
+            Some(rt) => rt.handle().clone(),
+            None => match Handle::try_current() {
+                Ok(handle) => handle,
+                Err(e) => anyhow::bail!(e),
+            },
+        };
+
         let offload_manager = OffloadManager::new(
             disk_pool.clone(),
             host_pool.clone(),
             device_pool.clone(),
             nixl_agent.clone(),
+            offload_async_rt_handle,
         )?;
 
         let state = Arc::new(Self {

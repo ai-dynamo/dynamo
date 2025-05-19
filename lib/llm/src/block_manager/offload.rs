@@ -44,15 +44,18 @@
 //! The kind of offloads/onboards they perform is dictated by the source and target arguments
 //! of the [`OffloadManager::offload`] and [`OffloadManager::onboard`] methods.
 
-use nixl_sys::Agent as NixlAgent;
-use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, Notify};
-
 use super::block::{BlockError, BlockMetadata, BlockState, ImmutableBlock};
 use super::pool::BlockPoolError;
 use super::state::TransferContext;
 use super::storage::{Cuda, Storage};
 use super::{BlockPool, DeviceStorage, DiskStorage, PinnedStorage};
+use nixl_sys::Agent as NixlAgent;
+use std::sync::Arc;
+use tokio::runtime::Handle;
+use tokio::sync::{
+    mpsc::{self, error::TryRecvError},
+    Mutex,
+};
 
 use anyhow::Result;
 use std::any::Any;
@@ -75,20 +78,16 @@ pub struct OffloadManager<Metadata: BlockMetadata> {
     host: Arc<Option<BlockPool<PinnedStorage, Metadata>>>,
     device: Arc<Option<BlockPool<DeviceStorage, Metadata>>>,
 
-    /// Priority queues of pending offloads
-    device_offload_queue: Arc<Mutex<BTreeSet<OffloadRequest<DeviceStorage, Metadata>>>>,
-    host_offload_queue: Arc<Mutex<BTreeSet<OffloadRequest<PinnedStorage, Metadata>>>>,
-
-    /// Used to notify the offload worker that an item has been added to the priority queue
-    device_offload_notify: Arc<Notify>,
-    host_offload_notify: Arc<Notify>,
-
-    /// An incrementing counter for offloaded blocks. Within the same priority, blocks with lower tick values are processed first.
-    tick: Arc<Mutex<u64>>,
+    /// Queue of offloading requests.
+    device_offload_tx: mpsc::UnboundedSender<OffloadRequest<DeviceStorage, Metadata>>,
+    host_offload_tx: mpsc::UnboundedSender<OffloadRequest<PinnedStorage, Metadata>>,
 
     /// Queue of pending onboarding requests.
     host_onboard_tx: mpsc::UnboundedSender<OnboardRequest<PinnedStorage, DeviceStorage, Metadata>>,
     disk_onboard_tx: mpsc::UnboundedSender<OnboardRequest<DiskStorage, DeviceStorage, Metadata>>,
+
+    /// An incrementing counter for offloaded blocks. Within the same priority, blocks with lower tick values are processed first.
+    tick: Arc<Mutex<u64>>,
 }
 
 impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
@@ -97,12 +96,10 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         host: Arc<Option<BlockPool<PinnedStorage, Metadata>>>,
         device: Arc<Option<BlockPool<DeviceStorage, Metadata>>>,
         nixl_agent: Arc<Option<NixlAgent>>,
+        async_rt_handle: Handle,
     ) -> Result<Arc<Self>> {
-        let device_offload_queue = Arc::new(Mutex::new(BTreeSet::new()));
-        let device_offload_notify = Arc::new(Notify::new());
-
-        let host_offload_queue = Arc::new(Mutex::new(BTreeSet::new()));
-        let host_offload_notify = Arc::new(Notify::new());
+        let (device_offload_tx, device_offload_rx) = mpsc::unbounded_channel();
+        let (host_offload_tx, host_offload_rx) = mpsc::unbounded_channel();
 
         let (host_onboard_tx, host_onboard_rx) = mpsc::unbounded_channel();
         let (disk_onboard_tx, disk_onboard_rx) = mpsc::unbounded_channel();
@@ -111,13 +108,11 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             disk,
             host,
             device,
-            device_offload_queue,
-            host_offload_queue,
-            device_offload_notify,
-            host_offload_notify,
-            tick: Arc::new(Mutex::new(0)),
+            device_offload_tx,
+            host_offload_tx,
             host_onboard_tx,
             disk_onboard_tx,
+            tick: Arc::new(Mutex::new(0)),
         });
 
         let this_clone = this.clone();
@@ -133,14 +128,11 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         // Device -> Host offload
         let device_clone = this.device.clone();
         let host_clone = this.host.clone();
-        let device_offload_queue = this.device_offload_queue.clone();
-        let device_offload_notify = this.device_offload_notify.clone();
-        tokio::spawn(async move {
+        async_rt_handle.spawn(async move {
             OffloadManager::offload_worker(
                 device_clone,
                 host_clone,
-                device_offload_queue,
-                device_offload_notify,
+                device_offload_rx,
                 Arc::new(CudaTransferManager::new(
                     device_offload_transfer_ctx,
                     MAX_OFFLOAD_STREAM_DEPTH,
@@ -158,15 +150,12 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         // Host -> Disk offload
         let host_clone = this.host.clone();
         let disk_clone = this.disk.clone();
-        let host_offload_queue = this.host_offload_queue.clone();
-        let host_offload_notify = this.host_offload_notify.clone();
         let transfer_ctx_clone = transfer_ctx.clone();
-        tokio::spawn(async move {
+        async_rt_handle.spawn(async move {
             OffloadManager::offload_worker(
                 host_clone,
                 disk_clone,
-                host_offload_queue,
-                host_offload_notify,
+                host_offload_rx,
                 Arc::new(DiskTransferManager::new(
                     transfer_ctx_clone,
                     MAX_OFFLOAD_STREAM_DEPTH,
@@ -180,7 +169,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let host_clone = this.host.clone();
         let device_clone = this.device.clone();
         let transfer_ctx_clone = transfer_ctx.clone();
-        tokio::spawn(async move {
+        async_rt_handle.spawn(async move {
             OffloadManager::onboard_worker(
                 host_clone,
                 device_clone,
@@ -195,7 +184,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let disk_clone = this.disk.clone();
         let device_clone = this.device.clone();
         let transfer_ctx_clone = transfer_ctx.clone();
-        tokio::spawn(async move {
+        async_rt_handle.spawn(async move {
             OffloadManager::onboard_worker(
                 disk_clone,
                 device_clone,
@@ -212,8 +201,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
     async fn offload_worker<Source: Storage, Target: Storage>(
         source_pool_arc: Arc<Option<BlockPool<Source, Metadata>>>,
         target_pool_arc: Arc<Option<BlockPool<Target, Metadata>>>,
-        offload_queue: Arc<Mutex<BTreeSet<OffloadRequest<Source, Metadata>>>>,
-        offload_notify: Arc<Notify>,
+        mut offload_rx: mpsc::UnboundedReceiver<OffloadRequest<Source, Metadata>>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Metadata>>,
     ) -> Result<()> {
         if source_pool_arc.is_none() || target_pool_arc.is_none() {
@@ -223,12 +211,24 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let source_pool = source_pool_arc.as_ref().as_ref().unwrap();
         let target_pool = target_pool_arc.as_ref().as_ref().unwrap();
 
+        let mut queue = BTreeSet::new();
+
         loop {
             // Try to check the offload queue.
-            let request = offload_queue.lock().await.pop_first();
+            loop {
+                match offload_rx.try_recv() {
+                    Ok(request) => {
+                        queue.insert(request);
+                    }
+                    Err(TryRecvError::Empty) => {
+                        break;
+                    }
+                    Err(_) => return Ok(()),
+                }
+            }
 
             // If there is a request, process it.
-            if let Some(request) = request {
+            if let Some(request) = queue.pop_first() {
                 // Try to upgrade the block to a strong reference.
                 let block = match request.block.upgrade() {
                     Some(block) => Some(block),
@@ -273,8 +273,10 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     }
                 }
             } else {
-                // If the queue is empty, wait to be notified.
-                offload_notify.notified().await;
+                // Await the next request.
+                if let Some(request) = offload_rx.recv().await {
+                    queue.insert(request);
+                }
             }
         }
     }
@@ -351,25 +353,33 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         if let Some(device_block) =
             any_block.downcast_ref::<ImmutableBlock<DeviceStorage, Metadata>>()
         {
+            // The host pool doesn't exist, so we can't offload to it.
+            if self.device_offload_tx.is_closed() {
+                return Ok(());
+            }
+
             let request = OffloadRequest {
                 block: Arc::downgrade(device_block.mutable_block()),
                 sequence_hash: device_block.sequence_hash()?,
                 key,
             };
 
-            self.device_offload_queue.lock().await.insert(request);
-            self.device_offload_notify.notify_one();
+            self.device_offload_tx.send(request).unwrap();
         } else if let Some(host_block) =
             any_block.downcast_ref::<ImmutableBlock<PinnedStorage, Metadata>>()
         {
+            // The disk pool doesn't exist, so we can't offload to it.
+            if self.host_offload_tx.is_closed() {
+                return Ok(());
+            }
+
             let request = OffloadRequest {
                 block: Arc::downgrade(host_block.mutable_block()),
                 sequence_hash: host_block.sequence_hash()?,
                 key,
             };
 
-            self.host_offload_queue.lock().await.insert(request);
-            self.host_offload_notify.notify_one();
+            self.host_offload_tx.send(request).unwrap();
         }
 
         Ok(())
@@ -532,11 +542,14 @@ mod tests {
             Arc::new(None)
         };
 
+        let async_rt_handle = Handle::current();
+
         let manager = OffloadManager::new(
             disk_pool.clone(),
             host_pool.clone(),
             device_pool.clone(),
             agent_arc,
+            async_rt_handle,
         )?;
 
         Ok((manager, device_pool, host_pool, disk_pool))

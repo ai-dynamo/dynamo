@@ -37,6 +37,9 @@ pub struct KvManagerRuntimeConfig {
 
     #[builder(default = "NixlOptions::Enabled")]
     pub nixl: NixlOptions,
+
+    #[builder(default)]
+    pub async_runtime: Option<Arc<tokio::runtime::Runtime>>,
 }
 
 impl KvManagerRuntimeConfig {

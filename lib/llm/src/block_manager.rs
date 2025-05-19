@@ -211,7 +211,7 @@ mod tests {
             .disk_layout(
                 KvManagerLayoutConfig::builder()
                     .num_blocks(16)
-                    .allocator(storage::DiskAllocator::default())
+                    .allocator(storage::DiskAllocator)
                     .build()
                     .unwrap(),
             )
