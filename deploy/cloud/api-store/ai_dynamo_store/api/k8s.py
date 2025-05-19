@@ -14,6 +14,7 @@
 #  limitations under the License.
 
 import os
+from functools import wraps
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
@@ -34,6 +35,19 @@ DynamoGraphDeployment = K8sResource(
 )
 
 
+def ensure_kube_config(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            config.load_incluster_config()
+        except config.config_exception.ConfigException:
+            config.load_kube_config()
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+@ensure_kube_config
 def create_custom_resource(
     group: str, version: str, namespace: str, plural: str, body: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -50,11 +64,6 @@ def create_custom_resource(
     Returns:
         Created resource
     """
-    try:
-        config.load_incluster_config()
-    except config.config_exception.ConfigException:
-        config.load_kube_config()
-
     api = client.CustomObjectsApi()
     return api.create_namespaced_custom_object(
         group=group, version=version, namespace=namespace, plural=plural, body=body
@@ -101,6 +110,7 @@ def create_dynamo_deployment(
     )
 
 
+@ensure_kube_config
 def get_dynamo_deployment(name: str, namespace: str) -> Dict[str, Any]:
     """
     Get a DynamoGraphDeployment custom resource.
@@ -115,11 +125,6 @@ def get_dynamo_deployment(name: str, namespace: str) -> Dict[str, Any]:
     Raises:
         HTTPException: If the deployment is not found or an error occurs
     """
-    try:
-        config.load_incluster_config()
-    except config.config_exception.ConfigException:
-        config.load_kube_config()
-
     api = client.CustomObjectsApi()
     try:
         return api.get_namespaced_custom_object(
@@ -143,15 +148,11 @@ def get_namespace() -> str:
     return os.getenv("DEFAULT_KUBE_NAMESPACE", "dynamo")
 
 
+@ensure_kube_config
 def delete_dynamo_deployment(name: str, namespace: str) -> Dict[str, Any]:
     """
     Delete a DynamoGraphDeployment custom resource.
     """
-    try:
-        config.load_incluster_config()
-    except config.config_exception.ConfigException:
-        config.load_kube_config()
-
     api = client.CustomObjectsApi()
     try:
         return api.delete_namespaced_custom_object(
@@ -168,6 +169,7 @@ def delete_dynamo_deployment(name: str, namespace: str) -> Dict[str, Any]:
             raise HTTPException(status_code=500, detail=str(e))
 
 
+@ensure_kube_config
 def list_dynamo_deployments(
     namespace: str,
     label_selector: Optional[str] = None,
@@ -185,11 +187,6 @@ def list_dynamo_deployments(
     Raises:
         HTTPException: If an error occurs during listing
     """
-    try:
-        config.load_incluster_config()
-    except config.config_exception.ConfigException:
-        config.load_kube_config()
-
     api = client.CustomObjectsApi()
     try:
         response = api.list_namespaced_custom_object(
@@ -202,3 +199,62 @@ def list_dynamo_deployments(
         return response["items"]
     except client.rest.ApiException as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@ensure_kube_config
+def update_dynamo_deployment(
+    name: str,
+    namespace: str,
+    dynamo_nim: str,
+    labels: Dict[str, str],
+    envs: Optional[List[Dict[str, str]]] = None,
+) -> Dict[str, Any]:
+    """
+    Update a DynamoGraphDeployment custom resource.
+
+    Args:
+        name: Deployment name
+        namespace: Target namespace
+        dynamo_nim: Bento name and version (format: name:version)
+        labels: Resource labels
+        envs: Optional list of environment variables
+
+    Returns:
+        Updated deployment
+    """
+    # Fetch the current resource to get resourceVersion
+    current = get_dynamo_deployment(name, namespace)
+    resource_version = current["metadata"].get("resourceVersion")
+    if not resource_version:
+        raise RuntimeError("resourceVersion not found in current resource")
+
+    body = {
+        "apiVersion": "nvidia.com/v1alpha1",
+        "kind": "DynamoGraphDeployment",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "labels": labels,
+            "resourceVersion": resource_version,  # Required for update
+        },
+        "spec": {
+            "dynamoGraph": dynamo_nim,
+            "services": {},
+            "envs": envs if envs else [],
+        },
+    }
+    api = client.CustomObjectsApi()
+    try:
+        return api.replace_namespaced_custom_object(
+            group=DynamoGraphDeployment.group,
+            version=DynamoGraphDeployment.version,
+            namespace=namespace,
+            plural=DynamoGraphDeployment.plural,
+            name=name,
+            body=body,
+        )
+    except client.rest.ApiException as e:
+        if e.status == 404:
+            raise HTTPException(status_code=404, detail="Deployment not found")
+        else:
+            raise HTTPException(status_code=500, detail=str(e))

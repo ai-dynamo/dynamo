@@ -37,6 +37,7 @@ use crate::{
     protocols::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
+    protocols::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
 };
 use tracing;
 
@@ -240,6 +241,7 @@ impl ModelWatcher {
         // Ignore the errors because model could be either type
         let _ = self.manager.remove_chat_completions_model(model_name);
         let _ = self.manager.remove_completions_model(model_name);
+        let _ = self.manager.remove_embeddings_model(model_name);
 
         Ok(model_name)
     }
@@ -375,6 +377,16 @@ impl ModelWatcher {
                 let engine = Arc::new(push_router);
                 self.manager
                     .add_completions_model(&model_entry.name, engine)?;
+            }
+            ModelType::Embedding => {
+                let push_router = PushRouter::<
+                    NvCreateEmbeddingRequest,
+                    Annotated<NvCreateEmbeddingResponse>,
+                >::from_client(client, Default::default())
+                .await?;
+                let engine = Arc::new(push_router);
+                self.manager
+                    .add_embeddings_model(&model_entry.name, engine)?;
             }
         }
 

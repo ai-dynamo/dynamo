@@ -33,8 +33,11 @@ name = "_core"
 # "rlib" is necessary to support doctests.
 crate-type = ["cdylib", "rlib"]
 
-[dependencies]
+[features]
+default = []
+block-manager = ["dynamo-llm/block-manager", "dep:dlpark"]
 
+[dependencies]
 dynamo-llm = { path = "../../llm" }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-engine-python = { path = "../../engines/python" }
@@ -67,3 +70,5 @@ pyo3-async-runtimes = { version = "0.23.0", default-features = false, features =
 ] }
 
 pythonize = "0.23"
+
+dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }

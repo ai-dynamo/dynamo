@@ -47,7 +47,7 @@ pub use metrics::Metrics;
 
 use crate::types::openai::{
     chat_completions::OpenAIChatCompletionsStreamingEngine,
-    completions::OpenAICompletionsStreamingEngine,
+    completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
 };
 use std::{
     collections::HashMap,
@@ -116,6 +116,15 @@ impl ModelManager {
         clients.add(model, engine)
     }
 
+    pub fn add_embeddings_model(
+        &self,
+        model: &str,
+        engine: OpenAIEmbeddingsStreamingEngine,
+    ) -> Result<(), ServiceHttpError> {
+        let mut clients = self.state.embeddings_engines.lock().unwrap();
+        clients.add(model, engine)
+    }
+
     pub fn remove_completions_model(&self, model: &str) -> Result<(), ServiceHttpError> {
         let mut clients = self.state.completion_engines.lock().unwrap();
         clients.remove(model)
@@ -123,6 +132,11 @@ impl ModelManager {
 
     pub fn remove_chat_completions_model(&self, model: &str) -> Result<(), ServiceHttpError> {
         let mut clients = self.state.chat_completion_engines.lock().unwrap();
+        clients.remove(model)
+    }
+
+    pub fn remove_embeddings_model(&self, model: &str) -> Result<(), ServiceHttpError> {
+        let mut clients = self.state.embeddings_engines.lock().unwrap();
         clients.remove(model)
     }
 
@@ -191,6 +205,7 @@ impl<E> ModelEngines<E> {
 pub struct DeploymentState {
     completion_engines: Arc<Mutex<ModelEngines<OpenAICompletionsStreamingEngine>>>,
     chat_completion_engines: Arc<Mutex<ModelEngines<OpenAIChatCompletionsStreamingEngine>>>,
+    embeddings_engines: Arc<Mutex<ModelEngines<OpenAIEmbeddingsStreamingEngine>>>,
     metrics: Arc<Metrics>,
     sse_keep_alive: Option<Duration>,
 }
@@ -200,9 +215,24 @@ impl DeploymentState {
         Self {
             completion_engines: Arc::new(Mutex::new(ModelEngines::default())),
             chat_completion_engines: Arc::new(Mutex::new(ModelEngines::default())),
+            embeddings_engines: Arc::new(Mutex::new(ModelEngines::default())),
             metrics: Arc::new(Metrics::default()),
             sse_keep_alive: None,
         }
+    }
+
+    // TODO: Remove this allow once `embeddings` is implemented in lib/llm/src/http/service/openai.rs
+    #[allow(dead_code)]
+    fn get_embeddings_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAIEmbeddingsStreamingEngine, ServiceHttpError> {
+        self.embeddings_engines
+            .lock()
+            .unwrap()
+            .get(model)
+            .cloned()
+            .ok_or(ServiceHttpError::ModelNotFound(model.to_string()))
     }
 
     fn get_completions_engine(

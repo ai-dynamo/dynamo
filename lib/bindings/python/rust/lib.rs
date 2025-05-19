@@ -83,6 +83,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     engine::add_to_module(m)?;
 
+    #[cfg(feature = "block-manager")]
+    llm::block_manager::add_to_module(m)?;
+
     Ok(())
 }
 
@@ -113,6 +116,7 @@ fn register_llm<'p>(
         ModelType::Chat => llm_rs::model_type::ModelType::Chat,
         ModelType::Completion => llm_rs::model_type::ModelType::Completion,
         ModelType::Backend => llm_rs::model_type::ModelType::Backend,
+        ModelType::Embedding => llm_rs::model_type::ModelType::Embedding,
     };
 
     let inner_path = model_path.to_string();
@@ -192,6 +196,7 @@ enum ModelType {
     Chat = 1,
     Completion = 2,
     Backend = 3,
+    Embedding = 4,
 }
 
 #[pymethods]
