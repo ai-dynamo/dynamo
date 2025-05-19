@@ -38,6 +38,7 @@ struct SchedulerState {
     ready: VecDeque<Uuid>,
     running: LRUEvictor<Uuid>,
     requests: HashMap<Uuid, Request>,
+    prefill_costs: HashMap<Uuid, Option<PrefillCost>>,
 }
 
 impl Default for SchedulerState {
@@ -47,6 +48,7 @@ impl Default for SchedulerState {
             ready: VecDeque::new(),
             running: LRUEvictor::new(),
             requests: HashMap::new(),
+            prefill_costs: HashMap::new(),
         }
     }
 }
@@ -54,7 +56,10 @@ impl Default for SchedulerState {
 impl SchedulerState {
     /// Create a new UUID for a DirectRequest, add it to requests, and push the UUID to waiting.
     fn receive(&mut self, request: DirectRequest) -> Uuid {
-        let uuid = Uuid::new_v4();
+        // Use the provided UUID if available, otherwise generate a new one
+        let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+
+        // Add the request to the map and waiting queue
         self.requests.insert(uuid, Request::Direct(request));
         self.waiting.push_back(uuid);
         uuid
@@ -97,10 +102,35 @@ impl SchedulerState {
         panic!("Failed to get creation signal from ActiveSequence");
     }
 
-    /// Remove a UUID and its associated Request from both running and requests collections.
+    /// Set the prefill cost for a UUID
+    fn set_prefill_cost(&mut self, uuid: Uuid, cost: Option<PrefillCost>) {
+        self.prefill_costs.insert(uuid, cost);
+    }
+
+    /// Get the prefill compute value for a UUID if available
+    fn get_prefill_compute(&self, uuid: &Uuid) -> Option<f64> {
+        self.prefill_costs
+            .get(uuid)
+            .and_then(|cost| cost.as_ref())
+            .map(|cost| cost.prefill_compute)
+    }
+
+    /// Calculate the total prefill tokens
+    fn total_prefill_tokens(&self) -> usize {
+        self.prefill_costs
+            .values()
+            .map(|cost| match cost {
+                Some(cost) => cost.new_tokens,
+                None => 0,
+            })
+            .sum()
+    }
+
+    /// Remove a UUID and its associated Request from collections.
     fn remove(&mut self, uuid: &Uuid) {
         self.running.remove(uuid);
         self.requests.remove(uuid);
+        self.prefill_costs.remove(uuid);
     }
 
     /// Preempt the oldest running request by evicting it from running, resetting the sequence,
@@ -113,6 +143,9 @@ impl SchedulerState {
 
         // Remove the request from the requests HashMap and ensure it's an ActiveSequence
         let request = self.requests.remove(&uuid)?;
+
+        // Remove the prefill cost to force recomputation
+        self.prefill_costs.remove(&uuid);
 
         // Extract the ActiveSequence from the Request enum
         let active_sequence = match request {
@@ -135,7 +168,6 @@ impl SchedulerState {
 pub struct Scheduler {
     state: Arc<Mutex<SchedulerState>>,
     kv_manager: Arc<Mutex<KvManager>>,
-    prefill_costs: Arc<Mutex<HashMap<Uuid, Option<PrefillCost>>>>,
     token_capacity: usize,
     watermark: f64,
     block_size: usize,
@@ -151,7 +183,7 @@ impl Scheduler {
         kv_capacity: usize,
         watermark: f64,
         block_size: usize,
-        chunk_size: Option<usize>, // TODO: not actually used
+        chunk_size: Option<usize>,
         output_tx: Option<mpsc::Sender<Uuid>>,
         cancellation_token: Option<CancellationToken>,
     ) -> Self {
@@ -164,8 +196,6 @@ impl Scheduler {
         let kv_manager = Arc::new(Mutex::new(kv_manager));
         let chunk_size = chunk_size.unwrap_or(256);
 
-        let prefill_costs = Arc::new(Mutex::new(HashMap::<Uuid, Option<PrefillCost>>::new()));
-
         // Create channel for request handling
         let (request_tx, mut request_rx) = mpsc::channel::<DirectRequest>(1024);
 
@@ -176,7 +206,6 @@ impl Scheduler {
         // Create a clone for the background task
         let state_clone = state.clone();
         let kv_manager_clone = kv_manager.clone();
-        let prefill_costs_clone = prefill_costs.clone();
         let output_tx_clone = output_tx.clone();
 
         // Spawn main background task with cancellation token
@@ -197,7 +226,6 @@ impl Scheduler {
                     // Try Scheduling Requests
                     _ = schedule_interval.tick() => {
                         let mut state_guard = state_clone.lock().await;
-                        let mut prefill_costs_guard = prefill_costs_clone.lock().await;
                         let mut kv_manager_guard = kv_manager_clone.lock().await;
 
                         // Process DirectRequests, converting them to ActiveSequence and scheduling them until we can't
@@ -205,21 +233,16 @@ impl Scheduler {
                         while let Some((uuid, request)) = state_guard.next() {
                             let active_sequence = get_active_sequence(request, block_size, chunk_size);
 
-                            // Calculate token budget using new_tokens from PrefillCost or treating None as 1
-                            let prefill_tokens = prefill_costs_guard.values().map(|cost| {
-                                match cost {
-                                    Some(cost) => cost.new_tokens,
-                                    None => 0,
-                                }
-                            }).sum::<usize>();
-                            let tokens_budget = token_capacity.saturating_sub(prefill_tokens);
+                            // Calculate token budget using new_tokens from PrefillCost
+                            let total_prefill_tokens = state_guard.total_prefill_tokens();
+                            let tokens_budget = token_capacity.saturating_sub(total_prefill_tokens);
 
                             // Check if it can be scheduled
                             if let Some(prefill_cost) = kv_manager_guard.try_schedule(&active_sequence, watermark, tokens_budget) {
                                 // Get creation signal and schedule the request
                                 let signal = state_guard.run(uuid, active_sequence);
                                 kv_manager_guard.process(&signal);
-                                prefill_costs_guard.insert(uuid, Some(prefill_cost));
+                                state_guard.set_prefill_cost(uuid, Some(prefill_cost));
                             } else {
                                 state_guard.make_ready(uuid, active_sequence);
                                 break;
@@ -235,14 +258,10 @@ impl Scheduler {
                     // Simulate running requests (prefill + decode)
                     _ = simulate_interval.tick() => {
                         let mut state_guard = state_clone.lock().await;
-                        let mut prefill_costs_guard = prefill_costs_clone.lock().await;
                         let mut kv_manager_guard = kv_manager_clone.lock().await;
 
                         // Process each running request
-                        let mut uuids_to_remove = Vec::new();
-                        // Accumulate total sleep duration
                         let mut total_sleep_duration = Duration::from_millis(0);
-
                         let uuids: Vec<Uuid> = state_guard.running.keys().cloned().collect();
                         for uuid in uuids {
                             // Check if UUID is still in running_requests, if not skip this iteration
@@ -250,21 +269,21 @@ impl Scheduler {
                                 continue;
                             }
 
+                            // Get prefill compute value first
+                            let prefill_compute = state_guard.get_prefill_compute(&uuid);
+
                             // Get the active sequence for this UUID
                             let sequence = state_guard.requests.get_mut(&uuid)
                                 .and_then(|req| if let Request::Active(seq) = req { Some(seq) } else { None })
                                 .expect("UUID in running_requests must have a corresponding active sequence");
 
-                            // Get the prefill cost for sleep calculation if available
-                            let prefill_cost = prefill_costs_guard.get(&uuid).and_then(|cost| cost.as_ref());
-
                             // Generate token and get signals
                             let signals = sequence.generate();
 
                             // Accumulate sleep duration based on prefill_compute if available
-                            if let Some(cost) = prefill_cost {
+                            if let Some(compute) = prefill_compute {
                                 // TODO: A magic number to model prefill compute
-                                let sleep_ms = (cost.prefill_compute / 131072.0) as u64;
+                                let sleep_ms = (compute / 131072.0) as u64;
                                 total_sleep_duration += Duration::from_millis(sleep_ms);
                             } else {
                                 // TODO: A magic number to simulate ITL
@@ -290,21 +309,14 @@ impl Scheduler {
                                 let _ = tx.try_send(uuid);
                             }
 
-                            // Set active_tokens to None after a token is generated
-                            if sequence.generated_tokens() == 1 {
-                                prefill_costs_guard.insert(uuid, None);
-                            }
-
                             // Check if we're done after generating
                             if sequence.generated_tokens() >= sequence.max_output_tokens() {
-                                uuids_to_remove.push(uuid);
+                                // Remove completed sequence immediately
+                                state_guard.remove(&uuid);
+                            } else if sequence.generated_tokens() == 1 {
+                                // Apply the reset outside of sequence borrow - only for sequences that are continuing
+                                state_guard.set_prefill_cost(uuid, None);
                             }
-                        }
-
-                        // Remove completed sequences
-                        for uuid in uuids_to_remove {
-                            state_guard.remove(&uuid);
-                            prefill_costs_guard.remove(&uuid);
                         }
 
                         // Sleep once for the accumulated duration
@@ -319,7 +331,6 @@ impl Scheduler {
         Self {
             state,
             kv_manager,
-            prefill_costs,
             token_capacity,
             watermark,
             block_size,
@@ -387,7 +398,6 @@ impl Clone for Scheduler {
         Self {
             state: self.state.clone(),
             kv_manager: self.kv_manager.clone(),
-            prefill_costs: self.prefill_costs.clone(),
             token_capacity: self.token_capacity,
             watermark: self.watermark,
             block_size: self.block_size,
@@ -510,6 +520,7 @@ mod tests {
             let request = DirectRequest {
                 tokens: input_tokens,
                 max_output_tokens,
+                uuid: None,
             };
             scheduler.receive(request).await;
         }

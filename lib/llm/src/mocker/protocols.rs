@@ -58,6 +58,7 @@ pub enum MoveBlockResponse {
 pub struct DirectRequest {
     pub tokens: Vec<Token>,
     pub max_output_tokens: usize,
+    pub uuid: Option<Uuid>,
 }
 
 /// Represents the cost of prefilling content in the cache
