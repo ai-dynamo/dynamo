@@ -647,12 +647,20 @@ impl<S: Storage + NixlDescriptor, M: BlockMetadata> BlockDataExt<S> for MutableB
         self.data.num_layers()
     }
 
-    fn layer_view(&self, layer_idx: usize) -> BlockResult<view::LayerView<S>> {
-        self.data.layer_view(layer_idx)
+    fn num_outer_dims(&self) -> usize {
+        self.data.num_outer_dims()
     }
 
-    fn layer_view_mut(&mut self, layer_idx: usize) -> BlockResult<view::LayerViewMut<S>> {
-        self.data.layer_view_mut(layer_idx)
+    fn layer_view(&self, layer_idx: usize, outer_idx: usize) -> BlockResult<view::LayerView<S>> {
+        self.data.layer_view(layer_idx, outer_idx)
+    }
+
+    fn layer_view_mut(
+        &mut self,
+        layer_idx: usize,
+        outer_idx: usize,
+    ) -> BlockResult<view::LayerViewMut<S>> {
+        self.data.layer_view_mut(layer_idx, outer_idx)
     }
 
     fn block_view(&self) -> BlockResult<view::BlockView<S>> {
@@ -776,11 +784,15 @@ impl<S: Storage + NixlDescriptor, M: BlockMetadata> BlockDataExt<S> for Immutabl
         self.block.num_layers()
     }
 
-    fn layer_view(&self, layer_idx: usize) -> BlockResult<view::LayerView<S>> {
-        self.block.layer_view(layer_idx)
+    fn num_outer_dims(&self) -> usize {
+        self.block.num_outer_dims()
     }
 
-    fn layer_view_mut(&mut self, _: usize) -> BlockResult<view::LayerViewMut<S>> {
+    fn layer_view(&self, layer_idx: usize, outer_idx: usize) -> BlockResult<view::LayerView<S>> {
+        self.block.layer_view(layer_idx, outer_idx)
+    }
+
+    fn layer_view_mut(&mut self, _: usize, _: usize) -> BlockResult<view::LayerViewMut<S>> {
         // This should never be called since ImmutableBlock is immutable,
         // but we need to implement the full trait
         Err(BlockError::InvalidState(
@@ -1842,12 +1854,12 @@ mod tests {
         assert_eq!(mutable_block.num_layers(), 2);
 
         // Test layer_view()
-        let layer_view = mutable_block.layer_view(0).unwrap();
+        let layer_view = mutable_block.layer_view(0, 0).unwrap();
         assert_eq!(layer_view.size(), 4 * 13 * 2); // page_size x inner_dim x dtype_bytes
         assert!(!unsafe { layer_view.as_ptr() }.is_null());
 
         // Test layer_view_mut()
-        let mut layer_view_mut = mutable_block.layer_view_mut(1).unwrap();
+        let mut layer_view_mut = mutable_block.layer_view_mut(1, 0).unwrap();
         assert_eq!(layer_view_mut.size(), 4 * 13 * 2); // page_size x inner_dim x dtype_bytes
         assert!(!unsafe { layer_view_mut.as_mut_ptr() }.is_null());
 
@@ -1899,7 +1911,7 @@ mod tests {
         assert_eq!(immutable_block.num_layers(), 2);
 
         // Test layer_view()
-        let layer_view = immutable_block.layer_view(0).unwrap();
+        let layer_view = immutable_block.layer_view(0, 0).unwrap();
         assert_eq!(layer_view.size(), 4 * 13 * 2); // page_size x inner_dim x dtype_bytes
         assert!(!unsafe { layer_view.as_ptr() }.is_null());
 
@@ -1911,7 +1923,7 @@ mod tests {
         // Test that mutable methods return errors
         let mut mut_immutable_block = immutable_block; // We need a mutable reference for these tests
 
-        let layer_view_mut_res = mut_immutable_block.layer_view_mut(0);
+        let layer_view_mut_res = mut_immutable_block.layer_view_mut(0, 0);
         assert!(layer_view_mut_res.is_err());
         if let Err(BlockError::InvalidState(msg)) = layer_view_mut_res {
             assert!(msg.contains("immutable block"));
