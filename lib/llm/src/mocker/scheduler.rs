@@ -330,11 +330,6 @@ impl Scheduler {
         }
     }
 
-    /// Returns a clone of the request sender channel
-    pub fn event_sender(&self) -> mpsc::Sender<DirectRequest> {
-        self.request_tx.clone()
-    }
-
     /// Add a new request to the waiting queue
     pub async fn receive(&self, request: DirectRequest) {
         let _ = self.request_tx.send(request).await;
