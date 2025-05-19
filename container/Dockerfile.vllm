@@ -375,10 +375,11 @@ RUN cargo build --release --locked --features mistralrs,python,dynamo-llm/block-
 # Build dynamo wheel
 RUN uv build --wheel --out-dir /workspace/dist && \
     cd /workspace/lib/bindings/python && \
-    uv build --wheel --out-dir /workspace/dist --python 3.12 && \
+    uv pip install maturin[patchelf] && \
+    maturin build --release --features block-manager --out /workspace/dist && \
     if [ "$RELEASE_BUILD" = "true" ]; then \
-        uv build --wheel --out-dir /workspace/dist --python 3.11 && \
-        uv build --wheel --out-dir /workspace/dist --python 3.10; \
+        uv run --python 3.11 maturin build --release --features block-manager --out /workspace/dist && \
+        uv run --python 3.10 maturin build --release --features block-manager --out /workspace/dist; \
     fi
 
 #######################################
