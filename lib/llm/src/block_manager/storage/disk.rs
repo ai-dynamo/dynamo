@@ -50,6 +50,9 @@ impl DiskStorage {
         };
 
         let file = unsafe { File::from_raw_fd(raw_fd) };
+        let file_name = String::from_utf8_lossy(&template_bytes)
+            .trim_end_matches("\0")
+            .to_string();
 
         file.set_len(size as u64).map_err(|_| {
             StorageError::AllocationFailed("Failed to set temp file size".to_string())
@@ -63,7 +66,7 @@ impl DiskStorage {
 
         Ok(Self {
             file,
-            file_name: String::from_utf8(template_bytes).unwrap(),
+            file_name,
             size,
             handles: RegistrationHandles::new(),
         })

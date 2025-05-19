@@ -83,9 +83,20 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 let agent = NixlAgent::new(&worker_id.to_string())?;
 
                 tracing::debug!("Creating NIXL backends");
-                let (_ucx_mem_list1, ucx_params) = agent.get_plugin_params("UCX")?;
-                let backend = agent.create_backend("UCX", &ucx_params)?;
-                nixl_backends.insert("UCX".to_string(), Arc::new(backend));
+
+                if let Ok((_, ucx_params)) = agent.get_plugin_params("UCX") {
+                    let backend = agent.create_backend("UCX", &ucx_params)?;
+                    nixl_backends.insert("UCX".to_string(), Arc::new(backend));
+                } else {
+                    tracing::warn!("No UCX plugin found; will not create UCX backend");
+                }
+
+                if let Ok((_, gds_params)) = agent.get_plugin_params("GDS") {
+                    let backend = agent.create_backend("GDS", &gds_params)?;
+                    nixl_backends.insert("GDS".to_string(), Arc::new(backend));
+                } else {
+                    tracing::warn!("No GDS plugin found; will not create GDS backend");
+                }
 
                 Some(agent)
             }

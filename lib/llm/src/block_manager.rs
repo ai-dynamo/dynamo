@@ -183,6 +183,8 @@ impl<Metadata: BlockMetadata> Drop for KvBlockManager<Metadata> {
 mod tests {
     use super::*;
 
+    use crate::block_manager::block::BlockExt;
+    use crate::tokens::Tokens;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     // Atomic Counter for Worker ID
@@ -194,6 +196,7 @@ mod tests {
             .runtime(
                 KvManagerRuntimeConfig::builder()
                     .worker_id(worker_id)
+                    .enable_nixl()
                     .build()
                     .unwrap(),
             )
@@ -202,6 +205,13 @@ mod tests {
                     .num_layers(3)
                     .page_size(4)
                     .inner_dim(16)
+                    .build()
+                    .unwrap(),
+            )
+            .disk_layout(
+                KvManagerLayoutConfig::builder()
+                    .num_blocks(16)
+                    .allocator(storage::DiskAllocator::default())
                     .build()
                     .unwrap(),
             )
@@ -309,5 +319,45 @@ mod tests {
 
         // // Execute the transfer request
         // transfer_request.execute().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_offload() -> Result<()> {
+        dynamo_runtime::logging::init();
+
+        let block_manager = create_reference_block_manager();
+
+        let device = block_manager.device().unwrap();
+
+        let tokens = Tokens::from(vec![1, 2, 3, 4]);
+        let token_sequence = tokens.into_sequence(4, Some(0));
+        let token_block = token_sequence.blocks().first().unwrap();
+
+        let mut device_block = device.allocate_blocks(1).await?.into_iter().next().unwrap();
+        device_block.apply_token_block(token_block.clone())?;
+
+        let immutable_device_blocks = device.register_blocks(vec![device_block]).await.unwrap();
+        assert_eq!(immutable_device_blocks.len(), 1);
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // It should now be on host and disk.
+        let host_blocks = block_manager
+            .host()
+            .unwrap()
+            .match_sequence_hashes(vec![immutable_device_blocks[0].sequence_hash()?].as_slice())
+            .await
+            .unwrap();
+        assert_eq!(host_blocks.len(), 1);
+
+        let disk_blocks = block_manager
+            .disk()
+            .unwrap()
+            .match_sequence_hashes(vec![immutable_device_blocks[0].sequence_hash()?].as_slice())
+            .await
+            .unwrap();
+        assert_eq!(disk_blocks.len(), 1);
+
+        Ok(())
     }
 }
