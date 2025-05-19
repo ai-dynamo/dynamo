@@ -17,7 +17,6 @@ use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::protocols::{MoveBlock, MoveBlockResponse, PrefillCost, UniqueBlock};
 use crate::mocker::sequence::ActiveSequence;
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
 
 /// Mock implementation of worker for testing and simulation
 pub struct KvManager {
@@ -25,7 +24,6 @@ pub struct KvManager {
     block_size: usize,
     active_blocks: HashMap<UniqueBlock, usize>,
     inactive_blocks: LRUEvictor<UniqueBlock>,
-    start_time: Instant,
     all_blocks: HashSet<UniqueBlock>,
 }
 
@@ -33,7 +31,6 @@ impl KvManager {
     pub fn new(max_capacity: usize, block_size: usize) -> Self {
         let active_blocks = HashMap::new();
         let inactive_blocks = LRUEvictor::new();
-        let start_time = Instant::now();
         let all_blocks = HashSet::new();
 
         KvManager {
@@ -41,7 +38,6 @@ impl KvManager {
             block_size,
             active_blocks,
             inactive_blocks,
-            start_time,
             all_blocks,
         }
     }
@@ -129,8 +125,8 @@ impl KvManager {
                         // If reference count reaches zero, remove from active and move to inactive
                         if *ref_count == 0 {
                             self.active_blocks.remove(hash);
-                            self.inactive_blocks
-                                .insert(hash.clone(), self.start_time.elapsed().as_secs_f64());
+                            // Use the LRUEvictor's timing functionality
+                            self.inactive_blocks.insert(hash.clone());
                         }
                     }
                 }

@@ -16,6 +16,7 @@
 use std::cmp::Eq;
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
+use std::time::Instant;
 
 /// An LRU evictor that maintains objects and evicts them based on their
 /// last accessed time. Implements a "lazy" eviction mechanism where:
@@ -29,6 +30,7 @@ pub struct LRUEvictor<T: Clone + Eq + Hash> {
     pub free_table: HashMap<T, f64>,
     priority_queue: VecDeque<(T, f64)>,
     cleanup_threshold: usize,
+    start_time: Instant,
 }
 
 impl<T: Clone + Eq + Hash> Default for LRUEvictor<T> {
@@ -49,7 +51,19 @@ impl<T: Clone + Eq + Hash> LRUEvictor<T> {
             free_table: HashMap::new(),
             priority_queue: VecDeque::new(),
             cleanup_threshold,
+            start_time: Instant::now(),
         }
+    }
+
+    /// Get the current timestamp as seconds since initialization
+    pub fn current_timestamp(&self) -> f64 {
+        self.start_time.elapsed().as_secs_f64()
+    }
+
+    /// Insert or update an object in the evictor with current timestamp
+    pub fn insert(&mut self, object: T) {
+        let timestamp = self.current_timestamp();
+        self._insert(object, timestamp);
     }
 
     /// Check if the evictor contains the given object
@@ -80,7 +94,7 @@ impl<T: Clone + Eq + Hash> LRUEvictor<T> {
     }
 
     /// Insert or update an object in the evictor
-    pub fn insert(&mut self, object: T, last_accessed: f64) {
+    pub fn _insert(&mut self, object: T, last_accessed: f64) {
         self.free_table.insert(object.clone(), last_accessed);
         self.priority_queue.push_back((object, last_accessed));
         self.cleanup_if_necessary();
@@ -132,15 +146,22 @@ mod tests {
         // Create a new LRUEvictor with the given cleanup threshold
         let mut evictor = LRUEvictor::<i32>::with_cleanup_threshold(threshold);
 
-        // Add items in the specified order with incrementing timestamps
-        evictor.insert(4, 1.0);
-        evictor.insert(3, 1.0);
-        evictor.insert(2, 1.0);
-        evictor.insert(1, 1.0);
-        evictor.insert(5, 2.0);
-        evictor.insert(1, 2.0); // Updates timestamp for 1
-        evictor.insert(4, 3.0); // Updates timestamp for 4
-        evictor.insert(2, 3.0); // Updates timestamp for 2
+        // Add items in the specified order with small delays between each
+        evictor.insert(4);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        evictor.insert(3);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        evictor.insert(2);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        evictor.insert(1);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        evictor.insert(5);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        evictor.insert(1); // Updates timestamp for 1
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        evictor.insert(4); // Updates timestamp for 4
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        evictor.insert(2); // Updates timestamp for 2
 
         // Verify the eviction order
         println!("Testing with threshold {}", threshold);
