@@ -20,7 +20,7 @@ limitations under the License.
 This directory contains Helm charts for manually deploying Dynamo inference graphs to Kubernetes. These charts are used when you need full control over your deployment configuration.
 
 For detailed documentation on manual deployment using Helm charts, please refer to:
-- [Manual Helm Deployment Guide](../docs/guides/dynamo_deploy/manual_helm_deployment.md)
-- [Minikube Setup Guide](../docs/guides/dynamo_deploy/minikube.md)
+- [Manual Helm Deployment Guide](../../docs/guides/dynamo_deploy/manual_helm_deployment.md)
+- [Minikube Setup Guide](../../docs/guides/dynamo_deploy/minikube.md)
 
 For a quick start example, see [examples/hello_world/README.md#deploying-to-kubernetes-using-helm](../../examples/hello_world/README.md#deploying-to-kubernetes-using-helm)

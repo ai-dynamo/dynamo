@@ -58,7 +58,7 @@ BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
 TENSORRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
-TENSORRTLLM_BASE_IMAGE_TAG=25.03-py3
+TENSORRTLLM_BASE_IMAGE_TAG=25.04-py3
 
 # Important Note: Because of ABI compatibility issues between TensorRT-LLM and NGC PyTorch,
 # we need to build the TensorRT-LLM wheel from source.
@@ -88,7 +88,8 @@ TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-TRTLLM_COMMIT=83f37614ef735d251281136c3c05b1fecf8ef68b
+TRTLLM_COMMIT=290649b6aaed5f233b0a0adf50edc1347f8d2b14
+
 # TensorRT-LLM PyPI index URL
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
 TENSORRTLLM_PIP_WHEEL=""
@@ -96,7 +97,11 @@ TENSORRTLLM_PIP_WHEEL=""
 
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-VLLM_BASE_IMAGE_TAG="25.03-cuda12.8-devel-ubuntu24.04"
+# FIXME: NCCL will hang with 25.03, so use 25.01 for now
+# Please check https://github.com/ai-dynamo/dynamo/pull/1065
+# for details and reproducer to manually test if the image
+# can be updated to later versions.
+VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 NONE_BASE_IMAGE="ubuntu"
 NONE_BASE_IMAGE_TAG="24.04"
@@ -367,36 +372,34 @@ elif [[ $FRAMEWORK == "NONE" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.none
 fi
 
-if [[ $FRAMEWORK == "VLLM" ]]; then
-    NIXL_DIR="/tmp/nixl/nixl_src"
+NIXL_DIR="/tmp/nixl/nixl_src"
 
-    # Clone original NIXL to temp directory
-    if [ -d "$NIXL_DIR" ]; then
-        echo "Warning: $NIXL_DIR already exists, skipping clone"
+# Clone original NIXL to temp directory
+if [ -d "$NIXL_DIR" ]; then
+    echo "Warning: $NIXL_DIR already exists, skipping clone"
+else
+    if [ -n "${GITHUB_TOKEN}" ]; then
+        git clone "https://oauth2:${GITHUB_TOKEN}@github.com/${NIXL_REPO}" "$NIXL_DIR"
     else
-        if [ -n "${GITHUB_TOKEN}" ]; then
-            git clone "https://oauth2:${GITHUB_TOKEN}@github.com/${NIXL_REPO}" "$NIXL_DIR"
-        else
-            # Try HTTPS first with credential prompting disabled, fall back to SSH if it fails
-            if ! GIT_TERMINAL_PROMPT=0 git clone https://github.com/${NIXL_REPO} "$NIXL_DIR"; then
-                echo "HTTPS clone failed, falling back to SSH..."
-                git clone git@github.com:${NIXL_REPO} "$NIXL_DIR"
-            fi
+        # Try HTTPS first with credential prompting disabled, fall back to SSH if it fails
+        if ! GIT_TERMINAL_PROMPT=0 git clone https://github.com/${NIXL_REPO} "$NIXL_DIR"; then
+            echo "HTTPS clone failed, falling back to SSH..."
+            git clone git@github.com:${NIXL_REPO} "$NIXL_DIR"
         fi
     fi
-
-    cd "$NIXL_DIR" || exit
-    if ! git checkout ${NIXL_COMMIT}; then
-        echo "ERROR: Failed to checkout NIXL commit ${NIXL_COMMIT}. The cached directory may be out of date."
-        echo "Please delete $NIXL_DIR and re-run the build script."
-        exit 1
-    fi
-
-    BUILD_CONTEXT_ARG+=" --build-context nixl=$NIXL_DIR"
-
-    # Add NIXL_COMMIT as a build argument to enable caching
-    BUILD_ARGS+=" --build-arg NIXL_COMMIT=${NIXL_COMMIT} "
 fi
+
+cd "$NIXL_DIR" || exit
+if ! git checkout ${NIXL_COMMIT}; then
+    echo "ERROR: Failed to checkout NIXL commit ${NIXL_COMMIT}. The cached directory may be out of date."
+    echo "Please delete $NIXL_DIR and re-run the build script."
+    exit 1
+fi
+
+BUILD_CONTEXT_ARG+=" --build-context nixl=$NIXL_DIR"
+
+# Add NIXL_COMMIT as a build argument to enable caching
+BUILD_ARGS+=" --build-arg NIXL_COMMIT=${NIXL_COMMIT} "
 
 if [[ $TARGET == "local-dev" ]]; then
     BUILD_ARGS+=" --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) "

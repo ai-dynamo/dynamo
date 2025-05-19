@@ -13,7 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![deny(missing_docs)]
+// TODO: Add docs.
+#![allow(missing_docs)]
 
 //! # Storage Management
 //!
@@ -121,7 +122,8 @@ pub trait Remote {}
 
 /// Marker trait for [`Storage`] types that can be accessed by the standard
 /// mechanisms of the system, e.g. `memcpy`, `memset`, etc.
-pub trait SystemAccessible: Storage {}
+pub trait SystemAccessible {}
+pub trait CudaAccessible {}
 
 /// Errors that can occur during storage operations
 #[derive(Debug, Error)]
@@ -139,14 +141,14 @@ pub enum StorageError {
     #[error("Storage operation failed: {0}")]
     OperationFailed(String),
 
+    #[error("CUDA error: {0}")]
+    Cuda(#[from] cudarc::driver::DriverError),
+
     #[error("Registration key already exists: {0}")]
     RegistrationKeyExists(String),
 
     #[error("Handle not found for key: {0}")]
     HandleNotFound(String),
-
-    #[error("CUDA error: {0}")]
-    CudaError(#[from] cudarc::driver::DriverError),
 
     #[error("NIXL error: {0}")]
     NixlError(#[from] nixl_sys::NixlError),

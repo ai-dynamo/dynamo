@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::sync::Arc;
 
@@ -20,21 +8,19 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::Receiver;
 
 use dynamo_runtime::{
-    component::{self, ComponentEndpointInfo},
+    component::{self, Component, ComponentEndpointInfo},
     pipeline::{
         network::egress::push_router::PushRouter, ManyOut, Operator, RouterMode, SegmentSource,
         ServiceBackend, SingleIn, Source,
     },
     protocols::{self, annotated::Annotated},
     slug::Slug,
+    traits::DistributedRuntimeProvider as _,
     transports::etcd::{self, KeyValue, WatchEvent},
     DistributedRuntime,
 };
 
 use super::ModelManager;
-use crate::protocols::openai::chat_completions::{
-    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-};
 use crate::protocols::openai::completions::{CompletionRequest, CompletionResponse};
 use crate::{
     backend::Backend,
@@ -45,6 +31,12 @@ use crate::{
 use crate::{
     key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager},
     model_card::{self, ModelDeploymentCard},
+};
+use crate::{
+    kv_router::{scheduler::DefaultWorkerSelector, KvPushRouter, KvRouter},
+    protocols::openai::chat_completions::{
+        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+    },
 };
 use tracing;
 
@@ -74,7 +66,7 @@ impl ModelEntry {
     pub async fn load_mdc(
         &self,
         endpoint_id: protocols::Endpoint,
-        etcd_client: etcd::Client,
+        etcd_client: &etcd::Client,
     ) -> anyhow::Result<ModelDeploymentCard> {
         let kvstore: Box<dyn KeyValueStore> =
             Box::new(EtcdStorage::new(etcd_client.clone(), endpoint_id));
@@ -122,7 +114,7 @@ impl ModelNetworkName {
     }
 
     /// Fetch the ModelEntry from etcd.
-    pub async fn load_entry(&self, etcd_client: etcd::Client) -> anyhow::Result<ModelEntry> {
+    pub async fn load_entry(&self, etcd_client: &etcd::Client) -> anyhow::Result<ModelEntry> {
         let mut model_entries = etcd_client.kv_get(self.to_string(), None).await?;
         if model_entries.is_empty() {
             anyhow::bail!("No ModelEntry in etcd for key {self}");
@@ -142,9 +134,9 @@ impl ModelNetworkName {
     pub async fn load_mdc(
         &self,
         endpoint_id: protocols::Endpoint,
-        etcd_client: etcd::Client,
+        etcd_client: &etcd::Client,
     ) -> anyhow::Result<ModelDeploymentCard> {
-        let entry = self.load_entry(etcd_client.clone()).await?;
+        let entry = self.load_entry(etcd_client).await?;
         entry.load_mdc(endpoint_id, etcd_client).await
     }
 }
@@ -161,180 +153,231 @@ impl std::fmt::Display for ModelNetworkName {
     }
 }
 
-pub struct ModelWatchState {
-    pub prefix: String,
-    pub manager: ModelManager,
-    pub drt: DistributedRuntime,
+pub struct ModelWatcher {
+    prefix: String,
+    manager: ModelManager,
+    drt: DistributedRuntime,
+    router_mode: RouterMode,
+    kv_chooser: Option<Arc<KvRouter>>,
 }
 
-pub async fn model_watcher(state: Arc<ModelWatchState>, mut events_rx: Receiver<WatchEvent>) {
-    tracing::debug!("model watcher started");
+impl ModelWatcher {
+    pub async fn new(
+        component: Component,
+        model_manager: ModelManager,
+        network_prefix: &str,
+        router_mode: RouterMode,
+    ) -> anyhow::Result<ModelWatcher> {
+        let kv_chooser = if router_mode.is_kv_routing() {
+            let selector = Box::new(DefaultWorkerSelector {});
+            let chooser = KvRouter::new(
+                component.clone(),
+                crate::DEFAULT_KV_BLOCK_SIZE,
+                Some(selector),
+            )
+            .await?;
+            Some(Arc::new(chooser))
+        } else {
+            None
+        };
+        Ok(Self {
+            prefix: network_prefix.to_string(),
+            manager: model_manager,
+            drt: component.drt().clone(),
+            router_mode,
+            kv_chooser,
+        })
+    }
 
-    while let Some(event) = events_rx.recv().await {
-        match event {
-            WatchEvent::Put(kv) => {
-                let model_entry = match serde_json::from_slice::<ModelEntry>(kv.value()) {
-                    Ok(model_entry) => model_entry,
-                    Err(err) => {
-                        tracing::error!(%err, ?kv, "Invalid JSON in model entry");
+    pub async fn watch(self: Arc<Self>, mut events_rx: Receiver<WatchEvent>) {
+        tracing::debug!("model watcher started");
+
+        while let Some(event) = events_rx.recv().await {
+            match event {
+                WatchEvent::Put(kv) => {
+                    let model_entry = match serde_json::from_slice::<ModelEntry>(kv.value()) {
+                        Ok(model_entry) => model_entry,
+                        Err(err) => {
+                            tracing::error!(%err, ?kv, "Invalid JSON in model entry");
+                            continue;
+                        }
+                    };
+                    if self.manager.has_model_any(&model_entry.name) {
+                        tracing::trace!(
+                            service_name = model_entry.name,
+                            "New endpoint for existing model"
+                        );
                         continue;
                     }
-                };
-                if state.manager.has_model_any(&model_entry.name) {
-                    tracing::trace!(
-                        service_name = model_entry.name,
-                        "New endpoint for existing model"
-                    );
-                    continue;
-                }
 
-                match handle_put(&model_entry, state.clone()).await {
-                    Ok(()) => {
-                        tracing::info!(model_name = model_entry.name, "added model");
+                    match self.clone().handle_put(&model_entry).await {
+                        Ok(()) => {
+                            tracing::info!(model_name = model_entry.name, "added model");
+                        }
+                        Err(e) => {
+                            tracing::error!(%e, "error adding model {}", model_entry.name);
+                        }
+                    }
+                }
+                WatchEvent::Delete(kv) => match self.clone().handle_delete(&kv).await {
+                    Ok(model_name) => {
+                        tracing::info!("removed model {}", model_name);
                     }
                     Err(e) => {
-                        tracing::error!(%e, "error adding model {}", model_entry.name);
+                        tracing::error!("error removing model: {}", e);
                     }
-                }
+                },
             }
-            WatchEvent::Delete(kv) => match handle_delete(&kv, state.clone()).await {
-                Ok(model_name) => {
-                    tracing::info!("removed model {}", model_name);
-                }
-                Err(e) => {
-                    tracing::error!("error removing model: {}", e);
-                }
-            },
         }
     }
-}
 
-async fn handle_delete(kv: &KeyValue, state: Arc<ModelWatchState>) -> anyhow::Result<&str> {
-    let key = kv.key_str()?;
-    tracing::debug!(key, "removing model");
+    async fn handle_delete(self: Arc<Self>, kv: &KeyValue) -> anyhow::Result<&str> {
+        let key = kv.key_str()?;
+        tracing::debug!(key, "removing model");
 
-    let model_name = key.trim_start_matches(&state.prefix);
+        let model_name = key.trim_start_matches(&self.prefix);
 
-    // Ignore the errors because model could be either type
-    let _ = state.manager.remove_chat_completions_model(model_name);
-    let _ = state.manager.remove_completions_model(model_name);
+        // Ignore the errors because model could be either type
+        let _ = self.manager.remove_chat_completions_model(model_name);
+        let _ = self.manager.remove_completions_model(model_name);
 
-    Ok(model_name)
-}
+        Ok(model_name)
+    }
 
-// Handles a PUT event from etcd, this usually means adding a new model to the list of served
-// models.
-//
-// If this method errors, for the near term, we will delete the offending key.
-async fn handle_put(model_entry: &ModelEntry, state: Arc<ModelWatchState>) -> anyhow::Result<()> {
-    let endpoint_id = model_entry.endpoint.clone();
-    let client = state
-        .drt
-        .namespace(&endpoint_id.namespace)?
-        .component(&endpoint_id.component)?
-        .endpoint(&endpoint_id.name)
-        .client()
-        .await?;
-
-    let Some(etcd_client) = state.drt.etcd_client() else {
-        // Should be impossible because we only get here on an etcd event
-        anyhow::bail!("Missing etcd_client");
-    };
-    let card = match model_entry.load_mdc(endpoint_id, etcd_client).await {
-        Ok(card) => {
-            tracing::debug!(card.display_name, "adding model");
-            Some(card)
-        }
-        Err(err) => {
-            // `dynamo serve` isn't using MDC yet so can't be an error
-            tracing::info!(%err, "load_mdc did not complete");
-            None
-        }
-    };
-    match model_entry.model_type {
-        ModelType::Backend => {
-            // A Backend model expects pre-processed requests meaning it's up to us whether we
-            // handle Chat or Completions requests, so handle both.
-
-            let Some(mut card) = card else {
-                anyhow::bail!("Missing model deployment card");
-            };
-            // Download tokenizer.json etc to local disk
-            // This cache_dir is a tempfile::TempDir will be deleted on drop. I _think_
-            // OpenAIPreprocessor::new loads the files, so we can delete them after this
-            // function. Needs checking carefully, possibly we need to store it in state.
-            let _cache_dir = Some(card.move_from_nats(state.drt.nats_client()).await?);
-
-            let frontend = SegmentSource::<
-                SingleIn<NvCreateChatCompletionRequest>,
-                ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-            >::new();
-            let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
-            let backend = Backend::from_mdc(card.clone()).await?.into_operator();
-            let router = PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
-                client.clone(),
-                RouterMode::Random, // TODO how do we configure this?
-            )
+    // Handles a PUT event from etcd, this usually means adding a new model to the list of served
+    // models.
+    //
+    // If this method errors, for the near term, we will delete the offending key.
+    async fn handle_put(self: Arc<ModelWatcher>, model_entry: &ModelEntry) -> anyhow::Result<()> {
+        let endpoint_id = model_entry.endpoint.clone();
+        let client = self
+            .drt
+            .namespace(&endpoint_id.namespace)?
+            .component(&endpoint_id.component)?
+            .endpoint(&endpoint_id.name)
+            .client()
             .await?;
 
-            let chat_engine = frontend
-                .link(preprocessor.forward_edge())?
-                .link(backend.forward_edge())?
-                .link(ServiceBackend::from_engine(Arc::new(router)))?
-                .link(backend.backward_edge())?
-                .link(preprocessor.backward_edge())?
-                .link(frontend)?;
-            state
-                .manager
-                .add_chat_completions_model(&model_entry.name, chat_engine)?;
+        let Some(etcd_client) = self.drt.etcd_client() else {
+            // Should be impossible because we only get here on an etcd event
+            anyhow::bail!("Missing etcd_client");
+        };
+        let card = match model_entry.load_mdc(endpoint_id, &etcd_client).await {
+            Ok(card) => {
+                tracing::debug!(card.display_name, "adding model");
+                Some(card)
+            }
+            Err(err) => {
+                // `dynamo serve` isn't using MDC yet so can't be an error
+                tracing::info!(%err, "load_mdc did not complete");
+                None
+            }
+        };
+        match model_entry.model_type {
+            ModelType::Backend => {
+                // A Backend model expects pre-processed requests meaning it's up to us whether we
+                // handle Chat or Completions requests, so handle both.
 
-            let frontend = SegmentSource::<
-                SingleIn<CompletionRequest>,
-                ManyOut<Annotated<CompletionResponse>>,
-            >::new();
-            let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
-            let backend = Backend::from_mdc(card.clone()).await?.into_operator();
-            let router = PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
-                client,
-                RouterMode::Random, // TODO how do we configure this?
-            )
-            .await?;
+                let Some(mut card) = card else {
+                    anyhow::bail!("Missing model deployment card");
+                };
+                // Download tokenizer.json etc to local disk
+                // This cache_dir is a tempfile::TempDir will be deleted on drop. I _think_
+                // OpenAIPreprocessor::new loads the files, so we can delete them after this
+                // function. Needs checking carefully, possibly we need to store it in state.
+                let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
 
-            let completions_engine = frontend
-                .link(preprocessor.forward_edge())?
-                .link(backend.forward_edge())?
-                .link(ServiceBackend::from_engine(Arc::new(router)))?
-                .link(backend.backward_edge())?
-                .link(preprocessor.backward_edge())?
-                .link(frontend)?;
-            state
-                .manager
-                .add_completions_model(&model_entry.name, completions_engine)?;
-        }
-        ModelType::Chat => {
-            let push_router = PushRouter::<
-                NvCreateChatCompletionRequest,
-                Annotated<NvCreateChatCompletionStreamResponse>,
-            >::from_client(client, Default::default())
-            .await?;
-            let engine = Arc::new(push_router);
-            state
-                .manager
-                .add_chat_completions_model(&model_entry.name, engine)?;
-        }
-        ModelType::Completion => {
-            let push_router =
-                PushRouter::<CompletionRequest, Annotated<CompletionResponse>>::from_client(
-                    client,
-                    Default::default(),
+                let frontend = SegmentSource::<
+                    SingleIn<NvCreateChatCompletionRequest>,
+                    ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+                >::new();
+                let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
+                let backend = Backend::from_mdc(card.clone()).await?.into_operator();
+                let router = PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
+                    client.clone(),
+                    self.router_mode,
                 )
                 .await?;
-            let engine = Arc::new(push_router);
-            state
-                .manager
-                .add_completions_model(&model_entry.name, engine)?;
-        }
-    }
+                let service_backend = match self.router_mode {
+                    RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
+                        ServiceBackend::from_engine(Arc::new(router))
+                    }
+                    RouterMode::KV => {
+                        let Some(kv_chooser) = self.kv_chooser.clone() else {
+                            anyhow::bail!("KV routing mode with no chooser, should be unreachable");
+                        };
+                        let kv_push_router = KvPushRouter::new(router, kv_chooser);
+                        ServiceBackend::from_engine(Arc::new(kv_push_router))
+                    }
+                };
 
-    Ok(())
+                let chat_engine = frontend
+                    .link(preprocessor.forward_edge())?
+                    .link(backend.forward_edge())?
+                    .link(service_backend)?
+                    .link(backend.backward_edge())?
+                    .link(preprocessor.backward_edge())?
+                    .link(frontend)?;
+                self.manager
+                    .add_chat_completions_model(&model_entry.name, chat_engine)?;
+
+                let frontend = SegmentSource::<
+                    SingleIn<CompletionRequest>,
+                    ManyOut<Annotated<CompletionResponse>>,
+                >::new();
+                let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
+                let backend = Backend::from_mdc(card.clone()).await?.into_operator();
+                let router = PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
+                    client,
+                    self.router_mode,
+                )
+                .await?;
+                let service_backend = match self.router_mode {
+                    RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
+                        ServiceBackend::from_engine(Arc::new(router))
+                    }
+                    RouterMode::KV => {
+                        let Some(kv_chooser) = self.kv_chooser.clone() else {
+                            anyhow::bail!("KV routing mode with no chooser, should be unreachable");
+                        };
+                        let kv_push_router = KvPushRouter::new(router, kv_chooser);
+                        ServiceBackend::from_engine(Arc::new(kv_push_router))
+                    }
+                };
+
+                let completions_engine = frontend
+                    .link(preprocessor.forward_edge())?
+                    .link(backend.forward_edge())?
+                    .link(service_backend)?
+                    .link(backend.backward_edge())?
+                    .link(preprocessor.backward_edge())?
+                    .link(frontend)?;
+                self.manager
+                    .add_completions_model(&model_entry.name, completions_engine)?;
+            }
+            ModelType::Chat => {
+                let push_router = PushRouter::<
+                    NvCreateChatCompletionRequest,
+                    Annotated<NvCreateChatCompletionStreamResponse>,
+                >::from_client(client, Default::default())
+                .await?;
+                let engine = Arc::new(push_router);
+                self.manager
+                    .add_chat_completions_model(&model_entry.name, engine)?;
+            }
+            ModelType::Completion => {
+                let push_router =
+                    PushRouter::<CompletionRequest, Annotated<CompletionResponse>>::from_client(
+                        client,
+                        Default::default(),
+                    )
+                    .await?;
+                let engine = Arc::new(push_router);
+                self.manager
+                    .add_completions_model(&model_entry.name, engine)?;
+            }
+        }
+
+        Ok(())
+    }
 }

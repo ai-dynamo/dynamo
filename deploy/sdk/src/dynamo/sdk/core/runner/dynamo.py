@@ -19,6 +19,7 @@ import logging
 import os
 import shlex
 import sys
+from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Set, Type, TypeVar
 
 import psutil
@@ -38,6 +39,7 @@ from dynamo.sdk.core.protocol.interface import (
     ServiceConfig,
     ServiceInterface,
 )
+from dynamo.sdk.core.runner.common import ServiceMixin
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +63,7 @@ class LocalEndpoint(DynamoEndpoint):
         return self._name
 
 
-class LocalService(ServiceInterface[T]):
+class LocalService(ServiceMixin, ServiceInterface[T]):
     """Circus implementation of the ServiceInterface"""
 
     def __init__(
@@ -79,6 +81,8 @@ class LocalService(ServiceInterface[T]):
         self._dynamo_config = dynamo_config or DynamoConfig(
             name=name, namespace="default"
         )
+        # Add the dynamo config to the service config
+        self._config["dynamo"] = asdict(self._dynamo_config)
         self._watcher = watcher
         self._socket = socket
         self.app = app or FastAPI(title=name)

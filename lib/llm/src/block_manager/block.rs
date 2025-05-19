@@ -24,7 +24,7 @@ use nixl_sys::NixlDescriptor;
 pub use state::{BlockState, BlockStateInvalid};
 
 use crate::block_manager::{
-    state::{KvBlockManagerState as BlockManager, TransferContext},
+    state::KvBlockManagerState as BlockManager,
     storage::{Local, Remote, Storage},
 };
 use crate::tokens::{SaltHash, SequenceHash, Token, TokenBlock, Tokens};
@@ -99,10 +99,6 @@ pub trait ReadableBlock: BlockDataProvider {
 
     fn storage_type_id(&self) -> std::any::TypeId {
         std::any::TypeId::of::<<Self as ReadableBlock>::StorageType>()
-    }
-
-    fn transfer_context(&self) -> &TransferContext {
-        unimplemented!()
     }
 }
 
@@ -683,9 +679,26 @@ pub struct ImmutableBlock<S: Storage, M: BlockMetadata> {
     block: Arc<MutableBlock<S, M>>,
 }
 
+impl<S: Storage, M: BlockMetadata> Clone for ImmutableBlock<S, M> {
+    fn clone(&self) -> Self {
+        Self {
+            block: self.block.clone(),
+        }
+    }
+}
+
 impl<S: Storage, M: BlockMetadata> ImmutableBlock<S, M> {
     pub(crate) fn new(block: Arc<MutableBlock<S, M>>) -> Self {
         Self { block }
+    }
+
+    pub fn manager(&self) -> Option<&Arc<BlockManager<M>>> {
+        // Access the underlying Block's manager field directly through deref
+        self.manager.as_ref()
+    }
+
+    pub fn mutable_block(&self) -> &Arc<MutableBlock<S, M>> {
+        &self.block
     }
 }
 
@@ -743,8 +756,17 @@ impl<'a, S: Storage, M: BlockMetadata> AsBlockSlice<'a, ImmutableBlock<S, M>>
     }
 }
 
-pub mod nixl {
+impl<S: Storage, M: BlockMetadata> ImmutableBlock<S, M> {
+    pub async fn enqueue_offload(&self, priority: u64) -> Result<()> {
+        // TODO: Is it ok to silently fail if the block is not managed?
+        if let Some(manager) = self.manager() {
+            manager.enqueue_offload_block(self, priority).await?;
+        }
+        Ok(())
+    }
+}
 
+pub mod nixl {
     use super::*;
 
     use super::view::{BlockKind, Kind, LayerKind};
@@ -1408,6 +1430,15 @@ pub mod nixl {
         fn as_block_descriptor_set(&self) -> Result<BlockDescriptorList, BlockDescriptorSetError> {
             self.as_slice().as_block_descriptor_set()
         }
+    }
+}
+
+#[cfg(test)]
+pub mod test_utils {
+    use super::private::PrivateToken;
+
+    pub fn get_private_token() -> PrivateToken {
+        PrivateToken
     }
 }
 

@@ -114,7 +114,7 @@ impl Cuda {
     /// If the context does not exist, it will return None.
     ///
     /// This will not lazily instantiate a context for a device. Use
-    /// [Cuda::get_or_init_device]
+    /// [Cuda::device_or_create]
     pub fn device(device_id: usize) -> Option<Arc<CudaContext>> {
         Cuda::instance()
             .lock()
@@ -127,7 +127,7 @@ impl Cuda {
     ///
     /// This will lazily instantiate a context for a device. Use
     /// [CudaContextManager::device] to get an existing context.
-    pub fn get_or_init_device(device_id: usize) -> Result<Arc<CudaContext>, StorageError> {
+    pub fn device_or_create(device_id: usize) -> Result<Arc<CudaContext>, StorageError> {
         Cuda::instance().lock().unwrap().get_context(device_id)
     }
 
@@ -159,12 +159,12 @@ impl Cuda {
     }
 
     // Get a context if it exists, but don't create one
-    fn get_existing_context(&self, device_id: usize) -> Option<Arc<CudaContext>> {
+    pub fn get_existing_context(&self, device_id: usize) -> Option<Arc<CudaContext>> {
         self.contexts.get(&device_id).cloned()
     }
 
     // Check if a context exists for a device
-    fn has_context(&self, device_id: usize) -> bool {
+    pub fn has_context(&self, device_id: usize) -> bool {
         self.contexts.contains_key(&device_id)
     }
 }
@@ -186,10 +186,10 @@ impl PinnedStorage {
     /// Create a new pinned storage with the given size
     pub fn new(ctx: &Arc<CudaContext>, size: usize) -> Result<Self, StorageError> {
         unsafe {
-            ctx.bind_to_thread().map_err(StorageError::CudaError)?;
+            ctx.bind_to_thread().map_err(StorageError::Cuda)?;
 
             let ptr = cudarc::driver::result::malloc_host(size, sys::CU_MEMHOSTALLOC_WRITECOMBINED)
-                .map_err(StorageError::CudaError)?;
+                .map_err(StorageError::Cuda)?;
 
             let ptr = ptr as *mut u8;
             assert!(!ptr.is_null(), "Failed to allocate pinned memory");
@@ -283,7 +283,7 @@ pub struct PinnedAllocator {
 impl Default for PinnedAllocator {
     fn default() -> Self {
         Self {
-            ctx: Cuda::get_or_init_device(0).expect("Failed to create CUDA context"),
+            ctx: Cuda::device_or_create(0).expect("Failed to create CUDA context"),
         }
     }
 }
@@ -292,7 +292,7 @@ impl PinnedAllocator {
     /// Create a new pinned allocator
     pub fn new() -> Result<Self, StorageError> {
         Ok(Self {
-            ctx: Cuda::get_or_init_device(0)?,
+            ctx: Cuda::device_or_create(0)?,
         })
     }
 }
@@ -318,9 +318,8 @@ impl CudaAccessible for DeviceStorage {}
 impl DeviceStorage {
     /// Create a new device storage with the given size
     pub fn new(ctx: &Arc<CudaContext>, size: usize) -> Result<Self, StorageError> {
-        ctx.bind_to_thread().map_err(StorageError::CudaError)?;
-        let ptr =
-            unsafe { cudarc::driver::result::malloc_sync(size).map_err(StorageError::CudaError)? };
+        ctx.bind_to_thread().map_err(StorageError::Cuda)?;
+        let ptr = unsafe { cudarc::driver::result::malloc_sync(size).map_err(StorageError::Cuda)? };
 
         Ok(Self {
             ptr,
@@ -406,11 +405,10 @@ impl DeviceAllocator {
     /// Create a new device allocator
     pub fn new(device_id: usize) -> Result<Self, StorageError> {
         Ok(Self {
-            ctx: Cuda::get_or_init_device(device_id)?,
+            ctx: Cuda::device_or_create(device_id)?,
         })
     }
 
-    /// Get the CUDA context
     pub fn ctx(&self) -> &Arc<CudaContext> {
         &self.ctx
     }

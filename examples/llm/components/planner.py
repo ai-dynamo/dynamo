@@ -31,6 +31,7 @@ from utils.prefill_queue import PrefillQueue
 
 from dynamo.llm import KvMetricsAggregator
 from dynamo.planner import KubernetesConnector, LocalConnector
+from dynamo.planner.defaults import PlannerDefaults
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -78,6 +79,8 @@ class Planner:
         logger.info(f"Components present in namespace: {args.namespace}")
 
         self.init_time = time.time()
+        # Set the appropriate logger function for repeated metric logging
+        self._repeating_log_func = logger.debug if args.no_operation else logger.info
 
     async def set_metric_aggregator(self):
         # TODO: separate KV metrics and prefill metrics
@@ -100,7 +103,9 @@ class Planner:
             p_endpoints = self.prefill_client.endpoint_ids()
         except Exception:
             p_endpoints = []
-            logger.info("No prefill workers found, operating in aggregated mode")
+            self._repeating_log_func(
+                "No prefill workers found, operating in aggregated mode"
+            )
         try:
             if self.workers_client is None:
                 self.workers_client = (
@@ -118,13 +123,13 @@ class Planner:
         return p_endpoints, d_endpoints
 
     async def reset_adjustment_interval(self):
-        logger.info(
+        self._repeating_log_func(
             f"Reset metrics for new adjustment interval at t={time.time() - self.init_time:.1f}s"
         )
 
         self.p_endpoints, self.d_endpoints = await self.get_workers_info()
 
-        logger.info(
+        self._repeating_log_func(
             f"Number of prefill workers: {len(self.p_endpoints)}, number of decode workers: {len(self.d_endpoints)}"
         )
 
@@ -135,7 +140,9 @@ class Planner:
         self.last_adjustment_time = time.time()
 
     async def collect_metrics(self):
-        logger.info(f"Collecting metrics at t={time.time() - self.init_time:.1f}s")
+        self._repeating_log_func(
+            f"Collecting metrics at t={time.time() - self.init_time:.1f}s"
+        )
 
         # collect prefill queue load
         try:
@@ -146,14 +153,16 @@ class Planner:
                 prefill_queue_size = await prefill_queue.get_queue_size()
                 measure_time = time.time() - self.init_time
             self.prefill_queue_load.append(prefill_queue_size)
-            logger.info(
+            self._repeating_log_func(
                 f"Collected prefill queue size at t={measure_time:.1f}s: {int(prefill_queue_size)}"
             )
             self.writer.add_scalar(
                 "prefill_queue_size", prefill_queue_size, measure_time
             )
         except Exception as e:
-            logger.info(f"Failed to collect prefill queue size metrics: {e}")
+            self._repeating_log_func(
+                f"Failed to collect prefill queue size metrics: {e}"
+            )
 
         # collect kv load
         total_active_requests: int = 0
@@ -176,7 +185,7 @@ class Planner:
                         kv_load = kv_load + 0.02 * num_requests_waiting
                 self.kv_load.append(kv_load)
             measure_time = time.time() - self.init_time
-            logger.info(
+            self._repeating_log_func(
                 f"Collected kv load at t={measure_time:.1f}s: {self.kv_load[prev_kv_load_len:]} (act/pnd req: {total_active_requests}/{total_queued_requests})"
             )
             average_kv_load = np.mean(self.kv_load[prev_kv_load_len:])
@@ -185,7 +194,7 @@ class Planner:
                 "total_queued_requests", total_queued_requests, measure_time
             )
         except Exception as e:
-            logger.info(f"Failed to collect kv load metrics: {e}")
+            self._repeating_log_func(f"Failed to collect kv load metrics: {e}")
 
         p_endpoints, d_endpoints = await self.get_workers_info()
         self.writer.add_scalar(
@@ -333,6 +342,12 @@ class Planner:
         """Main loop for the planner"""
 
         await self.set_metric_aggregator()
+
+        if self._repeating_log_func == logger.debug:
+            logger.info(
+                "Running in no-operation mode - detailed metrics will be logged at DEBUG level"
+            )
+
         await self.reset_adjustment_interval()
 
         while True:
@@ -391,90 +406,91 @@ if __name__ == "__main__":
     parser.add_argument(
         "--namespace",
         type=str,
-        default="dynamo",
+        default=PlannerDefaults.namespace,
         help="Namespace planner will look at",
     )
     parser.add_argument(
         "--served-model-name",
         type=str,
-        default="vllm",
+        default=PlannerDefaults.served_model_name,
         help="Model name that is being served (used for prefill queue name)",
     )
     parser.add_argument(
         "--no-operation",
         action="store_true",
+        default=PlannerDefaults.no_operation,
         help="Do not make any adjustments, just observe the metrics",
     )
     parser.add_argument(
         "--log-dir",
         type=str,
-        default=None,
+        default=PlannerDefaults.log_dir,
         help="Tensorboard logging directory",
     )
     parser.add_argument(
         "--adjustment-interval",
         type=int,
-        default=10,
+        default=PlannerDefaults.adjustment_interval,
         help="Interval in seconds between scaling adjustments",
     )
     parser.add_argument(
         "--metric-pulling-interval",
         type=int,
-        default=1,
+        default=PlannerDefaults.metric_pulling_interval,
         help="Interval in seconds between metric pulls",
     )
     parser.add_argument(
         "--max-gpu-budget",
         type=int,
-        default=8,
+        default=PlannerDefaults.max_gpu_budget,
         help="Maximum number of GPUs to use",
     )
     parser.add_argument(
         "--min-endpoint",
         type=int,
-        default=1,
+        default=PlannerDefaults.min_endpoint,
         help="Minimum number of endpoints to keep for prefill/decode workers",
     )
     parser.add_argument(
         "--decode-kv-scale-up-threshold",
         type=float,
-        default=0.9,
+        default=PlannerDefaults.decode_kv_scale_up_threshold,
         help="KV cache utilization threshold to scale up decode workers",
     )
     parser.add_argument(
         "--decode-kv-scale-down-threshold",
         type=float,
-        default=0.5,
+        default=PlannerDefaults.decode_kv_scale_down_threshold,
         help="KV cache utilization threshold to scale down decode workers",
     )
     parser.add_argument(
         "--prefill-queue-scale-up-threshold",
         type=float,
-        default=5,
+        default=PlannerDefaults.prefill_queue_scale_up_threshold,
         help="Queue utilization threshold to scale up prefill workers",
     )
     parser.add_argument(
         "--prefill-queue-scale-down-threshold",
         type=float,
-        default=0.2,
+        default=PlannerDefaults.prefill_queue_scale_down_threshold,
         help="Queue utilization threshold to scale down prefill workers",
     )
     parser.add_argument(
         "--decode-engine-num-gpu",
         type=int,
-        default=1,
+        default=PlannerDefaults.decode_engine_num_gpu,
         help="Number of GPUs per decode engine",
     )
     parser.add_argument(
         "--prefill-engine-num-gpu",
         type=int,
-        default=1,
+        default=PlannerDefaults.prefill_engine_num_gpu,
         help="Number of GPUs per prefill engine",
     )
     parser.add_argument(
         "--environment",
         type=str,
-        default="local",
+        default=PlannerDefaults.environment,
         help="Environment to run the planner in (local, kubernetes)",
     )
     args = parser.parse_args()
