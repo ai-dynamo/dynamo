@@ -487,10 +487,14 @@ fn process_signals(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::time::Duration;
 
+    #[rstest]
+    #[case::random(false)]
+    #[case::caching(true)]
     #[tokio::test]
-    async fn test_scheduler_token_generation() {
+    async fn test_scheduler_token_generation_patterns(#[case] use_shared_tokens: bool) {
         std::env::set_var("RUST_LOG", "debug");
 
         let kv_capacity: usize = 500;
@@ -514,12 +518,30 @@ mod tests {
             None,
         );
 
+        // Create shared tokens for caching case
+        let shared_tokens = if use_shared_tokens {
+            Some(
+                (0..input_len / 2)
+                    .map(|_| rand::random::<u32>() % 50000)
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+
         // Create test requests
         for _ in 0..num_requests {
-            // Create unique random token vector for each request
-            let input_tokens = (0..input_len)
-                .map(|_| rand::random::<u32>() % 50000)
-                .collect::<Vec<_>>();
+            let input_tokens = if let Some(ref shared) = shared_tokens {
+                // For caching case: use shared tokens for first half, random for second half
+                let mut tokens = shared.clone();
+                tokens.extend((0..input_len / 2).map(|_| rand::random::<u32>() % 50000));
+                tokens
+            } else {
+                // For random case: create unique random token vector for each request
+                (0..input_len)
+                    .map(|_| rand::random::<u32>() % 50000)
+                    .collect::<Vec<_>>()
+            };
 
             let request = DirectRequest {
                 tokens: input_tokens,
@@ -528,13 +550,14 @@ mod tests {
             };
             scheduler.receive(request).await;
         }
+
         let start_time = std::time::Instant::now();
 
         // Collect all generated tokens (should be num_requests * max_output_tokens)
         let expected_tokens = num_requests * max_output_tokens;
         let mut received_tokens = 0;
 
-        // Set up a timeout that causes the test to panic if no tokens are received for 5 consecutive seconds.
+        // Set up a timeout that causes the test to panic if no tokens are received for 2 seconds
         let timeout = tokio::time::sleep(Duration::from_secs(2));
         tokio::pin!(timeout);
 
@@ -566,7 +589,15 @@ mod tests {
 
         // Calculate and print elapsed time
         let elapsed = start_time.elapsed();
-        println!("Test completed in: {:?}", elapsed);
+        println!(
+            "Test completed in: {:?} for {} case",
+            elapsed,
+            if use_shared_tokens {
+                "caching"
+            } else {
+                "random"
+            }
+        );
 
         // Assert that we received the expected number of tokens
         assert!(

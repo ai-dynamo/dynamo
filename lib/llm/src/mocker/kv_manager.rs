@@ -110,9 +110,9 @@ impl KvManager {
             MoveBlock::Destroy(hashes) => {
                 // Loop in inverse direction
                 for hash in hashes.iter().rev() {
-                    self.active_blocks.remove(hash);
+                    self.active_blocks.remove(hash).unwrap();
                     // Remove from all_blocks when destroyed
-                    self.all_blocks.remove(hash);
+                    assert!(self.all_blocks.remove(hash));
                 }
             }
             MoveBlock::Deref(hashes) => {
@@ -135,15 +135,16 @@ impl KvManager {
                 let uuid_block = UniqueBlock::PartialBlock(*uuid);
                 let hash_block = UniqueBlock::FullBlock(*hash);
 
-                // Check if the UUID block exists in active blocks
-                if let Some(ref_count) = self.active_blocks.remove(&uuid_block) {
-                    // Replace with hash block, keeping the same reference count
-                    self.active_blocks.insert(hash_block.clone(), ref_count);
+                let Some(ref_count) = self.active_blocks.remove(&uuid_block) else {
+                    panic!("Cannot promote non-existent block.");
+                };
 
-                    // Update all_blocks
-                    self.all_blocks.remove(&uuid_block);
-                    self.all_blocks.insert(hash_block);
-                }
+                // Replace with hash block, keeping the same reference count
+                self.active_blocks.insert(hash_block.clone(), ref_count);
+
+                // Update all_blocks
+                assert!(self.all_blocks.remove(&uuid_block));
+                self.all_blocks.insert(hash_block);
             }
         }
 
