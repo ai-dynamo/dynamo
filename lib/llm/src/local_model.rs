@@ -8,10 +8,13 @@ use std::sync::Arc;
 use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 
-use crate::http::service::discovery::{ModelEntry, ModelNetworkName};
+use crate::discovery::ModelEntry;
 use crate::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager};
 use crate::model_card::{self, ModelDeploymentCard};
 use crate::model_type::ModelType;
+
+mod network_name;
+pub use network_name::ModelNetworkName;
 
 /// Prefix for Hugging Face model repository
 const HF_SCHEME: &str = "hf://";

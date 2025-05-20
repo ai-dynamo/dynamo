@@ -116,7 +116,7 @@ impl AsyncEngine<SingleIn<CompletionRequest>, ManyOut<Annotated<CompletionRespon
 }
 
 fn compare_counter(
-    metrics: Arc<Metrics>,
+    metrics: &Metrics,
     model: &str,
     endpoint: &Endpoint,
     request_type: &RequestType,
@@ -154,13 +154,13 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
     endpoint * 4 + request_type * 2 + status
 }
 
-fn compare_counters(metrics: Arc<Metrics>, model: &str, expected: &[u64; 8]) {
+fn compare_counters(metrics: &Metrics, model: &str, expected: &[u64; 8]) {
     for endpoint in &[Endpoint::Completions, Endpoint::ChatCompletions] {
         for request_type in &[RequestType::Unary, RequestType::Stream] {
             for status in &[Status::Success, Status::Error] {
                 let index = compute_index(endpoint, request_type, status);
                 compare_counter(
-                    metrics.clone(),
+                    metrics,
                     model,
                     endpoint,
                     request_type,
@@ -186,7 +186,8 @@ fn inc_counter(
 #[tokio::test]
 async fn test_http_service() {
     let service = HttpService::builder().port(8989).build().unwrap();
-    let manager = service.model_manager().clone();
+    let state = service.state_clone();
+    let manager = state.manager();
 
     let token = CancellationToken::new();
     let cancel_token = token.clone();
@@ -205,14 +206,14 @@ async fn test_http_service() {
     let result = manager.add_completions_model("bar", failure);
     assert!(result.is_ok());
 
-    let metrics = manager.metrics();
+    let metrics = state.metrics_clone();
     metrics.register(&registry).unwrap();
 
     let mut foo_counters = [0u64; 8];
     let mut bar_counters = [0u64; 8];
 
-    compare_counters(metrics.clone(), "foo", &foo_counters);
-    compare_counters(metrics.clone(), "bar", &bar_counters);
+    compare_counters(&metrics, "foo", &foo_counters);
+    compare_counters(&metrics, "bar", &bar_counters);
 
     let client = reqwest::Client::new();
 
@@ -264,8 +265,8 @@ async fn test_http_service() {
         Status::Success,
         &mut foo_counters,
     );
-    compare_counters(metrics.clone(), "foo", &foo_counters);
-    compare_counters(metrics.clone(), "bar", &bar_counters);
+    compare_counters(&metrics, "foo", &foo_counters);
+    compare_counters(&metrics, "bar", &bar_counters);
 
     // check registry and look or the request duration histogram
     let families = registry.gather();
@@ -337,8 +338,8 @@ async fn test_http_service() {
         Status::Success,
         &mut foo_counters,
     );
-    compare_counters(metrics.clone(), "foo", &foo_counters);
-    compare_counters(metrics.clone(), "bar", &bar_counters);
+    compare_counters(&metrics, "foo", &foo_counters);
+    compare_counters(&metrics, "bar", &bar_counters);
     // ==== ChatCompletions / Unary / Success ====
 
     // ==== ChatCompletions / Stream / Error ====
@@ -362,8 +363,8 @@ async fn test_http_service() {
         Status::Error,
         &mut bar_counters,
     );
-    compare_counters(metrics.clone(), "foo", &foo_counters);
-    compare_counters(metrics.clone(), "bar", &bar_counters);
+    compare_counters(&metrics, "foo", &foo_counters);
+    compare_counters(&metrics, "bar", &bar_counters);
     // ==== ChatCompletions / Stream / Error ====
 
     // ==== ChatCompletions / Unary / Error ====
@@ -383,8 +384,8 @@ async fn test_http_service() {
         Status::Error,
         &mut bar_counters,
     );
-    compare_counters(metrics.clone(), "foo", &foo_counters);
-    compare_counters(metrics.clone(), "bar", &bar_counters);
+    compare_counters(&metrics, "foo", &foo_counters);
+    compare_counters(&metrics, "bar", &bar_counters);
     // ==== ChatCompletions / Unary / Error ====
 
     // ==== Completions / Unary / Error ====
@@ -408,8 +409,8 @@ async fn test_http_service() {
         Status::Error,
         &mut bar_counters,
     );
-    compare_counters(metrics.clone(), "foo", &foo_counters);
-    compare_counters(metrics.clone(), "bar", &bar_counters);
+    compare_counters(&metrics, "foo", &foo_counters);
+    compare_counters(&metrics, "bar", &bar_counters);
     // ==== Completions / Unary / Error ====
 
     // ==== Completions / Stream / Error ====
@@ -429,8 +430,8 @@ async fn test_http_service() {
         Status::Error,
         &mut bar_counters,
     );
-    compare_counters(metrics.clone(), "foo", &foo_counters);
-    compare_counters(metrics.clone(), "bar", &bar_counters);
+    compare_counters(&metrics, "foo", &foo_counters);
+    compare_counters(&metrics, "bar", &bar_counters);
     // ==== Completions / Stream / Error ====
 
     // =========== Test Invalid Request ===========

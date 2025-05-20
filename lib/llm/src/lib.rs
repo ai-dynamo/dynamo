@@ -21,6 +21,7 @@
 pub mod backend;
 pub mod common;
 pub mod disagg_router;
+pub mod discovery;
 pub mod engines;
 pub mod gguf;
 pub mod http;

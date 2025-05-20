@@ -355,6 +355,10 @@ impl Client {
                     match event.event_type() {
                         etcd_client::EventType::Put => {
                             if let Some(kv) = event.kv() {
+                                if tx.is_closed() {
+                                    // Receiver no longer interested, expected.
+                                    break;
+                                }
                                 if let Err(err) = tx.send(WatchEvent::Put(kv.clone())).await {
                                     tracing::error!(
                                         "kv watcher error forwarding WatchEvent::Put: {err}"
@@ -366,6 +370,9 @@ impl Client {
                         }
                         etcd_client::EventType::Delete => {
                             if let Some(kv) = event.kv() {
+                                if tx.is_closed() {
+                                    break;
+                                }
                                 if tx.send(WatchEvent::Delete(kv.clone())).await.is_err() {
                                     // receiver is closed
                                     break;
