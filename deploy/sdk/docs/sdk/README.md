@@ -74,7 +74,7 @@ class ServiceA:
             await self.engine.shutdown()
             print("ServiceA engine shut down")
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: ChatCompletionRequest):
         # Call dependent service
         processed_request = await self.service_b.preprocess(request)
@@ -89,8 +89,8 @@ Dynamo follows a class-based architecture similar to BentoML making it intuitive
 1. Class attributes for dependencies using `depends()`
 2. An `__init__` method for standard initialization
 3. Optional lifecycle hooks like `@async_on_start` and `@async_on_shutdown`
-4. Endpoints defined with `@dynamo_endpoint()`. Optionally, an endpoint can be given a name
-   via `@dynamo_endpoint("my_endpoint_name")`, but otherwise will default to the name of the
+4. Endpoints defined with `@endpoint()`. Optionally, an endpoint can be given a name
+   via `@endpoint("my_endpoint_name")`, but otherwise will default to the name of the
    function being decorated if omitted.
 
 This approach provides a clean separation of concerns and makes the service structure easy to understand.

@@ -21,7 +21,7 @@ from components.utils import GeneralRequest, GeneralResponse, check_required_wor
 from components.worker import DummyWorker
 
 from dynamo._core import Client
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 from dynamo.sdk.lib.dependency import DynamoClient
 
 logger = logging.getLogger(__name__)
@@ -96,7 +96,7 @@ class Processor(Protocol):
         async for resp in engine_generator:
             yield GeneralResponse.model_validate_json(resp.data())
 
-    @dynamo_endpoint()
+    @endpoint()
     async def processor_generate(self, raw_request: GeneralRequest):
         async for response in self._generate(raw_request):
             yield response.model_dump_json()

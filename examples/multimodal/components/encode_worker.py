@@ -24,7 +24,7 @@ from transformers import AutoImageProcessor, LlavaForConditionalGeneration
 from utils.protocol import EncodeRequest, EncodeResponse
 from utils.vllm import parse_vllm_args
 
-from dynamo.sdk import dynamo_endpoint, service
+from dynamo.sdk import endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ class EncodeWorker:
             self.MODEL_ID, device_map="auto", torch_dtype=torch.float16
         ).eval()
 
-    @dynamo_endpoint()
+    @endpoint()
     async def encode(self, request: EncodeRequest) -> AsyncIterator[EncodeResponse]:
         image = self.open_image(request.image_url)
         image_embeds = self.image_processor(images=image, return_tensors="pt")

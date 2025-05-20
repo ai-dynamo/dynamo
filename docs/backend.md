@@ -16,7 +16,7 @@ see the [Dynamo Serve Guide](../docs/guides/dynamo_serve.md).
 When deploying a python-based worker with `dynamo serve` or `dynamo deploy`, it is
 a Python class based definition that requires a few key decorators to get going:
 - `@service`: used to define a worker class
-- `@dynamo_endpoint`: marks methods that can be called by other workers or clients
+- `@endpoint`: marks methods that can be called by other workers or clients
 
 For more detailed information on these concepts, see the
 [Dynamo SDK Docs](../deploy/sdk/docs/sdk/README.md).
@@ -26,7 +26,7 @@ For more detailed information on these concepts, see the
 Here is the rough outline of what a worker may look like in its simplest form:
 
 ```python
-from dynamo.sdk import dynamo_endpoint, service
+from dynamo.sdk import endpoint, service
 
 @service(
     dynamo={
@@ -37,7 +37,7 @@ class YourWorker:
     # Worker implementation
     # ...
 
-    @dynamo_endpoint()
+    @endpoint()
     async def your_endpoint(self, request: RequestType) -> AsyncIterator[ResponseType]:
         # Endpoint Implementation
         pass
@@ -48,7 +48,7 @@ When addressing this worker's endpoint with the `namespace/component/endpoint` s
 based on the definitions above, it would be: `your_namespace/YourWorker/your_endpoint`:
 - `namespace="your_namespace"`: Defined in the `@service` decorator
 - `component="YourWorker"`: Defined by the Python Class name
-- `endpoint="your_endpoint"`: Defined by the `@dynamo_endpoint` decorator, or by default the name of the function being decorated.
+- `endpoint="your_endpoint"`: Defined by the `@endpoint` decorator, or by default the name of the function being decorated.
 
 For more details about service configuration, resource management, and dynamo endpoints,
 see the [Dynamo SDK Docs](../deploy/sdk/docs/README.md).
@@ -79,7 +79,7 @@ Chat Completions objects, such as the ones specified in the OpenAI API. For exam
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 
 class YourLLMWorker:
-    @dynamo_endpoint(name="my_chat_completions_endpoint")
+    @endpoint(name="my_chat_completions_endpoint")
     async def generate(self, request: ChatCompletionRequest):
         # Endpoint Implementation
         pass
@@ -95,7 +95,7 @@ via custom RequestType/ResponseType definitions:
 # This can be run standalone with `dynamo serve basic_worker:YourWorker`
 
 from pydantic import BaseModel
-from dynamo.sdk import dynamo_endpoint, service
+from dynamo.sdk import endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +114,7 @@ class YourWorker:
     def __init__(self) -> None:
         logger.info("Starting worker...")
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: RequestType):
         """Generate tokens and stream them back"""
         logger.info(f"Worker endpoint received: {request.text}")
@@ -204,7 +204,7 @@ import random
 
 from pydantic import BaseModel
 from dynamo.llm import KvMetricsPublisher
-from dynamo.sdk import dynamo_endpoint, service, dynamo_context
+from dynamo.sdk import endpoint, service, dynamo_context
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +269,7 @@ class YourWorker:
             self.gpu_prefix_cache_hit_rate,
         )
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: RequestType):
         """Generate tokens, update KV Cache metrics, and stream the tokens back"""
         # Increment the number of active requests on receiving one
@@ -384,7 +384,7 @@ class Router:
         return best_worker_id
 
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: Tokens) -> AsyncIterator[WorkerId]:
         try:
             # lora_id is a placeholder for lora support, but not used in this example
@@ -563,7 +563,7 @@ class DecodeWorker:
                 .endpoint("generate")
                 .client()
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request):
         if self.do_remote_prefill:
             # Forward the request to the prefill worker
@@ -580,7 +580,7 @@ class PrefillWorker:
     def __init__(self):
         # ...
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request):
         # ... framework-specific prefill logic ...
 ```
@@ -612,7 +612,7 @@ For more information on Disaggregated Serving, see the
 
 2. **Async Operations**: Use async/await for I/O operations:
    ```python
-   @dynamo_endpoint()
+   @endpoint()
    async def generate(self, request):
        # Use async operations for better performance
        result = await self.some_async_operation()

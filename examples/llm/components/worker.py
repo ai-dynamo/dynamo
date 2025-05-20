@@ -32,7 +32,7 @@ from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
 from dynamo.llm import KvMetricsPublisher
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +183,7 @@ class VllmWorker:
         return callback
 
     # TODO: use the same child lease for metrics publisher endpoint and generate endpoint
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: vLLMGenerateRequest):
         # TODO: consider prefix hit when deciding prefill locally or remotely
 

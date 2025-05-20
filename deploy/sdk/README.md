@@ -37,7 +37,7 @@ The code for the pipeline looks like this:
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from dynamo.sdk import DYNAMO_IMAGE, depends, dynamo_endpoint, service, api
+from dynamo.sdk import DYNAMO_IMAGE, depends, endpoint, service, api
 
 
 class RequestType(BaseModel):
@@ -52,7 +52,7 @@ class ResponseType(BaseModel):
     dynamo={"namespace": "inference"},
 )
 class Backend:
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, req: RequestType):
         text = f"{req.text}-back"
         for token in text.split():
@@ -65,7 +65,7 @@ class Backend:
 class Middle:
     backend = depends(Backend)
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, req: RequestType):
         text = f"{req.text}-mid"
         next_request = RequestType(text=text).model_dump_json()

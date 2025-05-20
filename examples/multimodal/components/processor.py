@@ -31,7 +31,7 @@ from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from dynamo.runtime import EtcdKvCache
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +195,7 @@ class Processor(ProcessMixIn):
                 )
 
     # The generate endpoint will be used by the frontend to handle incoming requests.
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: MultiModalRequest):
         # TODO: After having the multimodal support in OpenAI compatible frontend, we can use that directly and remove the custom endpoint.
         msg = {
