@@ -90,11 +90,16 @@ impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
 
     fn handle_complete(self) -> Result<()> {
         let Self {
-            targets,
+            sources,
+            mut targets,
             target_registration_pool,
             completion_indicator,
             ..
         } = self;
+
+        for (source, target) in sources.iter().zip(targets.iter_mut()) {
+            transfer_metadata(source, target)?;
+        }
 
         if let Some(target_registration_pool) = target_registration_pool.as_ref() {
             let blocks = target_registration_pool.register_blocks_blocking(targets)?;
@@ -194,14 +199,6 @@ where
         &self,
         mut pending_transfer: PendingTransfer<Source, Target, Metadata>,
     ) -> Result<()> {
-        for (source, target) in pending_transfer
-            .sources
-            .iter()
-            .zip(pending_transfer.targets.iter_mut())
-        {
-            transfer_metadata(source, target)?;
-        }
-
         pending_transfer.sources.write_to(
             &mut pending_transfer.targets,
             None,
@@ -283,14 +280,6 @@ where
         &self,
         mut pending_transfer: PendingTransfer<Source, Target, Metadata>,
     ) -> Result<()> {
-        for (source, target) in pending_transfer
-            .sources
-            .iter()
-            .zip(pending_transfer.targets.iter_mut())
-        {
-            transfer_metadata(source, target)?;
-        }
-
         let future = pending_transfer.sources.nixl_write_to(
             &mut pending_transfer.targets,
             None,

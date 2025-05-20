@@ -139,7 +139,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                 )),
             )
             .await;
-            tracing::warn!("Offload worker finished: {:?}", res);
+            tracing::warn!("Offload worker terminated: {:?}", res);
         });
 
         let transfer_ctx = Arc::new(TransferContext::new(
@@ -162,7 +162,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                 )),
             )
             .await;
-            tracing::warn!("Offload worker finished: {:?}", res);
+            tracing::warn!("Offload worker terminated: {:?}", res);
         });
 
         // Host -> Device onboarding
@@ -177,7 +177,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                 Arc::new(CudaTransferManager::new(transfer_ctx_clone, 16384)),
             )
             .await;
-            tracing::warn!("Onboard worker finished: {:?}", res);
+            tracing::warn!("Onboard worker terminated: {:?}", res);
         });
 
         // Disk -> Device onboarding
