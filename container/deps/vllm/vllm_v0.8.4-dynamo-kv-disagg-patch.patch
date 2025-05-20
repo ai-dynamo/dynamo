@@ -4028,6 +4028,34 @@ index dd0b67df4..f436b0752 100644
                      )
  
                  generators.append(generator)
+diff --git a/vllm/entrypoints/openai/serving_completion.py b/vllm/entrypoints/openai/serving_completion.py
+index 1067f35ce..cbc131de4 100644
+--- a/vllm/entrypoints/openai/serving_completion.py
++++ b/vllm/entrypoints/openai/serving_completion.py
+@@ -33,6 +33,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
+ from vllm.sequence import Logprob
+ from vllm.transformers_utils.tokenizer import AnyTokenizer
+ from vllm.utils import merge_async_iterators
++from vllm.remote_prefill import RemotePrefillParams
+ 
+ logger = init_logger(__name__)
+ 
+@@ -65,6 +66,7 @@ class OpenAIServingCompletion(OpenAIServing):
+         self,
+         request: CompletionRequest,
+         raw_request: Optional[Request] = None,
++        remote_prefill_params: Optional[RemotePrefillParams] = None,
+     ) -> Union[AsyncGenerator[str, None], CompletionResponse, ErrorResponse]:
+         """Completion API similar to OpenAI's API.
+ 
+@@ -167,6 +169,7 @@ class OpenAIServingCompletion(OpenAIServing):
+                         prompt_adapter_request=prompt_adapter_request,
+                         trace_headers=trace_headers,
+                         priority=request.priority,
++                        remote_prefill_params=remote_prefill_params,
+                     )
+ 
+                 generators.append(generator)
 diff --git a/vllm/envs.py b/vllm/envs.py
 index f80bf878f..f64c49fe8 100644
 --- a/vllm/envs.py
