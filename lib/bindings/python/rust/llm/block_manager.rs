@@ -141,6 +141,26 @@ impl BlockManager {
         ))
     }
 
+    #[pyo3(signature = (count))]
+    fn allocate_host_blocks<'py>(
+        &self,
+        py: Python<'py>,
+        count: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let dtype = self.dtype.clone();
+        let device_id = self.device_id;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let blocks = inner.host().unwrap().allocate_blocks(count).await.unwrap();
+            // Wrap each block in an enum accounting for Pinned & Device block
+            let blocks = blocks
+                .into_iter()
+                .map(|b| block::BlockType::Pinned(b))
+                .collect();
+            Ok(block_list::BlockList::from_rust(blocks, dtype, device_id))
+        })
+    }
+
     fn allocate_device_blocks_blocking(&self, count: usize) -> PyResult<block_list::BlockList> {
         let blocks = self
             .inner
@@ -158,5 +178,30 @@ impl BlockManager {
             self.dtype.clone(),
             self.device_id,
         ))
+    }
+
+    #[pyo3(signature = (count))]
+    fn allocate_device_blocks<'py>(
+        &self,
+        py: Python<'py>,
+        count: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let dtype = self.dtype.clone();
+        let device_id = self.device_id;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let blocks = inner
+                .device()
+                .unwrap()
+                .allocate_blocks(count)
+                .await
+                .unwrap();
+            // Wrap each block in an enum accounting for Pinned & Device block
+            let blocks = blocks
+                .into_iter()
+                .map(|b| block::BlockType::Device(b))
+                .collect();
+            Ok(block_list::BlockList::from_rust(blocks, dtype, device_id))
+        })
     }
 }
