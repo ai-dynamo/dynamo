@@ -145,6 +145,11 @@ aligned-vec = "0.6.4"
 lazy_static = "1.4"
 
 [[bin]]
-name = "block_manager_bench"
+name = "block-manager-bench"
 path = "bin/bench_block_manager.rs"
+required-features = ["block-manager-bench"]
+
+[[bin]]
+name = "block-manager-bench-bandwidth"
+path = "bin/bench_block_manager_bandwidth.rs"
 required-features = ["block-manager-bench"]

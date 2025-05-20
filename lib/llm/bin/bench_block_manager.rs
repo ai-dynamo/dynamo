@@ -180,6 +180,7 @@ fn build_manager(args: &Args) -> Result<KvBlockManager<BasicMetadata>> {
         .num_layers(args.num_layers)
         .page_size(args.block_size)
         .inner_dim(args.inner_dim)
+        .outer_dim(1)
         .build()?;
 
     let device_layout = KvManagerLayoutConfig::builder()
