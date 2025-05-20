@@ -31,9 +31,9 @@ import uvicorn
 import uvloop
 from fastapi.responses import StreamingResponse
 
+from dynamo.core_sdk.protocol.interface import DynamoTransport, LinkedServices
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 from dynamo.sdk import dynamo_context
-from dynamo.sdk.core.protocol.interface import DynamoTransport, LinkedServices
 from dynamo.sdk.lib.loader import find_and_load_service
 from dynamo.sdk.lib.utils import get_host_port
 
@@ -132,9 +132,9 @@ def main(
     from bentoml._internal.container import BentoMLContainer
     from bentoml._internal.context import server_context
 
+    from dynamo.core_sdk.runner import TargetEnum
     from dynamo.runtime.logging import configure_dynamo_logging
     from dynamo.sdk.cli.utils import configure_target_environment
-    from dynamo.sdk.core.runner import TargetEnum
 
     configure_target_environment(TargetEnum(target))
 

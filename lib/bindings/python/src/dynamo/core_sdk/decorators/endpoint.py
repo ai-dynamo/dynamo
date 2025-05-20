@@ -18,12 +18,12 @@ import asyncio
 from functools import wraps
 from typing import Any, Callable, Dict, List, Optional, TypeVar, get_type_hints
 
-from dynamo.runtime import DistributedRuntime
-from dynamo.sdk.core.protocol.interface import (
+from dynamo.core_sdk.protocol.interface import (
     DynamoEndpointInterface,
     DynamoTransport,
     ServiceInterface,
 )
+from dynamo.runtime import DistributedRuntime
 
 T = TypeVar("T")
 

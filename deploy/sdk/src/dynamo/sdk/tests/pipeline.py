@@ -20,8 +20,8 @@
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from dynamo.core_sdk.protocol.interface import DynamoTransport
 from dynamo.sdk import depends, dynamo_endpoint, service
-from dynamo.sdk.core.protocol.interface import DynamoTransport
 
 """
 Pipeline Architecture:

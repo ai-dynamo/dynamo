@@ -15,8 +15,8 @@
 
 import pytest
 
+from dynamo.core_sdk.runner import TargetEnum
 from dynamo.sdk.cli.utils import configure_target_environment
-from dynamo.sdk.core.runner import TargetEnum
 
 pytestmark = pytest.mark.pre_merge
 
