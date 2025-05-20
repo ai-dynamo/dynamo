@@ -484,7 +484,7 @@ where
         if self.is_fully_contiguous() {
             let mr = self.layout.memory_region(self.block_idx, 0, 0)?;
             let offset = mr.addr();
-            let size = mr.size();
+            let size = mr.size() * self.num_layers();
             unsafe { view::BlockView::new(self, offset, size) }
         } else {
             Err(BlockError::InvalidState(
@@ -497,7 +497,7 @@ where
         if self.is_fully_contiguous() {
             let mr = self.layout.memory_region(self.block_idx, 0, 0)?;
             let offset = mr.addr();
-            let size = mr.size();
+            let size = mr.size() * self.num_layers();
             unsafe { view::BlockViewMut::new(self, offset, size) }
         } else {
             Err(BlockError::InvalidState(
