@@ -26,6 +26,7 @@ pytestmark = pytest.mark.pre_merge
 
 WORKER_ID = 0
 NUM_LAYER = 5
+OUTER_DIM = 2
 PAGE_SIZE = 4
 INNER_DIM = 13
 DTYPE, TORCH_DTYPE = "FP32", torch.float32
@@ -34,16 +35,35 @@ DEVICE_NUM_BLOCKS = 16
 DEVICE_ID = 0
 
 
+@pytest.fixture
+def block_manager():
+    """Pytest fixture for creating a BlockManager instance."""
+    return BlockManager(
+        WORKER_ID,
+        NUM_LAYER,
+        OUTER_DIM,
+        PAGE_SIZE,
+        INNER_DIM,
+        DTYPE,
+        HOST_NUM_BLOCKS,
+        DEVICE_NUM_BLOCKS,
+        DEVICE_ID,
+    )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 async def test_block_manager_initialization():
     # Python should drop the BlockManager instance as soon as it goes out of scope, but
     # it may not be garbage collected immediately, depending on the garbage collector.
-    BlockManager(WORKER_ID, NUM_LAYER, PAGE_SIZE, INNER_DIM)
-    BlockManager(WORKER_ID, NUM_LAYER, PAGE_SIZE, INNER_DIM, DTYPE)
-    BlockManager(WORKER_ID, NUM_LAYER, PAGE_SIZE, INNER_DIM, DTYPE, HOST_NUM_BLOCKS)
+    BlockManager(WORKER_ID, NUM_LAYER, OUTER_DIM, PAGE_SIZE, INNER_DIM)
+    BlockManager(WORKER_ID, NUM_LAYER, OUTER_DIM, PAGE_SIZE, INNER_DIM, DTYPE)
+    BlockManager(
+        WORKER_ID, NUM_LAYER, OUTER_DIM, PAGE_SIZE, INNER_DIM, DTYPE, HOST_NUM_BLOCKS
+    )
     BlockManager(
         WORKER_ID,
         NUM_LAYER,
+        OUTER_DIM,
         PAGE_SIZE,
         INNER_DIM,
         DTYPE,
@@ -52,6 +72,7 @@ async def test_block_manager_initialization():
     BlockManager(
         WORKER_ID,
         NUM_LAYER,
+        OUTER_DIM,
         PAGE_SIZE,
         INNER_DIM,
         DTYPE,
@@ -61,6 +82,7 @@ async def test_block_manager_initialization():
     BlockManager(
         WORKER_ID,
         NUM_LAYER,
+        OUTER_DIM,
         PAGE_SIZE,
         INNER_DIM,
         DTYPE,
@@ -70,6 +92,7 @@ async def test_block_manager_initialization():
     BlockManager(
         WORKER_ID,
         NUM_LAYER,
+        OUTER_DIM,
         PAGE_SIZE,
         INNER_DIM,
         DTYPE,
@@ -80,17 +103,7 @@ async def test_block_manager_initialization():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-async def test_cpu_block_access():
-    block_manager = BlockManager(
-        WORKER_ID,
-        NUM_LAYER,
-        PAGE_SIZE,
-        INNER_DIM,
-        DTYPE,
-        HOST_NUM_BLOCKS,
-        DEVICE_NUM_BLOCKS,
-        DEVICE_ID,
-    )
+async def test_cpu_block_access(block_manager: BlockManager):
     block_count = 2
     block_list = block_manager.allocate_host_blocks_blocking(block_count)
     py_blocks = block_list.to_list()
@@ -117,17 +130,7 @@ async def test_cpu_block_access():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-async def test_gpu_block_access():
-    block_manager = BlockManager(
-        WORKER_ID,
-        NUM_LAYER,
-        PAGE_SIZE,
-        INNER_DIM,
-        DTYPE,
-        HOST_NUM_BLOCKS,
-        DEVICE_NUM_BLOCKS,
-        DEVICE_ID,
-    )
+async def test_gpu_block_access(block_manager: BlockManager):
     block_count = 6
     block_list = block_manager.allocate_device_blocks_blocking(block_count)
     py_blocks = block_list.to_list()
@@ -154,17 +157,7 @@ async def test_gpu_block_access():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-async def test_block_list_iteration():
-    block_manager = BlockManager(
-        WORKER_ID,
-        NUM_LAYER,
-        PAGE_SIZE,
-        INNER_DIM,
-        DTYPE,
-        HOST_NUM_BLOCKS,
-        DEVICE_NUM_BLOCKS,
-        DEVICE_ID,
-    )
+async def test_block_list_iteration(block_manager: BlockManager):
     block_count = 4
     block_list = block_manager.allocate_host_blocks_blocking(block_count)
     # Test __len__()
@@ -192,17 +185,7 @@ async def test_block_list_iteration():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-async def test_block_copy_g1_g2():
-    block_manager = BlockManager(
-        WORKER_ID,
-        NUM_LAYER,
-        PAGE_SIZE,
-        INNER_DIM,
-        DTYPE,
-        HOST_NUM_BLOCKS,
-        DEVICE_NUM_BLOCKS,
-        DEVICE_ID,
-    )
+async def test_block_copy_g1_g2(block_manager: BlockManager):
     # Allocate device (G1) and host (G2) block
     host_block_list = block_manager.allocate_host_blocks_blocking(1)
     device_block_list = block_manager.allocate_device_blocks_blocking(1)
@@ -243,10 +226,12 @@ async def test_block_copy_g1_g2():
 
 async def main():
     await test_block_manager_initialization()
-    await test_cpu_block_access()
-    await test_gpu_block_access()
-    await test_block_list_iteration()
-    await test_block_copy_g1_g2()
+
+    # todo: revise these tests to index into the block via block_id, layer_id, outer_id (k/v)
+    # await test_cpu_block_access()
+    # await test_gpu_block_access()
+    # await test_block_list_iteration()
+    # await test_block_copy_g1_g2()
 
 
 if __name__ == "__main__":

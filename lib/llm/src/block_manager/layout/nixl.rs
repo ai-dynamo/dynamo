@@ -332,6 +332,7 @@ mod tests {
         let config = LayoutConfig::builder()
             .num_blocks(10)
             .num_layers(2)
+            .outer_dim(2)
             .page_size(4)
             .inner_dim(13)
             .build()

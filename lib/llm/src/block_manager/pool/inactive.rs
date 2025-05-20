@@ -582,6 +582,7 @@ pub(crate) mod tests {
         let config = LayoutConfigBuilder::default()
             .num_blocks(num_blocks)
             .num_layers(61)
+            .outer_dim(1)
             .page_size(16)
             .inner_dim(576)
             .build()

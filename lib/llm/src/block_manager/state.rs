@@ -115,6 +115,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
 
         layout_builder
             .num_layers(model.num_layers)
+            .outer_dim(model.outer_dim)
             .page_size(model.page_size)
             .inner_dim(model.inner_dim)
             .dtype(model.dtype);

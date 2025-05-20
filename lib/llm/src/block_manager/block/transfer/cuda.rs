@@ -112,18 +112,20 @@ where
     }
 
     for layer_idx in layer_range {
-        let src_view = src_data.layer_view(layer_idx)?;
-        let mut dst_view = dst_data.layer_view_mut(layer_idx)?;
+        for outer_idx in 0..src_data.num_outer_dims() {
+            let src_view = src_data.layer_view(layer_idx, outer_idx)?;
+            let mut dst_view = dst_data.layer_view_mut(layer_idx, outer_idx)?;
 
-        debug_assert_eq!(src_view.size(), dst_view.size());
+            debug_assert_eq!(src_view.size(), dst_view.size());
 
-        unsafe {
-            memcpy_fn(
-                src_view.as_ptr(),
-                dst_view.as_mut_ptr(),
-                src_view.size(),
-                stream,
-            )?;
+            unsafe {
+                memcpy_fn(
+                    src_view.as_ptr(),
+                    dst_view.as_mut_ptr(),
+                    src_view.size(),
+                    stream,
+                )?;
+            }
         }
     }
     Ok(())

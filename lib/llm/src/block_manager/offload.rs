@@ -506,6 +506,7 @@ mod tests {
         let mut config = LayoutConfig {
             num_blocks: device_blocks,
             num_layers: 8,
+            outer_dim: 1,
             page_size: BLOCK_SIZE,
             inner_dim: 1024,
             alignment: 1,

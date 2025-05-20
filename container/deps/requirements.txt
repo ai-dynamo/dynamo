@@ -19,6 +19,7 @@ ftfy
 grpcio-tools==1.66.0
 httpx
 kubernetes==32.0.1
+matplotlib
 msgspec
 mypy
 numpy

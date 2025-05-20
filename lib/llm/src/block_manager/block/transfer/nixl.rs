@@ -132,26 +132,28 @@ where
     // }
 
     for layer_idx in layer_range {
-        let src_view = src_data.layer_view(layer_idx)?;
-        let mut dst_view = dst_data.layer_view_mut(layer_idx)?;
+        for outer_idx in 0..src_data.num_outer_dims() {
+            let src_view = src_data.layer_view(layer_idx, outer_idx)?;
+            let mut dst_view = dst_data.layer_view_mut(layer_idx, outer_idx)?;
 
-        debug_assert_eq!(src_view.size(), dst_view.size());
+            debug_assert_eq!(src_view.size(), dst_view.size());
 
-        let src_desc = src_view.as_nixl_descriptor();
-        let dst_desc = dst_view.as_nixl_descriptor_mut();
+            let src_desc = src_view.as_nixl_descriptor();
+            let dst_desc = dst_view.as_nixl_descriptor_mut();
 
-        unsafe {
-            src_dl.add_desc(
-                src_desc.as_ptr() as usize,
-                src_desc.size(),
-                src_desc.device_id(),
-            )?;
+            unsafe {
+                src_dl.add_desc(
+                    src_desc.as_ptr() as usize,
+                    src_desc.size(),
+                    src_desc.device_id(),
+                )?;
 
-            dst_dl.add_desc(
-                dst_desc.as_ptr() as usize,
-                dst_desc.size(),
-                dst_desc.device_id(),
-            )?;
+                dst_dl.add_desc(
+                    dst_desc.as_ptr() as usize,
+                    dst_desc.size(),
+                    dst_desc.device_id(),
+                )?;
+            }
         }
     }
 
