@@ -85,7 +85,7 @@ def dynamo_endpoint(
     return decorator
 
 
-def dynamo_api(
+def api(
     name: Optional[str] = None,
     **kwargs,
 ) -> Callable[[Callable], DynamoEndpoint]:
