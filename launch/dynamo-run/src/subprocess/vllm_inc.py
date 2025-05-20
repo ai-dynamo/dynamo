@@ -137,14 +137,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     """
     Instantiate and serve
     """
-    component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
-
-    endpoint = component.endpoint(config.endpoint)
-    await register_llm(
-        ModelType.Backend, endpoint, config.model_path, config.model_name
-    )
-
     arg_map = {
         "model": config.model_path,
         "task": "generate",
@@ -185,7 +177,13 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     engine_context = build_async_engine_client_from_engine_args(engine_args)
     engine_client = await engine_context.__aenter__()
+    component = runtime.namespace(config.namespace).component(config.component)
+    await component.create_service()
+    endpoint = component.endpoint(config.endpoint)
 
+    await register_llm(
+        ModelType.Backend, endpoint, config.model_path, config.model_name
+    )
     handler = RequestHandler(component, engine_client, default_sampling_params)
     handler.setup_kv_metrics()
 
