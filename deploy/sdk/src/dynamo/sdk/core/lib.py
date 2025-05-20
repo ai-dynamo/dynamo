@@ -46,7 +46,24 @@ def set_target(target: DeploymentTarget) -> None:
 def get_target() -> DeploymentTarget:
     """Get the current service provider implementation"""
     global _target
-    return _target
+    try:
+        return _target
+    except NameError:
+        # If running in script mode without a target set, create a pass-through implementation
+        from dynamo.sdk.core.protocol.interface import DeploymentTarget, ServiceInterface
+        
+        class PassThroughTarget(DeploymentTarget):
+            def create_service(self, service_cls, config, dynamo_config, app=None, **kwargs):
+                # Just return the original class when used as script
+                return service_cls
+                
+            def create_dependency(self, on=None, **kwargs):
+                # Return whatever was passed in
+                return on
+        
+        # Set the global target to our pass-through implementation
+        _target = PassThroughTarget()
+        return _target
 
 
 # TODO: dynamo_component
