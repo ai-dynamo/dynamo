@@ -67,12 +67,10 @@ def get_dynamo_serve_cmd(config_file_path):
     ]
 
 
-def get_prefill_genai_perf_cmd(
-    isl,
+def _get_common_genai_perf_cmd(
     artifact_dir,
     seed=100,
     model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    osl=5,
     port=8000,
 ):
     return [
@@ -91,6 +89,33 @@ def get_prefill_genai_perf_cmd(
         "--streaming",
         "--url",
         f"http://localhost:{port}",
+        "--extra-inputs",
+        "ignore_eos:true",
+        "--extra-inputs",
+        '{"nvext":{"ignore_eos":true}}',
+        "--warmup-request-count",
+        "3",
+        "--artifact-dir",
+        artifact_dir,
+        "--random-seed",
+        str(seed),
+    ]
+
+
+def get_prefill_genai_perf_cmd(
+    isl,
+    artifact_dir,
+    seed=100,
+    model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    osl=5,
+    port=8000,
+):
+    return _get_common_genai_perf_cmd(
+        artifact_dir,
+        seed,
+        model,
+        port,
+    ) + [
         "--synthetic-input-tokens-mean",
         str(isl),
         "--synthetic-input-tokens-stddev",
@@ -103,20 +128,10 @@ def get_prefill_genai_perf_cmd(
         "max_tokens:5",
         "--extra-inputs",
         "min_tokens:5",
-        "--extra-inputs",
-        "ignore_eos:true",
-        "--extra-inputs",
-        '{"nvext":{"ignore_eos":true}}',
         "--concurrency",
         "1",
         "--request-count",
         "1",
-        "--warmup-request-count",
-        "3",
-        "--artifact-dir",
-        artifact_dir,
-        "--random-seed",
-        str(seed),
     ]
 
 
@@ -129,22 +144,12 @@ def get_decode_genai_perf_cmd(
     model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     port=8000,
 ):
-    return [
-        "genai-perf",
-        "profile",
-        "--model",
+    return _get_common_genai_perf_cmd(
+        artifact_dir,
+        seed,
         model,
-        "--tokenizer",
-        model,
-        "--service-kind",
-        "openai",
-        "--endpoint-type",
-        "chat",
-        "--endpoint",
-        "/v1/chat/completions",
-        "--streaming",
-        "--url",
-        f"http://localhost:{port}",
+        port,
+    ) + [
         "--synthetic-input-tokens-mean",
         str(isl),
         "--synthetic-input-tokens-stddev",
@@ -157,22 +162,12 @@ def get_decode_genai_perf_cmd(
         f"max_tokens:{osl}",
         "--extra-inputs",
         f"min_tokens:{osl}",
-        "--extra-inputs",
-        "ignore_eos:true",
-        "--extra-inputs",
-        '{"nvext":{"ignore_eos":true}}',
         "--concurrency",
         str(num_request),
         "--num-dataset-entries",
         str(num_request),
         "--request-count",
         str(num_request),
-        "--warmup-request-count",
-        "3",
-        "--artifact-dir",
-        artifact_dir,
-        "--random-seed",
-        str(seed),
     ]
 
 
