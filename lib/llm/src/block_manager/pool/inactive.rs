@@ -518,6 +518,10 @@ pub(crate) mod tests {
         fn reset_metadata(&mut self) {
             self.priority = 0;
         }
+
+        fn offload_priority(&self) -> Option<u64> {
+            Some(self.priority as u64)
+        }
     }
 
     type TestPriorityKey = PriorityKey<TestMetadata>;
