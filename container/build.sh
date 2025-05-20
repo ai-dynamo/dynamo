@@ -110,6 +110,7 @@ SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 NIXL_COMMIT=78695c2900cd7fff506764377386592dfc98e87e
+
 NIXL_REPO=ai-dynamo/nixl.git
 
 NO_CACHE=""
