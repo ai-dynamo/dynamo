@@ -103,22 +103,6 @@ class TRTLLMWorkerResponseOutput:
     # the result of result_handler passed to postprocess workers
     _postprocess_result: Any = None
 
-    @property
-    def length(self) -> int:
-        return len(self.token_ids)
-
-    @property
-    def text_diff(self) -> str:
-        return self.text[self._last_text_len :]
-
-    @property
-    def token_ids_diff(self) -> List[int]:
-        return self.token_ids[self._last_token_ids_len :]
-
-    @property
-    def logprobs_diff(self) -> List[float]:
-        return self.logprobs[self._last_logprobs_len :]
-
 
 class TRTLLMWorkerResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
