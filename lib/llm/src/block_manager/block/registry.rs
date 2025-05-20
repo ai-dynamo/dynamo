@@ -18,7 +18,7 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use super::super::events::{EventManager, EventReleaseManager, PublishHandle};
+use super::super::events::{EventManager, EventReleaseManager, EventType, PublishHandle};
 use super::state::BlockState;
 
 use crate::tokens::{BlockHash, SequenceHash, TokenBlock};
@@ -123,7 +123,7 @@ impl BlockRegistry {
     ) -> PublishHandle {
         let reg_handle = RegistrationHandle::from_token_block(token_block, event_manager.clone());
 
-        PublishHandle::new(reg_handle, event_manager)
+        PublishHandle::new(Arc::new(reg_handle), event_manager, EventType::Register)
     }
 }
 
@@ -179,7 +179,7 @@ impl Drop for RegistrationHandle {
 mod tests {
     use super::*;
 
-    use crate::block_manager::events::tests::{EventType, MockEventManager};
+    use crate::block_manager::events::tests::{MockEventManager, MockEventType};
     use crate::tokens::{TokenBlockSequence, Tokens};
 
     fn create_sequence() -> TokenBlockSequence {
@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0],
-            EventType::Register(sequence.blocks()[0].sequence_hash())
+            MockEventType::Register(sequence.blocks()[0].sequence_hash())
         );
 
         // the second event should be a Remove event
@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0],
-            EventType::Remove(sequence.blocks()[0].sequence_hash())
+            MockEventType::Remove(sequence.blocks()[0].sequence_hash())
         );
 
         // there should be no more events
@@ -264,7 +264,7 @@ mod tests {
         );
         assert_eq!(
             register_events[0],
-            EventType::Register(expected_sequence_hash),
+            MockEventType::Register(expected_sequence_hash),
             "Expected Register event"
         );
 
@@ -275,7 +275,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0],
-            EventType::Remove(expected_sequence_hash),
+            MockEventType::Remove(expected_sequence_hash),
             "Only Remove event should be triggered"
         );
 
@@ -318,8 +318,8 @@ mod tests {
             "Should receive two Register events in one batch"
         );
         // Order isn't guaranteed, so check for both
-        assert!(events.contains(&EventType::Register(hash1)));
-        assert!(events.contains(&EventType::Register(hash2)));
+        assert!(events.contains(&MockEventType::Register(hash1)));
+        assert!(events.contains(&MockEventType::Register(hash2)));
 
         // no more events immediately after publish
         assert!(rx.try_recv().is_err());
@@ -328,12 +328,12 @@ mod tests {
         drop(reg_handle1);
         let events1 = rx.try_recv().unwrap();
         assert_eq!(events1.len(), 1);
-        assert_eq!(events1[0], EventType::Remove(hash1));
+        assert_eq!(events1[0], MockEventType::Remove(hash1));
 
         drop(reg_handle2);
         let events2 = rx.try_recv().unwrap();
         assert_eq!(events2.len(), 1);
-        assert_eq!(events2[0], EventType::Remove(hash2));
+        assert_eq!(events2[0], MockEventType::Remove(hash2));
 
         // no more events
         assert!(rx.try_recv().is_err());
@@ -366,7 +366,7 @@ mod tests {
         publisher.publish();
         let events = rx.try_recv().unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0], EventType::Register(hash1));
+        assert_eq!(events[0], MockEventType::Register(hash1));
 
         // The RegistrationHandle Arc was taken by the publisher and dropped after the publish call
         // So, the Remove event should follow immediately.
@@ -378,7 +378,7 @@ mod tests {
         );
         assert_eq!(
             remove_events[0],
-            EventType::Remove(hash1),
+            MockEventType::Remove(hash1),
             "Expected Remove event"
         );
 

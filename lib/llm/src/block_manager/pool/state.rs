@@ -15,7 +15,7 @@
 
 use crate::block_manager::{
     block::{registry::BlockRegistationError, BlockState, PrivateBlockExt},
-    events::Publisher,
+    events::{EventType, PublishHandle, Publisher},
 };
 
 use super::*;
@@ -199,6 +199,9 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
         return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, M>>,
     ) -> Vec<ImmutableBlock<S, M>> {
         let mut immutable_blocks = Vec::new();
+
+        let mut publish_handles = self.publisher();
+
         for sequence_hash in sequence_hashes {
             if !self.registry.is_registered(sequence_hash) {
                 return immutable_blocks;
@@ -230,6 +233,18 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
                 .active
                 .register(mutable)
                 .expect("unable to register block; should ever happen");
+
+            match immutable.state() {
+                BlockState::Registered(reg_handle) => {
+                    let publish_handle = PublishHandle::new(
+                        reg_handle.clone(),
+                        self.event_manager.clone(),
+                        EventType::CacheHit,
+                    );
+                    publish_handles.take_handle(publish_handle);
+                }
+                _ => panic!("This should never happen."),
+            }
 
             immutable_blocks.push(immutable);
         }
