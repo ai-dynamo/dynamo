@@ -80,6 +80,7 @@ impl DiskStorage {
 impl Drop for DiskStorage {
     // TODO: How robust is this actually?
     fn drop(&mut self) {
+        self.handles.release();
         std::fs::remove_file(self.file_name.clone()).unwrap();
     }
 }

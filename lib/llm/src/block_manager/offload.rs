@@ -129,7 +129,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let device_clone = this.device.clone();
         let host_clone = this.host.clone();
         async_rt_handle.spawn(async move {
-            OffloadManager::offload_worker(
+            let res = OffloadManager::offload_worker(
                 device_clone,
                 host_clone,
                 device_offload_rx,
@@ -138,8 +138,8 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     MAX_OFFLOAD_STREAM_DEPTH,
                 )),
             )
-            .await
-            .unwrap()
+            .await;
+            tracing::warn!("Offload worker finished: {:?}", res);
         });
 
         let transfer_ctx = Arc::new(TransferContext::new(
@@ -152,7 +152,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let disk_clone = this.disk.clone();
         let transfer_ctx_clone = transfer_ctx.clone();
         async_rt_handle.spawn(async move {
-            OffloadManager::offload_worker(
+            let res = OffloadManager::offload_worker(
                 host_clone,
                 disk_clone,
                 host_offload_rx,
@@ -161,8 +161,8 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     MAX_OFFLOAD_STREAM_DEPTH,
                 )),
             )
-            .await
-            .unwrap()
+            .await;
+            tracing::warn!("Offload worker finished: {:?}", res);
         });
 
         // Host -> Device onboarding
@@ -170,14 +170,14 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let device_clone = this.device.clone();
         let transfer_ctx_clone = transfer_ctx.clone();
         async_rt_handle.spawn(async move {
-            OffloadManager::onboard_worker(
+            let res = OffloadManager::onboard_worker(
                 host_clone,
                 device_clone,
                 host_onboard_rx,
                 Arc::new(CudaTransferManager::new(transfer_ctx_clone, 16384)),
             )
-            .await
-            .unwrap()
+            .await;
+            tracing::warn!("Onboard worker finished: {:?}", res);
         });
 
         // Disk -> Device onboarding
@@ -185,14 +185,14 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let device_clone = this.device.clone();
         let transfer_ctx_clone = transfer_ctx.clone();
         async_rt_handle.spawn(async move {
-            OffloadManager::onboard_worker(
+            let res = OffloadManager::onboard_worker(
                 disk_clone,
                 device_clone,
                 disk_onboard_rx,
                 Arc::new(DiskTransferManager::new(transfer_ctx_clone, 16384)),
             )
-            .await
-            .unwrap()
+            .await;
+            tracing::warn!("Onboard worker terminated: {:?}", res);
         });
 
         Ok(this_clone)

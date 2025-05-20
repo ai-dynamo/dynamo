@@ -55,7 +55,7 @@ use crate::block_manager::BlockPool;
 use anyhow::Result;
 use async_trait::async_trait;
 use cudarc::driver::{sys::CUevent_flags, CudaEvent};
-use futures::{future::join_all, stream::FuturesUnordered, StreamExt};
+use futures::{stream::FuturesUnordered, StreamExt};
 
 use super::BlockResult;
 
@@ -157,7 +157,14 @@ impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
                 // Wait for the event.
                 event.synchronize()?;
                 // Only finalize the transfer after the event is signaled.
-                pending_transfer.handle_complete()?;
+                match pending_transfer.handle_complete() {
+                    Ok(_) => {}
+                    Err(e) => {
+                        // The only case where this can fail is if the progress engine is shutdown.
+                        // This is not a problem, so we can just ignore it.
+                        tracing::warn!("Error handling transfer completion: {:?}", e);
+                    }
+                }
             }
             Ok::<(), anyhow::Error>(())
         });
@@ -193,8 +200,13 @@ where
             .zip(pending_transfer.targets.iter_mut())
         {
             transfer_metadata(source, target)?;
-            source.write_to(target, None, self.transfer_ctx.clone())?;
         }
+
+        pending_transfer.sources.write_to(
+            &mut pending_transfer.targets,
+            None,
+            self.transfer_ctx.clone(),
+        )?;
 
         // Use a cuda event to record the completion of the transfers.
         let event = self
@@ -271,22 +283,30 @@ where
         &self,
         mut pending_transfer: PendingTransfer<Source, Target, Metadata>,
     ) -> Result<()> {
-        let futures = pending_transfer
+        for (source, target) in pending_transfer
             .sources
             .iter()
             .zip(pending_transfer.targets.iter_mut())
-            .map(|(source, target)| {
-                transfer_metadata(source, target).unwrap();
-                // Initiate the transfer, and get a future indicating completion.
-                source
-                    .nixl_write_to(target, None, self.transfer_ctx.clone())
-                    .unwrap()
-            })
-            .collect::<Vec<_>>();
+        {
+            transfer_metadata(source, target)?;
+        }
+
+        let future = pending_transfer.sources.nixl_write_to(
+            &mut pending_transfer.targets,
+            None,
+            self.transfer_ctx.clone(),
+        )?;
 
         let completion_future = async move {
-            let _ = join_all(futures).await;
-            pending_transfer.handle_complete().unwrap();
+            let _ = future.await;
+            match pending_transfer.handle_complete() {
+                Ok(_) => {}
+                Err(e) => {
+                    // The only case where this can fail is if the progress engine is being shutdown.
+                    // This is not a problem, so we can just ignore it.
+                    tracing::warn!("Error handling transfer completion: {:?}", e);
+                }
+            }
         };
 
         // Futures_(tx/rx) has a capacity of 1. If the queue worker has received another future and is awaiting next() due to a full `FuturesUnordered`,
