@@ -25,7 +25,7 @@ use std::{
 };
 
 use crate::{
-    component::{Client, Endpoint, EndpointSource},
+    component::{Client, Endpoint, InstanceSource},
     engine::{AsyncEngine, Data},
     pipeline::{AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn},
     traits::DistributedRuntimeProvider,
@@ -41,7 +41,7 @@ where
     /// The Client is how we gather remote endpoint information from etcd.
     pub client: Client,
 
-    /// How we choose which endpoint to send traffic to.
+    /// How we choose which instance to send traffic to.
     ///
     /// Setting this to KV means we never intend to call `generate` on this PushRouter. We are
     /// not using it as an AsyncEngine.
@@ -52,7 +52,7 @@ where
     /// Number of round robin requests handled. Used to decide which server is next.
     round_robin_counter: Arc<AtomicU64>,
 
-    /// The next step in the chain. PushRouter (this object) picks an endpoint,
+    /// The next step in the chain. PushRouter (this object) picks an instances,
     /// addresses it, then passes it to AddressedPushRouter which does the network traffic.
     addressed: Arc<AddressedPushRouter>,
 
@@ -101,25 +101,25 @@ where
         })
     }
 
-    /// Issue a request to the next available endpoint in a round-robin fashion
+    /// Issue a request to the next available instance in a round-robin fashion
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
 
-        let endpoint_id = {
-            let endpoints = self.client.endpoints();
-            let count = endpoints.len();
+        let instance_id = {
+            let instances = self.client.instances();
+            let count = instances.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
-                    "no endpoints found for endpoint {:?}",
-                    self.client.endpoint.etcd_path()
+                    "no instances found for endpoint {:?}",
+                    self.client.endpoint.etcd_root()
                 ));
             }
             let offset = counter % count as u64;
-            endpoints[offset as usize].id()
+            instances[offset as usize].id()
         };
-        tracing::trace!("round robin router selected {endpoint_id}");
+        tracing::trace!("round robin router selected {instance_id}");
 
-        let subject = self.client.endpoint.subject_to(endpoint_id);
+        let subject = self.client.endpoint.subject_to(instance_id);
         let request = request.map(|req| AddressedRequest::new(req, subject));
 
         self.addressed.generate(request).await
@@ -127,22 +127,22 @@ where
 
     /// Issue a request to a random endpoint
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let endpoint_id = {
-            let endpoints = self.client.endpoints();
-            let count = endpoints.len();
+        let instance_id = {
+            let instances = self.client.instances();
+            let count = instances.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
-                    "no endpoints found for endpoint {:?}",
-                    self.client.endpoint.etcd_path()
+                    "no instances found for endpoint {:?}",
+                    self.client.endpoint.etcd_root()
                 ));
             }
             let counter = rand::rng().random::<u64>();
             let offset = counter % count as u64;
-            endpoints[offset as usize].id()
+            instances[offset as usize].id()
         };
-        tracing::trace!("random router selected {endpoint_id}");
+        tracing::trace!("random router selected {instance_id}");
 
-        let subject = self.client.endpoint.subject_to(endpoint_id);
+        let subject = self.client.endpoint.subject_to(instance_id);
         let request = request.map(|req| AddressedRequest::new(req, subject));
 
         self.addressed.generate(request).await
@@ -152,22 +152,21 @@ where
     pub async fn direct(
         &self,
         request: SingleIn<T>,
-        endpoint_id: i64,
+        instance_id: i64,
     ) -> anyhow::Result<ManyOut<U>> {
         let found = {
-            let endpoints = self.client.endpoints();
-            endpoints.iter().any(|ep| ep.id() == endpoint_id)
+            let instances = self.client.instances();
+            instances.iter().any(|ep| ep.id() == instance_id)
         };
 
         if !found {
             return Err(anyhow::anyhow!(
-                "endpoint_id={} not found for endpoint {:?}",
-                endpoint_id,
-                self.client.endpoint.etcd_path()
+                "instance_id={instance_id} not found for endpoint {:?}",
+                self.client.endpoint.etcd_root()
             ));
         }
 
-        let subject = self.client.endpoint.subject_to(endpoint_id);
+        let subject = self.client.endpoint.subject_to(instance_id);
         let request = request.map(|req| AddressedRequest::new(req, subject));
 
         self.addressed.generate(request).await
@@ -189,12 +188,12 @@ where
     U: Data + for<'de> Deserialize<'de>,
 {
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
-        match &self.client.endpoints {
-            EndpointSource::Static => self.r#static(request).await,
-            EndpointSource::Dynamic(_) => match self.router_mode {
+        match &self.client.instances {
+            InstanceSource::Static => self.r#static(request).await,
+            InstanceSource::Dynamic(_) => match self.router_mode {
                 RouterMode::Random => self.random(request).await,
                 RouterMode::RoundRobin => self.round_robin(request).await,
-                RouterMode::Direct(endpoint_id) => self.direct(request, endpoint_id).await,
+                RouterMode::Direct(instance_id) => self.direct(request, instance_id).await,
                 RouterMode::KV => {
                     anyhow::bail!("KV routing should not call generate on PushRouter");
                 }

@@ -63,7 +63,7 @@ class Router:
         print("KV Router initialized")
 
     def _cost_function(self, request_prompt):
-        worker_ids = self.workers_client.endpoint_ids()
+        worker_ids = self.workers_client.instance_ids()
         num_workers = len(worker_ids)
         max_hit_rate = -1.0
         for curr_id in self.kv_cache.keys():

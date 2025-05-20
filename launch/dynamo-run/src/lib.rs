@@ -6,7 +6,7 @@ use std::{io::Read, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use dynamo_llm::{backend::ExecutionContext, engines::StreamingEngine, LocalModel};
-use dynamo_runtime::{protocols::Endpoint, CancellationToken, DistributedRuntime};
+use dynamo_runtime::{CancellationToken, DistributedRuntime};
 
 mod flags;
 pub use flags::Flags;
@@ -26,8 +26,8 @@ const PYTHON_STR_SCHEME: &str = "pystr:";
 pub const INTERNAL_ENDPOINT: &str = "dyn://dynamo.internal.worker";
 
 pub enum EngineConfig {
-    /// An remote networked engine we don't know about yet
-    Dynamic(Endpoint),
+    /// Remote networked engines
+    Dynamic,
 
     /// A Full service engine does it's own tokenization and prompt formatting.
     StaticFull {
@@ -48,7 +48,7 @@ pub async fn run(
     out_opt: Output,
     flags: Flags,
 ) -> anyhow::Result<()> {
-    if matches!(&in_opt, Input::Endpoint(_)) && matches!(&out_opt, Output::Endpoint(_)) {
+    if matches!(&in_opt, Input::Endpoint(_)) && matches!(&out_opt, Output::Dynamic) {
         anyhow::bail!("Cannot use endpoint for both in and out");
     }
 
@@ -59,9 +59,9 @@ pub async fn run(
         .or(flags.model_path_flag.clone());
 
     let local_model: LocalModel = match out_opt {
-        // If output is an endpoint we are ingress and don't have a local model, but making an
+        // If output is dynamic we are ingress and don't have a local model, but making an
         // empty one cleans up the code.
-        Output::Endpoint(_) => Default::default(),
+        Output::Dynamic => Default::default(),
 
         // All other output types have a local model
         _ => {
@@ -100,10 +100,7 @@ pub async fn run(
 
     // Create the engine matching `out`
     let engine_config = match out_opt {
-        Output::Endpoint(path) => {
-            let endpoint: Endpoint = path.parse()?;
-            EngineConfig::Dynamic(endpoint)
-        }
+        Output::Dynamic => EngineConfig::Dynamic,
         Output::EchoFull => EngineConfig::StaticFull {
             model: Box::new(local_model),
             engine: dynamo_llm::engines::make_engine_full(),
@@ -173,7 +170,7 @@ pub async fn run(
             extra = Some(Box::pin(async move {
                 stopper(cancel_token, child, py_script).await;
             }));
-            EngineConfig::Dynamic(endpoint)
+            EngineConfig::Dynamic
         }
         Output::Vllm => {
             if flags.base_gpu_id != 0 {
@@ -209,7 +206,7 @@ pub async fn run(
             extra = Some(Box::pin(async move {
                 stopper(cancel_token, child, py_script).await;
             }));
-            EngineConfig::Dynamic(endpoint)
+            EngineConfig::Dynamic
         }
 
         #[cfg(feature = "llamacpp")]

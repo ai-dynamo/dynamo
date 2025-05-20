@@ -134,13 +134,11 @@ impl LocalModel {
         self.card.move_to_nats(nats_client.clone()).await?;
 
         // Publish the Model Deployment Card to etcd
-        let endpoint_id = endpoint.id();
-        let kvstore: Box<dyn KeyValueStore> =
-            Box::new(EtcdStorage::new(etcd_client.clone(), endpoint_id.clone()));
+        let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
         let key = self.card.slug().to_string();
         card_store
-            .publish(model_card::BUCKET_NAME, None, &key, &mut self.card)
+            .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
             .await?;
 
         // Publish our ModelEntry to etcd. This allows ingress to find the model card.
@@ -149,7 +147,7 @@ impl LocalModel {
         tracing::debug!("Registering with etcd as {network_name}");
         let model_registration = ModelEntry {
             name: self.service_name().to_string(),
-            endpoint: endpoint_id.clone(),
+            endpoint: endpoint.id(),
             model_type,
         };
         etcd_client
@@ -172,7 +170,7 @@ impl LocalModel {
             // A static component is necessarily unique, it cannot register
             return Ok(());
         };
-        for endpoint_info in component.list_endpoints().await? {
+        for endpoint_info in component.list_instances().await? {
             let network_name: ModelNetworkName = (&endpoint_info).into();
             let entry = network_name.load_entry(&etcd_client).await?;
             if entry.name != model_name {

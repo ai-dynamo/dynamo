@@ -99,8 +99,8 @@ class Planner:
                 )
                 # TODO: remove this sleep after rust client() is blocking until watching state
                 await asyncio.sleep(0.1)
-            # TODO: use etcd events instead of pulling endpoints_ids
-            p_endpoints = self.prefill_client.endpoint_ids()
+            # TODO: use etcd events instead of pulling instance_ids
+            p_endpoints = self.prefill_client.instance_ids()
         except Exception:
             p_endpoints = []
             self._repeating_log_func(
@@ -116,8 +116,8 @@ class Planner:
                 )
                 # TODO: remove this sleep after rust client() is blocking until watching state
                 await asyncio.sleep(0.1)
-            # TODO: use etcd events instead of pulling endpoints_ids
-            d_endpoints = self.workers_client.endpoint_ids()
+            # TODO: use etcd events instead of pulling instance_ids
+            d_endpoints = self.workers_client.instance_ids()
         except Exception as e:
             raise RuntimeError(f"Failed to get decode worker endpoints: {e}")
         return p_endpoints, d_endpoints

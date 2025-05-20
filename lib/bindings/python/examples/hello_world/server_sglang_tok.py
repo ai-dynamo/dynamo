@@ -18,7 +18,7 @@
 #  - nats-server -js
 #
 # Window 1: `python server_sglang.py`. Wait for log "Starting endpoint".
-# Window 2: `dynamo-run out=dyn://dynamo.backend.generate`
+# Window 2: `dynamo-run out=dyn
 
 import argparse
 import asyncio
