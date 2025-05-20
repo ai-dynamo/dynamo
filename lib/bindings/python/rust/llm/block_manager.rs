@@ -19,7 +19,6 @@
 
 use super::*;
 use pyo3::PyResult;
-use tokio;
 
 mod block;
 mod block_list;
@@ -34,9 +33,6 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[pyclass]
 pub struct BlockManager {
-    // TODO: Can this be implicitly created and referenced?
-    tokio_runtime: tokio::runtime::Runtime,
-    // Block manager
     inner: Arc<dynamo_llm::block_manager::ReferenceBlockManager>,
     // TODO: Metadata should be stored in the block manager?
     dtype: dynamo_llm::common::dtype::DType,
@@ -116,16 +112,11 @@ impl BlockManager {
             );
         }
         let config = config.build().unwrap();
-        let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let block_manager = tokio_runtime.block_on(async {
-            dynamo_llm::block_manager::ReferenceBlockManager::new(config).unwrap()
-        });
+        let tokio_runtime = pyo3_async_runtimes::tokio::get_runtime();
         Ok(BlockManager {
-            tokio_runtime: tokio_runtime,
-            inner: Arc::from(block_manager),
+            inner: Arc::from(tokio_runtime.block_on(async {
+                dynamo_llm::block_manager::ReferenceBlockManager::new(config).unwrap()
+            })),
             dtype: dtype_,
             device_id: device_id,
         })
