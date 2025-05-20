@@ -17,8 +17,7 @@ limitations under the License.
 
 # Third-Party Software Attributions
 
-Dynamo uses Open Source components. You can find the details of these open-source projects along with license information below.
-We are grateful to the developers for their contributions to open source and acknowledge these below.
+This project uses the following third-party libraries. Each library is open-source and licensed under the terms indicated below.
 
 ## a2wsgi (1.10.8)
 
@@ -232,6 +231,7 @@ License: `Apache-2.0`
 ### URLs
   - `homepage`: https://github.com/abersheeran/a2wsgi
   - `repository`: https://github.com/abersheeran/a2wsgi
+
 ## absl-py (2.2.2)
 
 ### Licenses
@@ -444,6 +444,7 @@ License: `Apache Software License`
 
 ### URLs
   - `Homepage`: https://github.com/abseil/abseil-py
+
 ## accelerate (1.6.0)
 
 ### Licenses
@@ -655,6 +656,7 @@ License: `Apache Software License`
 
 ### URLs
   - `Homepage`: https://github.com/huggingface/accelerate
+
 ## aiohappyeyeballs (2.6.1)
 
 ### Licenses
@@ -947,6 +949,7 @@ PERFORMANCE OF THIS SOFTWARE.
   - `Changelog`: https://github.com/aio-libs/aiohappyeyeballs/blob/main/CHANGELOG.md
   - `Documentation`: https://aiohappyeyeballs.readthedocs.io
   - `Repository`: https://github.com/aio-libs/aiohappyeyeballs
+
 ## aiohttp (3.11.18)
 
 ### Licenses
@@ -978,6 +981,7 @@ License: `Apache Software License`
   - `GitHub: issues`: https://github.com/aio-libs/aiohttp/issues
   - `GitHub: repo`: https://github.com/aio-libs/aiohttp
   - `Homepage`: https://github.com/aio-libs/aiohttp
+
 ## aiosignal (1.3.2)
 
 ### Licenses
@@ -1195,6 +1199,7 @@ License: `Apache Software License`
   - `GitHub: issues`: https://github.com/aio-libs/aiosignal/issues
   - `GitHub: repo`: https://github.com/aio-libs/aiosignal
   - `Homepage`: https://github.com/aio-libs/aiosignal
+
 ## aiosqlite (0.21.0)
 
 ### Licenses
@@ -1227,6 +1232,7 @@ SOFTWARE.
 ### URLs
   - `Documentation`: https://aiosqlite.omnilib.dev
   - `Github`: https://github.com/omnilib/aiosqlite
+
 ## annotated-types (0.7.0)
 
 ### Licenses
@@ -1260,6 +1266,7 @@ SOFTWARE.
   - `Changelog`: https://github.com/annotated-types/annotated-types/releases
   - `Homepage`: https://github.com/annotated-types/annotated-types
   - `Source`: https://github.com/annotated-types/annotated-types
+
 ## anyio (4.9.0)
 
 ### Licenses
@@ -1293,6 +1300,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   - `Documentation`: https://anyio.readthedocs.io/en/latest/
   - `Issue tracker`: https://github.com/agronholm/anyio/issues
   - `Source code`: https://github.com/agronholm/anyio
+
 ## appdirs (1.4.4)
 
 ### Licenses
@@ -1326,6 +1334,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### URLs
   - `Homepage`: http://github.com/ActiveState/appdirs
+
 ## asgiref (3.8.1)
 
 ### Licenses
@@ -1366,6 +1375,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   - `Documentation`: https://asgi.readthedocs.io/
   - `Further Documentation`: https://docs.djangoproject.com/en/stable/topics/async/#async-adapter-functions
   - `Homepage`: https://github.com/django/asgiref/
+
 ## attrs (25.3.0)
 
 ### Licenses
@@ -1401,6 +1411,7 @@ SOFTWARE.
   - `Funding`: https://github.com/sponsors/hynek
   - `GitHub`: https://github.com/python-attrs/attrs
   - `Tidelift`: https://tidelift.com/subscription/pkg/pypi-attrs?utm_source=pypi-attrs&utm_medium=pypi
+
 ## bentoml (1.4.8)
 
 ### Licenses
@@ -1618,6 +1629,7 @@ License: `Apache Software License`
   - `Slack`: https://l.bentoml.com/join-slack
   - `Tracker`: https://github.com/bentoml/BentoML/issues
   - `Twitter`: https://twitter.com/bentomlai
+
 ## cachetools (5.5.2)
 
 ### Licenses
@@ -1648,6 +1660,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/tkem/cachetools/
+
 ## cattrs (23.1.2)
 
 ### Licenses
@@ -1673,6 +1686,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
   - `Documentation`: https://catt.rs/en/stable/
   - `Homepage`: https://catt.rs
   - `Repository`: https://github.com/python-attrs/cattrs
+
 ## certifi (2025.4.26)
 
 ### Licenses
@@ -1704,6 +1718,7 @@ one at http://mozilla.org/MPL/2.0/.
 ### URLs
   - `Homepage`: https://github.com/certifi/python-certifi
   - `Source`: https://github.com/certifi/python-certifi
+
 ## cfgv (3.4.0)
 
 ### Licenses
@@ -1733,6 +1748,7 @@ THE SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/asottile/cfgv
+
 ## chardet (5.2.0)
 
 ### Licenses
@@ -2248,6 +2264,7 @@ That's all there is to it!
   - `GitHub Project`: https://github.com/chardet/chardet
   - `Homepage`: https://github.com/chardet/chardet
   - `Issue Tracker`: https://github.com/chardet/chardet/issues
+
 ## charset-normalizer (3.4.2)
 
 ### Licenses
@@ -2282,6 +2299,7 @@ SOFTWARE.
   - `Code`: https://github.com/jawah/charset_normalizer
   - `Documentation`: https://charset-normalizer.readthedocs.io/
   - `Issue tracker`: https://github.com/jawah/charset_normalizer/issues
+
 ## circus (0.19.0)
 
 ### Licenses
@@ -2308,6 +2326,7 @@ limitations under the License.
 ### URLs
   - `Documentation`: https://circus.readthedocs.io
   - `Source`: https://github.com/circus-tent/circus
+
 ## click (8.1.8)
 
 ### Licenses
@@ -2351,6 +2370,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   - `Documentation`: https://click.palletsprojects.com/
   - `Donate`: https://palletsprojects.com/donate
   - `Source`: https://github.com/pallets/click/
+
 ## click-option-group (0.5.7)
 
 ### Licenses
@@ -2393,6 +2413,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   - `Documentation`: https://click-option-group.readthedocs.io
   - `Homepage`: https://github.com/click-contrib/click-option-group
   - `Issues`: https://github.com/click-contrib/click-option-group/issues
+
 ## cloudpickle (3.1.1)
 
 ### Licenses
@@ -2400,6 +2421,7 @@ License: `BSD License`
 
 ### URLs
   - `Homepage`: https://github.com/cloudpipe/cloudpickle
+
 ## coverage (7.8.0)
 
 ### Licenses
@@ -2592,6 +2614,7 @@ License: `Apache-2.0`
   - `Issues`: https://github.com/nedbat/coveragepy/issues
   - `Mastodon`: https://hachyderm.io/@coveragepy
   - `Mastodon (nedbat)`: https://hachyderm.io/@nedbat
+
 ## dataproperty (1.1.0)
 
 ### Licenses
@@ -2626,6 +2649,7 @@ SOFTWARE.
   - `Homepage`: https://github.com/thombashi/DataProperty
   - `Source`: https://github.com/thombashi/DataProperty
   - `Tracker`: https://github.com/thombashi/DataProperty/issues
+
 ## deprecated (1.2.18)
 
 ### Licenses
@@ -2659,6 +2683,7 @@ SOFTWARE.```
   - `Documentation`: https://deprecated.readthedocs.io/en/latest/
   - `Homepage`: https://github.com/laurent-laporte-pro/deprecated
   - `Source`: https://github.com/laurent-laporte-pro/deprecated
+
 ## distlib (0.3.9)
 
 ### Licenses
@@ -2956,6 +2981,7 @@ OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
   - `Homepage`: https://github.com/pypa/distlib
   - `Source`: https://github.com/pypa/distlib
   - `Tracker`: https://github.com/pypa/distlib/issues
+
 ## distro (1.9.0)
 
 ### Licenses
@@ -3168,6 +3194,7 @@ License: `Apache Software License`
 
 ### URLs
   - `Homepage`: https://github.com/python-distro/distro
+
 ## dnspython (2.7.0)
 
 ### Licenses
@@ -3216,6 +3243,7 @@ OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
   - `homepage`: https://www.dnspython.org
   - `issues`: https://github.com/rthalley/dnspython/issues
   - `repository`: https://github.com/rthalley/dnspython.git
+
 ## durationpy (0.10)
 
 ### Licenses
@@ -3234,6 +3262,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ### URLs
   - `Download`: https://github.com/icholy/durationpy/tarball/0.10
   - `Homepage`: https://github.com/icholy/durationpy
+
 ## email-validator (2.2.0)
 
 ### Licenses
@@ -3271,6 +3300,7 @@ For more information, please refer to <https://unlicense.org/>
 
 ### URLs
   - `Homepage`: https://github.com/JoshData/python-email-validator
+
 ## fastapi (0.115.6)
 
 ### Licenses
@@ -3306,6 +3336,7 @@ THE SOFTWARE.
   - `Homepage`: https://github.com/fastapi/fastapi
   - `Issues`: https://github.com/fastapi/fastapi/issues
   - `Repository`: https://github.com/fastapi/fastapi
+
 ## fastapi-cli (0.0.7)
 
 ### Licenses
@@ -3341,6 +3372,7 @@ THE SOFTWARE.
   - `Homepage`: https://github.com/fastapi/fastapi-cli
   - `Issues`: https://github.com/fastapi/fastapi-cli/issues
   - `Repository`: https://github.com/fastapi/fastapi-cli
+
 ## filelock (3.18.0)
 
 ### Licenses
@@ -3378,6 +3410,7 @@ For more information, please refer to <http://unlicense.org>
   - `Homepage`: https://github.com/tox-dev/py-filelock
   - `Source`: https://github.com/tox-dev/py-filelock
   - `Tracker`: https://github.com/tox-dev/py-filelock/issues
+
 ## frozenlist (1.6.0)
 
 ### Licenses
@@ -3598,6 +3631,7 @@ License: `Apache-2.0`
   - `GitHub: issues`: https://github.com/aio-libs/frozenlist/issues
   - `GitHub: repo`: https://github.com/aio-libs/frozenlist
   - `Homepage`: https://github.com/aio-libs/frozenlist
+
 ## fs (2.4.16)
 
 ### Licenses
@@ -3640,6 +3674,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   - `Documentation`: https://pyfilesystem2.readthedocs.io/en/latest/
   - `Homepage`: https://github.com/PyFilesystem/pyfilesystem2
   - `Wiki`: https://www.pyfilesystem.org/
+
 ## fsspec (2025.3.2)
 
 ### Licenses
@@ -3681,6 +3716,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   - `Changelog`: https://filesystem-spec.readthedocs.io/en/latest/changelog.html
   - `Documentation`: https://filesystem-spec.readthedocs.io/en/latest/
   - `Homepage`: https://github.com/fsspec/filesystem_spec
+
 ## ftfy (6.3.1)
 
 ### Licenses
@@ -3709,6 +3745,7 @@ limitations under the License.
   - `Homepage`: https://ftfy.readthedocs.io/en/latest/
   - `Issues`: https://github.com/rspeer/python-ftfy/issues/
   - `Repository`: https://github.com/rspeer/python-ftfy
+
 ## google-auth (2.40.1)
 
 ### Licenses
@@ -3920,6 +3957,7 @@ License: `Apache Software License`
 
 ### URLs
   - `Homepage`: https://github.com/googleapis/google-auth-library-python
+
 ## grpcio (1.71.0)
 
 ### Licenses
@@ -4543,6 +4581,7 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
   - `Documentation`: https://grpc.github.io/grpc/python
   - `Homepage`: https://grpc.io
   - `Source Code`: https://github.com/grpc/grpc
+
 ## grpcio-tools (1.66.0)
 
 ### Licenses
@@ -4552,6 +4591,7 @@ License: `Apache Software License`
   - `Bug Tracker`: https://github.com/grpc/grpc/issues
   - `Homepage`: https://grpc.io
   - `Source Code`: https://github.com/grpc/grpc/tree/master/tools/distrib/python/grpcio_tools
+
 ## h11 (0.16.0)
 
 ### Licenses
@@ -4584,6 +4624,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/python-hyper/h11
+
 ## httpcore (1.0.9)
 
 ### Licenses
@@ -4623,6 +4664,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   - `Documentation`: https://www.encode.io/httpcore
   - `Homepage`: https://www.encode.io/httpcore/
   - `Source`: https://github.com/encode/httpcore
+
 ## httptools (0.6.4)
 
 ### Licenses
@@ -4654,6 +4696,7 @@ THE SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/MagicStack/httptools
+
 ## httpx (0.28.1)
 
 ### Licenses
@@ -4679,6 +4722,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
   - `Documentation`: https://www.python-httpx.org
   - `Homepage`: https://github.com/encode/httpx
   - `Source`: https://github.com/encode/httpx
+
 ## httpx-ws (0.7.2)
 
 ### Licenses
@@ -4711,6 +4755,7 @@ SOFTWARE.
 ### URLs
   - `Documentation`: https://frankie567.github.io/httpx-ws/
   - `Source`: https://github.com/frankie567/httpx-ws
+
 ## huggingface-hub (0.31.4)
 
 ### Licenses
@@ -4922,6 +4967,7 @@ License: `Apache Software License`
 
 ### URLs
   - `Homepage`: https://github.com/huggingface/huggingface_hub
+
 ## identify (2.6.10)
 
 ### Licenses
@@ -4951,6 +4997,7 @@ THE SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/pre-commit/identify
+
 ## idna (3.10)
 
 ### Licenses
@@ -4994,6 +5041,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   - `Changelog`: https://github.com/kjd/idna/blob/master/HISTORY.rst
   - `Issue tracker`: https://github.com/kjd/idna/issues
   - `Source`: https://github.com/kjd/idna
+
 ## importlib-metadata (8.6.1)
 
 ### Licenses
@@ -5206,6 +5254,7 @@ License: `Apache Software License`
 
 ### URLs
   - `Source`: https://github.com/python/importlib_metadata
+
 ## iniconfig (2.1.0)
 
 ### Licenses
@@ -5237,6 +5286,7 @@ SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/pytest-dev/iniconfig
+
 ## jinja2 (3.1.6)
 
 ### Licenses
@@ -5279,6 +5329,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   - `Documentation`: https://jinja.palletsprojects.com/
   - `Donate`: https://palletsprojects.com/donate
   - `Source`: https://github.com/pallets/jinja/
+
 ## kantoku (0.18.3)
 
 ### Licenses
@@ -5305,6 +5356,7 @@ limitations under the License.
 ### URLs
   - `Documentation`: https://circus.readthedocs.io
   - `Source`: https://github.com/bentoml/kantoku
+
 ## kubernetes (32.0.1)
 
 ### Licenses
@@ -5517,6 +5569,7 @@ License: `Apache Software License`
 
 ### URLs
   - `Homepage`: https://github.com/kubernetes-client/python
+
 ## libucx-cu12 (1.18.1)
 
 ### Licenses
@@ -5555,6 +5608,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### URLs
   - `Homepage`: https://github.com/openucx/ucx
+
 ## markdown (3.8)
 
 ### Licenses
@@ -5615,6 +5669,7 @@ SOFTWARE.
   - `Homepage`: https://Python-Markdown.github.io/
   - `Issue Tracker`: https://github.com/Python-Markdown/markdown/issues
   - `Repository`: https://github.com/Python-Markdown/markdown
+
 ## markdown-it-py (3.0.0)
 
 ### Licenses
@@ -5672,6 +5727,7 @@ SOFTWARE.
 ### URLs
   - `Documentation`: https://markdown-it-py.readthedocs.io
   - `Homepage`: https://github.com/executablebooks/markdown-it-py
+
 ## markupsafe (3.0.2)
 
 ### Licenses
@@ -5714,6 +5770,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   - `Documentation`: https://markupsafe.palletsprojects.com/
   - `Donate`: https://palletsprojects.com/donate
   - `Source`: https://github.com/pallets/markupsafe/
+
 ## mbstrdecoder (1.1.4)
 
 ### Licenses
@@ -5748,6 +5805,7 @@ SOFTWARE.
   - `Homepage`: https://github.com/thombashi/mbstrdecoder
   - `Source`: https://github.com/thombashi/mbstrdecoder
   - `Tracker`: https://github.com/thombashi/mbstrdecoder/issues
+
 ## mdurl (0.1.2)
 
 ### Licenses
@@ -5804,6 +5862,7 @@ IN THE SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/executablebooks/mdurl
+
 ## mpmath (1.3.0)
 
 ### Licenses
@@ -5844,6 +5903,7 @@ DAMAGE.
   - `Homepage`: http://mpmath.org/
   - `Source`: https://github.com/fredrik-johansson/mpmath
   - `Tracker`: https://github.com/fredrik-johansson/mpmath/issues
+
 ## msgspec (0.19.0)
 
 ### Licenses
@@ -5884,6 +5944,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   - `Homepage`: https://jcristharif.com/msgspec/
   - `Issue Tracker`: https://github.com/jcrist/msgspec/issues
   - `Source`: https://github.com/jcrist/msgspec/
+
 ## multidict (6.4.3)
 
 ### Licenses
@@ -5916,6 +5977,7 @@ License: `Apache Software License`
   - `GitHub: issues`: https://github.com/aio-libs/multidict/issues
   - `GitHub: repo`: https://github.com/aio-libs/multidict
   - `Homepage`: https://github.com/aio-libs/multidict
+
 ## mypy (1.15.0)
 
 ### Licenses
@@ -6159,6 +6221,7 @@ OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
   - `Homepage`: https://www.mypy-lang.org/
   - `Issues`: https://github.com/python/mypy/issues
   - `Repository`: https://github.com/python/mypy
+
 ## mypy-extensions (1.1.0)
 
 ### Licenses
@@ -6196,6 +6259,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/python/mypy_extensions
+
 ## nats-py (2.10.0)
 
 ### Licenses
@@ -6408,6 +6472,7 @@ License: `Apache Software License`
 ### URLs
   - `Bug Tracker`: https://github.com/nats-io/nats.py/issues
   - `Homepage`: https://github.com/nats-io/nats.py
+
 ## networkx (3.4.2)
 
 ### Licenses
@@ -6458,6 +6523,7 @@ License: `BSD License`
   - `Documentation`: https://networkx.org/documentation/stable/
   - `Homepage`: https://networkx.org/
   - `Source Code`: https://github.com/networkx/networkx
+
 ## nodeenv (1.9.1)
 
 ### Licenses
@@ -6500,6 +6566,7 @@ DAMAGE.
 
 ### URLs
   - `Homepage`: https://github.com/ekalinin/nodeenv
+
 ## numpy (1.26.4)
 
 ### Licenses
@@ -7486,6 +7553,7 @@ License: LGPL-2.1-or-later
   - `release notes`: https://numpy.org/doc/stable/release
   - `source`: https://github.com/numpy/numpy
   - `tracker`: https://github.com/numpy/numpy/issues
+
 ## nvidia-cublas-cu12 (12.6.4.1)
 
 ### Licenses
@@ -9064,6 +9132,7 @@ conditions:
 
 ### URLs
   - `Homepage`: https://developer.nvidia.com/cuda-zone
+
 ## nvidia-cuda-cupti-cu12 (12.6.80)
 
 ### Licenses
@@ -10642,6 +10711,7 @@ conditions:
 
 ### URLs
   - `Homepage`: https://developer.nvidia.com/cuda-zone
+
 ## nvidia-cuda-nvrtc-cu12 (12.6.77)
 
 ### Licenses
@@ -12220,6 +12290,7 @@ conditions:
 
 ### URLs
   - `Homepage`: https://developer.nvidia.com/cuda-zone
+
 ## nvidia-cuda-runtime-cu12 (12.6.77)
 
 ### Licenses
@@ -13798,6 +13869,7 @@ conditions:
 
 ### URLs
   - `Homepage`: https://developer.nvidia.com/cuda-zone
+
 ## nvidia-cudnn-cu12 (9.5.1.17)
 
 ### Licenses
@@ -13962,6 +14034,7 @@ In addition to the rights above, for parties that are developing software intend
 
 ### URLs
   - `Homepage`: https://developer.nvidia.com/cuda-zone
+
 ## nvidia-cufft-cu12 (11.3.0.4)
 
 ### Licenses
@@ -15540,6 +15613,7 @@ conditions:
 
 ### URLs
   - `Homepage`: https://developer.nvidia.com/cuda-zone
+
 ## nvidia-cufile-cu12 (1.11.1.6)
 
 ### Licenses
@@ -17118,6 +17192,7 @@ conditions:
 
 ### URLs
   - `Homepage`: https://developer.nvidia.com/cuda-zone
+
 ## nvidia-curand-cu12 (10.3.7.77)
 
 ### Licenses
@@ -18696,6 +18771,7 @@ conditions:
 
 ### URLs
   - `Homepage`: https://developer.nvidia.com/cuda-zone
+
 ## nvidia-cusolver-cu12 (11.7.1.2)
 
 ### Licenses
@@ -20274,6 +20350,7 @@ conditions:
 
 ### URLs
   - `Homepage`: https://developer.nvidia.com/cuda-zone
+
 ## nvidia-cusparse-cu12 (12.5.4.2)
 
 ### Licenses
@@ -21852,6 +21929,7 @@ conditions:
 
 ### URLs
   - `Homepage`: https://developer.nvidia.com/cuda-zone
+
 ## nvidia-cusparselt-cu12 (0.6.3)
 
 ### Licenses
@@ -21859,6 +21937,7 @@ License: `NVIDIA Proprietary Software`
 
 ### URLs
   - `Homepage`: https://developer.nvidia.com/cusparselt
+
 ## nvidia-ml-py (12.575.51)
 
 ### Licenses
@@ -21866,6 +21945,7 @@ License: `BSD License`
 
 ### URLs
   - `Homepage`: https://forums.developer.nvidia.com
+
 ## nvidia-nccl-cu12 (2.26.2)
 
 ### Licenses
@@ -21915,6 +21995,7 @@ for more information and license details.
 
 ### URLs
   - `Homepage`: https://developer.nvidia.com/cuda-zone
+
 ## nvidia-nvjitlink-cu12 (12.6.85)
 
 ### Licenses
@@ -23493,6 +23574,7 @@ conditions:
 
 ### URLs
   - `Homepage`: https://developer.nvidia.com/cuda-zone
+
 ## nvidia-nvtx-cu12 (12.6.77)
 
 ### Licenses
@@ -23721,6 +23803,7 @@ Software.
 
 ### URLs
   - `Homepage`: https://developer.nvidia.com/cuda-zone
+
 ## oauthlib (3.2.2)
 
 ### Licenses
@@ -23758,6 +23841,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### URLs
   - `Homepage`: https://github.com/oauthlib/oauthlib
+
 ## openai (1.39.0)
 
 ### Licenses
@@ -23970,6 +24054,7 @@ License: `Apache Software License`
 ### URLs
   - `Homepage`: https://github.com/openai/openai-python
   - `Repository`: https://github.com/openai/openai-python
+
 ## opentelemetry-api (1.33.1)
 
 ### Licenses
@@ -24182,6 +24267,7 @@ License: `Apache Software License`
 ### URLs
   - `Homepage`: https://github.com/open-telemetry/opentelemetry-python/tree/main/opentelemetry-api
   - `Repository`: https://github.com/open-telemetry/opentelemetry-python
+
 ## opentelemetry-instrumentation (0.54b1)
 
 ### Licenses
@@ -24394,6 +24480,7 @@ License: `Apache-2.0`
 ### URLs
   - `Homepage`: https://github.com/open-telemetry/opentelemetry-python-contrib/tree/main/opentelemetry-instrumentation
   - `Repository`: https://github.com/open-telemetry/opentelemetry-python-contrib
+
 ## opentelemetry-instrumentation-aiohttp-client (0.54b1)
 
 ### Licenses
@@ -24606,6 +24693,7 @@ License: `Apache-2.0`
 ### URLs
   - `Homepage`: https://github.com/open-telemetry/opentelemetry-python-contrib/tree/main/instrumentation/opentelemetry-instrumentation-aiohttp-client
   - `Repository`: https://github.com/open-telemetry/opentelemetry-python-contrib
+
 ## opentelemetry-instrumentation-asgi (0.54b1)
 
 ### Licenses
@@ -24818,6 +24906,7 @@ License: `Apache-2.0`
 ### URLs
   - `Homepage`: https://github.com/open-telemetry/opentelemetry-python-contrib/tree/main/instrumentation/opentelemetry-instrumentation-asgi
   - `Repository`: https://github.com/open-telemetry/opentelemetry-python-contrib
+
 ## opentelemetry-sdk (1.33.1)
 
 ### Licenses
@@ -25030,6 +25119,7 @@ License: `Apache Software License`
 ### URLs
   - `Homepage`: https://github.com/open-telemetry/opentelemetry-python/tree/main/opentelemetry-sdk
   - `Repository`: https://github.com/open-telemetry/opentelemetry-python
+
 ## opentelemetry-semantic-conventions (0.54b1)
 
 ### Licenses
@@ -25242,6 +25332,7 @@ License: `Apache Software License`
 ### URLs
   - `Homepage`: https://github.com/open-telemetry/opentelemetry-python/tree/main/opentelemetry-semantic-conventions
   - `Repository`: https://github.com/open-telemetry/opentelemetry-python
+
 ## opentelemetry-util-http (0.54b1)
 
 ### Licenses
@@ -25250,6 +25341,7 @@ License: `Apache-2.0`
 ### URLs
   - `Homepage`: https://github.com/open-telemetry/opentelemetry-python-contrib/tree/main/util/opentelemetry-util-http
   - `Repository`: https://github.com/open-telemetry/opentelemetry-python-contrib
+
 ## orjson (3.10.18)
 
 ### Licenses
@@ -25489,6 +25581,7 @@ DEALINGS IN THE SOFTWARE.
   - `changelog`: https://github.com/ijl/orjson/blob/master/CHANGELOG.md
   - `documentation`: https://github.com/ijl/orjson
   - `source`: https://github.com/ijl/orjson
+
 ## packaging (25.0)
 
 ### Licenses
@@ -25709,6 +25802,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ### URLs
   - `Documentation`: https://packaging.pypa.io/
   - `Source`: https://github.com/pypa/packaging
+
 ## pathspec (0.12.1)
 
 ### Licenses
@@ -26094,6 +26188,7 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
   - `Documentation`: https://python-path-specification.readthedocs.io/en/latest/index.html
   - `Issue Tracker`: https://github.com/cpburnz/python-pathspec/issues
   - `Source Code`: https://github.com/cpburnz/python-pathspec
+
 ## pathvalidate (3.2.3)
 
 ### Licenses
@@ -26129,6 +26224,7 @@ SOFTWARE.
   - `Homepage`: https://github.com/thombashi/pathvalidate
   - `Source`: https://github.com/thombashi/pathvalidate
   - `Tracker`: https://github.com/thombashi/pathvalidate/issues
+
 ## pip (25.0.1)
 
 ### Licenses
@@ -26163,6 +26259,7 @@ SOFTWARE.
   - `Documentation`: https://pip.pypa.io
   - `Homepage`: https://pip.pypa.io/
   - `Source`: https://github.com/pypa/pip
+
 ## pip-requirements-parser (32.0.1)
 
 ### Licenses
@@ -26359,6 +26456,7 @@ Reuse and wrap pip's own parser
 
 ### URLs
   - `Homepage`: https://github.com/nexB/pip-requirements-parser
+
 ## platformdirs (4.3.8)
 
 ### Licenses
@@ -26394,6 +26492,7 @@ SOFTWARE.
   - `Homepage`: https://github.com/tox-dev/platformdirs
   - `Source`: https://github.com/tox-dev/platformdirs
   - `Tracker`: https://github.com/tox-dev/platformdirs/issues
+
 ## pluggy (1.6.0)
 
 ### Licenses
@@ -26422,6 +26521,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
 
 ## pre-commit (4.2.0)
 
@@ -26452,6 +26552,7 @@ THE SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/pre-commit/pre-commit
+
 ## prometheus-client (0.22.0)
 
 ### Licenses
@@ -26664,6 +26765,7 @@ License: `Apache Software License`
 ### URLs
   - `Documentation`: https://prometheus.github.io/client_python/
   - `Homepage`: https://github.com/prometheus/client_python
+
 ## prompt-toolkit (3.0.51)
 
 ### Licenses
@@ -26698,6 +26800,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
+
 
 ## propcache (0.3.1)
 
@@ -26920,6 +27023,7 @@ License: `Apache Software License`
   - `GitHub: issues`: https://github.com/aio-libs/propcache/issues
   - `GitHub: repo`: https://github.com/aio-libs/propcache
   - `Homepage`: https://github.com/aio-libs/propcache
+
 ## protobuf (5.27.3)
 
 ### Licenses
@@ -26962,6 +27066,7 @@ support library is itself covered by the above license.
 
 ### URLs
   - `Homepage`: https://developers.google.com/protocol-buffers/
+
 ## psutil (7.0.0)
 
 ### Licenses
@@ -27001,6 +27106,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### URLs
   - `Homepage`: https://github.com/giampaolo/psutil
+
 ## py-cpuinfo (9.0.0)
 
 ### Licenses
@@ -27031,6 +27137,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/workhorsy/py-cpuinfo
+
 ## pyasn1 (0.6.1)
 
 ### Licenses
@@ -27069,6 +27176,7 @@ POSSIBILITY OF SUCH DAMAGE.
   - `Homepage`: https://github.com/pyasn1/pyasn1
   - `Issues`: https://github.com/pyasn1/pyasn1/issues
   - `Source`: https://github.com/pyasn1/pyasn1
+
 ## pyasn1-modules (0.4.2)
 
 ### Licenses
@@ -27106,6 +27214,7 @@ POSSIBILITY OF SUCH DAMAGE.
   - `Homepage`: https://github.com/pyasn1/pyasn1-modules
   - `Issues`: https://github.com/pyasn1/pyasn1-modules/issues
   - `Source`: https://github.com/pyasn1/pyasn1-modules
+
 ## pydantic (2.7.1)
 
 ### Licenses
@@ -27141,6 +27250,7 @@ SOFTWARE.
   - `Funding`: https://github.com/sponsors/samuelcolvin
   - `Homepage`: https://github.com/pydantic/pydantic
   - `Source`: https://github.com/pydantic/pydantic
+
 ## pydantic-core (2.18.2)
 
 ### Licenses
@@ -27174,6 +27284,7 @@ SOFTWARE.
   - `Funding`: https://github.com/sponsors/samuelcolvin
   - `Homepage`: https://github.com/pydantic/pydantic-core
   - `Source`: https://github.com/pydantic/pydantic-core
+
 ## pygments (2.19.1)
 
 ### Licenses
@@ -27213,6 +27324,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   - `Documentation`: https://pygments.org/docs
   - `Homepage`: https://pygments.org
   - `Source`: https://github.com/pygments/pygments
+
 ## pynvml (12.0.0)
 
 ### Licenses
@@ -27251,6 +27363,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ### URLs
   - `Homepage`: https://github.com/gpuopenanalytics/pynvml
   - `Source`: https://github.com/gpuopenanalytics/pynvml
+
 ## pyparsing (3.2.3)
 
 ### Licenses
@@ -27279,6 +27392,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/pyparsing/pyparsing/
+
 ## pyright (1.1.400)
 
 ### Licenses
@@ -27553,6 +27667,7 @@ DEALINGS IN THE SOFTWARE.
   - `Homepage`: https://github.com/RobertCraigie/pyright-python
   - `Source`: https://github.com/RobertCraigie/pyright-python
   - `Tracker`: https://github.com/RobertCraigie/pyright-python/issues
+
 ## pytablewriter (1.2.1)
 
 ### Licenses
@@ -27589,6 +27704,7 @@ SOFTWARE.
   - `Homepage`: https://github.com/thombashi/pytablewriter
   - `Source`: https://github.com/thombashi/pytablewriter
   - `Tracker`: https://github.com/thombashi/pytablewriter/issues
+
 ## pytest (8.3.5)
 
 ### Licenses
@@ -27626,6 +27742,7 @@ THE SOFTWARE.
   - `Homepage`: https://docs.pytest.org/en/latest/
   - `Source`: https://github.com/pytest-dev/pytest
   - `Tracker`: https://github.com/pytest-dev/pytest/issues
+
 ## pytest-asyncio (0.26.0)
 
 ### Licenses
@@ -27841,6 +27958,7 @@ License: `Apache-2.0`
   - `Documentation`: https://pytest-asyncio.readthedocs.io
   - `Homepage`: https://github.com/pytest-dev/pytest-asyncio
   - `Source Code`: https://github.com/pytest-dev/pytest-asyncio
+
 ## pytest-benchmark (5.1.0)
 
 ### Licenses
@@ -27874,6 +27992,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   - `Documentation`: https://pytest-benchmark.readthedocs.io/
   - `Homepage`: https://github.com/ionelmc/pytest-benchmark
   - `Issue Tracker`: https://github.com/ionelmc/pytest-benchmark/issues
+
 ## pytest-codeblocks (0.17.0)
 
 ### Licenses
@@ -27908,6 +28027,7 @@ SOFTWARE.
   - `Funding`: https://github.com/sponsors/nschloe
   - `Homepage`: https://github.com/nschloe/pytest-codeblocks
   - `Issues`: https://github.com/nschloe/pytest-codeblocks/issues
+
 ## pytest-cov (6.1.1)
 
 ### Licenses
@@ -27942,6 +28062,7 @@ THE SOFTWARE.
   - `Documentation`: https://pytest-cov.readthedocs.io/
   - `Homepage`: https://github.com/pytest-dev/pytest-cov
   - `Issue Tracker`: https://github.com/pytest-dev/pytest-cov/issues
+
 ## pytest-md-report (0.7.0)
 
 ### Licenses
@@ -27976,6 +28097,7 @@ SOFTWARE.
   - `Homepage`: https://github.com/thombashi/pytest-md-report
   - `Source`: https://github.com/thombashi/pytest-md-report
   - `Tracker`: https://github.com/thombashi/pytest-md-report/issues
+
 ## pytest-mypy (1.0.1)
 
 ### Licenses
@@ -28007,6 +28129,7 @@ THE SOFTWARE.
 
 ### URLs
   - `homepage`: https://github.com/realpython/pytest-mypy
+
 ## pytest-timeout (2.4.0)
 
 ### Licenses
@@ -28039,6 +28162,7 @@ THE SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/pytest-dev/pytest-timeout
+
 ## python-dateutil (2.9.0.post0)
 
 ### Licenses
@@ -28104,6 +28228,7 @@ The above BSD License Applies to all code, even that also covered by Apache 2.0.
   - `Documentation`: https://dateutil.readthedocs.io/en/stable/
   - `Homepage`: https://github.com/dateutil/dateutil
   - `Source`: https://github.com/dateutil/dateutil
+
 ## python-dotenv (1.1.0)
 
 ### Licenses
@@ -28141,6 +28266,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### URLs
   - `Homepage`: https://github.com/theskumar/python-dotenv
+
 ## python-json-logger (3.3.0)
 
 ### Licenses
@@ -28161,6 +28287,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 ### URLs
   - `GitHub`: https://github.com/nhairs/python-json-logger
   - `Homepage`: https://nhairs.github.io/python-json-logger
+
 ## python-multipart (0.0.20)
 
 ### Licenses
@@ -28188,6 +28315,7 @@ limitations under the License.
   - `Documentation`: https://kludex.github.io/python-multipart/
   - `Homepage`: https://github.com/Kludex/python-multipart
   - `Source`: https://github.com/Kludex/python-multipart
+
 ## python-rapidjson (1.20)
 
 ### Licenses
@@ -28222,6 +28350,7 @@ SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/python-rapidjson/python-rapidjson
+
 ## pytz (2025.2)
 
 ### Licenses
@@ -28252,6 +28381,7 @@ DEALINGS IN THE SOFTWARE.
 ### URLs
   - `Download`: https://pypi.org/project/pytz/
   - `Homepage`: http://pythonhosted.org/pytz
+
 ## pyyaml (6.0.2)
 
 ### Licenses
@@ -28288,6 +28418,7 @@ SOFTWARE.
   - `Homepage`: https://pyyaml.org/
   - `Mailing lists`: http://lists.sourceforge.net/lists/listinfo/yaml-core
   - `Source Code`: https://github.com/yaml/pyyaml
+
 ## pyzmq (26.4.0)
 
 ### Licenses
@@ -28933,6 +29064,7 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
   - `Homepage`: https://pyzmq.readthedocs.org
   - `Source`: https://github.com/zeromq/pyzmq
   - `Tracker`: https://github.com/zeromq/pyzmq/issues
+
 ## questionary (2.1.0)
 
 ### Licenses
@@ -28964,6 +29096,7 @@ SOFTWARE.
   - `Documentation`: https://questionary.readthedocs.io/
   - `Homepage`: https://github.com/tmbo/questionary
   - `Repository`: https://github.com/tmbo/questionary
+
 ## regex (2024.11.6)
 
 ### Licenses
@@ -29182,6 +29315,7 @@ All additions and alterations are licensed under the Apache 2.0 License.
 
 ### URLs
   - `Homepage`: https://github.com/mrabarnett/mrab-regex
+
 ## requests (2.32.3)
 
 ### Licenses
@@ -29220,6 +29354,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   - `Documentation`: https://requests.readthedocs.io
   - `Homepage`: https://requests.readthedocs.io
   - `Source`: https://github.com/psf/requests
+
 ## requests-oauthlib (2.0.0)
 
 ### Licenses
@@ -29245,6 +29380,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/requests/requests-oauthlib
+
 ## rich (14.0.0)
 
 ### Licenses
@@ -29275,6 +29411,7 @@ SOFTWARE.
 ### URLs
   - `Documentation`: https://rich.readthedocs.io/en/latest/
   - `Homepage`: https://github.com/Textualize/rich
+
 ## rich-toolkit (0.14.6)
 
 ### Licenses
@@ -29304,6 +29441,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+
 ## rsa (4.9.1)
 
 ### Licenses
@@ -29328,6 +29466,7 @@ limitations under the License.
 ### URLs
   - `Homepage`: https://stuvel.eu/rsa
   - `Repository`: https://github.com/sybrenstuvel/python-rsa
+
 ## safetensors (0.5.3)
 
 ### Licenses
@@ -29336,6 +29475,7 @@ License: `Apache Software License`
 ### URLs
   - `Homepage`: https://github.com/huggingface/safetensors
   - `Source`: https://github.com/huggingface/safetensors
+
 ## schema (0.7.7)
 
 ### Licenses
@@ -29365,6 +29505,7 @@ SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/keleshev/schema
+
 ## sentencepiece (0.2.0)
 
 ### Licenses
@@ -29372,6 +29513,7 @@ License: `Apache Software License`
 
 ### URLs
   - `Homepage`: https://github.com/google/sentencepiece
+
 ## setuptools (80.7.1)
 
 ### Licenses
@@ -29402,6 +29544,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
   - `Changelog`: https://setuptools.pypa.io/en/stable/history.html
   - `Documentation`: https://setuptools.pypa.io/
   - `Source`: https://github.com/pypa/setuptools
+
 ## shellingham (1.5.4)
 
 ### Licenses
@@ -29425,6 +29568,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/sarugaku/shellingham
+
 ## simple-di (0.1.5)
 
 ### Licenses
@@ -29636,6 +29780,7 @@ License: `Apache License 2.0`
 
 ### URLs
   - `Homepage`: https://github.com/bentoml/simple_di
+
 ## six (1.17.0)
 
 ### Licenses
@@ -29664,6 +29809,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/benjaminp/six
+
 ## sniffio (1.3.1)
 
 ### Licenses
@@ -29907,6 +30053,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   - `Changelog`: https://sniffio.readthedocs.io/en/latest/history.html
   - `Documentation`: https://sniffio.readthedocs.io/
   - `Homepage`: https://github.com/python-trio/sniffio
+
 ## starlette (0.41.3)
 
 ### Licenses
@@ -29948,6 +30095,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   - `Funding`: https://github.com/sponsors/encode
   - `Homepage`: https://github.com/encode/starlette
   - `Source`: https://github.com/encode/starlette
+
 ## sympy (1.14.0)
 
 ### Licenses
@@ -29980,6 +30128,7 @@ SOFTWARE.
 ### URLs
   - `Homepage`: https://sympy.org
   - `Source`: https://github.com/sympy/sympy
+
 ## tabledata (1.3.4)
 
 ### Licenses
@@ -30015,6 +30164,7 @@ SOFTWARE.
   - `Homepage`: https://github.com/thombashi/tabledata
   - `Source`: https://github.com/thombashi/tabledata
   - `Tracker`: https://github.com/thombashi/tabledata/issues
+
 ## tcolorpy (0.1.7)
 
 ### Licenses
@@ -30049,6 +30199,7 @@ SOFTWARE.
   - `Homepage`: https://github.com/thombashi/tcolorpy
   - `Source`: https://github.com/thombashi/tcolorpy
   - `Tracker`: https://github.com/thombashi/tcolorpy/issues
+
 ## tensorboard (2.19.0)
 
 ### Licenses
@@ -30626,6 +30777,7 @@ THE SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/tensorflow/tensorboard
+
 ## tensorboard-data-server (0.7.2)
 
 ### Licenses
@@ -30633,6 +30785,7 @@ License: `Apache Software License`
 
 ### URLs
   - `Homepage`: https://github.com/tensorflow/tensorboard/tree/master/tensorboard/data/server
+
 ## tensorboardx (2.6.2.2)
 
 ### Licenses
@@ -30664,6 +30817,7 @@ SOFTWARE.
 
 ### URLs
   - `Homepage`: https://github.com/lanpa/tensorboardX
+
 ## tokenizers (0.21.1)
 
 ### Licenses
@@ -30672,6 +30826,7 @@ License: `Apache Software License`
 ### URLs
   - `Homepage`: https://github.com/huggingface/tokenizers
   - `Source`: https://github.com/huggingface/tokenizers
+
 ## tomli-w (1.2.0)
 
 ### Licenses
@@ -30704,6 +30859,7 @@ SOFTWARE.
 ### URLs
   - `Changelog`: https://github.com/hukkin/tomli-w/blob/master/CHANGELOG.md
   - `Homepage`: https://github.com/hukkin/tomli-w
+
 ## torch (2.7.0)
 
 ### Licenses
@@ -39568,6 +39724,7 @@ If the Library as you received it specifies that a proxy can decide whether futu
 ### URLs
   - `Download`: https://github.com/pytorch/pytorch/tags
   - `Homepage`: https://pytorch.org/
+
 ## tornado (6.5)
 
 ### Licenses
@@ -39781,6 +39938,7 @@ License: `Apache Software License`
 ### URLs
   - `Homepage`: http://www.tornadoweb.org/
   - `Source`: https://github.com/tornadoweb/tornado
+
 ## tqdm (4.67.1)
 
 ### Licenses
@@ -39843,6 +40001,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   - `homepage`: https://tqdm.github.io
   - `repository`: https://github.com/tqdm/tqdm
   - `wiki`: https://github.com/tqdm/tqdm/wiki
+
 ## transformers (4.48.3)
 
 ### Licenses
@@ -40056,6 +40215,7 @@ License: `Apache Software License`
 
 ### URLs
   - `Homepage`: https://github.com/huggingface/transformers
+
 ## triton (3.3.0)
 
 ### Licenses
@@ -40091,6 +40251,7 @@ License: `MIT License`
 
 ### URLs
   - `Homepage`: https://github.com/triton-lang/triton/
+
 ## tritonclient (2.53.0)
 
 ### Licenses
@@ -40126,6 +40287,7 @@ License: `BSD License`
 
 ### URLs
   - `Homepage`: https://developer.nvidia.com/nvidia-triton-inference-server
+
 ## typepy (1.3.4)
 
 ### Licenses
@@ -40161,6 +40323,7 @@ SOFTWARE.
   - `Homepage`: https://github.com/thombashi/typepy
   - `Source`: https://github.com/thombashi/typepy
   - `Tracker`: https://github.com/thombashi/typepy/issues
+
 ## typer (0.15.4)
 
 ### Licenses
@@ -40196,6 +40359,7 @@ THE SOFTWARE.
   - `Homepage`: https://github.com/fastapi/typer
   - `Issues`: https://github.com/fastapi/typer/issues
   - `Repository`: https://github.com/fastapi/typer
+
 ## types-psutil (7.0.0.20250218)
 
 ### Licenses
@@ -40447,6 +40611,7 @@ DEALINGS IN THE SOFTWARE.
   - `GitHub`: https://github.com/python/typeshed
   - `Homepage`: https://github.com/python/typeshed
   - `Issue tracker`: https://github.com/python/typeshed/issues
+
 ## types-pyyaml (6.0.12.20250516)
 
 ### Licenses
@@ -40698,6 +40863,7 @@ DEALINGS IN THE SOFTWARE.
   - `GitHub`: https://github.com/python/typeshed
   - `Homepage`: https://github.com/python/typeshed
   - `Issue tracker`: https://github.com/python/typeshed/issues
+
 ## types-requests (2.32.0.20250515)
 
 ### Licenses
@@ -40949,6 +41115,7 @@ DEALINGS IN THE SOFTWARE.
   - `GitHub`: https://github.com/python/typeshed
   - `Homepage`: https://github.com/python/typeshed
   - `Issue tracker`: https://github.com/python/typeshed/issues
+
 ## typing-extensions (4.13.2)
 
 ### Licenses
@@ -41243,6 +41410,7 @@ PERFORMANCE OF THIS SOFTWARE.
   - `Home`: https://github.com/python/typing_extensions
   - `Q & A`: https://github.com/python/typing/discussions
   - `Repository`: https://github.com/python/typing_extensions
+
 ## typing-inspection (0.4.0)
 
 ### Licenses
@@ -41277,6 +41445,7 @@ SOFTWARE.
   - `Documentation`: https://pydantic.github.io/typing-inspection/dev/
   - `Homepage`: https://github.com/pydantic/typing-inspection
   - `Source`: https://github.com/pydantic/typing-inspection
+
 ## ucx-py-cu12 (0.43.0)
 
 ### Licenses
@@ -41315,6 +41484,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   - `Documentation`: https://ucx-py.readthedocs.io/en/stable/
   - `Homepage`: https://github.com/rapidsai/ucx-py
   - `Source`: https://github.com/rapidsai/ucx-py
+
 ## ujson (5.10.0)
 
 ### Licenses
@@ -41441,6 +41611,7 @@ https://opensource.apple.com/source/tcl/tcl-14/tcl/license.terms
   - `Download`: https://github.com/ultrajson/ultrajson
   - `Homepage`: https://github.com/ultrajson/ultrajson
   - `Source`: https://github.com/ultrajson/ultrajson
+
 ## urllib3 (2.4.0)
 
 ### Licenses
@@ -41475,6 +41646,7 @@ SOFTWARE.
   - `Code`: https://github.com/urllib3/urllib3
   - `Documentation`: https://urllib3.readthedocs.io
   - `Issue tracker`: https://github.com/urllib3/urllib3/issues
+
 ## uvicorn (0.34.2)
 
 ### Licenses
@@ -41515,6 +41687,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   - `Funding`: https://github.com/sponsors/encode
   - `Homepage`: https://www.uvicorn.org/
   - `Source`: https://github.com/encode/uvicorn
+
 ## uvloop (0.21.0)
 
 ### Licenses
@@ -41752,6 +41925,7 @@ THE SOFTWARE.
 
 ### URLs
   - `github`: https://github.com/MagicStack/uvloop
+
 ## virtualenv (20.31.2)
 
 ### Licenses
@@ -41785,6 +41959,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   - `Homepage`: https://github.com/pypa/virtualenv
   - `Source`: https://github.com/pypa/virtualenv
   - `Tracker`: https://github.com/pypa/virtualenv/issues
+
 ## watchfiles (1.0.5)
 
 ### Licenses
@@ -41820,6 +41995,7 @@ SOFTWARE.
   - `Funding`: https://github.com/sponsors/samuelcolvin
   - `Homepage`: https://github.com/samuelcolvin/watchfiles
   - `Source`: https://github.com/samuelcolvin/watchfiles
+
 ## wcwidth (0.2.13)
 
 ### Licenses
@@ -41857,6 +42033,7 @@ disclaims all warranties with regard to this software.
 
 ### URLs
   - `Homepage`: https://github.com/jquast/wcwidth
+
 ## websocket-client (1.8.0)
 
 ### Licenses
@@ -42073,6 +42250,7 @@ License: `Apache Software License`
   - `Download`: https://github.com/websocket-client/websocket-client/releases
   - `Homepage`: https://github.com/websocket-client/websocket-client.git
   - `Source`: https://github.com/websocket-client/websocket-client/
+
 ## websockets (15.0.1)
 
 ### Licenses
@@ -42111,6 +42289,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   - `Funding`: https://tidelift.com/subscription/pkg/pypi-websockets?utm_source=pypi-websockets&utm_medium=referral&utm_campaign=readme
   - `Homepage`: https://github.com/python-websockets/websockets
   - `Tracker`: https://github.com/python-websockets/websockets/issues
+
 ## werkzeug (3.1.3)
 
 ### Licenses
@@ -42154,6 +42333,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   - `Donate`: https://palletsprojects.com/donate
   - `Issue Tracker`: https://github.com/pallets/werkzeug/issues/
   - `Source Code`: https://github.com/pallets/werkzeug/
+
 ## wrapt (1.17.2)
 
 ### Licenses
@@ -42191,6 +42371,7 @@ POSSIBILITY OF SUCH DAMAGE.
   - `Changelog`: https://wrapt.readthedocs.io/en/latest/changes.html
   - `Documentation`: https://wrapt.readthedocs.io/
   - `Homepage`: https://github.com/GrahamDumpleton/wrapt
+
 ## wsproto (1.2.0)
 
 ### Licenses
@@ -42221,6 +42402,7 @@ THE SOFTWARE.```
 
 ### URLs
   - `Homepage`: https://github.com/python-hyper/wsproto/
+
 ## yarl (1.20.0)
 
 ### Licenses
@@ -42442,6 +42624,7 @@ License: `Apache Software License`
   - `GitHub: issues`: https://github.com/aio-libs/yarl/issues
   - `GitHub: repo`: https://github.com/aio-libs/yarl
   - `Homepage`: https://github.com/aio-libs/yarl
+
 ## zipp (3.21.0)
 
 ### Licenses
@@ -42469,5 +42652,7 @@ IN THE SOFTWARE.
 
 ### URLs
   - `Source`: https://github.com/jaraco/zipp
+
+
 ---
 This file was automatically generated.
