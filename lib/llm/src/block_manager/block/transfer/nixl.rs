@@ -125,6 +125,8 @@ where
         append_xfer_request(src, dst, &mut src_dl, &mut dst_dl)?;
     }
 
+    debug_assert!(!src_dl.has_overlaps()? && !dst_dl.has_overlaps()?);
+
     let xfer_req =
         nixl_agent.create_xfer_req(XferOp::Write, &src_dl, &dst_dl, &nixl_agent.name(), None)?;
 

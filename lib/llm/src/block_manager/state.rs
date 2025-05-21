@@ -51,9 +51,9 @@ pub struct KvBlockManagerState<Metadata: BlockMetadata> {
     nixl_agent: Arc<Option<NixlAgent>>,
     nixl_backends: HashMap<String, Arc<nixl_sys::Backend>>,
 
-    disk_pool: Arc<Option<BlockPool<DiskStorage, Metadata>>>,
-    host_pool: Arc<Option<BlockPool<PinnedStorage, Metadata>>>,
-    device_pool: Arc<Option<BlockPool<DeviceStorage, Metadata>>>,
+    disk_pool: Option<Arc<BlockPool<DiskStorage, Metadata>>>,
+    host_pool: Option<Arc<BlockPool<PinnedStorage, Metadata>>>,
+    device_pool: Option<Arc<BlockPool<DeviceStorage, Metadata>>>,
 
     local_block_set: NixlBlockSet,
     remote_block_sets: RwLock<HashMap<WorkerID, HashMap<usize, RemoteBlocks>>>,
@@ -126,7 +126,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
         let (disk_pool, disk_blocks) = if let Some(config) = config.disk_layout {
             if nixl_agent.is_none() {
                 tracing::warn!("NIXL is disabled; will not allocate disk blocks.");
-                (Arc::new(None), None)
+                (None, None)
             } else {
                 next_block_set_idx += 1;
                 tracing::debug!("Constructing disk pool.");
@@ -139,11 +139,11 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                     cancellation_token.clone(),
                     worker_id,
                 )?;
-                (Arc::new(Some(pool)), Some(blocks))
+                (Some(Arc::new(pool)), Some(blocks))
             }
         } else {
             tracing::debug!("No disk layout provided; will not allocate disk blocks.");
-            (Arc::new(None), None)
+            (None, None)
         };
 
         // Create the host block pool if a host layout is provided
@@ -159,10 +159,10 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 cancellation_token.clone(),
                 worker_id,
             )?;
-            (Arc::new(Some(pool)), Some(blocks))
+            (Some(Arc::new(pool)), Some(blocks))
         } else {
             tracing::debug!("No host layout provided; will not allocate host blocks.");
-            (Arc::new(None), None)
+            (None, None)
         };
 
         // Create the device block pool if a device layout is provided
@@ -178,10 +178,10 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 cancellation_token.clone(),
                 worker_id,
             )?;
-            (Arc::new(Some(pool)), Some(blocks))
+            (Some(Arc::new(pool)), Some(blocks))
         } else {
             tracing::debug!("No device layout provided; will not allocate device blocks.");
-            (Arc::new(None), None)
+            (None, None)
         };
 
         // Finalize the local block set by adding NIXL metadata
@@ -414,15 +414,15 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
     }
 
     pub fn disk(&self) -> Option<&BlockPool<DiskStorage, Metadata>> {
-        self.disk_pool.as_ref().as_ref()
+        self.disk_pool.as_ref().map(|pool| pool.as_ref())
     }
 
     pub fn host(&self) -> Option<&BlockPool<PinnedStorage, Metadata>> {
-        self.host_pool.as_ref().as_ref()
+        self.host_pool.as_ref().map(|pool| pool.as_ref())
     }
 
     pub fn device(&self) -> Option<&BlockPool<DeviceStorage, Metadata>> {
-        self.device_pool.as_ref().as_ref()
+        self.device_pool.as_ref().map(|pool| pool.as_ref())
     }
 
     pub fn worker_id(&self) -> WorkerID {

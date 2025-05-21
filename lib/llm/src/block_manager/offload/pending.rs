@@ -33,11 +33,12 @@
 //! Since CUDA and NIXL transfers use completely different semantics, we implement two separate transfer managers.
 //!
 //! ## Workflow
-//! 1. A transfer request is made by calling [`TransferManager::begin_transfer`]
-//! 2. [`TransferManager::begin_transfer`] performs the transfer, and enqueues relevant data into a bounded channel.
+//! 1. A transfer request is made by calling [`TransferManager::enqueue_transfer`]
+//! 2. [`TransferManager::enqueue_transfer`] performs the transfer, and enqueues relevant data into a bounded channel.
 //! 3. A worker thread (consuming this bounded channel and enforcing rate limiting) awaits the incoming transfers.
 //! 4. After a transfer is complete, the worker thread registers the blocks with the target pool, and returns the registered blocks to the caller.
 
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::thread::spawn;
@@ -68,7 +69,7 @@ pub struct PendingTransfer<Source: Storage, Target: Storage, Metadata: BlockMeta
     /// The oneshot sender that optionally returns the registered blocks once the transfer is complete.
     completion_indicator: Option<oneshot::Sender<BlockResult<Target, Metadata>>>,
     /// The target pool that will receive the registered block.
-    target_registration_pool: Arc<Option<BlockPool<Target, Metadata>>>,
+    target_pool: Arc<BlockPool<Target, Metadata>>,
 }
 
 impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
@@ -78,13 +79,14 @@ impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
         sources: Vec<Arc<MutableBlock<Source, Metadata>>>,
         targets: Vec<MutableBlock<Target, Metadata>>,
         completion_indicator: Option<oneshot::Sender<BlockResult<Target, Metadata>>>,
-        target_registration_pool: Arc<Option<BlockPool<Target, Metadata>>>,
+        target_pool: Arc<BlockPool<Target, Metadata>>,
     ) -> Self {
+        assert_eq!(sources.len(), targets.len());
         Self {
             sources,
             targets,
             completion_indicator,
-            target_registration_pool,
+            target_pool,
         }
     }
 
@@ -92,7 +94,7 @@ impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
         let Self {
             sources,
             mut targets,
-            target_registration_pool,
+            target_pool,
             completion_indicator,
             ..
         } = self;
@@ -101,12 +103,10 @@ impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
             transfer_metadata(source, target)?;
         }
 
-        if let Some(target_registration_pool) = target_registration_pool.as_ref() {
-            let blocks = target_registration_pool.register_blocks_blocking(targets)?;
+        let blocks = target_pool.register_blocks_blocking(targets)?;
 
-            if let Some(completion_indicator) = completion_indicator {
-                completion_indicator.send(Ok(blocks))?;
-            }
+        if let Some(completion_indicator) = completion_indicator {
+            completion_indicator.send(Ok(blocks))?;
         }
 
         Ok(())
@@ -139,7 +139,7 @@ pub trait TransferManager<Source: Storage, Target: Storage, Metadata: BlockMetad
     Send + Sync
 {
     /// Begin a transfer. Blocks if the pending queue is full.
-    async fn begin_transfer(
+    async fn enqueue_transfer(
         &self,
         pending_transfer: PendingTransfer<Source, Target, Metadata>,
     ) -> Result<()>;
@@ -153,9 +153,10 @@ pub struct CudaTransferManager<Source: Storage, Target: Storage, Metadata: Block
 impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
     CudaTransferManager<Source, Target, Metadata>
 {
-    pub fn new(transfer_ctx: Arc<TransferContext>, max_depth: usize) -> Self {
-        let (tx, mut rx) =
-            mpsc::channel::<(PendingTransfer<Source, Target, Metadata>, CudaEvent)>(max_depth);
+    pub fn new(transfer_ctx: Arc<TransferContext>, max_concurrent_transfers: usize) -> Self {
+        let (tx, mut rx) = mpsc::channel::<(PendingTransfer<Source, Target, Metadata>, CudaEvent)>(
+            max_concurrent_transfers,
+        );
 
         spawn(move || {
             while let Some((pending_transfer, event)) = rx.blocking_recv() {
@@ -195,7 +196,7 @@ where
     // Check that the target block is writable.
     MutableBlock<Target, Metadata>: WritableBlock<StorageType = Target>,
 {
-    async fn begin_transfer(
+    async fn enqueue_transfer(
         &self,
         mut pending_transfer: PendingTransfer<Source, Target, Metadata>,
     ) -> Result<()> {
@@ -227,7 +228,7 @@ pub struct DiskTransferManager {
 }
 
 impl DiskTransferManager {
-    pub fn new(transfer_ctx: Arc<TransferContext>, max_size: usize) -> Self {
+    pub fn new(transfer_ctx: Arc<TransferContext>, max_concurrent_transfers: usize) -> Self {
         let (futures_tx, mut futures_rx) = mpsc::channel(1);
 
         tokio::spawn(async move {
@@ -239,7 +240,7 @@ impl DiskTransferManager {
                 tokio::select! {
                     Some(future) = futures_rx.recv() => {
                         // If we're at max size, block the worker thread on the next() call until we have capacity.
-                        while pending_transfers.len() >= max_size {
+                        while pending_transfers.len() >= max_concurrent_transfers {
                             pending_transfers.next().await;
                         }
                         // Once we have capacity, push the new future onto the queue.
@@ -276,7 +277,7 @@ where
     // Check that the target block is writable.
     MutableBlock<Target, Metadata>: WritableBlock<StorageType = Target>,
 {
-    async fn begin_transfer(
+    async fn enqueue_transfer(
         &self,
         mut pending_transfer: PendingTransfer<Source, Target, Metadata>,
     ) -> Result<()> {
@@ -301,6 +302,115 @@ where
         // Futures_(tx/rx) has a capacity of 1. If the queue worker has received another future and is awaiting next() due to a full `FuturesUnordered`,
         // this call will block until the worker has processed the prior future.
         self.futures_tx.send(Box::pin(completion_future)).await?;
+
+        Ok(())
+    }
+}
+
+/// A transfer manager that enforces a max batch size for transfers.
+pub struct TransferBatcher<Source, Target, Metadata, Manager>
+where
+    Source: Storage,
+    Target: Storage,
+    Metadata: BlockMetadata,
+    Manager: TransferManager<Source, Target, Metadata>,
+{
+    transfer_manager: Manager,
+    max_transfer_batch_size: usize,
+    _phantom: PhantomData<(Source, Target, Metadata)>,
+}
+
+impl<Source, Target, Metadata, Manager> TransferBatcher<Source, Target, Metadata, Manager>
+where
+    Source: Storage,
+    Target: Storage,
+    Metadata: BlockMetadata,
+    Manager: TransferManager<Source, Target, Metadata>,
+{
+    pub fn new(transfer_manager: Manager, max_transfer_batch_size: usize) -> Self {
+        Self {
+            transfer_manager,
+            max_transfer_batch_size,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+#[async_trait]
+impl<Source, Target, Metadata, Manager> TransferManager<Source, Target, Metadata>
+    for TransferBatcher<Source, Target, Metadata, Manager>
+where
+    Source: Storage,
+    Target: Storage,
+    Metadata: BlockMetadata,
+    Manager: TransferManager<Source, Target, Metadata>,
+{
+    async fn enqueue_transfer(
+        &self,
+        pending_transfer: PendingTransfer<Source, Target, Metadata>,
+    ) -> Result<()> {
+        // If it's smaller than the max batch size, just enqueue it.
+        if pending_transfer.sources.len() < self.max_transfer_batch_size {
+            return self
+                .transfer_manager
+                .enqueue_transfer(pending_transfer)
+                .await;
+        }
+
+        // Otherwise, we need to split the transfer into multiple smaller transfers.
+
+        let PendingTransfer {
+            mut sources,
+            mut targets,
+            completion_indicator,
+            target_pool,
+        } = pending_transfer;
+
+        let mut indicators = Vec::new();
+
+        while !sources.is_empty() {
+            let sources = sources
+                .drain(..std::cmp::min(self.max_transfer_batch_size, sources.len()))
+                .collect();
+            let targets = targets
+                .drain(..std::cmp::min(self.max_transfer_batch_size, targets.len()))
+                .collect();
+
+            // If we have a completion indicator, we need to create a new one for each sub-transfer.
+            let indicator = if completion_indicator.is_some() {
+                let (batch_tx, batch_rx) = oneshot::channel();
+                indicators.push(batch_rx);
+                Some(batch_tx)
+            } else {
+                None
+            };
+
+            let request = PendingTransfer::new(sources, targets, indicator, target_pool.clone());
+            // Enqueue our reduced transfer. This may block if the queue is full.
+            self.transfer_manager.enqueue_transfer(request).await?;
+        }
+
+        if let Some(completion_indicator) = completion_indicator {
+            tokio::spawn(async move {
+                let mut results = Vec::new();
+
+                for indicator in indicators.into_iter() {
+                    // Await each sub-transfer, and append the results to our final results.
+                    let result = match indicator.await.unwrap() {
+                        Ok(result) => result,
+                        Err(e) => {
+                            tracing::error!("Error receiving transfer results: {:?}", e);
+                            completion_indicator.send(Err(e)).unwrap();
+                            return;
+                        }
+                    };
+                    results.extend(result);
+                }
+
+                // Send the final results to the top-level completion indicator.
+                completion_indicator.send(Ok(results)).unwrap();
+            });
+        }
 
         Ok(())
     }
