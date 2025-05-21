@@ -113,14 +113,16 @@ class TRTLLMWorkerResponseOutput:
 
     @property
     def token_ids_diff(self) -> List[int]:
-        return [] if self.token_ids is None else self.token_ids[self._last_token_ids_len :]
-    
+        return (
+            [] if self.token_ids is None else self.token_ids[self._last_token_ids_len :]
+        )
+
     # Ignoring the mypy error here as this is copied from TensorRT-LLM project.
     # https://github.com/NVIDIA/TensorRT-LLM/blob/19c6e68bec891b66146a09647ee7b70230ef5f67/tensorrt_llm/executor/result.py#L68
     # TODO: Work with the TensorRT-LLM team to get this fixed.
     @property
-    def logprobs_diff(self) -> List[float]: # type: ignore
-         return [] if self.logprobs is None else self.logprobs[self._last_logprobs_len :] # type: ignore
+    def logprobs_diff(self) -> List[float]:  # type: ignore
+        return [] if self.logprobs is None else self.logprobs[self._last_logprobs_len :]  # type: ignore
 
 
 class TRTLLMWorkerResponse(BaseModel):
