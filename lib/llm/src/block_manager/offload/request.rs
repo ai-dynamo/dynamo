@@ -20,10 +20,27 @@ use crate::block_manager::block::{BlockMetadata, ImmutableBlock, MutableBlock};
 use crate::block_manager::pool::BlockPoolError;
 use crate::block_manager::storage::Storage;
 
-#[derive(PartialEq, Eq, Ord, PartialOrd)]
+/// Higher priority offloads are done first.
+/// If two offloads have the same priority, the one that was requested first is done first.
+#[derive(PartialEq, Eq)]
 pub struct OffloadRequestKey {
     pub priority: u64,
     pub timestamp: u64,
+}
+
+impl PartialOrd for OffloadRequestKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OffloadRequestKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .priority
+            .cmp(&self.priority)
+            .then(self.timestamp.cmp(&other.timestamp))
+    }
 }
 
 /// Data needed to offload a block.
