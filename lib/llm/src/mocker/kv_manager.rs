@@ -35,10 +35,15 @@
 //! ### Promote
 //! - Converts a partial block (uuid) into a full block (global block hash)
 //!
-//! ## Note
+//! ## Preemption
 //! If a Use operation fails (typically due to insufficient space), a false boolean signal
 //! is returned to the scheduler for preemption. Initial KV block allocations for new requests
 //! should not fail due to the watermark checking.
+//!
+//! ## NOTE
+//! For simplicity (or non-simplicity), reference counting is tracked manually instead of using
+//! the more idiomatic built-in Arc reference counter. This can be considered a shadow / mirror
+//! implementation of the main block manager.
 
 use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::protocols::{MoveBlock, PrefillCost, UniqueBlock};

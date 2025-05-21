@@ -164,15 +164,15 @@ impl SchedulerState {
         self.prefill_costs.remove(&uuid);
 
         // Extract the ActiveSequence from the Request enum
-        let Request::Active(active_sequence) = request else {
+        let Request::Active(mut active_sequence) = request else {
             panic!("Expected ActiveSequence in running queue")
         };
 
         // Reset the sequence and get the new sequence and signal
-        let (new_sequence, signals) = active_sequence.reset_with_signal();
+        let signals = active_sequence.reset_with_signal();
 
         // Insert the new sequence back into the requests map and add to waiting queue
-        self.requests.insert(uuid, Request::Active(new_sequence));
+        self.requests.insert(uuid, Request::Active(active_sequence));
         self.waiting.push_back(uuid);
 
         Some(signals)
@@ -305,7 +305,7 @@ impl Scheduler {
                             // Process all signals with the KvManager
                             // Handling of preemption on failure
                             if !process_signals(&mut kv_manager_guard, &signals) {
-                                sequence.partial_reset();
+                                sequence.pop();  // revert the failed generation op
 
                                 // free_signal derefs the preempted blocks
                                 let Some(free_signal) = state_guard.preempt() else {
