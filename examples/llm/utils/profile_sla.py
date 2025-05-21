@@ -28,6 +28,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import requests
 import yaml
+from scipy.interpolate import griddata
 
 DECODE_NUM_REQUESTS_RANGE = [
     1,
@@ -355,6 +356,25 @@ if __name__ == "__main__":
     parser.add_argument(
         "--itl", type=int, default=5, help="target Inter Token Latency in ms"
     )
+    # below are arguments used for interpolating TTFT and ITL under different ISL/OSL
+    parser.add_argument(
+        "--max-context-length",
+        type=int,
+        default=16384,
+        help="maximum context length supported by the served model",
+    )
+    parser.add_argument(
+        "--prefill-interpolation-granularity",
+        type=int,
+        default=16,
+        help="how many samples to benchmark to interpolate TTFT under different ISL",
+    )
+    parser.add_argument(
+        "--decode-interpolation-granularity",
+        type=int,
+        default=6,
+        help="how many samples to benchmark to interpolate ITL under different active kv cache size and decode context length",
+    )
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
@@ -379,12 +399,12 @@ if __name__ == "__main__":
     prefill_config = convert_config(config, "prefill")
     for tp_size in profile_tp_size:
         logger.info(f"Profiling prefill with TP size {tp_size}...")
+        prefill_config = set_config_tp_size(prefill_config, tp_size)
         logger.info(f"Dynamo config: {prefill_config}")
 
         work_dir = f"{args.output_dir}/prefill_tp{tp_size}"
         os.makedirs(work_dir, exist_ok=True)
 
-        prefill_config = set_config_tp_size(prefill_config, tp_size)
         prefill_config_fn = f"{work_dir}/config.yaml"
         dynamo_log_fn = f"{work_dir}/dynamo.log"
         with open(prefill_config_fn, "w") as f:
@@ -471,12 +491,12 @@ if __name__ == "__main__":
     decode_config = convert_config(config, "decode")
     for tp_size in profile_tp_size:
         logger.info(f"Profiling decode with TP size {tp_size}...")
+        decode_config = set_config_tp_size(decode_config, tp_size)
         logger.info(f"Dynamo config: {decode_config}")
 
         work_dir = f"{args.output_dir}/decode_tp{tp_size}"
         os.makedirs(work_dir, exist_ok=True)
 
-        decode_config = set_config_tp_size(decode_config, tp_size)
         decode_config_fn = f"{work_dir}/config.yaml"
         dynamo_log_fn = f"{work_dir}/dynamo.log"
         with open(decode_config_fn, "w") as f:
@@ -645,3 +665,300 @@ if __name__ == "__main__":
     logger.info(
         f"Suggested planner upper/lower bound for decode kv cache utilization: {max(0.1, selected_decode_kv_cache_utilization - 0.2):.2f}/{min(1, selected_decode_kv_cache_utilization + 0.2):.2f}"
     )
+
+    # interpolate ISL - TTFT with best prefill TP
+    best_prefill_tp = prefill_tp_size[selected_prefill_idx]
+    prefill_isl = []
+    prefill_ttft = []
+    prefill_thpt_per_gpu = []
+    logger.info(
+        f"Profiling prefill under best TP {best_prefill_tp} with different ISL..."
+    )
+    prefill_config = convert_config(config, "prefill")
+    prefill_config = set_config_tp_size(prefill_config, tp_size)
+    logger.info(f"Dynamo config: {prefill_config}")
+
+    work_dir = f"{args.output_dir}/prefill_tp{tp_size}_interpolation"
+    os.makedirs(work_dir, exist_ok=True)
+
+    prefill_config_fn = f"{work_dir}/config.yaml"
+    dynamo_log_fn = f"{work_dir}/dynamo.log"
+    with open(prefill_config_fn, "w") as f:
+        yaml.dump(prefill_config, f)
+
+    # Start the dynamo serve process
+    logger.info(f"Starting dynamo serve with TP size {tp_size}...")
+    dynamo_serve_cmd = get_dynamo_serve_cmd(prefill_config_fn)
+    with open(dynamo_log_fn, "w") as dynamo_log_f:
+        dynamo_process = subprocess.Popen(
+            dynamo_serve_cmd,
+            stdout=dynamo_log_f,
+            stderr=subprocess.STDOUT,
+            text=True,
+            preexec_fn=os.setsid,  # Use process group for clean termination
+        )
+
+    if not wait_for_server_ready(model_name, port):
+        logger.error(f"Server did not become ready, skip profiling tp={tp_size}")
+
+        for isl in range(
+            100,
+            args.max_context_length,
+            (args.max_context_length - 100) // args.prefill_interpolation_granularity,
+        ):
+            # run genai-perf
+            logger.info(f"Running genai-perf with isl {isl}")
+            genai_perf_artifact_dir = f"{work_dir}/gap_isl{isl}"
+            genai_perf_cmd = get_prefill_genai_perf_cmd(
+                isl, genai_perf_artifact_dir, model=model_name, port=port
+            )
+            gap_process = subprocess.Popen(
+                genai_perf_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            stdout, stderr = gap_process.communicate()
+            if gap_process.returncode == 0:
+                logger.info("Genai-perf profiling completed successfully")
+                logger.info(stdout)
+                gap_result = get_gap_result(genai_perf_artifact_dir)
+                ttft = gap_result["time_to_first_token"]["avg"]
+                prefill_isl.append(isl)
+                prefill_ttft.append(ttft)
+                prefill_thpt_per_gpu.append(isl / ttft / best_prefill_tp * 1000)
+            else:
+                logger.error(
+                    f"Genai-perf failed with error code: {gap_process.returncode}"
+                )
+                logger.error(f"stderr: {stderr}")
+
+    # Send SIGINT to the dynamo process to terminate it gracefully
+    os.killpg(os.getpgid(dynamo_process.pid), signal.SIGINT)
+    dynamo_process.communicate()
+
+    # Interpolate prefill_ttft vs prefill_isl with quadratic function (y=ax^2+bx+c)
+    if len(prefill_isl) > 2:
+        logger.info("Interpolating prefill TTFT and throughput vs ISL...")
+
+        # Convert to numpy arrays for easier manipulation
+        prefill_isl_np = np.array(prefill_isl)
+        prefill_ttft_np = np.array(prefill_ttft)
+        prefill_thpt_per_gpu_np = np.array(prefill_thpt_per_gpu)
+
+        # Fit quadratic functions
+        ttft_coeffs = np.polyfit(prefill_isl_np, prefill_ttft_np, 2)
+        thpt_coeffs = np.polyfit(prefill_isl_np, prefill_thpt_per_gpu_np, 2)
+
+        # Create interpolation functions
+        ttft_poly = np.poly1d(ttft_coeffs)
+        thpt_poly = np.poly1d(thpt_coeffs)
+
+        # Generate points for smooth curves
+        x_interp = np.linspace(min(prefill_isl_np), max(prefill_isl_np), 100)
+        ttft_interp = ttft_poly(x_interp)
+        thpt_interp = thpt_poly(x_interp)
+
+        # Plot TTFT vs ISL
+        plt.figure(figsize=(10, 6))
+        plt.scatter(prefill_isl_np, prefill_ttft_np, s=100, label="Measured data")
+        plt.plot(
+            x_interp,
+            ttft_interp,
+            "r-",
+            label=f"Quadratic fit: {ttft_coeffs[0]:.2e}x² + {ttft_coeffs[1]:.2e}x + {ttft_coeffs[2]:.2e}",
+        )
+
+        plt.title("Prefill TTFT vs Input Sequence Length")
+        plt.xlabel("Input Sequence Length (tokens)")
+        plt.ylabel("Time to First Token (ms)")
+        plt.grid(True)
+        plt.legend()
+
+        ttft_plot_path = f"{work_dir}/prefill_ttft_interpolation.png"
+        plt.savefig(ttft_plot_path, dpi=300)
+        logger.info(f"TTFT interpolation plot saved to {ttft_plot_path}")
+        plt.close()
+
+        # Plot Throughput vs ISL
+        plt.figure(figsize=(10, 6))
+        plt.scatter(
+            prefill_isl_np, prefill_thpt_per_gpu_np, s=100, label="Measured data"
+        )
+        plt.plot(
+            x_interp,
+            thpt_interp,
+            "g-",
+            label=f"Quadratic fit: {thpt_coeffs[0]:.2e}x² + {thpt_coeffs[1]:.2e}x + {thpt_coeffs[2]:.2e}",
+        )
+
+        plt.title("Prefill Throughput vs Input Sequence Length")
+        plt.xlabel("Input Sequence Length (tokens)")
+        plt.ylabel("Prefill throughput per GPU (tokens/s/GPU)")
+        plt.grid(True)
+        plt.legend()
+
+        thpt_plot_path = f"{work_dir}/prefill_throughput_interpolation.png"
+        plt.savefig(thpt_plot_path, dpi=300)
+        logger.info(
+            f"Prefill throughput per GPU interpolation plot saved to {thpt_plot_path}"
+        )
+        plt.close()
+    else:
+        logger.warning(
+            "Not enough data points to perform interpolation (need at least 3 points)"
+        )
+
+    # interpolate ITL - Active_KV_Cache - Decode_Context_Length with best decode TP
+    x_kv_usage = []
+    y_context_length = []
+    z_itl = []
+    best_decode_tp = decode_tp_size[selected_decode_idx]
+    logger.info(f"Profiling decode with TP size {best_decode_tp}...")
+    decode_config = set_config_tp_size(decode_config, best_decode_tp)
+    logger.info(f"Dynamo config: {decode_config}")
+
+    work_dir = f"{args.output_dir}/decode_tp{best_decode_tp}_interpolation"
+    os.makedirs(work_dir, exist_ok=True)
+
+    decode_config_fn = f"{work_dir}/config.yaml"
+    dynamo_log_fn = f"{work_dir}/dynamo.log"
+    with open(decode_config_fn, "w") as f:
+        yaml.dump(decode_config, f)
+
+    # Start the dynamo serve process
+    logger.info(f"Starting dynamo serve with TP size {tp_size}...")
+    dynamo_serve_cmd = get_dynamo_serve_cmd(decode_config_fn)
+    with open(dynamo_log_fn, "w") as dynamo_log_f:
+        dynamo_process = subprocess.Popen(
+            dynamo_serve_cmd,
+            stdout=dynamo_log_f,
+            stderr=subprocess.STDOUT,
+            text=True,
+            preexec_fn=os.setsid,  # Use process group for clean termination
+        )
+
+    if not wait_for_server_ready(model_name, port):
+        logger.error(f"Server did not become ready, skip profiling tp={tp_size}")
+
+        max_kv_tokens = get_kv_cache_size_from_dynamo_log(dynamo_log_fn)
+
+        osl = 500  # not too large to reduce ITL variance, not too small to have stable measurement
+        for isl in range(
+            100,
+            args.max_context_length - osl,
+            (args.max_context_length - osl) // args.decode_interpolation_granularity,
+        ):
+            logger.info(f"Profiling decode with isl {isl}...")
+            max_concurrency = max_kv_tokens // (isl + osl)
+            sweep_num_request = range(1, max_concurrency, max_concurrency // 5)
+            logger.info(f"Num request range: {list(sweep_num_request)}")
+
+            for num_request in sweep_num_request:
+                logger.info(f"Profiling decode with num_request {num_request}...")
+
+                # first warm-up the engine by pre-computing all prefill tokens
+                # we use the same random seed to make sure the prompt is the same
+                seed = random.randint(0, 1000000)
+                genai_perf_artifact_dir = (
+                    f"{work_dir}/gap_isl{isl}_osl{osl}_n{num_request}_warmup"
+                )
+                genai_perf_cmd = get_decode_genai_perf_cmd(
+                    isl,
+                    osl,
+                    genai_perf_artifact_dir,
+                    num_request,
+                    seed=seed,
+                    model=model_name,
+                    port=port,
+                )
+                gap_process = subprocess.Popen(
+                    genai_perf_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                gap_process.communicate()
+                # then send out the real requests, hopefully, this will skip all prefill computation
+                genai_perf_artifact_dir = (
+                    f"{work_dir}/gap_isl{isl}_osl{osl}_n{num_request}"
+                )
+                genai_perf_cmd = get_decode_genai_perf_cmd(
+                    isl,
+                    osl,
+                    genai_perf_artifact_dir,
+                    num_request,
+                    seed=seed,
+                    model=model_name,
+                    port=port,
+                )
+                gap_process = subprocess.Popen(
+                    genai_perf_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                stdout, stderr = gap_process.communicate()
+                if gap_process.returncode == 0:
+                    logger.info("Genai-perf profiling completed successfully")
+                    logger.info(stdout)
+                    gap_result = get_gap_result(genai_perf_artifact_dir)
+                    itl = gap_result["inter_token_latency"]["avg"]
+                    x_kv_usage.append((isl + osl / 2) * num_request / max_kv_tokens)
+                    y_context_length.append(isl + osl / 2)
+                    z_itl.append(itl)
+                else:
+                    logger.error(
+                        f"Genai-perf failed with error code: {gap_process.returncode}"
+                    )
+                    logger.error(f"stderr: {stderr}")
+
+        # Send SIGINT to the dynamo process to terminate it gracefully
+        os.killpg(os.getpgid(dynamo_process.pid), signal.SIGINT)
+        dynamo_process.communicate()
+
+        # Save the data points to a .npz file
+        save_path = f"{work_dir}/decode_tp{tp_size}_data.npz"
+        np.savez(
+            save_path,
+            x_kv_usage=np.array(x_kv_usage),
+            y_context_length=np.array(y_context_length),
+            z_itl=np.array(z_itl),
+        )
+        logger.info(f"Saved data points to {save_path}")
+
+        xi = np.linspace(min(x_kv_usage), max(x_kv_usage), 100)
+        yi = np.linspace(min(y_context_length), max(y_context_length), 100)
+        X, Y = np.meshgrid(xi, yi)
+        Z = griddata((x_kv_usage, y_context_length), z_itl, (X, Y), method="cubic")
+
+        fig = plt.figure(figsize=(12, 10))
+        ax = fig.add_subplot(111, projection="3d")
+
+        # Create the surface plot with customizations
+        surf = ax.plot_surface(
+            X,
+            Y,
+            Z,
+            cmap=cm.coolwarm,  # Change colormap
+            linewidth=0.2,  # Add grid lines
+            antialiased=True,
+            alpha=0.8,
+        )
+
+        # Add a color bar with custom settings
+        cbar = fig.colorbar(surf, ax=ax, shrink=0.5, aspect=5)
+        cbar.set_label("Z Value", fontsize=12)
+        cbar.ax.tick_params(labelsize=10)
+
+        # Add labels with custom font sizes
+        ax.set_xlabel("Active KV Percentage", fontsize=12)
+        ax.set_ylabel("Decode Context Length", fontsize=12)
+        ax.set_zlabel("ITL", fontsize=12)
+
+        # Set viewing angle
+        ax.view_init(elev=30, azim=45)  # elevation and azimuth angles
+        ax.grid(True)
+        ax.tick_params(axis="both", which="major", labelsize=10)
+
+        plt.savefig(f"{work_dir}/decode_tp{tp_size}.png", dpi=300, bbox_inches="tight")
