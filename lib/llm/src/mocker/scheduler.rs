@@ -13,6 +13,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Asynchronous Scheduler for LLM Request Management
+//!
+//! This module implements an asynchronous scheduler that handles three main functions:
+//! 1. Receiving new requests and placing them in the waiting queue
+//! 2. Scheduling waiting requests against available KV cache resources
+//! 3. Simulating the execution of running requests with realistic timing
+//!
+//! ## Scheduling Process
+//! The scheduler uses a watermark-based approach to determine if there's sufficient
+//! KV cache space for new requests. It also enforces a batched tokens budget to prevent
+//! oversubscription of computational resources. Only requests that can be allocated
+//! these resources are moved from waiting to running state.
+//!
+//! ## Request Simulation
+//! The simulation models two key phases:
+//! - Prefill phase: Uses a quadratic cost function: (cached_tokens + new_tokens) * new_tokens
+//! - Decode phase: Uses a cost function proportional to active KV blocks (linear)
+//!
+//! ## Resource Management
+//! The scheduler communicates with the KvManager through MoveBlock signals at each
+//! stage of request processing. When resources become constrained, it employs an
+//! LRU-based preemption strategy where the oldest running request is evicted and
+//! placed at the back of the waiting queue to be rescheduled later.
+//!
+//! ## NOTE
+//! The current prefill and decoding time simulations are not scientific at all and are WIP
+
 use crate::kv_router::protocols::ForwardPassMetrics;
 use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::kv_manager::KvManager;
@@ -243,8 +270,12 @@ impl Scheduler {
                         let mut state_guard = state_clone.lock().await;
                         let mut kv_manager_guard = kv_manager_clone.lock().await;
 
+                        // Base time needed for decoding (assumed memory bound on KV cache)
+                        let active_tokens = kv_manager_guard.num_active_blocks() * block_size;
+                        // TODO: 1024 is a dummy / magic scaling factor
+                        let mut generation_time = Duration::from_millis((active_tokens / 1024) as u64);
+
                         // Process each running request
-                        let mut total_sleep_duration = Duration::from_millis(0);
                         let uuids: Vec<Uuid> = state_guard.running.keys().cloned().collect();
                         for uuid in uuids {
                             // Check if UUID is still in running_requests, if not skip this iteration
@@ -264,12 +295,12 @@ impl Scheduler {
                             let signals = sequence.generate();
 
                             // Accumulate sleep duration based on prefill_compute if available
+                            // prefill compute = (cached_tokens + new_tokens) * new_tokens
                             let sleep_ms = if let Some(compute) = prefill_compute {
-                                (compute / 131072.0) as u64  // TODO: A magic scaling to model prefill compute
-                            } else {
-                                1  // FIXME: A dummy number to simulate ITL. Need some work.
-                            };
-                            total_sleep_duration += Duration::from_millis(sleep_ms);
+                                // TODO: 131072 is a dummy / magic scaling factor
+                                (compute / 131072.0) as u64
+                            } else { 0 };
+                            generation_time += Duration::from_millis(sleep_ms);
 
                             // Process all signals with the KvManager
                             // Handling of preemption on failure
@@ -306,8 +337,8 @@ impl Scheduler {
                         }
 
                         // Sleep once for the accumulated duration
-                        if total_sleep_duration.as_millis() > 0 {
-                            tokio::time::sleep(total_sleep_duration).await;
+                        if generation_time.as_millis() > 0 {
+                            tokio::time::sleep(generation_time).await;
                         }
                     }
                 }

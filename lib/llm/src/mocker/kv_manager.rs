@@ -13,13 +13,39 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! # KV Manager
+//! A synchronous implementation of a block manager that handles MoveBlock signals for caching KV blocks.
+//!
+//! ## Block Operations
+//! The KV manager processes four types of MoveBlock signals:
+//!
+//! ### Use
+//! - Checks if block exists in active pool → increment reference count
+//! - If in inactive pool → move to active pool
+//! - If neither → try evicting from inactive pool to make room
+//! - If inactive pool is empty → pre-empt the oldest running request
+//!
+//! ### Destroy
+//! - Removes the block from the active pool
+//!
+//! ### Deref
+//! - Decrements reference count of a block in active pool
+//! - If count reaches zero → move block to inactive pool
+//!
+//! ### Promote
+//! - Converts a partial block (uuid) into a full block (global block hash)
+//!
+//! ## Note
+//! If a Use operation fails (typically due to insufficient space), a false boolean signal
+//! is returned to the scheduler for preemption. Initial KV block allocations for new requests
+//! should not fail due to the watermark checking.
+
 use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::protocols::{MoveBlock, PrefillCost, UniqueBlock};
 use crate::mocker::sequence::ActiveSequence;
 use derive_getters::Getters;
 use std::collections::{HashMap, HashSet};
 
-/// Mock implementation of worker for testing and simulation
 #[derive(Getters)]
 pub struct KvManager {
     #[getter(copy)]
@@ -79,7 +105,8 @@ impl KvManager {
                             // Remove evicted block from all_blocks
                             self.all_blocks.remove(&evicted);
                         } else {
-                            // Return false instead of panicking
+                            // Cannot evict block, meaning no free blocks left in inactive pool
+                            // Send a signal, scheduler would expect to handle preemption upon receiving this
                             return false;
                         }
                     }
@@ -154,6 +181,16 @@ impl KvManager {
     pub fn current_capacity_perc(&self) -> f64 {
         let current = self.current_capacity() as f64;
         current / self.max_capacity as f64
+    }
+
+    /// Get the number of active blocks
+    pub fn num_active_blocks(&self) -> usize {
+        self.active_blocks.len()
+    }
+
+    /// Get the number of inactive blocks
+    pub fn num_inactive_blocks(&self) -> usize {
+        self.inactive_blocks.len()
     }
 
     /// Get the keys of inactive blocks
