@@ -701,7 +701,7 @@ if __name__ == "__main__":
 
     if not wait_for_server_ready(model_name, port):
         logger.error(f"Server did not become ready, skip profiling tp={tp_size}")
-
+    else:
         for isl in range(
             100,
             args.max_context_length,
@@ -841,7 +841,7 @@ if __name__ == "__main__":
 
     if not wait_for_server_ready(model_name, port):
         logger.error(f"Server did not become ready, skip profiling tp={tp_size}")
-
+    else:
         max_kv_tokens = get_kv_cache_size_from_dynamo_log(dynamo_log_fn)
 
         osl = 500  # not too large to reduce ITL variance, not too small to have stable measurement
