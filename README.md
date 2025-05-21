@@ -21,7 +21,7 @@ limitations under the License.
 [![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/nvidia-dynamo)
 
-| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[Support Matrix](support_matrix.md)** | **[Guides](docs/guides)** | **[Architecture and Features](docs/architecture.md)** | **[APIs](lib/bindings/python/README.md)** | **[SDK](deploy/sdk/README.md)** |
+| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[Support Matrix](docs/support_matrix.md)** | **[Guides](docs/guides)** | **[Architecture and Features](docs/architecture/architecture.md)** | **[APIs](lib/bindings/python/README.md)** | **[SDK](deploy/dynamo/sdk/README.md)** |
 
 ### 📢 **Please join us for our** [ **first Dynamo in-person meetup with vLLM and SGLang leads**](https://events.nvidia.com/nvidiadynamousermeetups) **on 6/5 (Thu) in SF!** ###
 
@@ -38,7 +38,7 @@ Built in Rust for performance and in Python for extensibility, Dynamo is fully o
 ### Installation
 
 The following examples require a few system level packages.
-Recommended to use Ubuntu 24.04 with a x86_64 CPU. See [support_matrix.md](support_matrix.md)
+Recommended to use Ubuntu 24.04 with a x86_64 CPU. See [docs/support_matrix.md](support_matrix.md)
 
 ```
 apt-get update

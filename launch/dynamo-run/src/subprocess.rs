@@ -12,7 +12,7 @@ use regex::Regex;
 use tokio::io::AsyncBufReadExt;
 
 use dynamo_llm::engines::MultiNodeConfig;
-use dynamo_llm::LocalModel;
+use dynamo_llm::local_model::LocalModel;
 use dynamo_runtime::protocols::Endpoint as EndpointId;
 
 pub mod sglang;

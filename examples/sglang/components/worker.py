@@ -36,7 +36,7 @@ from utils.protocol import DisaggPreprocessedRequest, PreprocessedRequest
 from utils.sglang import parse_sglang_args
 
 from dynamo.llm import ModelType, register_llm
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +112,7 @@ class SGLangWorker:
             sampling_params["ignore_eos"] = request.stop_conditions.ignore_eos
         return sampling_params
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: PreprocessedRequest):
         # TODO: maintain a mapping from SGLang's Ouput struct to LLMEngineOuput
         sampling_params = self._build_sampling_params(request)

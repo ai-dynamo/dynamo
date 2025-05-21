@@ -27,7 +27,7 @@ from common.utils import RequestType
 from components.kv_router import Router
 from components.worker import TensorRTLLMWorker
 
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
 logger = logging.getLogger(__name__)
@@ -143,7 +143,7 @@ class Processor(ChatProcessorMixin):
                 logger.debug(f"[preprocessor] Response: {response}")
                 yield json.loads(response)
 
-    @dynamo_endpoint(name="chat/completions")
+    @endpoint(name="chat/completions")
     async def generate_chat(self, raw_request: DynamoTRTLLMChatCompletionRequest):
         # max_tokens is deprecated, however if the max_tokens is provided instead
         # of max_completion_tokens, we will use the value as max_completion_tokens.
@@ -172,7 +172,7 @@ class Processor(ChatProcessorMixin):
         async for response in self._generate(raw_request, RequestType.CHAT):
             yield response
 
-    @dynamo_endpoint(name="completions")
+    @endpoint(name="completions")
     async def completions(self, raw_request: DynamoTRTLLMCompletionRequest):
         # min_tokens isn't currently propagated through the Rust OpenAI HTTP frontend,
         # and ignore_eos is passed through the 'nvext' field, so set both when found.

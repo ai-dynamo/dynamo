@@ -20,7 +20,7 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from utils.protocol import MultiModalRequest
 
-from dynamo.sdk import DYNAMO_IMAGE, depends, dynamo_api, service
+from dynamo.sdk import DYNAMO_IMAGE, api, depends, service
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 class Frontend:
     processor = depends(Processor)
 
-    @dynamo_api()
+    @api()
     async def generate(self, request: MultiModalRequest):
         async def content_generator():
             async for response in self.processor.generate(request.model_dump_json()):

@@ -97,14 +97,14 @@ impl Client {
             loop {
                 let kv_event = tokio::select! {
                     _ = watch_tx.closed() => {
-                        tracing::debug!("all watchers have closed; shutting down endpoint watcher for prefix: {}", prefix);
+                        tracing::debug!("all watchers have closed; shutting down endpoint watcher for prefix: {prefix}");
                         break;
                     }
                     kv_event = kv_event_rx.recv() => {
                         match kv_event {
                             Some(kv_event) => kv_event,
                             None => {
-                                tracing::debug!("watch stream has closed; shutting down endpoint watcher for prefix: {}", prefix);
+                                tracing::debug!("watch stream has closed; shutting down endpoint watcher for prefix: {prefix}");
                                 break;
                             }
                         }
@@ -118,7 +118,7 @@ impl Client {
                         if let (Ok(key), Ok(val)) = (key, val) {
                             map.insert(key.clone(), val);
                         } else {
-                            tracing::error!("Unable to parse put endpoint event; shutting down endpoint watcher for prefix: {}", prefix);
+                            tracing::error!("Unable to parse put endpoint event; shutting down endpoint watcher for prefix: {prefix}");
                             break;
                         }
                     }

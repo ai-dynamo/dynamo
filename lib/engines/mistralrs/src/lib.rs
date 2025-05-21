@@ -42,7 +42,7 @@ use dynamo_llm::protocols::openai::{
 };
 
 use dynamo_llm::engines::{EngineDispatcher, StreamingEngine};
-use dynamo_llm::LocalModel;
+use dynamo_llm::local_model::LocalModel;
 
 /// How many requests mistral will run at once in the paged attention scheduler.
 /// It actually runs 1 fewer than this.

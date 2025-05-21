@@ -214,7 +214,7 @@ def main(
             for name, endpoint in dynamo_endpoints.items():
                 bound_method = endpoint.func.__get__(class_instance)
                 # Only pass request type for now, use Any for response
-                # TODO: Handle a dynamo_endpoint not having types
+                # TODO: Handle an endpoint not having types
                 # TODO: Handle multiple endpoints in a single component
                 dynamo_wrapped_method = dynamo_endpoint(endpoint.request_type, Any)(
                     bound_method
