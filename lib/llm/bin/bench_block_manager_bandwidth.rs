@@ -14,22 +14,18 @@
 // limitations under the License.
 
 use anyhow::Result;
-use clap::{Parser};
-use dynamo_llm::{
-    block_manager::{
-        block::{BlockExt, MutableBlock},
-        KvBlockManager, KvBlockManagerConfig,
-        KvManagerLayoutConfig, KvManagerModelConfig, KvManagerRuntimeConfig, BasicMetadata,
-        BlockPool,
-        storage::{DeviceAllocator, DiskAllocator, PinnedAllocator},
-        Storage, BlockMetadata
-    },
+use clap::Parser;
+use dynamo_llm::block_manager::{
+    block::{BlockExt, MutableBlock},
+    storage::{DeviceAllocator, DiskAllocator, PinnedAllocator},
+    BasicMetadata, BlockMetadata, BlockPool, KvBlockManager, KvBlockManagerConfig,
+    KvManagerLayoutConfig, KvManagerModelConfig, KvManagerRuntimeConfig, Storage,
 };
 
-use indicatif::ProgressIterator;
-use tokio::time::sleep;
 use core::time::Duration;
+use indicatif::ProgressIterator;
 use std::time::Instant;
+use tokio::time::sleep;
 
 #[derive(Parser)]
 struct Args {
@@ -45,14 +41,17 @@ struct Args {
     #[clap(long, default_value_t = 32)]
     block_size: usize,
 
+    /// Amount of blocks per pool
     #[clap(long, default_value_t = 16)]
     num_blocks: usize,
 
+    /// Amount of blocks per transferred batch
     #[clap(long, default_value_t = 4)]
     blocks_per_batch: usize,
 
+    /// Amount of iterations
     #[clap(long, default_value_t = 100)]
-    iterations: usize
+    iterations: usize,
 }
 
 fn build_manager(args: &Args) -> Result<KvBlockManager<BasicMetadata>> {
@@ -107,10 +106,7 @@ async fn completed_block<S: Storage, Metadata: BlockMetadata>(
     pool: &BlockPool<S, Metadata>,
     tokens: Vec<u32>,
 ) -> Result<MutableBlock<S, Metadata>> {
-    let mut block =         pool.allocate_blocks(1)
-    .await?
-    .into_iter()
-    .next().unwrap();
+    let mut block = pool.allocate_blocks(1).await?.into_iter().next().unwrap();
 
     block.init_sequence(42)?;
     for token in tokens {
@@ -121,23 +117,31 @@ async fn completed_block<S: Storage, Metadata: BlockMetadata>(
 }
 
 fn get_bandwidth_gbs(latencies: Vec<Duration>, args: &Args) -> f64 {
-    let total_bytes = args.num_layers * args.inner_dim * args.block_size * args.blocks_per_batch * 2;
+    let total_bytes =
+        args.num_layers * args.inner_dim * args.block_size * args.blocks_per_batch * 2;
     let mean = latencies.iter().sum::<Duration>() / latencies.len() as u32;
-    let bandwidth = total_bytes as f64 / mean.as_nanos() as f64;
-    bandwidth
+
+    total_bytes as f64 / mean.as_nanos() as f64
 }
 
-async fn onboard_bandwidth<S: Storage, M: BlockMetadata>(manager: &KvBlockManager<M>, source: &BlockPool<S, M>, args: &Args) -> Result<()> {
+async fn onboard_bandwidth<S: Storage, M: BlockMetadata>(
+    manager: &KvBlockManager<M>,
+    source: &BlockPool<S, M>,
+    args: &Args,
+) -> Result<()> {
     let mut latencies = Vec::new();
 
     for _ in (0..args.iterations).progress() {
         let mut blocks = Vec::new();
 
-        
-
         for i in 0..args.blocks_per_batch {
-            let source_block = completed_block(&source, vec![i as u32; args.block_size]).await?;
-            let immutable_source_block = source.register_blocks(vec![source_block]).await?.into_iter().next().unwrap();
+            let source_block = completed_block(source, vec![i as u32; args.block_size]).await?;
+            let immutable_source_block = source
+                .register_blocks(vec![source_block])
+                .await?
+                .into_iter()
+                .next()
+                .unwrap();
             blocks.push(immutable_source_block);
         }
 
@@ -147,16 +151,19 @@ async fn onboard_bandwidth<S: Storage, M: BlockMetadata>(manager: &KvBlockManage
         latencies.push(duration);
     }
 
-    println!("Onboarding latency: {:?}", latencies.iter().sum::<Duration>() / latencies.len() as u32);
-    println!("Onboarding bandwidth: {:?} GB/s", get_bandwidth_gbs(latencies, args));
+    println!(
+        "Onboarding latency: {:?}",
+        latencies.iter().sum::<Duration>() / latencies.len() as u32
+    );
+    println!(
+        "Onboarding bandwidth: {:?} GB/s",
+        get_bandwidth_gbs(latencies, args)
+    );
 
     Ok(())
 }
 
-async fn benchmark(
-    manager: KvBlockManager<BasicMetadata>,
-    args: Args,
-) -> Result<()> {
+async fn benchmark(manager: KvBlockManager<BasicMetadata>, args: Args) -> Result<()> {
     println!("Warmup...");
 
     let device = manager.device().unwrap();
@@ -164,25 +171,34 @@ async fn benchmark(
     let disk = manager.disk().unwrap();
 
     for _ in 0..10 {
-        let device_block = completed_block(&device, vec![0; args.block_size]).await?;
+        let device_block = completed_block(device, vec![0; args.block_size]).await?;
 
-        let immutable_device_block = device.register_blocks(vec![device_block]).await?.into_iter().next().unwrap();
+        let immutable_device_block = device
+            .register_blocks(vec![device_block])
+            .await?
+            .into_iter()
+            .next()
+            .unwrap();
 
         sleep(Duration::from_millis(100)).await;
 
-        let disk_block = disk.match_sequence_hashes(vec![immutable_device_block.sequence_hash()?].as_slice()).await?.into_iter().next().unwrap();
+        let disk_block = disk
+            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()?].as_slice())
+            .await?
+            .into_iter()
+            .next()
+            .unwrap();
 
         let _ = manager.onboard_blocks(vec![disk_block]).await?;
-        
     }
 
     println!("Starting benchmark...");
 
     println!("=== Host ===");
-    onboard_bandwidth(&manager, &host, &args).await?;
+    onboard_bandwidth(&manager, host, &args).await?;
 
     println!("=== Disk ===");
-    onboard_bandwidth(&manager, &disk, &args).await?;
+    onboard_bandwidth(&manager, disk, &args).await?;
 
     Ok(())
 }
