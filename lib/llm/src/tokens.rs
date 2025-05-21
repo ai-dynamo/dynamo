@@ -188,7 +188,7 @@ pub enum TokenBlockError {
 ///
 /// This structure accumulates tokens until it reaches the specified `block_size`,
 /// at which point it can be [`commit`](PartialTokenBlock::commit)ted into a full [`TokenBlock`].
-#[derive(Debug)] // No Clone: intended to be unique within a sequence
+#[derive(Debug, PartialEq)] // No Clone: intended to be unique within a sequence
 pub struct PartialTokenBlock {
     tokens: Tokens,
     block_size: usize,
@@ -478,7 +478,7 @@ impl TokenBlock {
 /// - [`BlockHash`]: Hash of tokens within a single block (seeded by [`SaltHash`]).
 /// - [`SequenceHash`]: Hash combining the previous block's [`SequenceHash`] and the current
 ///   block's [`BlockHash`] (also seeded by [`SaltHash`]).
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct TokenBlockSequence {
     blocks: Vec<TokenBlock>,
     current_block: PartialTokenBlock,
