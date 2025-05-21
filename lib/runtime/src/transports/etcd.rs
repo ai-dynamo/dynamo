@@ -340,7 +340,7 @@ impl Client {
         let kvs = get_response.take_kvs();
         tracing::trace!("initial kv count: {:?}", kvs.len());
 
-        let (tx, rx) = mpsc::channel(2048);
+        let (tx, rx) = mpsc::channel(32);
 
         self.runtime.secondary().spawn(async move {
             for kv in kvs {
