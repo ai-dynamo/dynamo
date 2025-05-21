@@ -20,7 +20,7 @@
 * [Extra engine arguments](#extra-engine-arguments)
 
 
-This guide explains the`dynamo runs` command.
+This guide explains the`dynamo run` command.
 
 `dynamo-run` is a CLI tool for exploring the Dynamo components. It's also an example of how to use components from Rust. If you use the Python wheel, it's available as `dynamo run` .
 
@@ -60,8 +60,8 @@ The parameter can be the ID of a HuggingFace repository (which will be downloade
 ### Run a model from local file
 
 To run a model from local file:
--Download the model from Hugging Face
--Run the model from local file
+- Download the model from Hugging Face
+- Run the model from local file
 
 See the following sections for details.
 

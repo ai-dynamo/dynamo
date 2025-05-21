@@ -129,24 +129,6 @@ PYTHONPATH=/workspace/examples/llm python components/planner.py <arguments>
 # PYTHONPATH=/workspace/examples/llm python components/planner.py --namespace=dynamo --served-model-name=vllm --no-operation --log-dir=log/planner
 ```
 
-<<<<<<< HEAD:docs/guides/planner.md
-Planner takes the following arguments:
-* `--namespace` (str, default: "dynamo"): The namespace planner looks at
-* `--served-model-name` (str, default: "vllm"): Model name that is being served`
-* `--no-operation` (flag): Do not make any adjustments, just observe the metrics and log to tensorboard
-* `--log-dir` (str, default: None): Tensorboard logging directory
-* `--adjustment-interval` (int, default: 30): Interval in seconds between scaling adjustments
-* `--metric-pulling-interval` (int, default: 1): Interval in seconds between metric pulls
-* `--max-gpu-budget` (int, default: 8): Maximum number of GPUs to use, planner won't scale up more than this number of GPUs for prefill plus decode workers
-* `--min-gpu-budget` (int, default: 1): Minimum number of GPUs to use, planner won't scale down below this number of GPUs for prefill or decode workers
-* `--decode-kv-scale-up-threshold` (float, default: 0.9): KV cache utilization threshold to scale up decode workers
-* `--decode-kv-scale-down-threshold` (float, default: 0.5): KV cache utilization threshold to scale down decode workers
-* `--prefill-queue-scale-up-threshold` (float, default: 0.5): Queue utilization threshold to scale up prefill workers
-* `--prefill-queue-scale-down-threshold` (float, default: 0.2): Queue utilization threshold to scale down prefill workers
-* `--decode-engine-num-gpu` (int, default: 1): Number of GPUs per decode engine
-* `--prefill-engine-num-gpu` (int, default: 1): Number of GPUs per prefill engine
-=======
->>>>>>> main:docs/planner.md
 
 ### Tensorboard
 
@@ -207,15 +189,10 @@ If the last decode worker is removed, the statefile looks like:
 
 We keep the initial non-suffix entry in order to know what cmd we'll need to spin up another worker. This is the same for prefill workers as well.
 
-<<<<<<< HEAD:docs/guides/planner.md
 ``` {note}
 At the moment - planner work best if your initial replicas per worker are 1. This is because if you specify replicas > 1 when you initially start `dynamo serve`, the current implementation in `serving.py` starts each process in the same watcher.
 ```
-=======
-> [!NOTE]
-> At the moment - planner work best if your initial replicas per worker are 1. This is because if you specify replicas > 1 when you initially start `dynamo serve`, the current implementation in `serving.py` starts each process in the same watcher.
 
 ### Kubernetes Backend
 
 The Kubernetes backend works by updating the replicas count of the DynamoGraphDeployment custom resource. When the planner detects the need to scale up or down a specific worker type, it uses the Kubernetes API to patch the DynamoGraphDeployment resource, modifying the replicas count for the appropriate component. The Kubernetes operator then reconciles this change by creating or removing the necessary pods. This provides a seamless scaling experience in Kubernetes environments without requiring manual intervention.
->>>>>>> main:docs/planner.md
