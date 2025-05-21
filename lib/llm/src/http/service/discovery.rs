@@ -1,33 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::{mpsc::Receiver, Notify};
 
 use dynamo_runtime::{
-    component::{self, Component, ComponentEndpointInfo},
+    component::{self, Component, Instance},
     pipeline::{
-        network::egress::push_router::PushRouter, ManyOut, Operator,
-        RouterMode as RuntimeRouterMode, SegmentSource, ServiceBackend, SingleIn, Source,
+        network::egress::push_router::PushRouter, ManyOut, Operator, RouterMode, SegmentSource,
+        ServiceBackend, SingleIn, Source,
     },
     protocols::{self, annotated::Annotated},
     slug::Slug,
-    traits::DistributedRuntimeProvider as _,
     transports::etcd::{self, KeyValue, WatchEvent},
     DistributedRuntime,
 };
@@ -49,6 +36,7 @@ use crate::{
     protocols::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
+    protocols::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
 };
 use tracing;
 
@@ -77,15 +65,13 @@ impl ModelEntry {
     /// This does not touch it's fields so you may need to call move_from_nats on it.
     pub async fn load_mdc(
         &self,
-        endpoint_id: protocols::Endpoint,
-        etcd_client: etcd::Client,
+        etcd_client: &etcd::Client,
     ) -> anyhow::Result<ModelDeploymentCard> {
-        let kvstore: Box<dyn KeyValueStore> =
-            Box::new(EtcdStorage::new(etcd_client.clone(), endpoint_id));
+        let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
         let card_key = ModelDeploymentCard::service_name_slug(&self.name);
         match card_store
-            .load::<ModelDeploymentCard>(model_card::BUCKET_NAME, &card_key)
+            .load::<ModelDeploymentCard>(model_card::ROOT_PATH, &card_key)
             .await
         {
             Ok(Some(mdc)) => Ok(mdc),
@@ -110,9 +96,9 @@ impl ModelNetworkName {
     /// It looks like this:
     /// ns.cp.ep-694d967ca5efd804
     fn from_parts(namespace: &str, component: &str, endpoint: &str, lease_id: i64) -> Self {
-        ModelNetworkName(
-            Slug::slugify(&format!("{namespace}.{component}.{endpoint}-{lease_id:x}")).to_string(),
-        )
+        let model_root = component::MODEL_ROOT_PATH;
+        let slug = Slug::slugify(&format!("{namespace}.{component}.{endpoint}-{lease_id:x}"));
+        ModelNetworkName(format!("{model_root}/{slug}"))
     }
 
     // We can't do From<&component::Endpoint> here because we also need the lease_id
@@ -126,7 +112,7 @@ impl ModelNetworkName {
     }
 
     /// Fetch the ModelEntry from etcd.
-    pub async fn load_entry(&self, etcd_client: etcd::Client) -> anyhow::Result<ModelEntry> {
+    pub async fn load_entry(&self, etcd_client: &etcd::Client) -> anyhow::Result<ModelEntry> {
         let mut model_entries = etcd_client.kv_get(self.to_string(), None).await?;
         if model_entries.is_empty() {
             anyhow::bail!("No ModelEntry in etcd for key {self}");
@@ -145,17 +131,21 @@ impl ModelNetworkName {
     /// TODO We have potentially two for each endpoint, one Chat and one Completion.
     pub async fn load_mdc(
         &self,
-        endpoint_id: protocols::Endpoint,
-        etcd_client: etcd::Client,
+        etcd_client: &etcd::Client,
     ) -> anyhow::Result<ModelDeploymentCard> {
-        let entry = self.load_entry(etcd_client.clone()).await?;
-        entry.load_mdc(endpoint_id, etcd_client).await
+        let entry = self.load_entry(etcd_client).await?;
+        entry.load_mdc(etcd_client).await
     }
 }
 
-impl From<&ComponentEndpointInfo> for ModelNetworkName {
-    fn from(cei: &ComponentEndpointInfo) -> Self {
-        Self::from_parts(&cei.namespace, &cei.component, &cei.endpoint, cei.lease_id)
+impl From<&Instance> for ModelNetworkName {
+    fn from(cei: &Instance) -> Self {
+        Self::from_parts(
+            &cei.namespace,
+            &cei.component,
+            &cei.endpoint,
+            cei.instance_id,
+        )
     }
 }
 
@@ -165,62 +155,36 @@ impl std::fmt::Display for ModelNetworkName {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum LLMRouterMode {
-    Random,
-    RoundRobin,
-    KV,
-}
-
-impl LLMRouterMode {
-    pub fn is_kv_routing(&self) -> bool {
-        *self == LLMRouterMode::KV
-    }
-
-    pub fn as_runtime(&self) -> Option<RuntimeRouterMode> {
-        match self {
-            LLMRouterMode::RoundRobin => Some(RuntimeRouterMode::RoundRobin),
-            LLMRouterMode::Random => Some(RuntimeRouterMode::Random),
-            // Runtime router does not have KV, it's a dynamo-llm thing, not dynamo-runtime
-            LLMRouterMode::KV => None,
-        }
-    }
-}
-
 pub struct ModelWatcher {
-    prefix: String,
     manager: ModelManager,
     drt: DistributedRuntime,
-    router_mode: LLMRouterMode,
-    kv_chooser: Option<Arc<KvRouter>>,
+    router_mode: RouterMode,
+    notify_on_model: Notify,
 }
 
 impl ModelWatcher {
     pub async fn new(
-        component: Component,
+        runtime: DistributedRuntime,
         model_manager: ModelManager,
-        network_prefix: &str,
-        router_mode: LLMRouterMode,
+        router_mode: RouterMode,
     ) -> anyhow::Result<ModelWatcher> {
-        let kv_chooser = if router_mode.is_kv_routing() {
-            let selector = Box::new(DefaultWorkerSelector {});
-            let chooser = KvRouter::new(
-                component.clone(),
-                crate::DEFAULT_KV_BLOCK_SIZE,
-                Some(selector),
-            )
-            .await?;
-            Some(Arc::new(chooser))
-        } else {
-            None
-        };
         Ok(Self {
-            prefix: network_prefix.to_string(),
             manager: model_manager,
-            drt: component.drt().clone(),
+            drt: runtime,
             router_mode,
-            kv_chooser,
+            notify_on_model: Notify::new(),
         })
+    }
+
+    /// Wait until we have at least one chat completions model and return it's name.
+    pub async fn wait_for_chat_model(&self) -> String {
+        // Loop in case it gets added and immediately deleted
+        loop {
+            if let Some(model_name) = self.manager.list_chat_completions_models().first() {
+                return model_name.to_owned();
+            }
+            self.notify_on_model.notified().await
+        }
     }
 
     pub async fn watch(self: Arc<Self>, mut events_rx: Receiver<WatchEvent>) {
@@ -232,7 +196,14 @@ impl ModelWatcher {
                     let model_entry = match serde_json::from_slice::<ModelEntry>(kv.value()) {
                         Ok(model_entry) => model_entry,
                         Err(err) => {
-                            tracing::error!(%err, ?kv, "Invalid JSON in model entry");
+                            match kv.value_str() {
+                                Ok(value) => {
+                                    tracing::error!(%err, value, "Invalid JSON in model entry")
+                                }
+                                Err(value_str_err) => {
+                                    tracing::error!(original_error = %err, %value_str_err, "Invalid UTF-8 string in model entry, expected JSON")
+                                }
+                            }
                             continue;
                         }
                     };
@@ -241,12 +212,14 @@ impl ModelWatcher {
                             service_name = model_entry.name,
                             "New endpoint for existing model"
                         );
+                        self.notify_on_model.notify_waiters();
                         continue;
                     }
 
-                    match self.clone().handle_put(&model_entry).await {
+                    match self.clone().handle_put(&kv, &model_entry).await {
                         Ok(()) => {
                             tracing::info!(model_name = model_entry.name, "added model");
+                            self.notify_on_model.notify_waiters();
                         }
                         Err(e) => {
                             tracing::error!(%e, "error adding model {}", model_entry.name);
@@ -265,38 +238,49 @@ impl ModelWatcher {
         }
     }
 
-    async fn handle_delete(self: Arc<Self>, kv: &KeyValue) -> anyhow::Result<&str> {
+    /// Returns the name of the model we just deleted
+    async fn handle_delete(self: Arc<ModelWatcher>, kv: &KeyValue) -> anyhow::Result<String> {
         let key = kv.key_str()?;
-        tracing::debug!(key, "removing model");
-
-        let model_name = key.trim_start_matches(&self.prefix);
+        let model_entry = match self.manager.state.entries.lock().unwrap().remove(key) {
+            Some(entry) => entry,
+            None => {
+                anyhow::bail!("Missing ModelEntry for {key}");
+            }
+        };
+        let model_name = &model_entry.name;
+        tracing::debug!(model_name, "removing model");
 
         // Ignore the errors because model could be either type
         let _ = self.manager.remove_chat_completions_model(model_name);
         let _ = self.manager.remove_completions_model(model_name);
+        let _ = self.manager.remove_embeddings_model(model_name);
 
-        Ok(model_name)
+        // We own model_entry now so take ownership of the name
+        Ok(model_entry.name)
     }
 
     // Handles a PUT event from etcd, this usually means adding a new model to the list of served
     // models.
     //
     // If this method errors, for the near term, we will delete the offending key.
-    async fn handle_put(self: Arc<ModelWatcher>, model_entry: &ModelEntry) -> anyhow::Result<()> {
+    async fn handle_put(
+        self: Arc<ModelWatcher>,
+        kv: &KeyValue,
+        model_entry: &ModelEntry,
+    ) -> anyhow::Result<()> {
+        let key = kv.key_str()?;
         let endpoint_id = model_entry.endpoint.clone();
-        let client = self
+        let component = self
             .drt
             .namespace(&endpoint_id.namespace)?
-            .component(&endpoint_id.component)?
-            .endpoint(&endpoint_id.name)
-            .client()
-            .await?;
+            .component(&endpoint_id.component)?;
+        let client = component.endpoint(&endpoint_id.name).client().await?;
 
         let Some(etcd_client) = self.drt.etcd_client() else {
             // Should be impossible because we only get here on an etcd event
             anyhow::bail!("Missing etcd_client");
         };
-        let card = match model_entry.load_mdc(endpoint_id, etcd_client).await {
+        let card = match model_entry.load_mdc(&etcd_client).await {
             Ok(card) => {
                 tracing::debug!(card.display_name, "adding model");
                 Some(card)
@@ -307,6 +291,14 @@ impl ModelWatcher {
                 None
             }
         };
+        // We need to save the entry to know what the model is called when we delete it
+        self.manager
+            .state
+            .entries
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), model_entry.clone());
+
         match model_entry.model_type {
             ModelType::Backend => {
                 // A Backend model expects pre-processed requests meaning it's up to us whether we
@@ -329,18 +321,16 @@ impl ModelWatcher {
                 let backend = Backend::from_mdc(card.clone()).await?.into_operator();
                 let router = PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
                     client.clone(),
-                    self.router_mode.as_runtime(),
+                    self.router_mode,
                 )
                 .await?;
                 let service_backend = match self.router_mode {
-                    LLMRouterMode::Random | LLMRouterMode::RoundRobin => {
+                    RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
                         ServiceBackend::from_engine(Arc::new(router))
                     }
-                    LLMRouterMode::KV => {
-                        let Some(kv_chooser) = self.kv_chooser.clone() else {
-                            anyhow::bail!("KV routing mode with no chooser, should be unreachable");
-                        };
-                        let kv_push_router = KvPushRouter::new(router, kv_chooser);
+                    RouterMode::KV => {
+                        let chooser = self.kv_chooser_for(&model_entry.name, &component).await?;
+                        let kv_push_router = KvPushRouter::new(router, chooser);
                         ServiceBackend::from_engine(Arc::new(kv_push_router))
                     }
                 };
@@ -363,18 +353,16 @@ impl ModelWatcher {
                 let backend = Backend::from_mdc(card.clone()).await?.into_operator();
                 let router = PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
                     client,
-                    self.router_mode.as_runtime(),
+                    self.router_mode,
                 )
                 .await?;
                 let service_backend = match self.router_mode {
-                    LLMRouterMode::Random | LLMRouterMode::RoundRobin => {
+                    RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
                         ServiceBackend::from_engine(Arc::new(router))
                     }
-                    LLMRouterMode::KV => {
-                        let Some(kv_chooser) = self.kv_chooser.clone() else {
-                            anyhow::bail!("KV routing mode with no chooser, should be unreachable");
-                        };
-                        let kv_push_router = KvPushRouter::new(router, kv_chooser);
+                    RouterMode::KV => {
+                        let chooser = self.kv_chooser_for(&model_entry.name, &component).await?;
+                        let kv_push_router = KvPushRouter::new(router, chooser);
                         ServiceBackend::from_engine(Arc::new(kv_push_router))
                     }
                 };
@@ -410,8 +398,51 @@ impl ModelWatcher {
                 self.manager
                     .add_completions_model(&model_entry.name, engine)?;
             }
+            ModelType::Embedding => {
+                let push_router = PushRouter::<
+                    NvCreateEmbeddingRequest,
+                    Annotated<NvCreateEmbeddingResponse>,
+                >::from_client(client, Default::default())
+                .await?;
+                let engine = Arc::new(push_router);
+                self.manager
+                    .add_embeddings_model(&model_entry.name, engine)?;
+            }
         }
 
         Ok(())
+    }
+
+    async fn kv_chooser_for(
+        &self,
+        model_name: &str,
+        component: &Component,
+    ) -> anyhow::Result<Arc<KvRouter>> {
+        if let Some(kv_chooser) = self
+            .manager
+            .state
+            .kv_choosers
+            .lock()
+            .unwrap()
+            .get(model_name)
+        {
+            // Return early to avoid holding the lock during the await later
+            return Ok(Arc::clone(kv_chooser));
+        }
+        let selector = Box::new(DefaultWorkerSelector {});
+        let chooser = KvRouter::new(
+            component.clone(),
+            crate::DEFAULT_KV_BLOCK_SIZE,
+            Some(selector),
+        )
+        .await?;
+        let new_kv_chooser = Arc::new(chooser);
+        self.manager
+            .state
+            .kv_choosers
+            .lock()
+            .unwrap()
+            .insert(model_name.to_string(), new_kv_chooser.clone());
+        Ok(new_kv_chooser)
     }
 }

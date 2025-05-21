@@ -170,7 +170,7 @@ class Router:
 
         # Get all worker IDs from the client. This is needed because scores / metrics may not have values for all workers
         # and we want all workers to be considered in the logit calculation
-        worker_ids = self.workers_client.endpoint_ids()
+        worker_ids = self.workers_client.instance_ids()
 
         worker_logits = {}
         for worker_id in worker_ids:

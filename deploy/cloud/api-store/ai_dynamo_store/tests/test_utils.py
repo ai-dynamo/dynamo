@@ -13,7 +13,8 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-from .deployments import get_deployment_status, get_urls
+
+from ..api.utils import build_latest_revision_from_cr, get_deployment_status, get_urls
 
 
 def test_get_deployment_status():
@@ -57,3 +58,43 @@ def test_get_urls():
         }
     }
     assert get_urls(resource) == ["https://example.com"]
+
+
+def test_build_latest_revision_from_cr_minimal():
+    cr = {
+        "metadata": {
+            "uid": "u1",
+            "name": "n1",
+            "creationTimestamp": "2024-01-01T00:00:00Z",
+        },
+        "spec": {
+            "dynamoGraph": "repo:ver",
+            "services": {"svc": {}},
+            "envs": [{"name": "A", "value": "B"}],
+        },
+    }
+    rev = build_latest_revision_from_cr(cr)
+    assert rev["uid"] == "u1"
+    assert rev["name"] == "n1"
+    assert rev["targets"][0]["bento"]["repository"]["name"] == "repo"
+    assert rev["targets"][0]["bento"]["name"] == "ver"
+    assert rev["targets"][0]["config"]["services"] == {"svc": {}}
+    assert rev["targets"][0]["config"]["envs"] == [{"name": "A", "value": "B"}]
+
+
+def test_build_latest_revision_from_cr_missing_fields():
+    cr = {"spec": {}}
+    rev = build_latest_revision_from_cr(cr)
+    assert rev["uid"] == "dummy-uid"
+    assert rev["name"] == "dummy-revision"
+    assert rev["targets"][0]["bento"]["repository"]["name"] == "unknown"
+    assert rev["targets"][0]["bento"]["name"] == "unknown"
+    assert rev["targets"][0]["config"]["services"] == {}
+    assert rev["targets"][0]["config"]["envs"] == []
+
+
+def test_build_latest_revision_from_cr_bento_colonless():
+    cr = {"spec": {"dynamoGraph": "justrepo"}}
+    rev = build_latest_revision_from_cr(cr)
+    assert rev["targets"][0]["bento"]["repository"]["name"] == "unknown"
+    assert rev["targets"][0]["bento"]["name"] == "unknown"

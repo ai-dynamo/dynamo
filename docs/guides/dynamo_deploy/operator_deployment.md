@@ -121,7 +121,7 @@ Deploy your service using the Dynamo deployment command:
 export DEPLOYMENT_NAME=hello-world
 
 # Create the deployment
-dynamo deployment create $DYNAMO_TAG --no-wait -n $DEPLOYMENT_NAME
+dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME
 ```
 
 #### Managing Deployments
@@ -139,6 +139,12 @@ To get detailed information about a specific deployment:
 
 ```bash
 dynamo deployment get $DEPLOYMENT_NAME
+```
+
+To update a specific deployment:
+
+```bash
+dynamo deployment update $DEPLOYMENT_NAME [--config-file FILENAME] [--env ENV_VAR]
 ```
 
 To remove a deployment and all its associated resources:

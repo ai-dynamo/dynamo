@@ -901,3 +901,47 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 		})
 	}
 }
+
+func TestSetLwsAnnotations(t *testing.T) {
+	type args struct {
+		serviceArgs *ServiceArgs
+		deployment  *v1alpha1.DynamoComponentDeployment
+	}
+	tests := []struct {
+		name    string
+		args    args
+		wantErr bool
+		want    *v1alpha1.DynamoComponentDeployment
+	}{
+		{
+			name: "Test SetLwsAnnotations for 16 GPUs",
+			args: args{
+				serviceArgs: &ServiceArgs{
+					Resources: &Resources{
+						GPU: &[]string{"8"}[0],
+					},
+					TotalGpus: &[]int32{16}[0],
+				},
+				deployment: &v1alpha1.DynamoComponentDeployment{},
+			},
+			wantErr: false,
+			want: &v1alpha1.DynamoComponentDeployment{
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						Annotations: map[string]string{
+							"nvidia.com/deployment-type": "leader-worker",
+							"nvidia.com/lws-size":        "2",
+						},
+					},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := SetLwsAnnotations(tt.args.serviceArgs, tt.args.deployment); (err != nil) != tt.wantErr {
+				t.Errorf("SetLwsAnnotations() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}

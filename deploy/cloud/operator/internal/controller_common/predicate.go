@@ -32,6 +32,7 @@ type Config struct {
 	RestrictedNamespace string
 	// If true, assume VirtualService endpoints are HTTPS
 	VirtualServiceSupportsHTTPS bool
+	EnableLWS                   bool
 }
 
 func EphemeralDeploymentEventFilter(config Config) predicate.Predicate {

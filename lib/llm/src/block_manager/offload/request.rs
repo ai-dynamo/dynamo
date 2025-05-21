@@ -57,6 +57,11 @@ impl<S: Storage, M: BlockMetadata> PartialEq for OffloadRequest<S, M> {
 
 impl<S: Storage, M: BlockMetadata> Eq for OffloadRequest<S, M> {}
 
+pub type BlockResult<Target, Metadata> =
+    Result<Vec<ImmutableBlock<Target, Metadata>>, BlockPoolError>;
+
+/// Data needed for onboarding.
+/// Unlike offloading, we need a means to return the resulting blocks to the caller.
 pub struct OnboardRequest<Source: Storage, Target: Storage, M: BlockMetadata> {
     pub blocks: Vec<ImmutableBlock<Source, M>>,
     pub response_tx:

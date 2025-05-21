@@ -42,12 +42,16 @@ pub mod service_v2;
 
 pub use async_trait::async_trait;
 pub use axum;
+use discovery::ModelEntry;
 pub use error::ServiceHttpError;
 pub use metrics::Metrics;
 
-use crate::types::openai::{
-    chat_completions::OpenAIChatCompletionsStreamingEngine,
-    completions::OpenAICompletionsStreamingEngine,
+use crate::{
+    kv_router::KvRouter,
+    types::openai::{
+        chat_completions::OpenAIChatCompletionsStreamingEngine,
+        completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
+    },
 };
 use std::{
     collections::HashMap,
@@ -116,6 +120,15 @@ impl ModelManager {
         clients.add(model, engine)
     }
 
+    pub fn add_embeddings_model(
+        &self,
+        model: &str,
+        engine: OpenAIEmbeddingsStreamingEngine,
+    ) -> Result<(), ServiceHttpError> {
+        let mut clients = self.state.embeddings_engines.lock().unwrap();
+        clients.add(model, engine)
+    }
+
     pub fn remove_completions_model(&self, model: &str) -> Result<(), ServiceHttpError> {
         let mut clients = self.state.completion_engines.lock().unwrap();
         clients.remove(model)
@@ -123,6 +136,11 @@ impl ModelManager {
 
     pub fn remove_chat_completions_model(&self, model: &str) -> Result<(), ServiceHttpError> {
         let mut clients = self.state.chat_completion_engines.lock().unwrap();
+        clients.remove(model)
+    }
+
+    pub fn remove_embeddings_model(&self, model: &str) -> Result<(), ServiceHttpError> {
+        let mut clients = self.state.embeddings_engines.lock().unwrap();
         clients.remove(model)
     }
 
@@ -191,8 +209,11 @@ impl<E> ModelEngines<E> {
 pub struct DeploymentState {
     completion_engines: Arc<Mutex<ModelEngines<OpenAICompletionsStreamingEngine>>>,
     chat_completion_engines: Arc<Mutex<ModelEngines<OpenAIChatCompletionsStreamingEngine>>>,
+    embeddings_engines: Arc<Mutex<ModelEngines<OpenAIEmbeddingsStreamingEngine>>>,
     metrics: Arc<Metrics>,
     sse_keep_alive: Option<Duration>,
+    entries: Arc<Mutex<HashMap<String, ModelEntry>>>,
+    kv_choosers: Arc<Mutex<HashMap<String, Arc<KvRouter>>>>,
 }
 
 impl DeploymentState {
@@ -200,12 +221,29 @@ impl DeploymentState {
         Self {
             completion_engines: Arc::new(Mutex::new(ModelEngines::default())),
             chat_completion_engines: Arc::new(Mutex::new(ModelEngines::default())),
+            embeddings_engines: Arc::new(Mutex::new(ModelEngines::default())),
             metrics: Arc::new(Metrics::default()),
             sse_keep_alive: None,
+            entries: Arc::new(Mutex::new(HashMap::new())),
+            kv_choosers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    fn get_completions_engine(
+    // TODO: Remove this allow once `embeddings` is implemented in lib/llm/src/http/service/openai.rs
+    #[allow(dead_code)]
+    fn get_embeddings_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAIEmbeddingsStreamingEngine, ServiceHttpError> {
+        self.embeddings_engines
+            .lock()
+            .unwrap()
+            .get(model)
+            .cloned()
+            .ok_or(ServiceHttpError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn get_completions_engine(
         &self,
         model: &str,
     ) -> Result<OpenAICompletionsStreamingEngine, ServiceHttpError> {
@@ -217,7 +255,7 @@ impl DeploymentState {
             .ok_or(ServiceHttpError::ModelNotFound(model.to_string()))
     }
 
-    fn get_chat_completions_engine(
+    pub fn get_chat_completions_engine(
         &self,
         model: &str,
     ) -> Result<OpenAIChatCompletionsStreamingEngine, ServiceHttpError> {

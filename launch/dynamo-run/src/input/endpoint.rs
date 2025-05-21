@@ -89,7 +89,7 @@ pub async fn run(
 
             (Box::pin(fut), Some(model.card().clone()))
         }
-        EngineConfig::Dynamic(_) => {
+        EngineConfig::Dynamic => {
             // We can only get here for in=dyn out=vllm|sglang`, because vllm and sglang are a
             // subprocess that we talk to like a remote endpoint.
             // That means the vllm/sglang subprocess is doing all the work, we are idle.

@@ -14,7 +14,7 @@
 # limitations under the License.
 
 ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
-ARG BASE_IMAGE_TAG="25.03-py3"
+ARG BASE_IMAGE_TAG="25.04-py3"
 ARG RELEASE_BUILD
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -141,7 +141,11 @@ COPY --from=trtllm_wheel . /trtllm_wheel/
 # TODO: Currently, ABI compatibility issues with TRTLLM wheel and NGC PyTorch prevent us
 # from using the TRTLLM wheel in a uv venv. Once the issues are resolved, we can
 # use uv to install TensorRT-LLM wheel within the uv venv.
+# Note: TensorRT needs to be uninstalled before installing the TRTLLM wheel
+# because there might be mismatched versions of TensorRT between the NGC PyTorch
+# and the TRTLLM wheel.
 RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
+    pip uninstall -y tensorrt && \
     if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         # Install from local wheel directory in build context
         WHEEL_FILE=$(find /trtllm_wheel -name "*.whl" | head -n 1); \

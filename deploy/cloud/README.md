@@ -20,7 +20,7 @@ limitations under the License.
 This directory contains the infrastructure components required for the Dynamo cloud platform, which is used when deploying with the `dynamo deploy` CLI commands.
 
 For detailed documentation on setting up and using the Dynamo Cloud Platform, please refer to:
-- [Dynamo Cloud Platform Guide](../docs/guides/dynamo_deploy/dynamo_cloud.md)
-- [Operator Deployment Guide](../docs/guides/dynamo_deploy/operator_deployment.md)
+- [Dynamo Cloud Platform Guide](../../docs/guides/dynamo_deploy/dynamo_cloud.md)
+- [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md)
 
 For a quick start example, see [examples/hello_world/README.md#deploying-to-kubernetes-using-dynamo-cloud-and-dynamo-deploy-cli](../../examples/hello_world/README.md#deploying-to-kubernetes-using-dynamo-cloud-and-dynamo-deploy-cli)

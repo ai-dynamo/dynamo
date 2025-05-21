@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use dynamo_runtime::component::Endpoint;
+use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 
 use crate::http::service::discovery::{ModelEntry, ModelNetworkName};
@@ -36,6 +36,13 @@ impl Default for LocalModel {
 }
 
 impl LocalModel {
+    pub fn with_name_only(name: &str) -> Self {
+        LocalModel {
+            card: ModelDeploymentCard::with_name_only(name),
+            ..Default::default()
+        }
+    }
+
     pub fn card(&self) -> &ModelDeploymentCard {
         &self.card
     }
@@ -119,18 +126,19 @@ impl LocalModel {
         let Some(etcd_client) = endpoint.drt().etcd_client() else {
             anyhow::bail!("Cannot attach to static endpoint");
         };
+        self.ensure_unique(endpoint.component(), self.display_name())
+            .await?;
+
         // Store model config files in NATS object store
         let nats_client = endpoint.drt().nats_client();
         self.card.move_to_nats(nats_client.clone()).await?;
 
         // Publish the Model Deployment Card to etcd
-        let endpoint_id = endpoint.id();
-        let kvstore: Box<dyn KeyValueStore> =
-            Box::new(EtcdStorage::new(etcd_client.clone(), endpoint_id.clone()));
+        let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
         let key = self.card.slug().to_string();
         card_store
-            .publish(model_card::BUCKET_NAME, None, &key, &mut self.card)
+            .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
             .await?;
 
         // Publish our ModelEntry to etcd. This allows ingress to find the model card.
@@ -139,7 +147,7 @@ impl LocalModel {
         tracing::debug!("Registering with etcd as {network_name}");
         let model_registration = ModelEntry {
             name: self.service_name().to_string(),
-            endpoint: endpoint_id.clone(),
+            endpoint: endpoint.id(),
             model_type,
         };
         etcd_client
@@ -149,5 +157,26 @@ impl LocalModel {
                 None, // use primary lease
             )
             .await
+    }
+
+    /// Ensure that each component serves only one model.
+    /// We can have multiple instances of the same model running using the same component name
+    /// (they get load balanced, and are differentiated in etcd by their lease_id).
+    /// We cannot have multiple models with the same component name.
+    ///
+    /// Returns an error if there is already a component by this name serving a different model.
+    async fn ensure_unique(&self, component: &Component, model_name: &str) -> anyhow::Result<()> {
+        let Some(etcd_client) = component.drt().etcd_client() else {
+            // A static component is necessarily unique, it cannot register
+            return Ok(());
+        };
+        for endpoint_info in component.list_instances().await? {
+            let network_name: ModelNetworkName = (&endpoint_info).into();
+            let entry = network_name.load_entry(&etcd_client).await?;
+            if entry.name != model_name {
+                anyhow::bail!("Duplicate component. Attempt to register model {model_name} at {component}, which is already used by {network_name} running model {}.", entry.name);
+            }
+        }
+        Ok(())
     }
 }

@@ -1,24 +1,26 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. 
-All rights reserved.
-SPDX-License-Identifier: Apache-2.0
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
--->
-
 # Running Dynamo (`dynamo run`)
 
-This guide explains the`dynamo serve` command.
+* [Quickstart with pip and vllm](#quickstart-with-pip-and-vllm)
+    * [Automatically download a model from Hugging Face](#use-model-from-hugging-face)
+    * [Run a model from local file](#run-a-model-from-local-file)
+    * [Distributed system](#distributed-system)
+    * [Network names](#network-names)
+    * [KV-aware routing](#kv-aware-routing)
+* [Full usage details](#full-usage-details)
+    * [Setup](#setup)
+    * [mistral.rs](#mistralrs)
+    * [llama.cpp](#llamacpp)
+    * [Sglang](#sglang)
+    * [Vllm](#vllm)
+    * [TensorRT-LLM](#tensorrt-llm-engine)
+    * [Echo Engines](#echo-engines)
+    * [Write your own engine in Python](#write-your-own-engine-in-python)
+* [Batch mode](#batch-mode)
+* [Defaults](#defaults)
+* [Extra engine arguments](#extra-engine-arguments)
+
+
+This guide explains the`dynamo runs` command.
 
 `dynamo-run` is a CLI tool for exploring the Dynamo components. It's also an example of how to use components from Rust. If you use the Python wheel, it's available as `dynamo run` .
 
@@ -26,7 +28,7 @@ It supports these engines: mistralrs, llamacpp, sglang, vllm, and tensorrt-llm. 
 
 Usage:
 ```
-dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn://<path> [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv]
+dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv]
 ```
 
 Example: `dynamo run Qwen/Qwen3-0.6B`
@@ -72,7 +74,6 @@ To download model file:
 curl -L -o Llama-3.2-3B-Instruct-Q4_K_M.gguf "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf?download=true"
 ```
 #### Run model from local file
-
 To run the model: 
 
 *Text interface*
@@ -100,26 +101,62 @@ curl -d '{"model": "Llama-3.2-3B-Instruct-Q4_K_M", "max_completion_tokens": 2049
 
 You can run the ingress side (HTTP server and pre-processing) on one machine, for example a CPU node, and the worker on a different machine (a GPU node).
 
-You must have [etcd](https://etcd.io/) and [nats](https://nats.io) with jetstream installed and accessible from both nodes.
+You will need [etcd](https://etcd.io/) and [nats](https://nats.io) with jetstream installed and accessible from both nodes.
 
 **Node 1:** OpenAI compliant HTTP server, optional pre-processing, worker discovery:
+
 ```
-dynamo-run in=http out=dyn://llama3B_pool
+dynamo-run in=http out=dyn
 ```
 
 **Node 2:** Vllm engine. Receives and returns requests over the network:
+
 ```
-dynamo-run in=dyn://llama3B_pool out=vllm ~/llms/Llama-3.2-3B-Instruct
+dynamo-run in=dyn://llama3B.backend.generate out=vllm ~/llms/Llama-3.2-3B-Instruct
 ```
 
-This uses `etcd` to auto-discover the model and NATS to talk to it. You can run multiple workers on the same endpoint; it picks one at random each time.
-
-The `llama3B_pool` name is purely symbolic, pick anything as long as it matches the other node.
+This uses etcd to auto-discover the model and NATS to talk to it. You can
+run multiple instances on the same endpoint; it picks one based on the
+`--router-mode` (round-robin by default if left unspecified).
 
 Run `dynamo-run --help` for more options.
 
-### KV-aware routing
+### Network names
 
+The `in=dyn://` URLs have the format `dyn://namespace.component.endpoint`. For quickstart just use any string `dyn://test`, `dynamo-run` will default any missing parts for you. The pieces matter for a larger system.
+
+* *Namespace*: A pipeline. Usually a model. e.g "llama_8b". Just a name.
+* *Component*: A load balanced service needed to run that pipeline. "backend", "prefill", "decode", "preprocessor", "draft", etc. This typically has some configuration (which model to use, for example).
+* *Endpoint*: Like a URL. "generate", "load_metrics".
+* *Instance*: A process. Unique. Dynamo assigns each one a unique instance_id. The thing that is running is always an instance. Namespace/component/endpoint can refer to multiple instances.
+
+If you run two models, that is two pipelines. An exception would be if doing speculative decoding. The draft model is part of the pipeline of a bigger model.
+
+If you run two instances of the same model ("data parallel") they are the same namespace+component+endpoint but different instances. The router will spread traffic over all the instances of a namespace+component+endpoint. If you have four prefill workers in a pipeline, they all have the same namespace+component+endpoint and are automatically assigned unique instance_ids.
+
+Example 1: Data parallel load balanced, one model one pipeline two instances.
+```
+Node 1: dynamo-run in=dyn://qwen3-32b.backend.generate out=sglang /data/Qwen3-32B --tensor-parallel-size 2 --base-gpu-id 0
+Node 2: dynamo-run in=dyn://qwen3-32b.backend.generate out=sglang /data/Qwen3-32B --tensor-parallel-size 2 --base-gpu-id 2
+```
+
+Example 2: Two models, two pipelines.
+```
+Node 1: dynamo-run in=dyn://qwen3-32b.backend.generate out=vllm /data/Qwen3-32B
+Node 2: dynamo-run in=dyn://llama3-1-8b.backend.generate out=vllm /data/Llama-3.1-8B-Instruct/
+```
+
+Example 3: Different endpoints.
+
+The KV metrics publisher in VLLM adds a `load_metrics` endpoint to the current component. If the `llama3-1-8b.backend` component above is using patched vllm it will also expose `llama3-1-8b.backend.load_metrics`.
+
+Example 4: Multiple component in a pipeline
+
+In the P/D disaggregated setup you would have `deepseek-distill-llama8b.prefill.generate` (possibly multiple instance of this) and `deepseek-distill-llama8b.decode.generate`.
+
+For output it is always only `out=dyn`. This tells Dynamo to auto-discover the instances, group them by model, and load balance appropriately (depending on `--router-mode` flag). The old syntax of `dyn://...` is still accepted for backwards compatibility.
+
+### KV-aware routing
 
 **Setup**
 
@@ -153,7 +190,6 @@ To set up KV-aware routing on patched vllm:
    ```
    export LD_LIBRARY_PATH=$REPO_ROOT/target/debug/
    ```
-
 If you patched locally (instead of installing `ai-dynamo-vllm`), edit vllm's `platforms/__init__.py` to undo a patch change:
 ```
     #vllm_version = version("ai_dynamo_vllm")
@@ -171,7 +207,7 @@ dynamo-run in=dyn://dynamo.endpoint.generate out=vllm /data/llms/Qwen/Qwen3-4B
 **Start the ingress node**
 
 ```
-dynamo-run in=http out=dyn://dynamo.endpoint.generate --router-mode kv
+dynamo-run in=http out=dyn --router-mode kv
 ```
 
 The only difference from the distributed system above is `--router-mode kv`. The patched vllm announces when a KV block is created or removed. The Dynamo router run finds the worker with the best match for those KV blocks and directs the traffic to that node.
@@ -243,14 +279,12 @@ The binary is called `dynamo-run` in `target/debug`
 cd target/debug
 ```
 
-Build with `--release` for a smaller binary and better performance, but longer build times. The binary is found in `target/release`.
+Build with `--release` for a smaller binary and better performance, but longer build times. The binary will be in `target/release`.
 
 
 
 #### Defaults
-
 The input defaults to `in=text`. The output defaults to `out=mistralrs` engine, unless it is disabled with `--no-default-features` in which case vllm is used.
-
 ### Running Inference with Pre-built Engines
 
 #### mistralrs
@@ -268,7 +302,6 @@ dynamo-run in=text out=mistralrs Qwen/Qwen3-4B
 ```
 
 If you have multiple GPUs, mistral.rs does automatic tensor parallelism. You do not need to pass any extra flags to dynamo-run to enable it.
-
 
 #### llamacpp
 
@@ -290,8 +323,8 @@ dynamo-run out=llamacpp ~/llms/Llama-4-Scout-17B-16E-Instruct-UD-IQ1_S.gguf --mo
 
 If you have multiple GPUs, llama.cpp does automatic tensor parallelism. You do not need to pass any extra flags to dynamo-run to enable it.
 
-
 #### sglang
+
 The [SGLang](https://docs.sglang.ai/index.html) engine requires [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`) to be running.
 
 1. Setup the python virtual env:
@@ -482,9 +515,7 @@ The output looks like this:
 ```
 
 ### Extra engine arguments
-
 The vllm and sglang backends support passing any argument the engine accepts.
-
 Put the arguments in a JSON file:
 ```
 {
@@ -492,14 +523,10 @@ Put the arguments in a JSON file:
     "trust_remote_code": true
 }
 ```
-
 Pass it like this:
 ```
 dynamo-run out=sglang ~/llms/Llama-3.2-3B-Instruct --extra-engine-args sglang_extra.json
 ```
-
-
-
 ### Writing your own engine in Python
 
 Note: This section replaces "bring-your-own-engine".

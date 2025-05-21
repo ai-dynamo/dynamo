@@ -32,9 +32,12 @@ def parse_sglang_args(service_name, prefix) -> ServerArgs:
 
     ServerArgs.add_cli_args(parser)
     args = parser.parse_args(sglang_args)
-    args_dict = vars(args)
-    args_dict["disaggregation_bootstrap_port"] = bootstrap_port
-    args = Namespace(**args_dict)
+    if not any(
+        arg.startswith("--disaggregation-bootstrap-port") for arg in sglang_args
+    ):
+        args_dict = vars(args)
+        args_dict["disaggregation_bootstrap_port"] = bootstrap_port
+        args = Namespace(**args_dict)
     return ServerArgs.from_cli_args(args)
 
 

@@ -178,7 +178,7 @@ class ResourceAllocator:
 
         # Check if service requires GPUs
         if "gpu" in (config.get("resources") or {}):
-            num_gpus = config["resources"]["gpu"]  # type: ignore
+            num_gpus = int(config["resources"]["gpu"])  # type: ignore
             logger.info(f"GPU requirement found: {num_gpus}")
 
             # Check if we have enough GPUs

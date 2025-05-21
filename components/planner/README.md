@@ -30,7 +30,7 @@ PYTHONPATH=/workspace/examples/llm python components/planner.py --namespace <nam
 ## Backends
 
 1. `local` - uses circus to start/stop worker subprocesses
-2. `kubernetes` - uses the kubernetes API to adjust replicas of each component's resource definition. This is a work in progress and not currently available
+2. `kubernetes` - uses the kubernetes API to adjust replicas of the DynamoGraphDeployment resource, which automatically scales the corresponding worker pods up or down
 
 ## Local Backend (LocalPlanner)
 
@@ -118,10 +118,12 @@ If scaled to zero, the initial entry is kept without resources to maintain confi
 
 ### Testing
 
-For manual testing, you can use the controller_test.py file to add/remove components after you've run a serve command with `--enable-local-planner`.
+For manual testing, you can use the controller_test.py file to add/remove components after you've run a serve command on a Dynamo pipeline where the planner is linked.
 
 ## Kubernetes Backend
 
-[Coming soon]
+The Kubernetes backend works by updating the replicas count of the DynamoGraphDeployment custom resource. When the planner determines that workers need to be scaled up or down based on workload metrics, it uses the Kubernetes API to patch the DynamoGraphDeployment resource specification, changing the replicas count for the appropriate worker component. The Kubernetes operator then reconciles this change by creating or terminating the necessary pods. This provides a seamless autoscaling experience in Kubernetes environments without requiring manual intervention.
+
+The Kubernetes backend will automatically be used by Planner when your pipeline is deployed with `dynamo deployment create`. By default, the planner will run in no-op mode, which means it will monitor metrics but not take scaling actions. To enable actual scaling, you should also specify `--Planner.no-operation=false`.
 
 
