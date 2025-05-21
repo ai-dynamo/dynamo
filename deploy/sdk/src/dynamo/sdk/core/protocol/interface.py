@@ -173,9 +173,7 @@ class DynamoConfig:
     name: str | None = None
     namespace: str | None = None
     custom_lease: LeaseConfig | None = None
-    component_type: str | None = (
-        None  # Indicates if this is a meta/system component
-    )
+    component_type: str | None = None  # Indicates if this is a meta/system component
 
 
 class DeploymentTarget(ABC):
