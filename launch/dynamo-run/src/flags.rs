@@ -105,6 +105,12 @@ pub struct Flags {
     #[arg(long, default_value = "round-robin")]
     pub router_mode: RouterMode,
 
+    /// Max model context length. Reduce this if you don't have enough VRAM for the full model
+    /// context length (e.g. Llama 4).
+    /// Defaults to the model's max, which is usually model_max_length in tokenizer_config.json.
+    #[arg(long)]
+    pub context_length: Option<usize>,
+
     /// Additional engine-specific arguments from a JSON file.
     /// Contains a mapping of parameter names to values.
     #[arg(long)]

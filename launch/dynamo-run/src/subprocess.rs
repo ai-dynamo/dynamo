@@ -18,6 +18,8 @@ use dynamo_runtime::protocols::Endpoint as EndpointId;
 pub mod sglang;
 pub mod vllm;
 
+// TODO: I guess make a config object?
+#[allow(clippy::too_many_arguments)]
 pub async fn start(
     // The Python code to run
     py_script: &'static str,
@@ -27,6 +29,8 @@ pub async fn start(
     endpoint: &EndpointId,
     // How many GPUs to use
     tensor_parallel_size: u32,
+    // Max context length to allow
+    context_length: Option<usize>,
     // sglang which GPU to start from, on a multi-GPU system
     // vllm uses CUDA_VISIBLE_DEVICES
     base_gpu_id: Option<u32>,
@@ -53,6 +57,11 @@ pub async fn start(
         "--kv-block-size".to_string(),
         dynamo_llm::DEFAULT_KV_BLOCK_SIZE.to_string(),
     ];
+    if let Some(context_length) = context_length {
+        args.push("--context-length".to_string());
+        args.push(context_length.to_string());
+    }
+
     // sglang only
     if let Some(base_gpu_id) = base_gpu_id {
         args.push("--base-gpu-id".to_string());

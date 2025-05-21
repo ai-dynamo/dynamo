@@ -45,6 +45,7 @@ class Config:
     model_name: Optional[str]
     tensor_parallel_size: int
     kv_block_size: int
+    context_length: int
     extra_engine_args: str
 
 
@@ -157,6 +158,10 @@ async def init(runtime: DistributedRuntime, config: Config):
         # KV routing relies on logging KV metrics
         "disable_log_stats": False,
     }
+    if config.context_length:
+        # Usually we want it to default to the max (from tokenizer_config.json)
+        arg_map["max_model_len"] = config.context_length
+
     if config.extra_engine_args != "":
         json_map = {}
         # extra_engine_args is a filename
@@ -233,6 +238,12 @@ def cmd_line_args():
         "--kv-block-size", type=int, default=16, help="Size of a KV cache block."
     )
     parser.add_argument(
+        "--context-length",
+        type=int,
+        default=None,
+        help="Max model context length. Defaults to models max, usually model_max_length from tokenizer_config.json. Reducing this reduces VRAM requirements.",
+    )
+    parser.add_argument(
         "--extra-engine-args",
         type=str,
         default="",
@@ -263,6 +274,7 @@ def cmd_line_args():
     config.endpoint = parsed_endpoint_name
     config.tensor_parallel_size = args.tensor_parallel_size
     config.kv_block_size = args.kv_block_size
+    config.context_length = args.context_length
     config.extra_engine_args = args.extra_engine_args
 
     return config

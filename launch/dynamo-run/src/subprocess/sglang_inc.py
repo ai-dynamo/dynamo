@@ -35,6 +35,7 @@ class Config:
     base_gpu_id: int
     tensor_parallel_size: int
     kv_block_size: int
+    context_length: int
     nnodes: int
     node_rank: int
     dist_init_addr: str
@@ -92,6 +93,9 @@ async def init(runtime: DistributedRuntime, config: Config):
         "base_gpu_id": config.base_gpu_id,
         "page_size": config.kv_block_size,
     }
+    if config.context_length:
+        arg_map["context_length"] = config.context_length
+
     if config.dist_init_addr != "":
         arg_map["trust_remote_code"] = True
         arg_map["nnodes"] = config.nnodes
@@ -165,6 +169,12 @@ def cmd_line_args():
         "--kv-block-size", type=int, default=16, help="Size of a KV cache block."
     )
     parser.add_argument(
+        "--context-length",
+        type=int,
+        default=None,
+        help="Max model context length. Defaults to models max, usually model_max_length from tokenizer_config.json. Reducing this reduces VRAM requirements.",
+    )
+    parser.add_argument(
         "--nnodes", type=int, default=1, help="The number of machines SGLang will use"
     )
     parser.add_argument(
@@ -211,6 +221,7 @@ def cmd_line_args():
     config.base_gpu_id = args.base_gpu_id
     config.tensor_parallel_size = args.tensor_parallel_size
     config.kv_block_size = args.kv_block_size
+    config.context_length = args.context_length
     config.nnodes = args.nnodes
     config.node_rank = args.node_rank
     config.dist_init_addr = args.dist_init_addr

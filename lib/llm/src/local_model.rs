@@ -27,6 +27,10 @@ const DEFAULT_NAME: &str = "dynamo";
 pub struct LocalModel {
     full_path: PathBuf,
     card: ModelDeploymentCard,
+
+    /// The max context the engine will allow us sending to the model.
+    /// If not set this defaults to the engine's configured maximum.
+    pub context_length: Option<usize>,
 }
 
 impl Default for LocalModel {
@@ -34,6 +38,7 @@ impl Default for LocalModel {
         LocalModel {
             full_path: PathBuf::new(),
             card: ModelDeploymentCard::with_name_only(DEFAULT_NAME),
+            context_length: None,
         }
     }
 }
@@ -115,7 +120,11 @@ impl LocalModel {
         let mut card = ModelDeploymentCard::load(&model_config_path).await?;
         card.set_name(&model_name);
 
-        Ok(LocalModel { full_path, card })
+        Ok(LocalModel {
+            full_path,
+            card,
+            ..Default::default()
+        })
     }
 
     /// Attach this model the endpoint. This registers it on the network
