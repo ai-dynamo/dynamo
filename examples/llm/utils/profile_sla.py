@@ -28,6 +28,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import requests
 import yaml
+from matplotlib import cm
 from scipy.interpolate import griddata
 
 DECODE_NUM_REQUESTS_RANGE = [
