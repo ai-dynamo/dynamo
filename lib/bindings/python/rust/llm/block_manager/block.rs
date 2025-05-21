@@ -164,8 +164,9 @@ impl Block {
 #[pymethods]
 impl Block {
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
-    fn __dlpack__(
+    fn __dlpack__<'py>(
         &self,
+        py: Python<'py>,
         stream: Option<PyObject>,
         max_version: Option<PyObject>,
         dl_device: Option<PyObject>,
@@ -191,30 +192,28 @@ impl Block {
             dtype: self.dtype.clone(),
             device_id: self.device_id,
         });
-        let py_capsule = Python::with_gil(|py| manager_ctx.into_py(py));
+        let py_capsule = manager_ctx.into_py(py);
         Ok(py_capsule)
     }
 
-    fn __dlpack_device__(&self) -> PyResult<Py<PyTuple>> {
-        let dlpack_device = Python::with_gil(|py| {
-            let device_type_list = py.eval(c_str!("[('CPU', 1), ('CUDA', 2), ('CPU_PINNED', 3), ('OPENCL', 4), ('VULKAN', 7), ('METAL', 8), ('VPI', 9), ('ROCM', 10)]"), None, None).unwrap();
-            let device_type_enum = py
-                .import("enum")
-                .unwrap()
-                .getattr("Enum")
-                .unwrap()
-                .call1(("DLDeviceType", device_type_list))
-                .unwrap();
-            let block = self.inner.lock().unwrap();
-            let device_type = match &*block {
-                BlockType::Pinned(_) => device_type_enum.getattr("CPU_PINNED").unwrap(),
-                BlockType::Device(_) => device_type_enum.getattr("CUDA").unwrap(),
-            };
-            let device_id = self.device_id.into_py(py).into_bound(py);
-            let device = vec![device_type, device_id];
-            PyTuple::new(py, device).unwrap().unbind()
-        });
-        Ok(dlpack_device)
+    #[pyo3(signature = ())]
+    fn __dlpack_device__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let device_type_list = py.eval(c_str!("[('CPU', 1), ('CUDA', 2), ('CPU_PINNED', 3), ('OPENCL', 4), ('VULKAN', 7), ('METAL', 8), ('VPI', 9), ('ROCM', 10)]"), None, None).unwrap();
+        let device_type_enum = py
+            .import("enum")
+            .unwrap()
+            .getattr("Enum")
+            .unwrap()
+            .call1(("DLDeviceType", device_type_list))
+            .unwrap();
+        let block = self.inner.lock().unwrap();
+        let device_type = match &*block {
+            BlockType::Pinned(_) => device_type_enum.getattr("CPU_PINNED").unwrap(),
+            BlockType::Device(_) => device_type_enum.getattr("CUDA").unwrap(),
+        };
+        let device_id = self.device_id.into_py(py).into_bound(py);
+        let device = vec![device_type, device_id];
+        PyTuple::new(py, device)
     }
 }
 

@@ -14,8 +14,6 @@
 // limitations under the License.
 
 #![cfg(feature = "block-manager")]
-// Silence warnings about deprecated features (like pyo3::IntoPy::into_py)
-#![allow(deprecated)]
 
 use super::*;
 use pyo3::PyResult;
