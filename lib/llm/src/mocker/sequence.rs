@@ -17,16 +17,27 @@ use crate::mocker::protocols::{MoveBlock, UniqueBlock};
 use crate::tokens::{TokenBlockSequence, Tokens};
 use derive_getters::Getters;
 use rand::random;
+use uuid;
 
 /// Create unique blocks from a TokenBlockSequence
-fn create_unique_blocks_from_sequence(tokens: &TokenBlockSequence) -> Vec<UniqueBlock> {
+fn create_unique_blocks_from_sequence(
+    tokens: &TokenBlockSequence,
+    uuid: Option<uuid::Uuid>,
+    block_size: usize,
+) -> Vec<UniqueBlock> {
     let mut unique_blocks: Vec<UniqueBlock> = tokens
         .blocks()
         .iter()
         .map(|block| UniqueBlock::FullBlock(block.sequence_hash()))
         .collect();
 
-    unique_blocks.push(UniqueBlock::default());
+    // Only push the partial block if tokens count isn't a multiple of block_size
+    if tokens.total_tokens() % block_size != 0 {
+        unique_blocks.push(match uuid {
+            Some(uuid) => UniqueBlock::PartialBlock(uuid),
+            None => UniqueBlock::default(),
+        });
+    }
     unique_blocks
 }
 
@@ -70,7 +81,7 @@ impl ActiveSequence {
         let num_input_tokens = tokens.len();
 
         let tokens = Tokens::from(tokens).into_sequence(block_size, None);
-        let unique_blocks = create_unique_blocks_from_sequence(&tokens);
+        let unique_blocks = create_unique_blocks_from_sequence(&tokens, None, block_size);
         let creation_signal = Some(MoveBlock::Use(unique_blocks.clone(), None));
 
         Self {
@@ -107,26 +118,29 @@ impl ActiveSequence {
 
     /// Push a token to the sequence
     pub fn push(&mut self, token: u32) -> Option<Vec<MoveBlock>> {
-        let new_block_index_maybe = self.tokens.append(token).expect("Token push failed.");
+        self.tokens.append(token).expect("Token push failed.");
         self.generated_tokens += 1;
-        new_block_index_maybe?;
 
-        // Replace last partial block with full block, and make Promotion signal
-        let mut signals = Vec::new();
-        let Some(UniqueBlock::PartialBlock(uuid)) = self.unique_blocks.pop() else {
-            panic!("Expected last block to be a PartialBlock");
-        };
-        let last_block_hash = self.tokens.last_complete_block().unwrap().sequence_hash();
-        self.unique_blocks
-            .push(UniqueBlock::FullBlock(last_block_hash));
-        signals.push(MoveBlock::Promote(uuid, last_block_hash));
+        if self.len() % self.block_size != 1 {
+            return None;
+        }
 
         // Add a partial block for the first token in a new partial sequence
         // Send Use signal (to allocate space for this new generation block)
+        let mut signals = Vec::new();
+
+        // Replace last partial block with full block if it exists
+        if let Some(UniqueBlock::PartialBlock(uuid)) = self.unique_blocks.last().cloned() {
+            let last_block_hash = self.tokens.last_complete_block().unwrap().sequence_hash();
+            self.unique_blocks.pop();
+            self.unique_blocks
+                .push(UniqueBlock::FullBlock(last_block_hash));
+            signals.push(MoveBlock::Promote(uuid, last_block_hash));
+        }
+
         let new_partial_block = UniqueBlock::default();
         self.unique_blocks.push(new_partial_block.clone());
         signals.push(MoveBlock::Use(vec![new_partial_block], None));
-
         Some(signals)
     }
 
@@ -171,50 +185,47 @@ impl ActiveSequence {
 
     /// Free all blocks, generating appropriate signals for each block type
     pub fn free_signal(&self) -> Vec<MoveBlock> {
-        let mut signals = Vec::new();
-
-        // Collect blocks to deref based on type
-        match self.unique_blocks.last() {
-            Some(UniqueBlock::PartialBlock(uuid)) => {
-                // All blocks except the last are full blocks, last is partial
-                let full = self.unique_blocks[..self.unique_blocks.len() - 1].to_vec();
-                let partial = vec![UniqueBlock::PartialBlock(*uuid)];
-
-                // Add Destroy event for partial block first if it exists
-                if !partial.is_empty() {
-                    signals.push(MoveBlock::Destroy(partial));
+        self.unique_blocks
+            .iter()
+            .rev()
+            .map(|block| match block {
+                UniqueBlock::PartialBlock(uuid) => {
+                    MoveBlock::Destroy(vec![UniqueBlock::PartialBlock(*uuid)])
                 }
-
-                // Then add Deref event for full blocks
-                if !full.is_empty() {
-                    signals.push(MoveBlock::Deref(full));
+                UniqueBlock::FullBlock(hash) => {
+                    MoveBlock::Deref(vec![UniqueBlock::FullBlock(*hash)])
                 }
-            }
-            _ => {
-                // All blocks are full blocks
-                if !self.unique_blocks.is_empty() {
-                    signals.push(MoveBlock::Deref(self.unique_blocks.clone()));
-                }
-            }
-        }
-
-        signals
+            })
+            .collect()
     }
 
     /// Reset the sequence to its initial state and return the free signals from freeing current blocks
+    /// maintaining the uuid of the last partial block
     pub fn reset_with_signal(&mut self) -> Vec<MoveBlock> {
+        let free_signal = self.free_signal();
+
         self.tokens.truncate(self.num_input_tokens).unwrap();
-        self.unique_blocks = create_unique_blocks_from_sequence(&self.tokens);
+        self.unique_blocks =
+            create_unique_blocks_from_sequence(&self.tokens, None, self.block_size);
         self.generated_tokens = 0;
 
-        self.free_signal()
+        free_signal
     }
 
     /// Pops last token in the sequence.
     pub fn pop(&mut self) {
         self.tokens.pop();
         self.generated_tokens = self.generated_tokens.saturating_sub(1);
-        self.unique_blocks = create_unique_blocks_from_sequence(&self.tokens);
+
+        // Reverts to the last full block
+        if self.tokens.total_tokens() % self.block_size == 0
+            && matches!(
+                self.unique_blocks.last(),
+                Some(UniqueBlock::PartialBlock(_))
+            )
+        {
+            self.unique_blocks.pop();
+        }
     }
 }
 
@@ -253,22 +264,22 @@ mod tests {
         let signal_16 = signal_16.unwrap();
         assert_eq!(signal_16.len(), 2);
 
-        // First signal should be Promote for the previous block
-        match &signal_16[0] {
-            MoveBlock::Promote(uuid, _) => {
-                // The uuid is generated dynamically, so we just check it exists
-                let _ = uuid;
-            }
-            _ => panic!("Expected Promote signal as first signal"),
-        }
-
         // Second signal should be Use for new partial block
         match &signal_16[1] {
             MoveBlock::Use(blocks, _) => {
                 assert_eq!(blocks.len(), 1);
                 assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
             }
-            _ => panic!("Expected Use signal as second signal"),
+            _ => panic!("Expected Use signal as first signal"),
+        }
+
+        // First signal should be Promote for the previous block
+        match &signal_16[0] {
+            MoveBlock::Promote(uuid, _) => {
+                // The uuid is generated dynamically, so we just check it exists
+                let _ = uuid;
+            }
+            _ => panic!("Expected Promote signal as second signal"),
         }
 
         // Verify state after pushing tokens
@@ -295,6 +306,8 @@ mod tests {
         );
 
         // Reset partial block on seq1 and push back token 16
+        seq1.push(17);
+        seq1.pop();
         seq1.pop();
         seq1.push(16);
 
@@ -369,7 +382,16 @@ mod tests {
         let signals_second = seq.generate();
         assert_eq!(signals_second.len(), 2);
 
-        // First signal should be Promote
+        // First signal should be Use for new partial block
+        match &signals_second[1] {
+            MoveBlock::Use(blocks, _) => {
+                assert_eq!(blocks.len(), 1);
+                assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
+            }
+            _ => panic!("Expected Use signal as second signal after second token"),
+        }
+
+        // Second signal should be Promote
         match &signals_second[0] {
             MoveBlock::Promote(uuid, hash) => {
                 // The uuid and hash values are generated dynamically, so we just check the event type
@@ -377,15 +399,6 @@ mod tests {
                 let _ = hash;
             }
             _ => panic!("Expected Promote signal as first signal after second token"),
-        }
-
-        // Second signal should be Use for new partial block
-        match &signals_second[1] {
-            MoveBlock::Use(blocks, _) => {
-                assert_eq!(blocks.len(), 1);
-                assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
-            }
-            _ => panic!("Expected Use signal as second signal after second token"),
         }
 
         // Generate fourth token - should not trigger new signals as it's adding to partial block

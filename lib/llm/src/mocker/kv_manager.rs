@@ -135,6 +135,9 @@ impl KvManager {
                 for hash in hashes.iter().rev() {
                     // Decrement reference count and check if we need to move to inactive
                     if let Some(ref_count) = self.active_blocks.get_mut(hash) {
+                        if *ref_count == 0 {
+                            panic!("Negative reference count would be encountered after Deref.");
+                        }
                         *ref_count -= 1;
 
                         // If reference count reaches zero, remove from active and move to inactive

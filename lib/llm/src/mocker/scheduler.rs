@@ -272,8 +272,8 @@ impl Scheduler {
 
                         // Base time needed for decoding (assumed memory bound on KV cache)
                         let active_tokens = kv_manager_guard.num_active_blocks() * block_size;
-                        // TODO: 1024 is a dummy / magic scaling factor
-                        let mut generation_time = Duration::from_millis((active_tokens / 1024) as u64);
+                        // TODO: 2 is a dummy / magic scaling factor
+                        let mut generation_time = Duration::from_micros((active_tokens / 2) as u64);
 
                         // Process each running request
                         let uuids: Vec<Uuid> = state_guard.running.keys().cloned().collect();
@@ -297,10 +297,10 @@ impl Scheduler {
                             // Accumulate sleep duration based on prefill_compute if available
                             // prefill compute = (cached_tokens + new_tokens) * new_tokens
                             let sleep_ms = if let Some(compute) = prefill_compute {
-                                // TODO: 131072 is a dummy / magic scaling factor
-                                (compute / 131072.0) as u64
+                                // TODO: 1024 is a dummy / magic scaling factor
+                                (compute / 1024.0) as u64
                             } else { 0 };
-                            generation_time += Duration::from_millis(sleep_ms);
+                            generation_time += Duration::from_micros(sleep_ms);
 
                             // Process all signals with the KvManager
                             // Handling of preemption on failure
@@ -435,11 +435,6 @@ fn process_signals(
     for signal in signals {
         if kv_manager_guard.process(signal) {
             continue;
-        }
-
-        // Verify we have exactly one signal
-        if signals.len() != 1 {
-            panic!("Failed signal is Invalid");
         }
 
         // Check we have a Use signal with blocks
