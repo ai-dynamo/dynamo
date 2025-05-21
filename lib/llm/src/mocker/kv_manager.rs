@@ -154,7 +154,11 @@ impl KvManager {
                 let hash_block = UniqueBlock::FullBlock(*hash);
 
                 let Some(ref_count) = self.active_blocks.remove(&uuid_block) else {
-                    panic!("Cannot promote non-existent block.");
+                    let in_all_blocks = self.all_blocks.contains(&uuid_block);
+                    panic!(
+                        "Missing active block for promotion: {:?}. Block still exists: {}",
+                        uuid_block, in_all_blocks
+                    );
                 };
 
                 // Replace with hash block, keeping the same reference count

@@ -96,6 +96,10 @@ impl ActiveSequence {
         }
     }
 
+    pub fn extra_tokens(&self) -> usize {
+        self.len() % self.block_size
+    }
+
     pub fn len(&self) -> usize {
         self.tokens.total_tokens()
     }
@@ -208,6 +212,7 @@ impl ActiveSequence {
         self.unique_blocks =
             create_unique_blocks_from_sequence(&self.tokens, None, self.block_size);
         self.generated_tokens = 0;
+        self.creation_signal = Some(MoveBlock::Use(self.unique_blocks.clone(), None));
 
         free_signal
     }
@@ -218,12 +223,7 @@ impl ActiveSequence {
         self.generated_tokens = self.generated_tokens.saturating_sub(1);
 
         // Reverts to the last full block
-        if self.tokens.total_tokens() % self.block_size == 0
-            && matches!(
-                self.unique_blocks.last(),
-                Some(UniqueBlock::PartialBlock(_))
-            )
-        {
+        if self.tokens.total_tokens() % self.block_size == 0 {
             self.unique_blocks.pop();
         }
     }
@@ -288,9 +288,12 @@ mod tests {
         assert_eq!(seq1.len() % seq1.block_size(), 1);
 
         // Create another sequence with block size 16 initialized with tokens [0..17]
-        let extended_tokens: Vec<u32> = (0..17).collect();
+        let extended_tokens: Vec<u32> = (0..16).collect();
         let (mut seq2, _) =
             ActiveSequence::new_with_signal(extended_tokens, 100, Some(16), Some(256));
+        seq2.push(16);
+        seq2.pop();
+        seq2.push(16);
 
         // Simplified assertions
         assert_eq!(

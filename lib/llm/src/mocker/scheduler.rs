@@ -144,6 +144,7 @@ impl SchedulerState {
 
     /// Remove a UUID and its associated Request from collections.
     fn complete(&mut self, uuid: &Uuid) {
+        // println!("Request {} will complete", uuid);
         self.running.remove(uuid);
         self.requests.remove(uuid);
         self.prefill_costs.remove(uuid);
