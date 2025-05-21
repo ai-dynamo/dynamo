@@ -35,9 +35,7 @@ DEVICE_NUM_BLOCKS = 16
 DEVICE_ID = 0
 
 
-@pytest.fixture
-def block_manager():
-    """Pytest fixture for creating a BlockManager instance."""
+def new_block_manager():
     return BlockManager(
         WORKER_ID,
         NUM_LAYER,
@@ -49,6 +47,11 @@ def block_manager():
         DEVICE_NUM_BLOCKS,
         DEVICE_ID,
     )
+
+
+@pytest.fixture
+def block_manager():
+    return new_block_manager()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -111,12 +114,12 @@ async def test_cpu_block_access(block_manager: BlockManager):
     tensors = [torch.from_dlpack(b) for b in py_blocks]
     for tensor in tensors:
         assert tensor.get_device() == -1  # CPU
-        assert tensor.shape == (1, NUM_LAYER, PAGE_SIZE, INNER_DIM)
+        assert tensor.shape == (1, NUM_LAYER, OUTER_DIM, PAGE_SIZE, INNER_DIM)
         assert tensor.dtype == TORCH_DTYPE
     # print(tensors)
     for tensor in tensors:
-        tensor[0][0][0][0] = 1.0
-        tensor[0][NUM_LAYER - 1][PAGE_SIZE - 1][INNER_DIM - 1] = 1.0
+        tensor[0][0][0][0][0] = 1.0
+        tensor[0][NUM_LAYER - 1][OUTER_DIM - 1][PAGE_SIZE - 1][INNER_DIM - 1] = 1.0
     # print(tensors)
     py_blocks_ = block_list.to_list()
     assert py_blocks is not py_blocks_
@@ -138,12 +141,12 @@ async def test_gpu_block_access(block_manager: BlockManager):
     tensors = [torch.from_dlpack(b) for b in py_blocks]
     for tensor in tensors:
         assert tensor.get_device() == DEVICE_ID  # GPU
-        assert tensor.shape == (1, NUM_LAYER, PAGE_SIZE, INNER_DIM)
+        assert tensor.shape == (1, NUM_LAYER, OUTER_DIM, PAGE_SIZE, INNER_DIM)
         assert tensor.dtype == TORCH_DTYPE
     # print(tensors)
     for tensor in tensors:
-        tensor[0][0][0][0] = 1.0
-        tensor[0][NUM_LAYER - 1][PAGE_SIZE - 1][INNER_DIM - 1] = 1.0
+        tensor[0][0][0][0][0] = 1.0
+        tensor[0][NUM_LAYER - 1][OUTER_DIM - 1][PAGE_SIZE - 1][INNER_DIM - 1] = 1.0
     # print(tensors)
     py_blocks_ = block_list.to_list()
     assert py_blocks is not py_blocks_
@@ -166,20 +169,20 @@ async def test_block_list_iteration(block_manager: BlockManager):
     for i in range(block_count):
         block = block_list[i]
         tensor = torch.from_dlpack(block)
-        tensor[0][0][0][0] = 1.0 + i
+        tensor[0][0][0][0][0] = 1.0 + i
     # Test __iter__() and __next__()
     idx = 1.0
     for block in block_list:
         tensor = torch.from_dlpack(block)
-        assert tensor[0][0][0][0] == idx
-        tensor[0][0][0][0] += 0.5
+        assert tensor[0][0][0][0][0] == idx
+        tensor[0][0][0][0][0] += 0.5
         idx += 1.0
     assert idx == 1.0 + block_count
     # Test __iter__() should reset current index
     idx = 1.0
     for block in block_list:
         tensor = torch.from_dlpack(block)
-        assert tensor[0][0][0][0] == idx + 0.5
+        assert tensor[0][0][0][0][0] == idx + 0.5
         idx += 1.0
     assert idx == 1.0 + block_count
 
@@ -192,22 +195,32 @@ async def test_block_copy_g1_g2(block_manager: BlockManager):
     # Populate host block with unique values
     host_tensor = torch.from_dlpack(host_block_list[0])
     for i in range(NUM_LAYER):
-        for j in range(PAGE_SIZE):
-            for k in range(INNER_DIM):
-                host_tensor[0][i][j][k] = i * PAGE_SIZE * INNER_DIM + j * INNER_DIM + k
+        for j in range(OUTER_DIM):
+            for k in range(PAGE_SIZE):
+                for w in range(INNER_DIM):
+                    host_tensor[0][i][j][k][w] = (
+                        i * OUTER_DIM * PAGE_SIZE * INNER_DIM
+                        + j * PAGE_SIZE * INNER_DIM
+                        + k * INNER_DIM
+                        + w
+                    )
     # Copy host block to device block after permuting
-    permute_dims = (0, 2, 3, 1)
+    permute_dims = (0, 2, 4, 3, 1)
     device_tensor_ = torch.from_dlpack(device_block_list[0]).permute(*permute_dims)
     device_tensor_.copy_(host_tensor.permute(*permute_dims))
     # Assert device block is contiguous and updated in block manager
     device_tensor = torch.from_dlpack(device_block_list[0])
     for i in range(NUM_LAYER):
-        for j in range(PAGE_SIZE):
-            for k in range(INNER_DIM):
-                assert (
-                    device_tensor[0][i][j][k]
-                    == i * PAGE_SIZE * INNER_DIM + j * INNER_DIM + k
-                )
+        for j in range(OUTER_DIM):
+            for k in range(PAGE_SIZE):
+                for w in range(INNER_DIM):
+                    assert (
+                        device_tensor[0][i][j][k][w]
+                        == i * OUTER_DIM * PAGE_SIZE * INNER_DIM
+                        + j * PAGE_SIZE * INNER_DIM
+                        + k * INNER_DIM
+                        + w
+                    )
     # Set host block to zero and assert updated in block manager
     host_tensor_ = torch.from_dlpack(host_block_list[0]).permute(*permute_dims)
     host_tensor_.zero_()
@@ -216,22 +229,25 @@ async def test_block_copy_g1_g2(block_manager: BlockManager):
     host_tensor_.copy_(device_tensor_)
     # Assert host block is updated in block manager
     for i in range(NUM_LAYER):
-        for j in range(PAGE_SIZE):
-            for k in range(INNER_DIM):
-                assert (
-                    host_tensor[0][i][j][k]
-                    == i * PAGE_SIZE * INNER_DIM + j * INNER_DIM + k
-                )
+        for j in range(OUTER_DIM):
+            for k in range(PAGE_SIZE):
+                for w in range(INNER_DIM):
+                    assert (
+                        device_tensor[0][i][j][k][w]
+                        == i * OUTER_DIM * PAGE_SIZE * INNER_DIM
+                        + j * PAGE_SIZE * INNER_DIM
+                        + k * INNER_DIM
+                        + w
+                    )
 
 
 async def main():
     await test_block_manager_initialization()
-
-    # todo: revise these tests to index into the block via block_id, layer_id, outer_id (k/v)
-    # await test_cpu_block_access()
-    # await test_gpu_block_access()
-    # await test_block_list_iteration()
-    # await test_block_copy_g1_g2()
+    # TODO: revise these tests to index into the block via block_id, layer_id, outer_id (k/v)
+    await test_cpu_block_access(new_block_manager())
+    await test_gpu_block_access(new_block_manager())
+    await test_block_list_iteration(new_block_manager())
+    await test_block_copy_g1_g2(new_block_manager())
 
 
 if __name__ == "__main__":

@@ -109,16 +109,18 @@ impl ToTensor for DlPackTensor {
 
     fn shape_and_strides(&self) -> ShapeAndStrides {
         let mutable_block = self.block.lock().unwrap();
-        let (num_blocks, num_layers, page_size, inner_dim) = match &*mutable_block {
+        let (num_blocks, num_layers, num_outer_dims, page_size, inner_dim) = match &*mutable_block {
             BlockType::Pinned(block) => (
                 block.num_blocks(),
                 block.num_layers(),
+                block.num_outer_dims(),
                 block.page_size(),
                 block.inner_dim(),
             ),
             BlockType::Device(block) => (
                 block.num_blocks(),
                 block.num_layers(),
+                block.num_outer_dims(),
                 block.page_size(),
                 block.inner_dim(),
             ),
@@ -126,6 +128,7 @@ impl ToTensor for DlPackTensor {
         let shape_i64: Vec<i64> = vec![
             num_blocks as i64,
             num_layers as i64,
+            num_outer_dims as i64,
             page_size as i64,
             inner_dim as i64,
         ];
