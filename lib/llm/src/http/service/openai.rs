@@ -357,17 +357,10 @@ async fn list_models_openai(
         .as_secs();
     let mut data = Vec::new();
 
-    let models: HashSet<String> = state
-        .manager()
-        .list_chat_completions_models()
-        .into_iter()
-        .chain(state.manager().list_completions_models())
-        .chain(state.manager().list_embeddings_models())
-        .collect();
-
-    for model_id in models {
+    let models: HashSet<String> = state.manager().model_display_names();
+    for model_name in models {
         data.push(ModelListing {
-            id: model_id.clone(),
+            id: model_name.clone(),
             object: "object",
             created,                        // Where would this come from? The GGUF?
             owned_by: "nvidia".to_string(), // Get organization from GGUF

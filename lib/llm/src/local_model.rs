@@ -149,7 +149,7 @@ impl LocalModel {
         let network_name = ModelNetworkName::from_local(endpoint, etcd_client.lease_id());
         tracing::debug!("Registering with etcd as {network_name}");
         let model_registration = ModelEntry {
-            name: self.service_name().to_string(),
+            name: self.display_name().to_string(),
             endpoint: endpoint.id(),
             model_type,
         };

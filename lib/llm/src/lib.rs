@@ -29,6 +29,7 @@ pub mod hub;
 pub mod key_value_store;
 pub mod kv_router;
 pub use kv_router::DEFAULT_KV_BLOCK_SIZE;
+pub mod local_model;
 pub mod mocker;
 pub mod model_card;
 pub mod model_type;
@@ -39,9 +40,6 @@ pub mod request_template;
 pub mod tokenizers;
 pub mod tokens;
 pub mod types;
-
-mod local_model;
-pub use local_model::LocalModel;
 
 #[cfg(feature = "block-manager")]
 pub mod block_manager;

@@ -13,6 +13,7 @@ use crate::{
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
     },
 };
+use std::collections::HashSet;
 use std::sync::RwLock;
 use std::{
     collections::HashMap,
@@ -60,6 +61,14 @@ impl ModelManager {
     pub fn has_model_any(&self, model: &str) -> bool {
         self.chat_completion_engines.read().unwrap().contains(model)
             || self.completion_engines.read().unwrap().contains(model)
+    }
+
+    pub fn model_display_names(&self) -> HashSet<String> {
+        self.list_chat_completions_models()
+            .into_iter()
+            .chain(self.list_completions_models())
+            .chain(self.list_embeddings_models())
+            .collect()
     }
 
     pub fn list_chat_completions_models(&self) -> Vec<String> {

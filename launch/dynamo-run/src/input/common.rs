@@ -46,14 +46,11 @@ pub async fn prepare_engine(
                 anyhow::bail!("Cannot be both static mode and run with dynamic discovery.");
             };
             let model_manager = Arc::new(ModelManager::new());
-            let watch_obj = Arc::new(
-                ModelWatcher::new(
-                    distributed_runtime,
-                    model_manager.clone(),
-                    dynamo_runtime::pipeline::RouterMode::RoundRobin,
-                )
-                .await?,
-            );
+            let watch_obj = Arc::new(ModelWatcher::new(
+                distributed_runtime,
+                model_manager.clone(),
+                dynamo_runtime::pipeline::RouterMode::RoundRobin,
+            ));
             let models_watcher = etcd_client.kv_get_and_watch_prefix(MODEL_ROOT_PATH).await?;
             let (_prefix, _watcher, receiver) = models_watcher.dissolve();
 

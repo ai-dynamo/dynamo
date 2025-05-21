@@ -23,6 +23,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-llm = { workspace = true }
 

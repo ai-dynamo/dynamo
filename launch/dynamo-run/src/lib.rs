@@ -5,7 +5,7 @@ use std::{future::Future, pin::Pin};
 use std::{io::Read, sync::Arc, time::Duration};
 
 use anyhow::Context;
-use dynamo_llm::{backend::ExecutionContext, engines::StreamingEngine, LocalModel};
+use dynamo_llm::{backend::ExecutionContext, engines::StreamingEngine, local_model::LocalModel};
 use dynamo_runtime::{CancellationToken, DistributedRuntime};
 
 mod flags;

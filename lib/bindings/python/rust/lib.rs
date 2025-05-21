@@ -111,9 +111,10 @@ fn register_llm<'p>(
     let model_name = model_name.map(|n| n.to_string());
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         // Download from HF, load the ModelDeploymentCard
-        let mut local_model = llm_rs::LocalModel::prepare(&inner_path, None, model_name)
-            .await
-            .map_err(to_pyerr)?;
+        let mut local_model =
+            llm_rs::local_model::LocalModel::prepare(&inner_path, None, model_name)
+                .await
+                .map_err(to_pyerr)?;
 
         // Advertise ourself on etcd so ingress can find us
         local_model

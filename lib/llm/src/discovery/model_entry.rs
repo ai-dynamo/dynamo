@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use dynamo_runtime::protocols;
 use dynamo_runtime::transports::etcd;
+use dynamo_runtime::{protocols, slug::Slug};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -28,6 +28,11 @@ pub struct ModelEntry {
 }
 
 impl ModelEntry {
+    /// Slugified display name for use in etcd and NATS
+    pub fn slug(&self) -> Slug {
+        Slug::from_string(&self.name)
+    }
+
     pub fn requires_preprocessing(&self) -> bool {
         matches!(self.model_type, ModelType::Backend)
     }
@@ -40,7 +45,7 @@ impl ModelEntry {
     ) -> anyhow::Result<ModelDeploymentCard> {
         let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
-        let card_key = ModelDeploymentCard::service_name_slug(&self.name);
+        let card_key = self.slug();
         match card_store
             .load::<ModelDeploymentCard>(model_card::ROOT_PATH, &card_key)
             .await

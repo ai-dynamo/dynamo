@@ -14,7 +14,7 @@
     * [Vllm](#vllm)
     * [TensorRT-LLM](#tensorrt-llm-engine)
     * [Echo Engines](#echo-engines)
-    * [Write your own engine in Python](#write-your-own-engine-in-python)
+    * [Writing your own engine in Python](#writing-your-own-engine-in-python)
 * [Batch mode](#batch-mode)
 * [Defaults](#defaults)
 * [Extra engine arguments](#extra-engine-arguments)

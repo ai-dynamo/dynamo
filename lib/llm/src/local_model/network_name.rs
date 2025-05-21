@@ -32,6 +32,15 @@ impl ModelNetworkName {
         )
     }
 
+    pub fn from_entry(entry: &ModelEntry, lease_id: i64) -> Self {
+        Self::from_parts(
+            &entry.endpoint.namespace,
+            &entry.endpoint.component,
+            &entry.endpoint.name,
+            lease_id,
+        )
+    }
+
     /// Fetch the ModelEntry from etcd.
     pub async fn load_entry(&self, etcd_client: &etcd::Client) -> anyhow::Result<ModelEntry> {
         let mut model_entries = etcd_client.kv_get(self.to_string(), None).await?;
