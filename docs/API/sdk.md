@@ -17,6 +17,14 @@ limitations under the License.
 
 # Dynamo SDK
 
+# Table of Contents
+
+- [Introduction](#introduction)
+- [Installation](#installation)
+- [Core Concepts](#core-concepts)
+- [Writing a Service](#writing-a-service)
+- [Configuring a Service](#configuring-a-service)
+- [Composing Services into an Graph](#composing-services-into-an-graph)
 ## Introduction
 
 Dynamo is a flexible and performant distributed inferencing solution for large-scale deployments. It is an ecosystem of tools, frameworks, and abstractions that makes the design, customization, and deployment of frontier-level models onto datacenter-scale infrastructure easy to reason about and optimized for your specific inferencing workloads. Dynamo's core is written in Rust and contains a set of well-defined Python bindings. See Python Bindings](./python_bindings.md).
@@ -75,7 +83,14 @@ class ServiceA:
         self.engine = await initialize_model_engine(self.model_name)
         print(f"ServiceA initialized with model: {self.model_name}")
 
-    @dynamo_endpoint()
+    @async_on_shutdown
+    async def async_shutdown(self):
+        # Clean up resources
+        if self.engine:
+            await self.engine.shutdown()
+            print("ServiceA engine shut down")
+
+    @endpoint()
     async def generate(self, request: ChatCompletionRequest):
         # Call dependent service
         processed_request = await self.service_b.preprocess(request)
@@ -90,8 +105,8 @@ Dynamo follows a class-based architecture similar to BentoML making it intuitive
 1. Class attributes for dependencies using `depends()`
 2. An `__init__` method for standard initialization
 3. Optional lifecycle hooks like `@async_on_start` and `@async_on_shutdown`
-4. Endpoints defined with `@dynamo_endpoint()`. Optionally, an endpoint can be given a name
-   via `@dynamo_endpoint("my_endpoint_name")`, but otherwise defaults to the name of the
+4. Endpoints defined with `@endpoint()`. Optionally, an endpoint can be given a name
+   via `@endpoint("my_endpoint_name")`, but otherwise defaults to the name of the
    function being decorated if omitted.
 
 This approach provides a clean separation of concerns and makes the service structure easy to understand.
@@ -154,6 +169,19 @@ async def async_init(self):
 This is especially useful for:
 - Initializing external connections
 - Setting up runtime resources that require async operations
+
+#### `@async_on_shutdown`
+The `@async_on_shutdown` hook is called when the service is shutdown handles cleanup.
+
+```python
+@async_on_shutdown
+async def async_shutdown(self):
+    if self._engine_context is not None:
+        await self._engine_context.__aexit__(None, None, None)
+    print("VllmWorkerRouterLess shutting down")
+```
+
+This ensures resources are properly released, preventing memory leaks and making sure external connections are properly closed. This is helpful to clean up vLLM engines that have been started outside of the main process.
 
 ### Configuring a Service
 

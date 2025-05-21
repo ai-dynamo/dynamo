@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from components.planner import start_planner  # type: ignore[attr-defined]
 from dynamo.planner.defaults import PlannerDefaults
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, dynamo_context, endpoint, service
 from dynamo.sdk.core.protocol.interface import ComponentType
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
@@ -109,7 +109,7 @@ class Planner:
         await start_planner(self.runtime, self.args)
         logger.info("Planner started")
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: RequestType):
         """Dummy endpoint to satisfy that each component has an endpoint"""
         yield "mock endpoint"

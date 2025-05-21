@@ -25,7 +25,7 @@ from common.protocol import Tokens
 from components.worker import TensorRTLLMWorker
 
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
 logger = logging.getLogger(__name__)
@@ -209,7 +209,7 @@ class Router:
 
         return best_worker_id, worker_scores.get(best_worker_id, 0.0)
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: Tokens) -> AsyncIterator[WorkerId]:
         if self.indexer is None or self.metrics_aggregator is None:
             yield "_0.0"

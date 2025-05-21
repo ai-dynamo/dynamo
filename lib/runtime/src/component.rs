@@ -63,9 +63,6 @@ pub use client::{Client, InstanceSource};
 /// An instance is namespace+component+endpoint+lease_id and must be unique.
 pub const INSTANCE_ROOT_PATH: &str = "instances";
 
-/// The root etcd path for ModelEntry
-pub const MODEL_ROOT_PATH: &str = "models";
-
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportType {

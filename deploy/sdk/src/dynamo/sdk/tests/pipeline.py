@@ -20,7 +20,7 @@
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from dynamo.sdk import depends, dynamo_endpoint, service
+from dynamo.sdk import depends, endpoint, service
 from dynamo.sdk.core.protocol.interface import DynamoTransport
 
 """
@@ -68,7 +68,7 @@ class Backend:
     def __init__(self) -> None:
         print("Starting backend")
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, req: RequestType):
         """Generate tokens."""
         req_text = req.text
@@ -77,7 +77,7 @@ class Backend:
         for token in text.split():
             yield f"Backend: {token}"
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate_v2(self, req: RequestType):
         """Generate tokens."""
         req_text = req.text
@@ -98,7 +98,7 @@ class Backend2:
     def __init__(self) -> None:
         print("Starting backend2")
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, req: RequestType):
         """Forward requests to backend."""
 
@@ -121,7 +121,7 @@ class Middle:
     def __init__(self) -> None:
         print("Starting middle")
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, req: RequestType):
         """Forward requests to backend."""
         req_text = req.text
@@ -155,7 +155,7 @@ class Frontend:
     def __init__(self) -> None:
         print("Starting frontend")
 
-    @dynamo_endpoint(transports=[DynamoTransport.HTTP])
+    @endpoint(transports=[DynamoTransport.HTTP])
     async def generate(self, request: RequestType):
         """Stream results from the pipeline."""
         print(f"Frontend received: {request.text}")
