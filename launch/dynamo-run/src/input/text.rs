@@ -122,7 +122,13 @@ async fn main_loop(
         };
 
         // Call the model
-        let mut stream = engine.generate(Context::new(req)).await?;
+        let mut stream = match engine.generate(Context::new(req)).await {
+            Ok(stream) => stream,
+            Err(err) => {
+                tracing::error!(%err, "Request failed.");
+                continue;
+            }
+        };
 
         // Stream the output to stdout
         let mut stdout = std::io::stdout();
