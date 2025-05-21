@@ -121,7 +121,7 @@ The prefill queue and NIXL-based KV transfer design in Dynamo naturally allows r
 
 #### Auto-Discovery for new workers
 
-In Dynamo, we use etcd (a distributed key-value pair store) as a way to register and discover new components. When a new decode/aggregated worker starts, it adds its endpoint information to `etcd` allowing the router to discover it and route requests to it. For the KV-cache transfer process, newly added decode workers put memory descriptors of their kv cache (used in NIXL transfer) in etcd. Newly added prefill workers also register with `etcd` for discovery and simply start pulling prefill requests from the global prefill queue after they spin up. Prefill workers lazy-pull the descriptors when they start serving a remote prefill request for the first time.
+In Dynamo, we use `etcd` (a distributed key-value pair store) as a way to register and discover new components. When a new decode/aggregated worker starts, it adds its endpoint information to `etcd` allowing the router to discover it and route requests to it. For the KV-cache transfer process, newly added decode workers put memory descriptors of their KV cache (used in NIXL transfer) in `etcd`. Newly added prefill workers also register with `etcd` for discovery and simply start pulling prefill requests from the global prefill queue after they spin up. Prefill workers lazy-pull the descriptors when they start serving a remote prefill request for the first time.
 
 You can watch this happen live by running the following:
 

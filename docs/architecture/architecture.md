@@ -50,7 +50,7 @@ To address the growing demands of distributed inference serving, NVIDIA introduc
 
 ## High level architecture and key benefits
 
-The following diagram outlines Dynamo's high-level architecture. To enable large-scale distributed and disaggregated inference serving, Dynamo includes four key features:
+The following diagram outlines Dynamo's high-level architecture. To enable large-scale distributed and disaggregated inference serving, Dynamo includes five key features:
 
 - [Dynamo Disaggregated Serving](disagg_serving.md)
 - [Dynamo Smart Router](kv_cache_routing.md)
