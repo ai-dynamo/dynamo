@@ -74,7 +74,7 @@ To download model file:
 curl -L -o Llama-3.2-3B-Instruct-Q4_K_M.gguf "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf?download=true"
 ```
 #### Run model from local file
-To run the model: 
+To run the model:
 
 *Text interface*
 ```
@@ -160,14 +160,14 @@ For output it is always only `out=dyn`. This tells Dynamo to auto-discover the i
 
 **Setup**
 
-Currently, only patched vllm supports KV-aware routing. 
+Currently, only patched vllm supports KV-aware routing.
 
 To set up KV-aware routing on patched vllm:
 
 1. Ensure that `etcd` and `nats` (see [Quickstart with pip and vllm](#quickstart-with-pip-and-vllm)) are running and accessible from all nodes.
 1. Create a virtualenv: `uv venv kvtest` and source its `activate`.
 1. Use `pip` to **either**:
-   1. Install Dynamo's vllm branch: 
+   1. Install Dynamo's vllm branch:
       ```
       uv pip install ai-dynamo-vllm
       ```
@@ -176,17 +176,17 @@ To set up KV-aware routing on patched vllm:
       ```
       uv pip install vllm==0.8.4
       ```
-      And then patch it: 
+      And then patch it:
       ```
       cd kvtest/lib/python3.12/site-packages
       patch -p1 < $REPO_ROOT/container/deps/vllm/vllm_v0.8.4-dynamo-kv-disagg-patch.patch
       ```
-1. Build the C bindings: 
+1. Build the C bindings:
    ```
    cd $REPO_ROOT/lib/bindings/c
    cargo build`.
    ```
-1. Put the library you just built on library path: 
+1. Put the library you just built on library path:
    ```
    export LD_LIBRARY_PATH=$REPO_ROOT/target/debug/
    ```

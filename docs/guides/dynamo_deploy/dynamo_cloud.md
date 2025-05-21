@@ -43,7 +43,7 @@ Before getting started with the Dynamo cloud platform, ensure you have:
 - Helm installed (version 3.0 or later)
 
 ```{tip}
-Don't have a Kubernetes cluster? Check out our [Minikube setup guide](./minikube.md) to set up a local environment! 
+Don't have a Kubernetes cluster? Check out our [Minikube setup guide](./minikube.md) to set up a local environment!
 ```
 
 ## Building Docker Images for Dynamo Cloud Components

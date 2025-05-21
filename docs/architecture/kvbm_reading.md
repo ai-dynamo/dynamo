@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. 
+SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
 All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
@@ -18,6 +18,6 @@ limitations under the License.
 
 # KVBM Further Reading
 
-- [vLLM](https://docs.vllm.ai/en/latest/design/automatic_prefix_caching.html)   
-- [SGLang](https://github.com/sgl-project/sglang/pull/2693)   
-- [EMOGI](https://arxiv.org/abs/2006.06890) 
+- [vLLM](https://docs.vllm.ai/en/latest/design/automatic_prefix_caching.html)
+- [SGLang](https://github.com/sgl-project/sglang/pull/2693)
+- [EMOGI](https://arxiv.org/abs/2006.06890)

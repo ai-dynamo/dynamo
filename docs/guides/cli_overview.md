@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. 
+SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
 All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
@@ -104,7 +104,7 @@ dynamo deploy [PIPELINE]
 - `--config-file` or `-f` - Configuration file path. Defaults to *None*; required.
 - `--wait` - Whether or not to wait for deployment to be ready. Defaults to wait.
   `--no-wait`
-- `--timeout` - The number of seconds that can elapse before deployment times out; measured in seconds. Defaults to 3600. 
+- `--timeout` - The number of seconds that can elapse before deployment times out; measured in seconds. Defaults to 3600.
 - `--endpoint` or `-e` - The Dynamo Cloud endpoint where the pipeline should be deployed. Defaults to *None*; required.
 - `--help` or `-h` - Display in-line help for `dynamo deploy`.
 
