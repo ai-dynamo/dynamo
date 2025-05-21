@@ -56,7 +56,7 @@ pub struct Client {
     // This is me
     pub endpoint: Endpoint,
     // These are the remotes I know about
-    pub instances: Arc<InstanceSource>,
+    pub instance_source: Arc<InstanceSource>,
 }
 
 #[derive(Clone, Debug)]
@@ -70,7 +70,7 @@ impl Client {
     pub(crate) async fn new_static(endpoint: Endpoint) -> Result<Self> {
         Ok(Client {
             endpoint,
-            instances: Arc::new(InstanceSource::Static),
+            instance_source: Arc::new(InstanceSource::Static),
         })
     }
 
@@ -86,7 +86,7 @@ impl Client {
 
         Ok(Client {
             endpoint,
-            instances: instance_source,
+            instance_source,
         })
     }
 
@@ -100,7 +100,7 @@ impl Client {
     }
 
     pub fn instances(&self) -> Vec<Instance> {
-        match self.instances.as_ref() {
+        match self.instance_source.as_ref() {
             InstanceSource::Static => vec![],
             InstanceSource::Dynamic(watch_rx) => watch_rx.borrow().clone(),
         }
@@ -113,7 +113,7 @@ impl Client {
     /// Wait for at least one Instance to be available for this Endpoint
     pub async fn wait_for_instances(&self) -> Result<Vec<Instance>> {
         let mut instances: Vec<Instance> = vec![];
-        if let InstanceSource::Dynamic(mut rx) = self.instances.as_ref().clone() {
+        if let InstanceSource::Dynamic(mut rx) = self.instance_source.as_ref().clone() {
             // wait for there to be 1 or more endpoints
             loop {
                 instances = rx.borrow_and_update().to_vec();
@@ -129,7 +129,7 @@ impl Client {
 
     /// Is this component know at startup and not discovered via etcd?
     pub fn is_static(&self) -> bool {
-        matches!(self.instances.as_ref(), InstanceSource::Static)
+        matches!(self.instance_source.as_ref(), InstanceSource::Static)
     }
 
     async fn get_or_create_dynamic_instance_source(

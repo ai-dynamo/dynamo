@@ -199,7 +199,7 @@ impl AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<LLMEngineOutput>>, Er
         &self,
         request: SingleIn<BackendInput>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        match self.inner.client.instances.as_ref() {
+        match self.inner.client.instance_source.as_ref() {
             InstanceSource::Static => self.inner.r#static(request).await,
             InstanceSource::Dynamic(_) => {
                 let instance_id = self.chooser.find_best_match(&request.token_ids).await?;
