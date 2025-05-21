@@ -35,7 +35,7 @@ python sin_synth.py \
     --osl2 150
 ```
 
-This will generate a [mooncake style trace](https://github.com/kvcache-ai/Mooncake) with
+This generates a [mooncake style trace](https://github.com/kvcache-ai/Mooncake) with
 * duration = 600 seconds
 * isl/osl = 3000/150
 * request rate varies sinusoidally from 0.75 to 3 requests with a period of 150 seconds
@@ -76,7 +76,7 @@ and open `http://localhost:6006` in your browser. The following metrics are avai
 * `num_decode_workers`: the number of decode workers
 * `num_gpu`: the total number of GPUs used
 
-The benchmark results will be printed out in terminal 3 that runs the `genai-perf` command.
+The benchmark results are printed out in terminal 3 that runs the `genai-perf` command.
 
 In this example, we use a fixed 2p2d engine as baseline. Planner provides a `--no-operation` flag to watch and log the metrics without making any adjustments:
 
@@ -92,7 +92,7 @@ genai-perf profile --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B -m deeps
 
 The below two figures show the performance comparison between planner and the baseline 2p2d deployment. Planner achieves 1.5x speedup while using 7.4% less GPU resources.
 
-![Planner Performance Comparison](./images/planner_perf.png)
+![Two bar charts comparing 2P2D and Planner. Planner shows lower GPU usage and lower average sequence latency.](../../images/planner_perf.png)
 
-![Planner Tensorboard](./images/planner_tensorboard.png)
+![Planner Tensorboard; four line graphs comparing two runs: 2p2d_rr5-20_2 and planner_rr5-20.](../../images/planner_tensorboard.png)
 

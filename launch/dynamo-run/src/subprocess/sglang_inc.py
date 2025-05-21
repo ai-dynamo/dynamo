@@ -84,13 +84,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     """
     Instantiate and serve
     """
-    component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
-
-    endpoint = component.endpoint(config.endpoint)
-    await register_llm(
-        ModelType.Backend, endpoint, config.model_path, config.model_name
-    )
 
     arg_map = {
         "model_path": config.model_path,
@@ -123,6 +116,14 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     engine_args = ServerArgs(**arg_map)
     engine_client = sglang.Engine(server_args=engine_args)
+
+    component = runtime.namespace(config.namespace).component(config.component)
+    await component.create_service()
+
+    endpoint = component.endpoint(config.endpoint)
+    await register_llm(
+        ModelType.Backend, endpoint, config.model_path, config.model_name
+    )
 
     # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
     # after the lease is revoked

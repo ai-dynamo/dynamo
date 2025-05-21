@@ -27,7 +27,7 @@ from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
 )
 
-from dynamo.sdk import async_on_start, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ class VllmBaseWorker:
         finally:
             loop.stop()
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: vLLMGenerateRequest):
         gen = self.engine_client.generate(
             prompt=request.prompt,
