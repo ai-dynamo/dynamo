@@ -192,7 +192,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
         # MAX_JOBS set to avoid running OOM on vllm-flash-attn build, this can
         # significantly impact the overall build time. Each job can take up
         # to -16GB RAM each, so tune according to available system memory.
-        MAX_JOBS=${VLLM_MAX_JOBS} uv pip install . --no-build-isolation ; \
+        MAX_JOBS=${VLLM_MAX_JOBS} uv pip install -vv . --no-build-isolation ; \
     # Handle x86_64: Download wheel, unpack, setup for later steps
     else \
         python -m pip download --only-binary=:all: --no-deps --dest /tmp/vllm vllm==v${VLLM_REF} && \
