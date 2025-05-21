@@ -962,4 +962,5 @@ if __name__ == "__main__":
         ax.grid(True)
         ax.tick_params(axis="both", which="major", labelsize=10)
 
+        logger.info(f"Saving ITL surface plot to {work_dir}/decode_tp{tp_size}.png")
         plt.savefig(f"{work_dir}/decode_tp{tp_size}.png", dpi=300, bbox_inches="tight")
