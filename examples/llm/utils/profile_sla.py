@@ -29,6 +29,7 @@ import numpy as np
 import requests
 import yaml
 from matplotlib import cm
+from mpl_toolkits.mplot3d import Axes3D  # type: ignore
 from scipy.interpolate import griddata
 
 DECODE_NUM_REQUESTS_RANGE = [
@@ -852,8 +853,8 @@ if __name__ == "__main__":
         ):
             logger.info(f"Profiling decode with isl {isl}...")
             max_concurrency = max_kv_tokens // (isl + osl)
-            sweep_num_request = range(1, max_concurrency, max_concurrency // 5)
-            logger.info(f"Num request range: {list(sweep_num_request)}")
+            sweep_num_request = list(range(1, max_concurrency, max_concurrency // 5))
+            logger.info(f"Num request range: {sweep_num_request}")
 
             for num_request in sweep_num_request:
                 logger.info(f"Profiling decode with num_request {num_request}...")
@@ -934,15 +935,15 @@ if __name__ == "__main__":
         Z = griddata((x_kv_usage, y_context_length), z_itl, (X, Y), method="cubic")
 
         fig = plt.figure(figsize=(12, 10))
-        ax = fig.add_subplot(111, projection="3d")
+        ax = fig.add_subplot(111, projection="3d")  # type: ignore
 
         # Create the surface plot with customizations
-        surf = ax.plot_surface(
+        surf = ax.plot_surface(  # type: ignore
             X,
             Y,
             Z,
-            cmap=cm.coolwarm,  # Change colormap
-            linewidth=0.2,  # Add grid lines
+            cmap=cm.coolwarm,
+            linewidth=0.2,
             antialiased=True,
             alpha=0.8,
         )
@@ -955,10 +956,10 @@ if __name__ == "__main__":
         # Add labels with custom font sizes
         ax.set_xlabel("Active KV Percentage", fontsize=12)
         ax.set_ylabel("Decode Context Length", fontsize=12)
-        ax.set_zlabel("ITL", fontsize=12)
+        ax.set_zlabel("ITL", fontsize=12)  # type: ignore
 
         # Set viewing angle
-        ax.view_init(elev=30, azim=45)  # elevation and azimuth angles
+        ax.view_init(elev=30, azim=45)  # type: ignore
         ax.grid(True)
         ax.tick_params(axis="both", which="major", labelsize=10)
 
