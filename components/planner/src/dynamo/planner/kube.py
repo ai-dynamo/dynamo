@@ -137,7 +137,7 @@ class KubernetesAPI:
 
         for attempt in range(max_attempts):
             await asyncio.sleep(delay_seconds)
-            graph_deployment = self.get_graph_deployment(
+            graph_deployment = await self.get_graph_deployment(
                 graph_deployment_name, self.current_namespace
             )
             if not graph_deployment:

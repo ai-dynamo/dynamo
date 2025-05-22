@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Dict, Any
 from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
@@ -38,7 +39,7 @@ def k8s_api(mock_custom_api, mock_config):
 @pytest.mark.asyncio
 async def test_wait_for_graph_deployment_ready_success(k8s_api, mock_custom_api):
     # Mock the get_graph_deployment response
-    mock_deployment = {
+    mock_deployment: Dict[str, Any] = {
         "status": {
             "conditions": [
                 {"type": "Ready", "status": "True", "message": "Deployment is ready"}
@@ -61,7 +62,7 @@ async def test_wait_for_graph_deployment_ready_success(k8s_api, mock_custom_api)
 @pytest.mark.asyncio
 async def test_wait_for_graph_deployment_ready_timeout(k8s_api, mock_custom_api):
     # Mock the get_graph_deployment response with not ready status
-    mock_deployment = {
+    mock_deployment: Dict[str, Any] = {
         "status": {
             "conditions": [
                 {
@@ -102,7 +103,7 @@ async def test_wait_for_graph_deployment_not_found(k8s_api, mock_custom_api):
 @pytest.mark.asyncio
 async def test_wait_for_graph_deployment_no_conditions(k8s_api, mock_custom_api):
     # Mock the get_graph_deployment response with no conditions
-    mock_deployment = {"status": {}}
+    mock_deployment: Dict[str, Any] = {"status": {}}
     k8s_api.get_graph_deployment = AsyncMock(return_value=mock_deployment)
 
     # Test with minimal attempts and delay for faster testing
@@ -118,7 +119,7 @@ async def test_wait_for_graph_deployment_no_conditions(k8s_api, mock_custom_api)
 @pytest.mark.asyncio
 async def test_wait_for_graph_deployment_ready_on_second_attempt(k8s_api, mock_custom_api):
     # Mock the get_graph_deployment response to return not ready first, then ready
-    mock_deployment_not_ready = {
+    mock_deployment_not_ready: Dict[str, Any] = {
         "status": {
             "conditions": [
                 {
@@ -129,7 +130,7 @@ async def test_wait_for_graph_deployment_ready_on_second_attempt(k8s_api, mock_c
             ]
         }
     }
-    mock_deployment_ready = {
+    mock_deployment_ready: Dict[str, Any] = {
         "status": {
             "conditions": [
                 {"type": "Ready", "status": "True", "message": "Deployment is ready"}
