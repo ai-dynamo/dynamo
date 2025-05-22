@@ -1,0 +1,104 @@
+---
+source: lib/llm/tests/preprocessor.rs
+expression: formatted_prompt
+info:
+  messages:
+    - role: user
+      content: What is deep learning?
+  model: meta-llama_llama-3_1-70b-instruct--1605565
+  tools:
+    - type: function
+      function:
+        name: get_current_temperature
+        description: Get the current temperature for a specific location
+        parameters:
+          type: object
+          properties:
+            location:
+              type: string
+              description: "The city and state, e.g., San Francisco, CA"
+            unit:
+              type: string
+              enum:
+                - Celsius
+                - Fahrenheit
+              description: "The temperature unit to use. Infer this from the user's location."
+          required:
+            - location
+            - unit
+    - type: function
+      function:
+        name: get_rain_probability
+        description: Get the probability of rain for a specific location
+        parameters:
+          type: object
+          properties:
+            location:
+              type: string
+              description: "The city and state, e.g., San Francisco, CA"
+          required:
+            - location
+  tool_choice: auto
+---
+<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+Environment: ipython
+Cutting Knowledge Date: December 2023
+Today Date: <redacted>
+
+<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Given the following functions, please respond with a JSON for a function call with its proper arguments that best answers the given prompt.
+
+Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}.Do not use variables.
+
+{
+    "function": {
+        "description": "Get the current temperature for a specific location",
+        "name": "get_current_temperature",
+        "parameters": {
+            "properties": {
+                "location": {
+                    "description": "The city and state, e.g., San Francisco, CA",
+                    "type": "string"
+                },
+                "unit": {
+                    "description": "The temperature unit to use. Infer this from the user\u0027s location.",
+                    "enum": [
+                        "Celsius",
+                        "Fahrenheit"
+                    ],
+                    "type": "string"
+                }
+            },
+            "required": [
+                "location",
+                "unit"
+            ],
+            "type": "object"
+        }
+    },
+    "type": "function"
+}
+
+{
+    "function": {
+        "description": "Get the probability of rain for a specific location",
+        "name": "get_rain_probability",
+        "parameters": {
+            "properties": {
+                "location": {
+                    "description": "The city and state, e.g., San Francisco, CA",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "location"
+            ],
+            "type": "object"
+        }
+    },
+    "type": "function"
+}
+
+What is deep learning?<|eot_id|><|start_header_id|>assistant<|end_header_id|>
