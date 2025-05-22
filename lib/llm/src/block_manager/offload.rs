@@ -451,6 +451,10 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             self.disk_onboard_tx
                 .send(OnboardRequest::new(disk_blocks, tx))
                 .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
+        } else {
+            return Err(BlockPoolError::BlockError(BlockError::Other(
+                anyhow::anyhow!("Block type not supported for onboarding."),
+            )));
         }
 
         match rx.await {
@@ -1118,6 +1122,30 @@ mod tests {
             assert_eq!(blocks.len(), 1);
             compare_block_contents(&blocks[0], device_block)?;
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_onboard_unsupported_block_type() -> Result<()> {
+        let (offload_manager, device_pool, _, _) = build_pools(1, None, None)?;
+
+        let device_pool = device_pool.as_ref().unwrap();
+
+        let block = completed_block(device_pool, [0; 4]).await?;
+
+        let registered_block = device_pool
+            .register_blocks(vec![block])
+            .await?
+            .into_iter()
+            .next()
+            .unwrap();
+
+        let onboarded_blocks = offload_manager.onboard(vec![registered_block]).await;
+        assert!(matches!(
+            onboarded_blocks,
+            Err(BlockPoolError::BlockError(BlockError::Other(_)))
+        ));
 
         Ok(())
     }
