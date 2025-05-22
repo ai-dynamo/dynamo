@@ -13,12 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, Any
-from unittest.mock import AsyncMock, patch, MagicMock
+from typing import Any, Dict
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from dynamo.planner.kube import KubernetesAPI
+
 
 @pytest.fixture
 def mock_config():
@@ -26,10 +27,12 @@ def mock_config():
         mock.load_incluster_config = MagicMock()
         yield mock
 
+
 @pytest.fixture
 def mock_custom_api():
     with patch("dynamo.planner.kube.client.CustomObjectsApi") as mock:
         yield mock.return_value
+
 
 @pytest.fixture
 def k8s_api(mock_custom_api, mock_config):
@@ -37,7 +40,9 @@ def k8s_api(mock_custom_api, mock_config):
 
 
 @pytest.mark.asyncio
-async def test_wait_for_graph_deployment_ready_success(k8s_api, mock_custom_api):
+async def test_wait_for_graph_deployment_ready_success(
+    k8s_api, mock_custom_api
+):
     # Mock the get_graph_deployment response
     mock_deployment: Dict[str, Any] = {
         "status": {

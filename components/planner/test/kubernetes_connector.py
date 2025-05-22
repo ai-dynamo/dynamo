@@ -62,13 +62,13 @@ async def test_add_component_increases_replicas(kubernetes_connector, mock_kube_
     await kubernetes_connector.add_component(component_name)
 
     # Assert
-    mock_kube_api.get_graph_deployment.assert_called_once_with(component_name, "default")
+    mock_kube_api.get_graph_deployment.assert_called_once_with(
+        component_name, kubernetes_connector.namespace
+    )
     mock_kube_api.update_graph_replicas.assert_called_once_with(
         "test-graph", component_name, 2
     )
-    mock_kube_api.wait_for_graph_deployment_ready.assert_called_once_with(
-        "test-graph"
-    )
+    mock_kube_api.wait_for_graph_deployment_ready.assert_called_once_with("test-graph")
 
 
 @pytest.mark.asyncio
@@ -90,9 +90,7 @@ async def test_add_component_with_no_replicas_specified(
     mock_kube_api.update_graph_replicas.assert_called_once_with(
         "test-graph", component_name, 2
     )
-    mock_kube_api.wait_for_graph_deployment_ready.assert_called_once_with(
-        "test-graph"
-    )
+    mock_kube_api.wait_for_graph_deployment_ready.assert_called_once_with("test-graph")
 
 
 @pytest.mark.asyncio

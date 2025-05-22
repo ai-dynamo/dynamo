@@ -130,8 +130,8 @@ class KubernetesAPI:
     async def wait_for_graph_deployment_ready(
         self,
         graph_deployment_name: str,
-        max_attempts: int = 60, # default: 10 minutes total
-        delay_seconds: int = 10, # default: check every 10 seconds
+        max_attempts: int = 60,  # default: 10 minutes total
+        delay_seconds: int = 10,  # default: check every 10 seconds
     ) -> None:
         """Wait for a graph deployment to be ready"""
 
