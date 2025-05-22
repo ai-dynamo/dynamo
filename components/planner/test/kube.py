@@ -63,9 +63,7 @@ async def test_wait_for_graph_deployment_ready_success(k8s_api, mock_custom_api)
 
 
 @pytest.mark.asyncio
-async def test_wait_for_graph_deployment_ready_timeout(
-    k8s_api, mock_custom_api
-):
+async def test_wait_for_graph_deployment_ready_timeout(k8s_api, mock_custom_api):
     # Mock the get_graph_deployment response with not ready status
     mock_deployment: Dict[str, Any] = {
         "status": {
@@ -122,7 +120,9 @@ async def test_wait_for_graph_deployment_no_conditions(k8s_api, mock_custom_api)
 
 
 @pytest.mark.asyncio
-async def test_wait_for_graph_deployment_ready_on_second_attempt(k8s_api, mock_custom_api):
+async def test_wait_for_graph_deployment_ready_on_second_attempt(
+    k8s_api, mock_custom_api
+):
     # Mock the get_graph_deployment response to return not ready first, then ready
     mock_deployment_not_ready: Dict[str, Any] = {
         "status": {
