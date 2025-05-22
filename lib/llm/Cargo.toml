@@ -58,6 +58,7 @@ oneshot = { workspace = true }
 prometheus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+strum = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -68,7 +69,6 @@ validator = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 xxhash-rust = { workspace = true }
-strum = { workspace = true }
 
 akin = "0.4.0"
 async-openai = "0.27.2"
@@ -76,6 +76,7 @@ blake3 = "1"
 bytemuck = "1.22"
 candle-core = { version = "0.8.0" }
 derive-getters = "0.5"
+offset-allocator = "0.2"
 regex = "1"
 rayon = "1"
 
@@ -116,6 +117,7 @@ ggus = "0.4.0"
 memmap2 = "0.9.5"
 
 [dev-dependencies]
+assert_matches = "1.5"
 hf-hub = { workspace = true }
 proptest = "1.5.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }

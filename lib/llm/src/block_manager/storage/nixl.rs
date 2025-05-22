@@ -86,6 +86,49 @@ use super::{
     RegisterableStorage, Remote, Storage, StorageError, StorageType, SystemStorage,
 };
 
+pub struct NixlRemoteDescriptor {
+    storage: NixlStorage,
+    agent: String,
+    notif: Option<String>,
+}
+
+impl NixlRemoteDescriptor {
+    pub(crate) fn new(storage: NixlStorage, agent: String) -> Self {
+        Self {
+            storage,
+            agent,
+            notif: None,
+        }
+    }
+
+    /// Size in bytes of the remote memory region
+    pub fn len(&self) -> usize {
+        *self.storage.size()
+    }
+
+    /// Notification to be delivered to remote agent after the memory is fetched by a
+    /// NIXL READ operation.
+    pub fn set_notif(&mut self, notif: String) {
+        self.notif = Some(notif);
+    }
+
+    /// Clear the notification.
+    pub fn clear_notif(&mut self) {
+        self.notif = None;
+    }
+
+    /// Get the notification value to be delivered to remote agent after the memory is fetched by a
+    /// NIXL READ operation.
+    pub fn get_notif(&self) -> Option<String> {
+        self.notif.clone()
+    }
+
+    /// Get the NIXL agent name for the storage.
+    pub fn agent_name(&self) -> &str {
+        self.agent.as_str()
+    }
+}
+
 /// Marker trait for storage types that can be accessed by NIXL.
 ///
 /// This trait is different from [`NixlRegisterableStorage`] which has further restrictions
@@ -185,6 +228,30 @@ pub struct NixlStorage {
 
 impl Remote for NixlStorage {}
 impl NixlAccessible for NixlStorage {}
+
+impl NixlStorage {
+    pub(crate) fn from_storage_with_offset<S: Storage + NixlDescriptor>(
+        storage: &S,
+        offset: usize,
+        size: usize,
+    ) -> Result<Self, StorageError> {
+        if offset + size > Storage::size(storage) {
+            return Err(StorageError::OutOfBounds(format!(
+                "Offset: {}, Size: {}, Total Size: {}",
+                offset,
+                size,
+                Storage::size(storage)
+            )));
+        }
+
+        Ok(Self {
+            addr: storage.addr() + offset as u64,
+            size,
+            mem_type: storage.mem_type(),
+            device_id: storage.device_id(),
+        })
+    }
+}
 
 impl Storage for NixlStorage {
     fn storage_type(&self) -> StorageType {
