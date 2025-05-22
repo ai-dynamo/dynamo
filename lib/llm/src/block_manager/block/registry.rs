@@ -390,4 +390,46 @@ mod tests {
         drop(publisher);
         assert!(rx.try_recv().is_err());
     }
+
+    #[test]
+    fn test_publisher_cache_hit() {
+        let sequence = create_sequence();
+        let block1 = &sequence.blocks()[0];
+        let hash1 = block1.sequence_hash();
+
+        let (event_manager, mut rx) = MockEventManager::new();
+        let mut publisher = event_manager.publisher();
+
+        let reg_handle = Arc::new(RegistrationHandle::from_token_block(
+            block1,
+            event_manager.clone(),
+        ));
+
+        let handle = PublishHandle::new(
+            reg_handle.clone(),
+            event_manager.clone(),
+            EventType::CacheHit,
+        );
+
+        publisher.take_handle(handle);
+
+        assert!(rx.try_recv().is_err());
+
+        publisher.publish();
+
+        let events = rx.try_recv().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], MockEventType::CacheHit(hash1));
+
+        assert!(rx.try_recv().is_err());
+
+        drop(reg_handle);
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(events) if events.len() == 1 && events[0] == MockEventType::Remove(hash1)
+        ));
+
+        assert!(rx.try_recv().is_err());
+    }
 }
