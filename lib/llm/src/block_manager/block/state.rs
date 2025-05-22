@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use derive_getters::Getters;
 
-use super::registry::RegistrationHandle;
+use super::registry::{BlockHandle, RegistrationHandle};
 use super::Result;
 use crate::tokens::{PartialTokenBlock, SaltHash, Token, TokenBlock, Tokens};
 
@@ -30,7 +30,7 @@ pub enum BlockState {
     Reset,
     Partial(PartialState),
     Complete(CompleteState),
-    Registered(Arc<RegistrationHandle>, Arc<()>),
+    Registered(Arc<RegistrationHandle>, Arc<BlockHandle>),
 }
 
 impl BlockState {
