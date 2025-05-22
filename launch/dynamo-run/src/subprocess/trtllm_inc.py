@@ -60,7 +60,7 @@ class RequestHandler:
 
     def setup_kv_metrics(self):
         # Initially send dummy metrics to kick start,
-        # vLLM will not update stat until forward pass is triggered
+        # TRTLLM will not update stat until forward pass is triggered
         self.metrics_publisher.publish(
             0,  # request_active_slots
             1024,  # request_total_slots
@@ -173,22 +173,15 @@ async def init(runtime: DistributedRuntime, config: Config):
     component = runtime.namespace(config.namespace).component(config.component)
     await component.create_service()
 
-    endpoint = component.endpoint(config.endpoint)
-    await register_llm(
-        ModelType.Backend, endpoint, config.model_path, config.model_name
-    )
-
     # Convert model path to Path object if it's a local path, otherwise keep as string
     model_path = str(config.model_path)
 
     arg_map = {
         "model": model_path,
-        "task": "generate",
         "tensor_parallel_size": config.tensor_parallel_size,
         "skip_tokenizer_init": True,
         "disable_log_requests": True,
         "enable_prefix_caching": True,
-        "block_size": config.kv_block_size,
         # KV routing relies on logging KV metrics
         "disable_log_stats": False,
     }
@@ -205,6 +198,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     default_sampling_params.stop = None
 
     async with get_llm_engine(engine_args) as engine:
+        endpoint = component.endpoint(config.endpoint)
+        await register_llm(
+            ModelType.Backend, endpoint, config.model_path, config.model_name
+        )
         handler = RequestHandler(component, engine, default_sampling_params)
         handler.setup_kv_metrics()
 
