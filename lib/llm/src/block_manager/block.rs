@@ -38,12 +38,12 @@ use super::{
     WorkerID,
 };
 
+use derive_getters::Getters;
 use std::{
     fmt::Debug,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
-
 use thiserror::Error;
 
 mod private {
@@ -521,11 +521,24 @@ pub trait BlockDataProviderMut: BlockDataProvider {
     fn block_data_mut(&mut self, _: private::PrivateToken) -> &mut BlockData<Self::StorageType>;
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Getters)]
 pub struct BasicMetadata {
+    #[getter(copy)]
     priority: u32,
+    #[getter(copy)]
     returned_tick: u64,
+    #[getter(copy)]
     acquired_tick: u64,
+}
+
+impl BasicMetadata {
+    pub fn update_priority(&self, priority: u32) -> Self {
+        BasicMetadata {
+            priority,
+            returned_tick: self.returned_tick,
+            acquired_tick: self.acquired_tick,
+        }
+    }
 }
 
 impl BlockMetadata for BasicMetadata {
