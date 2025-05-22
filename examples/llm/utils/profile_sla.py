@@ -643,5 +643,5 @@ if __name__ == "__main__":
     )
     # set a +- 20% range for the kv cache utilization
     logger.info(
-        f"Suggested planner upper/lower bound for decode kv cache utilization: {max(0.1, selected_decode_kv_cache_utilization - 0.2):.2f}/{min(1, selected_decode_kv_cache_utilization + 0.2):.2f}"
+        f"Suggested planner upper/lower bound for decode kv cache utilization: {min(1, selected_decode_kv_cache_utilization + 0.2):.2f}/{max(0.1, selected_decode_kv_cache_utilization - 0.2):.2f}"
     )
