@@ -29,7 +29,6 @@ import numpy as np
 import requests
 import yaml
 from matplotlib import cm
-from mpl_toolkits.mplot3d import Axes3D  # type: ignore
 from scipy.interpolate import griddata
 
 DECODE_NUM_REQUESTS_RANGE = [
@@ -277,6 +276,29 @@ def get_port(config: dict) -> int:
         return config["Frontend"]["port"]
 
 
+def shutdown_deployment(dynamo_process):
+    os.killpg(os.getpgid(dynamo_process.pid), signal.SIGINT)
+    dynamo_process.communicate()
+
+    try:
+        current_pid = os.getpid()
+        ps_cmd = ["ps", "-ef"]
+        ps_output = subprocess.check_output(ps_cmd, text=True)
+        for line in ps_output.splitlines():
+            if "python" in line.lower():
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        pid = int(parts[1])
+                        if pid != current_pid:  # Exclude current process
+                            os.kill(pid, signal.SIGKILL)
+                    except ValueError:
+                        continue
+    except Exception as e:
+        logger.error(f"Error killing Python processes: {e}")
+    time.sleep(5)
+
+
 def wait_for_server_ready(model_name: str, port: int, timeout: int = 300):
     logger.info("Waiting for the server to be ready...")
     endpoint_url = f"http://localhost:{port}/v1/chat/completions"
@@ -333,6 +355,79 @@ def get_kv_cache_size_from_dynamo_log(dynamo_log_fn: str) -> int:
 def get_gap_result(artifact_dir: str) -> dict:
     with open(f"{artifact_dir}/profile_export_genai_perf.json", "r") as f:
         return json.load(f)
+
+
+def benchmark_prefill(isl, genai_perf_artifact_dir, model_name, port):
+    logger.info(f"Running genai-perf with isl {isl}")
+    genai_perf_cmd = get_prefill_genai_perf_cmd(
+        isl, genai_perf_artifact_dir, model=model_name, port=port
+    )
+    gap_process = subprocess.Popen(
+        genai_perf_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    stdout, stderr = gap_process.communicate()
+    if gap_process.returncode == 0:
+        logger.info("Genai-perf profiling completed successfully")
+        logger.info(stdout)
+        gap_result = get_gap_result(genai_perf_artifact_dir)
+        return gap_result
+    else:
+        logger.error(f"Genai-perf failed with error code: {gap_process.returncode}")
+        logger.error(f"stderr: {stderr}")
+        return None
+
+
+def benchmark_decode(isl, osl, num_request, genai_perf_artifact_dir, model_name, port):
+    logger.info(f"Profiling decode with num_request {num_request}...")
+
+    # first warm-up the engine by pre-computing all prefill tokens
+    # we use the same random seed to make sure the prompt is the same
+    seed = random.randint(0, 1000000)
+    genai_perf_cmd = get_decode_genai_perf_cmd(
+        args.isl,
+        args.osl,
+        f"{genai_perf_artifact_dir}_warmup",
+        num_request,
+        seed=seed,
+        model=model_name,
+        port=port,
+    )
+    gap_process = subprocess.Popen(
+        genai_perf_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    gap_process.communicate()
+    # then send out the real requests, hopefully, this will skip all prefill computation
+    genai_perf_cmd = get_decode_genai_perf_cmd(
+        args.isl,
+        args.osl,
+        genai_perf_artifact_dir,
+        num_request,
+        seed=seed,
+        model=model_name,
+        port=port,
+    )
+    gap_process = subprocess.Popen(
+        genai_perf_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    stdout, stderr = gap_process.communicate()
+    if gap_process.returncode == 0:
+        logger.info("Genai-perf profiling completed successfully")
+        logger.info(stdout)
+        gap_result = get_gap_result(genai_perf_artifact_dir)
+        return gap_result
+    else:
+        logger.error(f"Genai-perf failed with error code: {gap_process.returncode}")
+        logger.error(f"stderr: {stderr}")
+        return None
 
 
 if __name__ == "__main__":
@@ -429,30 +524,17 @@ if __name__ == "__main__":
             break
 
         # run genai-perf
-        logger.info(f"Running genai-perf with isl {args.isl}")
         genai_perf_artifact_dir = f"{work_dir}/gap_isl{args.isl}"
-        genai_perf_cmd = get_prefill_genai_perf_cmd(
-            args.isl, genai_perf_artifact_dir, model=model_name, port=port
+        gap_result = benchmark_prefill(
+            args.isl, genai_perf_artifact_dir, model_name, port
         )
-        gap_process = subprocess.Popen(
-            genai_perf_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
-        stdout, stderr = gap_process.communicate()
-        if gap_process.returncode == 0:
-            logger.info("Genai-perf profiling completed successfully")
-            logger.info(stdout)
-            gap_result = get_gap_result(genai_perf_artifact_dir)
+        if gap_result is not None:
             ttft = gap_result["time_to_first_token"]["avg"]
             prefill_tp_size.append(tp_size)
             prefill_ttft.append(ttft)
             prefill_thpt_per_gpu.append(args.isl / ttft / tp_size * 1000)
-        else:
-            logger.error(f"Genai-perf failed with error code: {gap_process.returncode}")
-            logger.error(f"stderr: {stderr}")
 
-        # Send SIGINT to the dynamo process to terminate it gracefully
-        os.killpg(os.getpgid(dynamo_process.pid), signal.SIGINT)
-        dynamo_process.communicate()
+        shutdown_deployment(dynamo_process)
 
     # Plot the results as a 2D scatter plot
     if prefill_tp_size and prefill_ttft and prefill_thpt_per_gpu:
@@ -532,50 +614,16 @@ if __name__ == "__main__":
         engine_decode_itl = []
         engine_decode_thpt_per_gpu = []
         for num_request in sweep_num_request:
-            logger.info(f"Profiling decode with num_request {num_request}...")
-
-            # first warm-up the engine by pre-computing all prefill tokens
-            # we use the same random seed to make sure the prompt is the same
-            seed = random.randint(0, 1000000)
-            genai_perf_artifact_dir = f"{work_dir}/gap_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}_warmup"
-            genai_perf_cmd = get_decode_genai_perf_cmd(
-                args.isl,
-                args.osl,
-                genai_perf_artifact_dir,
-                num_request,
-                seed=seed,
-                model=model_name,
-                port=port,
-            )
-            gap_process = subprocess.Popen(
-                genai_perf_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            gap_process.communicate()
-            # then send out the real requests, hopefully, this will skip all prefill computation
             genai_perf_artifact_dir = f"{work_dir}/gap_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
-            genai_perf_cmd = get_decode_genai_perf_cmd(
+            gap_result = benchmark_decode(
                 args.isl,
                 args.osl,
-                genai_perf_artifact_dir,
                 num_request,
-                seed=seed,
-                model=model_name,
-                port=port,
+                genai_perf_artifact_dir,
+                model_name,
+                port,
             )
-            gap_process = subprocess.Popen(
-                genai_perf_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            stdout, stderr = gap_process.communicate()
-            if gap_process.returncode == 0:
-                logger.info("Genai-perf profiling completed successfully")
-                logger.info(stdout)
-                gap_result = get_gap_result(genai_perf_artifact_dir)
+            if gap_result is not None:
                 itl = gap_result["inter_token_latency"]["avg"]
                 thpt_per_gpu = gap_result["output_token_throughput"]["avg"] / tp_size
                 engine_decode_itl.append(itl)
@@ -585,15 +633,8 @@ if __name__ == "__main__":
                 decode_thpt_per_gpu.append(thpt_per_gpu)
                 decode_concurrency.append(num_request)
                 decode_kv_cache_size.append(max_kv_tokens)
-            else:
-                logger.error(
-                    f"Genai-perf failed with error code: {gap_process.returncode}"
-                )
-                logger.error(f"stderr: {stderr}")
 
-        # Send SIGINT to the dynamo process to terminate it gracefully
-        os.killpg(os.getpgid(dynamo_process.pid), signal.SIGINT)
-        dynamo_process.communicate()
+        shutdown_deployment(dynamo_process)
 
         # Plot a line in the 2d plot
         plt.plot(engine_decode_itl, engine_decode_thpt_per_gpu, label=f"TP{tp_size}")
@@ -709,35 +750,17 @@ if __name__ == "__main__":
             (args.max_context_length - 100) // args.prefill_interpolation_granularity,
         ):
             # run genai-perf
-            logger.info(f"Running genai-perf with isl {isl}")
             genai_perf_artifact_dir = f"{work_dir}/gap_isl{isl}"
-            genai_perf_cmd = get_prefill_genai_perf_cmd(
-                isl, genai_perf_artifact_dir, model=model_name, port=port
+            gap_result = benchmark_prefill(
+                isl, genai_perf_artifact_dir, model_name, port
             )
-            gap_process = subprocess.Popen(
-                genai_perf_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            stdout, stderr = gap_process.communicate()
-            if gap_process.returncode == 0:
-                logger.info("Genai-perf profiling completed successfully")
-                logger.info(stdout)
-                gap_result = get_gap_result(genai_perf_artifact_dir)
+            if gap_result is not None:
                 ttft = gap_result["time_to_first_token"]["avg"]
                 prefill_isl.append(isl)
                 prefill_ttft.append(ttft)
                 prefill_thpt_per_gpu.append(isl / ttft / best_prefill_tp * 1000)
-            else:
-                logger.error(
-                    f"Genai-perf failed with error code: {gap_process.returncode}"
-                )
-                logger.error(f"stderr: {stderr}")
 
-    # Send SIGINT to the dynamo process to terminate it gracefully
-    os.killpg(os.getpgid(dynamo_process.pid), signal.SIGINT)
-    dynamo_process.communicate()
+    shutdown_deployment(dynamo_process)
 
     # Interpolate prefill_ttft vs prefill_isl with quadratic function (y=ax^2+bx+c)
     if len(prefill_isl) > 2:
@@ -815,6 +838,7 @@ if __name__ == "__main__":
     x_kv_usage = []
     y_context_length = []
     z_itl = []
+    z_thpt_per_gpu = []
     best_decode_tp = decode_tp_size[selected_decode_idx]
     logger.info(f"Profiling decode with TP size {best_decode_tp}...")
     decode_config = set_config_tp_size(decode_config, best_decode_tp)
@@ -851,73 +875,23 @@ if __name__ == "__main__":
             args.max_context_length - osl,
             (args.max_context_length - osl) // args.decode_interpolation_granularity,
         ):
-            logger.info(f"Profiling decode with isl {isl}...")
-            max_concurrency = max_kv_tokens // (isl + osl)
-            sweep_num_request = list(range(1, max_concurrency, max_concurrency // 5))
-            logger.info(f"Num request range: {sweep_num_request}")
-
             for num_request in sweep_num_request:
-                logger.info(f"Profiling decode with num_request {num_request}...")
-
-                # first warm-up the engine by pre-computing all prefill tokens
-                # we use the same random seed to make sure the prompt is the same
-                seed = random.randint(0, 1000000)
-                genai_perf_artifact_dir = (
-                    f"{work_dir}/gap_isl{isl}_osl{osl}_n{num_request}_warmup"
-                )
-                genai_perf_cmd = get_decode_genai_perf_cmd(
-                    isl,
-                    osl,
-                    genai_perf_artifact_dir,
-                    num_request,
-                    seed=seed,
-                    model=model_name,
-                    port=port,
-                )
-                gap_process = subprocess.Popen(
-                    genai_perf_cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-                gap_process.communicate()
-                # then send out the real requests, hopefully, this will skip all prefill computation
                 genai_perf_artifact_dir = (
                     f"{work_dir}/gap_isl{isl}_osl{osl}_n{num_request}"
                 )
-                genai_perf_cmd = get_decode_genai_perf_cmd(
-                    isl,
-                    osl,
-                    genai_perf_artifact_dir,
-                    num_request,
-                    seed=seed,
-                    model=model_name,
-                    port=port,
+                gap_result = benchmark_decode(
+                    isl, osl, num_request, genai_perf_artifact_dir, model_name, port
                 )
-                gap_process = subprocess.Popen(
-                    genai_perf_cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-                stdout, stderr = gap_process.communicate()
-                if gap_process.returncode == 0:
-                    logger.info("Genai-perf profiling completed successfully")
-                    logger.info(stdout)
-                    gap_result = get_gap_result(genai_perf_artifact_dir)
+                if gap_result is not None:
                     itl = gap_result["inter_token_latency"]["avg"]
                     x_kv_usage.append((isl + osl / 2) * num_request / max_kv_tokens)
                     y_context_length.append(isl + osl / 2)
                     z_itl.append(itl)
-                else:
-                    logger.error(
-                        f"Genai-perf failed with error code: {gap_process.returncode}"
+                    z_thpt_per_gpu.append(
+                        gap_result["output_token_throughput"]["avg"] / tp_size
                     )
-                    logger.error(f"stderr: {stderr}")
 
-        # Send SIGINT to the dynamo process to terminate it gracefully
-        os.killpg(os.getpgid(dynamo_process.pid), signal.SIGINT)
-        dynamo_process.communicate()
+        shutdown_deployment(dynamo_process)
 
         # Save the data points to a .npz file
         save_path = f"{work_dir}/decode_tp{tp_size}_data.npz"
@@ -926,6 +900,7 @@ if __name__ == "__main__":
             x_kv_usage=np.array(x_kv_usage),
             y_context_length=np.array(y_context_length),
             z_itl=np.array(z_itl),
+            z_thpt_per_gpu=np.array(z_thpt_per_gpu),
         )
         logger.info(f"Saved data points to {save_path}")
 
