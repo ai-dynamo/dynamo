@@ -127,10 +127,11 @@ impl MistralRsEngine {
             .build(None)?
         };
 
-        // TODO: The default max seq len should come from the model not be hard coded
-        let max_seq_len = model
-            .context_length
-            .unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN);
+        let mut max_seq_len = model.card().context_length;
+        if max_seq_len == 0 {
+            tracing::info!("context_length is 0. Probably error reading from model.");
+            max_seq_len = AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN;
+        }
 
         // Paged attention requires cuda
         let paged_attention_config = if cfg!(feature = "cuda") && EXP_ENABLE_PAGED_ATTENTION {
