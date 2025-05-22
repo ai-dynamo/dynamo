@@ -15,15 +15,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Deploying Dynamo Inference Graphs to Kubernetes
+# Deploying Inference Graphs to Kubernetes (`dynamo deploy`)
 
-This guide provides an overview of the different deployment options available for Dynamo inference graphs in Kubernetes environments.
+This guide explains the deployment options available for Dynamo inference graphs in Kubernetes environments.
 
 ## Deployment Options
 
-Dynamo provides two distinct deployment paths, each serving different use cases:
+Dynamo provides two distinct deployment options that each serve different use cases:
+1. Dynamo Cloud Kubernetes Platform is preferred in cases that support it
+2. Manual Deployment with Helm Charts is suited to users who need more control over their deployments
 
-### 1. 🚀 Dynamo Cloud Kubernetes Platform [PREFERRED]
+
+### Dynamo Cloud Kubernetes Platform [PREFERRED]
 
 The Dynamo Cloud Platform (`deploy/cloud/`) provides a managed deployment experience:
 
@@ -35,9 +38,9 @@ For detailed instructions on using the Dynamo Cloud Platform, see:
 - [Dynamo Cloud Platform Guide](dynamo_cloud.md): walks through installing and configuring the Dynamo cloud components on your Kubernetes cluster.
 - [Operator Deployment Guide](operator_deployment.md)
 
-### 2. Manual Deployment with Helm Charts
+### Manual Deployment with Helm Charts
 
-The manual deployment path (`deploy/helm/`) is available for users who need more control over their deployments:
+Users who need more control over their deployments can use the manual deployment path (`deploy/helm/`):
 
 - Used for manually deploying inference graphs to Kubernetes
 - Contains Helm charts and configurations for deploying individual inference pipelines
@@ -47,18 +50,18 @@ The manual deployment path (`deploy/helm/`) is available for users who need more
   - [Using the Deployment Script](manual_helm_deployment.md#using-the-deployment-script): all-in-one script for manual deployment
   - [Helm Deployment Guide](manual_helm_deployment.md#helm-deployment-guide): detailed instructions for manual deployment
 
-## Getting Started
+## Getting Started with Helm Deploym
 
 1. **For Dynamo Cloud Platform**:
    - Follow the [Dynamo Cloud Platform Guide](dynamo_cloud.md)
    - Deploy a Hello World pipeline using the [Operator Deployment Guide](operator_deployment.md)
-   - Deploy a Dynamo LLM pipeline to Kubernetes [Deploy LLM Guide](../../../examples/llm/README.md#deploy-to-kubernetes)
+   - Deploy a Dynamo LLM pipeline to Kubernetes [Deploy LLM Guide](../../examples/llm_deployment.md#deploy-to-kubernetes)
 
 2. **For Manual Deployment**:
    - Follow the [Manual Helm Deployment Guide](manual_helm_deployment.md)
 
-## Example Deployment
+## Example Deployments
 
-See the [Hello World example](../../../examples/hello_world/README.md#deploying-to-and-running-the-example-in-kubernetes) for a complete walkthrough of deploying a simple inference graph.
+See the [Hello World example](../../examples/hello_world.md#deploying-to-and-running-the-example-in-kubernetes) for a complete walkthrough of deploying a simple inference graph.
 
-See the [LLM example](../../../examples/llm/README.md#deploy-to-kubernetes) for a complete walkthrough of deploying a production-ready LLM inference pipeline to Kubernetes.
+See the [LLM example](../../examples/llm_deployment.md#deploy-to-kubernetes) for a complete walkthrough of deploying a production-ready LLM inference pipeline to Kubernetes.

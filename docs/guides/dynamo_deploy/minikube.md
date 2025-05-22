@@ -15,20 +15,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# 🏠 Minikube Setup Guide
+# Minikube Setup Guide
 
-Don't have a Kubernetes cluster? No problem! You can set up a local development environment using Minikube. This guide will walk you through setting up everything you need to run Dynamo Cloud locally.
+Don't have a Kubernetes cluster? No problem! You can set up a local development environment using Minikube. This guide walks through the set up of everything you need to run Dynamo Cloud locally.
 
 ## Setting Up Minikube
 
 ### 1. Install Minikube
-First things first! You'll need to install Minikube. Follow the official [Minikube installation guide](https://minikube.sigs.k8s.io/docs/start/) for your operating system.
+First things first! Start by installing Minikube. Follow the official [Minikube installation guide](https://minikube.sigs.k8s.io/docs/start/) for your operating system.
 
 ### 2. Configure GPU Support (Optional)
 Planning to use GPU-accelerated workloads? You'll need to configure GPU support in Minikube. Follow the [Minikube GPU guide](https://minikube.sigs.k8s.io/docs/tutorials/nvidia/) to set up NVIDIA GPU support before proceeding.
 
-> [!TIP]
-> Make sure to configure GPU support before starting Minikube if you plan to use GPU workloads!
+```{tip}
+Make sure to configure GPU support before starting Minikube if you plan to use GPU workloads!
+```
 
 ### 3. Start Minikube
 Time to launch your local cluster!
@@ -61,8 +62,3 @@ kubectl get storageclass
 
 Once your local environment is set up, you can proceed with the [Dynamo Cloud deployment guide](./dynamo_cloud.md) to deploy the platform to your local cluster.
 
-## Coming Soon
-
-- MicroK8s setup guide
-- Kind setup guide
-- More local development tips and tricks

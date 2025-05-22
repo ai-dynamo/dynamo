@@ -33,7 +33,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from dynamo.llm import KvMetricsAggregator
 from dynamo.runtime import EtcdKvCache
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -173,16 +173,16 @@ class Processor(ProcessMixIn):
     async def _get_kv_load(self):
         metrics = await self.metrics_aggregator.get_metrics()
         kv_load = {}
-        for endpoint in metrics.endpoints:
-            worker_id = endpoint.worker_id
-            kv_load[worker_id] = getattr(endpoint, "gpu_cache_usage_perc", 0.0)
+        for end_point in metrics.endpoints:
+            worker_id = end_point.worker_id
+            kv_load[worker_id] = getattr(end_point, "gpu_cache_usage_perc", 0.0)
         return kv_load
 
     async def _get_pending_requests(self):
         metrics = await self.metrics_aggregator.get_metrics()
         pending_requests = {}
-        for endpoint in metrics.endpoints:
-            worker_id = endpoint.worker_id
+        for end_point in metrics.endpoints:
+            worker_id = end_point.worker_id
             pending_requests[worker_id] = getattr(endpoint, "num_requests_waiting", 0)
         return pending_requests
 
@@ -327,12 +327,12 @@ class Processor(ProcessMixIn):
                     f"Request type {request_type} not implemented"
                 )
 
-    @dynamo_endpoint(name="chat/completions")
+    @endpoint(name="chat/completions")
     async def chat_completions(self, raw_request: ChatCompletionRequest):
         async for response in self._generate(raw_request, RequestType.CHAT):
             yield response
 
-    # @dynamo_endpoint()
+    # @endpoint()
     # async def completions(self, raw_request: CompletionRequest):
     #     async for response in self._generate(raw_request, RequestType.COMPLETION):
     #         yield response

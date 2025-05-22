@@ -30,7 +30,7 @@ from vllm.entrypoints.openai.api_server import (
 from vllm.inputs.data import TokensPrompt
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 
-from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +206,6 @@ class PrefillWorker:
         ):
             yield
 
-    @dynamo_endpoint()
+    @endpoint()
     async def mock(self, req: RequestType):
         yield f"mock_response: {req}"

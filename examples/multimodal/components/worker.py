@@ -41,7 +41,7 @@ from vllm.inputs.data import TokensPrompt
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +175,7 @@ class VllmWorker:
 
         return callback
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: vLLMMultimodalRequest):
         image_features = None
         if self.do_remote_prefill:

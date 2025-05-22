@@ -1,0 +1,17 @@
+---
+source: lib/llm/tests/preprocessor.rs
+expression: formatted_prompt
+info:
+  messages:
+    - role: user
+      content: What is deep learning?
+  model: meta-llama_llama-3_1-70b-instruct--1605565
+---
+<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+Cutting Knowledge Date: December 2023
+Today Date: <redacted>
+
+<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+What is deep learning?<|eot_id|><|start_header_id|>assistant<|end_header_id|>

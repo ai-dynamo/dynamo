@@ -63,7 +63,7 @@ class DynamoEndpoint:
         return await self.func(*args, **kwargs)
 
 
-def dynamo_endpoint(
+def endpoint(
     name: str | None = None,
     is_api: bool = False,
 ) -> t.Callable[[t.Callable], DynamoEndpoint]:
@@ -74,11 +74,11 @@ def dynamo_endpoint(
         is_api: Whether to expose the endpoint as an API. Defaults to False.
 
     Example:
-        @dynamo_endpoint()
+        @endpoint()
         def my_endpoint(self, input: str) -> str:
             return input
 
-        @dynamo_endpoint(name="custom_name")
+        @endpoint(name="custom_name")
         def another_endpoint(self, input: str) -> str:
             return input
     """

@@ -19,7 +19,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sdk import DYNAMO_IMAGE, depends, dynamo_api, dynamo_endpoint, service
+from dynamo.sdk import DYNAMO_IMAGE, api, depends, endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ class Backend:
         self.message = config.get("Backend", {}).get("message", "back")
         logger.info(f"Backend config message: {self.message}")
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, req: RequestType):
         """Generate tokens."""
         req_text = req.text
@@ -93,7 +93,7 @@ class Middle:
         self.message = config.get("Middle", {}).get("message", "mid")
         logger.info(f"Middle config message: {self.message}")
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, req: RequestType):
         """Forward requests to backend."""
         req_text = req.text
@@ -125,8 +125,8 @@ class Frontend:
         logger.info(f"Frontend config message: {self.message}")
         logger.info(f"Frontend config port: {self.port}")
 
-    # alternative syntax: @dynamo_endpoint(transports=[DynamoTransport.HTTP])
-    @dynamo_api()
+    # alternative syntax: @endpoint(transports=[DynamoTransport.HTTP])
+    @api()
     async def generate(self, request: RequestType):
         """Stream results from the pipeline."""
         logger.info(f"Frontend received: {request.text}")

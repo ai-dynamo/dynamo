@@ -25,7 +25,7 @@ from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams
 
 from dynamo.llm import ModelType, register_llm
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +129,7 @@ class SimpleLoadBalancer:
         ):
             yield MyRequestOutput.model_validate_json(decode_response.data())
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: PreprocessedRequest):
         logger.debug(
             "Processor received completion request: %s", request.model_dump_json()
