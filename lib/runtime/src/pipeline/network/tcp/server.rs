@@ -26,7 +26,7 @@ use tokio::sync::Mutex;
 use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{SinkExt, StreamExt};
-use local_ip_address::{list_afinet_netifas, local_ip};
+use local_ip_address::{list_afinet_netifas, local_ip, local_ipv6, Error};
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::AsyncWriteExt,
@@ -136,7 +136,16 @@ impl TcpStreamServer {
                     )))?
                     .to_string()
             }
-            None => local_ip().unwrap().to_string(),
+            None => local_ip()
+                .or_else(|err| match err {
+                    Error::LocalIpAddressNotFound => {
+                        // Fall back to IPv6 if no IPv4 addresses are found
+                        local_ipv6()
+                    }
+                    _ => Err(err),
+                })
+                .unwrap()
+                .to_string(),
         };
 
         let state = Arc::new(Mutex::new(State::default()));
