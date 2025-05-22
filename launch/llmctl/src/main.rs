@@ -204,8 +204,8 @@ async fn handle_command(runtime: Runtime, namespace: String, command: Commands) 
                     }
                 }
                 HttpCommands::Remove { model_type } => {
-                    let (_, name) = model_type.into_parts();
-                    remove_model(&distributed, &name).await?;
+                    let (model_type, name) = model_type.into_parts();
+                    remove_model(&distributed, model_type, &name).await?;
                 }
             }
         }
@@ -303,7 +303,11 @@ async fn list_models(
     Ok(())
 }
 
-async fn remove_model(distributed: &DistributedRuntime, model_name: &str) -> Result<()> {
+async fn remove_model(
+    distributed: &DistributedRuntime,
+    model_type: ModelType,
+    model_name: &str,
+) -> Result<()> {
     // We have to do this manually because normally the etcd lease system does it for us
     let watcher = ModelWatcher::new(
         distributed.clone(),
@@ -314,7 +318,10 @@ async fn remove_model(distributed: &DistributedRuntime, model_name: &str) -> Res
         anyhow::bail!("llmctl is only useful with dynamic workers");
     };
     let active_instances = watcher.entries_for_model(model_name).await?;
-    for entry in active_instances {
+    for entry in active_instances
+        .into_iter()
+        .filter(|entry| entry.model_type == model_type)
+    {
         let network_name = ModelNetworkName::from_entry(&entry, 0);
         tracing::debug!("deleting key: {network_name}");
         etcd_client
