@@ -31,6 +31,7 @@ protobuf==5.27.3
 pydantic==2.7.1
 pyright
 PyYAML
+scikit-learn
 sentencepiece
 tensorboard==2.19.0
 tensorboardX==2.6.2.2
