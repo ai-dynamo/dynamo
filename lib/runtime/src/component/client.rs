@@ -75,14 +75,14 @@ impl Client {
     }
 
     // Client with auto-discover instances using etcd
-    pub(crate) async fn new_dynamic(drt: &DistributedRuntime, endpoint: Endpoint) -> Result<Self> {
+    pub(crate) async fn new_dynamic(endpoint: Endpoint) -> Result<Self> {
         // create live endpoint watcher
         let Some(etcd_client) = &endpoint.component.drt.etcd_client else {
             anyhow::bail!("Attempt to create a dynamic client on a static endpoint");
         };
 
         let instance_source =
-            Self::get_or_create_dynamic_instance_source(drt, etcd_client, &endpoint).await?;
+            Self::get_or_create_dynamic_instance_source(etcd_client, &endpoint).await?;
 
         Ok(Client {
             endpoint,
@@ -133,10 +133,10 @@ impl Client {
     }
 
     async fn get_or_create_dynamic_instance_source(
-        drt: &DistributedRuntime,
         etcd_client: &EtcdClient,
         endpoint: &Endpoint,
     ) -> Result<Arc<InstanceSource>> {
+        let drt = endpoint.drt();
         let instance_sources = drt.instance_sources();
         let mut instance_sources = instance_sources.lock().await;
 
