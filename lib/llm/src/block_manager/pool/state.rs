@@ -25,11 +25,12 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
         event_manager: Arc<dyn EventManager>,
         return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, M>>,
         global_registry: GlobalRegistry,
+        async_runtime: Handle,
     ) -> Self {
         Self {
             active: ActiveBlockPool::new(),
             inactive: InactiveBlockPool::new(),
-            registry: BlockRegistry::new(event_manager.clone(), global_registry),
+            registry: BlockRegistry::new(event_manager.clone(), global_registry, async_runtime),
             return_tx,
             event_manager,
         }
@@ -260,9 +261,11 @@ impl<S: Storage, M: BlockMetadata> ProgressEngine<S, M> {
         cancel_token: CancellationToken,
         blocks: Vec<Block<S, M>>,
         global_registry: GlobalRegistry,
+        async_runtime: Handle,
     ) -> Self {
         let (return_tx, return_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = State::<S, M>::new(event_manager, return_tx, global_registry);
+        let mut state =
+            State::<S, M>::new(event_manager, return_tx, global_registry, async_runtime);
 
         tracing::debug!(count = blocks.len(), "adding blocks to inactive pool");
         state.inactive.add_blocks(blocks);

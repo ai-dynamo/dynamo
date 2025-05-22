@@ -125,6 +125,14 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
         let mut next_block_set_idx = 0;
         let mut local_block_set = block::nixl::NixlBlockSet::new(worker_id);
 
+        let async_rt_handle = match config.runtime.async_runtime {
+            Some(rt) => rt.handle().clone(),
+            None => match Handle::try_current() {
+                Ok(handle) => handle,
+                Err(e) => anyhow::bail!(e),
+            },
+        };
+
         let (disk_pool, disk_blocks) = if let Some(config) = config.disk_layout {
             if nixl_agent.is_none() {
                 tracing::warn!("NIXL is disabled; will not allocate disk blocks.");
@@ -141,6 +149,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                     cancellation_token.clone(),
                     worker_id,
                     global_registry.clone(),
+                    async_rt_handle.clone(),
                 )?;
                 (Some(Arc::new(pool)), Some(blocks))
             }
@@ -162,6 +171,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 cancellation_token.clone(),
                 worker_id,
                 global_registry.clone(),
+                async_rt_handle.clone(),
             )?;
             (Some(Arc::new(pool)), Some(blocks))
         } else {
@@ -182,6 +192,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 cancellation_token.clone(),
                 worker_id,
                 global_registry.clone(),
+                async_rt_handle.clone(),
             )?;
             (Some(Arc::new(pool)), Some(blocks))
         } else {
@@ -195,20 +206,12 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
             local_block_set.set_nixl_metadata(nixl_agent.get_local_md()?);
         }
 
-        let offload_async_rt_handle = match config.runtime.async_runtime {
-            Some(rt) => rt.handle().clone(),
-            None => match Handle::try_current() {
-                Ok(handle) => handle,
-                Err(e) => anyhow::bail!(e),
-            },
-        };
-
         let offload_manager = OffloadManager::new(
             disk_pool.clone(),
             host_pool.clone(),
             device_pool.clone(),
             nixl_agent.clone(),
-            offload_async_rt_handle,
+            async_rt_handle,
         )?;
 
         let state = Arc::new(Self {
@@ -490,11 +493,13 @@ fn create_block_pool<S: Storage + NixlRegisterableStorage, M: BlockMetadata>(
     cancellation_token: CancellationToken,
     worker_id: WorkerID,
     global_registry: GlobalRegistry,
+    async_runtime: Handle,
 ) -> Result<(BlockPool<S, M>, Vec<Block<S, M>>)> {
     let blocks = block::layout_to_blocks::<_, M>(layout, block_set_idx, worker_id)?;
     let pool = BlockPool::<S, M>::builder()
         .cancel_token(cancellation_token)
         .global_registry(global_registry)
+        .async_runtime(async_runtime)
         .build()?;
     Ok((pool, blocks))
 }

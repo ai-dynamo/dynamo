@@ -42,7 +42,7 @@ use super::state::BlockState;
 use crate::tokens::{BlockHash, SequenceHash, TokenBlock};
 
 use derive_getters::Getters;
-use tokio::sync::mpsc;
+use tokio::{runtime::Handle, sync::mpsc};
 
 pub type GlobalRegistry = Arc<Mutex<HashMap<SequenceHash, Weak<RegistrationHandle>>>>;
 
@@ -90,14 +90,18 @@ pub struct BlockRegistry {
 }
 
 impl BlockRegistry {
-    pub fn new(event_manager: Arc<dyn EventManager>, global_registry: GlobalRegistry) -> Self {
+    pub fn new(
+        event_manager: Arc<dyn EventManager>,
+        global_registry: GlobalRegistry,
+        async_runtime: Handle,
+    ) -> Self {
         let (unregister_tx, mut unregister_rx) = mpsc::unbounded_channel();
 
         let blocks = Arc::new(Mutex::new(HashMap::new()));
 
         let blocks_clone = blocks.clone();
         let global_registry_clone = global_registry.clone();
-        tokio::spawn(async move {
+        async_runtime.spawn(async move {
             let blocks = blocks_clone;
             let global_registry = global_registry_clone;
             while let Some(sequence_hash) = unregister_rx.recv().await {

@@ -603,6 +603,7 @@ pub(crate) mod tests {
     pub fn create_blocks(
         tokens: Tokens,
         block_size: usize,
+        async_runtime: Handle,
     ) -> Vec<Block<NullDeviceStorage, TestMetadata>> {
         let (token_blocks, _partial_token_block) =
             tokens.into_sequence(block_size, None).into_parts();
@@ -615,7 +616,8 @@ pub(crate) mod tests {
         let mut blocks = create_block_collection(num_blocks).into_blocks().unwrap();
 
         let event_manager = NullEventManager::new();
-        let mut registry = BlockRegistry::new(event_manager, GlobalRegistry::default());
+        let mut registry =
+            BlockRegistry::new(event_manager, GlobalRegistry::default(), async_runtime);
 
         // Iterate through the generated TokenBlocks and the template Blocks,
         // setting the state and registering each one.
@@ -645,6 +647,7 @@ pub(crate) mod tests {
         tokens: Tokens,
         block_size: usize,
         pool: &mut InactiveBlockPool<NullDeviceStorage, TestMetadata>,
+        async_runtime: Handle,
     ) -> (Vec<Block<NullDeviceStorage, TestMetadata>>, usize) {
         let (mut token_blocks, _partial_token_block) =
             tokens.into_sequence(block_size, None).into_parts();
@@ -657,7 +660,8 @@ pub(crate) mod tests {
         let matched_block_count = matched_blocks.len();
 
         let event_manager = NullEventManager::new();
-        let mut registry = BlockRegistry::new(event_manager, GlobalRegistry::default());
+        let mut registry =
+            BlockRegistry::new(event_manager, GlobalRegistry::default(), async_runtime);
 
         // all matched blocks should be in the complete or registered state
         for block in &mut matched_blocks {
@@ -697,6 +701,8 @@ pub(crate) mod tests {
     fn test_block_pool_lifecycle() {
         dynamo_runtime::logging::init();
 
+        let async_runtime = tokio::runtime::Runtime::new().unwrap();
+
         const PAGE_SIZE: usize = 2;
 
         let mut pool = create_block_pool(10);
@@ -715,7 +721,12 @@ pub(crate) mod tests {
 
         let tokens = create_token_sequence(&[1, 2, 3, 4]);
 
-        let (blocks, matched_block_count) = acquire_blocks(tokens.clone(), PAGE_SIZE, &mut pool);
+        let (blocks, matched_block_count) = acquire_blocks(
+            tokens.clone(),
+            PAGE_SIZE,
+            &mut pool,
+            async_runtime.handle().clone(),
+        );
         assert_eq!(blocks.len(), 2);
         assert_eq!(matched_block_count, 0);
         assert_eq!(pool.available_blocks(), 8);
@@ -725,7 +736,12 @@ pub(crate) mod tests {
         assert_eq!(pool.total_blocks(), 10);
         assert_eq!(pool.available_blocks(), 10);
 
-        let (blocks, matched_block_count) = acquire_blocks(tokens.clone(), PAGE_SIZE, &mut pool);
+        let (blocks, matched_block_count) = acquire_blocks(
+            tokens.clone(),
+            PAGE_SIZE,
+            &mut pool,
+            async_runtime.handle().clone(),
+        );
         assert_eq!(blocks.len(), 2);
         assert_eq!(matched_block_count, 2);
         assert_eq!(pool.available_blocks(), 8);
@@ -745,9 +761,11 @@ pub(crate) mod tests {
     fn test_basic_sequence_matching() {
         let mut pool = InactiveBlockPool::new();
 
+        let async_runtime = tokio::runtime::Runtime::new().unwrap();
+
         // Create a sequence of 4 tokens split into blocks of 2
         let sequence = create_token_sequence(&[1, 2, 3, 4]);
-        let blocks = create_blocks(sequence, 2);
+        let blocks = create_blocks(sequence, 2, async_runtime.handle().clone());
         assert_eq!(blocks.len(), 2);
 
         // Match the blocks in sequence
