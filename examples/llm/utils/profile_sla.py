@@ -925,7 +925,7 @@ if __name__ == "__main__":
             X,
             Y,
             Z,
-            cmap=cm.coolwarm,
+            cmap=cm.coolwarm,  # type: ignore
             linewidth=0.2,
             antialiased=True,
             alpha=0.8,
