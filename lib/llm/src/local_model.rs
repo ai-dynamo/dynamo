@@ -62,6 +62,15 @@ impl LocalModel {
         &self.card.service_name
     }
 
+    /// Override max number of tokens in context. We usually only do this to limit kv cache allocation.
+    pub fn set_context_length(&mut self, context_length: usize) {
+        self.card.context_length = context_length;
+    }
+
+    pub fn set_kv_cache_block_size(&mut self, block_size: usize) {
+        self.card.kv_cache_block_size = block_size;
+    }
+
     /// Make an LLM ready for use:
     /// - Download it from Hugging Face (and NGC in future) if necessary
     /// - Resolve the path

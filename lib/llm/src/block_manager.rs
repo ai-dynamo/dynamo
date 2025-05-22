@@ -192,11 +192,21 @@ mod tests {
 
     fn create_reference_block_manager() -> ReferenceBlockManager {
         let worker_id = WORKER_ID.fetch_add(1, Ordering::SeqCst);
+
+        // Check if we're already in a Tokio runtime context
+        let async_runtime = if tokio::runtime::Handle::try_current().is_ok() {
+            None // If we're already in a runtime, don't create a new one
+        } else {
+            // Only create a new runtime if not already in one
+            Some(Arc::new(tokio::runtime::Runtime::new().unwrap()))
+        };
+
         let config = KvBlockManagerConfig::builder()
             .runtime(
                 KvManagerRuntimeConfig::builder()
                     .worker_id(worker_id)
                     .enable_nixl()
+                    .async_runtime(async_runtime)
                     .build()
                     .unwrap(),
             )
