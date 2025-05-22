@@ -35,6 +35,8 @@ use super::block::registry::RegistrationHandle;
 ///
 /// The [RegistrationHandle] associated from [EventManager::block_register] call is an RAII object
 /// which will trigger a `Remove` event on being dropped.
+pub mod offload;
+
 pub trait EventManager: EventPublisher + EventReleaseManager + Send + Sync {
     // fn register_block(&self, token_block: &TokenBlock) -> PublishHandle;
     // fn publisher(&self) -> Publisher;
@@ -65,20 +67,20 @@ pub trait EventReleaseManager: Send + Sync {
 /// registration events.
 pub struct PublishHandle {
     handle: Arc<RegistrationHandle>,
-    publisher: Option<Arc<dyn EventPublisher>>,
+    publishers: Option<Vec<Arc<dyn EventPublisher>>>,
     event_type: EventType,
 }
 
 impl PublishHandle {
     pub fn new(
         handle: Arc<RegistrationHandle>,
-        publisher: Arc<dyn EventPublisher>,
+        publishers: Vec<Arc<dyn EventPublisher>>,
         event_type: EventType,
     ) -> Self {
-        let publisher = Some(publisher);
+        let publishers = Some(publishers);
         Self {
             handle,
-            publisher,
+            publishers,
             event_type,
         }
     }
@@ -88,14 +90,16 @@ impl PublishHandle {
     }
 
     fn disarm(&mut self) {
-        self.publisher = None;
+        self.publishers = None;
     }
 }
 
 impl Drop for PublishHandle {
     fn drop(&mut self) {
-        if let Some(publisher) = self.publisher.take() {
-            publisher.publish(vec![self.handle.clone()], self.event_type);
+        if let Some(publishers) = self.publishers.take() {
+            for publisher in publishers {
+                publisher.publish(vec![self.handle.clone()], self.event_type);
+            }
         }
     }
 }
@@ -110,14 +114,14 @@ impl Drop for PublishHandle {
 #[derive(Clone)]
 pub struct Publisher {
     handles: HashMap<EventType, Vec<Arc<RegistrationHandle>>>,
-    publisher: Arc<dyn EventPublisher>,
+    publishers: Vec<Arc<dyn EventPublisher>>,
 }
 
 impl Publisher {
-    pub fn new(publisher: Arc<dyn EventPublisher>) -> Self {
+    pub fn new(publishers: Vec<Arc<dyn EventPublisher>>) -> Self {
         Self {
             handles: HashMap::new(),
-            publisher,
+            publishers,
         }
     }
 
@@ -137,7 +141,9 @@ impl Publisher {
 
         for (event_type, handles) in handles {
             if !handles.is_empty() {
-                self.publisher.publish(handles, event_type);
+                for publisher in &self.publishers {
+                    publisher.publish(handles.clone(), event_type);
+                }
             }
         }
     }
@@ -155,24 +161,6 @@ impl Drop for Publisher {
 //   events so that we can batch them together.
 //
 // - Registration events are can be batched by the nature of the [EventManager::register_blocks] call.
-
-pub struct NullEventManager;
-
-impl NullEventManager {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {})
-    }
-}
-
-impl EventManager for NullEventManager {}
-
-impl EventPublisher for NullEventManager {
-    fn publish(&self, _handles: Vec<Arc<RegistrationHandle>>, _event_type: EventType) {}
-}
-
-impl EventReleaseManager for NullEventManager {
-    fn block_release(&self, _registration_handle: &RegistrationHandle) {}
-}
 
 #[cfg(test)]
 pub mod tests {
@@ -201,7 +189,7 @@ pub mod tests {
         }
 
         pub fn publisher(self: &Arc<Self>) -> Publisher {
-            Publisher::new(self.clone())
+            Publisher::new(vec![self.clone() as Arc<dyn EventPublisher>])
         }
     }
 

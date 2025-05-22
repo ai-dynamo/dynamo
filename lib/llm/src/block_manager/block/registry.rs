@@ -18,7 +18,9 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use super::super::events::{EventManager, EventReleaseManager, EventType, PublishHandle};
+use super::super::events::{
+    EventManager, EventPublisher, EventReleaseManager, EventType, PublishHandle,
+};
 use super::state::BlockState;
 
 use crate::tokens::{BlockHash, SequenceHash, TokenBlock};
@@ -42,14 +44,14 @@ pub struct UnregisterFailure(SequenceHash);
 #[derive()]
 pub struct BlockRegistry {
     blocks: HashMap<SequenceHash, Weak<RegistrationHandle>>,
-    event_manager: Arc<dyn EventManager>,
+    event_managers: Vec<Arc<dyn EventManager>>,
 }
 
 impl BlockRegistry {
-    pub fn new(event_manager: Arc<dyn EventManager>) -> Self {
+    pub fn new(event_managers: Vec<Arc<dyn EventManager>>) -> Self {
         Self {
             blocks: HashMap::new(),
-            event_manager,
+            event_managers,
         }
     }
 
@@ -84,7 +86,7 @@ impl BlockRegistry {
 
                 // Create the [RegistrationHandle] and [PublishHandle]
                 let publish_handle =
-                    Self::create_publish_handle(state.token_block(), self.event_manager.clone());
+                    Self::create_publish_handle(state.token_block(), self.event_managers.clone());
                 let reg_handle = publish_handle.remove_handle();
 
                 // Insert the [RegistrationHandle] into the registry
@@ -119,11 +121,24 @@ impl BlockRegistry {
 
     fn create_publish_handle(
         token_block: &TokenBlock,
-        event_manager: Arc<dyn EventManager>,
+        event_managers: Vec<Arc<dyn EventManager>>,
     ) -> PublishHandle {
-        let reg_handle = RegistrationHandle::from_token_block(token_block, event_manager.clone());
+        let reg_handle = RegistrationHandle::from_token_block(
+            token_block,
+            event_managers
+                .iter()
+                .map(|em| em.clone() as Arc<dyn EventReleaseManager>)
+                .collect(),
+        );
 
-        PublishHandle::new(Arc::new(reg_handle), event_manager, EventType::Register)
+        PublishHandle::new(
+            Arc::new(reg_handle),
+            event_managers
+                .iter()
+                .map(|em| em.clone() as Arc<dyn EventPublisher>)
+                .collect(),
+            EventType::Register,
+        )
     }
 }
 
@@ -139,7 +154,7 @@ pub struct RegistrationHandle {
     parent_sequence_hash: Option<SequenceHash>,
 
     #[getter(skip)]
-    release_manager: Arc<dyn EventReleaseManager>,
+    release_managers: Vec<Arc<dyn EventReleaseManager>>,
 
     token_block: TokenBlock,
 }
@@ -147,13 +162,13 @@ pub struct RegistrationHandle {
 impl RegistrationHandle {
     fn from_token_block(
         token_block: &TokenBlock,
-        release_manager: Arc<dyn EventReleaseManager>,
+        release_managers: Vec<Arc<dyn EventReleaseManager>>,
     ) -> Self {
         Self {
             block_hash: token_block.block_hash(),
             sequence_hash: token_block.sequence_hash(),
             parent_sequence_hash: token_block.parent_sequence_hash(),
-            release_manager,
+            release_managers,
             token_block: token_block.clone(),
         }
     }
@@ -171,7 +186,9 @@ impl std::fmt::Debug for RegistrationHandle {
 
 impl Drop for RegistrationHandle {
     fn drop(&mut self) {
-        self.release_manager.block_release(self);
+        for release_manager in &self.release_managers {
+            release_manager.block_release(self);
+        }
     }
 }
 
@@ -208,8 +225,10 @@ mod tests {
 
         let (event_manager, mut rx) = MockEventManager::new();
 
-        let publish_handle =
-            BlockRegistry::create_publish_handle(&sequence.blocks()[0], event_manager.clone());
+        let publish_handle = BlockRegistry::create_publish_handle(
+            &sequence.blocks()[0],
+            vec![event_manager.clone()],
+        );
 
         // no event should have been triggered
         assert!(rx.try_recv().is_err());
@@ -246,7 +265,7 @@ mod tests {
         let (event_manager, mut rx) = MockEventManager::new();
 
         let publish_handle =
-            BlockRegistry::create_publish_handle(block_to_test, event_manager.clone());
+            BlockRegistry::create_publish_handle(block_to_test, vec![event_manager.clone()]);
 
         // Remove the registration handle before dropping the publish handle
         let reg_handle = publish_handle.remove_handle();
@@ -294,8 +313,10 @@ mod tests {
         let (event_manager, mut rx) = MockEventManager::new();
         let mut publisher = event_manager.publisher();
 
-        let publish_handle1 = BlockRegistry::create_publish_handle(block1, event_manager.clone());
-        let publish_handle2 = BlockRegistry::create_publish_handle(block2, event_manager.clone());
+        let publish_handle1 =
+            BlockRegistry::create_publish_handle(block1, vec![event_manager.clone()]);
+        let publish_handle2 =
+            BlockRegistry::create_publish_handle(block2, vec![event_manager.clone()]);
 
         // Remove handles before adding to publisher
         let reg_handle1 = publish_handle1.remove_handle();
@@ -358,7 +379,8 @@ mod tests {
         let (event_manager, mut rx) = MockEventManager::new();
         let mut publisher = event_manager.publisher();
 
-        let publish_handle1 = BlockRegistry::create_publish_handle(block1, event_manager.clone());
+        let publish_handle1 =
+            BlockRegistry::create_publish_handle(block1, vec![event_manager.clone()]);
 
         publisher.take_handle(publish_handle1);
 
@@ -402,12 +424,12 @@ mod tests {
 
         let reg_handle = Arc::new(RegistrationHandle::from_token_block(
             block1,
-            event_manager.clone(),
+            vec![event_manager.clone()],
         ));
 
         let handle = PublishHandle::new(
             reg_handle.clone(),
-            event_manager.clone(),
+            vec![event_manager.clone()],
             EventType::CacheHit,
         );
 

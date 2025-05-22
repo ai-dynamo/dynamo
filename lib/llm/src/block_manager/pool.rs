@@ -71,7 +71,7 @@ pub use super::block::{ImmutableBlock, MutableBlock};
 use super::block::{
     nixl::short_type_name, registry::BlockRegistry, Block, BlockError, BlockMetadata,
 };
-use super::events::{EventManager, NullEventManager};
+use super::events::EventManager;
 use super::storage::Storage;
 
 use crate::tokens::{SequenceHash, TokenBlock};
@@ -108,8 +108,8 @@ pub enum BlockPoolError {
 #[derive(Builder, Dissolve)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
 pub struct BlockPoolArgs<S: Storage, M: BlockMetadata> {
-    #[builder(default = "NullEventManager::new()")]
-    event_manager: Arc<dyn EventManager>,
+    #[builder(default = "vec![]")]
+    event_managers: Vec<Arc<dyn EventManager>>,
 
     #[builder(default = "CancellationToken::new()")]
     cancel_token: CancellationToken,
@@ -197,12 +197,12 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
     ///
     /// A new [`BlockPool`] instance.
     fn new(
-        event_manager: Arc<dyn EventManager>,
+        event_managers: Vec<Arc<dyn EventManager>>,
         cancel_token: CancellationToken,
         blocks: Vec<Block<S, M>>,
     ) -> Self {
         let (pool, progress_engine) =
-            Self::with_progress_engine(event_manager, cancel_token, blocks);
+            Self::with_progress_engine(event_managers, cancel_token, blocks);
 
         // pool.runtime.handle().spawn(async move {
         //     let mut progress_engine = progress_engine;
@@ -236,7 +236,7 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
     }
 
     fn with_progress_engine(
-        event_manager: Arc<dyn EventManager>,
+        event_managers: Vec<Arc<dyn EventManager>>,
         cancel_token: CancellationToken,
         blocks: Vec<Block<S, M>>,
     ) -> (Self, ProgressEngine<S, M>) {
@@ -244,7 +244,7 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
         let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let progress_engine =
-            ProgressEngine::<S, M>::new(event_manager, priority_rx, ctrl_rx, cancel_token, blocks);
+            ProgressEngine::<S, M>::new(event_managers, priority_rx, ctrl_rx, cancel_token, blocks);
 
         (
             Self {
@@ -443,7 +443,7 @@ struct State<S: Storage, M: BlockMetadata> {
     inactive: InactiveBlockPool<S, M>,
     registry: BlockRegistry,
     return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, M>>,
-    event_manager: Arc<dyn EventManager>,
+    event_managers: Vec<Arc<dyn EventManager>>,
 }
 
 struct ProgressEngine<S: Storage, M: BlockMetadata> {

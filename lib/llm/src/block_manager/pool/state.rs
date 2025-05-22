@@ -15,22 +15,22 @@
 
 use crate::block_manager::{
     block::{registry::BlockRegistationError, BlockState, PrivateBlockExt},
-    events::{EventType, PublishHandle, Publisher},
+    events::{EventPublisher, EventType, PublishHandle, Publisher},
 };
 
 use super::*;
 
 impl<S: Storage, M: BlockMetadata> State<S, M> {
     fn new(
-        event_manager: Arc<dyn EventManager>,
+        event_managers: Vec<Arc<dyn EventManager>>,
         return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, M>>,
     ) -> Self {
         Self {
             active: ActiveBlockPool::new(),
             inactive: InactiveBlockPool::new(),
-            registry: BlockRegistry::new(event_manager.clone()),
+            registry: BlockRegistry::new(event_managers.clone()),
             return_tx,
-            event_manager,
+            event_managers,
         }
     }
 
@@ -238,7 +238,10 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
                 BlockState::Registered(reg_handle) => {
                     let publish_handle = PublishHandle::new(
                         reg_handle.clone(),
-                        self.event_manager.clone(),
+                        self.event_managers
+                            .iter()
+                            .map(|em| em.clone() as Arc<dyn EventPublisher>)
+                            .collect(),
                         EventType::CacheHit,
                     );
                     publish_handles.take_handle(publish_handle);
@@ -259,20 +262,25 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
     }
 
     fn publisher(&self) -> Publisher {
-        Publisher::new(self.event_manager.clone())
+        Publisher::new(
+            self.event_managers
+                .iter()
+                .map(|em| em.clone() as Arc<dyn EventPublisher>)
+                .collect(),
+        )
     }
 }
 
 impl<S: Storage, M: BlockMetadata> ProgressEngine<S, M> {
     pub fn new(
-        event_manager: Arc<dyn EventManager>,
+        event_managers: Vec<Arc<dyn EventManager>>,
         priority_rx: tokio::sync::mpsc::UnboundedReceiver<PriorityRequest<S, M>>,
         ctrl_rx: tokio::sync::mpsc::UnboundedReceiver<ControlRequest<S, M>>,
         cancel_token: CancellationToken,
         blocks: Vec<Block<S, M>>,
     ) -> Self {
         let (return_tx, return_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = State::<S, M>::new(event_manager, return_tx);
+        let mut state = State::<S, M>::new(event_managers, return_tx);
 
         tracing::debug!(count = blocks.len(), "adding blocks to inactive pool");
         state.inactive.add_blocks(blocks);
