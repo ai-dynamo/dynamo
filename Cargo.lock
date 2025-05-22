@@ -3522,6 +3522,7 @@ dependencies = [
 name = "llmctl"
 version = "0.2.1"
 dependencies = [
+ "anyhow",
  "clap",
  "dynamo-llm",
  "dynamo-runtime",

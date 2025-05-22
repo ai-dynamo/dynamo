@@ -21,7 +21,7 @@ from common.protocol import TRTLLMWorkerRequest
 from common.utils import ServerType
 from components.prefill_worker import TensorRTLLMPrefillWorker
 
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
 logger = logging.getLogger(__name__)
@@ -91,7 +91,7 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
         component = dynamo_context["component"]
         await self._kv_metrics_publisher.create_endpoint(component)
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: TRTLLMWorkerRequest):
         async for response in super().generate(request):
             yield response

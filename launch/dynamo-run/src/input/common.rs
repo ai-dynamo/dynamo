@@ -5,8 +5,8 @@ use std::pin::Pin;
 
 use dynamo_llm::{
     backend::{Backend, ExecutionContext},
+    discovery::{ModelManager, ModelWatcher, MODEL_ROOT_PATH},
     engines::StreamingEngineAdapter,
-    http::service::{discovery::ModelWatcher, ModelManager},
     model_card::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
     protocols::common::llm_backend::{BackendInput, BackendOutput},
@@ -19,7 +19,6 @@ use dynamo_llm::{
     },
 };
 use dynamo_runtime::{
-    component,
     engine::{AsyncEngineStream, Data},
     pipeline::{Context, ManyOut, Operator, ServiceBackend, ServiceFrontend, SingleIn, Source},
     DistributedRuntime, Runtime,
@@ -46,22 +45,19 @@ pub async fn prepare_engine(
             let Some(etcd_client) = distributed_runtime.etcd_client() else {
                 anyhow::bail!("Cannot be both static mode and run with dynamic discovery.");
             };
-            let model_manager = ModelManager::new();
-            let watch_obj = Arc::new(
-                ModelWatcher::new(
-                    distributed_runtime,
-                    model_manager.clone(),
-                    dynamo_runtime::pipeline::RouterMode::RoundRobin,
-                )
-                .await?,
-            );
-            let models_watcher = etcd_client
-                .kv_get_and_watch_prefix(component::MODEL_ROOT_PATH)
-                .await?;
+            let model_manager = Arc::new(ModelManager::new());
+            let watch_obj = Arc::new(ModelWatcher::new(
+                distributed_runtime,
+                model_manager.clone(),
+                dynamo_runtime::pipeline::RouterMode::RoundRobin,
+            ));
+            let models_watcher = etcd_client.kv_get_and_watch_prefix(MODEL_ROOT_PATH).await?;
             let (_prefix, _watcher, receiver) = models_watcher.dissolve();
 
             let inner_watch_obj = watch_obj.clone();
-            let _watcher_task = tokio::spawn(inner_watch_obj.watch(receiver));
+            let _watcher_task = tokio::spawn(async move {
+                inner_watch_obj.watch(receiver).await;
+            });
             tracing::info!("Waiting for remote model..");
 
             // TODO: We use the first model to appear, usually we have only one
@@ -69,9 +65,7 @@ pub async fn prepare_engine(
             // '/models` to list, and notifications when models are added / removed.
 
             let model_service_name = watch_obj.wait_for_chat_model().await;
-            let engine = model_manager
-                .state()
-                .get_chat_completions_engine(&model_service_name)?;
+            let engine = model_manager.get_chat_completions_engine(&model_service_name)?;
             Ok(PreparedEngine {
                 service_name: model_service_name,
                 engine,

@@ -65,18 +65,20 @@ use std::collections::BTreeSet;
 mod pending;
 pub mod request;
 
-use pending::{CudaTransferManager, DiskTransferManager, PendingTransfer, TransferManager};
+use pending::{
+    CudaTransferManager, DiskTransferManager, PendingTransfer, TransferBatcher, TransferManager,
+};
 use request::{BlockResult, OffloadRequest, OffloadRequestKey, OnboardRequest};
 
-// TODO: This should be dynamic
-const MAX_OFFLOAD_STREAM_DEPTH: usize = 4;
+const MAX_CONCURRENT_TRANSFERS: usize = 4;
+const MAX_TRANSFER_BATCH_SIZE: usize = 16;
 
 /// The offload manager handles all block transfers between different cache levels.
 pub struct OffloadManager<Metadata: BlockMetadata> {
     // Handles to the device, host, and disk pools.
-    disk: Arc<Option<BlockPool<DiskStorage, Metadata>>>,
-    host: Arc<Option<BlockPool<PinnedStorage, Metadata>>>,
-    device: Arc<Option<BlockPool<DeviceStorage, Metadata>>>,
+    disk: Option<Arc<BlockPool<DiskStorage, Metadata>>>,
+    host: Option<Arc<BlockPool<PinnedStorage, Metadata>>>,
+    device: Option<Arc<BlockPool<DeviceStorage, Metadata>>>,
 
     /// Queue of offloading requests.
     device_offload_tx: mpsc::UnboundedSender<OffloadRequest<DeviceStorage, Metadata>>,
@@ -92,9 +94,9 @@ pub struct OffloadManager<Metadata: BlockMetadata> {
 
 impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
     pub fn new(
-        disk: Arc<Option<BlockPool<DiskStorage, Metadata>>>,
-        host: Arc<Option<BlockPool<PinnedStorage, Metadata>>>,
-        device: Arc<Option<BlockPool<DeviceStorage, Metadata>>>,
+        disk: Option<Arc<BlockPool<DiskStorage, Metadata>>>,
+        host: Option<Arc<BlockPool<PinnedStorage, Metadata>>>,
+        device: Option<Arc<BlockPool<DeviceStorage, Metadata>>>,
         nixl_agent: Arc<Option<NixlAgent>>,
         async_rt_handle: Handle,
     ) -> Result<Arc<Self>> {
@@ -129,17 +131,17 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let device_clone = this.device.clone();
         let host_clone = this.host.clone();
         async_rt_handle.spawn(async move {
-            OffloadManager::offload_worker(
+            let res = OffloadManager::offload_worker(
                 device_clone,
                 host_clone,
                 device_offload_rx,
-                Arc::new(CudaTransferManager::new(
-                    device_offload_transfer_ctx,
-                    MAX_OFFLOAD_STREAM_DEPTH,
+                Arc::new(TransferBatcher::new(
+                    CudaTransferManager::new(device_offload_transfer_ctx, MAX_CONCURRENT_TRANSFERS),
+                    MAX_TRANSFER_BATCH_SIZE,
                 )),
             )
-            .await
-            .unwrap()
+            .await;
+            tracing::warn!("Offload worker terminated: {:?}", res);
         });
 
         let transfer_ctx = Arc::new(TransferContext::new(
@@ -152,17 +154,17 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let disk_clone = this.disk.clone();
         let transfer_ctx_clone = transfer_ctx.clone();
         async_rt_handle.spawn(async move {
-            OffloadManager::offload_worker(
+            let res = OffloadManager::offload_worker(
                 host_clone,
                 disk_clone,
                 host_offload_rx,
-                Arc::new(DiskTransferManager::new(
-                    transfer_ctx_clone,
-                    MAX_OFFLOAD_STREAM_DEPTH,
+                Arc::new(TransferBatcher::new(
+                    DiskTransferManager::new(transfer_ctx_clone, MAX_CONCURRENT_TRANSFERS),
+                    MAX_TRANSFER_BATCH_SIZE,
                 )),
             )
-            .await
-            .unwrap()
+            .await;
+            tracing::warn!("Offload worker terminated: {:?}", res);
         });
 
         // Host -> Device onboarding
@@ -170,14 +172,17 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let device_clone = this.device.clone();
         let transfer_ctx_clone = transfer_ctx.clone();
         async_rt_handle.spawn(async move {
-            OffloadManager::onboard_worker(
+            let res = OffloadManager::onboard_worker(
                 host_clone,
                 device_clone,
                 host_onboard_rx,
-                Arc::new(CudaTransferManager::new(transfer_ctx_clone, 16384)),
+                Arc::new(TransferBatcher::new(
+                    CudaTransferManager::new(transfer_ctx_clone, MAX_CONCURRENT_TRANSFERS),
+                    MAX_TRANSFER_BATCH_SIZE,
+                )),
             )
-            .await
-            .unwrap()
+            .await;
+            tracing::warn!("Onboard worker terminated: {:?}", res);
         });
 
         // Disk -> Device onboarding
@@ -185,31 +190,34 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let device_clone = this.device.clone();
         let transfer_ctx_clone = transfer_ctx.clone();
         async_rt_handle.spawn(async move {
-            OffloadManager::onboard_worker(
+            let res = OffloadManager::onboard_worker(
                 disk_clone,
                 device_clone,
                 disk_onboard_rx,
-                Arc::new(DiskTransferManager::new(transfer_ctx_clone, 16384)),
+                Arc::new(TransferBatcher::new(
+                    DiskTransferManager::new(transfer_ctx_clone, MAX_CONCURRENT_TRANSFERS),
+                    MAX_TRANSFER_BATCH_SIZE,
+                )),
             )
-            .await
-            .unwrap()
+            .await;
+            tracing::warn!("Onboard worker terminated: {:?}", res);
         });
 
         Ok(this_clone)
     }
 
     async fn offload_worker<Source: Storage, Target: Storage>(
-        source_pool_arc: Arc<Option<BlockPool<Source, Metadata>>>,
-        target_pool_arc: Arc<Option<BlockPool<Target, Metadata>>>,
+        source_pool: Option<Arc<BlockPool<Source, Metadata>>>,
+        target_pool: Option<Arc<BlockPool<Target, Metadata>>>,
         mut offload_rx: mpsc::UnboundedReceiver<OffloadRequest<Source, Metadata>>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Metadata>>,
     ) -> Result<()> {
-        if source_pool_arc.is_none() || target_pool_arc.is_none() {
+        if source_pool.is_none() || target_pool.is_none() {
             return Ok(());
         }
 
-        let source_pool = source_pool_arc.as_ref().as_ref().unwrap();
-        let target_pool = target_pool_arc.as_ref().as_ref().unwrap();
+        let source_pool = source_pool.as_ref().unwrap();
+        let target_pool = target_pool.as_ref().unwrap();
 
         let mut queue = BTreeSet::new();
 
@@ -252,7 +260,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     }
 
                     // Allocate a block from the host pool.
-                    // TODO: The most likely error here is that the host pool is full.
+                    // TODO: The most likely error here is that the target pool is full.
                     // It's probably not a good idea to keep consuming queue elements in the meantime.
                     let target_blocks = match target_pool.allocate_blocks(1).await {
                         Ok(blocks) => blocks,
@@ -263,11 +271,11 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
 
                     if let Some(target_block) = target_blocks.into_iter().next() {
                         transfer_manager
-                            .begin_transfer(PendingTransfer::new(
+                            .enqueue_transfer(PendingTransfer::new(
                                 vec![block],
                                 vec![target_block],
                                 None,
-                                target_pool_arc.clone(),
+                                target_pool.clone(),
                             ))
                             .await?;
                     }
@@ -282,16 +290,16 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
     }
 
     async fn onboard_worker<Source: Storage, Target: Storage>(
-        source_pool_arc: Arc<Option<BlockPool<Source, Metadata>>>,
-        target_pool_arc: Arc<Option<BlockPool<Target, Metadata>>>,
+        source_pool: Option<Arc<BlockPool<Source, Metadata>>>,
+        target_pool: Option<Arc<BlockPool<Target, Metadata>>>,
         mut onboard_rx: mpsc::UnboundedReceiver<OnboardRequest<Source, Target, Metadata>>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Metadata>>,
     ) -> Result<()> {
-        if source_pool_arc.is_none() || target_pool_arc.is_none() {
+        if source_pool.is_none() || target_pool.is_none() {
             return Ok(());
         }
 
-        let target_pool = target_pool_arc.as_ref().as_ref().unwrap();
+        let target_pool = target_pool.as_ref().unwrap();
 
         // Loop on incoming requests
         while let Some(request) = onboard_rx.recv().await {
@@ -311,11 +319,11 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                 .collect();
 
             transfer_manager
-                .begin_transfer(PendingTransfer::new(
+                .enqueue_transfer(PendingTransfer::new(
                     sources,
                     target_blocks,
                     Some(request.response_tx),
-                    target_pool_arc.clone(),
+                    target_pool.clone(),
                 ))
                 .await?;
         }
@@ -478,9 +486,9 @@ mod tests {
 
     const BLOCK_SIZE: usize = 4;
 
-    type DevicePool = Arc<Option<BlockPool<DeviceStorage, BasicMetadata>>>;
-    type HostPool = Arc<Option<BlockPool<PinnedStorage, BasicMetadata>>>;
-    type DiskPool = Arc<Option<BlockPool<DiskStorage, BasicMetadata>>>;
+    type DevicePool = Option<Arc<BlockPool<DeviceStorage, BasicMetadata>>>;
+    type HostPool = Option<Arc<BlockPool<PinnedStorage, BasicMetadata>>>;
+    type DiskPool = Option<Arc<BlockPool<DiskStorage, BasicMetadata>>>;
 
     lazy_static::lazy_static! {
         static ref NIXL_AGENT: Arc<Option<NixlAgent>> = {
@@ -521,16 +529,18 @@ mod tests {
         device.nixl_register(agent, None)?;
 
         let device_blocks = Blocks::<_, BasicMetadata>::new(device, 42, 0)?.into_blocks()?;
-        let device_pool = Arc::new(Some(BlockPool::builder().blocks(device_blocks).build()?));
+        let device_pool = Some(Arc::new(
+            BlockPool::builder().blocks(device_blocks).build()?,
+        ));
 
         let host_pool = if let Some(host_blocks) = host_blocks {
             config.num_blocks = host_blocks;
             let mut host = FullyContiguous::allocate(config.clone(), &PinnedAllocator::default())?;
             host.nixl_register(agent, None)?;
             let host_blocks = Blocks::<_, BasicMetadata>::new(host, 42, 0)?.into_blocks()?;
-            Arc::new(Some(BlockPool::builder().blocks(host_blocks).build()?))
+            Some(Arc::new(BlockPool::builder().blocks(host_blocks).build()?))
         } else {
-            Arc::new(None)
+            None
         };
 
         let disk_pool = if let Some(disk_blocks) = disk_blocks {
@@ -538,9 +548,9 @@ mod tests {
             let mut disk = FullyContiguous::allocate(config, &DiskAllocator)?;
             disk.nixl_register(agent, None)?;
             let disk_blocks = Blocks::<_, BasicMetadata>::new(disk, 42, 0)?.into_blocks()?;
-            Arc::new(Some(BlockPool::builder().blocks(disk_blocks).build()?))
+            Some(Arc::new(BlockPool::builder().blocks(disk_blocks).build()?))
         } else {
-            Arc::new(None)
+            None
         };
 
         let async_rt_handle = Handle::current();
@@ -558,7 +568,7 @@ mod tests {
 
     /// Create a block in the 'RESET' state.
     async fn get_block<S: Storage, Metadata: BlockMetadata>(
-        pool: &BlockPool<S, Metadata>,
+        pool: &Arc<BlockPool<S, Metadata>>,
     ) -> Result<MutableBlock<S, Metadata>> {
         pool.allocate_blocks(1)
             .await?
@@ -569,7 +579,7 @@ mod tests {
 
     /// Create a block in the 'PARTIAL' state.
     async fn partial_block<S: Storage, Metadata: BlockMetadata>(
-        pool: &BlockPool<S, Metadata>,
+        pool: &Arc<BlockPool<S, Metadata>>,
         token: u32,
     ) -> Result<MutableBlock<S, Metadata>> {
         let mut block = get_block(pool).await?;
@@ -580,7 +590,7 @@ mod tests {
 
     /// Create a block in the 'COMPLETED' state.
     async fn completed_block<S: Storage, Metadata: BlockMetadata>(
-        pool: &BlockPool<S, Metadata>,
+        pool: &Arc<BlockPool<S, Metadata>>,
         tokens: [u32; BLOCK_SIZE],
     ) -> Result<MutableBlock<S, Metadata>> {
         let mut block = get_block(pool).await?;
@@ -666,7 +676,7 @@ mod tests {
     async fn test_offload_invalid_blocks() -> Result<()> {
         let (offload_manager, device_pool, _, _) = build_pools(4, Some(4), None)?;
 
-        let device_pool = device_pool.as_ref().as_ref().unwrap();
+        let device_pool = device_pool.as_ref().unwrap();
 
         // Check blocks in the 'RESET' state.
         let immutable_block = ImmutableBlock::new(Arc::new(get_block(device_pool).await?));
@@ -699,8 +709,8 @@ mod tests {
     async fn test_offload_registered_blocks() -> Result<()> {
         let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None)?;
 
-        let device_pool = device_pool.as_ref().as_ref().unwrap();
-        let host_pool = host_pool.as_ref().as_ref().unwrap();
+        let device_pool = device_pool.as_ref().unwrap();
+        let host_pool = host_pool.as_ref().unwrap();
 
         // Create a block and register it with the offload manager
         let block = completed_block(device_pool, [0, 1, 2, 3]).await?;
@@ -742,8 +752,8 @@ mod tests {
     async fn test_no_host_blocks_available() -> Result<()> {
         let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None)?;
 
-        let device_pool = device_pool.as_ref().as_ref().unwrap();
-        let host_pool = host_pool.as_ref().as_ref().unwrap();
+        let device_pool = device_pool.as_ref().unwrap();
+        let host_pool = host_pool.as_ref().unwrap();
 
         let host_blocks = host_pool.allocate_blocks(4).await?;
         assert_eq!(host_blocks.len(), 4);
@@ -790,8 +800,8 @@ mod tests {
     async fn test_onboard() -> Result<()> {
         let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None)?;
 
-        let device_pool = device_pool.as_ref().as_ref().unwrap();
-        let host_pool = host_pool.as_ref().as_ref().unwrap();
+        let device_pool = device_pool.as_ref().unwrap();
+        let host_pool = host_pool.as_ref().unwrap();
 
         // Allocate and fill a block on the host.
         let host_block = completed_block(host_pool, [0, 1, 2, 3]).await?;
@@ -844,8 +854,8 @@ mod tests {
     async fn test_offload_onboard() -> Result<()> {
         let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None)?;
 
-        let device_pool = device_pool.as_ref().as_ref().unwrap();
-        let host_pool = host_pool.as_ref().as_ref().unwrap();
+        let device_pool = device_pool.as_ref().unwrap();
+        let host_pool = host_pool.as_ref().unwrap();
 
         let device_block = completed_block(device_pool, [0, 1, 2, 3]).await?;
         let immutable_device_block = device_pool
@@ -913,8 +923,8 @@ mod tests {
     async fn test_onboard_err_handling() -> Result<()> {
         let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None)?;
 
-        let device_pool = device_pool.as_ref().as_ref().unwrap();
-        let host_pool = host_pool.as_ref().as_ref().unwrap();
+        let device_pool = device_pool.as_ref().unwrap();
+        let host_pool = host_pool.as_ref().unwrap();
 
         let host_block = completed_block(host_pool, [0, 1, 2, 3]).await?;
         let immutable_host_block = host_pool
@@ -942,7 +952,7 @@ mod tests {
     async fn test_offload_onboard_no_host_blocks() -> Result<()> {
         let (offload_manager, device_pool, _, _) = build_pools(4, None, None)?;
 
-        let device_pool = device_pool.as_ref().as_ref().unwrap();
+        let device_pool = device_pool.as_ref().unwrap();
 
         let device_block = completed_block(device_pool, [0, 1, 2, 3]).await?;
         let immutable_device_block = device_pool
@@ -961,8 +971,8 @@ mod tests {
     async fn test_offload_disk() -> Result<()> {
         let (offload_manager, _, host_pool, disk_pool) = build_pools(4, Some(4), Some(4))?;
 
-        let host_pool = host_pool.as_ref().as_ref().unwrap();
-        let disk_pool = disk_pool.as_ref().as_ref().unwrap();
+        let host_pool = host_pool.as_ref().unwrap();
+        let disk_pool = disk_pool.as_ref().unwrap();
 
         let host_block = completed_block(host_pool, [0, 1, 2, 3]).await?;
         let immutable_host_block = host_pool
@@ -996,8 +1006,8 @@ mod tests {
     async fn test_onboard_disk() -> Result<()> {
         let (offload_manager, device_pool, _, disk_pool) = build_pools(4, None, Some(4))?;
 
-        let device_pool = device_pool.as_ref().as_ref().unwrap();
-        let disk_pool = disk_pool.as_ref().as_ref().unwrap();
+        let device_pool = device_pool.as_ref().unwrap();
+        let disk_pool = disk_pool.as_ref().unwrap();
 
         let disk_block = completed_block(disk_pool, [0, 1, 2, 3]).await?;
         let immutable_disk_block = disk_pool
@@ -1032,9 +1042,9 @@ mod tests {
         let (offload_manager, device_pool, host_pool, disk_pool) =
             build_pools(8, Some(8), Some(8))?;
 
-        let disk_pool = disk_pool.as_ref().as_ref().unwrap();
-        let host_pool = host_pool.as_ref().as_ref().unwrap();
-        let device_pool = device_pool.as_ref().as_ref().unwrap();
+        let disk_pool = disk_pool.as_ref().unwrap();
+        let host_pool = host_pool.as_ref().unwrap();
+        let device_pool = device_pool.as_ref().unwrap();
 
         let mut host_blocks = Vec::new();
 
@@ -1072,6 +1082,41 @@ mod tests {
                 .await?;
             assert_eq!(blocks.len(), 1);
             compare_block_contents(&blocks[0], disk_block)?;
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_transfer_batcher() -> Result<()> {
+        let (offload_manager, device_pool, _, disk_pool) = build_pools(
+            2 * MAX_TRANSFER_BATCH_SIZE + 1,
+            None,
+            Some(2 * MAX_TRANSFER_BATCH_SIZE + 1),
+        )?;
+
+        let device_pool = device_pool.as_ref().unwrap();
+        let disk_pool = disk_pool.as_ref().unwrap();
+
+        let mut disk_blocks = Vec::new();
+
+        for i in 0..2 * MAX_TRANSFER_BATCH_SIZE + 1 {
+            disk_blocks.push(completed_block(disk_pool, [i as u32; 4]).await?);
+        }
+
+        let immutable_disk_blocks = disk_pool.register_blocks(disk_blocks).await?;
+
+        let device_blocks = offload_manager
+            .onboard(immutable_disk_blocks.clone())
+            .await?;
+        assert_eq!(device_blocks.len(), 2 * MAX_TRANSFER_BATCH_SIZE + 1);
+
+        for device_block in &device_blocks {
+            let blocks = device_pool
+                .match_sequence_hashes(vec![device_block.sequence_hash()?].as_slice())
+                .await?;
+            assert_eq!(blocks.len(), 1);
+            compare_block_contents(&blocks[0], device_block)?;
         }
 
         Ok(())

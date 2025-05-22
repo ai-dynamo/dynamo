@@ -82,6 +82,10 @@ pub trait BlockMetadata: Default + std::fmt::Debug + Clone + Ord + Send + Sync +
     /// Resets the metadata to the default value
     /// If called, the [BlockMetadata::is_reset()] should return true
     fn reset_metadata(&mut self);
+
+    /// The offload priority of the block. Higher priority blocks are offloaded first.
+    /// If the block should not be offloaded, return None.
+    fn offload_priority(&self) -> Option<u64>;
 }
 
 /// Marker trait for types that are mutable blocks
@@ -535,6 +539,10 @@ impl BlockMetadata for BasicMetadata {
 
     fn reset_metadata(&mut self) {
         self.priority = 0;
+    }
+
+    fn offload_priority(&self) -> Option<u64> {
+        Some(self.priority as u64)
     }
 }
 /// Collection that holds shared storage and layout

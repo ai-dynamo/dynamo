@@ -752,7 +752,7 @@ impl KvIndexerSharded {
                                 }
 
                                 _ = cancel.cancelled() => {
-                                    tracing::debug!("KvCacheIndexer progress loop shutting down");
+                                    tracing::trace!("KvCacheIndexer progress loop shutting down");
                                     return;
                                 }
 
@@ -896,6 +896,10 @@ mod tests {
     use tokio::time;
     use tokio_util::sync::CancellationToken;
 
+    fn setup() {
+        dynamo_runtime::logging::init();
+    }
+
     fn make_blocks(hashes: Vec<u64>) -> Vec<KvCacheStoredBlockData> {
         hashes
             .iter()
@@ -948,6 +952,8 @@ mod tests {
 
     #[test]
     fn test_radix_tree() {
+        setup();
+
         let mut trie = RadixTree::new();
 
         let worker_1 = 0;
@@ -1151,6 +1157,7 @@ mod tests {
 
     #[test]
     fn test_remove_worker() {
+        setup();
         let mut trie = RadixTree::new();
 
         let worker_0 = 0;
@@ -1175,6 +1182,7 @@ mod tests {
 
     #[test]
     fn test_early_stopping() {
+        setup();
         let mut trie = RadixTree::new();
 
         let worker_0 = 0;
@@ -1203,6 +1211,7 @@ mod tests {
     #[case(32)]
     #[case(64)]
     fn test_compute_block_hash_for_seq(#[case] kv_block_size: usize) {
+        setup();
         // create a sequence of 64 elements
         let sequence = (0..kv_block_size).map(|i| i as u32).collect::<Vec<u32>>();
         let hashes = compute_block_hash_for_seq(&sequence, kv_block_size);
@@ -1250,6 +1259,7 @@ mod tests {
     #[tokio::test]
     #[apply(indexer_template)]
     async fn test_kv_indexer_new(num_shards: usize, kv_block_size: usize) {
+        setup();
         let token: CancellationToken = CancellationToken::new();
         let _ = make_indexer(&token, num_shards, kv_block_size);
     }
@@ -1257,6 +1267,7 @@ mod tests {
     #[tokio::test]
     #[apply(indexer_template)]
     async fn test_find_matches(num_shards: usize, kv_block_size: usize) {
+        setup();
         let token = CancellationToken::new();
         let kv_indexer = make_indexer(&token, num_shards, kv_block_size);
 
@@ -1269,6 +1280,7 @@ mod tests {
     #[tokio::test]
     #[apply(indexer_template)]
     async fn test_find_matches_for_request(num_shards: usize, kv_block_size: usize) {
+        setup();
         let token = CancellationToken::new();
         let kv_indexer = make_indexer(&token, num_shards, kv_block_size);
 
@@ -1281,6 +1293,7 @@ mod tests {
     #[tokio::test]
     #[apply(indexer_template)]
     async fn test_apply_event(num_shards: usize, kv_block_size: usize) {
+        setup();
         let worker_id = 0;
 
         let token = CancellationToken::new();
@@ -1295,6 +1308,7 @@ mod tests {
     #[tokio::test]
     #[apply(indexer_template)]
     async fn test_shutdown(num_shards: usize, kv_block_size: usize) {
+        setup();
         let token = CancellationToken::new();
         let mut kv_indexer = make_indexer(&token, num_shards, kv_block_size);
 
@@ -1304,65 +1318,107 @@ mod tests {
     #[tokio::test]
     #[apply(indexer_template)]
     async fn test_frequency(num_shards: usize, kv_block_size: usize) {
+        const ONE_MILLIS: Duration = Duration::from_millis(1);
+
+        setup();
         let mut kv_indexer: Box<dyn KvIndexerInterface>;
         let token = CancellationToken::new();
-        let duration = Some(Duration::from_millis(50));
+        let expiration = Duration::from_millis(50);
 
         if num_shards == 1 {
             kv_indexer = Box::new(KvIndexer::new_with_frequency(
                 token,
-                duration,
+                Some(expiration),
                 kv_block_size,
             ));
         } else {
             kv_indexer = Box::new(KvIndexerSharded::new_with_frequency(
                 token,
                 num_shards,
-                duration,
+                Some(expiration),
                 kv_block_size,
             ));
         }
 
-        let worker_id = 0;
-
-        let event = create_store_event(worker_id, 0, vec![1, 2, 3, 4], None);
-        kv_indexer.apply_event(event).await;
-
-        time::sleep(Duration::from_millis(5)).await;
-
+        // The blocks
         let block_hashes = vec![
             LocalBlockHash(1),
             LocalBlockHash(2),
             LocalBlockHash(3),
             LocalBlockHash(4),
         ];
-        let scores = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
 
-        assert_eq!(scores.frequencies.len(), 0);
+        let overlap = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
+        assert_eq!(
+            overlap.frequencies.len(),
+            0,
+            "Should be no cached blocks yet"
+        );
 
-        let scores = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
-        assert_eq!(scores.frequencies, vec![1, 1, 1, 1]);
+        // Blocks go in cache
+        let worker_id = 0;
+        let event = create_store_event(worker_id, 0, vec![1, 2, 3, 4], None);
+        kv_indexer.apply_event(event).await;
 
-        time::sleep(Duration::from_millis(100)).await;
+        // First access
+        // The store event is applied async so poll briefly
+        let mut overlap = OverlapScores::default();
+        let timeout = Duration::from_millis(10);
+        let start = Instant::now();
+        while overlap.scores.is_empty() && Instant::now().duration_since(start) < timeout {
+            time::sleep(ONE_MILLIS).await;
+            overlap = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
+        }
+        assert_eq!(
+            overlap.scores.len(),
+            1,
+            "One worker has these blocks cached"
+        );
+        assert_eq!(
+            overlap.frequencies.len(),
+            0,
+            "Blocks have not previously been accessed"
+        );
 
-        let scores = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
-        assert_eq!(scores.frequencies.len(), 0);
+        // Second access
+        let overlap = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
+        assert_eq!(overlap.scores.len(), 1, "Still one worker matches");
+        assert_eq!(
+            overlap.frequencies,
+            vec![1, 1, 1, 1],
+            "We should see the first access now"
+        );
 
-        let scores = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
-        assert_eq!(scores.frequencies, vec![1, 1, 1, 1]);
+        // Let those two accesses expire
+        time::sleep(expiration + Duration::from_millis(10)).await;
 
-        let scores = kv_indexer
+        // New first access
+        let overlap = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
+        assert_eq!(
+            overlap.frequencies.len(),
+            0,
+            "Blocks were accessed too long ago"
+        );
+
+        // New second access
+        let _ = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
+
+        // Access only the first three blocks
+        let overlap = kv_indexer
             .find_matches(block_hashes[0..3].to_vec())
             .await
             .unwrap();
-        assert_eq!(scores.frequencies, vec![2, 2, 2]);
+        // We see the previous two new accesses
+        assert_eq!(overlap.frequencies, vec![2, 2, 2]);
 
-        let scores = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
-        assert_eq!(scores.frequencies, vec![3, 3, 3, 2]);
+        // The third access did not touch the last block
+        let overlap = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
+        assert_eq!(overlap.frequencies, vec![3, 3, 3, 2]);
     }
 
     #[test]
     fn test_router_event_new() {
+        setup();
         let worker_id = 0;
         let kv_cache_event = KvCacheEvent {
             event_id: 1,
@@ -1392,6 +1448,7 @@ mod tests {
 
     #[test]
     fn test_radix_tree_default() {
+        setup();
         let radix_tree: RadixTree = Default::default();
         assert!(radix_tree.root.borrow().children.is_empty());
         assert!(radix_tree.root.borrow().workers.is_empty());
@@ -1400,6 +1457,7 @@ mod tests {
 
     #[test]
     fn test_overlap_scores_default() {
+        setup();
         let overlap_scores: OverlapScores = Default::default();
         assert!(overlap_scores.scores.is_empty());
     }

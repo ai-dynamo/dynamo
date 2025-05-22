@@ -511,6 +511,13 @@ class BaseTensorrtLLMEngine:
             if self._remote_prefill and self._server_type == ServerType.GEN:
                 ctx_response_obj = await self._get_remote_prefill_response(request)
 
+                yield TRTLLMWorkerResponse(
+                    request_id=request.id,
+                    prompt_token_ids=ctx_response_obj.prompt_token_ids,
+                    outputs=[asdict(ctx_response_obj.outputs[0])],
+                    finished=ctx_response_obj.finished,
+                ).model_dump_json(exclude_unset=True)
+
                 worker_inputs = ctx_response_obj.prompt_token_ids
                 disaggregated_params = (
                     DisaggregatedTypeConverter.to_llm_disaggregated_params(

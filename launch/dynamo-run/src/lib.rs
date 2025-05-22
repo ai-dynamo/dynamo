@@ -5,7 +5,7 @@ use std::{future::Future, pin::Pin};
 use std::{io::Read, sync::Arc, time::Duration};
 
 use anyhow::Context;
-use dynamo_llm::{backend::ExecutionContext, engines::StreamingEngine, LocalModel};
+use dynamo_llm::{backend::ExecutionContext, engines::StreamingEngine, local_model::LocalModel};
 use dynamo_runtime::{CancellationToken, DistributedRuntime};
 
 mod flags;
@@ -58,7 +58,7 @@ pub async fn run(
         .clone()
         .or(flags.model_path_flag.clone());
 
-    let local_model: LocalModel = match out_opt {
+    let mut local_model: LocalModel = match out_opt {
         // If output is dynamic we are ingress and don't have a local model, but making an
         // empty one cleans up the code.
         Output::Dynamic => Default::default(),
@@ -84,6 +84,7 @@ pub async fn run(
             }
         }
     };
+    local_model.context_length = flags.context_length;
 
     let mut extra: Option<Pin<Box<dyn Future<Output = ()> + Send>>> = None; // vllm and sglang sub-process
 
@@ -145,6 +146,7 @@ pub async fn run(
                 &local_model,
                 &endpoint,
                 flags.tensor_parallel_size,
+                flags.context_length,
                 if flags.base_gpu_id == 0 {
                     None
                 } else {
@@ -189,6 +191,7 @@ pub async fn run(
                 &local_model,
                 &endpoint,
                 flags.tensor_parallel_size,
+                flags.context_length,
                 None, // base_gpu_id. vllm uses CUDA_VISIBLE_DEVICES instead
                 None, // multi-node config. vllm uses `ray`, see guide
                 flags.extra_engine_args.as_deref(),
@@ -215,8 +218,7 @@ pub async fn run(
                 anyhow::bail!("--model-path should refer to a GGUF file. llama_cpp does not support safetensors.");
             }
             let engine =
-                dynamo_engine_llamacpp::make_engine(cancel_token.clone(), local_model.path())
-                    .await?;
+                dynamo_engine_llamacpp::make_engine(cancel_token.clone(), &local_model).await?;
             EngineConfig::StaticCore {
                 engine,
                 model: Box::new(local_model),

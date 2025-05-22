@@ -26,7 +26,7 @@ from utils.protocol import Tokens
 from utils.vllm import RouterType
 
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
 WorkerId = str
@@ -247,7 +247,7 @@ class Router:
         )
         return best_worker_id, kv_load[best_worker_id]
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: Tokens) -> AsyncIterator[Tuple[WorkerId, float]]:
         metrics = await self.metrics_aggregator.get_metrics()
 

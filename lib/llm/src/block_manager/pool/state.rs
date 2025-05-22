@@ -179,9 +179,10 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
 
             let immutable = self.active.register(mutable)?;
 
-            // TODO: Make a way to set meaningful priority values, and maybe don't enqueue offloads for every registered block.
             if offload {
-                immutable.enqueue_offload(0).await.unwrap();
+                if let Some(priority) = immutable.metadata().offload_priority() {
+                    immutable.enqueue_offload(priority).await.unwrap();
+                }
             }
 
             immutable_blocks.push(immutable);

@@ -17,7 +17,7 @@ from typing import Any
 
 from bentoml import on_shutdown as async_on_shutdown
 
-from dynamo.sdk.core.decorators.endpoint import dynamo_api, dynamo_endpoint
+from dynamo.sdk.core.decorators.endpoint import api, endpoint
 from dynamo.sdk.core.lib import DYNAMO_IMAGE, depends, service
 from dynamo.sdk.lib.decorators import async_on_start
 
@@ -29,7 +29,7 @@ __all__ = [
     "async_on_start",
     "depends",
     "dynamo_context",
-    "dynamo_endpoint",
-    "dynamo_api",
+    "endpoint",
+    "api",
     "service",
 ]

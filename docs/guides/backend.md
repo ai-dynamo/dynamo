@@ -1,3 +1,21 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
+All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+
 # Writing Python Workers in Dynamo
 
 This guide explains how to create your own Python worker in Dynamo and deploy
@@ -5,28 +23,28 @@ it via `dynamo serve` or `dynamo deploy`, covering basic concepts as well as
 advanced features like enabling KV routing and disaggregated serving.
 
 For detailed information about `dynamo serve` infrastructure, see the
-[Dynamo SDK Docs](../deploy/sdk/docs/sdk/README.md).
+[Dynamo SDK Docs](../API/sdk.md).
 
 For a guide that walks through how to launch a vLLM-based worker with
 implementation of Disaggregated Serving and KV-Aware Routing included,
-see the [Dynamo Serve Guide](../docs/guides/dynamo_serve.md).
+see the [Dynamo Serve Guide](../../docs/guides/dynamo_serve.md).
 
 ## Basic Concepts
 
 When deploying a python-based worker with `dynamo serve` or `dynamo deploy`, it is
 a Python class based definition that requires a few key decorators to get going:
 - `@service`: used to define a worker class
-- `@dynamo_endpoint`: marks methods that can be called by other workers or clients
+- `@endpoint`: marks methods that can be called by other workers or clients
 
 For more detailed information on these concepts, see the
-[Dynamo SDK Docs](../deploy/sdk/docs/sdk/README.md).
+[Dynamo SDK Docs](../API/sdk.md).
 
 ### Worker Skeleton
 
 Here is the rough outline of what a worker may look like in its simplest form:
 
 ```python
-from dynamo.sdk import dynamo_endpoint, service
+from dynamo.sdk import endpoint, service
 
 @service(
     dynamo={
@@ -37,7 +55,7 @@ class YourWorker:
     # Worker implementation
     # ...
 
-    @dynamo_endpoint()
+    @endpoint()
     async def your_endpoint(self, request: RequestType) -> AsyncIterator[ResponseType]:
         # Endpoint Implementation
         pass
@@ -48,10 +66,10 @@ When addressing this worker's endpoint with the `namespace/component/endpoint` s
 based on the definitions above, it would be: `your_namespace/YourWorker/your_endpoint`:
 - `namespace="your_namespace"`: Defined in the `@service` decorator
 - `component="YourWorker"`: Defined by the Python Class name
-- `endpoint="your_endpoint"`: Defined by the `@dynamo_endpoint` decorator, or by default the name of the function being decorated.
+- `endpoint="your_endpoint"`: Defined by the `@endpoint` decorator, or by default the name of the function being decorated.
 
 For more details about service configuration, resource management, and dynamo endpoints,
-see the [Dynamo SDK Docs](../deploy/sdk/docs/README.md).
+see the [Dynamo SDK Docs](../API/sdk.md).
 
 ### Request/Response Types
 
@@ -79,7 +97,7 @@ Chat Completions objects, such as the ones specified in the OpenAI API. For exam
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 
 class YourLLMWorker:
-    @dynamo_endpoint(name="my_chat_completions_endpoint")
+    @endpoint(name="my_chat_completions_endpoint")
     async def generate(self, request: ChatCompletionRequest):
         # Endpoint Implementation
         pass
@@ -95,7 +113,7 @@ via custom RequestType/ResponseType definitions:
 # This can be run standalone with `dynamo serve basic_worker:YourWorker`
 
 from pydantic import BaseModel
-from dynamo.sdk import dynamo_endpoint, service
+from dynamo.sdk import endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +132,7 @@ class YourWorker:
     def __init__(self) -> None:
         logger.info("Starting worker...")
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: RequestType):
         """Generate tokens and stream them back"""
         logger.info(f"Worker endpoint received: {request.text}")
@@ -125,7 +143,7 @@ class YourWorker:
 
 To see a minimal worker example like the above used in a larger pipeline of
 components, see the `dynamo serve`
-[Hello World example](../examples/hello_world).
+[Hello World example](../../examples/hello_world).
 
 ### Client Example
 
@@ -176,13 +194,13 @@ that does something like the following:
 - Forward responses back to client
 
 This advanced scenario of a separate
-[OpenAI Processor worker](../examples/llm/components/processor.py)
+[OpenAI Processor worker](https://github.com/ai-dynamo/dynamo/blob/main/examples/llm/components/processor.py)
 is demonstrated in this
-[vLLM example](../examples/llm/).
+[vLLM example](https://github.com/ai-dynamo/dynamo/tree/main/examples/llm).
 
 For a more minimal example of deploying a pipeline of components with a custom
 API that your client can communicate with, see the
-[Hello World example](../examples/hello_world).
+[Hello World example](../../examples/hello_world).
 
 ## Advanced Features
 
@@ -192,7 +210,7 @@ KV-aware routing is a powerful feature of Dynamo that optimizes for routing
 requests to specific workers while minimizing a specific KV-cache based cost function.
 
 In its simplest form, all a worker needs to do to enable KV-aware routing is to
-publish KV metrics through the `KvMetricsPublisher`, which will be consumed
+publish KV metrics through the `KvMetricsPublisher`, which is consumed
 by a Dynamo KV Router through the `KvMetricsAggregator`:
 
 ```python
@@ -204,7 +222,7 @@ import random
 
 from pydantic import BaseModel
 from dynamo.llm import KvMetricsPublisher
-from dynamo.sdk import dynamo_endpoint, service, dynamo_context
+from dynamo.sdk import endpoint, service, dynamo_context
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +287,7 @@ class YourWorker:
             self.gpu_prefix_cache_hit_rate,
         )
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: RequestType):
         """Generate tokens, update KV Cache metrics, and stream the tokens back"""
         # Increment the number of active requests on receiving one
@@ -300,7 +318,7 @@ to a KV Router through the `KvMetricsAggregator`.
 These metrics can then be inputs to a cost function to determine which
 of the available worker's the request should be routed to.
 
-For a [python-based KV Router](../examples/llm/components/kv_router.py)
+For a [python-based KV Router](../../examples/llm/components/kv_router.py)
 implementation, the router is like any other worker, and it can expose
 an endpoint that can do arbitrary things based on your use case.
 
@@ -384,7 +402,7 @@ class Router:
         return best_worker_id
 
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: Tokens) -> AsyncIterator[WorkerId]:
         try:
             # lora_id is a placeholder for lora support, but not used in this example
@@ -414,11 +432,11 @@ class Router:
 
 Similarly, for running a Rust-based Router as a standalone binary
 rather than as a Python Worker, see the
-[WorkerSelector Trait](../lib/llm/src/kv_router.rs) trait, and the
-[Router Component](../components/router/src/main.rs).
+[WorkerSelector Trait](../../lib/llm/src/kv_router.rs) trait, and the
+[Router Component](../../components/router/src/main.rs).
 
 For more details on receiving and routing based on the worker's published KV
-metrics, see the [KV Cache Routing Guide](../docs/kv_cache_routing.md).
+metrics, see the [KV Cache Routing Guide](../../docs/architecture/kv_cache_routing.md).
 
 ### Disaggregated Serving
 
@@ -520,7 +538,7 @@ The NIXL connector provides:
 - Efficient block-based KV cache transfers
 - Asynchronous transfer notifications
 
-For a complete implementation example using NIXL for disaggregated serving, see the [vLLM example](../examples/llm/README.md).
+For a complete implementation example using NIXL for disaggregated serving, see the [vLLM example](../examples/llm_deployment.md).
 
 #### Disaggregation in Dynamo
 
@@ -563,7 +581,7 @@ class DecodeWorker:
                 .endpoint("generate")
                 .client()
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request):
         if self.do_remote_prefill:
             # Forward the request to the prefill worker
@@ -580,7 +598,7 @@ class PrefillWorker:
     def __init__(self):
         # ...
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request):
         # ... framework-specific prefill logic ...
 ```
@@ -589,13 +607,13 @@ Depending on the load distribution of requests and number of Prefill/Decode
 worker instances, instead of directly forwarding requests to the Prefill
 worker endpoint, it may be advantageous to send Prefill requests into a queue
 that the Prefill workers can pull from on-demand instead. You can see an example
-of that [here](../examples/hello_world/disagg_skeleton/components/prefill_worker.py).
+of that [here](https://github.com/ai-dynamo/dynamo/blob/main/examples/hello_world/disagg_skeleton/components/prefill_worker.py).
 
 For an introductory example on doing disaggregation with Dynamo using simple models, see
-[this example](../examples/hello_world/disagg_skeleton).
+[this example](../examples/disagg_skeleton.md).
 
 For more information on Disaggregated Serving, see the
-[general guide](../docs/disagg_serving.md) and [performance tuning guide](../docs/guides/disagg_perf_tuning.md).
+[general guide](../architecture/disagg_serving.md) and [performance tuning guide](disagg_perf_tuning.md).
 
 ## Best Practices
 
@@ -612,7 +630,7 @@ For more information on Disaggregated Serving, see the
 
 2. **Async Operations**: Use async/await for I/O operations:
    ```python
-   @dynamo_endpoint()
+   @endpoint()
    async def generate(self, request):
        # Use async operations for better performance
        result = await self.some_async_operation()
@@ -620,6 +638,6 @@ For more information on Disaggregated Serving, see the
 
 ## Additional Resources
 
-- Check the [examples](../examples/) directory for more detailed implementations
-- Refer to the [Dynamo SDK Docs](../deploy/sdk/docs/sdk/README.md) for API details.
-- For Disaggregated Serving, see the [general guide](../docs/disagg_serving.md) and [performance tuning guide](../docs/guides/disagg_perf_tuning.md).
+- Check the [examples](https://github.com/ai-dynamo/dynamo/tree/main/examples) directory for more detailed implementations
+- Refer to the [Dynamo SDK Docs](../API/sdk.md) for API details.
+- For Disaggregated Serving, see the [general guide](../architecture/disagg_serving.md) and [performance tuning guide](disagg_perf_tuning.md).

@@ -17,7 +17,7 @@ import base64
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, List, Literal, Optional, Union
+from typing import Any, List, Literal, Optional, TypeAlias, Union
 
 import torch
 from common.utils import ConversationMessage
@@ -70,31 +70,59 @@ class TRTLLMWorkerRequest(BaseModel):
     disaggregated_params: Optional[DisaggregatedParams] = Field(default=None)
 
 
+@dataclass(slots=True)
+class Logprob:
+    """Holds logprob and vocab rank for a token."""
+
+    logprob: float
+    rank: Optional[int] = None
+
+
+# List of token_id_to_Logprob dict for prompt or generation texts
+TokenLogprobs: TypeAlias = list[dict[int, Logprob]]
+
+
 @dataclass
 class TRTLLMWorkerResponseOutput:
     index: int
-    text: str
-    token_ids: list[int]
-    logprobs: Optional[List[float]] = None
-    prompt_logprobs: Optional[List[float]] = None
+    text: str = ""
+    token_ids: Optional[List[int]] = field(default_factory=list)
     cumulative_logprob: Optional[float] = None
+    logprobs: Optional[TokenLogprobs] = field(default_factory=list)
+    prompt_logprobs: Optional[TokenLogprobs] = field(default_factory=list)
     finish_reason: Optional[Literal["stop", "length", "timeout", "cancelled"]] = None
     stop_reason: Optional[Union[int, str]] = None
     generation_logits: Optional[torch.Tensor] = None
     disaggregated_params: Optional[DisaggregatedParams] = None
 
-    _last_text_len: int = field(default=0)
-    _last_token_ids_len: int = field(default=0)
-    _last_logprobs_len: int = field(default=0)
-    _incremental_states: Optional[dict] = field(default=None)
-    _postprocess_result: Optional[Any] = field(default=None)
+    # hidden fields for tracking the diffs
+    _last_text_len: int = field(default=0, init=True, repr=False)
+    _last_token_ids_len: int = field(default=0, init=True, repr=False)
+    _last_logprobs_len: int = field(default=0, init=True, repr=False)
+    _incremental_states: Optional[dict] = field(default=None, init=True, repr=False)
+    # the result of result_handler passed to postprocess workers
+    _postprocess_result: Any = None
 
-    text_diff: str = field(default="")
-    length: int = field(default=0)
+    @property
+    def length(self) -> int:
+        return 0 if self.token_ids is None else len(self.token_ids)
 
-    def __post_init__(self):
-        self.text_diff = self.text[self._last_text_len :]
-        self.length = len(self.token_ids)
+    @property
+    def text_diff(self) -> str:
+        return self.text[self._last_text_len :]
+
+    @property
+    def token_ids_diff(self) -> List[int]:
+        return (
+            [] if self.token_ids is None else self.token_ids[self._last_token_ids_len :]
+        )
+
+    # Ignoring the mypy error here as this is copied from TensorRT-LLM project.
+    # https://github.com/NVIDIA/TensorRT-LLM/blob/19c6e68bec891b66146a09647ee7b70230ef5f67/tensorrt_llm/executor/result.py#L68
+    # TODO: Work with the TensorRT-LLM team to get this fixed.
+    @property
+    def logprobs_diff(self) -> List[float]:  # type: ignore
+        return [] if self.logprobs is None else self.logprobs[self._last_logprobs_len :]  # type: ignore
 
 
 class TRTLLMWorkerResponse(BaseModel):

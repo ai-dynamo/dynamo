@@ -8,10 +8,13 @@ use std::sync::Arc;
 use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 
-use crate::http::service::discovery::{ModelEntry, ModelNetworkName};
+use crate::discovery::ModelEntry;
 use crate::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager};
 use crate::model_card::{self, ModelDeploymentCard};
 use crate::model_type::ModelType;
+
+mod network_name;
+pub use network_name::ModelNetworkName;
 
 /// Prefix for Hugging Face model repository
 const HF_SCHEME: &str = "hf://";
@@ -24,6 +27,10 @@ const DEFAULT_NAME: &str = "dynamo";
 pub struct LocalModel {
     full_path: PathBuf,
     card: ModelDeploymentCard,
+
+    /// The max context the engine will allow us sending to the model.
+    /// If not set this defaults to the engine's configured maximum.
+    pub context_length: Option<usize>,
 }
 
 impl Default for LocalModel {
@@ -31,6 +38,7 @@ impl Default for LocalModel {
         LocalModel {
             full_path: PathBuf::new(),
             card: ModelDeploymentCard::with_name_only(DEFAULT_NAME),
+            context_length: None,
         }
     }
 }
@@ -112,7 +120,11 @@ impl LocalModel {
         let mut card = ModelDeploymentCard::load(&model_config_path).await?;
         card.set_name(&model_name);
 
-        Ok(LocalModel { full_path, card })
+        Ok(LocalModel {
+            full_path,
+            card,
+            ..Default::default()
+        })
     }
 
     /// Attach this model the endpoint. This registers it on the network
@@ -146,7 +158,7 @@ impl LocalModel {
         let network_name = ModelNetworkName::from_local(endpoint, etcd_client.lease_id());
         tracing::debug!("Registering with etcd as {network_name}");
         let model_registration = ModelEntry {
-            name: self.service_name().to_string(),
+            name: self.display_name().to_string(),
             endpoint: endpoint.id(),
             model_type,
         };

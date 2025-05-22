@@ -46,13 +46,13 @@ uv pip install maturin
 maturin develop --uv
 ```
 
-# Run Examples
+## Run Examples
 
-## Pre-requisite
+### Prerequisite
 
-See [README.md](../../runtime/README.md#️-prerequisites).
+See [README.md](../../../docs/runtime/README.md#prerequisites).
 
-## Hello World Example
+### Hello World Example
 
 1. Start 3 separate shells, and activate the virtual environment in each
 ```
@@ -80,7 +80,7 @@ distributed across the server instances in each server's output. If only one
 server instance is started, you should see the requests go to that server
 each time.
 
-# Performance
+## Performance
 
 The performance impacts of synchronizing the Python and Rust async runtimes
 is a critical consideration when optimizing the performance of a highly
