@@ -27,10 +27,6 @@ const DEFAULT_NAME: &str = "dynamo";
 pub struct LocalModel {
     full_path: PathBuf,
     card: ModelDeploymentCard,
-
-    /// The max context the engine will allow us sending to the model.
-    /// If not set this defaults to the engine's configured maximum.
-    pub context_length: Option<usize>,
 }
 
 impl Default for LocalModel {
@@ -38,7 +34,6 @@ impl Default for LocalModel {
         LocalModel {
             full_path: PathBuf::new(),
             card: ModelDeploymentCard::with_name_only(DEFAULT_NAME),
-            context_length: None,
         }
     }
 }
@@ -65,6 +60,15 @@ impl LocalModel {
 
     pub fn service_name(&self) -> &str {
         &self.card.service_name
+    }
+
+    /// Override max number of tokens in context. We usually only do this to limit kv cache allocation.
+    pub fn set_context_length(&mut self, context_length: usize) {
+        self.card.context_length = context_length;
+    }
+
+    pub fn set_kv_cache_block_size(&mut self, block_size: usize) {
+        self.card.kv_cache_block_size = block_size;
     }
 
     /// Make an LLM ready for use:
@@ -120,11 +124,7 @@ impl LocalModel {
         let mut card = ModelDeploymentCard::load(&model_config_path).await?;
         card.set_name(&model_name);
 
-        Ok(LocalModel {
-            full_path,
-            card,
-            ..Default::default()
-        })
+        Ok(LocalModel { full_path, card })
     }
 
     /// Attach this model the endpoint. This registers it on the network
