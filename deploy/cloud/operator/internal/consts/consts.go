@@ -64,4 +64,6 @@ const (
 	KubeAnnotationDynamoComponentHash            = "nvidia.com/dynamo-request-hash"
 	KubeAnnotationDynamoComponentImageBuiderHash = "nvidia.com/dynamo-request-image-builder-hash"
 	KubeAnnotationDynamoComponentStorageNS       = "nvidia.com/dynamo-storage-namespace"
+
+	DynamoDeploymentConfigEnvVar = "DYN_DEPLOYMENT_CONFIG"
 )

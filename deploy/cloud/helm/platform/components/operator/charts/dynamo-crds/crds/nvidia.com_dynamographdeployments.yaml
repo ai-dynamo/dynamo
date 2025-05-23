@@ -43,6 +43,8 @@ spec:
             type: object
           spec:
             properties:
+              config:
+                x-kubernetes-preserve-unknown-fields: true
               dynamoGraph:
                 type: string
               envs:

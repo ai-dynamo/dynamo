@@ -23,6 +23,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -41,7 +42,8 @@ type DynamoGraphDeploymentSpec struct {
 	Services map[string]*DynamoComponentDeploymentOverridesSpec `json:"services,omitempty"`
 	// Environment variables to be set in the deployment
 	// +kubebuilder:validation:Optional
-	Envs []corev1.EnvVar `json:"envs,omitempty"`
+	Envs   []corev1.EnvVar       `json:"envs,omitempty"`
+	Config *apiextensionsv1.JSON `json:"config,omitempty"`
 }
 
 // DynamoGraphDeploymentStatus defines the observed state of DynamoGraphDeployment.

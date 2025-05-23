@@ -391,6 +391,8 @@ spec:
                   minReplicas:
                     type: integer
                 type: object
+              config:
+                x-kubernetes-preserve-unknown-fields: true
               dynamoComponent:
                 type: string
               dynamoNamespace:
