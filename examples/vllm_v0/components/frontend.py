@@ -87,11 +87,6 @@ class Frontend:
             self.frontend_config.router,
         ]
 
-        # if self.frontend_config.router == "kv":
-        #     cmd += ["--router-mode", "kv", "--kv-cache-block-size", str(self.frontend_config.block_size)]
-        # else:
-        #     cmd += ["--router-mode", self.frontend_config.router]
-
         self.process = subprocess.Popen(
             cmd,
             stdout=None,
