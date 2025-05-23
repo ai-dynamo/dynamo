@@ -92,9 +92,8 @@ jobs:
       run: cargo test --locked --all-targets
 
   block-manager-rust:
-    runs-on: ubuntu-latest
-    # runs-on:
-    #   group: Fastchecker
+    runs-on:
+      group: Fastchecker
     name: Docker Rust Checks (llm/block-manager)
     env:
       CONTAINER_ID: rust_check_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
