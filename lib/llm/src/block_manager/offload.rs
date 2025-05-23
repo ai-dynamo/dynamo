@@ -477,8 +477,8 @@ mod tests {
         layout::{nixl::NixlLayout, FullyContiguous},
         pool::BlockPool,
         storage::{
-            DeviceAllocator, DeviceStorage, DiskAllocator, DiskStorage,
-            PinnedAllocator, PinnedStorage, StorageType,
+            DeviceAllocator, DeviceStorage, DiskAllocator, DiskStorage, PinnedAllocator,
+            PinnedStorage, StorageType,
         },
         DType, LayoutConfig,
     };
