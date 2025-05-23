@@ -19,6 +19,9 @@ Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo 
 # Dynamo deploy
 /examples/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen @sshchoi @PeaBrane @mohammedabdulwahhab @ai-dynamo/Devops
 
+# Multimodal
+/examples/multimodal/ @indrajit96 @whoisj @krishung5
+
 # CI/CD
 /.github/ @ai-dynamo/Devops @nnshah1
 CODEOWNERS @ai-dynamo/Devops @nnshah1
