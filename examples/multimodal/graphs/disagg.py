@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from components.encode_worker import EncodeWorker
+from components.encode_worker_loader import EncodeWorker
 from components.frontend import Frontend
 from components.prefill_worker import PrefillWorker
 from components.processor import Processor

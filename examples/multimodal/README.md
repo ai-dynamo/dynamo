@@ -124,3 +124,35 @@ You should see a response similar to this:
 ```
 " The image depicts a man moving across a field on a skateboard. The setting appears to be joyful, and this activity suggests that the man is enjoying an outdoor adventure. Additionally, a pet dog is probably accompanying, contributing to the positive mood. The mood and setting of the image appear lively and shoal. The sun is most likely low in the sky, as this would produce a nice daylight."
 ```
+
+## Encoder Implementation Details
+
+The image encoding component in both agg and disagg scenarios, responsible for generating image embeddings from input images, offers flexibility in its backend implementation. This is managed by the [`encode_worker_loader.py`](components/encode_worker_loader.py), which dynamically selects the encoder based on configuration.
+
+Two primary implementations are available:
+
+1.  **PyTorch-based Encoder**:
+    *   Implementation: [`encode_worker.py`](components/encode_worker.py)
+    *   Behavior: Uses Hugging Face Transformers with PyTorch for image processing and model inference. This is the default if no specific framework is chosen or if `encode-framework` is set to `"pytorch"`.
+
+2.  **ONNX Runtime-based Encoder (with TensorRT acceleration)**:
+    *   Implementation: [`encode_worker_onnx.py`](components/encode_worker_onnx.py)
+    *   Behavior: Utilizes ONNX Runtime, leveraging the TensorRT execution provider for optimized performance on NVIDIA GPUs. It uses separate ONNX models for the vision tower and projector parts of LLaVA.
+    *   Preprocessing: While it uses `LlavaProcessor` from Hugging Face during initialization to extract preprocessing parameters (from the `hf-model-path`), the actual per-image preprocessing (resize, crop, normalize) is performed manually using PIL and NumPy. This design showcases flexibilty of the Encode Worker.
+
+**Configuration:**
+
+To select the encoder implementation, modify the YAML configuration file (e.g., `configs/agg.yaml` or `configs/disagg.yaml`) by adding or updating the `FrameworkArgs` section:
+
+```yaml
+FrameworkArgs:
+  encode-framework: "onnx"  # or "pytorch"
+  onnx-model-path: "/workspace/examples/multimodal/llava_onnx_encoder" # Example path, required if encode-framework is "onnx"
+  hf-model-path: "/tmp/llava-1.5-7b-hf" # Example path, required if encode-framework is "onnx"
+```
+
+*   `encode-framework`: Set to `"onnx"` to use the ONNX Runtime-based encoder, or `"pytorch"` for the PyTorch-based one.
+*   `onnx-model-path`: (Required for `"onnx"` framework) Specifies the directory containing the converted ONNX models (e.g., `llava_vision_tower.onnx`, `llava_projector.onnx`). For guidance on converting models to ONNX and optimizing with TensorRT, refer to the [NVIDIA TensorRT Quick Start Guide](https://docs.nvidia.com/deeplearning/tensorrt/latest/getting-started/quick-start-guide.html#ex-deploy-onnx).
+*   `hf-model-path`: (Required for `"onnx"` framework) Points to the original Hugging Face model directory (e.g., where `preprocessor_config.json` for LLaVA is located). This is used to extract image preprocessing parameters.
+
+The necessary dependencies for the ONNX-based encoder (`onnx`, `onnxruntime-gpu`) are included in `container/deps/requirements.txt`.

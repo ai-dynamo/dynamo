@@ -23,6 +23,8 @@ matplotlib
 msgspec
 mypy
 numpy
+onnx
+onnxruntime-gpu
 opentelemetry-api
 opentelemetry-sdk
 pip==25.0.1
