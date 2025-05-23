@@ -19,6 +19,7 @@ use super::offload::OffloadManager;
 use super::{
     block::{Block, ImmutableBlock},
     config::NixlOptions,
+    events::{offload::OffloadEventManager, EventManager},
 };
 use cudarc::driver::CudaStream;
 use std::sync::Arc;
@@ -123,6 +124,8 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
         let mut next_block_set_idx = 0;
         let mut local_block_set = block::nixl::NixlBlockSet::new(worker_id);
 
+        let offload_event_manager = Arc::new(OffloadEventManager::new());
+
         let (disk_pool, disk_blocks) = if let Some(config) = config.disk_layout {
             if nixl_agent.is_none() {
                 tracing::warn!("NIXL is disabled; will not allocate disk blocks.");
@@ -138,6 +141,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                     next_block_set_idx,
                     cancellation_token.clone(),
                     worker_id,
+                    vec![offload_event_manager.clone()],
                 )?;
                 (Some(Arc::new(pool)), Some(blocks))
             }
@@ -158,6 +162,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 next_block_set_idx,
                 cancellation_token.clone(),
                 worker_id,
+                vec![offload_event_manager.clone()],
             )?;
             (Some(Arc::new(pool)), Some(blocks))
         } else {
@@ -177,6 +182,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 next_block_set_idx,
                 cancellation_token.clone(),
                 worker_id,
+                vec![offload_event_manager.clone()],
             )?;
             (Some(Arc::new(pool)), Some(blocks))
         } else {
@@ -202,6 +208,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
             disk_pool.clone(),
             host_pool.clone(),
             device_pool.clone(),
+            offload_event_manager,
             nixl_agent.clone(),
             offload_async_rt_handle,
         )?;
@@ -484,10 +491,12 @@ fn create_block_pool<S: Storage + NixlRegisterableStorage, M: BlockMetadata>(
     block_set_idx: usize,
     cancellation_token: CancellationToken,
     worker_id: WorkerID,
+    event_managers: Vec<Arc<dyn EventManager>>,
 ) -> Result<(BlockPool<S, M>, Vec<Block<S, M>>)> {
     let blocks = block::layout_to_blocks::<_, M>(layout, block_set_idx, worker_id)?;
     let pool = BlockPool::<S, M>::builder()
         .cancel_token(cancellation_token)
+        .event_managers(event_managers)
         .build()?;
     Ok((pool, blocks))
 }

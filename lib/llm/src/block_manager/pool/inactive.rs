@@ -490,7 +490,6 @@ pub(crate) mod tests {
     use crate::{
         block_manager::{
             block::{registry::BlockRegistry, state::CompleteState, Blocks, PrivateBlockExt},
-            events::NullEventManager,
             layout::{BlockLayout, FullyContiguous, LayoutConfigBuilder},
             storage::tests::{NullDeviceAllocator, NullDeviceStorage},
         },
@@ -614,8 +613,7 @@ pub(crate) mod tests {
 
         let mut blocks = create_block_collection(num_blocks).into_blocks().unwrap();
 
-        let event_manager = NullEventManager::new();
-        let mut registry = BlockRegistry::new(event_manager);
+        let mut registry = BlockRegistry::new(vec![]);
 
         // Iterate through the generated TokenBlocks and the template Blocks,
         // setting the state and registering each one.
@@ -656,8 +654,7 @@ pub(crate) mod tests {
         let mut matched_blocks = pool.match_token_blocks(&token_blocks);
         let matched_block_count = matched_blocks.len();
 
-        let event_manager = NullEventManager::new();
-        let mut registry = BlockRegistry::new(event_manager);
+        let mut registry = BlockRegistry::new(vec![]);
 
         // all matched blocks should be in the complete or registered state
         for block in &mut matched_blocks {

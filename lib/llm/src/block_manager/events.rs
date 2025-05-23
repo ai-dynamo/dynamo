@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::block::registry::RegistrationHandle;
@@ -34,13 +35,21 @@ use super::block::registry::RegistrationHandle;
 ///
 /// The [RegistrationHandle] associated from [EventManager::block_register] call is an RAII object
 /// which will trigger a `Remove` event on being dropped.
+pub mod offload;
+
 pub trait EventManager: EventPublisher + EventReleaseManager + Send + Sync {
     // fn register_block(&self, token_block: &TokenBlock) -> PublishHandle;
     // fn publisher(&self) -> Publisher;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EventType {
+    Register,
+    CacheHit,
+}
+
 pub trait EventPublisher: Send + Sync {
-    fn publish(&self, handles: Vec<Arc<RegistrationHandle>>);
+    fn publish(&self, handles: Vec<Arc<RegistrationHandle>>, event_type: EventType);
 }
 
 pub trait EventReleaseManager: Send + Sync {
@@ -58,14 +67,22 @@ pub trait EventReleaseManager: Send + Sync {
 /// registration events.
 pub struct PublishHandle {
     handle: Arc<RegistrationHandle>,
-    publisher: Option<Arc<dyn EventPublisher>>,
+    publishers: Option<Vec<Arc<dyn EventPublisher>>>,
+    event_type: EventType,
 }
 
 impl PublishHandle {
-    pub fn new(handle: RegistrationHandle, publisher: Arc<dyn EventPublisher>) -> Self {
-        let handle = Arc::new(handle);
-        let publisher = Some(publisher);
-        Self { handle, publisher }
+    pub fn new(
+        handle: Arc<RegistrationHandle>,
+        publishers: Vec<Arc<dyn EventPublisher>>,
+        event_type: EventType,
+    ) -> Self {
+        let publishers = Some(publishers);
+        Self {
+            handle,
+            publishers,
+            event_type,
+        }
     }
 
     pub fn remove_handle(&self) -> Arc<RegistrationHandle> {
@@ -73,14 +90,16 @@ impl PublishHandle {
     }
 
     fn disarm(&mut self) {
-        self.publisher = None;
+        self.publishers = None;
     }
 }
 
 impl Drop for PublishHandle {
     fn drop(&mut self) {
-        if let Some(publisher) = self.publisher.take() {
-            publisher.publish(vec![self.handle.clone()]);
+        if let Some(publishers) = self.publishers.take() {
+            for publisher in publishers {
+                publisher.publish(vec![self.handle.clone()], self.event_type);
+            }
         }
     }
 }
@@ -94,21 +113,24 @@ impl Drop for PublishHandle {
 /// The behavior of the [EventPublisher] is left entirely up to the the implementor.
 #[derive(Clone)]
 pub struct Publisher {
-    handles: Vec<Arc<RegistrationHandle>>,
-    publisher: Arc<dyn EventPublisher>,
+    handles: HashMap<EventType, Vec<Arc<RegistrationHandle>>>,
+    publishers: Vec<Arc<dyn EventPublisher>>,
 }
 
 impl Publisher {
-    pub fn new(publisher: Arc<dyn EventPublisher>) -> Self {
+    pub fn new(publishers: Vec<Arc<dyn EventPublisher>>) -> Self {
         Self {
-            handles: Vec::new(),
-            publisher,
+            handles: HashMap::new(),
+            publishers,
         }
     }
 
     pub fn take_handle(&mut self, publish_handle: PublishHandle) -> Arc<RegistrationHandle> {
         let handle = publish_handle.remove_handle();
-        self.handles.push(handle.clone());
+
+        let entry = self.handles.entry(publish_handle.event_type).or_default();
+        entry.push(handle.clone());
+
         let mut publish_handle = publish_handle;
         publish_handle.disarm();
         handle
@@ -116,8 +138,13 @@ impl Publisher {
 
     pub fn publish(&mut self) {
         let handles = std::mem::take(&mut self.handles);
-        if !handles.is_empty() {
-            self.publisher.publish(handles);
+
+        for (event_type, handles) in handles {
+            if !handles.is_empty() {
+                for publisher in &self.publishers {
+                    publisher.publish(handles.clone(), event_type);
+                }
+            }
         }
     }
 }
@@ -135,24 +162,6 @@ impl Drop for Publisher {
 //
 // - Registration events are can be batched by the nature of the [EventManager::register_blocks] call.
 
-pub struct NullEventManager;
-
-impl NullEventManager {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {})
-    }
-}
-
-impl EventManager for NullEventManager {}
-
-impl EventPublisher for NullEventManager {
-    fn publish(&self, _handles: Vec<Arc<RegistrationHandle>>) {}
-}
-
-impl EventReleaseManager for NullEventManager {
-    fn block_release(&self, _registration_handle: &RegistrationHandle) {}
-}
-
 #[cfg(test)]
 pub mod tests {
     use crate::tokens::SequenceHash;
@@ -160,36 +169,40 @@ pub mod tests {
     use super::*;
 
     #[derive(Debug, PartialEq, Eq)]
-    pub enum EventType {
+    pub enum MockEventType {
         Register(SequenceHash),
+        CacheHit(SequenceHash),
         Remove(SequenceHash),
     }
 
     pub struct MockEventManager {
-        tx: tokio::sync::mpsc::UnboundedSender<Vec<EventType>>,
+        tx: tokio::sync::mpsc::UnboundedSender<Vec<MockEventType>>,
     }
 
     impl MockEventManager {
         pub fn new() -> (
             Arc<Self>,
-            tokio::sync::mpsc::UnboundedReceiver<Vec<EventType>>,
+            tokio::sync::mpsc::UnboundedReceiver<Vec<MockEventType>>,
         ) {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             (Arc::new(Self { tx }), rx)
         }
 
         pub fn publisher(self: &Arc<Self>) -> Publisher {
-            Publisher::new(self.clone())
+            Publisher::new(vec![self.clone() as Arc<dyn EventPublisher>])
         }
     }
 
     impl EventManager for MockEventManager {}
 
     impl EventPublisher for MockEventManager {
-        fn publish(&self, handles: Vec<Arc<RegistrationHandle>>) {
+        fn publish(&self, handles: Vec<Arc<RegistrationHandle>>, event_type: EventType) {
             let events = handles
                 .iter()
-                .map(|handle| EventType::Register(handle.sequence_hash()))
+                .map(|handle| match event_type {
+                    EventType::Register => MockEventType::Register(handle.sequence_hash()),
+                    EventType::CacheHit => MockEventType::CacheHit(handle.sequence_hash()),
+                })
                 .collect::<Vec<_>>();
             self.tx.send(events).unwrap();
         }
@@ -197,7 +210,7 @@ pub mod tests {
 
     impl EventReleaseManager for MockEventManager {
         fn block_release(&self, registration_handle: &RegistrationHandle) {
-            let events = vec![EventType::Remove(registration_handle.sequence_hash())];
+            let events = vec![MockEventType::Remove(registration_handle.sequence_hash())];
             self.tx.send(events).unwrap();
         }
     }
