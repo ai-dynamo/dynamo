@@ -22,14 +22,14 @@ This directory contains examples for deploying vLLM (v0) models in both aggregat
 > [!NOTE]
 > Different than `/examples/llm`, this example uses `dynamo-run` to handle the (de)tokenization and routing. `dynamo-run` is a rust-based CLI designed for high-performance pre/post-processing and routing. Read more about `dynamo-run`: [dynamo_run.md](../docs/guides/dynamo_run.md).
 
-### Prerequisites
+## Prerequisites
 
 Start required services (etcd and NATS) using [Docker Compose](../../deploy/metrics/docker-compose.yml)
 ```bash
 docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
-### Build docker
+### Build and run docker
 
 ```bash
 # On an x86 machine
@@ -37,16 +37,13 @@ docker compose -f deploy/metrics/docker-compose.yml up -d
 
 # On an ARM machine (ex: GB200)
 ./container/build.sh --framework vllm --platform linux/arm64
-```
 
-### Run container
-
-```
 ./container/run.sh -it --framework vllm
 ```
 
 > [!WARNING]
 > Starting the container not in `--privileged` mode might result in significant CPU bottlenecks. Please turn on `--privileged` if you experience any performance issues.
+
 
 ## Run Deployment
 
