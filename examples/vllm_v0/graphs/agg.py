@@ -12,24 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-Common:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  block-size: 64
-  max-model-len: 16384
 
-Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  endpoint: dynamo.VllmWorker.generate
-  port: 8000
-  router: round-robin
-  common-configs: [block-size]
+from components.frontend import Frontend
+from components.worker import VllmWorker
 
-VllmWorker:
-  enforce-eager: true
-  max-num-batched-tokens: 16384
-  enable-prefix-caching: true
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: '1'
-  common-configs: [model, block-size, max-model-len]
+Frontend.link(VllmWorker)

@@ -16,6 +16,7 @@ Common:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   block-size: 64
   max-model-len: 16384
+  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
 
 Frontend:
   served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
@@ -25,11 +26,20 @@ Frontend:
   common-configs: [block-size]
 
 VllmWorker:
-  enforce-eager: true
-  max-num-batched-tokens: 16384
-  enable-prefix-caching: true
+  remote-prefill: true
+  conditional-disagg: true
+  max-local-prefill-length: 10
+  max-prefill-queue-size: 2
   ServiceArgs:
     workers: 1
     resources:
-      gpu: '1'
-  common-configs: [model, block-size, max-model-len]
+      gpu: 1
+  common-configs: [model, block-size, max-model-len, kv-transfer-config]
+
+PrefillWorker:
+  max-num-batched-tokens: 16384
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: 1
+  common-configs: [model, block-size, max-model-len, kv-transfer-config]
