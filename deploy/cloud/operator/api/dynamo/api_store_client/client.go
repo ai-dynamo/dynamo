@@ -38,14 +38,14 @@ func NewApiStoreClient(endpoint string) *ApiStoreClient {
 }
 
 func (c *ApiStoreClient) GetDynamoComponent(ctx context.Context, name, version string) (component *schemas.DynamoComponent, err error) {
-	url_ := urlJoin(c.endpoint, fmt.Sprintf("/api/v1/dynamo_nims/%s/versions/%s", name, version))
+	url_ := urlJoin(c.endpoint, fmt.Sprintf("/api/v1/dynamo_components/%s/versions/%s", name, version))
 	component = &schemas.DynamoComponent{}
 	_, err = DoJsonRequest(ctx, "GET", url_, nil, nil, nil, component, nil)
 	return
 }
 
 func (c *ApiStoreClient) PresignDynamoComponentDownloadURL(ctx context.Context, name, version string) (component *schemas.DynamoComponent, err error) {
-	url_ := urlJoin(c.endpoint, fmt.Sprintf("/api/v1/dynamo_nims/%s/versions/%s/presign_download_url", name, version))
+	url_ := urlJoin(c.endpoint, fmt.Sprintf("/api/v1/dynamo_components/%s/versions/%s/presign_download_url", name, version))
 	component = &schemas.DynamoComponent{}
 	_, err = DoJsonRequest(ctx, "PATCH", url_, nil, nil, nil, component, nil)
 	return

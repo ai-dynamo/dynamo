@@ -1000,7 +1000,7 @@ func (r *DynamoComponentReconciler) generateImageBuilderPodTemplateSpec(ctx cont
 			r.Recorder.Eventf(opt.DynamoComponent, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for dynamoComponent %s from api store service", opt.DynamoComponent.Spec.DynamoComponent)
 			dynamoComponentDownloadURL = dynamoComponent_.PresignedDownloadUrl
 		} else {
-			dynamoComponentDownloadURL = fmt.Sprintf("%s/api/v1/dynamo_nims/%s/versions/%s/download", apiStoreConf.Endpoint, dynamoComponentRepositoryName, dynamoComponentVersion)
+			dynamoComponentDownloadURL = fmt.Sprintf("%s/api/v1/dynamo_components/%s/versions/%s/download", apiStoreConf.Endpoint, dynamoComponentRepositoryName, dynamoComponentVersion)
 		}
 
 	}

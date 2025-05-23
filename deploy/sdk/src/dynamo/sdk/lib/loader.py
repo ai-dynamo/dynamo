@@ -23,6 +23,9 @@ import os
 import sys
 from typing import Optional, TypeVar
 
+import yaml
+
+from dynamo.sdk.core.protocol.deployment import Service
 from dynamo.sdk.lib.service import DynamoService
 
 logger = logging.getLogger(__name__)
@@ -191,3 +194,62 @@ def _do_import(import_str: str, working_dir: str) -> DynamoService:
         object.__setattr__(instance, "_import_str", import_str_val)
 
     return instance
+
+
+def _get_dir_size(path: str) -> int:
+    total = 0
+    for dirpath, _, filenames in os.walk(path):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            if os.path.isfile(fp):
+                total += os.path.getsize(fp)
+    logger.info(f"Total size of {path}: {total} bytes")
+    return total
+
+
+def load_entry_service(
+    pipeline_tag: str, build_dir: str = "~/bentoml/bentos"
+) -> Service:
+    """
+    Given a built pipeline tag (e.g. frontend:2uk2fwzvqsswvs7t), load the entry service as a deployment Service instance.
+    """
+    if ":" not in pipeline_tag:
+        raise ValueError("pipeline_tag must be in the form name:version")
+    name, version = pipeline_tag.split(":", 1)
+    graph_dir = os.path.expanduser(f"{build_dir}/{name}/{version}")
+    if not os.path.isdir(graph_dir):
+        raise FileNotFoundError(f"Pipeline directory not found: {graph_dir}")
+
+    config_path = os.path.join(graph_dir, "bento.yaml")
+    if not os.path.isfile(config_path):
+        raise FileNotFoundError(
+            f"Pipeline config (bento.yaml) not found in {graph_dir}"
+        )
+    with open(config_path, encoding="utf-8") as f:
+        graph_cfg = yaml.safe_load(f)
+
+    # Add src_dir to sys.path if needed
+    src_dir = os.path.join(graph_dir, "src")
+    if src_dir not in sys.path:
+        sys.path.insert(0, src_dir)
+
+    # Compute size_bytes as the total size of the bento directory
+    size_bytes = _get_dir_size(graph_dir)
+
+    service_name = graph_cfg.get("service")
+    for svc in graph_cfg.get("services", []):
+        svc_name = svc["name"]
+        if svc_name != graph_cfg.get("entry_service"):
+            continue
+        entry_service = Service(
+            service_name=service_name,
+            name=svc_name,
+            namespace="default",
+            version=version,
+            path=graph_dir,
+            envs=graph_cfg.get("envs", []),
+            apis={},
+            size_bytes=size_bytes,
+        )
+        return entry_service
+    raise ValueError("No entry service found in the pipeline")

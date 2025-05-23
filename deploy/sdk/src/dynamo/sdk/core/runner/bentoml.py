@@ -23,6 +23,7 @@ from _bentoml_sdk.service.dependency import Dependency as BentoDependency
 from fastapi import FastAPI
 
 from dynamo.sdk.core.decorators.endpoint import DynamoClient, DynamoEndpoint
+from dynamo.sdk.core.protocol.deployment import Env
 from dynamo.sdk.core.protocol.interface import (
     DependencyInterface,
     DeploymentTarget,
@@ -153,6 +154,10 @@ class BentoServiceAdapter(ServiceMixin, ServiceInterface[T]):
     @property
     def inner(self) -> Type[T]:
         return self._bentoml_service.inner
+
+    @property
+    def envs(self) -> List[Env]:
+        return self._bentoml_service.envs
 
     def get_endpoints(self) -> Dict[str, DynamoEndpointInterface]:
         return self._endpoints
