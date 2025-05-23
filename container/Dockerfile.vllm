@@ -347,6 +347,10 @@ COPY --from=base $CARGO_HOME $CARGO_HOME
 COPY --from=base /usr/local/nixl /opt/nvidia/nvda_nixl
 COPY --from=base /workspace /workspace
 COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
+COPY --from=base /usr/local/ucx /usr/local/ucx
+RUN echo "/usr/local/ucx/lib" >> /etc/ld.so.conf.d/nixl-plugins.conf && \
+    ldconfig
+COPY --from=base /opt/nixl /opt/nixl
 ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
 
 # Copy configuration files
@@ -381,6 +385,9 @@ RUN uv build --wheel --out-dir /workspace/dist && \
         uv run --python 3.11 maturin build --release --features block-manager --out /workspace/dist && \
         uv run --python 3.10 maturin build --release --features block-manager --out /workspace/dist; \
     fi
+
+# Build NIXL wheel
+RUN cd /opt/nixl && uv build . --out-dir /workspace/dist
 
 #######################################
 ########## CI Minimum Image ###########
@@ -482,22 +489,43 @@ WORKDIR /workspace
 ENV DYNAMO_HOME=/workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+### COPY BINDINGS ###
+# Copy all bindings (wheels, lib, include) from ci_minimum
+COPY --from=ci_minimum /opt/dynamo/bindings /opt/dynamo/bindings
+### COPY NATS & ETCD ###
+# Copy nats and etcd from base image
+COPY --from=base /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+
+# Copy UCX from base image as plugin for NIXL
+COPY --from=base /usr/local/ucx /usr/local/ucx
+RUN echo "/usr/local/ucx/lib" >> /etc/ld.so.conf.d/nixl-plugins.conf && \
+    ldconfig
 
 # Setup the python environment
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3-dev && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential python3-dev && \
     rm -rf /var/lib/apt/lists/* && \
     uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 # Install the wheels and symlink executables to /usr/local/bin so dynamo components can use them
 # Dynamo components currently do not have the VIRTUAL_ENV in their PATH, so we need to symlink the executables
+#Copy NIXL and Dynamo wheels into wheelhouse
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
+    uv pip install nixl --find-links wheelhouse && \
     ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
     rm -r wheelhouse
 
+# Common dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
+
+# Add NIXL plugin directory to ld.so.conf.d/nixl-plugins.conf for UCX_MO shared object
+RUN echo "/opt/dynamo/venv/lib/python3.12/site-packages/.nixl.mesonpy.libs/plugins" >> /etc/ld.so.conf.d/nixl-plugins.conf && \
+    ldconfig
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
 
