@@ -17,6 +17,7 @@
 import asyncio
 from functools import wraps
 from typing import Any, Callable, Dict, List, Optional, TypeVar, get_type_hints
+import inspect
 
 from dynamo.runtime import DistributedRuntime
 from dynamo.sdk.core.protocol.interface import (
@@ -94,6 +95,94 @@ def api(
     def decorator(func: Callable) -> DynamoEndpoint:
         return DynamoEndpoint(func, name, transports=[DynamoTransport.HTTP], **kwargs)
 
+    return decorator
+
+
+def liveness(
+    name: str = "/health/live",
+    **kwargs,
+) -> Callable[[Callable], DynamoEndpoint]:
+    """Decorator for liveness probes.
+    
+    Args:
+        name: Endpoint path, defaults to "/health/live"
+        
+    Example:
+        @liveness
+        def is_alive(self) -> tuple[int, dict]:
+            return 200, {"status": "alive"}  # (status_code, response_dict)
+    """
+    
+    def decorator(func: Callable) -> DynamoEndpoint:
+        setattr(func, "__is_liveness_probe__", True)
+        
+        # Create a wrapper that converts the return value to a proper response
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            from fastapi.responses import JSONResponse
+            
+            result = func(*args, **kwargs)
+            if inspect.isawaitable(result):
+                result = await result
+                
+            # Handle tuple return (status_code, content)
+            if isinstance(result, tuple) and len(result) == 2:
+                status_code, content = result
+                return JSONResponse(content=content, status_code=status_code)
+            # Already a response object
+            elif hasattr(result, "status_code") and hasattr(result, "body"):
+                return result
+            # Just return the value as JSON with 200
+            else:
+                return JSONResponse(content=result, status_code=200)
+                
+        return DynamoEndpoint(wrapper, name, transports=[DynamoTransport.HTTP], **kwargs)
+    
+    return decorator
+
+
+def readiness(
+    name: str = "/health/ready",
+    **kwargs,
+) -> Callable[[Callable], DynamoEndpoint]:
+    """Decorator for readiness probes.
+    
+    Args:
+        name: Endpoint path, defaults to "/health/ready"
+        
+    Example:
+        @readiness
+        def is_ready(self) -> tuple[int, dict]:
+            if self.model_loaded:
+                return 200, {"status": "ready"}
+            return 503, {"status": "initializing"}
+    """
+    
+    def decorator(func: Callable) -> DynamoEndpoint:
+        setattr(func, "__is_readiness_probe__", True)
+        
+        # Create a wrapper that converts the return value to a proper response
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            from fastapi.responses import JSONResponse
+            
+            result = func(*args, **kwargs)
+            if inspect.isawaitable(result):
+                result = await result
+                
+            # Handle tuple return (status_code, content)
+            if isinstance(result, tuple) and len(result) == 2:
+                status_code, content = result
+                return JSONResponse(content=content, status_code=status_code)
+            # Already a response object
+            elif hasattr(result, "status_code") and hasattr(result, "body"):
+                return result
+            # Just return the value as JSON with 200
+            else:
+                return JSONResponse(content=result, status_code=200)
+                
+        return DynamoEndpoint(wrapper, name, transports=[DynamoTransport.HTTP], **kwargs)
+    
     return decorator
 
 

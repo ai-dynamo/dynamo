@@ -13,13 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import logging
+import time
 
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sdk import DYNAMO_IMAGE, api, depends, endpoint, service
+from dynamo.sdk import DYNAMO_IMAGE, api, depends, endpoint, liveness, readiness, service, async_on_start
 from dynamo.sdk.lib.config import ServiceConfig
 
 logger = logging.getLogger(__name__)
@@ -68,7 +70,17 @@ class Backend:
         logger.info("Starting backend")
         config = ServiceConfig.get_instance()
         self.message = config.get("Backend", {}).get("message", "back")
+        self.ready = False
         logger.info(f"Backend config message: {self.message}")
+
+    @async_on_start
+    async def initialize(self):
+        """Simulate initialization process that takes time"""
+        logger.info("Backend initializing...")
+        # Simulate initialization delay
+        await asyncio.sleep(2)
+        self.ready = True
+        logger.info("Backend initialization complete")
 
     @endpoint()
     async def generate(self, req: RequestType):
@@ -78,6 +90,19 @@ class Backend:
         text = f"{req_text}-{self.message}"
         for token in text.split():
             yield f"Backend: {token}"
+            
+    @liveness()
+    async def is_alive(self):
+        """Custom liveness check"""
+        return 200, {"status": "alive", "service": "Backend"}
+        
+    @readiness()
+    async def is_ready(self):
+        """Custom readiness check that returns 200 only when initialized"""
+        if self.ready:
+            return 200, {"status": "ready", "service": "Backend"}
+        else:
+            return 503, {"status": "initializing", "service": "Backend"}
 
 
 @service(
@@ -103,6 +128,11 @@ class Middle:
         async for response in self.backend.generate(next_request):
             logger.info(f"Middle received response: {response}")
             yield f"Middle: {response}"
+            
+    @liveness()
+    async def is_alive(self):
+        """Custom liveness check"""
+        return 200, {"status": "alive", "service": "Middle"}
 
 
 @service(
@@ -122,6 +152,7 @@ class Frontend:
         config = ServiceConfig.get_instance()
         self.message = config.get("Frontend", {}).get("message", "front")
         self.port = config.get("Frontend", {}).get("port", 8000)
+        self.health_checks = 0
         logger.info(f"Frontend config message: {self.message}")
         logger.info(f"Frontend config port: {self.port}")
 
@@ -136,3 +167,31 @@ class Frontend:
                 yield f"Frontend: {response}"
 
         return StreamingResponse(content_generator())
+        
+    @liveness()
+    async def is_alive(self):
+        """Custom liveness check that counts health check calls"""
+        self.health_checks += 1
+        return 200, {
+            "status": "alive", 
+            "service": "Frontend",
+            "checks": self.health_checks
+        }
+        
+    @readiness(name="/health/ready")
+    async def is_ready(self):
+        """Custom readiness check that checks downstream services"""
+        try:
+            # You could implement more complex health checking logic here,
+            # such as checking downstream dependencies
+            return 200, {
+                "status": "ready", 
+                "service": "Frontend",
+                "downstream_status": "OK"
+            }
+        except Exception as e:
+            return 503, {
+                "status": "not_ready", 
+                "service": "Frontend",
+                "error": str(e)
+            }

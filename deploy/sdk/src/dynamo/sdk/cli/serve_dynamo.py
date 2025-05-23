@@ -29,7 +29,7 @@ from typing import Any
 import click
 import uvicorn
 import uvloop
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 from dynamo.sdk import dynamo_context
@@ -81,6 +81,64 @@ def add_fastapi_routes(app, service, class_instance):
 
             added_routes.append(path)
             logger.info(f"Added API route {path} to FastAPI app")
+    return added_routes
+
+
+def add_health_check_routes(app, service, class_instance):
+    """
+    Add default health check routes if not provided by the service.
+    
+    Args:
+        app: FastAPI app instance
+        service: Dynamo service instance
+        class_instance: Instance of the service class
+    """
+    
+    endpoints = service.get_dynamo_endpoints()
+    liveness_path = "/health/live"
+    readiness_path = "/health/ready"
+    
+    # Check if custom health checks are defined
+    has_custom_liveness = any(
+        getattr(endpoint.func, "__is_liveness_probe__", False) 
+        for endpoint in endpoints.values()
+    )
+    has_custom_readiness = any(
+        getattr(endpoint.func, "__is_readiness_probe__", False) 
+        for endpoint in endpoints.values()
+    )
+    
+    # Add default health check routes if custom ones are not defined
+    added_routes = []
+    
+    if not has_custom_liveness:
+        logger.info(f"Adding default liveness check at {liveness_path}")
+        
+        async def default_liveness():
+            return JSONResponse(content={"status": "alive"}, status_code=200)
+        
+        app.add_api_route(
+            liveness_path,
+            default_liveness,
+            methods=["GET"],
+            tags=["health"],
+        )
+        added_routes.append(liveness_path)
+    
+    if not has_custom_readiness:
+        logger.info(f"Adding default readiness check at {readiness_path}")
+        
+        async def default_readiness():
+            return JSONResponse(content={"status": "ready"}, status_code=200)
+        
+        app.add_api_route(
+            readiness_path,
+            default_readiness,
+            methods=["GET"],
+            tags=["health"],
+        )
+        added_routes.append(readiness_path)
+    
     return added_routes
 
 
@@ -268,8 +326,8 @@ def main(
             logger.error(f"Error in Dynamo component setup: {str(e)}")
             raise
 
-    # if the service has a FastAPI app, add the worker as an event handler
-    def web_worker():
+    # Modified web_worker to use async
+    async def web_worker(service):
         if not service.app:
             return
 
@@ -278,40 +336,54 @@ def main(
         # TODO: init hooks
         # Add API routes to the FastAPI app
         added_routes = add_fastapi_routes(service.app, service, class_instance)
+        added_routes.extend(add_health_check_routes(service.app, service, class_instance))
         if added_routes:
             # Configure uvicorn with graceful shutdown
             host, port = get_host_port()
-            config = uvicorn.Config(service.app, host=host, port=port, log_level="info")
+            config = uvicorn.Config(
+                service.app, 
+                host=host, 
+                port=port, 
+                log_level="info",
+                loop="asyncio"
+            )
             server = uvicorn.Server(config)
 
             # Start the server with graceful shutdown handling
             logger.info(
                 f"Starting FastAPI server on {config.host}:{config.port} with routes: {added_routes}"
             )
-            server.run()
+            await server.serve()
         else:
             logger.warning("No API routes found, not starting FastAPI server")
-            # Keep the process running until interrupted
-            logger.info("Service is running, press Ctrl+C to stop")
-            while True:
-                try:
-                    # Sleep in small increments to respond to signals quickly
-                    time.sleep(0.1)
-                except KeyboardInterrupt:
-                    logger.info("Gracefully shutting down FastAPI process")
-                    break
 
+    # Replace the last part of main() that runs the worker or web worker
+    async def run_web_worker_and_dynamo_worker():
+        """Run both the dynamo worker and web worker as concurrent tasks"""
+        # Check if HTTP server is needed
+        start_http_server = False
+        for endpoint in service.get_dynamo_endpoints().values():
+            logger.debug(f"Checking transports for endpoint: {endpoint.transports}")
+            if DynamoTransport.HTTP in endpoint.transports:
+                start_http_server = True
+                break
+        
+        # Create tasks list
+        tasks = []
+        
+        # Add web worker task if needed
+        if start_http_server:
+            tasks.append(asyncio.create_task(web_worker(service)))
+        
+        # Add dynamo worker task
+        tasks.append(asyncio.create_task(worker()))
+        
+        # Wait for all tasks to complete
+        await asyncio.gather(*tasks)
+
+    # Update the end of main() to run both tasks
     uvloop.install()
-    start_http_server = False
-    for endpoint in service.get_dynamo_endpoints().values():
-        logger.debug(f"Checking transports for endpoint: {endpoint.transports}")
-        if DynamoTransport.HTTP in endpoint.transports:
-            start_http_server = True
-            break
-    if start_http_server:
-        web_worker()
-    else:
-        asyncio.run(worker())
+    asyncio.run(run_web_worker_and_dynamo_worker())
 
 
 if __name__ == "__main__":
