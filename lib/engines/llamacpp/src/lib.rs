@@ -29,10 +29,6 @@ use dynamo_llm::{backend::ExecutionContext, local_model::LocalModel};
 /// If user does not provide a max_tokens limit prompt+output to this many
 const DEFAULT_MAX_TOKENS: u32 = 8192;
 
-/// If the user does not provide a context length limit default to this.
-/// TODO: This should come from GGUF key {model}.context_length
-const CONTEXT_LENGTH: u32 = 32768;
-
 static LLAMA_BACKEND: tokio::sync::OnceCell<LlamaBackend> = tokio::sync::OnceCell::const_new();
 pub(crate) static LLAMA_MODEL: tokio::sync::OnceCell<LlamaModel> =
     tokio::sync::OnceCell::const_new();
@@ -75,13 +71,13 @@ impl LlamacppEngine {
         LLAMA_MODEL.set(model)?;
 
         let (ctx_set, ctx_get) = tokio::sync::mpsc::channel(NUM_CONTEXTS);
-        let n_ctx = NonZeroU32::new(
-            model_config
-                .context_length
-                .map(|n| n as u32)
-                .unwrap_or(CONTEXT_LENGTH),
-        );
-        let llama_ctx_params = LlamaContextParams::default().with_n_ctx(n_ctx);
+        let llama_ctx_params = if model_config.card().context_length > 0 {
+            let n_ctx = NonZeroU32::new(model_config.card().context_length as u32);
+            LlamaContextParams::default().with_n_ctx(n_ctx)
+        } else {
+            // Context length defaults to 512 currently
+            LlamaContextParams::default()
+        };
         for (i, ctx_holder) in LLAMA_CONTEXTS.iter().enumerate().take(NUM_CONTEXTS) {
             let llama_ctx = LLAMA_MODEL
                 .get()

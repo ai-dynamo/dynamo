@@ -17,8 +17,9 @@ use std::collections::HashMap;
 
 use crate::model_card::model::ModelDeploymentCard;
 use anyhow::{Context, Result};
-use std::fs;
-use std::path::Path;
+use std::fs::{self, File};
+use std::io::BufReader;
+use std::path::{Path, PathBuf};
 
 use crate::model_card::model::{ModelInfoType, PromptFormatterArtifact, TokenizerKind};
 
@@ -84,6 +85,14 @@ impl ModelDeploymentCard {
                 gguf_file.display()
             );
         };
+
+        // TODO: we do this in HFConfig also, unify
+        let content = super::model::load_gguf(gguf_file)?;
+        let context_length = content.get_metadata()[&format!("{}.context_length", content.arch())]
+            .to_u32()
+            .unwrap_or(0) as usize;
+        tracing::debug!(context_length, "Loaded context length from GGUF");
+
         Ok(Self {
             display_name: model_name.to_string(),
             service_name: model_name.to_string(),
@@ -93,11 +102,11 @@ impl ModelDeploymentCard {
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
             last_published: None,
+            context_length,
+            kv_cache_block_size: 0,
         })
     }
 
-    /// TODO: This will be implemented after nova-hub is integrated with the model-card
-    /// TODO: Attempt to auto-detect model type and construct an MDC from a NGC repo
     #[allow(dead_code)]
     async fn from_ngc_repo(_: &str) -> anyhow::Result<Self> {
         Err(anyhow::anyhow!(
@@ -106,6 +115,16 @@ impl ModelDeploymentCard {
     }
 
     async fn from_repo(repo_id: &str, model_name: &str) -> anyhow::Result<Self> {
+        let context_length = file_json_field(
+            &Path::join(&PathBuf::from(repo_id), "tokenizer_config.json"),
+            "model_max_length",
+        )
+        .unwrap_or(0);
+        tracing::trace!(
+            context_length,
+            "Loaded context length (model_max_length) from tokenizer_config.json"
+        );
+
         Ok(Self {
             display_name: model_name.to_string(),
             service_name: model_name.to_string(),
@@ -115,6 +134,8 @@ impl ModelDeploymentCard {
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
             last_published: None,
+            context_length,
+            kv_cache_block_size: 0, // set later
         })
     }
 }
@@ -220,4 +241,59 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Reads a JSON file, extracts a specific field, and deserializes it into type T.
+///
+/// # Arguments
+///
+/// * `json_file_path`: Path to the JSON file.
+/// * `field_name`: The name of the field to extract from the JSON map.
+///
+/// # Returns
+///
+/// A `Result` containing the deserialized value of type `T` if successful,
+/// or an `anyhow::Error` if any step fails (file I/O, JSON parsing, field not found,
+/// or deserialization to `T` fails).
+///
+/// # Type Parameters
+///
+/// * `T`: The expected type of the field's value. `T` must implement `serde::de::DeserializeOwned`.
+fn file_json_field<T: serde::de::DeserializeOwned>(
+    json_file_path: &Path,
+    field_name: &str,
+) -> anyhow::Result<T> {
+    // 1. Open the file
+    let file = File::open(json_file_path)
+        .with_context(|| format!("Failed to open file: {:?}", json_file_path))?;
+    let reader = BufReader::new(file);
+
+    // 2. Parse the JSON file into a generic serde_json::Value
+    // We parse into `serde_json::Value` first because we need to look up a specific field.
+    // If we tried to deserialize directly into `T`, `T` would need to represent the whole JSON structure.
+    let json_data: serde_json::Value = serde_json::from_reader(reader)
+        .with_context(|| format!("Failed to parse JSON from file: {:?}", json_file_path))?;
+
+    // 3. Ensure the root of the JSON is an object (map)
+    let map = json_data.as_object().ok_or_else(|| {
+        anyhow::anyhow!("JSON root is not an object in file: {:?}", json_file_path)
+    })?;
+
+    // 4. Get the specific field's value
+    let field_value = map.get(field_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Field '{}' not found in JSON file: {:?}",
+            field_name,
+            json_file_path
+        )
+    })?;
+
+    // 5. Deserialize the field's value into the target type T
+    // We need to clone `field_value` because `from_value` consumes its input.
+    serde_json::from_value(field_value.clone()).with_context(|| {
+        format!(
+            "Failed to deserialize field '{}' (value: {:?}) to the expected type from file: {:?}",
+            field_name, field_value, json_file_path
+        )
+    })
 }

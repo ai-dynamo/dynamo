@@ -111,6 +111,10 @@ pub struct Flags {
     #[arg(long)]
     pub context_length: Option<usize>,
 
+    /// KV cache block size (vllm only)
+    #[arg(long)]
+    pub kv_cache_block_size: Option<usize>,
+
     /// Additional engine-specific arguments from a JSON file.
     /// Contains a mapping of parameter names to values.
     #[arg(long)]
