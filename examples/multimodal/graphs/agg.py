@@ -6,6 +6,7 @@
 # You may obtain a copy of the License at
 #
 # http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from components.encode_worker import EncodeWorker
+from components.decode_worker import VllmDecodeWorker
+from components.encode_worker import VllmEncodeWorker
 from components.frontend import Frontend
 from components.processor import Processor
-from components.worker import VllmWorker
 
-Frontend.link(Processor).link(VllmWorker).link(EncodeWorker)
+Frontend.link(Processor).link(VllmDecodeWorker).link(VllmEncodeWorker)
