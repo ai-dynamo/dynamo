@@ -144,9 +144,9 @@ async def test_remove_component(
 async def main(runtime: DistributedRuntime):
     connector = LocalConnector("dynamo", runtime)
 
-    # await connector.add_component("PrefillWorker")
-    # await connector.add_component("VllmWorker")
-    # await connector.remove_component("VllmWorker")
+    await connector.add_component("PrefillWorker")
+    await connector.add_component("VllmWorker")
+    await connector.remove_component("VllmWorker")
     await connector.remove_component("PrefillWorker")
 
 
