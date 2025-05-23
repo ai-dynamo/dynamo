@@ -162,9 +162,6 @@ pub enum StorageError {
 
     #[error("Out of bounds: {0}")]
     OutOfBounds(String),
-
-    #[error("Storage not registered with NIXL")]
-    NotRegisteredWithNixl,
 }
 
 /// Core storage trait that provides access to memory regions

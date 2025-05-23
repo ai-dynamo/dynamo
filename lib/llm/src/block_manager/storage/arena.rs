@@ -25,7 +25,7 @@
 //!
 //! TODO: provide rust example
 
-use super::Storage;
+use super::{Storage, StorageError};
 use offset_allocator::{Allocation, Allocator};
 use std::sync::{Arc, Mutex};
 
@@ -39,6 +39,12 @@ pub enum ArenaError {
 
     #[error("Failed to convert pages to u32")]
     PagesNotConvertible,
+
+    #[error("Storage not registered with NIXL")]
+    NotRegisteredWithNixl,
+
+    #[error("Storage error: {0}")]
+    StorageError(#[from] StorageError),
 }
 
 #[derive(Clone)]
@@ -155,7 +161,7 @@ mod nixl {
     where
         S: NixlRegisterableStorage,
     {
-        pub fn to_nixl_remote_descriptor(&self) -> Result<NixlRemoteDescriptor, StorageError> {
+        pub fn to_nixl_remote_descriptor(&self) -> Result<NixlRemoteDescriptor, ArenaError> {
             let agent = self.storage.nixl_agent_name();
 
             match agent {
@@ -169,7 +175,7 @@ mod nixl {
 
                     Ok(NixlRemoteDescriptor::new(storage, agent))
                 }
-                _ => Err(StorageError::NotRegisteredWithNixl),
+                _ => Err(ArenaError::NotRegisteredWithNixl),
             }
         }
     }
