@@ -123,6 +123,13 @@ pub struct ModelDeploymentCard {
     /// Incrementing count of how many times we published this card
     #[serde(default, skip_serializing)]
     pub revision: u64,
+
+    /// Max context (in number of tokens) this model can handle
+    pub context_length: usize,
+
+    /// Size of a KV cache block - vllm only currently
+    /// Passed to the engine and the KV router.
+    pub kv_cache_block_size: usize,
 }
 
 impl ModelDeploymentCard {
@@ -486,7 +493,7 @@ impl TokenizerKind {
     }
 }
 
-fn load_gguf(gguf_file: &Path) -> anyhow::Result<Content> {
+pub(crate) fn load_gguf(gguf_file: &Path) -> anyhow::Result<Content> {
     let filename = gguf_file.display().to_string();
     let mut f = File::open(gguf_file).with_context(|| filename.clone())?;
     // vec because GGUF can be split into multiple files (shards)

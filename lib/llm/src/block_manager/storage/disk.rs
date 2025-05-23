@@ -15,6 +15,7 @@
 
 use super::*;
 
+use core::ffi::c_char;
 use nix::fcntl::{fallocate, FallocateFlags};
 use std::ffi::CString;
 use std::fs::File;
@@ -41,7 +42,7 @@ impl DiskStorage {
 
         let raw_fd = unsafe {
             nix::libc::mkostemp(
-                template_bytes.as_mut_ptr() as *mut i8,
+                template_bytes.as_mut_ptr() as *mut c_char,
                 // For maximum performance, GPU DirectStorage requires O_DIRECT.
                 // This allows transfers to bypass the kernel page cache.
                 // It also introduces the restriction that all accesses must be page-aligned.
@@ -80,6 +81,7 @@ impl DiskStorage {
 impl Drop for DiskStorage {
     // TODO: How robust is this actually?
     fn drop(&mut self) {
+        self.handles.release();
         std::fs::remove_file(self.file_name.clone()).unwrap();
     }
 }

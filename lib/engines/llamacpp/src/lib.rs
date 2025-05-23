@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::{
     num::NonZeroU32,
@@ -34,15 +22,12 @@ use llama_cpp_2::{
     token::LlamaToken,
 };
 
-use dynamo_llm::backend::ExecutionContext;
 use dynamo_llm::protocols::common::llm_backend::{BackendInput, LLMEngineOutput};
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_llm::{backend::ExecutionContext, local_model::LocalModel};
 
 /// If user does not provide a max_tokens limit prompt+output to this many
 const DEFAULT_MAX_TOKENS: u32 = 8192;
-
-// I'm not entirely sure what this is. The model context size surely comes from the GGUF??
-const CONTEXT_SIZE: u32 = 8192;
 
 static LLAMA_BACKEND: tokio::sync::OnceCell<LlamaBackend> = tokio::sync::OnceCell::const_new();
 pub(crate) static LLAMA_MODEL: tokio::sync::OnceCell<LlamaModel> =
@@ -59,9 +44,9 @@ unsafe impl Sync for ContextWrapper {} // LlamaContext has a NonNull which is !S
 
 pub async fn make_engine(
     cancel_token: CancellationToken,
-    model_path: &Path,
+    model: &LocalModel,
 ) -> pipeline_error::Result<ExecutionContext> {
-    let engine = LlamacppEngine::new(cancel_token, model_path).await?;
+    let engine = LlamacppEngine::new(cancel_token, model).await?;
     let engine: ExecutionContext = Arc::new(engine);
     Ok(engine)
 }
@@ -79,16 +64,20 @@ struct LlamacppEngine {
 impl LlamacppEngine {
     async fn new(
         cancel_token: CancellationToken,
-        model_path: &Path,
+        model_config: &LocalModel,
     ) -> pipeline_error::Result<Self> {
         let backend = LlamaBackend::init()?;
-        let model = load_model(&backend, model_path)?;
+        let model = load_model(&backend, model_config.path())?;
         LLAMA_MODEL.set(model)?;
 
         let (ctx_set, ctx_get) = tokio::sync::mpsc::channel(NUM_CONTEXTS);
-        // Safety: NonZeroU32::new only errors if we give it a zero
-        let context_size = NonZeroU32::new(CONTEXT_SIZE).unwrap();
-        let llama_ctx_params = LlamaContextParams::default().with_n_ctx(Some(context_size));
+        let llama_ctx_params = if model_config.card().context_length > 0 {
+            let n_ctx = NonZeroU32::new(model_config.card().context_length as u32);
+            LlamaContextParams::default().with_n_ctx(n_ctx)
+        } else {
+            // Context length defaults to 512 currently
+            LlamaContextParams::default()
+        };
         for (i, ctx_holder) in LLAMA_CONTEXTS.iter().enumerate().take(NUM_CONTEXTS) {
             let llama_ctx = LLAMA_MODEL
                 .get()
