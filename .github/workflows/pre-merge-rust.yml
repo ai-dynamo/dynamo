@@ -90,3 +90,29 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+
+  block-manager-rust:
+    runs-on: ubuntu-latest
+    # runs-on:
+    #   group: Fastchecker
+    name: Docker Rust Checks (llm/block-manager)
+    env:
+      CONTAINER_ID: rust_check_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Define Image Tag
+        id: define_image_tag
+        run: |
+          echo "image_tag=dynamo:block-manager-rust" >> $GITHUB_OUTPUT
+      - name: Build image
+        env:
+          GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
+        run: |
+          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target ci_minimum --framework vllm
+      - name: Run Rust checks (llm/block-manager)
+        run: |
+          docker run -w /workspace/lib/llm --name ${{ env.CONTAINER_ID }}_rust_checks ${{ steps.define_image_tag.outputs.image_tag }} bash -ec 'rustup component add rustfmt clippy && cargo fmt -- --check && cargo clippy --features block-manager --no-deps --all-targets -- -D warnings && cargo test --locked --all-targets --features=block-manager'
+
