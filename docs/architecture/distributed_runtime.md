@@ -61,7 +61,7 @@ The hierarchy and naming in etcd and NATS may change over time, and this documen
 
 Dynamo uses `Client` object to call an endpoint. When a `Client` objected is created, it is given the name of the `Namespace`, `Component`, and `Endpoint`. It then sets up an etcd watcher to monitor the prefix `/services/{namespace}/{component}/{endpoint}`. The etcd watcher continuously updates the `Client` with the information, including `lease_id` and NATS subject of the available `Endpoint`s.
 
-The user can decide which load balancing strategy to use when calling the `Endpoint` from the `Client`, which is done in [PushRouter](/lib/runtime/src/pipeline/network/egress/push_router.rs). Dynamo supports three load balancing strategies:
+The user can decide which load balancing strategy to use when calling the `Endpoint` from the `Client`, which is done in [push_routers.rs](../../lib/runtime/src/pipeline/network/egress/push_router.rs). Dynamo supports three load balancing strategies:
 
 - `random`: randomly select an endpoint to hit,
 - `round_robin`: select endpoints in round-robin order,
