@@ -1,0 +1,141 @@
+ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+
+
+ARG ARCH=amd64
+ARG ARCH_ALT=x86_64
+
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} as dev
+
+ARG ARCH
+ARG ARCH_ALT
+
+# libclang-dev && git needed for llamacpp engine deps in dynamo-run build
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0 libclang-dev git
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+RUN mkdir /opt/dynamo && \
+    uv venv /opt/dynamo/venv --python 3.12 && \
+    . /opt/dynamo/venv/bin/activate && \
+    uv pip install pip
+
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+# Rust build/dev dependencies
+RUN apt update -y && \
+    apt install --no-install-recommends -y \
+    wget \
+    build-essential \
+    protobuf-compiler \
+    cmake \
+    libssl-dev \
+    pkg-config
+
+# Install sglang
+RUN uv pip install "sglang[all]>=0.4.6.post4"
+
+
+# Build nixl and install
+WORKDIR /workspace
+
+RUN apt-get update -y && \
+    apt-get install -y \
+    cmake \
+	clang \
+    libclang-dev \
+	git \
+    nvtop \
+    autoconf \
+    libtool
+
+### UCX EFA Setup ###
+RUN rm -rf /opt/hpcx/ucx
+RUN rm -rf /usr/local/ucx
+RUN cd /usr/local/src && \
+    git clone https://github.com/openucx/ucx.git && \
+    cd ucx &&                   \
+    git checkout v1.19.x &&     \
+    ./autogen.sh && ./configure \
+    --prefix=/usr/local/ucx     \
+    --enable-shared             \
+    --disable-static            \
+    --disable-doxygen-doc       \
+    --enable-optimizations      \
+    --enable-cma                \
+    --enable-devel-headers      \
+    --with-cuda=/usr/local/cuda \
+    --with-verbs                \
+    --with-efa                  \
+    --with-dm                   \
+    --with-gdrcopy=/usr/local   \
+    --enable-mt &&              \
+    make -j &&                  \
+    make -j install-strip &&    \
+    ldconfig
+
+ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:/usr/local/cuda/compat/lib.real:$LD_LIBRARY_PATH
+ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
+
+
+
+WORKDIR /workspace
+
+RUN cd /usr/local/src && \
+    git clone --branch 0.2.0 https://github.com/ai-dynamo/nixl.git nixl && \
+    cd nixl && \
+    uv pip install .
+
+    
+
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH \
+    RUST_VERSION=1.86.0
+
+# Define Rust target based on ARCH_ALT ARG
+ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
+
+# Install Rust using RUSTARCH derived from ARCH_ALT
+RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
+    # TODO: Add SHA check back based on RUSTARCH
+    chmod +x rustup-init && \
+    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
+    rm rustup-init && \
+    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
+
+ARG CARGO_BUILD_JOBS
+# Set CARGO_BUILD_JOBS to 16 if not provided
+# This is to prevent cargo from building $(nproc) jobs in parallel,
+# which might exceed the number of opened files limit.
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
+
+WORKDIR /workspace
+ENV DYNAMO_HOME=/workspace
+
+COPY . /workspace/
+
+ARG CARGO_BUILD_JOBS
+
+ENV CARGO_TARGET_DIR=/workspace/target
+
+RUN cargo build --release --locked --features python && \
+    cargo doc --no-deps && \
+    cp target/release/dynamo-run /usr/local/bin && \
+    cp target/release/http /usr/local/bin && \
+    cp target/release/llmctl /usr/local/bin && \
+    cp target/release/metrics /usr/local/bin && \
+    cp target/release/mock_worker /usr/local/bin
+
+
+# Build dynamo wheels
+RUN uv build --wheel --out-dir /workspace/dist && \
+    cd /workspace/lib/bindings/python && \
+    uv build --wheel --out-dir /workspace/dist
+
+# Install dynamo wheesl
+RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
+    uv pip install /workspace/dist/ai_dynamo*any.whl
+

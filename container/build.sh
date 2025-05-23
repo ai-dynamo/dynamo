@@ -49,7 +49,7 @@ PYTHON_PACKAGE_VERSION=${current_tag:-$latest_tag.dev+$commit_id}
 # dependencies are specified in the /container/deps folder and
 # installed within framework specific sections of the Dockerfile.
 
-declare -A FRAMEWORKS=(["VLLM"]=1 ["TENSORRTLLM"]=2 ["NONE"]=3)
+declare -A FRAMEWORKS=(["VLLM"]=1 ["TENSORRTLLM"]=2 ["NONE"]=3, ["SGLANG"]=4)
 DEFAULT_FRAMEWORK=VLLM
 
 SOURCE_DIR=$(dirname "$(readlink -f "$0")")
@@ -105,6 +105,9 @@ VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 NONE_BASE_IMAGE="ubuntu"
 NONE_BASE_IMAGE_TAG="24.04"
+
+SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 NIXL_COMMIT=78695c2900cd7fff506764377386592dfc98e87e
 NIXL_REPO=ai-dynamo/nixl.git
@@ -370,6 +373,8 @@ elif [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.tensorrt_llm
 elif [[ $FRAMEWORK == "NONE" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.none
+elif [[ $FRAMEWORK == "SGLANG" ]]; then
+    DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang
 fi
 
 NIXL_DIR="/tmp/nixl/nixl_src"
