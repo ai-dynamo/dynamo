@@ -86,6 +86,15 @@ use super::{
     RegisterableStorage, Remote, Storage, StorageError, StorageType, SystemStorage,
 };
 
+/// NIXL remote descriptor
+///
+/// This struct is used to describe a remote memory region that is accessible by a NIXL agent.
+///
+/// This object is capable of being serialized and transfered to other nodes.  It carries with it
+/// the necessary information to create [`nixl_sys::XferDescList`].
+///
+/// The [`NixlRemoteDescriptor`] can be used in traits that READ from remote memory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NixlRemoteDescriptor {
     storage: NixlStorage,
     agent: String,

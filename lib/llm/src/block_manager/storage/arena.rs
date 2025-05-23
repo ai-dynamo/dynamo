@@ -16,9 +16,9 @@
 //! # Arena Allocator
 //!
 //! This module provides an arena allocator for generally heap-like allocations.
-//! An [`ArenaAllocator`] can be create by taking ownership of a [`Storage`] instance.
+//! An [`OffsetAllocator`] can be create by taking ownership of a [`Storage`] instance.
 //!
-//! The [`ArenaAllocator`] allocates memory contiguous regions using the [`offset_allocator`] crate,
+//! The [`OffsetAllocator`] allocates memory contiguous regions using the [`offset_allocator`] crate,
 //! which builds on  [Sebastian Aaltonen's OffsetAllocator](https://github.com/sebbbi/OffsetAllocator)
 //!
 //! ## Usage
@@ -30,7 +30,7 @@ use offset_allocator::{Allocation, Allocator};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, thiserror::Error)]
-pub enum ArenaError {
+pub enum OffsetAllocatorError {
     #[error("Page size must be a power of 2")]
     PageSizeNotAligned,
 
@@ -47,24 +47,36 @@ pub enum ArenaError {
     StorageError(#[from] StorageError),
 }
 
+/// Arena allocator backed by an instance of a [`Storage`] object.
+///
+/// This struct wraps an [`Allocator`] from the [`offset_allocator`] crate,
+/// and provides methods for allocating memory from the storage.
+///
+/// The allocator is thread-safe, and the storage is shared between the allocator and the buffers.
 #[derive(Clone)]
-pub struct ArenaAllocator<S: Storage> {
+pub struct OffsetAllocator<S: Storage> {
     storage: Arc<S>,
     allocator: Arc<Mutex<Allocator>>,
     page_size: u64,
 }
 
-impl<S: Storage> std::fmt::Debug for ArenaAllocator<S> {
+impl<S: Storage> std::fmt::Debug for OffsetAllocator<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "ArenaAllocator {{ storage: {:?}, page_size: {} }}",
+            "OffsetAllocator {{ storage: {:?}, page_size: {} }}",
             self.storage, self.page_size
         )
     }
 }
 
-pub struct ArenaBuffer<S: Storage> {
+/// A buffer allocated from an [`OffsetAllocator`].
+///
+/// This struct wraps an [`Allocation`] from the [`offset_allocator`] crate,
+/// and provides methods for interacting with the allocated memory.
+///
+/// The buffer is backed by a [`Storage`] object, and the allocation is freed when the buffer is dropped.
+pub struct OffsetBuffer<S: Storage> {
     offset: u64,
     address: u64,
     requested_size: usize,
@@ -73,12 +85,20 @@ pub struct ArenaBuffer<S: Storage> {
     allocator: Arc<Mutex<Allocator>>,
 }
 
-impl<S: Storage> ArenaAllocator<S> {
-    pub fn new(storage: S, page_size: usize) -> Result<Self, ArenaError> {
+impl<S: Storage> OffsetAllocator<S> {
+    /// Create a new [`OffsetAllocator`] from a [`Storage`] object and a page size.
+    ///
+    /// The page size must be a power of two.
+    ///
+    /// The allocator will divide the storage into pages and allocations will consist of a set of contiguous
+    /// pages whose aggregate size is greater than or equal to the requested size.
+    ///
+    /// The allocator is thread-safe, and the storage is shared between the allocator and the buffers.
+    pub fn new(storage: S, page_size: usize) -> Result<Self, OffsetAllocatorError> {
         let storage = Arc::new(storage);
 
         if !page_size.is_power_of_two() {
-            return Err(ArenaError::PageSizeNotAligned);
+            return Err(OffsetAllocatorError::PageSizeNotAligned);
         }
 
         // divide storage into pages,
@@ -88,7 +108,7 @@ impl<S: Storage> ArenaAllocator<S> {
         let allocator = Allocator::new(
             pages
                 .try_into()
-                .map_err(|_| ArenaError::PagesNotConvertible)?,
+                .map_err(|_| OffsetAllocatorError::PagesNotConvertible)?,
         );
 
         let allocator = Arc::new(Mutex::new(allocator));
@@ -100,7 +120,8 @@ impl<S: Storage> ArenaAllocator<S> {
         })
     }
 
-    pub fn allocate(&self, size: usize) -> Result<ArenaBuffer<S>, ArenaError> {
+    /// Allocate a new [`OffsetBuffer`] from the allocator.
+    pub fn allocate(&self, size: usize) -> Result<OffsetBuffer<S>, OffsetAllocatorError> {
         let size = size as u64;
         let pages = size.div_ceil(self.page_size);
 
@@ -108,15 +129,19 @@ impl<S: Storage> ArenaAllocator<S> {
             .allocator
             .lock()
             .unwrap()
-            .allocate(pages.try_into().map_err(|_| ArenaError::AllocationFailed)?)
-            .ok_or(ArenaError::AllocationFailed)?;
+            .allocate(
+                pages
+                    .try_into()
+                    .map_err(|_| OffsetAllocatorError::AllocationFailed)?,
+            )
+            .ok_or(OffsetAllocatorError::AllocationFailed)?;
 
         let offset = allocation.offset as u64 * self.page_size;
         let address = self.storage.addr() + offset;
 
         debug_assert!(address + size <= self.storage.addr() + self.storage.size() as u64);
 
-        Ok(ArenaBuffer {
+        Ok(OffsetBuffer {
             offset,
             address,
             requested_size: size as usize,
@@ -127,11 +152,11 @@ impl<S: Storage> ArenaAllocator<S> {
     }
 }
 
-impl<S: Storage> std::fmt::Debug for ArenaBuffer<S> {
+impl<S: Storage> std::fmt::Debug for OffsetBuffer<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "ArenaBuffer {{ addr {}, size: {}, kind: {:?}, allocator: {:p}}}",
+            "OffsetBuffer {{ addr {}, size: {}, kind: {:?}, allocator: {:p}}}",
             self.address,
             self.requested_size,
             self.storage.storage_type(),
@@ -140,7 +165,7 @@ impl<S: Storage> std::fmt::Debug for ArenaBuffer<S> {
     }
 }
 
-impl<S: Storage> ArenaBuffer<S> {
+impl<S: Storage> OffsetBuffer<S> {
     /// Starting address of the buffer
     pub fn address(&self) -> u64 {
         self.address
@@ -157,11 +182,12 @@ mod nixl {
     use super::super::*;
     use super::*;
 
-    impl<S: Storage> ArenaBuffer<S>
+    impl<S: Storage> OffsetBuffer<S>
     where
         S: NixlRegisterableStorage,
     {
-        pub fn to_nixl_remote_descriptor(&self) -> Result<NixlRemoteDescriptor, ArenaError> {
+        /// Create a [`NixlRemoteDescriptor`] from the buffer.
+        pub fn nixl_remote_descriptor(&self) -> Result<NixlRemoteDescriptor, OffsetAllocatorError> {
             let agent = self.storage.nixl_agent_name();
 
             match agent {
@@ -175,12 +201,12 @@ mod nixl {
 
                     Ok(NixlRemoteDescriptor::new(storage, agent))
                 }
-                _ => Err(ArenaError::NotRegisteredWithNixl),
+                _ => Err(OffsetAllocatorError::NotRegisteredWithNixl),
             }
         }
     }
 
-    impl<S: Storage> MemoryRegion for ArenaBuffer<S>
+    impl<S: Storage> MemoryRegion for OffsetBuffer<S>
     where
         S: MemoryRegion,
     {
@@ -193,7 +219,7 @@ mod nixl {
         }
     }
 
-    impl<S: Storage> NixlDescriptor for ArenaBuffer<S>
+    impl<S: Storage> NixlDescriptor for OffsetBuffer<S>
     where
         S: NixlDescriptor,
     {
@@ -207,7 +233,7 @@ mod nixl {
     }
 }
 
-impl<S: Storage> Drop for ArenaBuffer<S> {
+impl<S: Storage> Drop for OffsetBuffer<S> {
     fn drop(&mut self) {
         self.allocator.lock().unwrap().free(self.allocation);
     }
@@ -224,28 +250,31 @@ mod tests {
     const PAGE_COUNT: usize = 10;
     const TOTAL_STORAGE_SIZE: usize = PAGE_SIZE * PAGE_COUNT;
 
-    fn create_allocator() -> ArenaAllocator<SystemStorage> {
+    fn create_allocator() -> OffsetAllocator<SystemStorage> {
         let storage = SystemStorage::new(TOTAL_STORAGE_SIZE).unwrap();
-        ArenaAllocator::new(storage, PAGE_SIZE).unwrap()
+        OffsetAllocator::new(storage, PAGE_SIZE).unwrap()
     }
 
     #[test]
-    /// Tests successful creation of an `ArenaAllocator` with valid page size.
-    /// Verifies that `ArenaAllocator::new` returns `Ok`.
+    /// Tests successful creation of an `OffsetAllocator` with valid page size.
+    /// Verifies that `OffsetAllocator::new` returns `Ok`.
     fn test_arena_allocator_new_success() {
         let storage = SystemStorage::new(TOTAL_STORAGE_SIZE).unwrap();
-        let allocator_result = ArenaAllocator::new(storage, PAGE_SIZE);
+        let allocator_result = OffsetAllocator::new(storage, PAGE_SIZE);
         assert!(allocator_result.is_ok());
     }
 
     #[test]
-    /// Tests `ArenaAllocator` creation with an invalid page size (not a power of 2).
-    /// Verifies that `ArenaAllocator::new` returns an `ArenaError::PageSizeNotAligned` error.
+    /// Tests `OffsetAllocator` creation with an invalid page size (not a power of 2).
+    /// Verifies that `OffsetAllocator::new` returns an `OffsetAllocatorError::PageSizeNotAligned` error.
     fn test_arena_allocator_new_invalid_page_size() {
         let storage = SystemStorage::new(TOTAL_STORAGE_SIZE).unwrap();
-        let allocator_result = ArenaAllocator::new(storage, PAGE_SIZE + 1);
+        let allocator_result = OffsetAllocator::new(storage, PAGE_SIZE + 1);
         assert!(allocator_result.is_err());
-        assert_matches!(allocator_result, Err(ArenaError::PageSizeNotAligned));
+        assert_matches!(
+            allocator_result,
+            Err(OffsetAllocatorError::PageSizeNotAligned)
+        );
     }
 
     #[test]
@@ -300,17 +329,17 @@ mod tests {
 
     #[test]
     /// Tests an attempt to allocate a buffer larger than the total available storage.
-    /// Verifies that the allocation fails with `ArenaError::AllocationFailed`.
+    /// Verifies that the allocation fails with `OffsetAllocatorError::AllocationFailed`.
     fn test_allocate_too_large() {
         let allocator = create_allocator();
         let buffer_size = TOTAL_STORAGE_SIZE + PAGE_SIZE;
         let buffer_result = allocator.allocate(buffer_size);
         assert!(buffer_result.is_err());
-        assert_matches!(buffer_result, Err(ArenaError::AllocationFailed));
+        assert_matches!(buffer_result, Err(OffsetAllocatorError::AllocationFailed));
     }
 
     #[test]
-    /// Tests the `Drop` implementation of `ArenaBuffer` for freeing allocated pages.
+    /// Tests the `Drop` implementation of `OffsetBuffer` for freeing allocated pages.
     /// It allocates a buffer, lets it go out of scope (triggering `drop`), and then
     /// attempts to reallocate a buffer of the same size. This second allocation should
     /// succeed and reuse the initially allocated space, starting at the storage address.
@@ -337,7 +366,7 @@ mod tests {
     #[test]
     /// Tests filling the arena with two buffers that together consume all available pages
     /// and then attempting one more small allocation, which should fail.
-    /// Verifies that after the allocator is full, `ArenaError::AllocationFailed` is returned.
+    /// Verifies that after the allocator is full, `OffsetAllocatorError::AllocationFailed` is returned.
     fn test_allocate_fill_and_fail() {
         let allocator = create_allocator();
         let buffer_size_half = TOTAL_STORAGE_SIZE / 2; // Each takes 5 pages
@@ -355,7 +384,7 @@ mod tests {
         // Now try to allocate one more page, should fail
         let buffer3_result = allocator.allocate(PAGE_SIZE);
         assert!(buffer3_result.is_err());
-        assert_matches!(buffer3_result, Err(ArenaError::AllocationFailed));
+        assert_matches!(buffer3_result, Err(OffsetAllocatorError::AllocationFailed));
     }
 
     #[test]
@@ -417,14 +446,14 @@ mod tests {
             buffer2_result.is_err(),
             "Second allocation should fail due to insufficient pages"
         );
-        assert_matches!(buffer2_result, Err(ArenaError::AllocationFailed));
+        assert_matches!(buffer2_result, Err(OffsetAllocatorError::AllocationFailed));
     }
 
     #[test]
     /// Tests filling the arena with multiple non-page-aligned allocations that each consume more
     /// than one page due to rounding (specifically, `PAGE_SIZE + 1` bytes, consuming 2 pages each).
     /// After filling the arena based on this consumption, it verifies that a subsequent small
-    /// allocation fails with `ArenaError::AllocationFailed`.
+    /// allocation fails with `OffsetAllocatorError::AllocationFailed`.
     fn test_fill_with_non_aligned_and_fail() {
         let allocator = create_allocator();
         // This test verifies that multiple small allocations, each consuming slightly more than one page
@@ -451,6 +480,9 @@ mod tests {
             final_alloc_result.is_err(),
             "Final allocation of 1 byte should fail as arena is full"
         );
-        assert_matches!(final_alloc_result, Err(ArenaError::AllocationFailed));
+        assert_matches!(
+            final_alloc_result,
+            Err(OffsetAllocatorError::AllocationFailed)
+        );
     }
 }
