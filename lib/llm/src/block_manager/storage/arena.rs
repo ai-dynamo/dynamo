@@ -102,7 +102,7 @@ impl<S: Storage> ArenaAllocator<S> {
 
     pub fn allocate(&self, size: usize) -> Result<ArenaBuffer<S>, ArenaError> {
         let size = size as u64;
-        let pages = (size as u64 + self.page_size - 1) / self.page_size;
+        let pages = size.div_ceil(self.page_size);
 
         let allocation = self
             .allocator
@@ -170,7 +170,7 @@ mod nixl {
                     let storage = NixlStorage::from_storage_with_offset(
                         self.storage.as_ref(),
                         self.offset as usize,
-                        self.requested_size as usize,
+                        self.requested_size,
                     )?;
 
                     Ok(NixlRemoteDescriptor::new(storage, agent))

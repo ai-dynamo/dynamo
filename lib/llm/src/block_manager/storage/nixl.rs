@@ -102,7 +102,7 @@ impl NixlRemoteDescriptor {
     }
 
     /// Size in bytes of the remote memory region
-    pub fn len(&self) -> usize {
+    pub fn size(&self) -> usize {
         *self.storage.size()
     }
 
