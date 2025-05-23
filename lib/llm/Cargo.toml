@@ -35,6 +35,7 @@ testing-cuda  = ["dep:cudarc"]
 testing-nixl  = ["dep:nixl-sys"]
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
 sentencepiece = ["dep:sentencepiece"]
+block-manager-bench = ["block-manager", "testing-cuda", "dep:clap", "dep:indicatif", "dep:plotters", "dep:ordered-float"]
 
 [dependencies]
 # repo
@@ -116,6 +117,12 @@ minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
 ggus = "0.4.0"
 memmap2 = "0.9.5"
 
+# Bench script
+clap = { version = "4.5.37", features = ["derive"], optional = true }
+indicatif = { version = "0.17.11", optional = true }
+plotters = { version = "0.3.7", optional = true }
+ordered-float = { version = "5.0.0", optional = true }
+
 [dev-dependencies]
 assert_matches = "1.5"
 hf-hub = { workspace = true }
@@ -132,3 +139,13 @@ insta = { version = "1.41", features = [
 ] }
 aligned-vec = "0.6.4"
 lazy_static = "1.4"
+
+[[bin]]
+name = "block-manager-bench"
+path = "bin/bench_block_manager.rs"
+required-features = ["block-manager-bench"]
+
+[[bin]]
+name = "block-manager-bench-bandwidth"
+path = "bin/bench_block_manager_bandwidth.rs"
+required-features = ["block-manager-bench"]
