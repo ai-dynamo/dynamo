@@ -259,12 +259,10 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                         }
                     }
 
-                    // Allocate a block from the host pool.
-                    // TODO: The most likely error here is that the target pool is full.
-                    // It's probably not a good idea to keep consuming queue elements in the meantime.
                     let target_blocks = match target_pool.allocate_blocks(1).await {
                         Ok(blocks) => blocks,
                         Err(_) => {
+                            tracing::error!("Target pool full. This shouldn't ever happen!");
                             continue;
                         }
                     };
