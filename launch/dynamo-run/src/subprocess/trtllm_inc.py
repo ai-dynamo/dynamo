@@ -1,36 +1,35 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# `dynamo-run out=vllm` runs this script
-# Can also be used standalone: `python3 vllm_inc.py` - lots of optional cmd line params
-
-# Setup checklist:
-# - We are in a virtualenv with vllm installed - and patched if using kv routing.
-# - `libdynamo_llm_capi.so` is in system lib path or it's containing folder is in LD_LIBRARY_PATH
-#   It builds in target/debug/ by default.
+# TODO:
+# - Add event and metrics publishers
+# - Support default dynamo-run out=trtllm launch
+# - Support disaggregated serving
+#
+# Can be used standalone: `python3 trtllm_inc.py` - lots of optional cmd line params
 
 import argparse
 import asyncio
 import logging
-import os
 import sys
-import uuid
-from typing import Optional
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator, Optional
 
 import uvloop
-from vllm import SamplingParams
-from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.openai.api_server import (
-    build_async_engine_client_from_engine_args,
-)
-from vllm.inputs import TokensPrompt
+
+# Import TRTLLM and related modules
+from tensorrt_llm import LLM, LlmArgs, SamplingParams
+from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
+from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
 from dynamo.llm import KvMetricsPublisher, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 # Only used if you run it manually from the command line
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
-DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
+# Qwen/Qwen3-0.6B is not supported by TRTLLM yet.
+DEFAULT_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -45,7 +44,6 @@ class Config:
     model_name: Optional[str]
     tensor_parallel_size: int
     kv_block_size: int
-    context_length: int
     extra_engine_args: str
 
 
@@ -55,19 +53,14 @@ class RequestHandler:
     """
 
     def __init__(self, component, engine, default_sampling_params):
+        self.engine = engine
         self.component = component
-        self.engine_client = engine
         self.default_sampling_params = default_sampling_params
         self.metrics_publisher = KvMetricsPublisher()
 
     def setup_kv_metrics(self):
-        if not hasattr(self.engine_client, "set_metrics_publisher"):
-            logging.debug("VLLM version does not support KV metrics")
-            return
-
-        self.engine_client.set_metrics_publisher(self.metrics_publisher)
         # Initially send dummy metrics to kick start,
-        # vLLM will not update stat until forward pass is triggered
+        # TRTLLM will not update stat until forward pass is triggered
         self.metrics_publisher.publish(
             0,  # request_active_slots
             1024,  # request_total_slots
@@ -87,12 +80,9 @@ class RequestHandler:
         await self.metrics_publisher.create_endpoint(self.component)
 
     async def generate(self, request):
-        # logging.debug(f"Received request: {request}")
-        request_id = str(uuid.uuid4().hex)
+        inputs = request["token_ids"]
 
-        prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
-
-        sampling_params = SamplingParams(**self.default_sampling_params)
+        sampling_params = self.default_sampling_params
         for key, value in request["sampling_options"].items():
             if not value:
                 continue
@@ -104,12 +94,10 @@ class RequestHandler:
             sampling_params.max_tokens = max_tokens
 
         num_output_tokens_so_far = 0
-        gen = self.engine_client.generate(prompt, sampling_params, request_id)
-        async for res in gen:
-            # res is vllm's RequestOutput
-
-            # This is the expected way for a request to end.
-            # The new token ID will be eos, don't forward it.
+        # TODO: Disable streaming for context only requests when adding disagg support
+        async for res in self.engine.llm.generate_async(
+            inputs=inputs, sampling_params=sampling_params, streaming=True
+        ):
             if res.finished:
                 yield {"finish_reason": "stop", "token_ids": []}
                 break
@@ -134,22 +122,62 @@ async def worker(runtime: DistributedRuntime):
     await init(runtime, cmd_line_args())
 
 
-def _check_and_set_env_value(key, expected, allow_override=False):
-    if not allow_override and key in os.environ and os.environ[key] != expected:
-        raise ValueError(
-            f"{key} is set and doesn't equal expected {expected}. Please unset variable before launch."
-        )
-    os.environ.setdefault(key, expected)
+class AsyncLLMEngine:
+    def __init__(self, engine_args):
+        self.engine_args = engine_args
+        self._llm: Optional[LLM] = None
+        self._initialized = False
+
+    async def initialize(self):
+        if not self._initialized:
+            model = self.engine_args.pop("model")
+            self._llm = LLM(
+                model=model,
+                **self.engine_args,
+            )
+            self._initialized = True
+
+    async def cleanup(self):
+        if self._initialized:
+            try:
+                self._llm.shutdown()
+            except Exception as e:
+                logging.error(f"Error during cleanup: {e}")
+            finally:
+                self._initialized = False
+
+    @property
+    def llm(self):
+        if not self._initialized:
+            raise RuntimeError("Engine not initialized")
+        return self._llm
+
+
+@asynccontextmanager
+async def get_llm_engine(engine_args: LlmArgs) -> AsyncGenerator[AsyncLLMEngine, None]:
+    engine = AsyncLLMEngine(engine_args)
+    try:
+        await engine.initialize()
+        yield engine
+    except Exception as e:
+        logging.error(f"Error in engine context: {e}")
+        raise
+    finally:
+        await engine.cleanup()
 
 
 async def init(runtime: DistributedRuntime, config: Config):
     """
     Instantiate and serve
     """
+    component = runtime.namespace(config.namespace).component(config.component)
+    await component.create_service()
+
+    # Convert model path to Path object if it's a local path, otherwise keep as string
+    model_path = str(config.model_path)
 
     arg_map = {
-        "model": config.model_path,
-        "task": "generate",
+        "model": model_path,
         "tensor_parallel_size": config.tensor_parallel_size,
         "skip_tokenizer_init": True,
         "disable_log_requests": True,
@@ -157,63 +185,34 @@ async def init(runtime: DistributedRuntime, config: Config):
         # KV routing relies on logging KV metrics
         "disable_log_stats": False,
     }
-    if config.kv_block_size:
-        arg_map["block_size"] = config.kv_block_size
-
-    if config.context_length:
-        # Usually we want it to default to the max (from tokenizer_config.json)
-        arg_map["max_model_len"] = config.context_length
-
     if config.extra_engine_args != "":
-        json_map = {}
-        # extra_engine_args is a filename
-        try:
-            with open(config.extra_engine_args) as f:
-                json_map = json.load(f)
-        except FileNotFoundError:
-            logging.error(f"File {config.extra_engine_args} not found.")
-        except json.JSONDecodeError as e:
-            logging.error(f"Invalid JSON in {config.extra_engine_args}: {e}")
-        logging.debug(f"Adding extra engine arguments: {json_map}")
-        arg_map = {**arg_map, **json_map}  # json_map gets precedence
+        arg_map = update_llm_args_with_extra_options(arg_map, config.extra_engine_args)
 
-    # Patch won't start KVCacheEventManager unless these four are set
+    logging.debug(f"TRTLLM engine args: {arg_map}")
+    engine_args = arg_map
 
-    component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
-    endpoint = component.endpoint(config.endpoint)
+    # Populate default sampling params from the model
+    tokenizer = tokenizer_factory(arg_map["model"])
+    default_sampling_params = SamplingParams()
+    default_sampling_params._setup(tokenizer)
+    default_sampling_params.stop = None
 
-    _check_and_set_env_value("VLLM_WORKER_ID", str(endpoint.lease_id()))
-    _check_and_set_env_value(
-        "VLLM_KV_CAPI_PATH", "libdynamo_llm_capi.so", allow_override=True
-    )
-    _check_and_set_env_value("VLLM_KV_NAMESPACE", config.namespace)
-    _check_and_set_env_value("VLLM_KV_COMPONENT", config.component)
-    _check_and_set_env_value(
-        "VLLM_NO_USAGE_STATS", "1", allow_override=True
-    )  # Avoid internal HTTP requests
-    engine_args = AsyncEngineArgs(**arg_map)
-    model_config = engine_args.create_model_config()
-    # Load default sampling params from `generation_config.json`
-    default_sampling_params = model_config.get_diff_sampling_param()
+    async with get_llm_engine(engine_args) as engine:
+        endpoint = component.endpoint(config.endpoint)
+        await register_llm(
+            ModelType.Backend, endpoint, config.model_path, config.model_name
+        )
+        handler = RequestHandler(component, engine, default_sampling_params)
+        handler.setup_kv_metrics()
 
-    engine_context = build_async_engine_client_from_engine_args(engine_args)
-    engine_client = await engine_context.__aenter__()
-
-    await register_llm(
-        ModelType.Backend, endpoint, config.model_path, config.model_name
-    )
-    handler = RequestHandler(component, engine_client, default_sampling_params)
-    handler.setup_kv_metrics()
-
-    # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
-    # after the lease is revoked
-    await endpoint.serve_endpoint(handler.generate)
+        # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
+        # after the lease is revoked
+        await endpoint.serve_endpoint(handler.generate)
 
 
 def cmd_line_args():
     parser = argparse.ArgumentParser(
-        description="vLLM server integrated with Dynamo LLM."
+        description="TensorRT-LLM server integrated with Dynamo LLM."
     )
     parser.add_argument(
         "--endpoint",
@@ -237,19 +236,13 @@ def cmd_line_args():
         "--tensor-parallel-size", type=int, default=1, help="Number of GPUs to use."
     )
     parser.add_argument(
-        "--kv-block-size", type=int, default=16, help="Size of a KV cache block."
-    )
-    parser.add_argument(
-        "--context-length",
-        type=int,
-        default=None,
-        help="Max model context length. Defaults to models max, usually model_max_length from tokenizer_config.json. Reducing this reduces VRAM requirements.",
+        "--kv-block-size", type=int, default=32, help="Size of a KV cache block."
     )
     parser.add_argument(
         "--extra-engine-args",
         type=str,
         default="",
-        help="Path to a JSON file containing additional keyword arguments to pass to the vLLM AsyncLLMEngine.",
+        help="Path to a YAML file containing additional keyword arguments to pass to the TRTLLM engine.",
     )
     args = parser.parse_args()
 
@@ -276,7 +269,6 @@ def cmd_line_args():
     config.endpoint = parsed_endpoint_name
     config.tensor_parallel_size = args.tensor_parallel_size
     config.kv_block_size = args.kv_block_size
-    config.context_length = args.context_length
     config.extra_engine_args = args.extra_engine_args
 
     return config
