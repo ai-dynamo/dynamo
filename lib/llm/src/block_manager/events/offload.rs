@@ -21,6 +21,7 @@ use crate::block_manager::events::{
 };
 use crate::tokens::SequenceHash;
 
+/// An event manager that propagates cache hits to the offload manager.
 pub struct OffloadEventManager {
     tx: broadcast::Sender<Vec<SequenceHash>>,
 }

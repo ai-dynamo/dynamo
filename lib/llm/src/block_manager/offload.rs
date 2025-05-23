@@ -61,14 +61,14 @@ use tokio::sync::{
 use anyhow::Result;
 use std::any::Any;
 
-use std::collections::{BTreeSet, HashMap};
-
 mod pending;
+mod queue;
 pub mod request;
 
 use pending::{
     CudaTransferManager, DiskTransferManager, PendingTransfer, TransferBatcher, TransferManager,
 };
+use queue::OffloadQueue;
 use request::{BlockResult, OffloadRequest, OffloadRequestKey, OnboardRequest};
 
 const MAX_CONCURRENT_TRANSFERS: usize = 4;
@@ -225,18 +225,14 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let source_pool = source_pool.as_ref().unwrap();
         let target_pool = target_pool.as_ref().unwrap();
 
-        let mut queue = BTreeSet::new();
-        let mut lookup = HashMap::new();
-
-        let mut cache_hit_receiver = event_manager.receiver();
+        let mut offload_queue = OffloadQueue::new(event_manager.receiver());
 
         loop {
             // Try to check the offload queue.
             loop {
                 match offload_rx.try_recv() {
                     Ok(request) => {
-                        lookup.insert(request.sequence_hash, request.clone());
-                        queue.insert(request);
+                        offload_queue.push(request);
                     }
                     Err(TryRecvError::Empty) => {
                         break;
@@ -246,8 +242,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             }
 
             // If there is a request, process it.
-            if let Some(request) = queue.pop_first() {
-                lookup.remove(&request.sequence_hash);
+            if let Some(request) = offload_queue.pop() {
                 // Try to upgrade the block to a strong reference.
                 let block = match request.block.upgrade() {
                     Some(block) => Some(block),
@@ -300,30 +295,18 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                             result = transfer_fut => {
                                 result.unwrap();
                             }
-                            _ = async {
-                                while let Ok(cache_hits) = cache_hit_receiver.recv().await {
-                                    for sequence_hash in cache_hits {
-                                        if let Some(mut request) = lookup.remove(&sequence_hash) {
-                                            queue.remove(&request);
-                                            if request.block.upgrade().is_some() {
-                                                // We'd probably want something more fancy than this.
-                                                // But this works as a POC. Just increment priority by 1.
-                                                request.key.priority += 1;
-                                                queue.insert(request.clone());
-                                                lookup.insert(sequence_hash, request);
-                                            }
-                                        }
-                                    }
-                                }
-                                std::future::pending::<()>().await;
-                            } => {}
+                            _ = offload_queue.cache_hit_worker() => {
+                                return Ok(())
+                            }
                         }
                     }
                 }
             } else {
                 // Await the next request.
                 if let Some(request) = offload_rx.recv().await {
-                    queue.insert(request);
+                    offload_queue.push(request);
+                } else {
+                    return Ok(());
                 }
             }
         }
