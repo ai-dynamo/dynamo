@@ -277,8 +277,7 @@ impl WorkerSelector for DefaultWorkerSelector {
             let score = worker_scores.get(&worker_id).copied().unwrap_or(0.0);
 
             // Calculate normalized metrics
-            assert!(ep.data.kv_total_blocks > 0);
-            let gpu_cache_usage = ep.data.kv_active_blocks as f64 / ep.data.kv_total_blocks as f64;
+            let gpu_cache_usage = ep.data.gpu_cache_usage_perc as f64;
             let normalized_waiting = if max_waiting > 0.0 {
                 ep.data.num_requests_waiting as f64 / max_waiting
             } else {

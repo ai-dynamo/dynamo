@@ -61,6 +61,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::AggregatedMetrics>()?;
     m.add_class::<llm::kv::KvMetricsAggregator>()?;
     m.add_class::<llm::kv::KvEventPublisher>()?;
+    m.add_class::<llm::kv::KvEventPublisherFromZmq>()?;
+    m.add_class::<llm::kv::KvEventPublisherFromZmqConfig>()?;
     m.add_class::<llm::kv::KvRecorder>()?;
     m.add_class::<llm::nats::NatsQueue>()?;
     m.add_class::<http::HttpService>()?;
