@@ -27,16 +27,15 @@ from utils.prefill_queue import PrefillQueue
 from utils.protocol import PreprocessedRequest
 from utils.vllm import RouterType, parse_vllm_args
 from vllm import SamplingParams
-from vllm.inputs import TokensPrompt
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
 )
+from vllm.inputs import TokensPrompt
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
 from dynamo.llm import KvMetricsPublisher, ModelType, register_llm
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
-
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +110,7 @@ class VllmWorker:
             endpoint,
             self.engine_args.model,
             self.engine_args.served_model_name,
-            # kv_cache_block_size=self.engine_args.kv_cache_block_size, 
+            kv_cache_block_size=self.engine_args.block_size,
         )
         self._engine_context = build_async_engine_client_from_engine_args(
             self.engine_args
@@ -203,7 +202,6 @@ class VllmWorker:
 
     @endpoint()
     async def generate(self, request: PreprocessedRequest):
-
         request_id = str(uuid.uuid4())
 
         if self.disaggregated_router is not None:
@@ -214,7 +212,7 @@ class VllmWorker:
                 prefill_queue_size = await prefill_queue.get_queue_size()
             disagg_router_decision = await self.disaggregated_router.prefill_remote(
                 len(request.token_ids),
-                0, # TODO: return prefix hit rate from dynamo-run router
+                0,  # TODO: return prefix hit rate from dynamo-run router
                 prefill_queue_size,
             )
         else:
@@ -262,7 +260,6 @@ class VllmWorker:
                 break
 
             output = response.outputs[0]
-            next_total_toks = len(output.token_ids)
             out = {"token_ids": output.token_ids}
             if output.finish_reason:
                 out["finish_reason"] = output.finish_reason

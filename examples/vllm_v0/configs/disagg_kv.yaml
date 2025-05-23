@@ -22,7 +22,7 @@ Frontend:
   served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   endpoint: dynamo.VllmWorker.generate
   port: 8000
-  router: round-robin
+  router: kv
   common-configs: [block-size]
 
 VllmWorker:

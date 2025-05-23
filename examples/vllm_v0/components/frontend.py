@@ -15,8 +15,6 @@
 
 import logging
 import subprocess
-import asyncio
-import signal
 from pathlib import Path
 
 from components.worker import VllmWorker
@@ -24,7 +22,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from dynamo import sdk
-from dynamo.sdk import depends, service, async_on_start, dynamo_context
+from dynamo.sdk import depends, service
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
 
@@ -85,11 +83,14 @@ class Frontend:
             f"out={endpoint}",
             "--http-port",
             str(self.frontend_config.port),
+            "--router-mode",
+            self.frontend_config.router,
         ]
-        if self.frontend_config.router == "kv":
-            cmd += ["--router-mode", "kv", "--kv-cache-block-size", str(self.frontend_config.block_size)]
-        else:
-            cmd += ["--router-mode", self.frontend_config.router]
+
+        # if self.frontend_config.router == "kv":
+        #     cmd += ["--router-mode", "kv", "--kv-cache-block-size", str(self.frontend_config.block_size)]
+        # else:
+        #     cmd += ["--router-mode", self.frontend_config.router]
 
         self.process = subprocess.Popen(
             cmd,
