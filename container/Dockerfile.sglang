@@ -294,13 +294,11 @@ COPY components /workspace/components
 COPY launch /workspace/launch
 COPY deploy/sdk /workspace/deploy/sdk
 
-# Build Rust crate binaries packaged with the wheel
-RUN cargo build --release --locked --features mistralrs,python,dynamo-llm/block-manager \
-    -p dynamo-run \
-    -p llmctl \
-    # Multiple http named crates are present in dependencies, need to specify the path
-    -p file://$PWD/components/http \
-    -p metrics
+RUN cargo build \
+	--release \
+	--locked \
+	--features mistralrs,python,dynamo-llm/block-manager \
+	--workspace
 
 # Build dynamo wheel
 RUN uv build --wheel --out-dir /workspace/dist && \
@@ -323,6 +321,7 @@ ENV CARGO_TARGET_DIR=/workspace/target
 WORKDIR /workspace
 
 COPY --from=wheel_builder /workspace/dist/ /workspace/dist/
+# Copy all the Rust binaries built in the previous stage
 COPY --from=wheel_builder /workspace/target/ /workspace/target/
 COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
 # Copy Cargo cache to avoid re-downloading dependencies
@@ -330,13 +329,8 @@ COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
 COPY . /workspace
 
-# Build rest of the crates
-# Need to figure out rust caching to avoid rebuilding and remove exclude flags
-RUN cargo build --release --locked --features block-manager --workspace \
-    --exclude dynamo-run \
-    --exclude llmctl \
-    --exclude file://$PWD/components/http \
-    --exclude metrics
+# Build C bindings, creates lib/bindings/c/include
+RUN cd /workspace/lib/bindings/c && cargo build --release
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
