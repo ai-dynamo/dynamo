@@ -213,7 +213,23 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
             // 3. return channel
 
             if let Some(immutable) = self.active.match_sequence_hash(sequence_hash) {
+                match immutable.state() {
+                    BlockState::Registered(reg_handle) => {
+                        let publish_handle = PublishHandle::new(
+                            reg_handle.clone(),
+                            self.event_managers
+                                .iter()
+                                .map(|em| em.clone() as Arc<dyn EventPublisher>)
+                                .collect(),
+                            EventType::CacheHit,
+                        );
+                        publish_handles.take_handle(publish_handle);
+                    }
+                    _ => panic!("This should never happen."),
+                }
+
                 immutable_blocks.push(immutable);
+
                 continue;
             }
 
@@ -233,21 +249,6 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
                 .active
                 .register(mutable)
                 .expect("unable to register block; should ever happen");
-
-            match immutable.state() {
-                BlockState::Registered(reg_handle) => {
-                    let publish_handle = PublishHandle::new(
-                        reg_handle.clone(),
-                        self.event_managers
-                            .iter()
-                            .map(|em| em.clone() as Arc<dyn EventPublisher>)
-                            .collect(),
-                        EventType::CacheHit,
-                    );
-                    publish_handles.take_handle(publish_handle);
-                }
-                _ => panic!("This should never happen."),
-            }
 
             immutable_blocks.push(immutable);
         }

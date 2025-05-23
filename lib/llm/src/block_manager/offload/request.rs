@@ -22,7 +22,7 @@ use crate::block_manager::storage::Storage;
 
 /// Higher priority offloads are done first.
 /// If two offloads have the same priority, the one that was requested first is done first.
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone)]
 pub struct OffloadRequestKey {
     pub priority: u64,
     pub timestamp: u64,
@@ -50,6 +50,16 @@ pub struct OffloadRequest<S: Storage, M: BlockMetadata> {
     pub key: OffloadRequestKey,
     pub block: Weak<MutableBlock<S, M>>,
     pub sequence_hash: u64,
+}
+
+impl<S: Storage, M: BlockMetadata> Clone for OffloadRequest<S, M> {
+    fn clone(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            block: self.block.clone(),
+            sequence_hash: self.sequence_hash,
+        }
+    }
 }
 
 impl<S: Storage, M: BlockMetadata> PartialOrd for OffloadRequest<S, M> {

@@ -121,10 +121,10 @@ pub struct BlockPoolArgs<S: Storage, M: BlockMetadata> {
 impl<S: Storage, M: BlockMetadata> BlockPoolArgsBuilder<S, M> {
     pub fn build(self) -> anyhow::Result<BlockPool<S, M>> {
         let args = self.build_internal()?;
-        let (event_manager, cancel_token, blocks) = args.dissolve();
+        let (event_managers, cancel_token, blocks) = args.dissolve();
 
         tracing::info!("building block pool");
-        let pool = BlockPool::new(event_manager, cancel_token, blocks);
+        let pool = BlockPool::new(event_managers, cancel_token, blocks);
 
         Ok(pool)
     }

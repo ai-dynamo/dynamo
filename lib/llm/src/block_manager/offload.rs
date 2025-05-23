@@ -45,6 +45,7 @@
 //! of the [`OffloadManager::offload`] and [`OffloadManager::onboard`] methods.
 
 use super::block::{BlockError, BlockMetadata, BlockState, ImmutableBlock};
+use super::events::offload::OffloadEventManager;
 use super::pool::BlockPoolError;
 use super::state::TransferContext;
 use super::storage::{Cuda, Storage};
@@ -60,7 +61,7 @@ use tokio::sync::{
 use anyhow::Result;
 use std::any::Any;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 mod pending;
 pub mod request;
@@ -97,6 +98,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         disk: Option<Arc<BlockPool<DiskStorage, Metadata>>>,
         host: Option<Arc<BlockPool<PinnedStorage, Metadata>>>,
         device: Option<Arc<BlockPool<DeviceStorage, Metadata>>>,
+        event_manager: Arc<OffloadEventManager>,
         nixl_agent: Arc<Option<NixlAgent>>,
         async_rt_handle: Handle,
     ) -> Result<Arc<Self>> {
@@ -130,6 +132,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         // Device -> Host offload
         let device_clone = this.device.clone();
         let host_clone = this.host.clone();
+        let event_manager_clone = event_manager.clone();
         async_rt_handle.spawn(async move {
             let res = OffloadManager::offload_worker(
                 device_clone,
@@ -139,6 +142,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     CudaTransferManager::new(device_offload_transfer_ctx, MAX_CONCURRENT_TRANSFERS),
                     MAX_TRANSFER_BATCH_SIZE,
                 )),
+                event_manager_clone,
             )
             .await;
             tracing::warn!("Offload worker terminated: {:?}", res);
@@ -162,6 +166,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     DiskTransferManager::new(transfer_ctx_clone, MAX_CONCURRENT_TRANSFERS),
                     MAX_TRANSFER_BATCH_SIZE,
                 )),
+                event_manager,
             )
             .await;
             tracing::warn!("Offload worker terminated: {:?}", res);
@@ -211,6 +216,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         target_pool: Option<Arc<BlockPool<Target, Metadata>>>,
         mut offload_rx: mpsc::UnboundedReceiver<OffloadRequest<Source, Metadata>>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Metadata>>,
+        event_manager: Arc<OffloadEventManager>,
     ) -> Result<()> {
         if source_pool.is_none() || target_pool.is_none() {
             return Ok(());
@@ -220,12 +226,16 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let target_pool = target_pool.as_ref().unwrap();
 
         let mut queue = BTreeSet::new();
+        let mut lookup = HashMap::new();
+
+        let mut cache_hit_receiver = event_manager.receiver();
 
         loop {
             // Try to check the offload queue.
             loop {
                 match offload_rx.try_recv() {
                     Ok(request) => {
+                        lookup.insert(request.sequence_hash, request.clone());
                         queue.insert(request);
                     }
                     Err(TryRecvError::Empty) => {
@@ -237,6 +247,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
 
             // If there is a request, process it.
             if let Some(request) = queue.pop_first() {
+                lookup.remove(&request.sequence_hash);
                 // Try to upgrade the block to a strong reference.
                 let block = match request.block.upgrade() {
                     Some(block) => Some(block),
@@ -270,14 +281,43 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     };
 
                     if let Some(target_block) = target_blocks.into_iter().next() {
-                        transfer_manager
-                            .enqueue_transfer(PendingTransfer::new(
-                                vec![block],
-                                vec![target_block],
-                                None,
-                                target_pool.clone(),
-                            ))
-                            .await?;
+                        // Wait for the transfer to enqueue.
+                        // In the meantime, listen for cache hits.
+
+                        let transfer_fut = transfer_manager.enqueue_transfer(PendingTransfer::new(
+                            vec![block],
+                            vec![target_block],
+                            None,
+                            target_pool.clone(),
+                        ));
+
+                        // This is a bit funky.
+                        // The transfer future may be temporarily blocked by the transfer manager due to a full queue.
+                        // When this is the case, we want to process cache hits.
+                        // Once the transfer future returns, we cancel the future checking cache hits.
+                        tokio::select! {
+                            biased;
+                            result = transfer_fut => {
+                                result.unwrap();
+                            }
+                            _ = async {
+                                while let Ok(cache_hits) = cache_hit_receiver.recv().await {
+                                    for sequence_hash in cache_hits {
+                                        if let Some(mut request) = lookup.remove(&sequence_hash) {
+                                            queue.remove(&request);
+                                            if request.block.upgrade().is_some() {
+                                                // We'd probably want something more fancy than this.
+                                                // But this works as a POC. Just increment priority by 1.
+                                                request.key.priority += 1;
+                                                queue.insert(request.clone());
+                                                lookup.insert(sequence_hash, request);
+                                            }
+                                        }
+                                    }
+                                }
+                                std::future::pending::<()>().await;
+                            } => {}
+                        }
                     }
                 }
             } else {
@@ -467,6 +507,7 @@ mod tests {
 
     use crate::block_manager::{
         block::{BasicMetadata, BlockDataExt, BlockDataProvider, BlockExt, Blocks, MutableBlock},
+        events::offload::OffloadEventManager,
         layout::{nixl::NixlLayout, FullyContiguous},
         pool::BlockPool,
         storage::{
@@ -524,13 +565,18 @@ mod tests {
         let agent_arc = NIXL_AGENT.clone();
         let agent = agent_arc.as_ref().as_ref().unwrap();
 
+        let offload_event_manager = Arc::new(OffloadEventManager::new());
+
         let mut device = FullyContiguous::allocate(config.clone(), &DeviceAllocator::default())?;
 
         device.nixl_register(agent, None)?;
 
         let device_blocks = Blocks::<_, BasicMetadata>::new(device, 42, 0)?.into_blocks()?;
         let device_pool = Some(Arc::new(
-            BlockPool::builder().blocks(device_blocks).build()?,
+            BlockPool::builder()
+                .blocks(device_blocks)
+                .event_managers(vec![offload_event_manager.clone()])
+                .build()?,
         ));
 
         let host_pool = if let Some(host_blocks) = host_blocks {
@@ -538,7 +584,12 @@ mod tests {
             let mut host = FullyContiguous::allocate(config.clone(), &PinnedAllocator::default())?;
             host.nixl_register(agent, None)?;
             let host_blocks = Blocks::<_, BasicMetadata>::new(host, 42, 0)?.into_blocks()?;
-            Some(Arc::new(BlockPool::builder().blocks(host_blocks).build()?))
+            Some(Arc::new(
+                BlockPool::builder()
+                    .blocks(host_blocks)
+                    .event_managers(vec![offload_event_manager.clone()])
+                    .build()?,
+            ))
         } else {
             None
         };
@@ -548,7 +599,12 @@ mod tests {
             let mut disk = FullyContiguous::allocate(config, &DiskAllocator)?;
             disk.nixl_register(agent, None)?;
             let disk_blocks = Blocks::<_, BasicMetadata>::new(disk, 42, 0)?.into_blocks()?;
-            Some(Arc::new(BlockPool::builder().blocks(disk_blocks).build()?))
+            Some(Arc::new(
+                BlockPool::builder()
+                    .blocks(disk_blocks)
+                    .event_managers(vec![offload_event_manager.clone()])
+                    .build()?,
+            ))
         } else {
             None
         };
@@ -559,6 +615,7 @@ mod tests {
             disk_pool.clone(),
             host_pool.clone(),
             device_pool.clone(),
+            offload_event_manager,
             agent_arc,
             async_rt_handle,
         )?;

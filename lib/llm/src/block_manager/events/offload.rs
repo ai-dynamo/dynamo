@@ -1,17 +1,29 @@
-use std::sync::{Arc, Weak};
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::broadcast;
 
 use crate::block_manager::events::{
     EventManager, EventPublisher, EventReleaseManager, EventType, RegistrationHandle,
 };
+use crate::tokens::SequenceHash;
 
 pub struct OffloadEventManager {
-    tx: mpsc::UnboundedSender<Vec<Weak<RegistrationHandle>>>,
+    tx: broadcast::Sender<Vec<SequenceHash>>,
+}
+
+impl Default for OffloadEventManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OffloadEventManager {
-    pub fn new(tx: mpsc::UnboundedSender<Vec<Weak<RegistrationHandle>>>) -> Self {
+    pub fn new() -> Self {
+        let (tx, _) = broadcast::channel(1024);
         Self { tx }
+    }
+
+    pub fn receiver(&self) -> broadcast::Receiver<Vec<SequenceHash>> {
+        self.tx.subscribe()
     }
 }
 
@@ -20,9 +32,13 @@ impl EventPublisher for OffloadEventManager {
         if event_type != EventType::CacheHit {
             return;
         }
-        self.tx
-            .send(handles.iter().map(Arc::downgrade).collect())
-            .unwrap();
+
+        let _ = self.tx.send(
+            handles
+                .iter()
+                .map(|handle| handle.sequence_hash())
+                .collect(),
+        );
     }
 }
 
