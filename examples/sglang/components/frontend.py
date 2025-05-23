@@ -17,6 +17,7 @@ import logging
 import subprocess
 from pathlib import Path
 
+from components.sglang_router import SGLangRouter
 from components.worker import SGLangWorker
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -56,6 +57,7 @@ class FrontendConfig(BaseModel):
     app=FastAPI(title="LLM Example"),
 )
 class Frontend:
+    router = depends(SGLangRouter)
     worker = depends(SGLangWorker)
 
     def __init__(self):
