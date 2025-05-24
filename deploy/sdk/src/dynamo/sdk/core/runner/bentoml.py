@@ -35,6 +35,7 @@ from dynamo.sdk.core.protocol.interface import (
     ServiceInterface,
 )
 from dynamo.sdk.core.runner.common import ServiceMixin
+from dynamo.sdk.core.runner.health import register_liveness_probe
 
 T = TypeVar("T", bound=object)
 
@@ -116,6 +117,7 @@ class BentoServiceAdapter(ServiceMixin, ServiceInterface[T]):
             self.app = FastAPI(title=name)
         else:
             self.app = app
+        register_liveness_probe(self.app, service_cls)
         self._dependencies: Dict[str, "DependencyInterface"] = {}
         self._bentoml_service.config["dynamo"] = asdict(self._dynamo_config)
         self._api_endpoints: list[str] = []
