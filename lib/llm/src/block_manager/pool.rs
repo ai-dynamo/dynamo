@@ -70,6 +70,7 @@ pub use super::block::{ImmutableBlock, MutableBlock};
 
 use super::block::{
     nixl::short_type_name, registry::BlockRegistry, Block, BlockError, BlockMetadata,
+    GlobalRegistry,
 };
 use super::events::{EventManager, NullEventManager};
 use super::storage::Storage;
@@ -80,6 +81,7 @@ use std::{
     collections::{BTreeSet, HashMap, VecDeque},
     sync::{Arc, Weak},
 };
+use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::Result;
@@ -116,15 +118,27 @@ pub struct BlockPoolArgs<S: Storage, M: BlockMetadata> {
 
     #[builder(default)]
     blocks: Vec<Block<S, M>>,
+
+    #[builder(default)]
+    global_registry: GlobalRegistry,
+
+    #[builder(default = "Handle::current()")]
+    async_runtime: Handle,
 }
 
 impl<S: Storage, M: BlockMetadata> BlockPoolArgsBuilder<S, M> {
     pub fn build(self) -> anyhow::Result<BlockPool<S, M>> {
         let args = self.build_internal()?;
-        let (event_manager, cancel_token, blocks) = args.dissolve();
+        let (event_manager, cancel_token, blocks, global_registry, async_runtime) = args.dissolve();
 
         tracing::info!("building block pool");
-        let pool = BlockPool::new(event_manager, cancel_token, blocks);
+        let pool = BlockPool::new(
+            event_manager,
+            cancel_token,
+            blocks,
+            global_registry,
+            async_runtime,
+        );
 
         Ok(pool)
     }
@@ -200,9 +214,16 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
         event_manager: Arc<dyn EventManager>,
         cancel_token: CancellationToken,
         blocks: Vec<Block<S, M>>,
+        global_registry: GlobalRegistry,
+        async_runtime: Handle,
     ) -> Self {
-        let (pool, progress_engine) =
-            Self::with_progress_engine(event_manager, cancel_token, blocks);
+        let (pool, progress_engine) = Self::with_progress_engine(
+            event_manager,
+            cancel_token,
+            blocks,
+            global_registry,
+            async_runtime,
+        );
 
         // pool.runtime.handle().spawn(async move {
         //     let mut progress_engine = progress_engine;
@@ -239,12 +260,21 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
         event_manager: Arc<dyn EventManager>,
         cancel_token: CancellationToken,
         blocks: Vec<Block<S, M>>,
+        global_registry: GlobalRegistry,
+        async_runtime: Handle,
     ) -> (Self, ProgressEngine<S, M>) {
         let (priority_tx, priority_rx) = tokio::sync::mpsc::unbounded_channel();
         let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let progress_engine =
-            ProgressEngine::<S, M>::new(event_manager, priority_rx, ctrl_rx, cancel_token, blocks);
+        let progress_engine = ProgressEngine::<S, M>::new(
+            event_manager,
+            priority_rx,
+            ctrl_rx,
+            cancel_token,
+            blocks,
+            global_registry,
+            async_runtime,
+        );
 
         (
             Self {
@@ -468,9 +498,15 @@ mod tests {
             self,
         ) -> anyhow::Result<(BlockPool<S, M>, ProgressEngine<S, M>)> {
             let args = self.build_internal()?;
-            let (event_manager, cancel_token, blocks) = args.dissolve();
-            let (pool, progress_engine) =
-                BlockPool::with_progress_engine(event_manager, cancel_token, blocks);
+            let (event_manager, cancel_token, blocks, global_registry, async_runtime) =
+                args.dissolve();
+            let (pool, progress_engine) = BlockPool::with_progress_engine(
+                event_manager,
+                cancel_token,
+                blocks,
+                global_registry,
+                async_runtime,
+            );
 
             Ok((pool, progress_engine))
         }
@@ -560,8 +596,14 @@ mod tests {
             .into_blocks()
             .unwrap();
 
+        let async_runtime = tokio::runtime::Runtime::new().unwrap();
+
         // Create the BlockPool and add the blocks
-        let pool = BlockPool::builder().blocks(blocks).build().unwrap();
+        let pool = BlockPool::builder()
+            .blocks(blocks)
+            .async_runtime(async_runtime.handle().clone())
+            .build()
+            .unwrap();
 
         // All blocks should be in the Reset/Empty state
         // No blocks should match the expected sequence hash

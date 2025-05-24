@@ -336,7 +336,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         priority: u64,
     ) -> core::result::Result<(), BlockPoolError> {
         match block.state() {
-            BlockState::Registered(_) => {}
+            BlockState::Registered(_, _) => {}
             _ => {
                 return Err(BlockPoolError::BlockError(BlockError::InvalidState(
                     "Block is not registered.".to_string(),
@@ -399,7 +399,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
     ) -> BlockResult<DeviceStorage, Metadata> {
         for block in &blocks {
             match block.state() {
-                BlockState::Registered(_) => {}
+                BlockState::Registered(_, _) => {}
                 _ => {
                     return Err(BlockPoolError::BlockError(BlockError::InvalidState(
                         "Block is not registered.".to_string(),
@@ -828,7 +828,7 @@ mod tests {
         // Check that the block is registered.
         assert!(matches!(
             onboarded_blocks[0].state(),
-            BlockState::Registered(_)
+            BlockState::Registered(_, _)
         ));
 
         compare_block_contents(&onboarded_blocks[0], &immutable_host_block)?;
@@ -911,7 +911,7 @@ mod tests {
         );
         assert!(matches!(
             onboarded_blocks[0].state(),
-            BlockState::Registered(_)
+            BlockState::Registered(_, _)
         ));
 
         compare_block_contents(&onboarded_blocks[0], &immutable_host_block)?;

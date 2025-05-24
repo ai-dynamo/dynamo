@@ -118,7 +118,7 @@ fn transfer_metadata<Source: Storage, Target: Storage, Metadata: BlockMetadata>(
     target: &mut MutableBlock<Target, Metadata>,
 ) -> Result<()> {
     // Only registered blocks can be transferred. There are upstream checks for this, so this shouldn't ever fail.
-    if let BlockState::Registered(reg_handle) = source.state() {
+    if let BlockState::Registered(reg_handle, _) = source.state() {
         // Bring the block back to the 'Reset' state.
         target.reset();
         // Transfer metadata.
