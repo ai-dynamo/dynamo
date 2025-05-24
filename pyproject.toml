@@ -66,6 +66,10 @@ vllm = [
     "ai-dynamo-vllm~=0.8.4"
 ]
 
+sglang = [
+    "sglang[all]==0.4.6.post4"
+]
+
 [project.scripts]
 dynamo = "dynamo.sdk.cli.cli:cli"
 dynamo-run = "dynamo.sdk.cli.run_executable:dynamo_run"
