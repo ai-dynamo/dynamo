@@ -575,6 +575,40 @@ class KvEventPublisher:
         """
         ...
 
+class KvEventPublisherFromZmqConfig:
+    def __init__(
+        self,
+        worker_id: int,
+        kv_block_size: int,
+        zmq_endpoint: str = "tcp://127.0.0.1:5557",
+        zmq_topic: str = ""
+    ) -> None:
+        """
+        Configuration for the KvEventPublisherFromZmq.
+
+        :param worker_id: The worker ID.
+        :param kv_block_size: The block size for the key-value store.
+        :param zmq_endpoint: The ZeroMQ endpoint. Defaults to "tcp://127.0.0.1:5557".
+        :param zmq_topic: The ZeroMQ topic to subscribe to. Defaults to an empty string.
+        """
+        ...
+
+class KvEventPublisherFromZmq:
+    def __init__(self, component: Component, config: KvEventPublisherFromZmqConfig) -> None:
+        """
+        Initializes a new KvEventPublisherFromZmq instance.
+
+        :param component: The component to be used.
+        :param config: Configuration for the event publisher.
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Shuts down the event publisher, stopping any background tasks.
+        """
+        ...
+
 class HttpService:
     """
     A HTTP service for dynamo applications.

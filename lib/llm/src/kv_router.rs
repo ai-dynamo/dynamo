@@ -73,7 +73,7 @@ impl KvRouter {
             .primary_lease()
             .expect("Cannot KV route static workers")
             .primary_token();
-
+        tracing::info!("KV Routing initialized");
         let metrics_aggregator =
             KvMetricsAggregator::new(component.clone(), cancellation_token.clone()).await;
         let indexer = KvIndexer::new(cancellation_token.clone(), block_size);

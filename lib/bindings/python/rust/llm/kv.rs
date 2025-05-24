@@ -20,7 +20,8 @@ use llm_rs::kv_router::indexer::KvIndexerInterface;
 use rs::traits::events::EventSubscriber;
 use tracing;
 
-use llm_rs::kv_router::{indexer::compute_block_hash_for_seq, protocols::*};
+use llm_rs::kv_router::protocols::*;
+use llm_rs::kv_router::publisher::create_stored_blocks;
 
 #[pyclass]
 pub(crate) struct KvRouter {
@@ -122,9 +123,65 @@ impl KvMetricsPublisher {
 }
 
 #[pyclass]
+#[derive(Clone)]
+pub struct KvEventPublisherFromZmqConfig {
+    #[pyo3(get, set)]
+    pub worker_id: i64,
+    #[pyo3(get, set)]
+    pub kv_block_size: usize,
+    #[pyo3(get, set)]
+    pub zmq_endpoint: String,
+    #[pyo3(get, set)]
+    pub zmq_topic: String,
+}
+
+#[pymethods]
+impl KvEventPublisherFromZmqConfig {
+    #[new]
+    #[pyo3(signature = (
+        worker_id,
+        kv_block_size,
+        zmq_endpoint = "tcp://127.0.0.1:5557".to_string(),
+        zmq_topic = "".to_string()
+    ))]
+    pub fn new(
+        worker_id: i64,
+        kv_block_size: usize,
+        zmq_endpoint: String,
+        zmq_topic: String,
+    ) -> Self {
+        Self {
+            worker_id,
+            kv_block_size,
+            zmq_endpoint,
+            zmq_topic,
+        }
+    }
+}
+
+#[pyclass]
+pub(crate) struct KvEventPublisherFromZmq {
+    inner: llm_rs::kv_router::publisher::KvEventPublisherFromZmq
+}
+
+#[pymethods]
+impl KvEventPublisherFromZmq {
+    #[new]
+    fn new(component: Component, config: KvEventPublisherFromZmqConfig) -> PyResult<Self> {
+        let mut inner = llm_rs::kv_router::publisher::KvEventPublisherFromZmq::new(config.kv_block_size);
+        inner.start_background_task(component.inner, config.worker_id, config.zmq_endpoint, config.zmq_topic);
+        Ok(Self { inner })
+    }
+
+    fn shutdown(&mut self) {
+        self.inner.shutdown()
+    }
+}
+
+#[pyclass]
 pub(crate) struct KvEventPublisher {
     inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
-    warning_count: u32,
+    kv_block_size: usize,
 }
 
 #[pymethods]
@@ -132,14 +189,14 @@ impl KvEventPublisher {
     #[new]
     fn new(component: Component, worker_id: i64, kv_block_size: usize) -> PyResult<Self> {
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
-            component.inner.clone(),
+            component.inner,
             worker_id,
-            kv_block_size,
+            kv_block_size
         )
         .map_err(to_pyerr)?;
         Ok(Self {
             inner: inner.into(),
-            warning_count: 0,
+            kv_block_size
         })
     }
 
@@ -151,15 +208,16 @@ impl KvEventPublisher {
         event_id: u64,
         token_ids: Vec<u32>,
         num_block_tokens: Vec<u64>,
-        block_hashes: Vec<u64>,
+        block_hashes: Vec<i64>,
         lora_id: u64,
-        parent_hash: Option<u64>,
+        parent_hash: Option<i64>,
     ) -> PyResult<()> {
         let event = KvCacheEvent {
             event_id,
             data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: parent_hash.map(ExternalSequenceBlockHash),
-                blocks: self.create_stored_blocks(
+                parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
+                blocks: create_stored_blocks(
+                    self.kv_block_size,
                     &token_ids,
                     &num_block_tokens,
                     &block_hashes,
@@ -171,10 +229,10 @@ impl KvEventPublisher {
         self.inner.publish(event).map_err(to_pyerr)
     }
 
-    fn publish_removed(&self, _py: Python, event_id: u64, block_hashes: Vec<u64>) -> PyResult<()> {
+    fn publish_removed(&self, _py: Python, event_id: u64, block_hashes: Vec<i64>) -> PyResult<()> {
         let block_hashes: Vec<ExternalSequenceBlockHash> = block_hashes
             .iter()
-            .map(|&v| ExternalSequenceBlockHash(v))
+            .map(|&h| ExternalSequenceBlockHash::from(h))
             .collect();
         let event = KvCacheEvent {
             event_id,
@@ -185,49 +243,6 @@ impl KvEventPublisher {
     }
 }
 
-impl KvEventPublisher {
-    fn create_stored_block_from_parts(
-        &self,
-        block_hash: u64,
-        token_ids: &[u32],
-        _lora_id: u64,
-    ) -> KvCacheStoredBlockData {
-        let tokens_hash = compute_block_hash_for_seq(token_ids, self.inner.kv_block_size())[0];
-        KvCacheStoredBlockData {
-            block_hash: ExternalSequenceBlockHash(block_hash),
-            tokens_hash,
-        }
-    }
-
-    fn create_stored_blocks(
-        &mut self,
-        token_ids: &[u32],
-        num_block_tokens: &[u64],
-        block_hashes: &[u64],
-        lora_id: u64,
-    ) -> Vec<KvCacheStoredBlockData> {
-        let mut blocks: Vec<KvCacheStoredBlockData> = Vec::new();
-
-        let mut token_offset: usize = 0;
-        for (num_tokens_it, block_hash_it) in num_block_tokens.iter().zip(block_hashes.iter()) {
-            if (self.warning_count < 3) && (*num_tokens_it != self.inner.kv_block_size() as u64) {
-                tracing::warn!(
-                    "Block not published. Block size must be {} tokens to be published. Block size is: {}",
-                    self.inner.kv_block_size(),
-                    *num_tokens_it
-                );
-                self.warning_count += 1;
-                break;
-            }
-
-            let tokens = &token_ids[token_offset..(token_offset + *num_tokens_it as usize)];
-            blocks.push(self.create_stored_block_from_parts(*block_hash_it, tokens, lora_id));
-            token_offset += *num_tokens_it as usize;
-        }
-
-        blocks
-    }
-}
 
 #[pyclass]
 #[derive(Clone)]

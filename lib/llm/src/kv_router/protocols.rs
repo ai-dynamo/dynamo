@@ -65,6 +65,21 @@ pub struct LocalBlockHash(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct ExternalSequenceBlockHash(pub u64);
 
+// Implement From trait for convenient conversion
+impl From<u64> for ExternalSequenceBlockHash {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl From<i64> for ExternalSequenceBlockHash {
+    /// Bitwise reinterpretation: preserves all bits, including negatives.
+    /// This is lossless, but negative i64 values will appear as large u64 values.
+    fn from(value: i64) -> Self {
+        Self(value as u64)
+    }
+}
+
 /// Represents a collection of cache events and a shutdown flag.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct KvCacheEvents {
