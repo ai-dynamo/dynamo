@@ -14,12 +14,9 @@
 // limitations under the License.
 
 #![cfg(feature = "block-manager")]
-// Silence warnings about deprecated features (like pyo3::IntoPy::into_py)
-#![allow(deprecated)]
 
 use super::*;
 use pyo3::PyResult;
-use tokio;
 
 mod block;
 mod block_list;
@@ -34,9 +31,6 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[pyclass]
 pub struct BlockManager {
-    // TODO: Can this be implicitly created and referenced?
-    tokio_runtime: tokio::runtime::Runtime,
-    // Block manager
     inner: Arc<dynamo_llm::block_manager::ReferenceBlockManager>,
     // TODO: Metadata should be stored in the block manager?
     dtype: dynamo_llm::common::dtype::DType,
@@ -116,16 +110,11 @@ impl BlockManager {
             );
         }
         let config = config.build().unwrap();
-        let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let block_manager = tokio_runtime.block_on(async {
-            dynamo_llm::block_manager::ReferenceBlockManager::new(config).unwrap()
-        });
+        let tokio_runtime = pyo3_async_runtimes::tokio::get_runtime();
         Ok(BlockManager {
-            tokio_runtime: tokio_runtime,
-            inner: Arc::from(block_manager),
+            inner: Arc::from(tokio_runtime.block_on(async {
+                dynamo_llm::block_manager::ReferenceBlockManager::new(config).unwrap()
+            })),
             dtype: dtype_,
             device_id: device_id,
         })
@@ -150,6 +139,26 @@ impl BlockManager {
         ))
     }
 
+    #[pyo3(signature = (count))]
+    fn allocate_host_blocks<'py>(
+        &self,
+        py: Python<'py>,
+        count: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let dtype = self.dtype.clone();
+        let device_id = self.device_id;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let blocks = inner.host().unwrap().allocate_blocks(count).await.unwrap();
+            // Wrap each block in an enum accounting for Pinned & Device block
+            let blocks = blocks
+                .into_iter()
+                .map(|b| block::BlockType::Pinned(b))
+                .collect();
+            Ok(block_list::BlockList::from_rust(blocks, dtype, device_id))
+        })
+    }
+
     fn allocate_device_blocks_blocking(&self, count: usize) -> PyResult<block_list::BlockList> {
         let blocks = self
             .inner
@@ -167,5 +176,30 @@ impl BlockManager {
             self.dtype.clone(),
             self.device_id,
         ))
+    }
+
+    #[pyo3(signature = (count))]
+    fn allocate_device_blocks<'py>(
+        &self,
+        py: Python<'py>,
+        count: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let dtype = self.dtype.clone();
+        let device_id = self.device_id;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let blocks = inner
+                .device()
+                .unwrap()
+                .allocate_blocks(count)
+                .await
+                .unwrap();
+            // Wrap each block in an enum accounting for Pinned & Device block
+            let blocks = blocks
+                .into_iter()
+                .map(|b| block::BlockType::Device(b))
+                .collect();
+            Ok(block_list::BlockList::from_rust(blocks, dtype, device_id))
+        })
     }
 }

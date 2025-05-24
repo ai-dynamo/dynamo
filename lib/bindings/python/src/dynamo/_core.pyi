@@ -784,9 +784,41 @@ class BlockManager:
         """
         ...
 
+    async def allocate_host_blocks(self, count: int) -> BlockList:
+        """
+        Allocate a list of host blocks
+
+        Parameters:
+        -----------
+        count: int
+            Number of blocks to allocate
+
+        Returns:
+        --------
+        BlockList
+            List of allocated blocks
+        """
+        ...
+
     def allocate_device_blocks_blocking(self, count: int) -> BlockList:
         """
         Allocate a list of device blocks (blocking call)
+
+        Parameters:
+        -----------
+        count: int
+            Number of blocks to allocate
+
+        Returns:
+        --------
+        BlockList
+            List of allocated blocks
+        """
+        ...
+
+    async def allocate_device_blocks(self, count: int) -> BlockList:
+        """
+        Allocate a list of device blocks
 
         Parameters:
         -----------

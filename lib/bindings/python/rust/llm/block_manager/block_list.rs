@@ -14,8 +14,6 @@
 // limitations under the License.
 
 #![cfg(feature = "block-manager")]
-// Silence warnings about deprecated features (like pyo3::IntoPy::into_py)
-#![allow(deprecated)]
 
 use super::*;
 
@@ -52,16 +50,14 @@ impl BlockList {
 
 #[pymethods]
 impl BlockList {
-    fn to_list(&self) -> PyResult<Py<PyList>> {
-        let py_list = Python::with_gil(|py| {
-            let blocks: Vec<block::Block> = self
-                .inner
-                .iter()
-                .map(|b| block::Block::from_rust(b.clone(), self.dtype.clone(), self.device_id))
-                .collect();
-            PyList::new(py, blocks).unwrap().unbind()
-        });
-        Ok(py_list)
+    #[pyo3(signature = ())]
+    fn to_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let blocks: Vec<block::Block> = self
+            .inner
+            .iter()
+            .map(|b| block::Block::from_rust(b.clone(), self.dtype.clone(), self.device_id))
+            .collect();
+        PyList::new(py, blocks)
     }
 
     fn __len__(&self) -> PyResult<usize> {
@@ -84,13 +80,10 @@ impl BlockList {
         Ok(block)
     }
 
-    fn __iter__(slf: Py<Self>) -> PyResult<Py<Self>> {
-        Python::with_gil(|py| {
-            let mut slf = slf.borrow_mut(py);
-            // Reset iterator index at the beginning of each iteration
-            // Use to_list() for iterating concurrently
-            slf.py_itr_idx = 0;
-        });
+    fn __iter__(mut slf: PyRefMut<'_, Self>) -> PyResult<PyRefMut<'_, Self>> {
+        // Reset iterator index at the beginning of each iteration
+        // Use to_list() for iterating concurrently
+        slf.py_itr_idx = 0;
         Ok(slf)
     }
 
