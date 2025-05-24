@@ -262,7 +262,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     let target_blocks = match target_pool.allocate_blocks(1).await {
                         Ok(blocks) => blocks,
                         Err(_) => {
-                            tracing::error!("Target pool full. This shouldn't ever happen!");
+                            tracing::warn!("Target pool full. Skipping offload. This should only ever happen with very small pool sizes.");
                             continue;
                         }
                     };
@@ -679,7 +679,7 @@ mod tests {
                 file.read_exact(&mut aligned)?;
                 contents = aligned.to_vec();
             }
-            _ => panic!(),
+            _ => anyhow::bail!("Unsupported storage type."),
         }
 
         Ok(contents.to_vec())
