@@ -305,10 +305,10 @@ If you have multiple GPUs, mistral.rs does automatic tensor parallelism. You do 
 
 #### llamacpp
 
-Currently [llama.cpp](https://github.com/ggml-org/llama.cpp) is not included by default. Build it like this:
+[llama.cpp](https://github.com/ggml-org/llama.cpp) is built for CPU by default. For an optimized build pass the appropriate feature flag (highly recommended):
 
 ```
-cargo build --features llamacpp[,cuda|metal|vulkan] -p dynamo-run
+cargo build --features cuda|metal|vulkan -p dynamo-run
 ```
 
 ```
