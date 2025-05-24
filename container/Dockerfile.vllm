@@ -78,6 +78,9 @@ WORKDIR /workspace
 ### UCX EFA Setup ###
 RUN rm -rf /opt/hpcx/ucx
 RUN rm -rf /usr/local/ucx
+RUN curl -O https://efa-installer.amazonaws.com/aws-efa-installer-latest.tar.gz && \
+    tar -xf aws-efa-installer-latest.tar.gz && cd aws-efa-installer && \
+    ./efa_installer.sh -y --skip-kmod -g --no-verify
 RUN cd /usr/local/src && \
     git clone https://github.com/openucx/ucx.git && \
     cd ucx &&                   \
