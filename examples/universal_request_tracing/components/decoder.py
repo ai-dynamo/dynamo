@@ -128,8 +128,6 @@ class Decoder(RequestTracingMixin):
         """
         Convert token ID to text (simplified simulation).
         """
-        current_request_id = get_current_request_id()
-        
         special_tokens = {
             0: "<eos>",
             1: "<pad>",

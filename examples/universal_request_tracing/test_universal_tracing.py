@@ -35,7 +35,7 @@ import aiohttp
 async def test_with_custom_request_id(base_url: str = "http://localhost:8080"):
     """Test with custom X-Request-Id header."""
     
-    custom_request_id = f"universal-test-{uuid.uuid4()}"
+    custom_request_id = f"test-universal-{uuid.uuid4()}"
     
     headers = {
         "Content-Type": "application/json",
@@ -60,7 +60,7 @@ async def test_with_custom_request_id(base_url: str = "http://localhost:8080"):
             json=payload
         ) as response:
             response_headers = dict(response.headers)
-            response_data = await response.json()
+            await response.json() 
             
             print(f"📥 Response status: {response.status}")
             returned_id = response_headers.get('X-Request-Id')
@@ -100,7 +100,7 @@ async def test_without_request_id(base_url: str = "http://localhost:8080"):
             json=payload
         ) as response:
             response_headers = dict(response.headers)
-            response_data = await response.json()
+            await response.json() 
             
             print(f"📥 Response status: {response.status}")
             generated_id = response_headers.get('X-Request-Id')
@@ -145,7 +145,7 @@ async def test_completions_endpoint(base_url: str = "http://localhost:8080"):
             json=payload
         ) as response:
             response_headers = dict(response.headers)
-            response_data = await response.json()
+            await response.json()  
             
             print(f"📥 Response status: {response.status}")
             returned_id = response_headers.get('X-Request-Id')
@@ -176,12 +176,11 @@ async def test_health_endpoint(base_url: str = "http://localhost:8080"):
             headers=headers
         ) as response:
             response_headers = dict(response.headers)
-            response_data = await response.json()
+            await response.json() 
             
             print(f"📥 Response status: {response.status}")
             returned_id = response_headers.get('X-Request-Id')
             print(f"📋 Returned X-Request-Id: {returned_id}")
-            print(f"💬 Health response: {response_data}")
             
             if returned_id == custom_request_id:
                 print("✅ Health endpoint request ID successfully preserved!")

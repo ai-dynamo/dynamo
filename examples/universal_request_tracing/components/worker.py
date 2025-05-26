@@ -124,8 +124,6 @@ class Worker(RequestTracingMixin):
         """
         Simulate KV cache prefilling with request tracking.
         """
-        current_request_id = get_current_request_id()
-        
         self.log_with_request_id("debug", "Prefilling KV cache")
         
         await asyncio.sleep(0.2)

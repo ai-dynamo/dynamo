@@ -102,10 +102,10 @@ class Processor(RequestTracingMixin):
         
         if self.use_router:
             self.log_with_request_id("debug", "Using router for request routing")
-            engine_generator = await self.router_client.generate(request_data)
+            engine_generator = await self.router.generate(raw_request, request_id)
         else:
             self.log_with_request_id("debug", "Direct worker processing")
-            engine_generator = await self.worker_client.generate(request_data)
+            engine_generator = await self.worker.generate(raw_request, request_id)
         
         async for response in engine_generator:
             current_id = get_current_request_id()
