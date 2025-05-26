@@ -59,11 +59,9 @@ def extract_or_generate_request_id(
     if request is not None:
         request_id = request.headers.get("x-request-id")
     
-    # Try to extract from headers dict
     if request_id is None and headers is not None:
         request_id = headers.get("x-request-id") or headers.get("X-Request-Id")
     
-    # Generate new UUID if no request ID found
     if request_id is None:
         request_id = str(uuid.uuid4())
     
