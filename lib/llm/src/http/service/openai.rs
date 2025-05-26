@@ -195,30 +195,24 @@ async fn completions(
 
         // Add X-Request-Id header to response
         let mut response = sse_stream.into_response();
-        response.headers_mut().insert(
-            "x-request-id",
-            request_id.parse().unwrap(),
-        );
+        response
+            .headers_mut()
+            .insert("x-request-id", request_id.parse().unwrap());
         Ok(response)
     } else {
         let response = CompletionResponse::from_annotated_stream(stream.into())
             .await
             .map_err(|e| {
-                tracing::error!(
-                    request_id,
-                    "Failed to fold completions stream for: {:?}",
-                    e
-                );
+                tracing::error!(request_id, "Failed to fold completions stream for: {:?}", e);
                 ErrorResponse::internal_server_error("Failed to fold completions stream")
             })?;
 
         inflight.mark_ok();
         let mut json_response = Json(response).into_response();
         // Add X-Request-Id header to response
-        json_response.headers_mut().insert(
-            "x-request-id",
-            request_id.parse().unwrap(),
-        );
+        json_response
+            .headers_mut()
+            .insert("x-request-id", request_id.parse().unwrap());
         Ok(json_response)
     }
 }
@@ -326,10 +320,9 @@ async fn chat_completions(
 
         // Add X-Request-Id header to response
         let mut response = sse_stream.into_response();
-        response.headers_mut().insert(
-            "x-request-id",
-            request_id.parse().unwrap(),
-        );
+        response
+            .headers_mut()
+            .insert("x-request-id", request_id.parse().unwrap());
         Ok(response)
     } else {
         let response = NvCreateChatCompletionResponse::from_annotated_stream(stream.into())
@@ -349,10 +342,9 @@ async fn chat_completions(
         inflight.mark_ok();
         let mut json_response = Json(response).into_response();
         // Add X-Request-Id header to response
-        json_response.headers_mut().insert(
-            "x-request-id",
-            request_id.parse().unwrap(),
-        );
+        json_response
+            .headers_mut()
+            .insert("x-request-id", request_id.parse().unwrap());
         Ok(json_response)
     }
 }
