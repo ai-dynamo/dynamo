@@ -27,6 +27,7 @@ from dynamo.sdk.core.protocol.interface import (
     ServiceInterface,
 )
 
+T = TypeVar("T", bound=object)
 G = TypeVar("G", bound=Callable[..., Any])
 
 #  Note: global service provider.
@@ -51,7 +52,7 @@ def get_target() -> DeploymentTarget:
 
 # TODO: dynamo_component
 def service(
-    inner: Optional[Type[G]] = None,
+    inner: Optional[Type[T]] = None,
     /,
     *,
     dynamo: Optional[Union[Dict[str, Any], DynamoConfig]] = None,
@@ -70,7 +71,7 @@ def service(
 
     assert isinstance(dynamo_config, DynamoConfig)
 
-    def decorator(inner: Type[G]) -> ServiceInterface[G]:
+    def decorator(inner: Type[T]) -> ServiceInterface[T]:
         provider = get_target()
         if inner is not None:
             dynamo_config.name = inner.__name__
@@ -87,8 +88,8 @@ def service(
 
 
 def depends(
-    on: Optional[ServiceInterface[G]] = None, **kwargs: Any
-) -> DependencyInterface[G]:
+    on: Optional[ServiceInterface[T]] = None, **kwargs: Any
+) -> DependencyInterface[T]:
     """Create a dependency using the current service provider"""
     provider = get_target()
     return provider.create_dependency(on=on, **kwargs)
