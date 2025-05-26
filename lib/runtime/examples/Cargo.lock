@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -994,7 +994,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hello_world"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "dynamo-runtime",
 ]
@@ -2120,6 +2120,7 @@ version = "0.23.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df51b5869f3a441595eac5e8ff14d486ff285f7b8c0df8770e49c3b56351f0f0"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -2305,7 +2306,7 @@ dependencies = [
 
 [[package]]
 name = "service_metrics"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "dynamo-runtime",
  "futures",
@@ -2734,8 +2735,10 @@ dependencies = [
  "percent-encoding",
  "pin-project",
  "prost",
+ "rustls-pemfile",
  "socket2",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower 0.4.13",
  "tower-layer",

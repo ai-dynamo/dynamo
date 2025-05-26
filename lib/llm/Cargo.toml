@@ -27,7 +27,13 @@ description = "Dynamo LLM Library"
 [features]
 default = []
 
-cuda_kv = ["dep:cudarc", "dep:ndarray"]
+# todo: enable this as default
+# default = ["block-manager", "testing-full"]
+
+testing-full  = ["testing-cuda", "testing-nixl"]
+testing-cuda  = ["dep:cudarc"]
+testing-nixl  = ["dep:nixl-sys"]
+block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
 sentencepiece = ["dep:sentencepiece"]
 
 [dependencies]
@@ -48,9 +54,11 @@ etcd-client = { workspace = true }
 futures =  { workspace = true }
 hf-hub = { workspace = true }
 rand = { workspace = true }
+oneshot = { workspace = true }
 prometheus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+strum = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -61,7 +69,6 @@ validator = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 xxhash-rust = { workspace = true }
-strum = { workspace = true }
 
 akin = "0.4.0"
 async-openai = "0.27.2"
@@ -69,12 +76,15 @@ blake3 = "1"
 bytemuck = "1.22"
 candle-core = { version = "0.8.0" }
 derive-getters = "0.5"
+offset-allocator = "0.2"
 regex = "1"
 rayon = "1"
 
-# kv_cuda
-cudarc = { version = "0.16.2", features = ["cuda-12040"], optional = true }
+# block_manager
+nixl-sys = { version = "0.2.1-rc.3", optional = true }
+cudarc = { version = "0.16.2", features = ["cuda-12020"], optional = true }
 ndarray = { version = "0.16", optional = true }
+nix = { version = "0.26", optional = true }
 
 # protocols
 unicode-segmentation = "1.12"
@@ -99,14 +109,15 @@ toktrie_hf_tokenizers =  { version = "0.6.28" }
 bs62 = { version = "0.1" }
 erased-serde = { version = "0.4" }
 itertools = { version = "0.14.0" }
-minijinja = { version = "2.3.1", features = ["loader"] }
-minijinja-contrib = { version = "2.3.1", features = ["pycompat"] }
+minijinja = { version = "2.10.2", features = ["loader"] }
+minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
 
 # GGUF
 ggus = "0.4.0"
 memmap2 = "0.9.5"
 
 [dev-dependencies]
+assert_matches = "1.5"
 hf-hub = { workspace = true }
 proptest = "1.5.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
@@ -119,3 +130,5 @@ insta = { version = "1.41", features = [
   "redactions",
   "filters",
 ] }
+aligned-vec = "0.6.4"
+lazy_static = "1.4"

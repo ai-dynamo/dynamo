@@ -173,24 +173,14 @@ impl FromStr for Endpoint {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum RouterType {
-    PushRoundRobin,
-    PushRandom,
-}
-
-impl Default for RouterType {
-    fn default() -> Self {
-        Self::PushRandom
+impl Endpoint {
+    /// As a String like dyn://dynamo.internal.worker
+    pub fn as_url(&self) -> String {
+        format!(
+            "{ENDPOINT_SCHEME}{}.{}.{}",
+            self.namespace, self.component, self.name
+        )
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub struct ModelMetaData {
-    pub name: String,
-    pub component: Component,
-    pub router_type: RouterType,
 }
 
 #[cfg(test)]
@@ -198,33 +188,6 @@ mod tests {
     use super::*;
     use std::convert::TryFrom;
     use std::str::FromStr;
-
-    #[test]
-    fn test_router_type_default() {
-        let default_router = RouterType::default();
-        assert_eq!(default_router, RouterType::PushRandom);
-    }
-
-    #[test]
-    fn test_router_type_serialization() {
-        let router_round_robin = RouterType::PushRoundRobin;
-        let router_random = RouterType::PushRandom;
-
-        let serialized_round_robin = serde_json::to_string(&router_round_robin).unwrap();
-        let serialized_random = serde_json::to_string(&router_random).unwrap();
-
-        assert_eq!(serialized_round_robin, "\"push_round_robin\"");
-        assert_eq!(serialized_random, "\"push_random\"");
-    }
-
-    #[test]
-    fn test_router_type_deserialization() {
-        let round_robin: RouterType = serde_json::from_str("\"push_round_robin\"").unwrap();
-        let random: RouterType = serde_json::from_str("\"push_random\"").unwrap();
-
-        assert_eq!(round_robin, RouterType::PushRoundRobin);
-        assert_eq!(random, RouterType::PushRandom);
-    }
 
     #[test]
     fn test_valid_endpoint_from() {

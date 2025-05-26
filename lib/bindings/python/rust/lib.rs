@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
@@ -83,6 +71,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     engine::add_to_module(m)?;
 
+    #[cfg(feature = "block-manager")]
+    llm::block_manager::add_to_module(m)?;
+
     Ok(())
 }
 
@@ -101,27 +92,37 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
 }
 
 #[pyfunction]
-#[pyo3(signature = (model_type, endpoint, model_path, model_name=None))]
+#[pyo3(signature = (model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None))]
 fn register_llm<'p>(
     py: Python<'p>,
     model_type: ModelType,
     endpoint: Endpoint,
     model_path: &str,
     model_name: Option<&str>,
+    context_length: Option<usize>,
+    kv_cache_block_size: Option<usize>,
 ) -> PyResult<Bound<'p, PyAny>> {
     let model_type_obj = match model_type {
         ModelType::Chat => llm_rs::model_type::ModelType::Chat,
         ModelType::Completion => llm_rs::model_type::ModelType::Completion,
         ModelType::Backend => llm_rs::model_type::ModelType::Backend,
+        ModelType::Embedding => llm_rs::model_type::ModelType::Embedding,
     };
 
     let inner_path = model_path.to_string();
     let model_name = model_name.map(|n| n.to_string());
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         // Download from HF, load the ModelDeploymentCard
-        let mut local_model = llm_rs::LocalModel::prepare(&inner_path, None, model_name)
-            .await
-            .map_err(to_pyerr)?;
+        let mut local_model =
+            llm_rs::local_model::LocalModel::prepare(&inner_path, None, model_name)
+                .await
+                .map_err(to_pyerr)?;
+        if let Some(context_length) = context_length {
+            local_model.set_context_length(context_length);
+        }
+        if let Some(kv_cache_block_size) = kv_cache_block_size {
+            local_model.set_kv_cache_block_size(kv_cache_block_size);
+        }
 
         // Advertise ourself on etcd so ingress can find us
         local_model
@@ -185,12 +186,6 @@ struct Client {
     router: rs::pipeline::PushRouter<serde_json::Value, serde_json::Value>,
 }
 
-#[pyclass]
-#[derive(Clone)]
-struct PyLease {
-    inner: rs::transports::etcd::Lease,
-}
-
 #[pyclass(eq, eq_int)]
 #[derive(Clone, PartialEq)]
 #[repr(i32)]
@@ -198,25 +193,7 @@ enum ModelType {
     Chat = 1,
     Completion = 2,
     Backend = 3,
-}
-
-#[pymethods]
-impl PyLease {
-    fn id(&self) -> i64 {
-        self.inner.id()
-    }
-
-    fn revoke(&self) {
-        self.inner.revoke();
-    }
-
-    fn is_valid<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let lease = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let is_valid = lease.is_valid().await.map_err(to_pyerr)?;
-            Ok(is_valid)
-        })
-    }
+    Embedding = 4,
 }
 
 #[pymethods]
@@ -261,16 +238,6 @@ impl DistributedRuntime {
             Some(etcd_client) => Ok(Some(EtcdClient { inner: etcd_client })),
             None => Ok(None),
         }
-    }
-
-    fn primary_token(&self) -> CancellationToken {
-        let inner = self.inner.runtime().primary_token();
-        CancellationToken { inner }
-    }
-
-    fn child_token(&self) -> CancellationToken {
-        let inner = self.inner.runtime().child_token();
-        CancellationToken { inner }
     }
 
     fn shutdown(&self) {
@@ -461,61 +428,22 @@ impl Component {
             Ok(())
         })
     }
-
-    #[pyo3(signature = (ttl=1))]
-    fn create_service_with_custom_lease<'p>(
-        &self,
-        py: Python<'p>,
-        ttl: i64,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let component = self.inner.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Get the etcd client from the runtime
-            let etcd_client = component
-                .drt()
-                .etcd_client()
-                .ok_or_else(|| to_pyerr("etcd client not found"))?;
-
-            // Create a custom lease with the specified TTL
-            let custom_lease = etcd_client.create_lease(ttl).await.map_err(to_pyerr)?;
-
-            tracing::info!("created custom lease: {:?}", custom_lease);
-
-            // Create a service
-            // TODO: tie the lease to service instead of endpoint
-            let _service = component
-                .service_builder()
-                .create()
-                .await
-                .map_err(to_pyerr)?;
-
-            // Return the lease
-            Ok(PyLease {
-                inner: custom_lease,
-            })
-        })
-    }
 }
 
 #[pymethods]
 impl Endpoint {
-    #[pyo3(signature = (generator, lease=None))]
+    #[pyo3(signature = (generator))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
         generator: PyObject,
-        lease: Option<&PyLease>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
             self.event_loop.clone(),
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
-        let mut builder = self.inner.endpoint_builder().handler(ingress);
-        if lease.is_some() {
-            builder = builder.lease(lease.map(|l| l.inner.clone()));
-        }
+        let builder = self.inner.endpoint_builder().handler(ingress);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             builder.start().await.map_err(to_pyerr)?;
             Ok(())
@@ -658,16 +586,19 @@ impl EtcdClient {
 
 #[pymethods]
 impl Client {
-    /// Get list of current endpoints
-    fn endpoint_ids(&self) -> Vec<i64> {
-        self.router.client.endpoint_ids()
+    /// Get list of current instances.
+    /// Replaces endpoint_ids.
+    fn instance_ids(&self) -> Vec<i64> {
+        self.router.client.instance_ids()
     }
 
-    fn wait_for_endpoints<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+    /// Wait for an instance to be available for work.
+    /// Replaces wait_for_endpoints.
+    fn wait_for_instances<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.router.client.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             inner
-                .wait_for_endpoints()
+                .wait_for_instances()
                 .await
                 .map(|v| v.into_iter().map(|cei| cei.id()).collect::<Vec<i64>>())
                 .map_err(to_pyerr)
@@ -738,12 +669,12 @@ impl Client {
     }
 
     /// Directly send a request to a specific endpoint.
-    #[pyo3(signature = (request, endpoint_id, annotated=DEFAULT_ANNOTATED_SETTING))]
+    #[pyo3(signature = (request, instance_id, annotated=DEFAULT_ANNOTATED_SETTING))]
     fn direct<'p>(
         &self,
         py: Python<'p>,
         request: PyObject,
-        endpoint_id: i64,
+        instance_id: i64,
         annotated: Option<bool>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
@@ -754,7 +685,7 @@ impl Client {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = client
-                .direct(request.into(), endpoint_id)
+                .direct(request.into(), instance_id)
                 .await
                 .map_err(to_pyerr)?;
 

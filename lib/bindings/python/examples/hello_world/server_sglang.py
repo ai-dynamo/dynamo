@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 #
 # A very basic example of sglang worker handling pre-processed requests.
@@ -19,13 +7,17 @@
 # Dynamo does the HTTP handling, prompt templating and tokenization, then forwards the
 # request via NATS to this python script, which runs sglang.
 #
+# The key differences between this and `server_sglang_tok.py` are:
+# - The `register_llm` function registers us a `Backend` model
+# - The `generate` function receives a pre-tokenized request and must return token_ids in the response.
+#
 # Setup a virtualenv with dynamo.llm, dynamo.runtime and sglang[all] installed
 #  in lib/bindings/python `maturin develop` and `pip install -e .` should do it
 # Start nats and etcd:
 #  - nats-server -js
 #
 # Window 1: `python server_sglang.py`. Wait for log "Starting endpoint".
-# Window 2: `dynamo-run out=dyn://dynamo.backend.generate`
+# Window 2: `dynamo-run out=dyn
 
 import argparse
 import asyncio
@@ -39,7 +31,7 @@ from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
-DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
 
 class Config:
@@ -108,7 +100,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
     # after the lease is revoked
-    await endpoint.serve_endpoint(RequestHandler(engine_client).generate, None)
+    await endpoint.serve_endpoint(RequestHandler(engine_client).generate)
 
 
 def cmd_line_args():

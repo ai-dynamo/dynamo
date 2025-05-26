@@ -17,11 +17,11 @@
 # Use this to test changes made to CLI, SDK, etc
 
 
-from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from dynamo.sdk import depends, dynamo_endpoint, service
+from dynamo.sdk import depends, endpoint, service
+from dynamo.sdk.core.protocol.interface import DynamoTransport
 
 """
 Pipeline Architecture:
@@ -56,14 +56,10 @@ class ResponseType(BaseModel):
 GPU_ENABLED = False
 
 
-app = FastAPI(title="Hello World!")
-
-
 @service(
     resources={"cpu": "1"},
     traffic={"timeout": 30},
     dynamo={
-        "enabled": True,
         "namespace": "inference",
     },
     workers=1,
@@ -72,7 +68,7 @@ class Backend:
     def __init__(self) -> None:
         print("Starting backend")
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, req: RequestType):
         """Generate tokens."""
         req_text = req.text
@@ -81,7 +77,7 @@ class Backend:
         for token in text.split():
             yield f"Backend: {token}"
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate_v2(self, req: RequestType):
         """Generate tokens."""
         req_text = req.text
@@ -94,7 +90,7 @@ class Backend:
 @service(
     resources={"cpu": "2"},
     traffic={"timeout": 30},
-    dynamo={"enabled": True, "namespace": "inference"},
+    dynamo={"namespace": "inference"},
 )
 class Backend2:
     backend = depends(Backend)
@@ -102,7 +98,7 @@ class Backend2:
     def __init__(self) -> None:
         print("Starting backend2")
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, req: RequestType):
         """Forward requests to backend."""
 
@@ -116,7 +112,7 @@ class Backend2:
 @service(
     resources={"cpu": "1"},
     traffic={"timeout": 30},
-    dynamo={"enabled": True, "namespace": "inference"},
+    dynamo={"namespace": "inference"},
 )
 class Middle:
     backend = depends(Backend)
@@ -125,7 +121,7 @@ class Middle:
     def __init__(self) -> None:
         print("Starting middle")
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, req: RequestType):
         """Forward requests to backend."""
         req_text = req.text
@@ -150,8 +146,7 @@ class Middle:
 @service(
     resources={"cpu": "1"},
     traffic={"timeout": 60},
-    dynamo={"enabled": True, "namespace": "inference"},
-    app=app,
+    dynamo={"namespace": "inference"},
 )
 class Frontend:
     middle = depends(Middle)
@@ -160,7 +155,7 @@ class Frontend:
     def __init__(self) -> None:
         print("Starting frontend")
 
-    @dynamo_endpoint(is_api=True)
+    @endpoint(transports=[DynamoTransport.HTTP])
     async def generate(self, request: RequestType):
         """Stream results from the pipeline."""
         print(f"Frontend received: {request.text}")

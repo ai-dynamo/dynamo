@@ -40,6 +40,9 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
+	volcanoscheme "volcano.sh/apis/pkg/client/clientset/versioned/scheme"
+
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -57,6 +60,10 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(nvidiacomv1alpha1.AddToScheme(scheme))
+
+	utilruntime.Must(lwsscheme.AddToScheme(scheme))
+
+	utilruntime.Must(volcanoscheme.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -71,9 +78,11 @@ func main() {
 	var natsAddr string
 	var etcdAddr string
 	var istioVirtualServiceGateway string
+	var virtualServiceSupportsHTTPS bool
 	var ingressControllerClassName string
 	var ingressControllerTLSSecretName string
 	var ingressHostSuffix string
+	var enableLWS bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -91,12 +100,16 @@ func main() {
 	flag.StringVar(&etcdAddr, "etcdAddr", "", "address of the etcd server")
 	flag.StringVar(&istioVirtualServiceGateway, "istio-virtual-service-gateway", "",
 		"The name of the istio virtual service gateway to use")
+	flag.BoolVar(&virtualServiceSupportsHTTPS, "virtual-service-supports-https", false,
+		"If set, assume VirtualService endpoints are HTTPS")
 	flag.StringVar(&ingressControllerClassName, "ingress-controller-class-name", "",
 		"The name of the ingress controller class to use")
 	flag.StringVar(&ingressControllerTLSSecretName, "ingress-controller-tls-secret-name", "",
 		"The name of the ingress controller TLS secret to use")
 	flag.StringVar(&ingressHostSuffix, "ingress-host-suffix", "",
 		"The suffix to use for the ingress host")
+	flag.BoolVar(&enableLWS, "enable-lws", false,
+		"If set, enable leader worker set")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -106,7 +119,9 @@ func main() {
 	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
 
 	ctrlConfig := commonController.Config{
-		RestrictedNamespace: restrictedNamespace,
+		RestrictedNamespace:         restrictedNamespace,
+		VirtualServiceSupportsHTTPS: virtualServiceSupportsHTTPS,
+		EnableLWS:                   enableLWS,
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
@@ -178,7 +193,6 @@ func main() {
 	}
 	if err = (&controller.DynamoComponentDeploymentReconciler{
 		Client:            mgr.GetClient(),
-		Scheme:            mgr.GetScheme(),
 		Recorder:          mgr.GetEventRecorderFor("dynamocomponentdeployment"),
 		Config:            ctrlConfig,
 		NatsAddr:          natsAddr,
@@ -200,7 +214,6 @@ func main() {
 	}
 	if err = (&controller.DynamoGraphDeploymentReconciler{
 		Client:                     mgr.GetClient(),
-		Scheme:                     mgr.GetScheme(),
 		Recorder:                   mgr.GetEventRecorderFor("dynamographdeployment"),
 		Config:                     ctrlConfig,
 		VirtualServiceGateway:      istioVirtualServiceGateway,

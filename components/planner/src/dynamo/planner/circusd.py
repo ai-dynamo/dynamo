@@ -174,10 +174,21 @@ class CircusController:
             waiting: Whether to wait for completion
             max_retries: Maximum number of retry attempts
             retry_delay: Delay between retries in seconds
+            timeout: Timeout in seconds for waiting for graceful exit
 
         Returns:
             True if successful, False otherwise
         """
+        # First send SIGTERM to the process
+        try:
+            logger.info(f"Sending SIGTERM to processes in watcher {name}")
+            response = self.client.send_message("signal", name=name, signum="SIGTERM")
+            if response.get("status") != "ok":
+                logger.warning(f"Failed to send SIGTERM to {name}: {response}")
+        except Exception as e:
+            logger.warning(f"Error sending SIGTERM to {name}: {e}")
+
+        # Now wait for the process to exit gracefully
         exited = await self._wait_for_process_graceful_exit(name, timeout)
         if not exited:
             logger.error(

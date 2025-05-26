@@ -77,32 +77,52 @@ class DeploymentStatus(str, Enum):
     """Status of a dynamo deployment."""
 
     PENDING = "pending"
-    IN_PROGRESS = "in_progress"
+    IN_PROGRESS = "in progress"
     RUNNING = "running"
     FAILED = "failed"
     TERMINATED = "terminate"
-    SCALED_TO_ZERO = "scaled_to_zero"
+    SCALED_TO_ZERO = "scaled to zero"
+
+    @property
+    def color(self) -> str:
+        return {
+            DeploymentStatus.RUNNING: "green",
+            DeploymentStatus.IN_PROGRESS: "yellow",
+            DeploymentStatus.PENDING: "yellow",
+            DeploymentStatus.FAILED: "red",
+            DeploymentStatus.TERMINATED: "red",
+            DeploymentStatus.SCALED_TO_ZERO: "yellow",
+        }.get(self, "white")
 
 
 @dataclass
 class ScalingPolicy:
     policy: str
-    parameters: dict[str, t.Union[int, float, str]] = field(default_factory=dict)
+    parameters: t.Dict[str, t.Union[int, float, str]] = field(default_factory=dict)
+
+
+@dataclass
+class Env:
+    name: str
+    value: str = ""
 
 
 @dataclass
 class Service:
-    """A single component."""
+    """The entry service of a deployment."""
 
+    service_name: str
     name: str
     namespace: str
-    class_name: str
-    id: str | None = None
-    cmd: list[str] = field(default_factory=list)
+    version: str
+    path: str
+    cmd: t.List[str] = field(default_factory=list)
     resources: Resources | None = None
-    environment: dict[str, str] = field(default_factory=dict)
-    secrets: list[str] = field(default_factory=list)
+    envs: t.List[Env] = field(default_factory=list)
+    secrets: t.List[str] = field(default_factory=list)
     scaling: ScalingPolicy = field(default_factory=lambda: ScalingPolicy(policy="none"))
+    apis: dict = field(default_factory=dict)
+    size_bytes: int = 0
 
 
 @dataclass
@@ -111,21 +131,28 @@ class Deployment:
 
     name: str
     namespace: str
-    services: list[Service] = field(default_factory=list)
+    pipeline: t.Optional[str] = None
+    entry_service: t.Optional[Service] = None
+    envs: t.Optional[t.List[dict]] = None
+
+
+# Type alias for deployment responses (e.g., from backend APIs)
+DeploymentResponse = t.Dict[str, t.Any]
 
 
 class DeploymentManager(ABC):
     """Interface for managing dynamo graph deployments."""
 
     @abstractmethod
-    def create_deployment(self, deployment: Deployment) -> str:
+    def create_deployment(self, deployment: Deployment, **kwargs) -> DeploymentResponse:
         """Create new deployment.
 
         Args:
             deployment: Deployment configuration
+            **kwargs: Additional backend-specific arguments
 
         Returns:
-            The ID of the created deployment
+            The created deployment
         """
         pass
 
@@ -140,7 +167,7 @@ class DeploymentManager(ABC):
         pass
 
     @abstractmethod
-    def get_deployment(self, deployment_id: str) -> dict[str, t.Any]:
+    def get_deployment(self, deployment_id: str) -> DeploymentResponse:
         """Get deployment details.
 
         Args:
@@ -152,7 +179,7 @@ class DeploymentManager(ABC):
         pass
 
     @abstractmethod
-    def list_deployments(self) -> list[dict[str, t.Any]]:
+    def list_deployments(self) -> t.List[DeploymentResponse]:
         """List all deployments.
 
         Returns:
@@ -170,10 +197,13 @@ class DeploymentManager(ABC):
         pass
 
     @abstractmethod
-    def get_status(self, deployment_id: str) -> DeploymentStatus:
+    def get_status(
+        self,
+        deployment_id: str,
+    ) -> DeploymentStatus:
         """Get the current status of a deployment.
 
-        Args:
+        Args (one of):
             deployment_id: The ID of the deployment
 
         Returns:
@@ -182,7 +212,9 @@ class DeploymentManager(ABC):
         pass
 
     @abstractmethod
-    def wait_until_ready(self, deployment_id: str, timeout: int = 3600) -> bool:
+    def wait_until_ready(
+        self, deployment_id: str, timeout: int = 3600
+    ) -> t.Tuple[DeploymentResponse, bool]:
         """Wait until a deployment is ready.
 
         Args:
@@ -190,15 +222,18 @@ class DeploymentManager(ABC):
             timeout: Maximum time to wait in seconds
 
         Returns:
-            True if deployment became ready, False if timed out
+            Tuple of deployment response and a boolean indicating if the deployment became ready
         """
         pass
 
     @abstractmethod
-    def get_endpoint_urls(self, deployment_id: str) -> list[str]:
+    def get_endpoint_urls(
+        self,
+        deployment_id: str,
+    ) -> t.List[str]:
         """Get the list of endpoint urls attached to a deployment.
 
-        Args:
+        Args (one of):
             deployment_id: The ID of the deployment
 
         Returns:

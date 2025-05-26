@@ -51,6 +51,7 @@ class LLMAPIConfig:
         data = {
             "pytorch_backend_config": self.pytorch_backend_config,
             "kv_cache_config": self.kv_cache_config,
+            "skip_tokenizer_init": self.skip_tokenizer_init,
         }
         if self.extra_args:
             data.update(self.extra_args)

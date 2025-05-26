@@ -49,7 +49,7 @@ mkdir -p $HOME/dynamo/.build/target
 export CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 
 # build project, it will be saved at $HOME/dynamo/.build/target
-cargo build --locked --profile dev --features mistralrs,sglang,vllm,python
+cargo build --locked --profile dev --features mistralrs,python
 cargo doc --no-deps
 
 # create symlinks for the binaries in the deploy directory
@@ -61,6 +61,8 @@ ln -sf $HOME/dynamo/.build/target/debug/llmctl $HOME/dynamo/deploy/sdk/src/dynam
 # install the python bindings in editable mode
 cd $HOME/dynamo/lib/bindings/python && retry uv pip install -e .
 cd $HOME/dynamo && retry env DYNAMO_BIN_PATH=$HOME/dynamo/.build/target/debug uv pip install -e .
+
+export PYTHONPATH=/home/ubuntu/dynamo/components/planner/src:$PYTHONPATH
 
 # source the venv and set the VLLM_KV_CAPI_PATH in bashrc
 echo "source /opt/dynamo/venv/bin/activate" >> ~/.bashrc

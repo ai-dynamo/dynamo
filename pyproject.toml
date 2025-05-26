@@ -15,7 +15,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.2.0"
+version = "0.2.1"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -29,11 +29,12 @@ dependencies = [
     "bentoml==1.4.8",
     "types-psutil==7.0.0.20250218",
     "kubernetes==32.0.1",
-    "ai-dynamo-runtime==0.2.0",
+    "ai-dynamo-runtime==0.2.1",
     "fastapi==0.115.6",
     "distro",
     "typer",
     "circus>=0.17.0",
+    "click<8.2.0",
 ]
 
 classifiers = [
@@ -188,3 +189,19 @@ check_untyped_defs = true
 module = ["vllm.*", "bentoml.*", "fs.*", "_bentoml_sdk.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
+
+# extra-content-head
+#extra_content_head = [
+#    '''
+#    <script src="https://assets.adobedtm.com/5d4962a43b79/c1061d2c5e7b/launch-191c2462b890.min.js" ></script>
+#    ''',
+#]
+
+#[tool.sphinx]
+
+# extra-content-footer
+#extra_content_footer = [
+#    '''
+#    <script type="text/javascript">if (typeof _satellite !== "undefined") {_satellite.pageBottom();}</script>
+#    ''',
+#]

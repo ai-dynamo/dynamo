@@ -5,8 +5,8 @@ use std::{future::Future, pin::Pin};
 use std::{io::Read, sync::Arc, time::Duration};
 
 use anyhow::Context;
-use dynamo_llm::{backend::ExecutionContext, engines::StreamingEngine, LocalModel};
-use dynamo_runtime::{protocols::Endpoint, CancellationToken, DistributedRuntime};
+use dynamo_llm::{backend::ExecutionContext, engines::StreamingEngine, local_model::LocalModel};
+use dynamo_runtime::{CancellationToken, DistributedRuntime};
 
 mod flags;
 pub use flags::Flags;
@@ -16,19 +16,21 @@ pub use dynamo_llm::request_template::RequestTemplate;
 pub use opt::{Input, Output};
 mod subprocess;
 
-/// When `in=text` the user doesn't need to know the model name, and doesn't need to provide it on
-/// the command line. Hence it's optional, and defaults to this.
-const INVISIBLE_MODEL_NAME: &str = "dynamo-run";
-
 const CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How we identify a python string endpoint
 #[cfg(feature = "python")]
 const PYTHON_STR_SCHEME: &str = "pystr:";
 
+/// Where we will attach the vllm/sglang subprocess. Invisible to users.
+pub const INTERNAL_ENDPOINT: &str = "dyn://dynamo.internal.worker";
+
+/// Default size of a KV cache block. Override with --kv-cache-block-size
+const DEFAULT_KV_CACHE_BLOCK_SIZE: usize = 16;
+
 pub enum EngineConfig {
-    /// An remote networked engine we don't know about yet
-    Dynamic(Endpoint),
+    /// Remote networked engines
+    Dynamic,
 
     /// A Full service engine does it's own tokenization and prompt formatting.
     StaticFull {
@@ -49,40 +51,53 @@ pub async fn run(
     out_opt: Output,
     flags: Flags,
 ) -> anyhow::Result<()> {
+    if matches!(&in_opt, Input::Endpoint(_)) && matches!(&out_opt, Output::Dynamic) {
+        anyhow::bail!("Cannot use endpoint for both in and out");
+    }
+
     let cancel_token = runtime.primary_token();
     let maybe_path = flags
         .model_path_pos
         .clone()
         .or(flags.model_path_flag.clone());
 
-    let local_model: LocalModel = match out_opt {
-        // If output is an endpoint we are ingress and don't have a local model, but making an
+    let mut local_model: LocalModel = match out_opt {
+        // If output is dynamic we are ingress and don't have a local model, but making an
         // empty one cleans up the code.
-        Output::Endpoint(_) => Default::default(),
+        Output::Dynamic => Default::default(),
 
         // All other output types have a local model
         _ => {
             match &maybe_path {
                 Some(model_path) => {
-                    let maybe_model_name = if in_opt == Input::Text {
-                        Some(INVISIBLE_MODEL_NAME.to_string())
-                    } else {
-                        flags.model_name.clone()
-                    };
                     LocalModel::prepare(
                         model_path.to_str().context("Invalid UTF-8 in model path")?,
                         flags.model_config.as_deref(),
-                        maybe_model_name,
+                        flags.model_name.clone(),
                     )
                     .await?
                 }
                 None => {
                     // echo_full engine doesn't need a path
-                    Default::default()
+                    match &flags.model_name {
+                        Some(name) => LocalModel::with_name_only(name),
+                        None => Default::default(),
+                    }
                 }
             }
         }
     };
+
+    // Only set if user provides. Usually loaded from tokenizer_config.json
+    if let Some(context_length) = flags.context_length {
+        local_model.set_context_length(context_length);
+    }
+    // Always set, there is no engine provided default
+    local_model.set_kv_cache_block_size(
+        flags
+            .kv_cache_block_size
+            .unwrap_or(DEFAULT_KV_CACHE_BLOCK_SIZE),
+    );
 
     let mut extra: Option<Pin<Box<dyn Future<Output = ()> + Send>>> = None; // vllm and sglang sub-process
 
@@ -99,9 +114,15 @@ pub async fn run(
 
     // Create the engine matching `out`
     let engine_config = match out_opt {
-        Output::Endpoint(path) => {
-            let endpoint: Endpoint = path.parse()?;
-            EngineConfig::Dynamic(endpoint)
+        Output::Dynamic => {
+            // Sanity check - TODO probably make a general sanity check at start of method
+            if flags.context_length.is_some() {
+                anyhow::bail!("'--content-length' flag should only be used on the worker node, not on the ingress");
+            }
+            if flags.kv_cache_block_size.is_some() {
+                anyhow::bail!("'--kv-cache-block-size' flag should only be used on the worker node, not on the ingress");
+            }
+            EngineConfig::Dynamic
         }
         Output::EchoFull => EngineConfig::StaticFull {
             model: Box::new(local_model),
@@ -121,7 +142,7 @@ pub async fn run(
         }
         #[cfg(feature = "mistralrs")]
         Output::MistralRs => EngineConfig::StaticFull {
-            engine: dynamo_engine_mistralrs::make_engine(local_model.path()).await?,
+            engine: dynamo_engine_mistralrs::make_engine(&local_model).await?,
             model: Box::new(local_model),
         },
         Output::SgLang => {
@@ -129,6 +150,14 @@ pub async fn run(
                 // TODO Does sglang support GGUF? Can we make it work?
                 anyhow::bail!("`--model-path should point at a HuggingFace repo checkout");
             }
+
+            // If `in=dyn` we want the sglang subprocess to listen on that endpoint.
+            // If not, then the endpoint isn't exposed so we invent an internal one.
+            let endpoint = match &in_opt {
+                Input::Endpoint(path) => path.parse()?,
+                _ => INTERNAL_ENDPOINT.parse()?,
+            };
+
             let multi_node_conf = dynamo_llm::engines::MultiNodeConfig {
                 num_nodes: flags.num_nodes,
                 node_rank: flags.node_rank,
@@ -137,18 +166,13 @@ pub async fn run(
             let (py_script, child) = match subprocess::start(
                 subprocess::sglang::PY,
                 &local_model,
-                flags.tensor_parallel_size,
-                if flags.base_gpu_id == 0 {
-                    None
-                } else {
-                    Some(flags.base_gpu_id)
-                },
+                &endpoint,
+                flags.clone(),
                 if flags.num_nodes <= 1 {
                     None
                 } else {
                     Some(multi_node_conf)
                 },
-                flags.extra_engine_args.as_deref(),
             )
             .await
             {
@@ -163,20 +187,26 @@ pub async fn run(
             extra = Some(Box::pin(async move {
                 stopper(cancel_token, child, py_script).await;
             }));
-            let endpoint: Endpoint = subprocess::ENDPOINT.parse()?;
-            EngineConfig::Dynamic(endpoint)
+            EngineConfig::Dynamic
         }
         Output::Vllm => {
             if flags.base_gpu_id != 0 {
                 anyhow::bail!("vllm does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
             }
+
+            // If `in=dyn` we want the vllm subprocess to listen on that endpoint.
+            // If not, then the endpoint isn't exposed so we invent an internal one.
+            let endpoint = match &in_opt {
+                Input::Endpoint(path) => path.parse()?,
+                _ => INTERNAL_ENDPOINT.parse()?,
+            };
+
             let (py_script, child) = match subprocess::start(
                 subprocess::vllm::PY,
                 &local_model,
-                flags.tensor_parallel_size,
-                None, // base_gpu_id. vllm uses CUDA_VISIBLE_DEVICES instead
+                &endpoint,
+                flags.clone(),
                 None, // multi-node config. vllm uses `ray`, see guide
-                flags.extra_engine_args.as_deref(),
             )
             .await
             {
@@ -191,8 +221,7 @@ pub async fn run(
             extra = Some(Box::pin(async move {
                 stopper(cancel_token, child, py_script).await;
             }));
-            let endpoint: Endpoint = subprocess::ENDPOINT.parse()?;
-            EngineConfig::Dynamic(endpoint)
+            EngineConfig::Dynamic
         }
 
         #[cfg(feature = "llamacpp")]
@@ -201,8 +230,7 @@ pub async fn run(
                 anyhow::bail!("--model-path should refer to a GGUF file. llama_cpp does not support safetensors.");
             }
             let engine =
-                dynamo_engine_llamacpp::make_engine(cancel_token.clone(), local_model.path())
-                    .await?;
+                dynamo_engine_llamacpp::make_engine(cancel_token.clone(), &local_model).await?;
             EngineConfig::StaticCore {
                 engine,
                 model: Box::new(local_model),

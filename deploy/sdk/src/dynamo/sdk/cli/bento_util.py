@@ -21,7 +21,6 @@ User facing python APIs for managing local bentos and build new bentos.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import typing as t
@@ -29,7 +28,6 @@ import typing as t
 import fs
 import fs.errors
 import fs.mirror
-import yaml
 from bentoml._internal.bento.bento import BENTO_PROJECT_DIR_NAME, BENTO_README_FILENAME
 from bentoml._internal.bento.bento import Bento as BaseBento
 from bentoml._internal.bento.bento import (
@@ -40,7 +38,6 @@ from bentoml._internal.bento.bento import (
     BentoRunnerInfo,
     BentoServiceInfo,
     get_default_svc_readme,
-    get_service_import_str,
 )
 from bentoml._internal.bento.build_config import BentoBuildConfig, BentoPathSpec
 from bentoml._internal.configuration.containers import BentoMLContainer
@@ -54,7 +51,7 @@ from fs.copy import copy_file
 from fs.tempfs import TempFS
 from simple_di import Provide, inject
 
-from dynamo.sdk.lib.service import LinkedServices
+from dynamo.sdk.core.protocol.interface import LinkedServices
 
 logger = logging.getLogger(__name__)
 
@@ -94,9 +91,12 @@ class Bento(BaseBento):
         # TODO: At some point we need this to take place within the load function
         LinkedServices.remove_unused_edges()
 
+        inner = svc.get_bentoml_service().inner
+        name = f"{inner.__module__}:{inner.__name__}"
+        setattr(svc.get_bentoml_service(), "_import_str", name)
         if not build_config.service:
-            object.__setattr__(build_config, "service", get_service_import_str(svc))
-        is_legacy = isinstance(svc, Service)
+            object.__setattr__(build_config, "service", name)
+        is_legacy = isinstance(svc.get_bentoml_service(), Service)
         # Apply default build options
         image: Image | None = None
         disable_image = "no_image" in enabled_features or is_legacy
@@ -114,8 +114,8 @@ class Bento(BaseBento):
                 if build_config.name is not None
                 else to_snake_case(svc.name)
             )
-            build_config.envs.extend(svc.envs)
-            build_config.labels.update(svc.labels)
+            # build_config.envs.extend(svc.envs)
+            # build_config.labels.update(svc.labels)
             if svc.image is not None:
                 image = Image(base_image=svc.image)
         if not disable_image:
@@ -215,15 +215,6 @@ class Bento(BaseBento):
                         f.write(get_default_svc_readme(svc, version))
                     else:
                         f.write(build_config.description)
-
-            # Create 'apis/openapi.yaml' file
-            bento_fs.makedir("apis")
-            with bento_fs.open(fs.path.combine("apis", "openapi.yaml"), "w") as f:
-                yaml.dump(svc.openapi_spec, f)
-            if not is_legacy:
-                with bento_fs.open(fs.path.combine("apis", "schema.json"), "w") as f:
-                    json.dump(svc.schema(), f, indent=2)
-
         if image is None:
             bento_info = BentoInfo(
                 tag=tag,
@@ -256,22 +247,19 @@ class Bento(BaseBento):
                 schema=svc.schema() if not is_legacy else {},
             )
         else:
+            services = [
+                BentoServiceInfo.from_service(s.get_bentoml_service())
+                for s in svc.all_services().values()
+            ]
+            svc = svc.get_bentoml_service()
             bento_info = BentoInfoV2(
                 tag=tag,
                 service=svc,  # type: ignore # attrs converters do not typecheck
                 entry_service=svc.name,
                 labels=build_config.labels,
                 models=models,
-                services=(
-                    [
-                        BentoServiceInfo.from_service(s)
-                        for s in svc.all_services().values()
-                    ]
-                    if not is_legacy
-                    else []
-                ),
+                services=(services if not is_legacy else []),
                 envs=build_config.envs,
-                schema=svc.schema() if not is_legacy else {},
                 image=image.freeze(bento_fs, build_config.envs, platform),
             )
 

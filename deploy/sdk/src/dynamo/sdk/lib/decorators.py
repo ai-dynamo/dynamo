@@ -21,15 +21,21 @@ from typing import Any, get_type_hints
 
 from pydantic import BaseModel
 
+from dynamo.sdk.core.protocol.interface import DynamoTransport
+
 
 class DynamoEndpoint:
     """Decorator class for Dynamo endpoints"""
 
-    def __init__(self, func: t.Callable, name: str | None = None, is_api: bool = False):
+    def __init__(
+        self,
+        func: t.Callable,
+        name: str | None = None,
+        transports: t.List[DynamoTransport] | None = None,
+    ):
         self.func = func
         self.name = name or func.__name__
-        self.is_dynamo_endpoint = True
-        self.is_api = is_api
+        self._transports = transports or [DynamoTransport.DEFAULT]
         # Extract request type from hints
         hints = get_type_hints(func)
         args = list(hints.items())
@@ -57,7 +63,7 @@ class DynamoEndpoint:
         return await self.func(*args, **kwargs)
 
 
-def dynamo_endpoint(
+def endpoint(
     name: str | None = None,
     is_api: bool = False,
 ) -> t.Callable[[t.Callable], DynamoEndpoint]:
@@ -68,17 +74,18 @@ def dynamo_endpoint(
         is_api: Whether to expose the endpoint as an API. Defaults to False.
 
     Example:
-        @dynamo_endpoint()
+        @endpoint()
         def my_endpoint(self, input: str) -> str:
             return input
 
-        @dynamo_endpoint(name="custom_name")
+        @endpoint(name="custom_name")
         def another_endpoint(self, input: str) -> str:
             return input
     """
 
     def decorator(func: t.Callable) -> DynamoEndpoint:
-        return DynamoEndpoint(func, name, is_api)
+        transports = [DynamoTransport.HTTP] if is_api else [DynamoTransport.DEFAULT]
+        return DynamoEndpoint(func, name, transports)
 
     return decorator
 

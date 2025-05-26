@@ -16,8 +16,9 @@
 from typing import Any
 
 from bentoml import on_shutdown as async_on_shutdown
-from bentoml._internal.context import server_context  # type: ignore
 
+from dynamo.sdk.core.decorators.endpoint import api, endpoint
+from dynamo.sdk.core.lib import DYNAMO_IMAGE, depends, service
 from dynamo.sdk.lib.decorators import async_on_start, dynamo_endpoint
 from dynamo.sdk.lib.dependency import depends
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
@@ -41,6 +42,8 @@ __all__ = [
     "auto_trace_endpoints",
     "depends",
     "dynamo_context",
+    "endpoint",
+    "api",
     "dynamo_endpoint",
     "extract_or_generate_request_id",
     "get_current_request_id",

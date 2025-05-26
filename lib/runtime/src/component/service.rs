@@ -85,8 +85,6 @@ impl ServiceConfigBuilder {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to start service: {e}"))?;
 
-        tracing::debug!("Service started TEMP");
-
         // new copy of service_name as the previous one is moved into the task above
         let service_name = component.service_name();
 
@@ -101,7 +99,6 @@ impl ServiceConfigBuilder {
         // drop the guard to unlock the mutex
         drop(guard);
 
-        tracing::debug!("create done");
         Ok(component)
     }
 }

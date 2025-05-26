@@ -20,14 +20,16 @@ package dynamo
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"emperror.dev/errors"
 	apiStoreClient "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/api_store_client"
-	compounaiCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconfig "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/config"
@@ -42,18 +44,24 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+const (
+	ComponentTypePlanner      = "planner"
+	PlannerServiceAccountName = "planner-serviceaccount"
+)
+
 // ServiceConfig represents the YAML configuration structure for a service
 type DynamoConfig struct {
-	Enabled   bool   `yaml:"enabled"`
-	Namespace string `yaml:"namespace"`
-	Name      string `yaml:"name"`
+	Enabled       bool   `yaml:"enabled"`
+	Namespace     string `yaml:"namespace"`
+	Name          string `yaml:"name"`
+	ComponentType string `yaml:"component_type,omitempty"`
 }
 
 type Resources struct {
-	CPU    string            `yaml:"cpu,omitempty"`
-	Memory string            `yaml:"memory,omitempty"`
-	GPU    string            `yaml:"gpu,omitempty"`
-	Custom map[string]string `yaml:"custom,omitempty"`
+	CPU    *string           `yaml:"cpu,omitempty" json:"cpu,omitempty"`
+	Memory *string           `yaml:"memory,omitempty" json:"memory,omitempty"`
+	GPU    *string           `yaml:"gpu,omitempty" json:"gpu,omitempty"`
+	Custom map[string]string `yaml:"custom,omitempty" json:"custom,omitempty"`
 }
 
 type Traffic struct {
@@ -66,16 +74,34 @@ type Autoscaling struct {
 }
 
 type Config struct {
-	Dynamo      *DynamoConfig `yaml:"dynamo,omitempty"`
-	Resources   *Resources    `yaml:"resources,omitempty"`
-	Traffic     *Traffic      `yaml:"traffic,omitempty"`
-	Autoscaling *Autoscaling  `yaml:"autoscaling,omitempty"`
+	Dynamo       *DynamoConfig `yaml:"dynamo,omitempty"`
+	Resources    *Resources    `yaml:"resources,omitempty"`
+	Traffic      *Traffic      `yaml:"traffic,omitempty"`
+	Autoscaling  *Autoscaling  `yaml:"autoscaling,omitempty"`
+	HttpExposed  bool          `yaml:"http_exposed,omitempty"`
+	ApiEndpoints []string      `yaml:"api_endpoints,omitempty"`
+	Workers      *int32        `yaml:"workers,omitempty"`
+	TotalGpus    *int32        `yaml:"total_gpus,omitempty"`
 }
 
 type ServiceConfig struct {
 	Name         string              `yaml:"name"`
 	Dependencies []map[string]string `yaml:"dependencies,omitempty"`
 	Config       Config              `yaml:"config"`
+}
+
+type DynDeploymentConfig = map[string]*DynDeploymentServiceConfig
+
+// ServiceConfig represents the configuration for a specific service
+type DynDeploymentServiceConfig struct {
+	ServiceArgs *ServiceArgs `json:"ServiceArgs,omitempty"`
+}
+
+// ServiceArgs represents the arguments that can be passed to any service
+type ServiceArgs struct {
+	Workers   *int32     `json:"workers,omitempty"`
+	Resources *Resources `json:"resources,omitempty"`
+	TotalGpus *int32     `json:"total_gpus,omitempty"`
 }
 
 func (s ServiceConfig) GetNamespace() *string {
@@ -128,7 +154,7 @@ func RetrieveDynamoGraphDownloadURL(ctx context.Context, dynamoDeployment *v1alp
 		recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "GenerateImageBuilderPod", "Got presigned url for dynamo graph %s from api store service", dynamoDeployment.Spec.DynamoGraph)
 		dynamoGraphDownloadURL = dynamoComponent_.PresignedDownloadUrl
 	} else {
-		dynamoGraphDownloadURL = fmt.Sprintf("%s/api/v1/dynamo_nims/%s/versions/%s/download", apiStoreConf.Endpoint, dynamoComponentRepositoryName, dynamoComponentVersion)
+		dynamoGraphDownloadURL = fmt.Sprintf("%s/api/v1/dynamo_components/%s/versions/%s/download", apiStoreConf.Endpoint, dynamoComponentRepositoryName, dynamoComponentVersion)
 	}
 
 	return &dynamoGraphDownloadURL, nil
@@ -212,6 +238,12 @@ func ParseDynamoGraphConfig(ctx context.Context, yamlContent *bytes.Buffer) (*Dy
 	return &config, err
 }
 
+func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeploymentConfig, error) {
+	var config DynDeploymentConfig
+	err := json.Unmarshal(jsonContent, &config)
+	return config, err
+}
+
 func GetDynamoGraphConfig(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, recorder EventRecorder) (*DynamoGraphConfig, error) {
 	dynamoGraphDownloadURL, err := RetrieveDynamoGraphDownloadURL(ctx, dynamoDeployment, recorder)
 	if err != nil {
@@ -224,10 +256,36 @@ func GetDynamoGraphConfig(ctx context.Context, dynamoDeployment *v1alpha1.Dynamo
 	return ParseDynamoGraphConfig(ctx, yamlContent)
 }
 
+func SetLwsAnnotations(serviceArgs *ServiceArgs, deployment *v1alpha1.DynamoComponentDeployment) error {
+	if serviceArgs.Resources != nil &&
+		serviceArgs.Resources.GPU != nil && *serviceArgs.Resources.GPU != "" && *serviceArgs.Resources.GPU != "0" &&
+		serviceArgs.TotalGpus != nil && *serviceArgs.TotalGpus > 0 {
+
+		gpusPerNodeStr := *serviceArgs.Resources.GPU
+		gpusPerNode, errGpusPerNode := strconv.Atoi(gpusPerNodeStr)
+
+		if errGpusPerNode != nil {
+			return fmt.Errorf("failed to parse GPUs per node value '%s' for service %s: %w", gpusPerNodeStr, deployment.Spec.ServiceName, errGpusPerNode)
+		}
+
+		// Calculate lwsSize using ceiling division to ensure enough nodes for all GPUs
+		lwsSize := (int(*serviceArgs.TotalGpus) + gpusPerNode - 1) / gpusPerNode
+		if lwsSize > 1 {
+			if deployment.Spec.Annotations == nil {
+				deployment.Spec.Annotations = make(map[string]string)
+			}
+			deployment.Spec.Annotations["nvidia.com/lws-size"] = strconv.Itoa(lwsSize)
+			deployment.Spec.Annotations["nvidia.com/deployment-type"] = "leader-worker"
+		}
+	}
+	return nil
+}
+
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig
 func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, config *DynamoGraphConfig, ingressSpec *v1alpha1.IngressSpec) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	dynamoServices := make(map[string]string)
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
+	graphDynamoNamespace := ""
 	for _, service := range config.Services {
 		deployment := &v1alpha1.DynamoComponentDeployment{}
 		deployment.Name = fmt.Sprintf("%s-%s", parentDynamoGraphDeployment.Name, strings.ToLower(service.Name))
@@ -235,6 +293,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		deployment.Spec.DynamoTag = config.DynamoTag
 		deployment.Spec.DynamoComponent = parentDynamoGraphDeployment.Spec.DynamoGraph
 		deployment.Spec.ServiceName = service.Name
+		deployment.Spec.Replicas = service.Config.Workers
 		labels := make(map[string]string)
 		// add the labels in the spec in order to label all sub-resources
 		deployment.Spec.Labels = labels
@@ -250,27 +309,54 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			deployment.Spec.DynamoNamespace = &dynamoNamespace
 			dynamoServices[service.Name] = fmt.Sprintf("%s/%s", service.Config.Dynamo.Name, dynamoNamespace)
 			labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
-		} else {
-			// dynamo is not enabled
-			if config.EntryService == service.Name {
-				// enable virtual service for the entry service
-				deployment.Spec.Ingress = *ingressSpec
+			// we check that all dynamo components are in the same namespace
+			// this is needed for the planner to work correctly
+			// this check will be removed when the global planner will be implemented
+			if graphDynamoNamespace != "" && graphDynamoNamespace != dynamoNamespace {
+				return nil, fmt.Errorf("different namespaces for the same graph, expected %s, got %s", graphDynamoNamespace, dynamoNamespace)
+			}
+			graphDynamoNamespace = dynamoNamespace
+			if service.Config.Dynamo.ComponentType == ComponentTypePlanner {
+				deployment.Spec.ExtraPodSpec = &common.ExtraPodSpec{
+					ServiceAccountName: PlannerServiceAccountName,
+				}
 			}
 		}
+		// Check http_exposed independently
+		if config.EntryService == service.Name && service.Config.HttpExposed {
+			deployment.Spec.Ingress = *ingressSpec
+			// TODO (maybe): add paths to IngressSpec
+		}
+
 		if service.Config.Resources != nil {
-			deployment.Spec.Resources = &compounaiCommon.Resources{
-				Requests: &compounaiCommon.ResourceItem{
-					CPU:    service.Config.Resources.CPU,
-					Memory: service.Config.Resources.Memory,
-					GPU:    service.Config.Resources.GPU,
+			deployment.Spec.Resources = &common.Resources{
+				Requests: &common.ResourceItem{
 					Custom: service.Config.Resources.Custom,
 				},
-				Limits: &compounaiCommon.ResourceItem{
-					CPU:    service.Config.Resources.CPU,
-					Memory: service.Config.Resources.Memory,
-					GPU:    service.Config.Resources.GPU,
+				Limits: &common.ResourceItem{
 					Custom: service.Config.Resources.Custom,
 				},
+			}
+			if service.Config.Resources.CPU != nil {
+				deployment.Spec.Resources.Requests.CPU = *service.Config.Resources.CPU
+				deployment.Spec.Resources.Limits.CPU = *service.Config.Resources.CPU
+			}
+			if service.Config.Resources.Memory != nil {
+				deployment.Spec.Resources.Requests.Memory = *service.Config.Resources.Memory
+				deployment.Spec.Resources.Limits.Memory = *service.Config.Resources.Memory
+			}
+			if service.Config.Resources.GPU != nil {
+				deployment.Spec.Resources.Requests.GPU = *service.Config.Resources.GPU
+				deployment.Spec.Resources.Limits.GPU = *service.Config.Resources.GPU
+			}
+
+			serviceArgs := ServiceArgs{
+				Resources: service.Config.Resources,
+				TotalGpus: service.Config.TotalGpus,
+				Workers:   service.Config.Workers,
+			}
+			if err := SetLwsAnnotations(&serviceArgs, deployment); err != nil {
+				return nil, err
 			}
 		}
 		deployment.Spec.Autoscaling = &v1alpha1.Autoscaling{

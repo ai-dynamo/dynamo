@@ -87,8 +87,8 @@ pub enum Output {
     /// Accept preprocessed requests, echo the tokens back as the response
     EchoCore,
 
-    /// Publish requests to a namespace/component/endpoint path.
-    Endpoint(String),
+    /// Listen for models on nats/etcd, add/remove dynamically
+    Dynamic,
 
     #[cfg(feature = "mistralrs")]
     /// Run inference on a model in a GGUF file using mistralrs w/ candle
@@ -130,9 +130,15 @@ impl TryFrom<&str> for Output {
             "echo_full" => Ok(Output::EchoFull),
             "echo_core" => Ok(Output::EchoCore),
 
+            "dyn" => Ok(Output::Dynamic),
+
+            // Deprecated, should only use `out=dyn`
             endpoint_path if endpoint_path.starts_with(ENDPOINT_SCHEME) => {
-                let path = endpoint_path.strip_prefix(ENDPOINT_SCHEME).unwrap();
-                Ok(Output::Endpoint(path.to_string()))
+                tracing::warn!(
+                    "out=dyn://<path> is deprecated, the path is not used. Please use 'out=dyn'"
+                );
+                //let path = endpoint_path.strip_prefix(ENDPOINT_SCHEME).unwrap();
+                Ok(Output::Dynamic)
             }
 
             #[cfg(feature = "python")]
@@ -163,7 +169,7 @@ impl fmt::Display for Output {
             Output::EchoFull => "echo_full",
             Output::EchoCore => "echo_core",
 
-            Output::Endpoint(path) => path,
+            Output::Dynamic => "dyn",
 
             #[cfg(feature = "python")]
             Output::PythonStr(_) => "pystr",

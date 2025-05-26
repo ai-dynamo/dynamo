@@ -25,12 +25,12 @@ async def check_required_workers(
     workers_client: Client, required_workers: int, on_change=True, poll_interval=0.5
 ):
     """Wait until the minimum number of workers are ready."""
-    worker_ids = workers_client.endpoint_ids()
+    worker_ids = workers_client.instance_ids()
     num_workers = len(worker_ids)
 
     while num_workers < required_workers:
         await asyncio.sleep(poll_interval)
-        worker_ids = workers_client.endpoint_ids()
+        worker_ids = workers_client.instance_ids()
         new_count = len(worker_ids)
 
         if (not on_change) or new_count != num_workers:

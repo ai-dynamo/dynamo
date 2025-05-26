@@ -40,11 +40,9 @@ use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 use url::Url;
 
-use crate::gguf::{Content, ContentConfig};
+use crate::gguf::{Content, ContentConfig, ModelConfigLike};
 use crate::key_value_store::Versioned;
 use crate::protocols::TokenIdType;
-
-pub const BUCKET_NAME: &str = "mdc";
 
 /// Delete model deployment cards that haven't been re-published after this long.
 /// Cleans up if the worker stopped.
@@ -125,6 +123,13 @@ pub struct ModelDeploymentCard {
     /// Incrementing count of how many times we published this card
     #[serde(default, skip_serializing)]
     pub revision: u64,
+
+    /// Max context (in number of tokens) this model can handle
+    pub context_length: usize,
+
+    /// Size of a KV cache block - vllm only currently
+    /// Passed to the engine and the KV router.
+    pub kv_cache_block_size: usize,
 }
 
 impl ModelDeploymentCard {
@@ -143,13 +148,6 @@ impl ModelDeploymentCard {
             service_name: Slug::slugify(name).to_string(),
             ..Default::default()
         }
-    }
-
-    /// A URL and NATS friendly and very likely unique ID for this model.
-    /// Mostly human readable. a-z, 0-9, _ and - only.
-    /// Pass the service_name.
-    pub fn service_name_slug(s: &str) -> Slug {
-        Slug::from_string(s)
     }
 
     /// How often we should check if a model deployment card expired because it's workers are gone
@@ -188,7 +186,7 @@ impl ModelDeploymentCard {
     }
 
     pub fn slug(&self) -> Slug {
-        ModelDeploymentCard::service_name_slug(&self.service_name)
+        Slug::from_string(&self.display_name)
     }
 
     /// Serialize the model deployment card to a JSON string
@@ -386,17 +384,22 @@ impl ModelInfoType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HFConfig {
-    bos_token_id: TokenIdType,
-
-    #[serde(with = "either::serde_untagged")]
-    eos_token_id: Either<TokenIdType, Vec<TokenIdType>>,
-
     /// denotes the mixin to the flattened data model which can be present
     /// in the config.json file
     architectures: Vec<String>,
 
     /// general model type
     model_type: String,
+
+    text_config: Option<HFTextConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HFTextConfig {
+    bos_token_id: TokenIdType,
+
+    #[serde(with = "either::serde_untagged")]
+    eos_token_id: Either<TokenIdType, Vec<TokenIdType>>,
 
     /// max sequence length
     max_position_embeddings: usize,
@@ -412,9 +415,13 @@ struct HFConfig {
 }
 
 impl HFConfig {
-    async fn from_json_file(file: &String) -> Result<Arc<dyn ModelInfo>> {
+    async fn from_json_file(file: &str) -> Result<Arc<dyn ModelInfo>> {
         let contents = std::fs::read_to_string(file)?;
-        let config: Self = serde_json::from_str(&contents)?;
+        let mut config: Self = serde_json::from_str(&contents)?;
+        if config.text_config.is_none() {
+            let text_config: HFTextConfig = serde_json::from_str(&contents)?;
+            config.text_config = Some(text_config);
+        }
         Ok(Arc::new(config))
     }
     fn from_gguf(gguf_file: &Path) -> Result<Arc<dyn ModelInfo>> {
@@ -433,19 +440,21 @@ impl HFConfig {
 
         let arch = content.arch().to_string();
         Ok(Arc::new(HFConfig {
-            bos_token_id,
-            eos_token_id: Either::Left(eos_token_id),
             architectures: vec![format!("{}ForCausalLM", capitalize(&arch))],
             // "general.architecture"
             model_type: arch,
-            // "llama.context_length"
-            max_position_embeddings: model_config_metadata.max_seq_len(),
-            // "llama.block_count"
-            num_hidden_layers,
-            // "llama.attention.head_count"
-            num_attention_heads: model_config_metadata.num_attn_heads(),
-            // "tokenizer.ggml.tokens".len()
-            vocab_size,
+            text_config: Some(HFTextConfig {
+                bos_token_id,
+                eos_token_id: Either::Left(eos_token_id),
+                // "llama.context_length"
+                max_position_embeddings: model_config_metadata.max_seq_len(),
+                // "llama.block_count"
+                num_hidden_layers,
+                // "llama.attention.head_count"
+                num_attention_heads: model_config_metadata.num_attn_heads(),
+                // "tokenizer.ggml.tokens".len()
+                vocab_size,
+            }),
         }))
     }
 }
@@ -456,22 +465,22 @@ impl ModelInfo for HFConfig {
     }
 
     fn bos_token_id(&self) -> TokenIdType {
-        self.bos_token_id
+        self.text_config.as_ref().unwrap().bos_token_id
     }
 
     fn eos_token_ids(&self) -> Vec<TokenIdType> {
-        match &self.eos_token_id {
+        match &self.text_config.as_ref().unwrap().eos_token_id {
             Either::Left(eos_token_id) => vec![*eos_token_id],
             Either::Right(eos_token_ids) => eos_token_ids.clone(),
         }
     }
 
     fn max_position_embeddings(&self) -> usize {
-        self.max_position_embeddings
+        self.text_config.as_ref().unwrap().max_position_embeddings
     }
 
     fn vocab_size(&self) -> usize {
-        self.vocab_size
+        self.text_config.as_ref().unwrap().vocab_size
     }
 }
 
@@ -484,7 +493,7 @@ impl TokenizerKind {
     }
 }
 
-fn load_gguf(gguf_file: &Path) -> anyhow::Result<Content> {
+pub(crate) fn load_gguf(gguf_file: &Path) -> anyhow::Result<Content> {
     let filename = gguf_file.display().to_string();
     let mut f = File::open(gguf_file).with_context(|| filename.clone())?;
     // vec because GGUF can be split into multiple files (shards)
@@ -503,4 +512,28 @@ fn capitalize(s: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HFConfig;
+    use std::path::Path;
+
+    #[tokio::test]
+    pub async fn test_config_json_llama3() -> anyhow::Result<()> {
+        let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct/config.json");
+        let config = HFConfig::from_json_file(&config_file.display().to_string()).await?;
+        assert_eq!(config.bos_token_id(), 128000);
+        Ok(())
+    }
+
+    #[tokio::test]
+    pub async fn test_config_json_llama4() -> anyhow::Result<()> {
+        let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/Llama-4-Scout-17B-16E-Instruct/config.json");
+        let config = HFConfig::from_json_file(&config_file.display().to_string()).await?;
+        assert_eq!(config.bos_token_id(), 200000);
+        Ok(())
+    }
 }

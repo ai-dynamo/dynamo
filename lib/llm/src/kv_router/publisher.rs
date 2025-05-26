@@ -23,13 +23,11 @@ use dynamo_runtime::{
         SingleIn,
     },
     protocols::annotated::Annotated,
-    transports::etcd::Lease,
     Error, Result,
 };
 use futures::stream;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing as log;
 
 pub struct KvEventPublisher {
     tx: mpsc::UnboundedSender<KvCacheEvent>,
@@ -46,7 +44,7 @@ impl KvEventPublisher {
     }
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
-        log::debug!("Publish event: {:?}", event);
+        tracing::debug!("Publish event: {:?}", event);
         self.tx.send(event)
     }
 
@@ -61,7 +59,7 @@ fn start_publish_task(
     mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
 ) {
     let component_clone = component.clone();
-    log::info!("Publishing KV Events to subject: {}", KV_EVENT_SUBJECT);
+    tracing::info!("Publishing KV Events to subject: {}", KV_EVENT_SUBJECT);
 
     _ = component.drt().runtime().secondary().spawn(async move {
         while let Some(event) = rx.recv().await {
@@ -89,16 +87,16 @@ impl KvMetricsPublisher {
         &self,
         metrics: Arc<ForwardPassMetrics>,
     ) -> Result<(), tokio::sync::watch::error::SendError<Arc<ForwardPassMetrics>>> {
-        log::debug!("Publish metrics: {:?}", metrics);
+        tracing::trace!("Publish metrics: {metrics:?}");
         self.tx.send(metrics)
     }
 
-    pub async fn create_endpoint(&self, component: Component, lease: Option<Lease>) -> Result<()> {
+    pub async fn create_endpoint(&self, component: Component) -> Result<()> {
         let mut metrics_rx = self.rx.clone();
         let handler = Arc::new(KvLoadEndpoingHander::new(metrics_rx.clone()));
         let handler = Ingress::for_engine(handler)?;
 
-        let builder = component
+        component
             .endpoint(KV_METRICS_ENDPOINT)
             .endpoint_builder()
             .stats_handler(move |_| {
@@ -106,9 +104,8 @@ impl KvMetricsPublisher {
                 serde_json::to_value(&*metrics).unwrap()
             })
             .handler(handler)
-            .lease(lease);
-
-        builder.start().await
+            .start()
+            .await
     }
 }
 

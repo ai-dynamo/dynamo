@@ -155,12 +155,10 @@ impl TcpClient {
                         }
                     };
 
-                    tracing::debug!("joining reader and writer");
                     let mut stream = reader.unsplit(writer);
 
                     // await the tcp server to shutdown the socket connection
                     // set a timeout for the server shutdown
-                    tracing::debug!("awaiting server shutdown");
                     let mut buf = vec![0u8; 1024];
                     let deadline = Instant::now() + Duration::from_secs(10);
                     loop {
@@ -174,7 +172,6 @@ impl TcpClient {
                             })?;
                         if n == 0 {
                             // Server has closed (FIN)
-                            log::debug!("server closed the connection");
                             break;
                         }
                     }
@@ -254,7 +251,6 @@ async fn handle_reader(
                 }
             }
             _ = alive_tx.closed() => {
-                tracing::debug!("writer stream closed; shutting down");
                 break;
             }
         }

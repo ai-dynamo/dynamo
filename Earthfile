@@ -21,8 +21,8 @@ VERSION 0.8
 
 ############### SHARED LIBRARY TARGETS ##############################
 golang-base:
-    FROM golang:1.23
-    RUN apt-get update && apt-get install -y git && apt-get clean && rm -rf /var/lib/apt/lists/* && curl -sSfL https://github.com/golangci/golangci-lint/releases/download/v1.61.0/golangci-lint-1.61.0-linux-amd64.tar.gz | tar -xzv && mv golangci-lint-1.61.0-linux-amd64/golangci-lint /usr/local/bin/
+    FROM golang:1.24
+    RUN apt-get update && apt-get install -y git && apt-get clean && rm -rf /var/lib/apt/lists/* && go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
 
 operator-src:
     FROM +golang-base
@@ -91,13 +91,13 @@ rust-base:
     ENV RUSTUP_HOME=/usr/local/rustup
     ENV CARGO_HOME=/usr/local/cargo
     ENV PATH=/usr/local/cargo/bin:$PATH
-    ENV RUST_VERSION=1.86.0
+    ENV RUST_VERSION=1.87.0
     ENV RUSTARCH=x86_64-unknown-linux-gnu
 
     RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/x86_64-unknown-linux-gnu/rustup-init" && \
         echo "a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f *rustup-init" | sha256sum -c - && \
         chmod +x rustup-init && \
-        ./rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.86.0 --default-host x86_64-unknown-linux-gnu && \
+        ./rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.87.0 --default-host x86_64-unknown-linux-gnu && \
         rm rustup-init && \
         chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 

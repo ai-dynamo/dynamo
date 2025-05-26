@@ -23,7 +23,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,14 +42,12 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
-	"github.com/cisco-open/k8s-objectmatcher/patch"
 	"github.com/huandu/xstrings"
 	istioNetworking "istio.io/api/networking/v1beta1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
@@ -58,11 +55,13 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+
+	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
+	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
 
 const (
@@ -77,12 +76,17 @@ const (
 	DeploymentTargetTypeDebug                            = "debug"
 	HeaderNameDebug                                      = "X-Nvidia-Debug"
 	DefaultIngressSuffix                                 = "local"
+	KubernetesDeploymentStrategy                         = "kubernetes"
+
+	KubeAnnotationDeploymentType = "nvidia.com/deployment-type"
+	KubeAnnotationLWSSize        = "nvidia.com/lws-size"
+	DeploymentTypeStandard       = "standard"
+	DeploymentTypeLeaderWorker   = "leader-worker"
 )
 
 // DynamoComponentDeploymentReconciler reconciles a DynamoComponentDeployment object
 type DynamoComponentDeploymentReconciler struct {
 	client.Client
-	Scheme            *runtime.Scheme
 	Recorder          record.EventRecorder
 	Config            controller_common.Config
 	NatsAddr          string
@@ -107,6 +111,9 @@ type DynamoComponentDeploymentReconciler struct {
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=networking.istio.io,resources=virtualservices,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;create;delete
+
+// +kubebuilder:rbac:groups=scheduling.volcano.sh,resources=podgroups,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -243,34 +250,144 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		return ctrl.Result{}, err
 	}
 
-	// create or update api-server deployment
-	modified_, deployment, err := r.createOrUpdateOrDeleteDeployments(ctx, generateResourceOption{
-		dynamoComponentDeployment: dynamoComponentDeployment,
-		dynamoComponent:           dynamoComponentCR,
-	})
-	if err != nil {
-		return
-	}
+	// Determine deployment type
+	deploymentType := GetDeploymentType(dynamoComponentDeployment)
 
-	if modified_ {
-		modified = true
-	}
+	logs.Info("Using deployment type", "type", deploymentType)
 
-	// create or update api-server hpa
-	modified_, _, err = createOrUpdateResource(ctx, r, generateResourceOption{
-		dynamoComponentDeployment: dynamoComponentDeployment,
-		dynamoComponent:           dynamoComponentCR,
-	}, r.generateHPA)
-	if err != nil {
-		return
-	}
+	// Create the appropriate workload resource based on deployment type
+	var leaderWorkerSets []*leaderworkersetv1.LeaderWorkerSet
+	var deployment *appsv1.Deployment
+	if r.Config.EnableLWS && deploymentType == DeploymentTypeLeaderWorker {
+		desiredReplicas := int32(1)
+		if dynamoComponentDeployment.Spec.Replicas != nil {
+			desiredReplicas = *dynamoComponentDeployment.Spec.Replicas
+		}
 
-	if modified_ {
-		modified = true
+		anyModified := false
+
+		for i := range int(desiredReplicas) {
+
+			modified_, _, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*volcanov1beta1.PodGroup, bool, error) {
+				return r.generateVolcanoPodGroup(ctx, generateResourceOption{
+					dynamoComponentDeployment:               dynamoComponentDeployment,
+					dynamoComponent:                         dynamoComponentCR,
+					isStealingTrafficDebugModeEnabled:       false,
+					containsStealingTrafficDebugModeEnabled: false,
+					instanceID:                              &i,
+				})
+			})
+
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+
+			if modified_ {
+				anyModified = true
+			}
+
+			modified_, lwsObj, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*leaderworkersetv1.LeaderWorkerSet, bool, error) {
+				return r.generateLeaderWorkerSet(ctx, generateResourceOption{
+					dynamoComponentDeployment:               dynamoComponentDeployment,
+					dynamoComponent:                         dynamoComponentCR,
+					isStealingTrafficDebugModeEnabled:       false,
+					containsStealingTrafficDebugModeEnabled: false,
+					instanceID:                              &i,
+				})
+			})
+
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+
+			if modified_ {
+				anyModified = true
+			}
+
+			leaderWorkerSets = append(leaderWorkerSets, lwsObj)
+		}
+
+		// Clean up any excess LeaderWorkerSets (if replicas were decreased)
+		baseKubeName := r.getKubeName(dynamoComponentDeployment, dynamoComponentCR, false)
+		for i := int(desiredReplicas); ; i++ {
+			// Try to find a LeaderWorkerSet with the next index
+			nextLWSName := fmt.Sprintf("%s-%d", baseKubeName, i)
+			lwsToDelete := &leaderworkersetv1.LeaderWorkerSet{}
+			err := r.Get(ctx, types.NamespacedName{
+				Name:      nextLWSName,
+				Namespace: dynamoComponentDeployment.Namespace,
+			}, lwsToDelete)
+
+			if err != nil {
+				if k8serrors.IsNotFound(err) {
+					break
+				}
+				return ctrl.Result{}, err
+			}
+
+			err = r.Delete(ctx, lwsToDelete)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+
+			podGroupName := nextLWSName
+			podGroupToDelete := &volcanov1beta1.PodGroup{}
+			err = r.Get(ctx, types.NamespacedName{
+				Name:      podGroupName,
+				Namespace: dynamoComponentDeployment.Namespace,
+			}, podGroupToDelete)
+
+			if err != nil {
+				if !k8serrors.IsNotFound(err) {
+					logs.Error(err, "Failed to get PodGroup for deletion", "podGroupName", podGroupName)
+				}
+			} else {
+				err = r.Delete(ctx, podGroupToDelete)
+				if err != nil {
+					logs.Error(err, "Failed to delete PodGroup", "podGroupName", podGroupName)
+				}
+			}
+
+			anyModified = true
+		}
+
+		modified = anyModified
+
+	} else {
+		modified_, obj, err := r.createOrUpdateOrDeleteDeployments(ctx, generateResourceOption{
+			dynamoComponentDeployment: dynamoComponentDeployment,
+			dynamoComponent:           dynamoComponentCR,
+		})
+
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		if modified_ {
+			modified = true
+		}
+
+		deployment = obj
+
+		// create or update api-server hpa
+		modified_, _, err = commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*autoscalingv2.HorizontalPodAutoscaler, bool, error) {
+			return r.generateHPA(generateResourceOption{
+				dynamoComponentDeployment: dynamoComponentDeployment,
+				dynamoComponent:           dynamoComponentCR,
+			})
+		})
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		if modified_ {
+			modified = true
+		}
+
 	}
 
 	// create or update api-server service
-	modified_, err = r.createOrUpdateOrDeleteServices(ctx, generateResourceOption{
+	modified_, err := r.createOrUpdateOrDeleteServices(ctx, generateResourceOption{
 		dynamoComponentDeployment: dynamoComponentDeployment,
 		dynamoComponent:           dynamoComponentCR,
 	})
@@ -301,8 +418,303 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 
 	logs.Info("Finished reconciling.")
 	r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeNormal, "Update", "All resources updated!")
-	err = r.computeAvailableStatusCondition(ctx, req, deployment)
+
+	if deploymentType == DeploymentTypeLeaderWorker {
+		err = r.computeAvailableStatusConditionForLeaderWorkerSets(ctx, req, leaderWorkerSets)
+	} else {
+		err = r.computeAvailableStatusCondition(ctx, req, deployment)
+	}
+
 	return
+}
+
+// computeAvailableStatusConditionForLeaderWorkerSet updates the status condition based on LeaderWorkerSet readiness
+func (r *DynamoComponentDeploymentReconciler) computeAvailableStatusConditionForLeaderWorkerSets(ctx context.Context, req ctrl.Request, leaderWorkerSets []*leaderworkersetv1.LeaderWorkerSet) error {
+	logs := log.FromContext(ctx)
+
+	allReady := true
+	for _, leaderWorkerSet := range leaderWorkerSets {
+		if !IsLeaderWorkerSetReady(leaderWorkerSet) {
+			allReady = false
+			break
+		}
+	}
+
+	if allReady {
+		logs.Info("All LeaderWorkerSets are ready. Setting available status condition to true.")
+		_, err := r.setStatusConditions(ctx, req,
+			metav1.Condition{
+				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+				Status:  metav1.ConditionTrue,
+				Reason:  "AllLeaderWorkerSetsReady",
+				Message: "All LeaderWorkerSets are ready",
+			},
+		)
+		return err
+	} else {
+		logs.Info("Not all LeaderWorkerSets are ready. Setting available status condition to false.")
+		_, err := r.setStatusConditions(ctx, req,
+			metav1.Condition{
+				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+				Status:  metav1.ConditionFalse,
+				Reason:  "LeaderWorkerSetsNotReady",
+				Message: "Not all LeaderWorkerSets are ready",
+			},
+		)
+		return err
+	}
+}
+
+// GetDeploymentType returns the deployment type from the annotations
+// If not set, it returns the default DeploymentTypeStandard
+func GetDeploymentType(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) string {
+	resourceAnnotations := getResourceAnnotations(dynamoComponentDeployment)
+	deploymentType := resourceAnnotations[KubeAnnotationDeploymentType]
+	if deploymentType == "" {
+		deploymentType = DeploymentTypeStandard
+	}
+	return deploymentType
+}
+
+// IsLeaderWorkerSetReady determines if a LeaderWorkerSet is fully ready and available
+func IsLeaderWorkerSetReady(leaderWorkerSet *leaderworkersetv1.LeaderWorkerSet) bool {
+	if leaderWorkerSet == nil {
+		return false
+	}
+
+	desiredReplicas := int32(1)
+	if leaderWorkerSet.Spec.Replicas != nil {
+		desiredReplicas = *leaderWorkerSet.Spec.Replicas
+	}
+
+	// Special case: if no replicas are desired, the LeaderWorkerSet is considered ready
+	if desiredReplicas == 0 {
+		return true
+	}
+
+	status := leaderWorkerSet.Status
+
+	if status.ReadyReplicas < desiredReplicas {
+		return false
+	}
+
+	// Look for the Available condition specifically - this is defined in the CRD for LeaderWorkerSet
+	for _, cond := range leaderWorkerSet.Status.Conditions {
+		if cond.Type == string(leaderworkersetv1.LeaderWorkerSetAvailable) {
+			return cond.Status == metav1.ConditionTrue
+		}
+	}
+
+	return false
+}
+
+func (r *DynamoComponentDeploymentReconciler) generateVolcanoPodGroup(ctx context.Context, opt generateResourceOption) (*volcanov1beta1.PodGroup, bool, error) {
+	logs := log.FromContext(ctx)
+	logs.Info("Generating Volcano PodGroup")
+
+	if opt.instanceID == nil {
+		return nil, false, errors.New("generateVolcanoPodGroup: instanceID cannot be nil")
+	}
+	instanceID := *opt.instanceID
+
+	if instanceID < 0 {
+		return nil, false, fmt.Errorf("generateVolcanoPodGroup: instanceID cannot be negative, got %d", instanceID)
+	}
+
+	podGroupName := r.getKubeName(opt.dynamoComponentDeployment, opt.dynamoComponent, opt.isStealingTrafficDebugModeEnabled)
+	podGroupName = fmt.Sprintf("%s-%d", podGroupName, instanceID)
+
+	kubeNs := opt.dynamoComponentDeployment.Namespace
+
+	labels := make(map[string]string)
+	labels["instance-id"] = fmt.Sprintf("%d", instanceID)
+
+	lwsSizeStr, ok := opt.dynamoComponentDeployment.Spec.Annotations[KubeAnnotationLWSSize]
+	if !ok {
+		return nil, false, fmt.Errorf("generateVolcanoPodGroup: missing required annotation %s", KubeAnnotationLWSSize)
+	}
+	lwsSize, err := strconv.ParseInt(lwsSizeStr, 10, 32)
+	if err != nil {
+		return nil, false, fmt.Errorf("generateVolcanoPodGroup: invalid value for annotation %s: %v", KubeAnnotationLWSSize, err)
+	}
+	if lwsSize <= 0 {
+		return nil, false, fmt.Errorf("generateVolcanoPodGroup: LWS size must be greater than 0, got %d", lwsSize)
+	}
+	if lwsSize == 1 {
+		return nil, false, errors.New("generateVolcanoPodGroup: LWS size of 1 means that the LWS is not needed, change 'nvidia.com/deployment-type' to 'standard'/disable whatever flag you used to enable LWS")
+	}
+	minMember := int32(lwsSize)
+
+	podGroup := &volcanov1beta1.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      podGroupName,
+			Namespace: kubeNs,
+			Labels:    labels,
+		},
+		Spec: volcanov1beta1.PodGroupSpec{
+			MinMember: minMember,
+		},
+	}
+
+	return podGroup, false, nil
+}
+
+func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx context.Context, opt generateResourceOption, kubeName string, labels map[string]string, instanceID int) (*corev1.PodTemplateSpec, error) {
+	leaderPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to generate leader pod template")
+	}
+
+	if labels != nil {
+		leaderPodTemplateSpec.ObjectMeta.Labels = labels
+	} else {
+		leaderPodTemplateSpec.ObjectMeta.Labels = make(map[string]string)
+	}
+	leaderPodTemplateSpec.ObjectMeta.Labels["role"] = "leader"
+	leaderPodTemplateSpec.ObjectMeta.Labels["instance-id"] = fmt.Sprintf("%d", instanceID)
+	delete(leaderPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
+
+	if leaderPodTemplateSpec.ObjectMeta.Annotations == nil {
+		leaderPodTemplateSpec.ObjectMeta.Annotations = make(map[string]string)
+	}
+	leaderPodTemplateSpec.ObjectMeta.Annotations["scheduling.k8s.io/group-name"] = kubeName
+
+	leaderPodTemplateSpec.Spec.SchedulerName = "volcano"
+
+	if leaderPodTemplateSpec.Spec.Containers[0].Command == nil {
+		return nil, errors.New("generateLeaderPodTemplateSpec: container Command cannot be nil for Ray leader pod")
+	}
+
+	if len(leaderPodTemplateSpec.Spec.Containers[0].Args) == 0 {
+		return nil, errors.New("generateLeaderPodTemplateSpec: container Args cannot be empty for Ray leader pod")
+	}
+
+	currentArgs := leaderPodTemplateSpec.Spec.Containers[0].Args[0]
+	if opt.dynamoComponentDeployment.Spec.Resources == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits.GPU == "" {
+		return nil, fmt.Errorf("generateLeaderPodTemplateSpec: GPU limit is not set for Ray leader pod")
+	}
+
+	leaderPodTemplateSpec.Spec.Containers[0].Args[0] = fmt.Sprintf("ray start --head --port=6379 && %s", currentArgs)
+
+	return leaderPodTemplateSpec, nil
+}
+
+func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx context.Context, opt generateResourceOption, kubeName string, labels map[string]string, instanceID int) (*corev1.PodTemplateSpec, error) {
+	workerPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to generate worker pod template")
+	}
+
+	if labels != nil {
+		workerPodTemplateSpec.ObjectMeta.Labels = labels
+	} else {
+		workerPodTemplateSpec.ObjectMeta.Labels = make(map[string]string)
+	}
+	workerPodTemplateSpec.ObjectMeta.Labels["role"] = "worker"
+	workerPodTemplateSpec.ObjectMeta.Labels["instance-id"] = fmt.Sprintf("%d", instanceID)
+	delete(workerPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
+
+	workerPodTemplateSpec.Spec.SchedulerName = "volcano"
+
+	if workerPodTemplateSpec.ObjectMeta.Annotations == nil {
+		workerPodTemplateSpec.ObjectMeta.Annotations = make(map[string]string)
+	}
+	workerPodTemplateSpec.ObjectMeta.Annotations["scheduling.k8s.io/group-name"] = kubeName
+
+	if workerPodTemplateSpec.Spec.Containers[0].Command == nil {
+		return nil, errors.New("generateWorkerPodTemplateSpec: container Command cannot be nil for Ray worker pod")
+	}
+
+	if len(workerPodTemplateSpec.Spec.Containers[0].Args) == 0 {
+		return nil, errors.New("generateWorkerPodTemplateSpec: container Args cannot be empty for Ray worker pod")
+	}
+
+	if opt.dynamoComponentDeployment.Spec.Resources == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits.GPU == "" {
+		return nil, fmt.Errorf("generateWorkerPodTemplateSpec: GPU limit is not set for Ray worker pod")
+	}
+
+	workerPodTemplateSpec.Spec.Containers[0].Args[0] = "ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"
+
+	return workerPodTemplateSpec, nil
+}
+
+// generateLeaderWorkerSet creates a LeaderWorkerSet resource from the DynamoComponentDeployment
+func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx context.Context, opt generateResourceOption) (*leaderworkersetv1.LeaderWorkerSet, bool, error) {
+	logs := log.FromContext(ctx)
+	logs.Info("Generating LeaderWorkerSet")
+
+	if opt.instanceID == nil {
+		return nil, false, errors.New("generateLeaderWorkerSet: instanceID cannot be nil")
+	}
+	instanceID := *opt.instanceID
+
+	if instanceID < 0 {
+		return nil, false, fmt.Errorf("generateLeaderWorkerSet: instanceID cannot be negative, got %d", instanceID)
+	}
+
+	kubeName := r.getKubeName(opt.dynamoComponentDeployment, opt.dynamoComponent, opt.isStealingTrafficDebugModeEnabled)
+	kubeName = fmt.Sprintf("%s-%d", kubeName, instanceID)
+
+	kubeNs := opt.dynamoComponentDeployment.Namespace
+	labels := r.getKubeLabels(opt.dynamoComponentDeployment, opt.dynamoComponent)
+
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	labels["instance-id"] = fmt.Sprintf("%d", instanceID)
+
+	leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      kubeName,
+			Namespace: kubeNs,
+			Labels:    labels,
+		},
+	}
+
+	leaderPodLabels := make(map[string]string)
+	for k, v := range labels {
+		leaderPodLabels[k] = v
+	}
+	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, opt, kubeName, leaderPodLabels, instanceID)
+	if err != nil {
+		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to generate leader pod template")
+	}
+
+	workerPodLabels := make(map[string]string)
+	for k, v := range labels {
+		workerPodLabels[k] = v
+	}
+	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, opt, kubeName, workerPodLabels, instanceID)
+	if err != nil {
+		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to generate worker pod template")
+	}
+
+	// Each individual LeaderWorkerSet always has exactly 1 replica
+	singleReplica := int32(1)
+	size, ok := opt.dynamoComponentDeployment.Spec.Annotations[KubeAnnotationLWSSize]
+	if !ok {
+		return nil, false, fmt.Errorf("generateLeaderWorkerSet: LWS size annotation '%s' is required", KubeAnnotationLWSSize)
+	}
+	sizeInt, err := strconv.ParseInt(size, 10, 32)
+	if err != nil {
+		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: LWS size annotation value must be an integer")
+	}
+	if sizeInt < 1 {
+		return nil, false, fmt.Errorf("generateLeaderWorkerSet: LWS size must be greater than 0, got %d", sizeInt)
+	}
+	groupSize := int32(sizeInt)
+
+	leaderWorkerSet.Spec = leaderworkersetv1.LeaderWorkerSetSpec{
+		Replicas:      &singleReplica,
+		StartupPolicy: leaderworkersetv1.LeaderCreatedStartupPolicy,
+		LeaderWorkerTemplate: leaderworkersetv1.LeaderWorkerTemplate{
+			LeaderTemplate: leaderPodTemplateSpec,
+			WorkerTemplate: *workerPodTemplateSpec,
+			Size:           &groupSize,
+		},
+	}
+
+	return leaderWorkerSet, false, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) error {
@@ -408,7 +820,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcilePVC(ctx context.Context, 
 			return nil, err
 		}
 		pvc = constructPVC(crd, pvcConfig)
-		if err := controllerutil.SetControllerReference(crd, pvc, r.Scheme); err != nil {
+		if err := controllerutil.SetControllerReference(crd, pvc, r.Client.Scheme()); err != nil {
 			logger.Error(err, "Failed to set controller reference", "pvc", pvc.Name)
 			return nil, err
 		}
@@ -458,156 +870,31 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditions(ctx context.Co
 func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteDeployments(ctx context.Context, opt generateResourceOption) (modified bool, depl *appsv1.Deployment, err error) {
 	containsStealingTrafficDebugModeEnabled := checkIfContainsStealingTrafficDebugModeEnabled(opt.dynamoComponentDeployment)
 	// create the main deployment
-	modified, depl, err = createOrUpdateResource(ctx, r, generateResourceOption{
-		dynamoComponentDeployment:               opt.dynamoComponentDeployment,
-		dynamoComponent:                         opt.dynamoComponent,
-		isStealingTrafficDebugModeEnabled:       false,
-		containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
-	}, r.generateDeployment)
+	modified, depl, err = commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*appsv1.Deployment, bool, error) {
+		return r.generateDeployment(ctx, generateResourceOption{
+			dynamoComponentDeployment:               opt.dynamoComponentDeployment,
+			dynamoComponent:                         opt.dynamoComponent,
+			isStealingTrafficDebugModeEnabled:       false,
+			containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
+		})
+	})
 	if err != nil {
 		err = errors.Wrap(err, "create or update deployment")
 		return
 	}
 	// create the debug deployment
-	modified2, _, err := createOrUpdateResource(ctx, r, generateResourceOption{
-		dynamoComponentDeployment:               opt.dynamoComponentDeployment,
-		dynamoComponent:                         opt.dynamoComponent,
-		isStealingTrafficDebugModeEnabled:       true,
-		containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
-	}, r.generateDeployment)
+	modified2, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*appsv1.Deployment, bool, error) {
+		return r.generateDeployment(ctx, generateResourceOption{
+			dynamoComponentDeployment:               opt.dynamoComponentDeployment,
+			dynamoComponent:                         opt.dynamoComponent,
+			isStealingTrafficDebugModeEnabled:       true,
+			containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
+		})
+	})
 	if err != nil {
 		err = errors.Wrap(err, "create or update debug deployment")
 	}
 	modified = modified || modified2
-	return
-}
-
-//nolint:nakedret
-func createOrUpdateResource[T client.Object](ctx context.Context, r *DynamoComponentDeploymentReconciler, opt generateResourceOption, generateResource func(ctx context.Context, opt generateResourceOption) (T, bool, error)) (modified bool, res T, err error) {
-	logs := log.FromContext(ctx)
-
-	resource, toDelete, err := generateResource(ctx, opt)
-	if err != nil {
-		return
-	}
-	resourceNamespace := resource.GetNamespace()
-	resourceName := resource.GetName()
-	resourceType := reflect.TypeOf(resource).Elem().Name()
-	logs = logs.WithValues("namespace", resourceNamespace, "resourceName", resourceName, "resourceType", resourceType)
-
-	// Retrieve the GroupVersionKind (GVK) of the desired object
-	gvk, err := apiutil.GVKForObject(resource, r.Client.Scheme())
-	if err != nil {
-		logs.Error(err, "Failed to get GVK for object")
-		return
-	}
-
-	// Create a new instance of the object
-	obj, err := r.Client.Scheme().New(gvk)
-	if err != nil {
-		logs.Error(err, "Failed to create a new object for GVK")
-		return
-	}
-
-	// Type assertion to ensure the object implements client.Object
-	oldResource, ok := obj.(T)
-	if !ok {
-		return
-	}
-
-	err = r.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: resourceNamespace}, oldResource)
-	oldResourceIsNotFound := k8serrors.IsNotFound(err)
-	if err != nil && !oldResourceIsNotFound {
-		r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeWarning, fmt.Sprintf("Get%s", resourceType), "Failed to get %s %s: %s", resourceType, resourceNamespace, err)
-		logs.Error(err, "Failed to get HPA.")
-		return
-	}
-	err = nil
-
-	if oldResourceIsNotFound {
-		if toDelete {
-			logs.Info("Resource not found. Nothing to do.")
-			return
-		}
-		logs.Info("Resource not found. Creating a new one.")
-
-		err = errors.Wrapf(patch.DefaultAnnotator.SetLastAppliedAnnotation(resource), "set last applied annotation for resource %s", resourceName)
-		if err != nil {
-			logs.Error(err, "Failed to set last applied annotation.")
-			r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeWarning, "SetLastAppliedAnnotation", "Failed to set last applied annotation for %s %s: %s", resourceType, resourceNamespace, err)
-			return
-		}
-
-		err = ctrl.SetControllerReference(opt.dynamoComponentDeployment, resource, r.Scheme)
-		if err != nil {
-			logs.Error(err, "Failed to set controller reference.")
-			r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeWarning, "SetControllerReference", "Failed to set controller reference for %s %s: %s", resourceType, resourceNamespace, err)
-			return
-		}
-
-		r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Creating a new %s %s", resourceType, resourceNamespace)
-		err = r.Create(ctx, resource)
-		if err != nil {
-			logs.Error(err, "Failed to create Resource.")
-			r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeWarning, fmt.Sprintf("Create%s", resourceType), "Failed to create %s %s: %s", resourceType, resourceNamespace, err)
-			return
-		}
-		logs.Info(fmt.Sprintf("%s created.", resourceType))
-		r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Created %s %s", resourceType, resourceNamespace)
-		modified = true
-		res = resource
-	} else {
-		logs.Info(fmt.Sprintf("%s found.", resourceType))
-		if toDelete {
-			logs.Info(fmt.Sprintf("%s not found. Deleting the existing one.", resourceType))
-			err = r.Delete(ctx, oldResource)
-			if err != nil {
-				logs.Error(err, fmt.Sprintf("Failed to delete %s.", resourceType))
-				r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeWarning, fmt.Sprintf("Delete%s", resourceType), "Failed to delete %s %s: %s", resourceType, resourceNamespace, err)
-				return
-			}
-			logs.Info(fmt.Sprintf("%s deleted.", resourceType))
-			r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeNormal, fmt.Sprintf("Delete%s", resourceType), "Deleted %s %s", resourceType, resourceNamespace)
-			modified = true
-			return
-		}
-
-		var patchResult *patch.PatchResult
-		patchResult, err = patch.DefaultPatchMaker.Calculate(oldResource, resource)
-		if err != nil {
-			logs.Error(err, "Failed to calculate patch.")
-			r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeWarning, fmt.Sprintf("CalculatePatch%s", resourceType), "Failed to calculate patch for %s %s: %s", resourceType, resourceNamespace, err)
-			return
-		}
-
-		if !patchResult.IsEmpty() {
-			logs.Info(fmt.Sprintf("%s spec is different. Updating %s. The patch result is: %s", resourceType, resourceType, patchResult.String()))
-
-			err = errors.Wrapf(patch.DefaultAnnotator.SetLastAppliedAnnotation(resource), "set last applied annotation for resource %s", resourceName)
-			if err != nil {
-				logs.Error(err, "Failed to set last applied annotation.")
-				r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeWarning, fmt.Sprintf("SetLastAppliedAnnotation%s", resourceType), "Failed to set last applied annotation for %s %s: %s", resourceType, resourceNamespace, err)
-				return
-			}
-
-			r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Updating %s %s", resourceType, resourceNamespace)
-			resource.SetResourceVersion(oldResource.GetResourceVersion())
-			err = r.Update(ctx, resource)
-			if err != nil {
-				logs.Error(err, fmt.Sprintf("Failed to update %s.", resourceType))
-				r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeWarning, fmt.Sprintf("Update%s", resourceType), "Failed to update %s %s: %s", resourceType, resourceNamespace, err)
-				return
-			}
-			logs.Info(fmt.Sprintf("%s updated.", resourceType))
-			r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Updated %s %s", resourceType, resourceNamespace)
-			modified = true
-			res = resource
-		} else {
-			logs.Info(fmt.Sprintf("%s spec is the same. Skipping update.", resourceType))
-			r.Recorder.Eventf(opt.dynamoComponentDeployment, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Skipping update %s %s", resourceType, resourceNamespace)
-			res = oldResource
-		}
-	}
 	return
 }
 
@@ -654,40 +941,46 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 	isDebugPodReceiveProductionTrafficEnabled := checkIfIsDebugPodReceiveProductionTrafficEnabled(resourceAnnotations)
 	containsStealingTrafficDebugModeEnabled := checkIfContainsStealingTrafficDebugModeEnabled(opt.dynamoComponentDeployment)
 	// main generic service
-	modified, _, err = createOrUpdateResource(ctx, r, generateResourceOption{
-		dynamoComponentDeployment:               opt.dynamoComponentDeployment,
-		dynamoComponent:                         opt.dynamoComponent,
-		isStealingTrafficDebugModeEnabled:       false,
-		isDebugPodReceiveProductionTraffic:      isDebugPodReceiveProductionTrafficEnabled,
-		containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
-		isGenericService:                        true,
-	}, r.generateService)
+	modified, _, err = commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
+		return r.generateService(generateResourceOption{
+			dynamoComponentDeployment:               opt.dynamoComponentDeployment,
+			dynamoComponent:                         opt.dynamoComponent,
+			isStealingTrafficDebugModeEnabled:       false,
+			isDebugPodReceiveProductionTraffic:      isDebugPodReceiveProductionTrafficEnabled,
+			containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
+			isGenericService:                        true,
+		})
+	})
 	if err != nil {
 		return
 	}
 
 	// debug production service (if enabled)
-	modified_, _, err := createOrUpdateResource(ctx, r, generateResourceOption{
-		dynamoComponentDeployment:               opt.dynamoComponentDeployment,
-		dynamoComponent:                         opt.dynamoComponent,
-		isStealingTrafficDebugModeEnabled:       false,
-		isDebugPodReceiveProductionTraffic:      isDebugPodReceiveProductionTrafficEnabled,
-		containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
-		isGenericService:                        false,
-	}, r.generateService)
+	modified_, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
+		return r.generateService(generateResourceOption{
+			dynamoComponentDeployment:               opt.dynamoComponentDeployment,
+			dynamoComponent:                         opt.dynamoComponent,
+			isStealingTrafficDebugModeEnabled:       false,
+			isDebugPodReceiveProductionTraffic:      isDebugPodReceiveProductionTrafficEnabled,
+			containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
+			isGenericService:                        false,
+		})
+	})
 	if err != nil {
 		return
 	}
 	modified = modified || modified_
 	// debug service (if enabled)
-	modified_, _, err = createOrUpdateResource(ctx, r, generateResourceOption{
-		dynamoComponentDeployment:               opt.dynamoComponentDeployment,
-		dynamoComponent:                         opt.dynamoComponent,
-		isStealingTrafficDebugModeEnabled:       true,
-		isDebugPodReceiveProductionTraffic:      isDebugPodReceiveProductionTrafficEnabled,
-		containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
-		isGenericService:                        false,
-	}, r.generateService)
+	modified_, _, err = commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
+		return r.generateService(generateResourceOption{
+			dynamoComponentDeployment:               opt.dynamoComponentDeployment,
+			dynamoComponent:                         opt.dynamoComponent,
+			isStealingTrafficDebugModeEnabled:       true,
+			isDebugPodReceiveProductionTraffic:      isDebugPodReceiveProductionTrafficEnabled,
+			containsStealingTrafficDebugModeEnabled: containsStealingTrafficDebugModeEnabled,
+			isGenericService:                        false,
+		})
+	})
 	if err != nil {
 		return
 	}
@@ -696,11 +989,15 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 }
 
 func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx context.Context, opt generateResourceOption) (modified bool, err error) {
-	modified, _, err = createOrUpdateResource(ctx, r, opt, r.generateIngress)
+	modified, _, err = commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1.Ingress, bool, error) {
+		return r.generateIngress(ctx, opt)
+	})
 	if err != nil {
 		return
 	}
-	modified_, _, err := createOrUpdateResource(ctx, r, opt, r.generateVirtualService)
+	modified_, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
+		return r.generateVirtualService(ctx, opt)
+	})
 	if err != nil {
 		return
 	}
@@ -740,7 +1037,7 @@ func (r *DynamoComponentDeploymentReconciler) generateIngress(ctx context.Contex
 									Service: &networkingv1.IngressServiceBackend{
 										Name: opt.dynamoComponentDeployment.Name,
 										Port: networkingv1.ServiceBackendPort{
-											Number: 3000,
+											Number: commonconsts.DynamoServicePort,
 										},
 									},
 								},
@@ -800,7 +1097,7 @@ func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context
 						Destination: &istioNetworking.Destination{
 							Host: opt.dynamoComponentDeployment.Name,
 							Port: &istioNetworking.PortSelector{
-								Number: 3000,
+								Number: commonconsts.DynamoServicePort,
 							},
 						},
 					},
@@ -962,9 +1259,10 @@ type generateResourceOption struct {
 	containsStealingTrafficDebugModeEnabled bool
 	isDebugPodReceiveProductionTraffic      bool
 	isGenericService                        bool
+	instanceID                              *int
 }
 
-func (r *DynamoComponentDeploymentReconciler) generateHPA(ctx context.Context, opt generateResourceOption) (*autoscalingv2.HorizontalPodAutoscaler, bool, error) {
+func (r *DynamoComponentDeploymentReconciler) generateHPA(opt generateResourceOption) (*autoscalingv2.HorizontalPodAutoscaler, bool, error) {
 	labels := r.getKubeLabels(opt.dynamoComponentDeployment, opt.dynamoComponent)
 
 	annotations := r.getKubeAnnotations(opt.dynamoComponentDeployment, opt.dynamoComponent)
@@ -1034,7 +1332,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		podLabels[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
 	}
 
-	podAnnotations := r.getKubeAnnotations(opt.dynamoComponentDeployment, opt.dynamoComponent)
+	podAnnotations := make(map[string]string)
 
 	kubeName := r.getKubeName(opt.dynamoComponentDeployment, opt.dynamoComponent, opt.isStealingTrafficDebugModeEnabled)
 
@@ -1121,7 +1419,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	// todo : remove this line when https://github.com/ai-dynamo/dynamo/issues/345 is fixed
 	enableDependsOption := false
 	if len(opt.dynamoComponentDeployment.Spec.ExternalServices) > 0 && enableDependsOption {
-		serviceSuffix := fmt.Sprintf("%s.svc.cluster.local:3000", opt.dynamoComponentDeployment.Namespace)
+		serviceSuffix := fmt.Sprintf("%s.svc.cluster.local:%d", opt.dynamoComponentDeployment.Namespace, containerPort)
 		keys := make([]string, 0, len(opt.dynamoComponentDeployment.Spec.ExternalServices))
 
 		for key := range opt.dynamoComponentDeployment.Spec.ExternalServices {
@@ -1151,6 +1449,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		if opt.dynamoComponentDeployment.Spec.DynamoNamespace != nil && *opt.dynamoComponentDeployment.Spec.DynamoNamespace != "" {
 			args = append(args, fmt.Sprintf("--%s.ServiceArgs.dynamo.namespace=%s", opt.dynamoComponentDeployment.Spec.ServiceName, *opt.dynamoComponentDeployment.Spec.DynamoNamespace))
 		}
+		args = append(args, fmt.Sprintf("--%s.environment=%s", opt.dynamoComponentDeployment.Spec.ServiceName, KubernetesDeploymentStrategy))
 	}
 
 	if len(opt.dynamoComponentDeployment.Spec.Envs) > 0 {
@@ -1504,8 +1803,7 @@ func getResourcesConfig(resources *dynamoCommon.Resources) (corev1.ResourceRequi
 	return currentResources, nil
 }
 
-//nolint:nakedret
-func (r *DynamoComponentDeploymentReconciler) generateService(ctx context.Context, opt generateResourceOption) (kubeService *corev1.Service, toDelete bool, err error) {
+func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResourceOption) (*corev1.Service, bool, error) {
 	var kubeName string
 	if opt.isGenericService {
 		kubeName = r.getGenericServiceName(opt.dynamoComponentDeployment, opt.dynamoComponent)
@@ -1515,7 +1813,7 @@ func (r *DynamoComponentDeploymentReconciler) generateService(ctx context.Contex
 
 	kubeNs := opt.dynamoComponentDeployment.Namespace
 
-	kubeService = &corev1.Service{
+	kubeService := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      kubeName,
 			Namespace: kubeNs,
@@ -1533,6 +1831,14 @@ func (r *DynamoComponentDeploymentReconciler) generateService(ctx context.Contex
 
 	for k, v := range labels {
 		selector[k] = v
+	}
+
+	// Check if we're using LeaderWorkerSet
+	deploymentType := GetDeploymentType(opt.dynamoComponentDeployment)
+
+	// If using LeaderWorkerSet, modify selector to only target leaders
+	if deploymentType == DeploymentTypeLeaderWorker {
+		selector["role"] = "leader"
 	}
 
 	if opt.isStealingTrafficDebugModeEnabled {
@@ -1559,7 +1865,7 @@ func (r *DynamoComponentDeploymentReconciler) generateService(ctx context.Contex
 	kubeService.ObjectMeta.Labels = labels
 	kubeService.Spec = spec
 
-	return
+	return kubeService, false, nil
 }
 
 type TLSModeOpt string
@@ -1581,7 +1887,6 @@ type IngressConfig struct {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
-
 	m := ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&appsv1.Deployment{}, builder.WithPredicates(predicate.Funcs{
@@ -1596,9 +1901,30 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		WithEventFilter(controller_common.EphemeralDeploymentEventFilter(r.Config))
 
+	if r.Config.EnableLWS {
+		m.Owns(&leaderworkersetv1.LeaderWorkerSet{}, builder.WithPredicates(predicate.Funcs{
+			// ignore creation cause we don't want to be called again after we create the LeaderWorkerSet
+			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
+			GenericFunc: func(ge event.GenericEvent) bool { return true },
+		})).
+			Owns(&volcanov1beta1.PodGroup{}, builder.WithPredicates(predicate.Funcs{
+				// ignore creation cause we don't want to be called again after we create the LeaderWorkerSet
+				CreateFunc:  func(ce event.CreateEvent) bool { return false },
+				DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+				UpdateFunc:  func(de event.UpdateEvent) bool { return true },
+				GenericFunc: func(ge event.GenericEvent) bool { return true },
+			}))
+	}
+
 	if r.UseVirtualService {
 		m.Owns(&networkingv1beta1.VirtualService{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))
 	}
 	m.Owns(&autoscalingv2.HorizontalPodAutoscaler{})
 	return m.Complete(r)
+}
+
+func (r *DynamoComponentDeploymentReconciler) GetRecorder() record.EventRecorder {
+	return r.Recorder
 }

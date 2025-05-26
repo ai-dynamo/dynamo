@@ -27,6 +27,7 @@ dynamo-operator:
     - name: ${DOCKER_SECRET_NAME}
 
   dynamo:
+    enableLWS: ${ENABLE_LWS}
     ingress:
       enabled: ${INGRESS_ENABLED}
       className: ${INGRESS_CLASS}
@@ -40,6 +41,7 @@ dynamo-operator:
       username: ${PIPELINES_DOCKER_USERNAME}
       password: ${PIPELINES_DOCKER_PASSWORD}
     imageBuildEngine: buildkit
+    virtualServiceSupportsHTTPS: ${VIRTUAL_SERVICE_SUPPORTS_HTTPS}
 
 dynamo-api-store:
   namespaceRestriction:

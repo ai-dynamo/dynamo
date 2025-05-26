@@ -1,20 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::collections::HashMap;
-use std::{num::NonZero, path::Path, sync::Arc};
+use std::{num::NonZero, sync::Arc};
 
 use async_openai::types::FinishReason;
 use async_stream::stream;
@@ -23,9 +11,10 @@ use either::Either;
 use indexmap::IndexMap;
 use mistralrs::{
     AutoDeviceMapParams, Constraint, DefaultSchedulerMethod, Device, DeviceMapSetting,
-    GGUFLoaderBuilder, GGUFSpecificConfig, MemoryGpuConfig, MistralRs, MistralRsBuilder,
+    GGUFLoaderBuilder, GGUFSpecificConfig, IsqType, MemoryGpuConfig, MistralRs, MistralRsBuilder,
     ModelDType, NormalLoaderBuilder, NormalRequest, NormalSpecificConfig, PagedAttentionConfig,
     Request, RequestMessage, ResponseOk, SamplingParams, SchedulerConfig, StopTokens, TokenSource,
+    VisionLoaderBuilder, VisionLoaderType, VisionSpecificConfig,
 };
 use tokio::sync::mpsc::channel;
 
@@ -37,9 +26,11 @@ use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_llm::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
     completions::{prompt_to_string, CompletionRequest, CompletionResponse},
+    embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
 };
 
 use dynamo_llm::engines::{EngineDispatcher, StreamingEngine};
+use dynamo_llm::local_model::LocalModel;
 
 /// How many requests mistral will run at once in the paged attention scheduler.
 /// It actually runs 1 fewer than this.
@@ -51,8 +42,11 @@ const PAGED_ATTENTION_MAX_NUM_SEQS: usize = 10;
 /// finish_reason=stop and no tokens for one of the requests.
 const EXP_ENABLE_PAGED_ATTENTION: bool = false;
 
-pub async fn make_engine(gguf_path: &Path) -> pipeline_error::Result<Arc<dyn StreamingEngine>> {
-    let engine = MistralRsEngine::new(gguf_path).await?;
+/// Initial message we send to mistral.rs to warm it up. We may not need this.
+const WARMUP_MESSAGE: &str = "This is a test message. Respond only with 'OK'.";
+
+pub async fn make_engine(model: &LocalModel) -> pipeline_error::Result<Arc<dyn StreamingEngine>> {
+    let engine = MistralRsEngine::new(model).await?;
     let engine: Arc<dyn StreamingEngine> = Arc::new(EngineDispatcher::new(engine));
     Ok(engine)
 }
@@ -74,7 +68,14 @@ struct MistralRsEngine {
 }
 
 impl MistralRsEngine {
-    async fn new(model_path: &Path) -> pipeline_error::Result<Self> {
+    async fn new(model: &LocalModel) -> pipeline_error::Result<Self> {
+        let model_path = model.path();
+        // Name some None's for clarity
+        let chat_template = None;
+        let tokenizer_json = None;
+        let no_kv_cache = false;
+        let jinja_explicit = None;
+        let display_name = model.display_name();
         let loader = if model_path.is_file() {
             // Load from a GGUF
             let Some(model_filename) = model_path.file_name() else {
@@ -85,7 +86,7 @@ impl MistralRsEngine {
             };
 
             GGUFLoaderBuilder::new(
-                None,
+                chat_template,
                 None,
                 model_dir.display().to_string(),
                 vec![model_filename.to_string_lossy().into_owned()],
@@ -93,29 +94,44 @@ impl MistralRsEngine {
                     prompt_chunksize: None,
                     topology: None,
                 },
+                no_kv_cache,
+                jinja_explicit,
             )
             .build()
+        } else if is_vision_model(display_name) {
+            let vlt = if is_gemma3(display_name) {
+                VisionLoaderType::Gemma3
+            } else if is_llama4(display_name) {
+                VisionLoaderType::Llama4
+            } else {
+                panic!("Unsupported vision model {display_name}");
+            };
+            VisionLoaderBuilder::new(
+                VisionSpecificConfig::default(),
+                chat_template,
+                tokenizer_json,
+                Some(model_path.display().to_string()),
+                jinja_explicit,
+            )
+            .build(vlt)
         } else {
             // Load from a HF repo dir
             NormalLoaderBuilder::new(
-                NormalSpecificConfig {
-                    use_flash_attn: false,
-                    prompt_chunksize: None,
-                    topology: None,
-                    organization: Default::default(),
-                    write_uqff: None,
-                    from_uqff: None,
-                    imatrix: None,
-                    calibration_file: None,
-                },
-                None,
-                None,
+                NormalSpecificConfig::default(),
+                chat_template,
+                tokenizer_json,
                 Some(model_path.display().to_string()),
+                no_kv_cache,
+                jinja_explicit,
             )
             .build(None)?
         };
 
-        let max_seq_len = AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN;
+        let mut max_seq_len = model.card().context_length;
+        if max_seq_len == 0 {
+            tracing::info!("context_length is 0. Probably error reading from model.");
+            max_seq_len = AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN;
+        }
 
         // Paged attention requires cuda
         let paged_attention_config = if cfg!(feature = "cuda") && EXP_ENABLE_PAGED_ATTENTION {
@@ -127,6 +143,21 @@ impl MistralRsEngine {
         } else {
             None
         };
+
+        let device_map_params = if is_vision_model(model.display_name()) {
+            AutoDeviceMapParams::Vision {
+                max_seq_len,
+                max_batch_size: AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
+                max_image_shape: (0, 0),
+                max_num_images: 0,
+            }
+        } else {
+            AutoDeviceMapParams::Text {
+                max_seq_len,
+                max_batch_size: AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
+            }
+        };
+
         // Load, into a Pipeline
         let pipeline = loader.load_model_from_hf(
             None,
@@ -134,11 +165,12 @@ impl MistralRsEngine {
             &ModelDType::Auto,
             &best_device()?,
             false,
-            DeviceMapSetting::Auto(AutoDeviceMapParams::Text {
-                max_seq_len,
-                max_batch_size: AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
-            }),
-            None,
+            DeviceMapSetting::Auto(device_map_params),
+            if is_llama4(display_name) {
+                Some(IsqType::Q4K)
+            } else {
+                None
+            },
             paged_attention_config,
         )?;
         let scheduler = if cfg!(feature = "cuda") && EXP_ENABLE_PAGED_ATTENTION {
@@ -154,14 +186,21 @@ impl MistralRsEngine {
                 config,
             }
         } else {
-            tracing::debug!("Using mistralrs DefaultScheduler");
             SchedulerConfig::DefaultScheduler {
                 // Safety: unwrap trivially safe here
                 method: DefaultSchedulerMethod::Fixed(NonZero::new(max_seq_len).unwrap()),
             }
         };
         // Create the MistralRs, which is a runner
-        let builder = MistralRsBuilder::new(pipeline.clone(), scheduler).with_prefix_cache_n(16);
+        let throughput_logging = false;
+        let search_embedding_model = None;
+        let builder = MistralRsBuilder::new(
+            pipeline.clone(),
+            scheduler,
+            throughput_logging,
+            search_embedding_model,
+        )
+        .with_prefix_cache_n(16);
         let engine = MistralRsEngine {
             mistralrs: builder.build(),
         };
@@ -174,21 +213,27 @@ impl MistralRsEngine {
         let request_id = engine.mistralrs.next_request_id();
         let warmup_request = Request::Normal(NormalRequest {
             id: request_id,
-            messages: RequestMessage::Chat(vec![IndexMap::from([
-                ("role".to_string(), Either::Left("user".to_string())),
-                ("content".to_string(), Either::Left("test".to_string())),
-            ])]),
+            messages: RequestMessage::Chat {
+                messages: vec![IndexMap::from([
+                    ("role".to_string(), Either::Left("user".to_string())),
+                    (
+                        "content".to_string(),
+                        Either::Left(WARMUP_MESSAGE.to_string()),
+                    ),
+                ])],
+                enable_thinking: Some(false),
+            },
             sampling_params: SamplingParams::deterministic(),
             response: tx,
             return_logprobs: false,
             is_streaming: false,
             constraint: Constraint::None,
             suffix: None,
-            adapters: None,
             tools: None,
             tool_choice: None,
             logits_processors: None,
             return_raw_logits: false,
+            web_search_options: None,
         });
 
         // Send warmup request and consume response
@@ -285,18 +330,21 @@ impl
         let request_id = self.mistralrs.next_request_id();
         let mistralrs_request = Request::Normal(NormalRequest {
             id: request_id,
-            messages: RequestMessage::Chat(messages),
+            messages: RequestMessage::Chat {
+                messages,
+                enable_thinking: None,
+            },
             sampling_params,
             response: tx,
             return_logprobs: request.inner.logprobs.unwrap_or_default(),
             is_streaming: true,
             constraint: Constraint::None,
             suffix: None,
-            adapters: None,
             tools: None,
             tool_choice: None,
             logits_processors: None,
             return_raw_logits: false,
+            web_search_options: None,
         });
 
         self.mistralrs.get_sender()?.send(mistralrs_request).await?;
@@ -477,11 +525,11 @@ impl AsyncEngine<SingleIn<CompletionRequest>, ManyOut<Annotated<CompletionRespon
             is_streaming: true,
             constraint: Constraint::None,
             suffix: None,
-            adapters: None,
             tools: None,
             tool_choice: None,
             logits_processors: None,
             return_raw_logits: false,
+            web_search_options: None,
         });
 
         self.mistralrs.get_sender()?.send(mistralrs_request).await?;
@@ -531,5 +579,33 @@ impl AsyncEngine<SingleIn<CompletionRequest>, ManyOut<Annotated<CompletionRespon
             }
         };
         Ok(ResponseStream::new(Box::pin(output), ctx))
+    }
+}
+
+fn is_vision_model(s: &str) -> bool {
+    is_gemma3(s) || is_llama4(s)
+}
+
+fn is_gemma3(s: &str) -> bool {
+    s.to_lowercase().contains("gemma-3")
+}
+
+fn is_llama4(s: &str) -> bool {
+    s.to_lowercase().contains("llama-4")
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateEmbeddingRequest>,
+        ManyOut<Annotated<NvCreateEmbeddingResponse>>,
+        Error,
+    > for MistralRsEngine
+{
+    async fn generate(
+        &self,
+        _request: SingleIn<NvCreateEmbeddingRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateEmbeddingResponse>>, Error> {
+        unimplemented!()
     }
 }

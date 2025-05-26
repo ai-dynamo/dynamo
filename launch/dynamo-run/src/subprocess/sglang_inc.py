@@ -1,19 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-#
-# A very basic example of sglang worker handling pre-processed requests.
-#
-# Dynamo does the HTTP handling, prompt templating and tokenization, then forwards the
-# request via NATS to this python script, which runs sglang.
-#
-# Setup a virtualenv with dynamo.llm, dynamo.runtime and sglang[all] installed
-#  in lib/bindings/python `maturin develop` and `pip install -e .` should do it
-# Start nats and etcd:
-#  - nats-server -js
-#
-# Window 1: `python server_sglang.py`. Wait for log "Starting endpoint".
-# Window 2: `dynamo-run out=dyn://dynamo.backend.generate`
+# `dynamo-run out=sglang` runs this script
+# Can also be used standalone: `python3 sglang_inc.py` - lots of optional cmd line params
 
 import argparse
 import asyncio
@@ -28,8 +17,9 @@ from sglang.srt.server_args import ServerArgs
 from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
+# Only used if you run it manually from the command line
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
-DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -44,6 +34,8 @@ class Config:
     model_name: Optional[str]
     base_gpu_id: int
     tensor_parallel_size: int
+    kv_block_size: int
+    context_length: int
     nnodes: int
     node_rank: int
     dist_init_addr: str
@@ -60,16 +52,12 @@ class RequestHandler:
 
     async def generate(self, request):
         sampling_params = {}
-        for key, value in request["sampling_options"].items():
-            if value:
-                # TODO: Do these always match? Maybe allow-list the fields that do match
-                sampling_params[key] = value
-
-        # sglang defaults this to 128
-        max_new_tokens = request["stop_conditions"]["max_tokens"]
-        if max_new_tokens:
-            sampling_params["max_new_tokens"] = max_new_tokens
-
+        if request["sampling_options"]["temperature"] is not None:
+            sampling_params["temperature"] = request["sampling_options"]["temperature"]
+        sampling_params = {
+            # sglang defaults this to 128
+            "max_new_tokens": request["stop_conditions"]["max_tokens"],
+        }
         num_output_tokens_so_far = 0
         gen = await self.engine_client.async_generate(
             input_ids=request["token_ids"], sampling_params=sampling_params, stream=True
@@ -97,13 +85,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     """
     Instantiate and serve
     """
-    component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
-
-    endpoint = component.endpoint(config.endpoint)
-    await register_llm(
-        ModelType.Backend, endpoint, config.model_path, config.model_name
-    )
 
     arg_map = {
         "model_path": config.model_path,
@@ -111,6 +92,13 @@ async def init(runtime: DistributedRuntime, config: Config):
         "tp_size": config.tensor_parallel_size,
         "base_gpu_id": config.base_gpu_id,
     }
+
+    if config.kv_block_size:
+        arg_map["page_size"] = config.kv_block_size
+
+    if config.context_length:
+        arg_map["context_length"] = config.context_length
+
     if config.dist_init_addr != "":
         arg_map["trust_remote_code"] = True
         arg_map["nnodes"] = config.nnodes
@@ -136,9 +124,17 @@ async def init(runtime: DistributedRuntime, config: Config):
     engine_args = ServerArgs(**arg_map)
     engine_client = sglang.Engine(server_args=engine_args)
 
+    component = runtime.namespace(config.namespace).component(config.component)
+    await component.create_service()
+
+    endpoint = component.endpoint(config.endpoint)
+    await register_llm(
+        ModelType.Backend, endpoint, config.model_path, config.model_name
+    )
+
     # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
     # after the lease is revoked
-    await endpoint.serve_endpoint(RequestHandler(engine_client).generate, None)
+    await endpoint.serve_endpoint(RequestHandler(engine_client).generate)
 
 
 def cmd_line_args():
@@ -171,6 +167,15 @@ def cmd_line_args():
     )
     parser.add_argument(
         "--tensor-parallel-size", type=int, default=1, help="Number of GPUs to use."
+    )
+    parser.add_argument(
+        "--kv-block-size", type=int, default=16, help="Size of a KV cache block."
+    )
+    parser.add_argument(
+        "--context-length",
+        type=int,
+        default=None,
+        help="Max model context length. Defaults to models max, usually model_max_length from tokenizer_config.json. Reducing this reduces VRAM requirements.",
     )
     parser.add_argument(
         "--nnodes", type=int, default=1, help="The number of machines SGLang will use"
@@ -218,6 +223,8 @@ def cmd_line_args():
     config.endpoint = parsed_endpoint_name
     config.base_gpu_id = args.base_gpu_id
     config.tensor_parallel_size = args.tensor_parallel_size
+    config.kv_block_size = args.kv_block_size
+    config.context_length = args.context_length
     config.nnodes = args.nnodes
     config.node_rank = args.node_rank
     config.dist_init_addr = args.dist_init_addr

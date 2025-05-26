@@ -35,7 +35,7 @@ python sin_synth.py \
     --osl2 150
 ```
 
-This will generate a [mooncake style trace](https://github.com/kvcache-ai/Mooncake) with
+This generates a [mooncake style trace](https://github.com/kvcache-ai/Mooncake) with
 * duration = 600 seconds
 * isl/osl = 3000/150
 * request rate varies sinusoidally from 0.75 to 3 requests with a period of 150 seconds
@@ -48,19 +48,9 @@ To measure the performance of dynamo with planner, we start from a 1p1d deployme
 
 ```bash
 cd examples/llm
-dynamo serve graphs.disagg:Frontend -f <path to disagg_1p1d.yml in this folder> --enable-local-planner
+dynamo serve graphs.disagg:Frontend -f disagg_1p1d.yml
 
 # in terminal 2
-PYTHONPATH=/workspace/examples/llm python components/planner.py \
-    --metric-pulling-interval 1 \
-    --adjustment-interval 10 \
-    --prefill-queue-scale-down-threshold 0.2 \
-    --prefill-queue-scale-up-threshold 10 \
-    --decode-kv-scale-down-threshold 0.3 \
-    --decode-kv-scale-up-threshold 0.6 \
-    --log-dir log/planner
-
-# in terminal 3
 genai-perf profile \
     --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     -m deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
@@ -86,18 +76,15 @@ and open `http://localhost:6006` in your browser. The following metrics are avai
 * `num_decode_workers`: the number of decode workers
 * `num_gpu`: the total number of GPUs used
 
-The benchmark results will be printed out in terminal 3 that runs the `genai-perf` command.
+The benchmark results are printed out in terminal 3 that runs the `genai-perf` command.
 
 In this example, we use a fixed 2p2d engine as baseline. Planner provides a `--no-operation` flag to watch and log the metrics without making any adjustments:
 
 ```bash
 # in terminal 1
-dynamo serve --enable-local-planner graphs.disagg:Frontend -f disagg_2p2d.yml
+dynamo serve graphs.disagg:Frontend -f disagg_2p2d.yml
 
-# in terminal 2 (optional)
-PYTHONPATH=/workspace/examples/llm python components/planner.py --no-operation --log-dir log/2p2d
-
-# in terminal 3
+# in terminal 2
 genai-perf profile --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B -m deepseek-ai/DeepSeek-R1-Distill-Llama-8B --service-kind openai --endpoint-type chat --url http://localhost:8000 --streaming --input-file payload:sin_b512_t600_rr5.0-20.0-150.0_io3000150-3000150-0.2-0.8-10.jsonl
 ```
 
@@ -105,7 +92,7 @@ genai-perf profile --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B -m deeps
 
 The below two figures show the performance comparison between planner and the baseline 2p2d deployment. Planner achieves 1.5x speedup while using 7.4% less GPU resources.
 
-![Planner Performance Comparison](./images/planner_perf.png)
+![Two bar charts comparing 2P2D and Planner. Planner shows lower GPU usage and lower average sequence latency.](../../images/planner_perf.png)
 
-![Planner Tensorboard](./images/planner_tensorboard.png)
+![Planner Tensorboard; four line graphs comparing two runs: 2p2d_rr5-20_2 and planner_rr5-20.](../../images/planner_tensorboard.png)
 
