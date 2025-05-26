@@ -14,10 +14,10 @@ Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo 
 /container/ @rmccorm4 @tanmayv25 @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @ai-dynamo/Devops
 
 # Dynamo deploy
-/deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @nnshah1 @mohammedabdulwahhab
+/deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @nnshah1 @mohammedabdulwahhab @atchernych
 
 # Dynamo deploy
-/examples/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen @sshchoi @PeaBrane @mohammedabdulwahhab @ai-dynamo/Devops
+/examples/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen @sshchoi @PeaBrane @mohammedabdulwahhab @atchernych @ai-dynamo/Devops
 
 # Multimodal
 /examples/multimodal/ @indrajit96 @whoisj @krishung5
