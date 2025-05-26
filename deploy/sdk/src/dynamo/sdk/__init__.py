@@ -22,6 +22,15 @@ from dynamo.sdk.lib.decorators import async_on_start, dynamo_endpoint
 from dynamo.sdk.lib.dependency import depends
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
 from dynamo.sdk.lib.service import service
+from dynamo.sdk.request_tracing import (
+    auto_trace_endpoints,
+    extract_or_generate_request_id,
+    get_current_request_id,
+    RequestTracingMixin,
+    trace_frontend_endpoint,
+    trace_processor_method,
+    with_request_tracing,
+)
 
 dynamo_context: dict[str, Any] = {}
 
@@ -29,9 +38,16 @@ __all__ = [
     "DYNAMO_IMAGE",
     "async_on_shutdown",
     "async_on_start",
+    "auto_trace_endpoints",
     "depends",
     "dynamo_context",
     "dynamo_endpoint",
+    "extract_or_generate_request_id",
+    "get_current_request_id",
+    "RequestTracingMixin",
     "server_context",
     "service",
+    "trace_frontend_endpoint",
+    "trace_processor_method",
+    "with_request_tracing",
 ]
