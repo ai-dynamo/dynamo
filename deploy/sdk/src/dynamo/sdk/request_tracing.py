@@ -56,7 +56,6 @@ def extract_or_generate_request_id(
         
     request_id = None
     
-    # Try to extract from FastAPI Request object
     if request is not None:
         request_id = request.headers.get("x-request-id")
     
@@ -106,11 +105,9 @@ def with_request_tracing(func: Callable) -> Callable:
     
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
-        # Extract request object if present
         request = None
         request_id = None
         
-        # Look for Request object in args/kwargs
         for arg in args:
             if isinstance(arg, Request):
                 request = arg
@@ -119,22 +116,18 @@ def with_request_tracing(func: Callable) -> Callable:
         if 'request' in kwargs and isinstance(kwargs['request'], Request):
             request = kwargs['request']
         
-        # Extract or generate request ID
         if request:
             request_id = extract_or_generate_request_id(request)
             set_request_context(request_id)
             logger.debug(f"Request tracing: extracted/generated request_id={request_id}")
         
-        # Check if function accepts request_id parameter
         sig = inspect.signature(func)
         if 'request_id' in sig.parameters and request_id:
             kwargs['request_id'] = request_id
         
         try:
-            # Call the original function
             result = await func(*args, **kwargs)
             
-            # Add X-Request-Id header to response if it's a Response object
             if request_id and isinstance(result, (Response, StreamingResponse)):
                 add_request_id_to_response(result, request_id)
             
@@ -160,16 +153,13 @@ def auto_trace_endpoints(cls):
                 pass
     """
     
-    # Get all methods of the class
     for attr_name in dir(cls):
         attr = getattr(cls, attr_name)
         
-        # Check if it's a method with dynamo_endpoint decorator
         if (hasattr(attr, '__call__') and 
             hasattr(attr, '_dynamo_endpoint') and 
             not attr_name.startswith('_')):
             
-            # Wrap the method with request tracing
             wrapped_method = with_request_tracing(attr)
             setattr(cls, attr_name, wrapped_method)
             
@@ -194,12 +184,10 @@ class RequestTracingMixin:
         if request_id:
             return request_id
         
-        # Try to get from current context
         context_id = get_current_request_id()
         if context_id:
             return context_id
         
-        # Generate new one as fallback
         new_id = str(uuid.uuid4())
         set_request_context(new_id)
         return new_id
@@ -211,7 +199,6 @@ class RequestTracingMixin:
         getattr(logger, level.lower())(log_message)
 
 
-# Convenience functions for common patterns
 def trace_frontend_endpoint(func: Callable) -> Callable:
     """Specialized decorator for frontend endpoints."""
     return with_request_tracing(func)
@@ -222,7 +209,6 @@ def trace_processor_method(func: Callable) -> Callable:
     
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
-        # Ensure request_id is available
         if 'request_id' not in kwargs or not kwargs['request_id']:
             kwargs['request_id'] = get_current_request_id() or str(uuid.uuid4())
         
