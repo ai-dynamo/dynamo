@@ -56,7 +56,7 @@ Users who need more control over their deployments can use the manual deployment
    - Follow the [Dynamo Cloud Platform Guide](dynamo_cloud.md)
    - Deploy a Hello World pipeline using the [Operator Deployment Guide](operator_deployment.md)
    - Deploy a Dynamo LLM pipeline to Kubernetes [Deploy LLM Guide](../../examples/llm_deployment.md#deploy-to-kubernetes)
-   - Model caching with [Fluid](model_caching_with_fluid.md) 
+   - Model caching with [Fluid](model_caching_with_fluid.md)
 
 2. **For Manual Deployment**:
    - Follow the [Manual Helm Deployment Guide](manual_helm_deployment.md)
