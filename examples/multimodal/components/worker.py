@@ -21,7 +21,7 @@ from typing import Optional
 
 import torch
 from components.disagg_router import PyDisaggregatedRouter
-from components.encode_worker import EncodeWorker
+from components.encode_worker_loader import EncodeWorker
 from components.prefill_worker import PrefillWorker
 from transformers import LlavaForConditionalGeneration
 from utils.logging import check_required_workers
