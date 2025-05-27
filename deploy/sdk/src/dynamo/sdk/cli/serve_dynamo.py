@@ -177,10 +177,13 @@ def main(
         server_context.worker_index = worker_id
 
     # Instance of the inner class of the service should be the same across the dynamo_worker, web_worker, and system_app_worker
-    class_instance = service.inner()
+    class_instance: Any = None
+    # will be set once dyn_worker has created class_instance
+    instanceReady = asyncio.Event()
 
     @dynamo_worker()
     async def dyn_worker(runtime: DistributedRuntime):
+        nonlocal class_instance
         global dynamo_context
         dynamo_context["runtime"] = runtime
         if service_name and service_name != service.name:
@@ -218,6 +221,7 @@ def main(
                     # Bind an instance of inner to the endpoint
             dynamo_context["component"] = component
             dynamo_context["endpoints"] = endpoints
+            class_instance = service.inner()
             dynamo_handlers = []
             for name, endpoint in dynamo_endpoints.items():
                 if DynamoTransport.DEFAULT in endpoint.transports:
@@ -245,6 +249,8 @@ def main(
             logger.info(
                 f"Starting {service.name} instance with all registered endpoints"
             )
+            # signal that class_instance (and its setup) is done
+            instanceReady.set()
             # Launch serve_endpoint for all endpoints concurrently
             tasks = [
                 endpoint.serve_endpoint(handler)
@@ -279,6 +285,8 @@ def main(
 
     # if the service has a FastAPI app, add the worker as an event handler
     async def web_worker():
+        # We want to wait until dyn_worker has initialized class_instance
+        await instanceReady.wait()
         if not service.app:
             return
 
@@ -301,6 +309,8 @@ def main(
             logger.warning("No API routes found, not starting FastAPI server")
 
     async def system_app_worker():
+        # We want to wait until dyn_worker has initialized class_instance
+        await instanceReady.wait()
         if not service.system_app:
             raise ValueError("System app not defined for service")
 
