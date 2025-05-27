@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import datetime
 import importlib
 import importlib.util
@@ -34,6 +33,7 @@ from typing import TypeVar
 
 import typer
 import yaml
+from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
@@ -76,8 +76,7 @@ class BuildError(Exception):
 # --- Data models ---
 
 
-@dataclasses.dataclass
-class Tag:
+class Tag(BaseModel):
     """Tag for identifying a package."""
 
     name: str
@@ -95,30 +94,28 @@ class Tag:
         return Tag(name=self.name, version=f"{timestamp}_{short_uuid}")
 
 
-@dataclasses.dataclass
-class ServiceConfig:
+class ServiceConfig(BaseModel):
     """Configuration for a service."""
 
     name: str
     service: str = ""  # Fully qualified service name
-    models: t.List[str] = dataclasses.field(default_factory=list)
-    dependencies: t.List[str] = dataclasses.field(default_factory=list)
-    resource: t.Dict[str, t.Any] = dataclasses.field(default_factory=dict)
+    models: t.List[str] = Field(default_factory=list)
+    dependencies: t.List[str] = Field(default_factory=list)
+    resource: t.Dict[str, t.Any] = Field(default_factory=dict)
     workers: t.Optional[int] = None
     image: str = "dynamo:latest"
-    dynamo: t.Dict[str, t.Any] = dataclasses.field(default_factory=dict)
+    dynamo: t.Dict[str, t.Any] = Field(default_factory=dict)
     http_exposed: bool = False
-    api_endpoints: t.List[str] = dataclasses.field(default_factory=list)
+    api_endpoints: t.List[str] = Field(default_factory=list)
 
 
-@dataclasses.dataclass
-class ServiceInfo:
+class ServiceInfo(BaseModel):
     """Information about a service."""
 
     name: str
     module_path: str
     class_name: str
-    config: ServiceConfig = dataclasses.field(default_factory=ServiceConfig)
+    config: ServiceConfig
 
     @classmethod
     def from_service(cls, service: ServiceInterface[T]) -> ServiceInfo:
@@ -152,15 +149,14 @@ class ServiceInfo:
         )
 
 
-@dataclasses.dataclass
-class BuildConfig:
+class BuildConfig(BaseModel):
     """Configuration for building a Dynamo pipeline."""
 
     service: str
     name: t.Optional[str] = None
     version: t.Optional[str] = None
     tag: t.Optional[str] = None
-    include: t.List[str] = dataclasses.field(
+    include: t.List[str] = Field(
         default_factory=lambda: [
             "**/*.py",
             "**/*.yaml",
@@ -170,27 +166,26 @@ class BuildConfig:
             "**/*.sh",
         ]
     )
-    exclude: t.List[str] = dataclasses.field(
+    exclude: t.List[str] = Field(
         default_factory=lambda: [
             "**/__pycache__/**",
             "**/.git/**",
         ]
     )
-    labels: t.Dict[str, str] = dataclasses.field(default_factory=dict)
-    envs: t.List[str] = dataclasses.field(default_factory=list)
-    docker: t.Dict[str, t.Any] = dataclasses.field(default_factory=dict)
+    labels: t.Dict[str, str] = Field(default_factory=dict)
+    envs: t.List[str] = Field(default_factory=list)
+    docker: t.Dict[str, t.Any] = Field(default_factory=dict)
 
     def to_yaml(self, file_obj: t.TextIO) -> None:
         """Write config to YAML file."""
-        yaml.dump(dataclasses.asdict(self), file_obj)
+        yaml.dump(self.model_dump(), file_obj)
 
     def with_defaults(self) -> BuildConfig:
         """Return config with default values filled in."""
         return self
 
 
-@dataclasses.dataclass
-class ManifestInfo:
+class ManifestInfo(BaseModel):
     """Information for generating a manifest file."""
 
     service: str
@@ -204,7 +199,7 @@ class ManifestInfo:
 
     def to_dict(self) -> t.Dict[str, t.Any]:
         """Convert to dictionary for YAML serialization."""
-        result = dataclasses.asdict(self)
+        result = self.model_dump()
         # Convert ServiceInfo objects to dictionaries
         services_dict = []
         for service in result["services"]:
@@ -230,8 +225,7 @@ class ManifestInfo:
         return result
 
 
-@dataclasses.dataclass
-class PackageInfo:
+class PackageInfo(BaseModel):
     """Information about a built package."""
 
     tag: Tag
@@ -244,7 +238,7 @@ class PackageInfo:
 
     def to_yaml(self) -> str:
         """Convert to YAML string."""
-        return yaml.dump(dataclasses.asdict(self))
+        return yaml.dump(self.model_dump())
 
     def to_manifest(self) -> ManifestInfo:
         """Convert to manifest information."""
@@ -304,8 +298,8 @@ class Package:
     def create(
         cls,
         build_config: BuildConfig,
+        build_ctx: str,
         version: t.Optional[str] = None,
-        build_ctx: t.Optional[str] = None,
     ) -> Package:
         dyn_svc = cls.dynamo_service(build_config, build_ctx)
 
@@ -318,7 +312,7 @@ class Package:
             version = build_config.version
 
         # Create tag with version
-        tag = Tag(package_name, version)
+        tag = Tag(name=package_name, version=version)
         if version is None:
             tag = tag.make_new_version()
 
@@ -437,14 +431,15 @@ class Package:
         """Get the Dockerfile template content with configurable base image."""
         # Try to load the Dockerfile.template template from the CLI directory
         cli_template_path = Path(__file__).parent / "Dockerfile.template"
-        if cli_template_path.exists():
-            with open(cli_template_path, "r") as f:
-                template_content = f.read()
-                # Replace the base image placeholder with the actual base image
-                template_content = template_content.replace(
-                    "__BASE_IMAGE__", base_image
-                )
-                return template_content
+        if not cli_template_path.exists():
+            raise FileNotFoundError(
+                f"Dockerfile template not found at {cli_template_path}"
+            )
+        with open(cli_template_path, "r") as f:
+            template_content = f.read()
+            # Replace the base image placeholder with the actual base image
+            template_content = template_content.replace("__BASE_IMAGE__", base_image)
+            return template_content
 
     @staticmethod
     def copy_files(
