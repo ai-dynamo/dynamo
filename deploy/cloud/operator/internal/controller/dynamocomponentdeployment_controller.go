@@ -1417,7 +1417,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	args = append(args, "cd", "src", "&&", "uv", "run", "dynamo", "serve")
 
 	// ensure liveness and readiness probes are enabled for the dynamo components
-	args = append(args, "--system-app-port", "5000")
+	args = append(args, "--system-app-port", fmt.Sprintf("%d", commonconsts.DynamoHealthPort))
 	args = append(args, "--enable-system-app")
 	args = append(args, "--use-default-health-checks")
 
@@ -1556,8 +1556,8 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			},
 			{
 				Protocol:      corev1.ProtocolTCP,
-				Name:          "health",
-				ContainerPort: int32(5000),
+				Name:          commonconsts.DynamoHealthPortName,
+				ContainerPort: int32(commonconsts.DynamoHealthPort),
 			},
 		},
 		SecurityContext: mainContainerSecurityContext,
@@ -1569,7 +1569,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path: "/healthz",
-					Port: intstr.FromString("health"),
+					Port: intstr.FromString(commonconsts.DynamoHealthPortName),
 				},
 			},
 		}
@@ -1580,7 +1580,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path: "/readyz",
-					Port: intstr.FromString("health"),
+					Port: intstr.FromString(commonconsts.DynamoHealthPortName),
 				},
 			},
 		}
