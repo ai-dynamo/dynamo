@@ -220,7 +220,7 @@ def load_entry_service(
     if not os.path.isdir(graph_dir):
         raise FileNotFoundError(f"Pipeline directory not found: {graph_dir}")
 
-    config_path = os.path.join(graph_dir, "bento.yaml")
+    config_path = os.path.join(graph_dir, "dynamo.yaml")
     if not os.path.isfile(config_path):
         raise FileNotFoundError(
             f"Pipeline config (bento.yaml) not found in {graph_dir}"
