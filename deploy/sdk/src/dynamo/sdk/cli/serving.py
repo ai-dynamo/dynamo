@@ -267,7 +267,8 @@ def serve_dynamo_graph(
                     dependency_map[name] = uri
                 # reserve one more to avoid conflicts
                 port_stack.enter_context(reserve_free_port())
-
+        else:
+            namespace, _ = svc.dynamo_address()
         dynamo_args = [
             "-m",
             _DYNAMO_WORKER_SCRIPT,
