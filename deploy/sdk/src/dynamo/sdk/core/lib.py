@@ -16,7 +16,7 @@
 
 import logging
 import os
-from typing import Any, Callable, Dict, Optional, Type, TypeVar, Union
+from typing import Any, Callable, Optional, Type, TypeVar
 
 from fastapi import FastAPI
 
