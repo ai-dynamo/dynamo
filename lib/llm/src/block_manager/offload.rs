@@ -130,7 +130,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         // Device -> Host offload
         let device_clone = this.device.clone();
         let host_clone = this.host.clone();
-        let device_offload_metrics = metrics.with_pool("device");
+        let device_offload_metrics = metrics.pool("device");
         async_rt_handle.spawn(async move {
             let res = OffloadManager::offload_worker(
                 device_clone,
@@ -155,7 +155,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let host_clone = this.host.clone();
         let disk_clone = this.disk.clone();
         let transfer_ctx_clone = transfer_ctx.clone();
-        let host_offload_metrics = metrics.with_pool("host");
+        let host_offload_metrics = metrics.pool("host");
         async_rt_handle.spawn(async move {
             let res = OffloadManager::offload_worker(
                 host_clone,
@@ -175,7 +175,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let host_clone = this.host.clone();
         let device_clone = this.device.clone();
         let transfer_ctx_clone = transfer_ctx.clone();
-        let host_onboard_metrics = metrics.with_pool("host");
+        let host_onboard_metrics = metrics.pool("host");
         async_rt_handle.spawn(async move {
             let res = OffloadManager::onboard_worker(
                 host_clone,
@@ -195,7 +195,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let disk_clone = this.disk.clone();
         let device_clone = this.device.clone();
         let transfer_ctx_clone = transfer_ctx.clone();
-        let disk_onboard_metrics = metrics.with_pool("disk");
+        let disk_onboard_metrics = metrics.pool("disk");
         async_rt_handle.spawn(async move {
             let res = OffloadManager::onboard_worker(
                 disk_clone,
