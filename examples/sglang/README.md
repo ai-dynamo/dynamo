@@ -41,7 +41,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ```bash
 # On an x86 machine - sglang does not support ARM yet
-./container/build.sh --framework SGLANG
+./container/build.sh --framework sglang
 ```
 
 ### Run container
