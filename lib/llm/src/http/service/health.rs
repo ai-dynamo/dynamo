@@ -29,12 +29,7 @@
 // limitations under the License.
 
 use super::{service_v2, RouteDoc};
-use axum::{
-    extract::Path, http::Method, http::StatusCode, response::IntoResponse, routing::get, Json,
-    Router,
-};
-use dynamo_runtime::component::{Instance, INSTANCE_ROOT_PATH};
-use dynamo_runtime::{DistributedRuntime, Runtime};
+use axum::{http::Method, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -43,125 +38,36 @@ pub fn health_check_router(
     path_override: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path_override.unwrap_or_else(|| "/health".to_string());
-    let path_namespace = format!("{path}/{{namespace}}");
-    let path_component = format!("{path}/{{namespace}}/{{component}}");
 
-    let docs: Vec<RouteDoc> = vec![
-        RouteDoc::new(Method::GET, &path),
-        RouteDoc::new(Method::GET, &path_namespace),
-        RouteDoc::new(Method::GET, &path_component),
-    ];
+    let docs: Vec<RouteDoc> = vec![RouteDoc::new(Method::GET, &path)];
 
     let router = Router::new()
         .route(&path, get(health_handler))
-        .route(&path_namespace, get(health_namespace_handler))
-        .route(&path_component, get(health_component_handler))
         .with_state(state);
 
     (docs, router)
 }
 
-async fn health_handler() -> impl IntoResponse {
-    Json(json!({"status": "healthy"}))
-}
-
-// A namespace health check will return if the namespace exists in ETCD and will return a list of components currently registered
-async fn health_namespace_handler(Path(namespace): Path<String>) -> impl IntoResponse {
-    let target_key = format!("{INSTANCE_ROOT_PATH}/{namespace}");
-
-    match get_instances(&target_key).await {
-        Ok(instances) if instances.is_empty() => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "namespace not found", "namespace": namespace})),
-        ),
-        Ok(instances) => {
-            let components: Vec<String> = instances
-                .iter()
-                .map(|i| format!("{}.{}", i.component, i.endpoint))
-                .collect();
-
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "namespace": namespace,
-                    "status": "healthy",
-                    "instance_count": components.len(),
-                    "components": components
-                })),
-            )
-        }
-        Err((status, msg)) => (status, Json(json!({"error": msg}))),
-    }
-}
-
-// A component health check will return the endpoints and instance IDs for a specific component
-async fn health_component_handler(
-    Path((namespace, component)): Path<(String, String)>,
+async fn health_handler(
+    axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
-    let target_key = format!("{INSTANCE_ROOT_PATH}/{namespace}/{component}");
+    let model_entries = state.manager().get_model_entries();
 
-    match get_instances(&target_key).await {
-        Ok(instances) if instances.is_empty() => (
-            StatusCode::NOT_FOUND,
+    if model_entries.is_empty() {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
-                "error": "component not found",
-                "namespace": namespace,
-                "component": component
+                "status": "unhealthy",
+                "message": "No models available"
             })),
-        ),
-        Ok(instances) => {
-            let instance_info: Vec<serde_json::Value> = instances
-                .iter()
-                .map(|i| {
-                    json!({
-                        "component": i.component,
-                        "endpoint": i.endpoint,
-                        "instance_id": i.instance_id
-                    })
-                })
-                .collect();
-
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "namespace": namespace,
-                    "component": component,
-                    "status": "healthy",
-                    "instance_count": instances.len(),
-                    "instances": instance_info
-                })),
-            )
-        }
-        Err((status, msg)) => (status, Json(json!({"error": msg}))),
+        )
+    } else {
+        (
+            StatusCode::OK,
+            Json(json!({
+                "status": "healthy",
+                "models": model_entries
+            })),
+        )
     }
-}
-
-// Helper function to get instances from etcd
-async fn get_instances(target_key: &str) -> Result<Vec<Instance>, (StatusCode, String)> {
-    let runtime =
-        Runtime::from_current().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let drt = DistributedRuntime::from_settings(runtime)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let kvpairs = drt
-        .etcd_client()
-        .ok_or((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "No etcd client".to_string(),
-        ))?
-        .kv_get_prefix(target_key)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let mut instances = Vec::new();
-    for kvpair in kvpairs {
-        match serde_json::from_slice::<Instance>(kvpair.value()) {
-            Ok(instance) => instances.push(instance),
-            Err(e) => tracing::error!("Failed to parse instance from etcd: {}", e),
-        }
-    }
-
-    Ok(instances)
 }

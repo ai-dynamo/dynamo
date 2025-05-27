@@ -58,6 +58,11 @@ impl ModelManager {
         }
     }
 
+    /// Get all model entries currently stored in the manager
+    pub fn get_model_entries(&self) -> Vec<ModelEntry> {
+        self.entries.lock().unwrap().values().cloned().collect()
+    }
+
     pub fn has_model_any(&self, model: &str) -> bool {
         self.chat_completion_engines.read().unwrap().contains(model)
             || self.completion_engines.read().unwrap().contains(model)
