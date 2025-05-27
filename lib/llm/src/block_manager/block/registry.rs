@@ -152,16 +152,12 @@ impl BlockRegistry {
 
             BlockState::Complete(state) => {
                 let sequence_hash = state.token_block().sequence_hash();
-                // If an identical block already exists in this pool, return an error.
+                let mut blocks = self.blocks.lock().unwrap();
 
-                {
-                    let blocks = self.blocks.lock().unwrap();
-                    if let Some(handle) = blocks.get(&sequence_hash) {
-                        if let Some(_handle) = handle.upgrade() {
-                            return Err(BlockRegistationError::BlockAlreadyRegistered(
-                                sequence_hash,
-                            ));
-                        }
+                // If an identical block already exists in this pool, return an error.
+                if let Some(handle) = blocks.get(&sequence_hash) {
+                    if let Some(_handle) = handle.upgrade() {
+                        return Err(BlockRegistationError::BlockAlreadyRegistered(sequence_hash));
                     }
                 }
 
@@ -194,11 +190,7 @@ impl BlockRegistry {
                     reg_handle
                 };
 
-                {
-                    let mut blocks = self.blocks.lock().unwrap();
-                    // Insert our block handle into the per-pool registry.
-                    blocks.insert(sequence_hash, Arc::downgrade(&block_handle));
-                }
+                blocks.insert(sequence_hash, Arc::downgrade(&block_handle));
 
                 // Update the [BlockState] to [BlockState::Registered]
                 let _ = std::mem::replace(
