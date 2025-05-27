@@ -30,10 +30,12 @@
 
 use super::{service_v2, RouteDoc};
 use axum::{
-    extract::Path, http::Method, http::StatusCode, response::IntoResponse, routing::get, Router,
+    extract::Path, http::Method, http::StatusCode, response::IntoResponse, routing::get, Json,
+    Router,
 };
 use dynamo_runtime::component::{Instance, INSTANCE_ROOT_PATH};
 use dynamo_runtime::{DistributedRuntime, Runtime};
+use serde_json::json;
 use std::sync::Arc;
 
 pub fn health_check_router(
@@ -60,7 +62,7 @@ pub fn health_check_router(
 }
 
 async fn health_handler() -> impl IntoResponse {
-    (StatusCode::OK, "OK")
+    Json(json!({"status": "healthy"}))
 }
 
 // A namespace health check will return if the namespace exists in ETCD and will return a list of components currently registered
@@ -70,7 +72,7 @@ async fn health_namespace_handler(Path(namespace): Path<String>) -> impl IntoRes
     match get_instances(&target_key).await {
         Ok(instances) if instances.is_empty() => (
             StatusCode::NOT_FOUND,
-            format!("Namespace '{}' not found", namespace),
+            Json(json!({"error": "namespace not found", "namespace": namespace})),
         ),
         Ok(instances) => {
             let components: Vec<String> = instances
@@ -80,15 +82,15 @@ async fn health_namespace_handler(Path(namespace): Path<String>) -> impl IntoRes
 
             (
                 StatusCode::OK,
-                format!(
-                    "Namespace '{}' is healthy: {} instances - {}",
-                    namespace,
-                    components.len(),
-                    components.join(", ")
-                ),
+                Json(json!({
+                    "namespace": namespace,
+                    "status": "healthy",
+                    "instance_count": components.len(),
+                    "components": components
+                })),
             )
         }
-        Err(error_response) => error_response,
+        Err((status, msg)) => (status, Json(json!({"error": msg}))),
     }
 }
 
@@ -101,42 +103,47 @@ async fn health_component_handler(
     match get_instances(&target_key).await {
         Ok(instances) if instances.is_empty() => (
             StatusCode::NOT_FOUND,
-            format!("Component '{}.{}' not found", namespace, component),
+            Json(json!({
+                "error": "component not found",
+                "namespace": namespace,
+                "component": component
+            })),
         ),
         Ok(instances) => {
-            let instance_info: Vec<String> = instances
+            let instance_info: Vec<serde_json::Value> = instances
                 .iter()
-                .map(|i| format!("{}.{} (id: {})", i.component, i.endpoint, i.instance_id))
+                .map(|i| {
+                    json!({
+                        "component": i.component,
+                        "endpoint": i.endpoint,
+                        "instance_id": i.instance_id
+                    })
+                })
                 .collect();
 
             (
                 StatusCode::OK,
-                format!(
-                    "Component '{}.{}' is healthy: {} instances - {}",
-                    namespace,
-                    component,
-                    instances.len(),
-                    instance_info.join(", ")
-                ),
+                Json(json!({
+                    "namespace": namespace,
+                    "component": component,
+                    "status": "healthy",
+                    "instance_count": instances.len(),
+                    "instances": instance_info
+                })),
             )
         }
-        Err(error_response) => error_response,
+        Err((status, msg)) => (status, Json(json!({"error": msg}))),
     }
-}
-
-// Helper function to get distributed runtime
-async fn get_drt() -> Result<DistributedRuntime, (StatusCode, String)> {
-    let runtime =
-        Runtime::from_current().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    DistributedRuntime::from_settings(runtime)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 // Helper function to get instances from etcd
 async fn get_instances(target_key: &str) -> Result<Vec<Instance>, (StatusCode, String)> {
-    let drt = get_drt().await?;
+    let runtime =
+        Runtime::from_current().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let drt = DistributedRuntime::from_settings(runtime)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let kvpairs = drt
         .etcd_client()
