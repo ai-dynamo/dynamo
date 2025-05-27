@@ -164,7 +164,7 @@ def serve(
         sys.path.insert(0, working_dir_str)
 
     svc = find_and_load_service(dynamo_pipeline, working_dir=working_dir)
-    logger.info(f"Loaded service: {svc.name}")
+    logger.debug(f"Loaded service: {svc.name}")
     logger.debug("Dependencies: %s", [dep.on.name for dep in svc.dependencies.values()])
     LinkedServices.remove_unused_edges()
 

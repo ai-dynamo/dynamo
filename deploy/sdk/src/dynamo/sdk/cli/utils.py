@@ -393,7 +393,7 @@ def is_local_planner_enabled(svc: Any, service_configs: dict) -> bool:
     planners = [
         node
         for node in nodes
-        if node.config.get("dynamo", {}).get("component_type") == ComponentType.PLANNER
+        if node.config.dynamo.component_type == ComponentType.PLANNER
     ]
 
     if len(planners) > 1:
@@ -429,7 +429,7 @@ def raise_local_planner_warning(svc: Any, service_configs: dict) -> None:
     nodes.append(svc)
     worker_names = ("PrefillWorker", "VllmWorker")
     worker_counts_greater_than_one = [
-        node.config.get("workers", 1) > 1 for node in nodes if node.name in worker_names
+        node.config.workers > 1 for node in nodes if node.name in worker_names
     ]
 
     if any(worker_counts_greater_than_one) and not no_op:

@@ -208,7 +208,7 @@ def _get_dir_size(path: str) -> int:
 
 
 def load_entry_service(
-    pipeline_tag: str, build_dir: str = "~/bentoml/bentos"
+    pipeline_tag: str, build_dir: str = "~/.dynamo/packages"
 ) -> Service:
     """
     Given a built pipeline tag (e.g. frontend:2uk2fwzvqsswvs7t), load the entry service as a deployment Service instance.

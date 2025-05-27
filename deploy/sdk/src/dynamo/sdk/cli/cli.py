@@ -22,10 +22,11 @@ import importlib.metadata
 import typer
 from rich.console import Console
 
+from dynamo.sdk.cli.build import build
 from dynamo.sdk.cli.deployment import app as deployment_app
 from dynamo.sdk.cli.deployment import deploy
 from dynamo.sdk.cli.env import env
-from dynamo.sdk.cli.pipeline import build, get
+from dynamo.sdk.cli.pipeline import get
 from dynamo.sdk.cli.run import run
 from dynamo.sdk.cli.serve import serve
 
