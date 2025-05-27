@@ -129,7 +129,6 @@ def serve(
     configure_dynamo_logging()
 
     if service_configs:
-        logger.info(f"Running dynamo serve with service configs {service_configs}")
         os.environ["DYNAMO_SERVICE_CONFIG"] = json.dumps(service_configs)
 
     if working_dir is None:
