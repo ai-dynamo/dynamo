@@ -41,6 +41,7 @@ from dynamo.sdk.core.protocol.interface import (
     ServiceInterface,
 )
 from dynamo.sdk.core.runner.common import ServiceMixin
+from dynamo.sdk.core.runner.health import register_liveness_probe
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,8 @@ class LocalService(ServiceMixin, ServiceInterface[T]):
                 )
             if isinstance(field, DependencyInterface):
                 self._dependencies[field_name] = field
+        inner_instance = inner_cls()
+        register_liveness_probe(self.app, inner_instance)
 
     def find_dependent_by_name(self, name: str) -> "ServiceInterface":
         return self.all_services()[name]

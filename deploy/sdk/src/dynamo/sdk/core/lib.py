@@ -15,7 +15,7 @@
 #  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
 
 import os
-from typing import Any, Dict, Optional, Type, TypeVar, Union
+from typing import Any, Callable, Dict, Optional, Type, TypeVar, Union
 
 from fastapi import FastAPI
 
@@ -28,6 +28,7 @@ from dynamo.sdk.core.protocol.interface import (
 )
 
 T = TypeVar("T", bound=object)
+G = TypeVar("G", bound=Callable[..., Any])
 
 #  Note: global service provider.
 # this should be set to a concrete implementation of the DeploymentTarget interface
@@ -92,3 +93,20 @@ def depends(
     """Create a dependency using the current service provider"""
     provider = get_target()
     return provider.create_dependency(on=on, **kwargs)
+
+
+def liveness(func: G) -> G:
+    """Decorator for liveness probe."""
+    if not callable(func):
+        raise TypeError("@liveness can only decorate callable methods")
+
+    func.__is_liveness_probe__ = True  # type: ignore
+    return func
+
+
+def get_liveness_handler(obj):
+    for attr in dir(obj):
+        fn = getattr(obj, attr)
+        if callable(fn) and getattr(fn, "__is_liveness_probe__", False):
+            return fn
+    return None

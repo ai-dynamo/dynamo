@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sdk import DYNAMO_IMAGE, api, depends, endpoint, service
+from dynamo.sdk.core.lib import liveness
 from dynamo.sdk.lib.config import ServiceConfig
 
 logger = logging.getLogger(__name__)
@@ -136,3 +137,8 @@ class Frontend:
                 yield f"Frontend: {response}"
 
         return StreamingResponse(content_generator())
+
+    @liveness
+    def is_alive(self) -> bool:
+        logger.info("Liveness probe")
+        return True
