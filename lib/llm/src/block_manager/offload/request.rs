@@ -96,3 +96,30 @@ impl<Source: Storage, Target: Storage, M: BlockMetadata> OnboardRequest<Source, 
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_offload_request_key_ordering() {
+        let key1 = OffloadRequestKey {
+            priority: 1,
+            timestamp: 1,
+        };
+
+        let key2 = OffloadRequestKey {
+            priority: 2,
+            timestamp: 2,
+        };
+
+        assert!(key2 < key1);
+
+        let key3 = OffloadRequestKey {
+            priority: 2,
+            timestamp: 3,
+        };
+
+        assert!(key2 < key3);
+    }
+}

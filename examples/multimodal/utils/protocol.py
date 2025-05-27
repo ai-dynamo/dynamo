@@ -17,6 +17,7 @@
 import json
 from typing import Any, List, Optional
 
+import connect
 import msgspec
 from pydantic import BaseModel, ConfigDict, field_validator
 from pydantic_core import core_schema
@@ -111,12 +112,13 @@ class EncodeRequest(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
     image_url: str
+    request_id: str
+    serialized_request: Optional[connect.SerializedRequest] = None
 
 
 class EncodeResponse(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    image_features: List[List[List[float]]]
+    request_id: str
 
 
 class MyRequestOutput(BaseModel):
@@ -129,7 +131,6 @@ class MyRequestOutput(BaseModel):
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
-
     request_id: str
     prompt: Optional[str] = None
     prompt_token_ids: Optional[List[int]] = None
