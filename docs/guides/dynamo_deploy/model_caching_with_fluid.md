@@ -204,7 +204,7 @@ kind: DynamoGraphDeployment
 metadata:
   name: model-caching
 spec:
-  dynamoGraph: frontend:3x6rl5b3gcnf5skh
+  dynamoGraph: "frontend:3x6rl5b3gcnf5skh"
   envs:
     - name: HF_HOME
       value: /model
