@@ -356,7 +356,7 @@ def resolve_service_config(
                 for key, value in configs.items():
                     service_configs[service][key] = value
 
-    logger.debug(f"Final resolved config: {service_configs}")
+    logger.info(f"Running dynamo serve with config: {service_configs}")
     return service_configs
 
 
