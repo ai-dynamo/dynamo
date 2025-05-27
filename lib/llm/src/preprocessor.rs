@@ -177,6 +177,7 @@ impl OpenAIPreprocessor {
         builder.stop_conditions(stop_conditions);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
+        builder.estimated_prefix_hit_num_blocks(None);
 
         Ok((builder.build()?, annotations))
     }

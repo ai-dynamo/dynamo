@@ -16,13 +16,13 @@ Common:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   block-size: 64
   max-model-len: 16384
+  router: kv
 
 Frontend:
   served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   endpoint: dynamo.VllmWorker.generate
   port: 8000
-  router: kv
-  common-configs: [block-size]
+  common-configs: [block-size, router]
 
 VllmWorker:
   enforce-eager: true
@@ -32,4 +32,4 @@ VllmWorker:
     workers: 1
     resources:
       gpu: '1'
-  common-configs: [model, block-size, max-model-len]
+  common-configs: [model, block-size, max-model-len, router]
