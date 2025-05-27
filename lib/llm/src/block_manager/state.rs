@@ -21,6 +21,7 @@ use super::{
     config::NixlOptions,
 };
 use cudarc::driver::CudaStream;
+use prometheus::Registry;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 
@@ -77,6 +78,11 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
         let mut nixl_backends: HashMap<String, Arc<nixl_sys::Backend>> = HashMap::new();
 
         let global_registry = GlobalRegistry::default();
+
+        let metrics_registry = Arc::new(Registry::new_custom(
+            Some("block_manager".to_string()),
+            None,
+        )?);
 
         // Create a NIXL agent if NIXL is enabled and instantiate requested backends
         // TODO: Build a map of NIXL backends to block pools/sets
@@ -212,6 +218,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
             device_pool.clone(),
             nixl_agent.clone(),
             async_rt_handle,
+            metrics_registry.clone(),
         )?;
 
         let state = Arc::new(Self {
