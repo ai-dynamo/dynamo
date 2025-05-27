@@ -35,9 +35,9 @@ use std::sync::Arc;
 
 pub fn health_check_router(
     state: Arc<service_v2::State>,
-    path_override: Option<String>,
+    path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    let path = path_override.unwrap_or_else(|| "/health".to_string());
+    let path = path.unwrap_or_else(|| "/health".to_string());
 
     let docs: Vec<RouteDoc> = vec![RouteDoc::new(Method::GET, &path)];
 
@@ -58,15 +58,19 @@ async fn health_handler(
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
                 "status": "unhealthy",
-                "message": "No models available"
+                "message": "No endpoints available"
             })),
         )
     } else {
+        let endpoints: Vec<String> = model_entries
+            .iter()
+            .map(|entry| entry.endpoint.as_url())
+            .collect();
         (
             StatusCode::OK,
             Json(json!({
                 "status": "healthy",
-                "models": model_entries
+                "endpoints": endpoints
             })),
         )
     }
