@@ -149,7 +149,8 @@ filterwarnings = [
     "error",
     "ignore:.*cuda*:DeprecationWarning", # Need this to avoid deprecation warnings from CUDA in tensorrt_llm.
     "ignore:.*pkg_resources.*:DeprecationWarning",
-    "ignore:.*multipart.*:PendingDeprecationWarning"
+    "ignore:.*pkg_resources.*:UserWarning",
+    "ignore:.*multipart.*:PendingDeprecationWarning",
 ]
 
 
