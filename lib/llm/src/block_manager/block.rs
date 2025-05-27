@@ -38,12 +38,12 @@ use super::{
     WorkerID,
 };
 
+use derive_getters::Getters;
 use std::{
     fmt::Debug,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
-
 use thiserror::Error;
 
 mod private {
@@ -192,8 +192,6 @@ impl<S: Storage, M: BlockMetadata> Block<S, M> {
         self.manager = Some(manager);
     }
 
-    // TODO(#967) - Enable with TransferEngine
-    #[allow(dead_code)]
     pub(crate) fn manager(&self) -> Option<&Arc<BlockManager<M>>> {
         self.manager.as_ref()
     }
@@ -521,11 +519,24 @@ pub trait BlockDataProviderMut: BlockDataProvider {
     fn block_data_mut(&mut self, _: private::PrivateToken) -> &mut BlockData<Self::StorageType>;
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Getters)]
 pub struct BasicMetadata {
+    #[getter(copy)]
     priority: u32,
+    #[getter(copy)]
     returned_tick: u64,
+    #[getter(copy)]
     acquired_tick: u64,
+}
+
+impl BasicMetadata {
+    pub fn update_priority(&self, priority: u32) -> Self {
+        BasicMetadata {
+            priority,
+            returned_tick: self.returned_tick,
+            acquired_tick: self.acquired_tick,
+        }
+    }
 }
 
 impl BlockMetadata for BasicMetadata {
@@ -755,11 +766,6 @@ impl<S: Storage, M: BlockMetadata> ImmutableBlock<S, M> {
         Self { block }
     }
 
-    pub fn manager(&self) -> Option<&Arc<BlockManager<M>>> {
-        // Access the underlying Block's manager field directly through deref
-        self.manager.as_ref()
-    }
-
     pub fn mutable_block(&self) -> &Arc<MutableBlock<S, M>> {
         &self.block
     }
@@ -859,9 +865,10 @@ impl<'a, S: Storage, M: BlockMetadata> AsBlockSlice<'a, ImmutableBlock<S, M>>
 
 impl<S: Storage, M: BlockMetadata> ImmutableBlock<S, M> {
     pub async fn enqueue_offload(&self, priority: u64) -> Result<()> {
-        // TODO: Is it ok to silently fail if the block is not managed?
         if let Some(manager) = self.manager() {
             manager.enqueue_offload_block(self, priority).await?;
+        } else {
+            tracing::warn!("Block is not managed. Unable to enqueue offload.");
         }
         Ok(())
     }

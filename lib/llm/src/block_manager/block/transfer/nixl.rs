@@ -16,7 +16,7 @@
 use super::*;
 
 use anyhow::Result;
-use nixl_sys::{MemoryRegion, NixlDescriptor, OptArgs, XferDescList, XferOp};
+use nixl_sys::{MemoryRegion, NixlDescriptor, OptArgs, XferDescList};
 use std::future::{poll_fn, Future};
 use std::task::Poll;
 
@@ -89,6 +89,7 @@ pub fn write_blocks_to<Source, Destination>(
     dst: &mut [Destination],
     ctx: Arc<TransferContext>,
     notify: Option<String>,
+    transfer_type: NixlTransfer,
 ) -> Result<Box<dyn Future<Output = ()> + Send + Sync + Unpin>>
 where
     Source: BlockDataProvider,
@@ -127,8 +128,13 @@ where
 
     debug_assert!(!src_dl.has_overlaps()? && !dst_dl.has_overlaps()?);
 
-    let xfer_req =
-        nixl_agent.create_xfer_req(XferOp::Write, &src_dl, &dst_dl, &nixl_agent.name(), None)?;
+    let xfer_req = nixl_agent.create_xfer_req(
+        transfer_type.as_xfer_op(),
+        &src_dl,
+        &dst_dl,
+        &nixl_agent.name(),
+        None,
+    )?;
 
     let mut xfer_args = OptArgs::new()?;
 

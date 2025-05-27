@@ -28,6 +28,7 @@ use crate::block_manager::storage::{
 
 use cudarc::driver::CudaStream;
 
+use nixl_sys::XferOp::{Read, Write};
 use std::future::Future;
 use std::ops::Range;
 
@@ -78,6 +79,21 @@ pub enum TransferError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NixlTransfer {
+    Read,
+    Write,
+}
+
+impl NixlTransfer {
+    pub fn as_xfer_op(&self) -> nixl_sys::XferOp {
+        match self {
+            NixlTransfer::Read => Read,
+            NixlTransfer::Write => Write,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferStrategy {
     Memcpy,
     CudaAsyncH2D,
@@ -85,8 +101,7 @@ pub enum TransferStrategy {
     CudaAsyncD2D,
     CudaBlockingH2D,
     CudaBlockingD2H,
-    NixlWrite, // aka PUT
-    NixlRead,  // aka GET
+    Nixl(NixlTransfer),
     Invalid,
 }
 
@@ -126,7 +141,7 @@ where
 {
     #[inline(always)]
     fn read_from_strategy() -> TransferStrategy {
-        TransferStrategy::NixlRead
+        TransferStrategy::Nixl(NixlTransfer::Read)
     }
 }
 
@@ -179,8 +194,14 @@ where
                 }
                 Ok(())
             }
-            TransferStrategy::NixlWrite => {
-                std::mem::drop(nixl::write_blocks_to(self, dst, ctx, notify)?);
+            TransferStrategy::Nixl(transfer_type) => {
+                std::mem::drop(nixl::write_blocks_to(
+                    self,
+                    dst,
+                    ctx,
+                    notify,
+                    transfer_type,
+                )?);
                 Ok(())
             }
             _ => Err(TransferError::IncompatibleTypes(format!(
@@ -196,8 +217,14 @@ where
         notify: Option<String>,
         ctx: Arc<TransferContext>,
     ) -> Result<Box<dyn Future<Output = ()> + Send + Sync + Unpin>, TransferError> {
-        if let TransferStrategy::NixlWrite = RB::write_to_strategy() {
-            Ok(nixl::write_blocks_to(self, dst, ctx, notify)?)
+        if let TransferStrategy::Nixl(transfer_type) = RB::write_to_strategy() {
+            Ok(nixl::write_blocks_to(
+                self,
+                dst,
+                ctx,
+                notify,
+                transfer_type,
+            )?)
         } else {
             Err(TransferError::IncompatibleTypes(format!(
                 "Expected NIXL transfer strategy, got: {:?}",
@@ -626,7 +653,7 @@ mod tests {
 
         assert_eq!(
             <SystemStorage as WriteToStrategy<NixlStorage>>::write_to_strategy(),
-            TransferStrategy::NixlWrite
+            TransferStrategy::Nixl(NixlTransfer::Write)
         );
 
         // Pinned to ...
@@ -644,7 +671,7 @@ mod tests {
         );
         assert_eq!(
             <PinnedStorage as WriteToStrategy<NixlStorage>>::write_to_strategy(),
-            TransferStrategy::NixlWrite
+            TransferStrategy::Nixl(NixlTransfer::Write)
         );
 
         // Device to ...
@@ -662,7 +689,7 @@ mod tests {
         );
         assert_eq!(
             <DeviceStorage as WriteToStrategy<NixlStorage>>::write_to_strategy(),
-            TransferStrategy::NixlWrite
+            TransferStrategy::Nixl(NixlTransfer::Write)
         );
 
         // Nixl to ... should fail to compile
