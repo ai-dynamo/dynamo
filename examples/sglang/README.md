@@ -47,7 +47,7 @@ docker compose -f deploy/docker-compose.yml up -d
 ### Run container
 
 ```bash
-./container/run.sh -it --framework SGLANG
+./container/run.sh -it --framework sglang
 ```
 
 ### Example architectures
