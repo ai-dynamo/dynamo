@@ -136,7 +136,7 @@ RUN if [ "$ARCH" = "arm64" ]; then \
     fi
 
 # Install sglang
-# Once either 0.4.6post5 or 0.4.7 is released, we can switch back to using the published version
+# Once either 0.4.6post6 or 0.4.7 is released, we can switch back to using the published version
 # This commit references a fix for DP attention and NIXL https://github.com/sgl-project/sglang/pull/6473
 ARG SGLANG_COMMIT="e806f708c954020bda7d1cc98035a44fd6a4eb96"
 RUN --mount=type=cache,target=/root/.cache/uv \
