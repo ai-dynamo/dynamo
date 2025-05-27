@@ -12,17 +12,18 @@ import argparse
 import asyncio
 import logging
 import sys
-from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Optional
+from typing import Optional
 
 import uvloop
 
 # Import TRTLLM and related modules
-from tensorrt_llm import LLM, LlmArgs, SamplingParams
+from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
+from trtllm.engine import get_llm_engine
+from trtllm.publishers import Publishers
 
-from dynamo.llm import KvMetricsPublisher, ModelType, register_llm
+from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 # Only used if you run it manually from the command line
@@ -30,6 +31,8 @@ DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 # Qwen/Qwen3-0.6B is not supported by TRTLLM yet.
 DEFAULT_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
+# Default buffer size for kv cache events.
+DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -45,6 +48,7 @@ class Config:
     tensor_parallel_size: int
     kv_block_size: int
     extra_engine_args: str
+    publish_events_and_metrics: bool
 
 
 class RequestHandler:
@@ -52,34 +56,19 @@ class RequestHandler:
     Request handler for the generate endpoint
     """
 
-    def __init__(self, component, engine, default_sampling_params):
+    def __init__(self, component, engine, default_sampling_params, publishers):
         self.engine = engine
         self.component = component
         self.default_sampling_params = default_sampling_params
-        self.metrics_publisher = KvMetricsPublisher()
-
-    def setup_kv_metrics(self):
-        # Initially send dummy metrics to kick start,
-        # TRTLLM will not update stat until forward pass is triggered
-        self.metrics_publisher.publish(
-            0,  # request_active_slots
-            1024,  # request_total_slots
-            0,  # kv_active_blocks
-            1024,  # kv_total_blocks
-            0,  # num_requests_waiting
-            0.0,  # gpu_cache_usage_perc
-            0.0,  # gpu_prefix_cache_hit_rate
-        )
-        task = asyncio.create_task(self.create_metrics_publisher_endpoint())
-        task.add_done_callback(
-            lambda _: logging.debug("metrics publisher endpoint created")
-        )
-
-    async def create_metrics_publisher_endpoint(self):
-        logging.debug("Creating metrics publisher endpoint")
-        await self.metrics_publisher.create_endpoint(self.component)
+        self.publishers = publishers
+        self.first_generation = True
 
     async def generate(self, request):
+        # Check if there is an error in the publishers error queue
+        publishers_error = self.publishers.check_error_queue()
+        if publishers_error:
+            raise publishers_error
+
         inputs = request["token_ids"]
 
         sampling_params = self.default_sampling_params
@@ -98,6 +87,12 @@ class RequestHandler:
         async for res in self.engine.llm.generate_async(
             inputs=inputs, sampling_params=sampling_params, streaming=True
         ):
+            # TRTLLM engine needs to start generating tokens first before stats
+            # can be retrieved.
+            if self.first_generation and self.publishers:
+                self.publishers.start_publish_threads()
+                self.first_generation = False
+
             if res.finished:
                 yield {"finish_reason": "stop", "token_ids": []}
                 break
@@ -122,50 +117,6 @@ async def worker(runtime: DistributedRuntime):
     await init(runtime, cmd_line_args())
 
 
-class AsyncLLMEngine:
-    def __init__(self, engine_args):
-        self.engine_args = engine_args
-        self._llm: Optional[LLM] = None
-        self._initialized = False
-
-    async def initialize(self):
-        if not self._initialized:
-            model = self.engine_args.pop("model")
-            self._llm = LLM(
-                model=model,
-                **self.engine_args,
-            )
-            self._initialized = True
-
-    async def cleanup(self):
-        if self._initialized:
-            try:
-                self._llm.shutdown()
-            except Exception as e:
-                logging.error(f"Error during cleanup: {e}")
-            finally:
-                self._initialized = False
-
-    @property
-    def llm(self):
-        if not self._initialized:
-            raise RuntimeError("Engine not initialized")
-        return self._llm
-
-
-@asynccontextmanager
-async def get_llm_engine(engine_args: LlmArgs) -> AsyncGenerator[AsyncLLMEngine, None]:
-    engine = AsyncLLMEngine(engine_args)
-    try:
-        await engine.initialize()
-        yield engine
-    except Exception as e:
-        logging.error(f"Error in engine context: {e}")
-        raise
-    finally:
-        await engine.cleanup()
-
-
 async def init(runtime: DistributedRuntime, config: Config):
     """
     Instantiate and serve
@@ -187,8 +138,28 @@ async def init(runtime: DistributedRuntime, config: Config):
     }
     if config.extra_engine_args != "":
         arg_map = update_llm_args_with_extra_options(arg_map, config.extra_engine_args)
+    if config.publish_events_and_metrics:
+        # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
+        kv_cache_config = None
+        if "kv_cache_config" not in arg_map:
+            kv_cache_config = {}
+            kv_cache_config["event_buffer_max_size"] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+        else:
+            kv_cache_config = arg_map["kv_cache_config"]
+            if not kv_cache_config.event_buffer_max_size:
+                kv_cache_config.event_buffer_max_size = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+        arg_map["kv_cache_config"] = kv_cache_config
 
-    logging.debug(f"TRTLLM engine args: {arg_map}")
+        # Only pytorch backend is supported for now to publish events and metrics.
+        if "backend" not in arg_map:
+            arg_map["backend"] = "pytorch"
+        elif arg_map["backend"] != "pytorch":
+            logging.error(
+                "Only pytorch backend is supported for now to publish events and metrics."
+            )
+            sys.exit(1)
+
+    logging.info(f"TRTLLM engine args: {arg_map}")
     engine_args = arg_map
 
     # Populate default sampling params from the model
@@ -202,12 +173,29 @@ async def init(runtime: DistributedRuntime, config: Config):
         await register_llm(
             ModelType.Backend, endpoint, config.model_path, config.model_name
         )
-        handler = RequestHandler(component, engine, default_sampling_params)
-        handler.setup_kv_metrics()
 
-        # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
-        # after the lease is revoked
-        await endpoint.serve_endpoint(handler.generate)
+        publishers = None
+        if config.publish_events_and_metrics:
+            kv_listener = runtime.namespace(config.namespace).component(
+                config.component
+            )
+            publishers = Publishers(
+                component,
+                engine,
+                kv_listener,
+                int(endpoint.lease_id()),
+                config.kv_block_size,
+            )
+
+        handler = RequestHandler(component, engine, default_sampling_params, publishers)
+
+        try:
+            # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
+            # after the lease is revoked
+            await endpoint.serve_endpoint(handler.generate)
+        finally:
+            if publishers:
+                await publishers.cleanup()
 
 
 def cmd_line_args():
@@ -235,6 +223,8 @@ def cmd_line_args():
     parser.add_argument(
         "--tensor-parallel-size", type=int, default=1, help="Number of GPUs to use."
     )
+    # IMPORTANT: We should ideally not expose this to users. We should be able to
+    # query the block size from the TRTLLM engine.
     parser.add_argument(
         "--kv-block-size", type=int, default=32, help="Size of a KV cache block."
     )
@@ -243,6 +233,11 @@ def cmd_line_args():
         type=str,
         default="",
         help="Path to a YAML file containing additional keyword arguments to pass to the TRTLLM engine.",
+    )
+    parser.add_argument(
+        "--publish-events-and-metrics",
+        action="store_true",
+        help="Publish events and metrics to the dynamo components.",
     )
     args = parser.parse_args()
 
@@ -270,10 +265,14 @@ def cmd_line_args():
     config.tensor_parallel_size = args.tensor_parallel_size
     config.kv_block_size = args.kv_block_size
     config.extra_engine_args = args.extra_engine_args
+    config.publish_events_and_metrics = args.publish_events_and_metrics
 
     return config
 
 
 if __name__ == "__main__":
     uvloop.install()
-    asyncio.run(worker())
+    try:
+        asyncio.run(worker())
+    except KeyboardInterrupt:
+        logging.info("Received SIGINT, shutting down...")
