@@ -23,10 +23,10 @@ from dynamo.sdk.lib.dependency import depends
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
 from dynamo.sdk.lib.service import service
 from dynamo.sdk.request_tracing import (
+    RequestTracingMixin,
     auto_trace_endpoints,
     extract_or_generate_request_id,
     get_current_request_id,
-    RequestTracingMixin,
     trace_frontend_endpoint,
     trace_processor_method,
     with_request_tracing,

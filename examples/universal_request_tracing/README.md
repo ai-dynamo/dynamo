@@ -49,10 +49,10 @@ class Processor(RequestTracingMixin):  # Inherit Mixin to get request ID utiliti
     async def chat_completions(self, raw_request: ChatCompletionRequest, request_id: Optional[str] = None):
         # Use Mixin method to ensure we have request_id
         request_id = self.ensure_request_id(request_id)
-        
+
         # Log with request_id
         self.log_with_request_id("info", f"Processing chat completion: {raw_request.model}")
-        
+
         # Pass request_id to downstream components
         async for response in self._generate(raw_request, request_id):
             yield response
@@ -138,10 +138,10 @@ class Processor(RequestTracingMixin):
     async def chat_completions(self, raw_request: ChatCompletionRequest, request_id: Optional[str] = None):
         # Ensure we have request_id (from parameter, context, or generate new)
         request_id = self.ensure_request_id(request_id)
-        
+
         # Log with request_id
         self.log_with_request_id("info", f"Processing chat completion for model: {raw_request.model}")
-        
+
         async for response in self._generate(raw_request, RequestType.CHAT, request_id):
             yield response
 
@@ -149,20 +149,20 @@ class Processor(RequestTracingMixin):
     async def completions(self, raw_request: CompletionRequest, request_id: Optional[str] = None):
         request_id = self.ensure_request_id(request_id)
         self.log_with_request_id("info", f"Processing completion for model: {raw_request.model}")
-        
+
         async for response in self._generate(raw_request, RequestType.COMPLETION, request_id):
             yield response
 
     async def _generate(self, raw_request, request_type: RequestType, request_id: str):
         # request_id automatically propagates to router and worker through Dynamo's Context system
         self.log_with_request_id("debug", f"Starting generation with request_id: {request_id}")
-        
+
         # Processing logic...
         if self.use_router:
             engine_generator = await self.router_client.generate(request_obj)
         else:
             engine_generator = await self.worker_client.generate(request_obj)
-        
+
         async for response in engine_generator:
             yield response
 ```
@@ -197,7 +197,7 @@ class Router(RequestTracingMixin):
     async def route(self, request_data: str, request_id: Optional[str] = None):
         request_id = self.ensure_request_id(request_id)
         self.log_with_request_id("info", "Routing request to optimal worker")
-        
+
         optimal_worker = await self._find_optimal_worker(request_data)
         return optimal_worker, 0.75  # worker_id, prefix_hit_rate
 ```
@@ -213,7 +213,7 @@ class Worker(RequestTracingMixin):
     async def generate(self, request_data: str, request_id: Optional[str] = None):
         request_id = self.ensure_request_id(request_id)
         self.log_with_request_id("info", "Starting text generation")
-        
+
         async for token in self._generate_tokens(request_data):
             yield token
 ```
@@ -229,7 +229,7 @@ class Prefiller(RequestTracingMixin):
     async def prefill(self, request_data: str, request_id: Optional[str] = None):
         request_id = self.ensure_request_id(request_id)
         self.log_with_request_id("info", "Starting KV cache prefill")
-        
+
         cache_key = self._generate_cache_key(request_data)
         return await self._perform_prefill(request_data, cache_key)
 ```
@@ -245,7 +245,7 @@ class Decoder(RequestTracingMixin):
     async def decode(self, hidden_states: List[float], request_id: Optional[str] = None):
         request_id = self.ensure_request_id(request_id)
         self.log_with_request_id("info", "Starting token decoding")
-        
+
         async for token_result in self._decode_tokens(hidden_states):
             yield token_result
 ```
@@ -261,13 +261,13 @@ async def test_universal_tracing():
         "Content-Type": "application/json",
         "X-Request-Id": "test-universal-123"
     }
-    
+
     payload = {
         "model": "meta-llama/Llama-3.2-3B-Instruct",
         "messages": [{"role": "user", "content": "Hello!"}],
         "max_tokens": 50
     }
-    
+
     async with aiohttp.ClientSession() as session:
         async with session.post(
             "http://localhost:8080/v1/chat/completions",
@@ -319,11 +319,11 @@ def extract_or_generate_request_id(request: Request) -> str:
 @dynamo_endpoint(is_api=True)
 async def chat_completions(self, request: Request, chat_request: ChatCompletionRequest):
     request_id = extract_or_generate_request_id(request)
-    
+
     async def content_generator():
         async for response in self.processor.chat_completions(chat_request, request_id):
             yield response
-    
+
     response = StreamingResponse(content_generator())
     response.headers["X-Request-Id"] = request_id
     return response
@@ -347,4 +347,4 @@ class Frontend:
 3. **Thread Safety**: Uses thread-local storage, safe in async environments
 4. **Context Propagation**: Router and Worker components automatically get request ID through Dynamo's Context system
 
-This universal approach greatly simplifies X-Request-Id implementation, allowing developers to focus on business logic rather than infrastructure code. 
+This universal approach greatly simplifies X-Request-Id implementation, allowing developers to focus on business logic rather than infrastructure code.

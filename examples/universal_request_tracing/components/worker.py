@@ -27,8 +27,8 @@ from typing import AsyncIterator, Optional
 from dynamo.sdk import (
     RequestTracingMixin,
     dynamo_endpoint,
-    service,
     get_current_request_id,
+    service,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 class Worker(RequestTracingMixin):
     """
     Worker component with automatic X-Request-Id support.
-    
+
     Benefits of using RequestTracingMixin:
     - ensure_request_id(): Automatic request ID management
     - log_with_request_id(): Consistent logging with request ID
@@ -53,22 +53,27 @@ class Worker(RequestTracingMixin):
         self.current_requests = {}
 
     @dynamo_endpoint(name="generate")
-    async def generate(self, request_data: str, request_id: Optional[str] = None) -> AsyncIterator[str]:
+    async def generate(
+        self, request_data: str, request_id: Optional[str] = None
+    ) -> AsyncIterator[str]:
         """
         Generate text with automatic request ID tracking.
-        
+
         The RequestTracingMixin automatically handles request ID management.
         """
         request_id = self.ensure_request_id(request_id)
-        
+
         self.log_with_request_id("info", f"Starting generation on {self.model_name}")
-        
+
         try:
-            self.current_requests[request_id] = {"status": "generating", "model": self.model_name}
-            
+            self.current_requests[request_id] = {
+                "status": "generating",
+                "model": self.model_name,
+            }
+
             async for token in self._generate_tokens(request_data):
                 yield token
-                
+
         except Exception as e:
             self.log_with_request_id("error", f"Generation failed: {e}")
             raise
@@ -83,12 +88,24 @@ class Worker(RequestTracingMixin):
         current_request_id = get_current_request_id()
         if current_request_id:
             logger.debug(f"Generating tokens for request: {current_request_id}")
-        
-        tokens = ["Hello", " world", "!", " This", " is", " a", " test", " response", "."]
-        
+
+        tokens = [
+            "Hello",
+            " world",
+            "!",
+            " This",
+            " is",
+            " a",
+            " test",
+            " response",
+            ".",
+        ]
+
         for i, token in enumerate(tokens):
-            self.log_with_request_id("debug", f"Generated token {i+1}/{len(tokens)}: '{token}'")
-            
+            self.log_with_request_id(
+                "debug", f"Generated token {i+1}/{len(tokens)}: '{token}'"
+            )
+
             await asyncio.sleep(0.1)
             yield token
 
@@ -99,24 +116,26 @@ class Worker(RequestTracingMixin):
         """
         request_id = self.ensure_request_id(request_id)
         self.log_with_request_id("debug", "Retrieving worker status")
-        
+
         return {
             "model": self.model_name,
             "active_requests": len(self.current_requests),
             "request_details": self.current_requests,
-            "status": "healthy"
+            "status": "healthy",
         }
 
     @dynamo_endpoint(name="prefill")
-    async def prefill(self, request_data: str, request_id: Optional[str] = None) -> AsyncIterator[str]:
+    async def prefill(
+        self, request_data: str, request_id: Optional[str] = None
+    ) -> AsyncIterator[str]:
         """
         Prefill operation with request tracking.
         """
         request_id = self.ensure_request_id(request_id)
         self.log_with_request_id("info", "Starting prefill operation")
-        
+
         await self._prefill_kv_cache(request_data)
-        
+
         async for token in self._generate_tokens(request_data):
             yield token
 
@@ -125,7 +144,7 @@ class Worker(RequestTracingMixin):
         Simulate KV cache prefilling with request tracking.
         """
         self.log_with_request_id("debug", "Prefilling KV cache")
-        
+
         await asyncio.sleep(0.2)
-        
+
         self.log_with_request_id("debug", "KV cache prefill completed")

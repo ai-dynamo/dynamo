@@ -21,17 +21,18 @@ without manual implementation. Just add @auto_trace_endpoints decorator!
 """
 
 import logging
+
+from components.processor import Processor
 from fastapi import FastAPI, Request
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
 
 from dynamo.sdk import (
+    DYNAMO_IMAGE,
     auto_trace_endpoints,
     depends,
     dynamo_endpoint,
     service,
-    DYNAMO_IMAGE,
 )
-from components.processor import Processor
 
 logger = logging.getLogger(__name__)
 
@@ -47,41 +48,45 @@ app = FastAPI(title="Universal Request Tracing Frontend")
 class Frontend:
     """
     Frontend with automatic X-Request-Id support.
-    
+
     Benefits:
     - Zero configuration required
     - Automatic header extraction/generation
     - Automatic response header injection
     - Request ID propagation to downstream components
     """
-    
+
     processor = depends(Processor)
 
     @dynamo_endpoint(is_api=True, path="/v1/chat/completions", methods=["POST"])
-    async def chat_completions(self, request: Request, chat_request: ChatCompletionRequest):
+    async def chat_completions(
+        self, request: Request, chat_request: ChatCompletionRequest
+    ):
         """
         OpenAI-compatible chat completions with automatic X-Request-Id support.
-        
+
         The @auto_trace_endpoints decorator automatically:
         1. Extracts X-Request-Id from request.headers
         2. Generates UUID if not provided
         3. Passes request_id to processor.chat_completions()
         4. Adds X-Request-Id header to response
-        
+
         No manual code needed! 🎉
         """
         logger.info("Processing chat completion request")
-        
+
         async for response in self.processor.chat_completions(chat_request):
             yield response
 
     @dynamo_endpoint(is_api=True, path="/v1/completions", methods=["POST"])
-    async def completions(self, request: Request, completion_request: CompletionRequest):
+    async def completions(
+        self, request: Request, completion_request: CompletionRequest
+    ):
         """
         OpenAI-compatible completions with automatic X-Request-Id support.
         """
         logger.info("Processing completion request")
-        
+
         async for response in self.processor.completions(completion_request):
             yield response
 
