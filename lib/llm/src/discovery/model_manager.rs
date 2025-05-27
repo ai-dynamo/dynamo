@@ -58,7 +58,6 @@ impl ModelManager {
         }
     }
 
-    /// Get all model entries currently stored in the manager
     pub fn get_model_entries(&self) -> Vec<ModelEntry> {
         self.entries.lock().unwrap().values().cloned().collect()
     }
