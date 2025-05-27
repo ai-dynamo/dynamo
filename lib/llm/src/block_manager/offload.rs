@@ -45,15 +45,12 @@
 //! of the [`OffloadManager::offload_worker`] and [`OffloadManager::onboard_worker`] methods.
 
 use super::block::{BlockError, BlockMetadata, BlockState, ImmutableBlock};
+use super::metrics::{BlockManagerMetrics, PoolMetrics};
 use super::pool::BlockPoolError;
 use super::state::TransferContext;
 use super::storage::{Cuda, Storage};
 use super::{BlockPool, DeviceStorage, DiskStorage, PinnedStorage};
 use nixl_sys::Agent as NixlAgent;
-use prometheus::{
-    register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry, IntCounterVec,
-    IntGaugeVec, Opts, Registry,
-};
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::{
@@ -76,45 +73,6 @@ use request::{BlockResult, OffloadRequest, OffloadRequestKey, OnboardRequest};
 
 const MAX_CONCURRENT_TRANSFERS: usize = 4;
 const MAX_TRANSFER_BATCH_SIZE: usize = 16;
-
-struct OffloadWorkerMetrics {
-    transfer_processed: IntCounterVec,
-    transfer_queue_size: IntGaugeVec,
-}
-
-impl OffloadWorkerMetrics {
-    pub fn new(metrics_registry: &Arc<Registry>, name: &str) -> Result<Arc<Self>> {
-        let queue_size_opts = Opts::new(
-            format!("{}_queue_size", name),
-            format!("Size of the {} queue", name),
-        )
-        .namespace("block_manager")
-        .subsystem("offload_manager");
-
-        let queue_size = register_int_gauge_vec_with_registry!(
-            queue_size_opts,
-            &["queue_type"],
-            metrics_registry
-        )?;
-
-        let processed_opts = Opts::new(
-            format!("{}_processed", name),
-            format!("Number of {}s processed", name),
-        )
-        .namespace("block_manager")
-        .subsystem("offload_manager");
-        let processed = register_int_counter_vec_with_registry!(
-            processed_opts,
-            &["queue_type"],
-            metrics_registry
-        )?;
-
-        Ok(Arc::new(OffloadWorkerMetrics {
-            transfer_processed: processed,
-            transfer_queue_size: queue_size,
-        }))
-    }
-}
 
 /// The offload manager handles all block transfers between different cache levels.
 pub struct OffloadManager<Metadata: BlockMetadata> {
@@ -142,7 +100,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         device: Option<Arc<BlockPool<DeviceStorage, Metadata>>>,
         nixl_agent: Arc<Option<NixlAgent>>,
         async_rt_handle: Handle,
-        metrics_registry: Arc<Registry>,
+        metrics: Arc<BlockManagerMetrics>,
     ) -> Result<Arc<Self>> {
         let (device_offload_tx, device_offload_rx) = mpsc::unbounded_channel();
         let (host_offload_tx, host_offload_rx) = mpsc::unbounded_channel();
@@ -169,12 +127,10 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             cuda_ctx.new_stream()?,
         ));
 
-        let offload_metric_args = OffloadWorkerMetrics::new(&metrics_registry, "offload")?;
-
         // Device -> Host offload
         let device_clone = this.device.clone();
         let host_clone = this.host.clone();
-        let offload_metric_args_clone = offload_metric_args.clone();
+        let device_offload_metrics = metrics.with_pool("device");
         async_rt_handle.spawn(async move {
             let res = OffloadManager::offload_worker(
                 device_clone,
@@ -184,8 +140,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     CudaTransferManager::new(device_offload_transfer_ctx, MAX_CONCURRENT_TRANSFERS),
                     MAX_TRANSFER_BATCH_SIZE,
                 )),
-                offload_metric_args_clone,
-                "device_to_host",
+                device_offload_metrics,
             )
             .await;
             tracing::warn!("Offload worker terminated: {:?}", res);
@@ -200,6 +155,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let host_clone = this.host.clone();
         let disk_clone = this.disk.clone();
         let transfer_ctx_clone = transfer_ctx.clone();
+        let host_offload_metrics = metrics.with_pool("host");
         async_rt_handle.spawn(async move {
             let res = OffloadManager::offload_worker(
                 host_clone,
@@ -209,20 +165,17 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     DiskTransferManager::new(transfer_ctx_clone, MAX_CONCURRENT_TRANSFERS),
                     MAX_TRANSFER_BATCH_SIZE,
                 )),
-                offload_metric_args,
-                "host_to_disk",
+                host_offload_metrics,
             )
             .await;
             tracing::warn!("Offload worker terminated: {:?}", res);
         });
 
-        let onboard_metric_args = OffloadWorkerMetrics::new(&metrics_registry, "onboard")?;
-
         // Host -> Device onboarding
         let host_clone = this.host.clone();
         let device_clone = this.device.clone();
         let transfer_ctx_clone = transfer_ctx.clone();
-        let onboard_metric_args_clone = onboard_metric_args.clone();
+        let host_onboard_metrics = metrics.with_pool("host");
         async_rt_handle.spawn(async move {
             let res = OffloadManager::onboard_worker(
                 host_clone,
@@ -232,8 +185,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     CudaTransferManager::new(transfer_ctx_clone, MAX_CONCURRENT_TRANSFERS),
                     MAX_TRANSFER_BATCH_SIZE,
                 )),
-                onboard_metric_args_clone,
-                "host_to_device",
+                host_onboard_metrics,
             )
             .await;
             tracing::warn!("Onboard worker terminated: {:?}", res);
@@ -243,6 +195,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let disk_clone = this.disk.clone();
         let device_clone = this.device.clone();
         let transfer_ctx_clone = transfer_ctx.clone();
+        let disk_onboard_metrics = metrics.with_pool("disk");
         async_rt_handle.spawn(async move {
             let res = OffloadManager::onboard_worker(
                 disk_clone,
@@ -252,8 +205,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     DiskTransferManager::new(transfer_ctx_clone, MAX_CONCURRENT_TRANSFERS),
                     MAX_TRANSFER_BATCH_SIZE,
                 )),
-                onboard_metric_args,
-                "disk_to_device",
+                disk_onboard_metrics,
             )
             .await;
             tracing::warn!("Onboard worker terminated: {:?}", res);
@@ -267,8 +219,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         target_pool: Option<Arc<BlockPool<Target, Metadata>>>,
         mut offload_rx: mpsc::UnboundedReceiver<OffloadRequest<Source, Metadata>>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Metadata>>,
-        metric_args: Arc<OffloadWorkerMetrics>,
-        name: &str,
+        pool_metrics: Arc<PoolMetrics>,
     ) -> Result<()> {
         if source_pool.is_none() || target_pool.is_none() {
             return Ok(());
@@ -285,10 +236,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                 match offload_rx.try_recv() {
                     Ok(request) => {
                         queue.insert(request);
-                        metric_args
-                            .transfer_queue_size
-                            .with_label_values(&[name])
-                            .inc();
+                        pool_metrics.gauge("offload_queue_size").inc();
                     }
                     Err(TryRecvError::Empty) => {
                         break;
@@ -299,10 +247,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
 
             // If there is a request, process it.
             if let Some(request) = queue.pop_first() {
-                metric_args
-                    .transfer_queue_size
-                    .with_label_values(&[name])
-                    .dec();
+                pool_metrics.gauge("offload_queue_size").dec();
                 // Try to upgrade the block to a strong reference.
                 let block = match request.block.upgrade() {
                     Some(block) => Some(block),
@@ -334,10 +279,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     };
 
                     if let Some(target_block) = target_blocks.into_iter().next() {
-                        metric_args
-                            .transfer_processed
-                            .with_label_values(&[name])
-                            .inc();
+                        pool_metrics.counter("offload_processed").inc();
                         transfer_manager
                             .enqueue_transfer(PendingTransfer::new(
                                 vec![block],
@@ -352,10 +294,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                 // Await the next request.
                 if let Some(request) = offload_rx.recv().await {
                     queue.insert(request);
-                    metric_args
-                        .transfer_queue_size
-                        .with_label_values(&[name])
-                        .inc();
+                    pool_metrics.gauge("offload_queue_size").inc();
                 }
             }
         }
@@ -366,8 +305,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         target_pool: Option<Arc<BlockPool<Target, Metadata>>>,
         mut onboard_rx: mpsc::UnboundedReceiver<OnboardRequest<Source, Target, Metadata>>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Metadata>>,
-        metric_args: Arc<OffloadWorkerMetrics>,
-        name: &str,
+        pool_metrics: Arc<PoolMetrics>,
     ) -> Result<()> {
         if source_pool.is_none() || target_pool.is_none() {
             return Ok(());
@@ -377,9 +315,8 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
 
         // Loop on incoming requests
         while let Some(request) = onboard_rx.recv().await {
-            metric_args
-                .transfer_queue_size
-                .with_label_values(&[name])
+            pool_metrics
+                .gauge("onboard_queue_size")
                 .set(onboard_rx.len() as i64);
             // Try to allocate blocks on the device.
             let target_blocks = match target_pool.allocate_blocks(request.blocks.len()).await {
@@ -390,9 +327,8 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                 }
             };
 
-            metric_args
-                .transfer_processed
-                .with_label_values(&[name])
+            pool_metrics
+                .counter("onboard_processed")
                 .inc_by(request.blocks.len() as u64);
 
             let sources = request
@@ -569,6 +505,7 @@ mod tests {
 
     use aligned_vec::avec;
     use cudarc::runtime::sys::{cudaMemcpy, cudaMemcpyKind, cudaMemset};
+    use prometheus::Registry;
     use std::fs::File;
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::mem::ManuallyDrop;
@@ -653,7 +590,7 @@ mod tests {
             device_pool.clone(),
             agent_arc,
             async_rt_handle,
-            Arc::new(Registry::new()),
+            BlockManagerMetrics::new(&Arc::new(Registry::new()))?,
         )?;
 
         Ok((manager, device_pool, host_pool, disk_pool))

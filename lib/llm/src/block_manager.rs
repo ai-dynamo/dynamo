@@ -25,6 +25,7 @@ mod state;
 pub mod block;
 pub mod events;
 pub mod layout;
+pub mod metrics;
 pub mod offload;
 pub mod pool;
 pub mod storage;
