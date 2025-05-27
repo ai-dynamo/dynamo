@@ -18,10 +18,6 @@ mod subprocess;
 
 const CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// How we identify a python string endpoint
-#[cfg(feature = "python")]
-const PYTHON_STR_SCHEME: &str = "pystr:";
-
 /// Where we will attach the vllm/sglang subprocess. Invisible to users.
 pub const INTERNAL_ENDPOINT: &str = "dyn://dynamo.internal.worker";
 
@@ -266,18 +262,6 @@ pub async fn run(
             let engine =
                 dynamo_engine_llamacpp::make_engine(cancel_token.clone(), &local_model).await?;
             EngineConfig::StaticCore {
-                engine,
-                model: Box::new(local_model),
-            }
-        }
-        #[cfg(feature = "python")]
-        Output::PythonStr(path_str) => {
-            let card = local_model.card();
-            let py_args = flags.as_vec(&path_str, &card.service_name);
-            let p = std::path::PathBuf::from(path_str);
-            let engine =
-                dynamo_engine_python::make_string_engine(cancel_token.clone(), &p, py_args).await?;
-            EngineConfig::StaticFull {
                 engine,
                 model: Box::new(local_model),
             }

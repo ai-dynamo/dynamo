@@ -1065,27 +1065,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-engine-python"
-version = "0.2.1"
-dependencies = [
- "anyhow",
- "async-openai",
- "async-stream",
- "async-trait",
- "dynamo-llm",
- "dynamo-runtime",
- "pyo3",
- "pyo3-async-runtimes",
- "pythonize",
- "serde",
- "serde_json",
- "thiserror 2.0.12",
- "tokio",
- "tokio-stream",
- "tracing",
-]
-
-[[package]]
 name = "dynamo-llm"
 version = "0.2.1"
 dependencies = [
@@ -1150,8 +1129,11 @@ dependencies = [
 name = "dynamo-py3"
 version = "0.2.1"
 dependencies = [
+ "anyhow",
+ "async-openai",
+ "async-stream",
+ "async-trait",
  "dlpark",
- "dynamo-engine-python",
  "dynamo-llm",
  "dynamo-runtime",
  "futures",
