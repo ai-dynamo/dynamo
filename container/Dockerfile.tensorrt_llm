@@ -166,8 +166,7 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
 ARG GENAI_PERF_VERSION
 
 # Install genai-perf for benchmarking
-
-RUN uv pip install genai-perf==$GENAI_PERF_VERSION
+RUN pip install genai-perf==$GENAI_PERF_VERSION
 
 # Install test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
