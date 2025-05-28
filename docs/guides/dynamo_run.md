@@ -12,7 +12,7 @@
     * [llama.cpp](#llamacpp)
     * [Sglang](#sglang)
     * [Vllm](#vllm)
-    * [TensorRT-LLM](#tensorrt-llm-engine)
+    * [TensorRT-LLM](#trtllm)
     * [Echo Engines](#echo-engines)
     * [Writing your own engine in Python](#writing-your-own-engine-in-python)
 * [Batch mode](#batch-mode)
