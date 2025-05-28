@@ -20,9 +20,12 @@ use pyo3::PyResult;
 
 mod block;
 mod block_list;
+mod dlpack;
+mod layer;
 
 /// Add bingings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<layer::Layer>()?;
     m.add_class::<block::Block>()?;
     m.add_class::<block_list::BlockList>()?;
     m.add_class::<BlockManager>()?;
