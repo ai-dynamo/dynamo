@@ -439,7 +439,7 @@ Shutdown: `ray stop`
 
 #### trtllm
 
-Using [TensorRT-LLM's LLM API](https://nvidia.github.io/TensorRT-LLM/llm-api/) high-level Python API.
+Using [TensorRT-LLM's LLM API](https://nvidia.github.io/TensorRT-LLM/llm-api/), a high-level Python API.
 
 You can use `--extra-engine-args` to pass extra arguments to LLM API engine.
 
