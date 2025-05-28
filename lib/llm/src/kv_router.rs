@@ -142,7 +142,10 @@ impl KvRouter {
             .map(|block| LocalBlockHash(block.block_hash()))
             .collect();
         let overlap_scores = self.indexer.find_matches(local_block_hashes).await?;
-        let worker_id = self.scheduler.schedule(overlap_scores.clone(), isl_tokens).await?;
+        let worker_id = self
+            .scheduler
+            .schedule(overlap_scores.clone(), isl_tokens)
+            .await?;
         let overlap_amount = overlap_scores.scores.get(&worker_id).copied().unwrap_or(0);
         Ok((worker_id, overlap_amount))
     }
