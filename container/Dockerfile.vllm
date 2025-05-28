@@ -427,6 +427,9 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
 RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/dist/ai_dynamo*any.whl
 
+# TODO: remove kantoku as a transitive dependency
+RUN uv pip uninstall -y kantoku circus && uv pip install circus==0.19.0
+
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
@@ -501,6 +504,9 @@ COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
     ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
     rm -r wheelhouse
+
+# TODO: remove kantoku as a transitive dependency
+RUN uv pip uninstall -y kantoku circus && uv pip install circus==0.19.0
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
