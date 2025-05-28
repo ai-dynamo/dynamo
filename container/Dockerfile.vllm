@@ -436,9 +436,7 @@ ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/
 ########################################
 FROM ci_minimum AS dev
 
-ARG GENAI_PERF_TAG
-
-ENV PATH="/perf/bin:${PATH}"
+ARG GENAI_PERF_VERSION
 
 # Install genai-perf for benchmarking
 RUN uv pip install genai-perf==$GENAI_PERF_VERSION
