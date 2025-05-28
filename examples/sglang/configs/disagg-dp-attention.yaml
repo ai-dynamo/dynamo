@@ -28,7 +28,7 @@ SGLangWorker:
   skip-tokenizer-init: true
   disaggregation-mode: prefill
   disaggregation-transfer-backend: nixl
-  port: 30000  
+  port: 30000
   ServiceArgs:
     workers: 1
     resources:
@@ -45,7 +45,7 @@ SGLangDecodeWorker:
   disaggregation-mode: decode
   disaggregation-transfer-backend: nixl
   # SGLang requires a port delta between prefill and decode workers when using enable-dp-attention
-  port: 31000 
+  port: 31000
   ServiceArgs:
     workers: 1
     resources:
