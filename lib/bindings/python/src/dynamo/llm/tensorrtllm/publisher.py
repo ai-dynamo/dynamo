@@ -80,6 +80,7 @@ class ManagedThread(threading.Thread):
         if self._current_future and not self._current_future.done():
             self._current_future.cancel()
 
+
 class Publisher:
     """
     A class to retrieve stats and kv cache events from TRTLLM engine and publish them to the metrics and events publishers.
@@ -341,6 +342,7 @@ class Publisher:
             self.publish_kv_cache_events_thread.join(timeout=cleanup_timeout)
             if self.publish_kv_cache_events_thread.is_alive():
                 logging.warning("KV cache events thread did not stop within timeout")
+
 
 @asynccontextmanager
 async def get_publisher(component, engine, kv_listener, worker_id, kv_block_size):
