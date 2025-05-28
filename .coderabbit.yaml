@@ -16,10 +16,10 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
 chat:
   auto_reply: true
-finishing_touches:
-  docstrings:
-    enabled: false
-  unit_tests:
-    enabled: false
