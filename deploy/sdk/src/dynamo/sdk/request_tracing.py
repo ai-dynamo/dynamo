@@ -144,13 +144,13 @@ def with_request_tracing(func: Callable) -> Callable:
 
 def auto_trace_endpoints(cls):
     """
-    Class decorator to automatically add request tracing to all dynamo_endpoints.
+    Class decorator to automatically add request tracing to all endpoints.
 
     Usage:
         @auto_trace_endpoints
         @service(...)
         class MyFrontend:
-            @dynamo_endpoint(is_api=True)
+            @endpoint(is_api=True)
             async def my_endpoint(self, request: Request, data: MyData):
                 # X-Request-Id is automatically handled
                 pass
@@ -161,7 +161,7 @@ def auto_trace_endpoints(cls):
 
         if (
             hasattr(attr, "__call__")
-            and hasattr(attr, "_dynamo_endpoint")
+            and hasattr(attr, "_endpoint")
             and not attr_name.startswith("_")
         ):
             wrapped_method = with_request_tracing(attr)

@@ -25,7 +25,7 @@ from typing import Optional, Tuple
 
 from dynamo.sdk import (
     RequestTracingMixin,
-    dynamo_endpoint,
+    endpoint,
     get_current_request_id,
     service,
 )
@@ -51,7 +51,7 @@ class Router(RequestTracingMixin):
         self.worker_loads = {}
         self.worker_count = 3
 
-    @dynamo_endpoint(name="route")
+    @endpoint()
     async def route(
         self, request_data: str, request_id: Optional[str] = None
     ) -> Tuple[str, float]:
@@ -98,7 +98,7 @@ class Router(RequestTracingMixin):
 
         return 0.75
 
-    @dynamo_endpoint(name="update_load")
+    @endpoint()
     async def update_load(
         self, worker_id: str, load: float, request_id: Optional[str] = None
     ):

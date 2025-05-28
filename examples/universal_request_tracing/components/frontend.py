@@ -30,7 +30,7 @@ from dynamo.sdk import (
     DYNAMO_IMAGE,
     auto_trace_endpoints,
     depends,
-    dynamo_endpoint,
+    endpoint,
     service,
 )
 
@@ -58,7 +58,7 @@ class Frontend:
 
     processor = depends(Processor)
 
-    @dynamo_endpoint(is_api=True, path="/v1/chat/completions", methods=["POST"])
+    @endpoint(is_api=True, path="/v1/chat/completions", methods=["POST"])
     async def chat_completions(
         self, request: Request, chat_request: ChatCompletionRequest
     ):
@@ -78,7 +78,7 @@ class Frontend:
         async for response in self.processor.chat_completions(chat_request):
             yield response
 
-    @dynamo_endpoint(is_api=True, path="/v1/completions", methods=["POST"])
+    @endpoint(is_api=True, path="/v1/completions", methods=["POST"])
     async def completions(
         self, request: Request, completion_request: CompletionRequest
     ):
@@ -90,7 +90,7 @@ class Frontend:
         async for response in self.processor.completions(completion_request):
             yield response
 
-    @dynamo_endpoint(is_api=True, path="/health", methods=["GET"])
+    @endpoint(is_api=True, path="/health", methods=["GET"])
     async def health(self, request: Request):
         """
         Health check endpoint - also gets automatic X-Request-Id support!

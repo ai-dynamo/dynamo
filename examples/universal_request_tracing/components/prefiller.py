@@ -26,7 +26,7 @@ from typing import AsyncIterator, Dict, Optional
 
 from dynamo.sdk import (
     RequestTracingMixin,
-    dynamo_endpoint,
+    endpoint,
     get_current_request_id,
     service,
 )
@@ -53,7 +53,7 @@ class Prefiller(RequestTracingMixin):
         self.prefill_queue = []
         self.cache_stats = {"hits": 0, "misses": 0, "prefills": 0}
 
-    @dynamo_endpoint(name="prefill")
+    @endpoint()
     async def prefill(
         self, request_data: str, request_id: Optional[str] = None
     ) -> Dict[str, any]:
@@ -118,7 +118,7 @@ class Prefiller(RequestTracingMixin):
 
         return {"status": "prefilled", "cache_key": cache_key, "kv_states": kv_states}
 
-    @dynamo_endpoint(name="get_cache")
+    @endpoint()
     async def get_cache(
         self, cache_key: str, request_id: Optional[str] = None
     ) -> Dict[str, any]:
@@ -137,7 +137,7 @@ class Prefiller(RequestTracingMixin):
             self.log_with_request_id("debug", "Cache miss")
             return {"status": "cache_miss"}
 
-    @dynamo_endpoint(name="batch_prefill")
+    @endpoint()
     async def batch_prefill(
         self, requests: list, request_id: Optional[str] = None
     ) -> AsyncIterator[Dict[str, any]]:
@@ -176,7 +176,7 @@ class Prefiller(RequestTracingMixin):
 
         return f"cache_{content_hash}"
 
-    @dynamo_endpoint(name="get_stats")
+    @endpoint()
     async def get_stats(self, request_id: Optional[str] = None) -> Dict[str, any]:
         """
         Get prefiller statistics with request tracking.

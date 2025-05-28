@@ -16,10 +16,10 @@ Dynamo SDK now provides built-in X-Request-Id support through decorators and Mix
 ### 1. Frontend Component - Using Class Decorator
 
 ```python
-from dynamo.sdk import auto_trace_endpoints, service, dynamo_endpoint
+from dynamo.sdk import auto_trace_endpoints, service, endpoint
 from fastapi import FastAPI, Request
 
-@auto_trace_endpoints  # Automatically add X-Request-Id support to all dynamo_endpoints
+@auto_trace_endpoints  # Automatically add X-Request-Id support to all endpoints
 @service(
     dynamo={"enabled": True, "namespace": "dynamo"},
     app=FastAPI(title="My Frontend"),
@@ -27,7 +27,7 @@ from fastapi import FastAPI, Request
 class Frontend:
     processor = depends(Processor)
 
-    @dynamo_endpoint(is_api=True, path="/v1/chat/completions", methods=["POST"])
+    @endpoint(is_api=True, path="/v1/chat/completions", methods=["POST"])
     async def chat_completions(self, request: Request, chat_request: ChatCompletionRequest):
         # request_id is automatically extracted from X-Request-Id header and passed to method
         # Response will automatically include X-Request-Id header
@@ -38,14 +38,14 @@ class Frontend:
 ### 2. Processor Component - Using Mixin Class
 
 ```python
-from dynamo.sdk import RequestTracingMixin, service, dynamo_endpoint
+from dynamo.sdk import RequestTracingMixin, service, endpoint
 from typing import Optional
 
 @service(dynamo={"enabled": True, "namespace": "dynamo"})
 class Processor(RequestTracingMixin):  # Inherit Mixin to get request ID utilities
     worker = depends(VllmWorker)
 
-    @dynamo_endpoint(name="chat/completions")
+    @endpoint(name="chat/completions")
     async def chat_completions(self, raw_request: ChatCompletionRequest, request_id: Optional[str] = None):
         # Use Mixin method to ensure we have request_id
         request_id = self.ensure_request_id(request_id)
@@ -65,7 +65,7 @@ from dynamo.sdk import trace_frontend_endpoint, trace_processor_method
 
 class MyComponent:
     @trace_frontend_endpoint  # Specifically for frontend endpoints
-    @dynamo_endpoint(is_api=True)
+    @endpoint(is_api=True)
     async def my_endpoint(self, request: Request, data: MyData):
         # X-Request-Id automatically handled
         pass
@@ -93,7 +93,7 @@ async def some_internal_method(self):
 ### Frontend Component
 
 ```python
-from dynamo.sdk import auto_trace_endpoints, service, dynamo_endpoint, depends
+from dynamo.sdk import auto_trace_endpoints, service, endpoint, depends
 from fastapi import FastAPI, Request
 from components.processor import Processor
 
@@ -105,7 +105,7 @@ from components.processor import Processor
 class Frontend:
     processor = depends(Processor)
 
-    @dynamo_endpoint(is_api=True, path="/v1/chat/completions", methods=["POST"])
+    @endpoint(is_api=True, path="/v1/chat/completions", methods=["POST"])
     async def chat_completions(self, request: Request, chat_request: ChatCompletionRequest):
         """
         X-Request-Id is automatically:
@@ -117,7 +117,7 @@ class Frontend:
         async for response in self.processor.chat_completions(chat_request):
             yield response
 
-    @dynamo_endpoint(is_api=True, path="/v1/completions", methods=["POST"])
+    @endpoint(is_api=True, path="/v1/completions", methods=["POST"])
     async def completions(self, request: Request, completion_request: CompletionRequest):
         async for response in self.processor.completions(completion_request):
             yield response
@@ -126,7 +126,7 @@ class Frontend:
 ### Processor Component
 
 ```python
-from dynamo.sdk import RequestTracingMixin, service, dynamo_endpoint, depends
+from dynamo.sdk import RequestTracingMixin, service, endpoint, depends
 from typing import Optional
 
 @service(dynamo={"enabled": True, "namespace": "dynamo"})
@@ -134,7 +134,7 @@ class Processor(RequestTracingMixin):
     worker = depends(VllmWorker)
     router = depends(Router)
 
-    @dynamo_endpoint(name="chat/completions")
+    @endpoint(name="chat/completions")
     async def chat_completions(self, raw_request: ChatCompletionRequest, request_id: Optional[str] = None):
         # Ensure we have request_id (from parameter, context, or generate new)
         request_id = self.ensure_request_id(request_id)
@@ -145,7 +145,7 @@ class Processor(RequestTracingMixin):
         async for response in self._generate(raw_request, RequestType.CHAT, request_id):
             yield response
 
-    @dynamo_endpoint(name="completions")
+    @endpoint(name="completions")
     async def completions(self, raw_request: CompletionRequest, request_id: Optional[str] = None):
         request_id = self.ensure_request_id(request_id)
         self.log_with_request_id("info", f"Processing completion for model: {raw_request.model}")
@@ -187,11 +187,11 @@ examples/universal_request_tracing/
 ### Router Component
 
 ```python
-from dynamo.sdk import RequestTracingMixin, dynamo_endpoint, service
+from dynamo.sdk import RequestTracingMixin, endpoint, service
 
 @service(dynamo={"enabled": True, "namespace": "dynamo"})
 class Router(RequestTracingMixin):
-    @dynamo_endpoint(name="route")
+    @endpoint(name="route")
     async def route(self, request_data: str, request_id: Optional[str] = None):
         request_id = self.ensure_request_id(request_id)
         self.log_with_request_id("info", "Routing request to optimal worker")
@@ -203,11 +203,11 @@ class Router(RequestTracingMixin):
 ### Worker Component
 
 ```python
-from dynamo.sdk import RequestTracingMixin, dynamo_endpoint, service
+from dynamo.sdk import RequestTracingMixin, endpoint, service
 
 @service(dynamo={"enabled": True, "namespace": "dynamo"})
 class Worker(RequestTracingMixin):
-    @dynamo_endpoint(name="generate")
+    @endpoint(name="generate")
     async def generate(self, request_data: str, request_id: Optional[str] = None):
         request_id = self.ensure_request_id(request_id)
         self.log_with_request_id("info", "Starting text generation")
@@ -219,11 +219,11 @@ class Worker(RequestTracingMixin):
 ### Prefiller Component
 
 ```python
-from dynamo.sdk import RequestTracingMixin, dynamo_endpoint, service
+from dynamo.sdk import RequestTracingMixin, endpoint, service
 
 @service(dynamo={"enabled": True, "namespace": "dynamo"})
 class Prefiller(RequestTracingMixin):
-    @dynamo_endpoint(name="prefill")
+    @endpoint(name="prefill")
     async def prefill(self, request_data: str, request_id: Optional[str] = None):
         request_id = self.ensure_request_id(request_id)
         self.log_with_request_id("info", "Starting KV cache prefill")
@@ -235,11 +235,11 @@ class Prefiller(RequestTracingMixin):
 ### Decoder Component
 
 ```python
-from dynamo.sdk import RequestTracingMixin, dynamo_endpoint, service
+from dynamo.sdk import RequestTracingMixin, endpoint, service
 
 @service(dynamo={"enabled": True, "namespace": "dynamo"})
 class Decoder(RequestTracingMixin):
-    @dynamo_endpoint(name="decode")
+    @endpoint(name="decode")
     async def decode(self, hidden_states: List[float], request_id: Optional[str] = None):
         request_id = self.ensure_request_id(request_id)
         self.log_with_request_id("info", "Starting token decoding")
@@ -314,7 +314,7 @@ def extract_or_generate_request_id(request: Request) -> str:
         request_id = str(uuid.uuid4())
     return request_id
 
-@dynamo_endpoint(is_api=True)
+@endpoint(is_api=True)
 async def chat_completions(self, request: Request, chat_request: ChatCompletionRequest):
     request_id = extract_or_generate_request_id(request)
 
@@ -331,7 +331,7 @@ async def chat_completions(self, request: Request, chat_request: ChatCompletionR
 ```python
 @auto_trace_endpoints
 class Frontend:
-    @dynamo_endpoint(is_api=True)
+    @endpoint(is_api=True)
     async def chat_completions(self, request: Request, chat_request: ChatCompletionRequest):
         # Everything is handled automatically!
         async for response in self.processor.chat_completions(chat_request):

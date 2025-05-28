@@ -26,7 +26,7 @@ from typing import AsyncIterator, Optional
 
 from dynamo.sdk import (
     RequestTracingMixin,
-    dynamo_endpoint,
+    endpoint,
     get_current_request_id,
     service,
 )
@@ -52,7 +52,7 @@ class Worker(RequestTracingMixin):
         self.model_name = "meta-llama/Llama-3.2-3B-Instruct"
         self.current_requests = {}
 
-    @dynamo_endpoint(name="generate")
+    @endpoint()
     async def generate(
         self, request_data: str, request_id: Optional[str] = None
     ) -> AsyncIterator[str]:
@@ -109,7 +109,7 @@ class Worker(RequestTracingMixin):
             await asyncio.sleep(0.1)
             yield token
 
-    @dynamo_endpoint(name="get_status")
+    @endpoint()
     async def get_status(self, request_id: Optional[str] = None) -> dict:
         """
         Get worker status with request tracking.
@@ -124,7 +124,7 @@ class Worker(RequestTracingMixin):
             "status": "healthy",
         }
 
-    @dynamo_endpoint(name="prefill")
+    @endpoint()
     async def prefill(
         self, request_data: str, request_id: Optional[str] = None
     ) -> AsyncIterator[str]:

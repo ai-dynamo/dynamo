@@ -31,7 +31,7 @@ from components.router import Router
 from dynamo.sdk import (
     RequestTracingMixin,
     depends,
-    dynamo_endpoint,
+    endpoint,
     get_current_request_id,
     service,
 )
@@ -66,7 +66,7 @@ class Processor(RequestTracingMixin):
         self.model_name = "meta-llama/Llama-3.2-3B-Instruct"
         self.use_router = True
 
-    @dynamo_endpoint(name="chat/completions")
+    @endpoint()
     async def chat_completions(
         self, raw_request: ChatCompletionRequest, request_id: Optional[str] = None
     ):
@@ -86,7 +86,7 @@ class Processor(RequestTracingMixin):
         async for response in self._generate(raw_request, RequestType.CHAT, request_id):
             yield response
 
-    @dynamo_endpoint(name="completions")
+    @endpoint()
     async def completions(
         self, raw_request: CompletionRequest, request_id: Optional[str] = None
     ):

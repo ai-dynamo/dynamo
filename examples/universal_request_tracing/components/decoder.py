@@ -24,12 +24,7 @@ import asyncio
 import logging
 from typing import AsyncIterator, Dict, List, Optional
 
-from dynamo.sdk import (
-    RequestTracingMixin,
-    dynamo_endpoint,
-    get_current_request_id,
-    service,
-)
+from dynamo.sdk import RequestTracingMixin, endpoint, get_current_request_id, service
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +48,7 @@ class Decoder(RequestTracingMixin):
         self.active_sequences = {}
         self.decode_stats = {"tokens_generated": 0, "sequences_completed": 0}
 
-    @dynamo_endpoint(name="decode")
+    @endpoint()
     async def decode(
         self, hidden_states: List[float], request_id: Optional[str] = None
     ) -> AsyncIterator[Dict[str, any]]:
@@ -179,7 +174,7 @@ class Decoder(RequestTracingMixin):
 
         return logprobs
 
-    @dynamo_endpoint(name="batch_decode")
+    @endpoint()
     async def batch_decode(
         self, batch_hidden_states: List[List[float]], request_id: Optional[str] = None
     ) -> AsyncIterator[Dict[str, any]]:
@@ -209,7 +204,7 @@ class Decoder(RequestTracingMixin):
                 token_result["batch_idx"] = batch_idx
                 yield token_result
 
-    @dynamo_endpoint(name="get_stats")
+    @endpoint()
     async def get_stats(self, request_id: Optional[str] = None) -> Dict[str, any]:
         """
         Get decoder statistics with request tracking.
@@ -227,7 +222,7 @@ class Decoder(RequestTracingMixin):
             ),
         }
 
-    @dynamo_endpoint(name="stop_sequence")
+    @endpoint()
     async def stop_sequence(
         self, sequence_id: str, request_id: Optional[str] = None
     ) -> Dict[str, any]:
