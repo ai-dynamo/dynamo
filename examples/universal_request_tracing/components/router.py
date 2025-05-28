@@ -21,7 +21,7 @@ request tracing for automatic request ID propagation.
 """
 
 import logging
-from typing import Tuple, Optional
+from typing import Optional, Tuple
 
 from dynamo.sdk import (
     RequestTracingMixin,
@@ -104,7 +104,9 @@ class Router(RequestTracingMixin):
 
     @endpoint()
     @with_request_id()
-    async def update_load(self, worker_id: str, load: float, request_id: Optional[str] = None):
+    async def update_load(
+        self, worker_id: str, load: float, request_id: Optional[str] = None
+    ):
         """
         Update worker load information with request tracking.
 

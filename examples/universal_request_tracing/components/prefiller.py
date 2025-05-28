@@ -122,7 +122,9 @@ class Prefiller(RequestTracingMixin):
 
     @endpoint()
     @with_request_id()
-    async def get_cache(self, cache_key: str, request_id: Optional[str] = None) -> Dict[str, Any]:
+    async def get_cache(
+        self, cache_key: str, request_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Retrieve cached KV states with request tracking.
 

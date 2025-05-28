@@ -22,17 +22,15 @@ request tracing for automatic request ID propagation across components.
 
 import logging
 from typing import Any, Dict, List, Optional
-import asyncio
 
+from dynamo.client import DynamoClient
 from dynamo.sdk import (
     RequestTracingMixin,
+    async_on_start,
     endpoint,
-    get_current_request_id,
     service,
     with_request_id,
-    async_on_start,
 )
-from dynamo.client import DynamoClient
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +50,8 @@ class Processor(RequestTracingMixin):
     """
 
     def __init__(self):
-        self.prefiller_client: Optional[DynamoClient] = None
-        self.decoder_client: Optional[DynamoClient] = None
+        self.prefiller_client: DynamoClient
+        self.decoder_client: DynamoClient
         self.request_count = 0
 
     @async_on_start
@@ -122,7 +120,9 @@ class Processor(RequestTracingMixin):
 
     @endpoint(is_api=True)
     @with_request_id()
-    async def get_system_stats(self, request_id: Optional[str] = None) -> Dict[str, Any]:
+    async def get_system_stats(
+        self, request_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Get statistics from all components with request tracking.
 
