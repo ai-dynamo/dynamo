@@ -26,13 +26,7 @@ from components.processor import Processor
 from fastapi import FastAPI, Request
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
 
-from dynamo.sdk import (
-    DYNAMO_IMAGE,
-    auto_trace_endpoints,
-    depends,
-    endpoint,
-    service,
-)
+from dynamo.sdk import DYNAMO_IMAGE, auto_trace_endpoints, depends, endpoint, service
 
 logger = logging.getLogger(__name__)
 

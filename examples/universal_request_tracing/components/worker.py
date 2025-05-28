@@ -24,12 +24,7 @@ import asyncio
 import logging
 from typing import AsyncIterator, Optional
 
-from dynamo.sdk import (
-    RequestTracingMixin,
-    endpoint,
-    get_current_request_id,
-    service,
-)
+from dynamo.sdk import RequestTracingMixin, endpoint, get_current_request_id, service
 
 logger = logging.getLogger(__name__)
 

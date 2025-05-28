@@ -23,12 +23,7 @@ request tracing for automatic request ID propagation.
 import logging
 from typing import Optional, Tuple
 
-from dynamo.sdk import (
-    RequestTracingMixin,
-    endpoint,
-    get_current_request_id,
-    service,
-)
+from dynamo.sdk import RequestTracingMixin, endpoint, get_current_request_id, service
 
 logger = logging.getLogger(__name__)
 
