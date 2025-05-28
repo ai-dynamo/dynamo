@@ -23,8 +23,6 @@ pub mod recorder;
 pub mod scheduler;
 pub mod scoring;
 
-use tracing;
-
 use crate::{
     kv_router::{
         indexer::{KvIndexer, KvIndexerInterface, RouterEvent},
