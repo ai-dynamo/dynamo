@@ -21,7 +21,8 @@ request tracing for automatic request ID propagation across components.
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+import asyncio
 
 from dynamo.sdk import (
     RequestTracingMixin,
@@ -29,7 +30,9 @@ from dynamo.sdk import (
     get_current_request_id,
     service,
     with_request_id,
+    async_on_start,
 )
+from dynamo.client import DynamoClient
 
 logger = logging.getLogger(__name__)
 
@@ -44,19 +47,28 @@ class Processor(RequestTracingMixin):
 
     Benefits of using RequestTracingMixin:
     - ensure_request_id(): Automatic request ID management
-    - log_with_request_id(): Consistent logging with request ID
+    - log(): Consistent logging with request ID
     - get_current_request_id(): Access request ID anywhere in call stack
     """
 
     def __init__(self):
-        self.prefiller_client = None
-        self.decoder_client = None
+        # These will be properly initialized in async_init
+        self.prefiller_client: DynamoClient
+        self.decoder_client: DynamoClient  
         self.request_count = 0
+
+    @async_on_start
+    async def async_init(self):
+        """Asynchronous initialization method that runs on service startup."""
+        self.log("debug", "Initializing component clients")
+        self.prefiller_client = await DynamoClient.create("prefiller")
+        self.decoder_client = await DynamoClient.create("decoder")
+        self.log("debug", "Component clients initialized successfully")
 
     @endpoint(is_api=True)
     @with_request_id()
     async def process(
-        self, request_text: str, request_id: str = None
+        self, request_text: str, request_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Process request with automatic request ID tracking.
@@ -73,9 +85,6 @@ class Processor(RequestTracingMixin):
         self.request_count += 1
 
         try:
-            # Initialize clients for each component (if needed)
-            await self._init_component_clients()
-
             # Prefill KV cache
             self.log("debug", "Calling prefiller service")
             prefill_result = await self.prefiller_client.prefill(
@@ -104,18 +113,6 @@ class Processor(RequestTracingMixin):
             self.log("error", f"Processing failed: {e}")
             raise
 
-    async def _init_component_clients(self):
-        """Initialize component clients if not already done."""
-        current_req_id_opt = get_current_request_id()
-        if current_req_id_opt:
-            logger.debug(f"Initializing clients for request: {current_req_id_opt}")
-
-        if self.prefiller_client is None:
-            from dynamo.client import DynamoClient
-
-            self.prefiller_client = await DynamoClient.create("prefiller")
-            self.decoder_client = await DynamoClient.create("decoder")
-
     def _compute_hidden_states(self, text: str) -> List[float]:
         """
         Simplified hidden states computation.
@@ -126,7 +123,7 @@ class Processor(RequestTracingMixin):
 
     @endpoint(is_api=True)
     @with_request_id()
-    async def get_system_stats(self, request_id: str = None) -> Dict[str, Any]:
+    async def get_system_stats(self, request_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Get statistics from all components with request tracking.
 
@@ -138,8 +135,6 @@ class Processor(RequestTracingMixin):
             A dict containing stats from all components
         """
         self.log("info", "Retrieving system statistics")
-
-        await self._init_component_clients()
 
         prefiller_stats = await self.prefiller_client.get_stats(request_id=request_id)
         decoder_stats = await self.decoder_client.get_stats(request_id=request_id)

@@ -22,7 +22,7 @@ request tracing for automatic request ID propagation and KV cache management.
 
 import asyncio
 import logging
-from typing import Any, AsyncIterator, Dict
+from typing import Any, AsyncIterator, Dict, Optional
 
 from dynamo.sdk import (
     RequestTracingMixin,
@@ -57,7 +57,7 @@ class Prefiller(RequestTracingMixin):
     @endpoint()
     @with_request_id()
     async def prefill(
-        self, request_data: str, request_id: str = None
+        self, request_data: str, request_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Prefill KV cache with automatic request ID tracking.
@@ -122,7 +122,7 @@ class Prefiller(RequestTracingMixin):
 
     @endpoint()
     @with_request_id()
-    async def get_cache(self, cache_key: str, request_id: str = None) -> Dict[str, Any]:
+    async def get_cache(self, cache_key: str, request_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Retrieve cached KV states with request tracking.
 
@@ -148,7 +148,7 @@ class Prefiller(RequestTracingMixin):
     @endpoint()
     @with_request_id()
     async def batch_prefill(
-        self, requests: list, request_id: str = None
+        self, requests: list, request_id: Optional[str] = None
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         Batch prefill operation with request tracking.
@@ -190,7 +190,7 @@ class Prefiller(RequestTracingMixin):
 
     @endpoint()
     @with_request_id()
-    async def get_stats(self, request_id: str = None) -> Dict[str, Any]:
+    async def get_stats(self, request_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Get prefiller statistics with request tracking.
 

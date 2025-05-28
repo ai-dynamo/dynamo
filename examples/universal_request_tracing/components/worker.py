@@ -22,7 +22,7 @@ request tracing for automatic request ID propagation and logging.
 
 import asyncio
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from dynamo.sdk import (
     RequestTracingMixin,
@@ -56,7 +56,7 @@ class Worker(RequestTracingMixin):
     @endpoint()
     @with_request_id()
     async def generate(
-        self, request_data: str, request_id: str = None
+        self, request_data: str, request_id: Optional[str] = None
     ) -> AsyncIterator[str]:
         """
         Generate text with automatic request ID tracking.
@@ -115,7 +115,7 @@ class Worker(RequestTracingMixin):
 
     @endpoint()
     @with_request_id()
-    async def get_status(self, request_id: str = None) -> dict:
+    async def get_status(self, request_id: Optional[str] = None) -> dict:
         """
         Get worker status with request tracking.
 
@@ -138,7 +138,7 @@ class Worker(RequestTracingMixin):
     @endpoint()
     @with_request_id()
     async def prefill(
-        self, request_data: str, request_id: str = None
+        self, request_data: str, request_id: Optional[str] = None
     ) -> AsyncIterator[str]:
         """
         Prefill operation with request tracking.

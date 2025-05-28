@@ -22,7 +22,7 @@ request tracing for automatic request ID propagation and decode operations.
 
 import asyncio
 import logging
-from typing import Any, AsyncIterator, Dict, List
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from dynamo.sdk import (
     RequestTracingMixin,
@@ -57,7 +57,7 @@ class Decoder(RequestTracingMixin):
     @endpoint()
     @with_request_id()
     async def decode(
-        self, hidden_states: List[float], request_id: str = None
+        self, hidden_states: List[float], request_id: Optional[str] = None
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         Decode hidden states to tokens with automatic request ID tracking.
@@ -188,7 +188,7 @@ class Decoder(RequestTracingMixin):
     @endpoint()
     @with_request_id()
     async def batch_decode(
-        self, batch_hidden_states: List[List[float]], request_id: str = None
+        self, batch_hidden_states: List[List[float]], request_id: Optional[str] = None
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         Batch decode multiple sequences with request tracking.
@@ -225,7 +225,7 @@ class Decoder(RequestTracingMixin):
 
     @endpoint()
     @with_request_id()
-    async def get_stats(self, request_id: str = None) -> Dict[str, Any]:
+    async def get_stats(self, request_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Get decoder statistics with request tracking.
 
@@ -251,7 +251,7 @@ class Decoder(RequestTracingMixin):
     @endpoint()
     @with_request_id()
     async def stop_sequence(
-        self, sequence_id: str, request_id: str = None
+        self, sequence_id: str, request_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Stop a specific decoding sequence with request tracking.
