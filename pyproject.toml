@@ -66,6 +66,10 @@ vllm = [
     "ai-dynamo-vllm~=0.8.4"
 ]
 
+sglang = [
+    "sglang[all]@git+https://github.com/sgl-project/sglang@e806f708c954020bda7d1cc98035a44fd6a4eb96#subdirectory=python"
+]
+
 [project.scripts]
 dynamo = "dynamo.sdk.cli.cli:cli"
 dynamo-run = "dynamo.sdk.cli.run_executable:dynamo_run"
@@ -86,6 +90,9 @@ packages = ["deploy/sdk/src/dynamo", "components/planner/src/dynamo"]
 
 [tool.hatch.build.hooks.custom]
 path = "hatch_build.py"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.codespell]
 # note: pre-commit passes explicit lists of files here, which this skip file list doesn't override -

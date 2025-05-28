@@ -18,10 +18,8 @@ from typing import Any
 from bentoml import on_shutdown as async_on_shutdown
 
 from dynamo.sdk.core.decorators.endpoint import api, endpoint
+from dynamo.sdk.core.lib import DYNAMO_IMAGE, depends, liveness, readiness, service
 from dynamo.sdk.lib.decorators import async_on_start, dynamo_endpoint
-from dynamo.sdk.lib.dependency import depends
-from dynamo.sdk.lib.image import DYNAMO_IMAGE
-from dynamo.sdk.lib.service import service
 from dynamo.sdk.request_tracing import (
     RequestTracingMixin,
     auto_trace_endpoints,
@@ -51,4 +49,6 @@ __all__ = [
     "trace_frontend_endpoint",
     "trace_processor_method",
     "with_request_tracing",
+    "liveness",
+    "readiness",
 ]

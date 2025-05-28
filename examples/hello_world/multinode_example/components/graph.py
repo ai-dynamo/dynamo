@@ -13,18 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
+from components.frontend import Frontend
+from components.processor import Processor
 
-
-def get_host_port():
-    """Gets host and port from environment variables. Defaults to 0.0.0.0:8000."""
-    port = int(os.environ.get("DYNAMO_PORT", 8000))
-    host = os.environ.get("DYNAMO_HOST", "0.0.0.0")
-    return host, port
-
-
-def get_system_app_host_port():
-    """Gets host and port for system app from environment variables. Defaults to choosing a random port."""
-    port = int(os.environ.get("DYNAMO_SYSTEM_APP_PORT", 0))
-    host = os.environ.get("DYNAMO_SYSTEM_APP_HOST", "0.0.0.0")
-    return host, port
+Frontend.link(Processor)
