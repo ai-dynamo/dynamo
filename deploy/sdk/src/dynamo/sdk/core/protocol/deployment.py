@@ -97,12 +97,16 @@ class DeploymentStatus(str, Enum):
 
 @dataclass
 class ScalingPolicy:
+    """Scaling policy."""
+
     policy: str
     parameters: t.Dict[str, t.Union[int, float, str]] = field(default_factory=dict)
 
 
 @dataclass
 class Env:
+    """Environment variable."""
+
     name: str
     value: str = ""
 

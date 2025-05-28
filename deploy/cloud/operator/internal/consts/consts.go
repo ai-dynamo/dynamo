@@ -10,6 +10,9 @@ const (
 	DynamoServicePortName   = "http"
 	DynamoContainerPortName = "http"
 
+	DynamoHealthPort     = 5000
+	DynamoHealthPortName = "health"
+
 	DynamoImageBuilderComponentName = "dynamo-image-builder"
 
 	DynamoApiServerComponentName = "api-server"

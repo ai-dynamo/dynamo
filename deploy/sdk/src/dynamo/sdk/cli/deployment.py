@@ -140,7 +140,7 @@ def _handle_deploy_create(
 
     # TODO: hardcoding this is a hack to get the services for the deployment
     # we should find a better way to do this once build is finished/generic
-    configure_target_environment(TargetEnum.BENTO)
+    configure_target_environment(TargetEnum.DYNAMO)
     entry_service = load_entry_service(pipeline)
 
     deployment_manager = get_deployment_manager(target, endpoint)
