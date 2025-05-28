@@ -154,10 +154,12 @@ async def init(runtime: DistributedRuntime, config: Config):
         "skip_tokenizer_init": True,
         "disable_log_requests": True,
         "enable_prefix_caching": True,
-        "block_size": config.kv_block_size,
         # KV routing relies on logging KV metrics
         "disable_log_stats": False,
     }
+    if config.kv_block_size:
+        arg_map["block_size"] = config.kv_block_size
+
     if config.context_length:
         # Usually we want it to default to the max (from tokenizer_config.json)
         arg_map["max_model_len"] = config.context_length

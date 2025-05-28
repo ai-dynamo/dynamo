@@ -91,8 +91,11 @@ async def init(runtime: DistributedRuntime, config: Config):
         "skip_tokenizer_init": True,
         "tp_size": config.tensor_parallel_size,
         "base_gpu_id": config.base_gpu_id,
-        "page_size": config.kv_block_size,
     }
+
+    if config.kv_block_size:
+        arg_map["page_size"] = config.kv_block_size
+
     if config.context_length:
         arg_map["context_length"] = config.context_length
 

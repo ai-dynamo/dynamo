@@ -21,7 +21,7 @@ Processor:
   router: round-robin
   common-configs: [model, block-size, max-model-len]
 
-VllmWorker:
+VllmDecodeWorker:
   enforce-eager: true
   max-num-batched-tokens: 16384
   enable-prefix-caching: true
@@ -33,7 +33,7 @@ VllmWorker:
       gpu: 1
   common-configs: [model, block-size, max-model-len]
 
-EncodeWorker:
+VllmEncodeWorker:
   tensor-parallel-size: 1
   router: random
   ServiceArgs:
