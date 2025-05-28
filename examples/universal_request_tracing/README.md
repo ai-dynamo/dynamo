@@ -180,8 +180,6 @@ examples/universal_request_tracing/
 │   ├── prefiller.py            # Prefiller with RequestTracingMixin
 │   └── decoder.py              # Decoder with RequestTracingMixin
 ├── test_universal_tracing.py   # Complete test script
-└── docs/
-    └── migration_guide.md      # Migration guide from manual implementation
 ```
 
 ## All Component Examples
