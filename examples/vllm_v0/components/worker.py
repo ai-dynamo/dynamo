@@ -202,6 +202,7 @@ class VllmWorker:
 
     @endpoint()
     async def generate(self, request: PreprocessedRequest):
+        print(request)
         request_id = str(uuid.uuid4())
 
         if self.disaggregated_router is not None:

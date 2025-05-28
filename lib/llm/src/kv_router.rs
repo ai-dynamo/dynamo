@@ -23,6 +23,8 @@ pub mod recorder;
 pub mod scheduler;
 pub mod scoring;
 
+use tracing;
+
 use crate::{
     kv_router::{
         indexer::{KvIndexer, KvIndexerInterface, RouterEvent},
@@ -192,7 +194,7 @@ impl AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<LLMEngineOutput>>, Er
                 let (instance_id, overlap_amount) =
                     self.chooser.find_best_match(&request.token_ids).await?;
                 // Update the request with the estimated prefix hit blocks
-                println!("KVPUSHROUTER: KV router selected worker {} with overlap amount {}", instance_id, overlap_amount);
+                
                 let (mut backend_input, context) = request.into_parts();
                 backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
                 let updated_request = context.map(|_| backend_input);
