@@ -160,7 +160,7 @@ def replace_url_with_relpath(url, src_doc_path):
 
     # The "target_path" must be a file at this line.
     relpath = os.path.relpath(target_path, start=os.path.dirname(src_doc_path))
-    return re.sub(dynamo_github_url_reg, relpath, url, 1)
+    return re.sub(dynamo_github_url_reg, relpath, url, count=1)
 
 
 def replace_relpath_with_url(relpath, src_doc_path):
