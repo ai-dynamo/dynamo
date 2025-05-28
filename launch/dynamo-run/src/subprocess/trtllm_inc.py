@@ -143,6 +143,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         "disable_log_stats": False,
     }
     if config.extra_engine_args != "":
+        # TODO: Support extra engine args from json file as well.
         arg_map = update_llm_args_with_extra_options(arg_map, config.extra_engine_args)
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.

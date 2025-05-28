@@ -460,11 +460,6 @@ Execute the following to load the TensorRT-LLM model specified in the configurat
 dynamo-run in=http out=trtllm TinyLlama/TinyLlama-1.1B-Chat-v1.0
 ```
 
-If using KV routing, you should also enable kv cache event and metrics publishers like below:
-```
-dynamo-run in=http out=trtllm TinyLlama/TinyLlama-1.1B-Chat-v1.0 -- --publish-events-and-metrics
-```
-
 #### Echo Engines
 
 Dynamo includes two echo engines for testing and debugging purposes:
