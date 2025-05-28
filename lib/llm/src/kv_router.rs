@@ -194,7 +194,6 @@ impl AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<LLMEngineOutput>>, Er
                 let (instance_id, overlap_amount) =
                     self.chooser.find_best_match(&request.token_ids).await?;
                 // Update the request with the estimated prefix hit blocks
-                
                 let (mut backend_input, context) = request.into_parts();
                 backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
                 let updated_request = context.map(|_| backend_input);
