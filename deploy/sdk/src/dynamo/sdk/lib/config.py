@@ -32,7 +32,7 @@ class ServiceConfig(dict):
         if cls._instance is None:
             cls._instance = cls._load_from_env()
         return cls._instance
-    
+
     @classmethod
     def _load_from_env(cls):
         """Load config from environment variable"""
@@ -55,7 +55,7 @@ class ServiceConfig(dict):
     def get_parsed_config(cls, service_name):
         """Get parsed config for a service with common configs applied, returned as dict"""
         instance = cls.get_instance()
-        
+
         if service_name not in instance:
             return {}
 

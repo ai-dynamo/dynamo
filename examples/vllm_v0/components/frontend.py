@@ -63,11 +63,12 @@ class Frontend:
 
     def __init__(self):
         """Initialize Frontend service with HTTP server and model configuration."""
-        self.frontend_config = FrontendConfig(**ServiceConfig.get_parsed_config("Frontend"))
+        self.frontend_config = FrontendConfig(
+            **ServiceConfig.get_parsed_config("Frontend")
+        )
         self.process = None
 
         logger.warning(f"Frontend config: {self.frontend_config}")
-
 
         self.start_ingress_and_processor()
 
