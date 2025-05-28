@@ -92,13 +92,15 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
 }
 
 #[pyfunction]
-#[pyo3(signature = (model_type, endpoint, model_path, model_name=None))]
+#[pyo3(signature = (model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None))]
 fn register_llm<'p>(
     py: Python<'p>,
     model_type: ModelType,
     endpoint: Endpoint,
     model_path: &str,
     model_name: Option<&str>,
+    context_length: Option<usize>,
+    kv_cache_block_size: Option<usize>,
 ) -> PyResult<Bound<'p, PyAny>> {
     let model_type_obj = match model_type {
         ModelType::Chat => llm_rs::model_type::ModelType::Chat,
@@ -111,9 +113,16 @@ fn register_llm<'p>(
     let model_name = model_name.map(|n| n.to_string());
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         // Download from HF, load the ModelDeploymentCard
-        let mut local_model = llm_rs::LocalModel::prepare(&inner_path, None, model_name)
-            .await
-            .map_err(to_pyerr)?;
+        let mut local_model =
+            llm_rs::local_model::LocalModel::prepare(&inner_path, None, model_name)
+                .await
+                .map_err(to_pyerr)?;
+        if let Some(context_length) = context_length {
+            local_model.set_context_length(context_length);
+        }
+        if let Some(kv_cache_block_size) = kv_cache_block_size {
+            local_model.set_kv_cache_block_size(kv_cache_block_size);
+        }
 
         // Advertise ourself on etcd so ingress can find us
         local_model

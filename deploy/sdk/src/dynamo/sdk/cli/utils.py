@@ -356,18 +356,14 @@ def resolve_service_config(
                 for key, value in configs.items():
                     service_configs[service][key] = value
 
-    logger.debug(f"Final resolved config: {service_configs}")
+    logger.info(f"Running dynamo serve with config: {service_configs}")
     return service_configs
 
 
 def configure_target_environment(target: TargetEnum):
     from dynamo.sdk.core.lib import set_target
 
-    if target == TargetEnum.BENTO:
-        from dynamo.sdk.core.runner.bentoml import BentoDeploymentTarget
-
-        target = BentoDeploymentTarget()
-    elif target == TargetEnum.DYNAMO:
+    if target == TargetEnum.DYNAMO:
         from dynamo.sdk.core.runner.dynamo import LocalDeploymentTarget
 
         target = LocalDeploymentTarget()
@@ -393,7 +389,7 @@ def is_local_planner_enabled(svc: Any, service_configs: dict) -> bool:
     planners = [
         node
         for node in nodes
-        if node.config.get("dynamo", {}).get("component_type") == ComponentType.PLANNER
+        if node.config.dynamo.component_type == ComponentType.PLANNER
     ]
 
     if len(planners) > 1:
@@ -429,7 +425,7 @@ def raise_local_planner_warning(svc: Any, service_configs: dict) -> None:
     nodes.append(svc)
     worker_names = ("PrefillWorker", "VllmWorker")
     worker_counts_greater_than_one = [
-        node.config.get("workers", 1) > 1 for node in nodes if node.name in worker_names
+        node.config.workers > 1 for node in nodes if node.name in worker_names
     ]
 
     if any(worker_counts_greater_than_one) and not no_op:

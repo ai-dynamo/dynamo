@@ -25,7 +25,10 @@ use std::sync::{
 };
 use tokio::{net::unix::pipe::Receiver, sync::Mutex};
 
-use crate::{pipeline::async_trait, transports::etcd::WatchEvent};
+use crate::{
+    pipeline::async_trait,
+    transports::etcd::{Client as EtcdClient, WatchEvent},
+};
 
 use super::*;
 
@@ -53,7 +56,7 @@ pub struct Client {
     // This is me
     pub endpoint: Endpoint,
     // These are the remotes I know about
-    pub instances: InstanceSource,
+    pub instance_source: Arc<InstanceSource>,
 }
 
 #[derive(Clone, Debug)]
@@ -67,7 +70,7 @@ impl Client {
     pub(crate) async fn new_static(endpoint: Endpoint) -> Result<Self> {
         Ok(Client {
             endpoint,
-            instances: InstanceSource::Static,
+            instance_source: Arc::new(InstanceSource::Static),
         })
     }
 
@@ -77,6 +80,74 @@ impl Client {
         let Some(etcd_client) = &endpoint.component.drt.etcd_client else {
             anyhow::bail!("Attempt to create a dynamic client on a static endpoint");
         };
+
+        let instance_source =
+            Self::get_or_create_dynamic_instance_source(etcd_client, &endpoint).await?;
+
+        Ok(Client {
+            endpoint,
+            instance_source,
+        })
+    }
+
+    pub fn path(&self) -> String {
+        self.endpoint.path()
+    }
+
+    /// The root etcd path we watch in etcd to discover new instances to route to.
+    pub fn etcd_root(&self) -> String {
+        self.endpoint.etcd_root()
+    }
+
+    pub fn instances(&self) -> Vec<Instance> {
+        match self.instance_source.as_ref() {
+            InstanceSource::Static => vec![],
+            InstanceSource::Dynamic(watch_rx) => watch_rx.borrow().clone(),
+        }
+    }
+
+    pub fn instance_ids(&self) -> Vec<i64> {
+        self.instances().into_iter().map(|ep| ep.id()).collect()
+    }
+
+    /// Wait for at least one Instance to be available for this Endpoint
+    pub async fn wait_for_instances(&self) -> Result<Vec<Instance>> {
+        let mut instances: Vec<Instance> = vec![];
+        if let InstanceSource::Dynamic(mut rx) = self.instance_source.as_ref().clone() {
+            // wait for there to be 1 or more endpoints
+            loop {
+                instances = rx.borrow_and_update().to_vec();
+                if instances.is_empty() {
+                    rx.changed().await?;
+                } else {
+                    break;
+                }
+            }
+        }
+        Ok(instances)
+    }
+
+    /// Is this component know at startup and not discovered via etcd?
+    pub fn is_static(&self) -> bool {
+        matches!(self.instance_source.as_ref(), InstanceSource::Static)
+    }
+
+    async fn get_or_create_dynamic_instance_source(
+        etcd_client: &EtcdClient,
+        endpoint: &Endpoint,
+    ) -> Result<Arc<InstanceSource>> {
+        let drt = endpoint.drt();
+        let instance_sources = drt.instance_sources();
+        let mut instance_sources = instance_sources.lock().await;
+
+        if let Some(instance_source) = instance_sources.get(endpoint) {
+            if let Some(instance_source) = instance_source.upgrade() {
+                return Ok(instance_source);
+            } else {
+                instance_sources.remove(endpoint);
+            }
+        }
+
         let prefix_watcher = etcd_client
             .kv_get_and_watch_prefix(endpoint.etcd_root())
             .await?;
@@ -146,51 +217,8 @@ impl Client {
             let _ = watch_tx.send(vec![]);
         });
 
-        Ok(Client {
-            endpoint,
-            instances: InstanceSource::Dynamic(watch_rx),
-        })
-    }
-
-    pub fn path(&self) -> String {
-        self.endpoint.path()
-    }
-
-    /// The root etcd path we watch in etcd to discover new instances to route to.
-    pub fn etcd_root(&self) -> String {
-        self.endpoint.etcd_root()
-    }
-
-    pub fn instances(&self) -> Vec<Instance> {
-        match &self.instances {
-            InstanceSource::Static => vec![],
-            InstanceSource::Dynamic(watch_rx) => watch_rx.borrow().clone(),
-        }
-    }
-
-    pub fn instance_ids(&self) -> Vec<i64> {
-        self.instances().into_iter().map(|ep| ep.id()).collect()
-    }
-
-    /// Wait for at least one Instance to be available for this Endpoint
-    pub async fn wait_for_instances(&self) -> Result<Vec<Instance>> {
-        let mut instances: Vec<Instance> = vec![];
-        if let InstanceSource::Dynamic(mut rx) = self.instances.clone() {
-            // wait for there to be 1 or more endpoints
-            loop {
-                instances = rx.borrow_and_update().to_vec();
-                if instances.is_empty() {
-                    rx.changed().await?;
-                } else {
-                    break;
-                }
-            }
-        }
-        Ok(instances)
-    }
-
-    /// Is this component know at startup and not discovered via etcd?
-    pub fn is_static(&self) -> bool {
-        matches!(self.instances, InstanceSource::Static)
+        let instance_source = Arc::new(InstanceSource::Dynamic(watch_rx));
+        instance_sources.insert(endpoint.clone(), Arc::downgrade(&instance_source));
+        Ok(instance_source)
     }
 }

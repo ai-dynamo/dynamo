@@ -1,14 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use clap::{Parser, Subcommand};
-use tracing as log;
+use std::sync::Arc;
 
-use dynamo_llm::discovery::ModelEntry;
+use clap::{Parser, Subcommand};
+
+use dynamo_llm::discovery::{ModelManager, ModelWatcher};
+use dynamo_llm::local_model::{LocalModel, ModelNetworkName};
 use dynamo_llm::model_type::ModelType;
+use dynamo_runtime::component::Endpoint;
+use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{
-    distributed::DistributedConfig, logging, protocols::Endpoint, raise, DistributedRuntime,
-    Result, Runtime, Worker,
+    distributed::DistributedConfig, logging, DistributedRuntime, Result, Runtime, Worker,
 };
 
 // Macro to define model types and associated commands
@@ -93,12 +96,13 @@ define_type_subcommands!(
 #[command(
     author="NVIDIA",
     version="0.2.1",
-    about="LLMCTL - Control and manage Dynamo Components",
+    about="LLMCTL - Deprecated. Do not use.",
     long_about = None,
     disable_help_subcommand = true,
 )]
 struct Cli {
     /// Public Namespace to operate in
+    /// Do not use this. In fact don't use anything about this file.
     #[arg(short = 'n', long)]
     public_namespace: Option<String>,
 
@@ -158,8 +162,8 @@ fn main() -> Result<()> {
     logging::init();
     let cli = Cli::parse();
 
-    // Default namespace to "public" if not specified
-    let namespace = cli.public_namespace.unwrap_or_else(|| "public".to_string());
+    // Default namespace to "dynamo" if not specified
+    let namespace = cli.public_namespace.unwrap_or_else(|| "dynamo".to_string());
 
     let worker = Worker::from_settings()?;
     worker.execute(|runtime| async move { handle_command(runtime, namespace, cli.command).await })
@@ -201,7 +205,7 @@ async fn handle_command(runtime: Runtime, namespace: String, command: Commands) 
                 }
                 HttpCommands::Remove { model_type } => {
                     let (model_type, name) = model_type.into_parts();
-                    remove_model(&distributed, namespace.to_string(), model_type, &name).await?;
+                    remove_model(&distributed, model_type, &name).await?;
                 }
             }
         }
@@ -209,7 +213,6 @@ async fn handle_command(runtime: Runtime, namespace: String, command: Commands) 
     Ok(())
 }
 
-// Helper functions to handle the actual operations
 async fn add_model(
     distributed: &DistributedRuntime,
     namespace: String,
@@ -217,74 +220,15 @@ async fn add_model(
     model_name: String,
     endpoint_name: &str,
 ) -> Result<()> {
-    log::debug!(
-        "Adding model {} with endpoint {}",
-        model_name,
-        endpoint_name
-    );
-
+    tracing::debug!("Adding model {model_name} with endpoint {endpoint_name}");
     if model_name.starts_with('/') {
-        raise!("Model name '{}' cannot start with a slash", model_name);
+        anyhow::bail!("Model name '{model_name}' cannot start with a slash");
     }
 
-    let parts: Vec<&str> = endpoint_name.split('.').collect();
+    let endpoint = endpoint_from_name(distributed, &namespace, endpoint_name)?;
 
-    if parts.len() < 2 {
-        raise!("Endpoint name '{}' is too short. Format should be 'component.endpoint' or 'namespace.component.endpoint'", endpoint_name);
-    } else if parts.len() > 3 {
-        raise!("Endpoint name '{}' is too long. Format should be 'component.endpoint' or 'namespace.component.endpoint'", endpoint_name);
-    }
-
-    // create model entry
-    let endpoint = Endpoint {
-        namespace: if parts.len() == 3 {
-            parts[0].to_string()
-        } else {
-            println!(
-                "Using the public namespace: {} for model: {}",
-                namespace, model_name
-            );
-            namespace.clone()
-        },
-        component: parts[parts.len() - 2].to_string(),
-        name: parts[parts.len() - 1].to_string(),
-    };
-
-    let model = ModelEntry {
-        name: model_name.to_string(),
-        endpoint,
-        model_type,
-    };
-
-    // add model to etcd
-    let component = distributed.namespace(&namespace)?.component("http")?;
-    let path = format!(
-        "{}/models/{}/{}",
-        component.etcd_root(),
-        model_type.as_str(),
-        model_name
-    );
-    let etcd_client = distributed
-        .etcd_client()
-        .expect("unreachable: llmctl is only useful with dynamic workers");
-
-    // check if model already exists
-    let kvs = etcd_client.kv_get_prefix(&path).await?;
-
-    if !kvs.is_empty() {
-        println!(
-            "{} model {} already exists, please remove it before changing the endpoint.",
-            model_type.as_str(),
-            model_name,
-        );
-        list_single_model(distributed, namespace, model_type, model_name).await?;
-    } else {
-        etcd_client
-            .kv_create(path, serde_json::to_vec_pretty(&model)?, None)
-            .await?;
-        println!("Added new {} model {}", model_type.as_str(), model_name,);
-        list_single_model(distributed, namespace, model_type, model_name).await?;
-    }
+    let mut model = LocalModel::with_name_only(&model_name);
+    model.attach(&endpoint, model_type).await?;
 
     Ok(())
 }
@@ -303,107 +247,56 @@ struct ModelRow {
     endpoint: String,
 }
 
-async fn list_single_model(
-    distributed: &DistributedRuntime,
-    namespace: String,
-    model_type: ModelType,
-    model_name: String,
-) -> Result<()> {
-    let component = distributed.namespace(&namespace)?.component("http")?;
-    let path = format!(
-        "{}/models/{}/{}",
-        component.etcd_root(),
-        model_type.as_str(),
-        model_name
-    );
-
-    let mut models = Vec::new();
-    let etcd_client = distributed
-        .etcd_client()
-        .expect("llmctl is only useful for dynamic workers");
-    let kvs = etcd_client.kv_get_prefix(&path).await?;
-
-    for kv in kvs {
-        if let (Ok(_key), Ok(model)) = (
-            kv.key_str(),
-            serde_json::from_slice::<ModelEntry>(kv.value()),
-        ) {
-            models.push(ModelRow {
-                model_type: model_type.as_str().to_string(),
-                name: model_name.clone(),
-                namespace: model.endpoint.namespace,
-                component: model.endpoint.component,
-                endpoint: model.endpoint.name,
-            });
-        }
-    }
-
-    if models.is_empty() {
-        println!("Something went wrong, no model was found.");
-    } else {
-        let table = tabled::Table::new(models);
-        println!("{}", table);
-    }
-    Ok(())
-}
-
 async fn list_models(
     distributed: &DistributedRuntime,
     namespace: String,
     model_type: Option<ModelType>,
 ) -> Result<()> {
-    let component = distributed.namespace(&namespace)?.component("http")?;
+    // We only need a ModelWatcher to call it's all_entries. llmctl is going away so no need to
+    // refactor for this.
+    let watcher = ModelWatcher::new(
+        distributed.clone(),
+        Arc::new(ModelManager::new()),
+        RouterMode::Random,
+    );
 
     let mut models = Vec::new();
-    let model_types = match model_type {
-        Some(mt) => vec![mt],
-        None => vec![ModelType::Chat, ModelType::Completion],
-    };
-
-    // TODO: Do we need the model_type in etcd key?
-
-    for mt in model_types {
-        let prefix = format!("{}/models/{}/", component.etcd_root(), mt.as_str(),);
-
-        let etcd_client = distributed
-            .etcd_client()
-            .expect("llmctl is only useful with dynamic workers");
-        let kvs = etcd_client.kv_get_prefix(&prefix).await?;
-
-        for kv in kvs {
-            if let (Ok(key), Ok(model)) = (
-                kv.key_str(),
-                serde_json::from_slice::<ModelEntry>(kv.value()),
-            ) {
-                models.push(ModelRow {
-                    model_type: mt.as_str().to_string(),
-                    name: key.trim_start_matches(&prefix).to_string(),
-                    namespace: model.endpoint.namespace,
-                    component: model.endpoint.component,
-                    endpoint: model.endpoint.name,
-                });
+    for entry in watcher.all_entries().await? {
+        match (model_type, entry.model_type) {
+            (None, _) => {
+                // list all
+            }
+            (Some(want), got) if want == got => {
+                // match
+            }
+            _ => {
+                // no match
+                continue;
             }
         }
+        models.push(ModelRow {
+            model_type: entry.model_type.as_str().to_string(),
+            name: entry.name,
+            namespace: entry.endpoint.namespace,
+            component: entry.endpoint.component,
+            endpoint: entry.endpoint.name,
+        });
     }
 
     if models.is_empty() {
         match &model_type {
             Some(mt) => println!(
-                "No {} models found in the public namespace: {}",
+                "No {} models found in namespace: {}",
                 mt.as_str(),
                 namespace
             ),
-            None => println!("No models found in the public namespace: {}", namespace),
+            None => println!("No models found in namespace: {}", namespace),
         }
     } else {
         let table = tabled::Table::new(models);
         match &model_type {
-            Some(mt) => println!(
-                "Listing {} models in the public namespace: {}",
-                mt.as_str(),
-                namespace
-            ),
-            None => println!("Listing all models in the public namespace: {}", namespace),
+            Some(mt) => println!("Listing {} models in namespace: {}", mt.as_str(), namespace),
+            None => println!("Listing all models in namespace: {}", namespace),
         }
         println!("{}", table);
     }
@@ -412,38 +305,53 @@ async fn list_models(
 
 async fn remove_model(
     distributed: &DistributedRuntime,
-    namespace: String,
     model_type: ModelType,
-    name: &str,
+    model_name: &str,
 ) -> Result<()> {
-    let component = distributed.namespace(&namespace)?.component("http")?;
-    let prefix = format!(
-        "{}/models/{}/{}",
-        component.etcd_root(),
-        model_type.as_str(),
-        name
+    // We have to do this manually because normally the etcd lease system does it for us
+    let watcher = ModelWatcher::new(
+        distributed.clone(),
+        Arc::new(ModelManager::new()),
+        RouterMode::Random,
     );
-
-    log::debug!("deleting key: {}", prefix);
-
-    // get the kvs from etcd
-    let mut kv_client = distributed
-        .etcd_client()
-        .expect("llmctl is only useful with dynamic workers")
-        .etcd_client()
-        .kv_client();
-    match kv_client.delete(prefix.as_bytes(), None).await {
-        Ok(_response) => {
-            println!(
-                "{} model {} removed from the public namespace: {}",
-                model_type.as_str(),
-                name,
-                namespace
-            );
-        }
-        Err(e) => {
-            log::error!("Error removing model {}: {}", name, e);
-        }
+    let Some(etcd_client) = distributed.etcd_client() else {
+        anyhow::bail!("llmctl is only useful with dynamic workers");
+    };
+    let active_instances = watcher.entries_for_model(model_name).await?;
+    for entry in active_instances
+        .into_iter()
+        .filter(|entry| entry.model_type == model_type)
+    {
+        let network_name = ModelNetworkName::from_entry(&entry, 0);
+        tracing::debug!("deleting key: {network_name}");
+        etcd_client
+            .kv_delete(network_name.to_string(), None)
+            .await?;
     }
+
     Ok(())
+}
+
+fn endpoint_from_name(
+    distributed: &DistributedRuntime,
+    namespace: &str,
+    endpoint_name: &str,
+) -> anyhow::Result<Endpoint> {
+    let parts: Vec<&str> = endpoint_name.split('.').collect();
+
+    if parts.len() < 2 {
+        anyhow::bail!("Endpoint name '{}' is too short. Format should be 'component.endpoint' or 'namespace.component.endpoint'", endpoint_name);
+    } else if parts.len() > 3 {
+        anyhow::bail!("Endpoint name '{}' is too long. Format should be 'component.endpoint' or 'namespace.component.endpoint'", endpoint_name);
+    }
+
+    // TODO previous version sometime hardcoded this to "http", so maybe adjust
+    let component_name = parts[parts.len() - 2].to_string();
+    let endpoint_name = parts[parts.len() - 1].to_string();
+
+    let component = distributed
+        .namespace(namespace)?
+        .component(component_name)?;
+
+    Ok(component.endpoint(endpoint_name))
 }

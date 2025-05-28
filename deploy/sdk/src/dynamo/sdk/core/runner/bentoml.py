@@ -23,6 +23,7 @@ from _bentoml_sdk.service.dependency import Dependency as BentoDependency
 from fastapi import FastAPI
 
 from dynamo.sdk.core.decorators.endpoint import DynamoClient, DynamoEndpoint
+from dynamo.sdk.core.protocol.deployment import Env
 from dynamo.sdk.core.protocol.interface import (
     DependencyInterface,
     DeploymentTarget,
@@ -72,6 +73,7 @@ class BentoServiceAdapter(ServiceMixin, ServiceInterface[T]):
         config: ServiceConfig,
         dynamo_config: Optional[DynamoConfig] = None,
         app: Optional[FastAPI] = None,
+        system_app: Optional[FastAPI] = None,
         **kwargs,
     ):
         name = service_cls.__name__
@@ -111,10 +113,8 @@ class BentoServiceAdapter(ServiceMixin, ServiceInterface[T]):
         )
 
         self._endpoints: Dict[str, BentoEndpoint] = {}
-        if not app:
-            self.app = FastAPI(title=name)
-        else:
-            self.app = app
+        self.app = app or FastAPI(title=name)
+        self.system_app = system_app or FastAPI(title=f"{name}-system")
         self._dependencies: Dict[str, "DependencyInterface"] = {}
         self._bentoml_service.config["dynamo"] = asdict(self._dynamo_config)
         self._api_endpoints: list[str] = []
@@ -153,6 +153,10 @@ class BentoServiceAdapter(ServiceMixin, ServiceInterface[T]):
     @property
     def inner(self) -> Type[T]:
         return self._bentoml_service.inner
+
+    @property
+    def envs(self) -> List[Env]:
+        return self._bentoml_service.envs
 
     def get_endpoints(self) -> Dict[str, DynamoEndpointInterface]:
         return self._endpoints
@@ -258,6 +262,7 @@ class BentoDeploymentTarget(DeploymentTarget):
         config: ServiceConfig,
         dynamo_config: Optional[DynamoConfig] = None,
         app: Optional[FastAPI] = None,
+        system_app: Optional[FastAPI] = None,
         **kwargs,
     ) -> ServiceInterface[T]:
         """Create a BentoServiceAdapter with the given parameters"""
@@ -266,6 +271,7 @@ class BentoDeploymentTarget(DeploymentTarget):
             config=config,
             dynamo_config=dynamo_config,
             app=app,
+            system_app=system_app,
             **kwargs,
         )
 

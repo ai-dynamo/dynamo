@@ -357,11 +357,7 @@ impl FullyContiguousConfig {
     /// Calculate the total number of bytes required for allocation, including initial alignment padding.
     /// Panics if the provided configuration is invalid.
     pub fn required_allocation_size(&self) -> usize {
-        let initial_padding = if self.inner.alignment > 1 {
-            self.inner.alignment - 1
-        } else {
-            0
-        };
+        let initial_padding = self.inner.alignment.saturating_sub(1);
         self.layout_data_bytes + initial_padding
     }
 }

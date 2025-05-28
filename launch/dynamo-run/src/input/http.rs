@@ -103,7 +103,7 @@ async fn run_watcher(
     network_prefix: &str,
     router_mode: RouterMode,
 ) -> anyhow::Result<()> {
-    let watch_obj = ModelWatcher::new(runtime, model_manager, router_mode).await?;
+    let watch_obj = ModelWatcher::new(runtime, model_manager, router_mode);
     tracing::info!("Watching for remote model at {network_prefix}");
     let models_watcher = etcd_client.kv_get_and_watch_prefix(network_prefix).await?;
     let (_prefix, _watcher, receiver) = models_watcher.dissolve();

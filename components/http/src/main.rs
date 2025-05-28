@@ -56,7 +56,7 @@ async fn app(runtime: Runtime) -> Result<()> {
     // the cli when operating on an `http` component will validate the namespace.component is
     // registered with HttpServiceComponentDefinition
 
-    let watch_obj = ModelWatcher::new(distributed.clone(), manager, RouterMode::Random).await?;
+    let watch_obj = ModelWatcher::new(distributed.clone(), manager, RouterMode::Random);
 
     if let Some(etcd_client) = distributed.etcd_client() {
         let models_watcher: PrefixWatcher =

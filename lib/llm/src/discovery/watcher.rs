@@ -39,17 +39,17 @@ pub struct ModelWatcher {
 }
 
 impl ModelWatcher {
-    pub async fn new(
+    pub fn new(
         runtime: DistributedRuntime,
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
-    ) -> anyhow::Result<ModelWatcher> {
-        Ok(Self {
+    ) -> ModelWatcher {
+        Self {
             manager: model_manager,
             drt: runtime,
             router_mode,
             notify_on_model: Notify::new(),
-        })
+        }
     }
 
     /// Wait until we have at least one chat completions model and return it's name.
@@ -93,10 +93,7 @@ impl ModelWatcher {
                     self.manager.save_model_entry(key, model_entry.clone());
 
                     if self.manager.has_model_any(&model_entry.name) {
-                        tracing::trace!(
-                            service_name = model_entry.name,
-                            "New endpoint for existing model"
-                        );
+                        tracing::trace!(name = model_entry.name, "New endpoint for existing model");
                         self.notify_on_model.notify_waiters();
                         continue;
                     }
@@ -211,7 +208,7 @@ impl ModelWatcher {
                     RouterMode::KV => {
                         let chooser = self
                             .manager
-                            .kv_chooser_for(&model_entry.name, &component)
+                            .kv_chooser_for(&model_entry.name, &component, card.kv_cache_block_size)
                             .await?;
                         let kv_push_router = KvPushRouter::new(router, chooser);
                         ServiceBackend::from_engine(Arc::new(kv_push_router))
@@ -246,7 +243,7 @@ impl ModelWatcher {
                     RouterMode::KV => {
                         let chooser = self
                             .manager
-                            .kv_chooser_for(&model_entry.name, &component)
+                            .kv_chooser_for(&model_entry.name, &component, card.kv_cache_block_size)
                             .await?;
                         let kv_push_router = KvPushRouter::new(router, chooser);
                         ServiceBackend::from_engine(Arc::new(kv_push_router))
@@ -300,7 +297,7 @@ impl ModelWatcher {
     }
 
     /// All the registered ModelEntry, one per instance
-    async fn all_entries(&self) -> anyhow::Result<Vec<ModelEntry>> {
+    pub async fn all_entries(&self) -> anyhow::Result<Vec<ModelEntry>> {
         let Some(etcd_client) = self.drt.etcd_client() else {
             anyhow::bail!("all_entries: Missing etcd client");
         };
@@ -326,7 +323,7 @@ impl ModelWatcher {
         Ok(entries)
     }
 
-    async fn entries_for_model(&self, model_name: &str) -> anyhow::Result<Vec<ModelEntry>> {
+    pub async fn entries_for_model(&self, model_name: &str) -> anyhow::Result<Vec<ModelEntry>> {
         let mut all = self.all_entries().await?;
         all.retain(|entry| entry.name == model_name);
         Ok(all)
