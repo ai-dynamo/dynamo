@@ -22,8 +22,8 @@ The Dynamo CLI is a powerful tool for serving, containerizing, and deploying Dyn
 The Dynamo CLI lets you:
 - [`run`](#run) - quickly chat with a model
 - [`serve`](#serve) - run a set of services locally (via `depends()` or `.link()`)
-- [`build`](#build) - create an archive of your services (called a `bento`)
-- [`deploy`](#deploy) - create a pipeline on Dynamo Cloud
+- [`build`](#build) - create a dynamo graph package of your services (called a `bento`)
+- [`deploy`](#deploy) - create a dynamo graph package on Dynamo Cloud
 
 ## Commands
 
@@ -89,15 +89,15 @@ dynamo build hello_world:Frontend
 
 ### `deploy`
 
-The `deploy` commmand creates a pipeline on Dynamo Cloud using parameters at the prompt or using a YAML configuration file. For details, see [Deploying Inference Graphs to Kubernetes](dynamo_deploy/README.md).
+The `deploy` commmand creates a dynamo graph on Dynamo Cloud using parameters at the prompt or using a YAML configuration file. For details, see [Deploying Inference Graphs to Kubernetes](dynamo_deploy/README.md).
 
 **Usage**
 ```bash
-dynamo deploy [PIPELINE]
+dynamo deploy [DYNAMO_GRPAH_PACKAGE]
 ```
 
 **Arguments**
-- `pipeline` - The pipeline to deploy. Defaults to *None*; required.
+- `DYNAMO_GRPAH_PACKAGE` - The dynamo graph package to deploy. Defaults to *None*; required.
 
 **Flags**
 - `--name` or `-n` - Deployment name. Defaults to *None*; required.
@@ -105,7 +105,7 @@ dynamo deploy [PIPELINE]
 - `--wait` - Whether or not to wait for deployment to be ready. Defaults to wait.
   `--no-wait`
 - `--timeout` - The number of seconds that can elapse before deployment times out; measured in seconds. Defaults to 3600.
-- `--endpoint` or `-e` - The Dynamo Cloud endpoint where the pipeline should be deployed. Defaults to *None*; required.
+- `--endpoint` or `-e` - The Dynamo Cloud endpoint where the dynamo graph package should be deployed. Defaults to *None*; required.
 - `--help` or `-h` - Display in-line help for `dynamo deploy`.
 
 

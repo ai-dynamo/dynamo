@@ -110,7 +110,7 @@ class ServiceInterface(Generic[T], ABC):
 
     @abstractmethod
     def link(self, next_service: "ServiceInterface") -> "ServiceInterface":
-        """Link this service to another service, creating a pipeline"""
+        """Link this service to another service, creating a graph"""
         pass
 
     @abstractmethod

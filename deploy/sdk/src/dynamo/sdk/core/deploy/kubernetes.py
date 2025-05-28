@@ -44,22 +44,24 @@ class KubernetesDeploymentManager(DeploymentManager):
         self.session = requests.Session()
         self.namespace = "default"
 
-    def _upload_pipeline(self, pipeline: str, entry_service: Service, **kwargs) -> None:
-        """Upload the entire pipeline as a single component/version, with a manifest of all services."""
+    def _upload_dynamograph_package(
+        self, dynamo_graph_package: str, entry_service: Service, **kwargs
+    ) -> None:
+        """Upload the entire graph as a single component/version, with a manifest of all services."""
         session = self.session
         endpoint = self.endpoint
-        pipeline_name, pipeline_version = pipeline.split(":")
+        dynamo_graph_name, dynamo_graph_version = dynamo_graph_package.split(":")
 
         # Check if component exists before POST
         comp_url = f"{endpoint}/api/v1/dynamo_components"
-        comp_get_url = f"{endpoint}/api/v1/dynamo_components/{pipeline_name}"
+        comp_get_url = f"{endpoint}/api/v1/dynamo_components/{dynamo_graph_name}"
         comp_exists = False
         comp_resp = session.get(comp_get_url)
         if comp_resp.status_code == 200:
             comp_exists = True
         if not comp_exists:
             comp_payload = {
-                "name": pipeline_name,
+                "name": dynamo_graph_name,
                 "description": "Registered by Dynamo's KubernetesDeploymentManager",
             }
             resp = session.post(comp_url, json=comp_payload)
@@ -68,8 +70,8 @@ class KubernetesDeploymentManager(DeploymentManager):
                 raise RuntimeError(f"Failed to create component: {resp.text}")
 
         # Check if version exists before POST
-        ver_url = f"{endpoint}/api/v1/dynamo_components/{pipeline_name}/versions"
-        ver_get_url = f"{endpoint}/api/v1/dynamo_components/{pipeline_name}/versions/{pipeline_version}"
+        ver_url = f"{endpoint}/api/v1/dynamo_components/{dynamo_graph_name}/versions"
+        ver_get_url = f"{endpoint}/api/v1/dynamo_components/{dynamo_graph_name}/versions/{dynamo_graph_version}"
         ver_exists = False
         ver_resp = session.get(ver_get_url)
         if ver_resp.status_code == 200:
@@ -90,7 +92,7 @@ class KubernetesDeploymentManager(DeploymentManager):
             }
             ver_payload = {
                 "name": entry_service.name,
-                "description": f"Auto-registered version for {pipeline}",
+                "description": f"Auto-registered version for {dynamo_graph_package}",
                 "resource_type": "dynamo_component_version",
                 "version": entry_service.version,
                 "manifest": manifest,
@@ -103,22 +105,24 @@ class KubernetesDeploymentManager(DeploymentManager):
         # Upload the graph
         build_dir = entry_service.path
         if not build_dir or not os.path.isdir(build_dir):
-            raise FileNotFoundError(f"Built pipeline directory not found: {build_dir}")
+            raise FileNotFoundError(
+                f"Built dynamo graph directory not found: {build_dir}"
+            )
         tar_stream = io.BytesIO()
         with tarfile.open(fileobj=tar_stream, mode="w") as tar:
             tar.add(build_dir, arcname=".")
         tar_stream.seek(0)
-        upload_url = f"{endpoint}/api/v1/dynamo_components/{pipeline_name}/versions/{pipeline_version}/upload"
+        upload_url = f"{endpoint}/api/v1/dynamo_components/{dynamo_graph_name}/versions/{dynamo_graph_version}/upload"
         upload_headers = {"Content-Type": "application/x-tar"}
         resp = session.put(upload_url, data=tar_stream, headers=upload_headers)
         if resp.status_code not in (200, 201, 204):
-            raise RuntimeError(f"Failed to upload pipeline artifact: {resp.text}")
+            raise RuntimeError(f"Failed to upload dynamo graph artifact: {resp.text}")
 
     def create_deployment(self, deployment: Deployment, **kwargs) -> DeploymentResponse:
         """Create a new deployment. Ensures all components and versions are registered/uploaded before creating the deployment."""
         # For each service/component in the deployment, upload it to the API store
-        self._upload_pipeline(
-            pipeline=deployment.pipeline or deployment.namespace,
+        self._upload_dynamograph_package(
+            dynamo_graph_package=deployment.dynamograph_package or deployment.namespace,
             entry_service=deployment.entry_service,
             **kwargs,
         )
@@ -127,7 +131,7 @@ class KubernetesDeploymentManager(DeploymentManager):
         dev = kwargs.get("dev", False)
         payload = {
             "name": deployment.name,
-            "component": deployment.pipeline or deployment.namespace,
+            "component": deployment.dynamograph_package or deployment.namespace,
             "dev": dev,
             "envs": deployment.envs,
         }
@@ -151,7 +155,7 @@ class KubernetesDeploymentManager(DeploymentManager):
         access_authorization = kwargs.get("access_authorization", False)
         payload = {
             "name": deployment.name,
-            "component": deployment.pipeline or deployment.namespace,
+            "component": deployment.dynamograph_package or deployment.namespace,
             "envs": deployment.envs,
             "services": deployment.services,
             "access_authorization": access_authorization,

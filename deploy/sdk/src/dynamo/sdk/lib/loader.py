@@ -208,22 +208,22 @@ def _get_dir_size(path: str) -> int:
 
 
 def load_entry_service(
-    pipeline_tag: str, build_dir: str = "~/bentoml/bentos"
+    dynamograph_package_tag: str, build_dir: str = "~/bentoml/bentos"
 ) -> Service:
     """
-    Given a built pipeline tag (e.g. frontend:2uk2fwzvqsswvs7t), load the entry service as a deployment Service instance.
+    Given a built dynamo graph tag (e.g. frontend:2uk2fwzvqsswvs7t), load the entry service as a deployment Service instance.
     """
-    if ":" not in pipeline_tag:
-        raise ValueError("pipeline_tag must be in the form name:version")
-    name, version = pipeline_tag.split(":", 1)
+    if ":" not in dynamograph_package_tag:
+        raise ValueError("dynamograph_package_tag must be in the form name:version")
+    name, version = dynamograph_package_tag.split(":", 1)
     graph_dir = os.path.expanduser(f"{build_dir}/{name}/{version}")
     if not os.path.isdir(graph_dir):
-        raise FileNotFoundError(f"Pipeline directory not found: {graph_dir}")
+        raise FileNotFoundError(f"dynamograph package directory not found: {graph_dir}")
 
     config_path = os.path.join(graph_dir, "bento.yaml")
     if not os.path.isfile(config_path):
         raise FileNotFoundError(
-            f"Pipeline config (bento.yaml) not found in {graph_dir}"
+            f"dynamograph package config (bento.yaml) not found in {graph_dir}"
         )
     with open(config_path, encoding="utf-8") as f:
         graph_cfg = yaml.safe_load(f)
@@ -252,4 +252,4 @@ def load_entry_service(
             size_bytes=size_bytes,
         )
         return entry_service
-    raise ValueError("No entry service found in the pipeline")
+    raise ValueError("No entry service found in the dynamograph package")

@@ -1,6 +1,6 @@
 # Dynamo Kubernetes Operator
 
-A Kubernetes Operator to manage all Dynamo pipelines using custom resources.
+A Kubernetes Operator to manage all Dynamo graphs using custom resources.
 
 
 ## Overview

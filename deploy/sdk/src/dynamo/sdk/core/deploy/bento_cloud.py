@@ -105,7 +105,7 @@ class BentoCloudDeploymentManager(DeploymentManager):
 
         config_params = DeploymentConfigParameters(
             name=deployment.name,
-            bento=deployment.pipeline or deployment.namespace,
+            bento=deployment.dynamo_graph_package or deployment.namespace,
             envs=deployment.envs,
             secrets=None,
             cli=True,

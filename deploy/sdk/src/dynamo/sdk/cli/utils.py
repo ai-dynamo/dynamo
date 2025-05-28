@@ -398,7 +398,7 @@ def is_local_planner_enabled(svc: Any, service_configs: dict) -> bool:
 
     if len(planners) > 1:
         console.print(
-            "[bold red]Error:[/bold red] More than one planner found in the pipeline"
+            "[bold red]Error:[/bold red] More than one planner found in the graph."
         )
         raise typer.Exit(code=1)
 

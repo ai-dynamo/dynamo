@@ -333,7 +333,7 @@ def update_deployment(name: str, deployment: UpdateDeploymentSchema):
         updated_crd = update_dynamo_deployment(
             name=deployment_name,
             namespace=kube_namespace,
-            dynamo_nim=deployment.bento,
+            dynamo_component=deployment.bento,
             labels={
                 "ngc-organization": ownership["organization_id"],
                 "ngc-user": ownership["user_id"],

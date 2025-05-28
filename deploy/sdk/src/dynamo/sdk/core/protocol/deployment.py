@@ -131,7 +131,7 @@ class Deployment:
 
     name: str
     namespace: str
-    pipeline: t.Optional[str] = None
+    dynamograph_package: t.Optional[str] = None
     entry_service: t.Optional[Service] = None
     envs: t.Optional[t.List[dict]] = None
 

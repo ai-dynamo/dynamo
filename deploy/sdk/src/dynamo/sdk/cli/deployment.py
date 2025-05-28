@@ -105,7 +105,9 @@ def _build_env_dicts(
 
 def _handle_deploy_create(
     ctx: typer.Context,
-    pipeline: str = typer.Argument(..., help="Dynamo pipeline to deploy"),
+    dynamograph_package: str = typer.Argument(
+        ..., help="Dynamo dynamograph package to deploy"
+    ),
     name: t.Optional[str] = typer.Option(None, "--name", "-n", help="Deployment name"),
     config_file: t.Optional[typer.FileText] = typer.Option(
         None, "--config-file", "-f", help="Configuration file path"
@@ -122,7 +124,7 @@ def _handle_deploy_create(
     envs: t.Optional[t.List[str]] = typer.Option(
         None,
         "--env",
-        help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo pipeline.",
+        help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo dynamograph package.",
     ),
     target: str = typer.Option(..., "--target", "-t", help="Deployment target"),
     dev: bool = typer.Option(False, "--dev", help="Development mode for deployment"),
@@ -131,7 +133,7 @@ def _handle_deploy_create(
 
     Args:
         ctx: typer context
-        pipeline: pipeline to deploy
+        dynamograph_package: dynamograph package to deploy
         name: name of the deployment
     """
 
@@ -141,14 +143,15 @@ def _handle_deploy_create(
     # TODO: hardcoding this is a hack to get the services for the deployment
     # we should find a better way to do this once build is finished/generic
     configure_target_environment(TargetEnum.BENTO)
-    entry_service = load_entry_service(pipeline)
+    entry_service = load_entry_service(dynamograph_package)
 
     deployment_manager = get_deployment_manager(target, endpoint)
     env_dicts = _build_env_dicts(config_file=config_file, args=ctx.args, envs=envs)
     deployment = Deployment(
-        name=name or (pipeline if pipeline else "unnamed-deployment"),
+        name=name
+        or (dynamograph_package if dynamograph_package else "unnamed-deployment"),
         namespace="default",
-        pipeline=pipeline,
+        dynamograph_package=dynamograph_package,
         entry_service=entry_service,
         envs=env_dicts,
     )
@@ -219,7 +222,9 @@ def _handle_deploy_create(
 @app.command()
 def create(
     ctx: typer.Context,
-    pipeline: str = typer.Argument(..., help="Dynamo pipeline to deploy"),
+    dynamograph_package: str = typer.Argument(
+        ..., help="Dynamo dynamograph package to deploy"
+    ),
     name: t.Optional[str] = typer.Option(None, "--name", "-n", help="Deployment name"),
     config_file: t.Optional[typer.FileText] = typer.Option(
         None, "--config-file", "-f", help="Configuration file path"
@@ -236,14 +241,23 @@ def create(
     envs: t.Optional[t.List[str]] = typer.Option(
         None,
         "--env",
-        help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo pipeline.",
+        help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo dynamograph package.",
     ),
     target: str = typer.Option(..., "--target", "-t", help="Deployment target"),
     dev: bool = typer.Option(False, "--dev", help="Development mode for deployment"),
 ) -> DeploymentResponse:
     """Create a deployment on Dynamo Cloud."""
     return _handle_deploy_create(
-        ctx, pipeline, name, config_file, wait, timeout, endpoint, envs, target, dev
+        ctx,
+        dynamograph_package,
+        name,
+        config_file,
+        wait,
+        timeout,
+        endpoint,
+        envs,
+        target,
+        dev,
     )
 
 
@@ -337,7 +351,7 @@ def update(
     envs: t.Optional[t.List[str]] = typer.Option(
         None,
         "--env",
-        help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo pipeline.",
+        help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo dynamograph package.",
     ),
     endpoint: str = typer.Option(
         ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD"
@@ -433,7 +447,9 @@ def delete(
 
 def deploy(
     ctx: typer.Context,
-    pipeline: str = typer.Argument(..., help="Dynamo pipeline to deploy"),
+    dynamograph_package: str = typer.Argument(
+        ..., help="Dynamo dynamograph package to deploy"
+    ),
     name: t.Optional[str] = typer.Option(None, "--name", "-n", help="Deployment name"),
     config_file: t.Optional[typer.FileText] = typer.Option(
         None, "--config-file", "-f", help="Configuration file path"
@@ -450,12 +466,21 @@ def deploy(
     envs: t.Optional[t.List[str]] = typer.Option(
         None,
         "--env",
-        help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo pipeline.",
+        help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your dynamograph package.",
     ),
     target: str = typer.Option(..., "--target", "-t", help="Deployment target"),
     dev: bool = typer.Option(False, "--dev", help="Development mode for deployment"),
 ) -> DeploymentResponse:
-    """Deploy a Dynamo pipeline (same as deployment create)."""
+    """Deploy a dynamograph package (same as deployment create)."""
     return _handle_deploy_create(
-        ctx, pipeline, name, config_file, wait, timeout, endpoint, envs, target, dev
+        ctx,
+        dynamograph_package,
+        name,
+        config_file,
+        wait,
+        timeout,
+        endpoint,
+        envs,
+        target,
+        dev,
     )
