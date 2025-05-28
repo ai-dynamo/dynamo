@@ -14,15 +14,15 @@
 #  limitations under the License.
 #  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
 
+import logging
 import os
-from typing import Any, Callable, Dict, Optional, Type, TypeVar, Union
+from typing import Any, Callable, Optional, Type, TypeVar
 
 from fastapi import FastAPI
 
 from dynamo.sdk.core.protocol.interface import (
     DependencyInterface,
     DeploymentTarget,
-    DynamoConfig,
     ServiceConfig,
     ServiceInterface,
 )
@@ -33,6 +33,7 @@ G = TypeVar("G", bound=Callable[..., Any])
 # this should be set to a concrete implementation of the DeploymentTarget interface
 _target: DeploymentTarget
 
+logger = logging.getLogger(__name__)
 
 DYNAMO_IMAGE = os.getenv("DYNAMO_IMAGE", "dynamo:latest-vllm")
 
@@ -49,36 +50,25 @@ def get_target() -> DeploymentTarget:
     return _target
 
 
-# TODO: dynamo_component
 def service(
     inner: Optional[Type[G]] = None,
     /,
     *,
-    dynamo: Optional[Union[Dict[str, Any], DynamoConfig]] = None,
     app: Optional[FastAPI] = None,
     system_app: Optional[FastAPI] = None,
     **kwargs: Any,
 ) -> Any:
     """Service decorator that's adapter-agnostic"""
-    config = ServiceConfig(kwargs)
-    # Parse dict into DynamoConfig object
-    dynamo_config: Optional[DynamoConfig] = None
-    if dynamo is not None:
-        if isinstance(dynamo, dict):
-            dynamo_config = DynamoConfig(**dynamo)
-        else:
-            dynamo_config = dynamo
-
-    assert isinstance(dynamo_config, DynamoConfig)
+    config = ServiceConfig(**kwargs)
+    logger.info(f"inner: {inner} config: {config}")
 
     def decorator(inner: Type[G]) -> ServiceInterface[G]:
         provider = get_target()
         if inner is not None:
-            dynamo_config.name = inner.__name__
+            config.dynamo.name = inner.__name__
         return provider.create_service(
             service_cls=inner,
             config=config,
-            dynamo_config=dynamo_config,
             app=app,
             system_app=system_app,
             **kwargs,

@@ -74,32 +74,7 @@ RUN apt-get update -y && \
 
 WORKDIR /workspace
 
-### UCX EFA Setup ###
-RUN rm -rf /opt/hpcx/ucx
-RUN rm -rf /usr/local/ucx
-RUN cd /usr/local/src && \
-    git clone https://github.com/openucx/ucx.git && \
-    cd ucx &&                   \
-    git checkout v1.19.x &&     \
-    ./autogen.sh && ./configure \
-    --prefix=/usr/local/ucx     \
-    --enable-shared             \
-    --disable-static            \
-    --disable-doxygen-doc       \
-    --enable-optimizations      \
-    --enable-cma                \
-    --enable-devel-headers      \
-    --with-cuda=/usr/local/cuda \
-    --with-verbs                \
-    --with-efa                  \
-    --with-dm                   \
-    --with-gdrcopy=/usr/local   \
-    --enable-mt &&              \
-    make -j &&                  \
-    make -j install-strip &&    \
-    ldconfig
-
-ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
+### TODO: Bring back UCX EFA setup once we are confident it works with IB devices
 ENV CPATH=/usr/include:$CPATH
 ENV PATH=/usr/bin:$PATH
 ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
@@ -159,59 +134,15 @@ RUN if [ "$ARCH" = "arm64" ]; then \
         cd /opt/nixl && uv pip install . ; \
     fi
 
-# Install patched vllm - keep this early in Dockerfile to avoid
-# rebuilds from unrelated source code changes
-ARG VLLM_REF="0.8.4"
-ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
-ARG VLLM_PATCHED_PACKAGE_NAME="ai_dynamo_vllm"
-ARG VLLM_PATCHED_PACKAGE_VERSION="0.8.4.post1"
-ARG VLLM_MAX_JOBS=4
-RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
-    --mount=type=cache,target=/root/.cache/uv \
-    mkdir /tmp/vllm && \
-    uv pip install pip wheel && \
-    # NOTE: vLLM build from source on ARM can take several hours, see VLLM_MAX_JOBS details.
-    if [ "$ARCH" = "arm64" ]; then \
-        # PyTorch 2.7 supports CUDA 12.8 and aarch64 installs
-        # NIXL has a torch dependency, so need to force-reinstall to install the correct version
-        uv pip install torch==2.7.0 torchvision torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/cu128 && \
-        # Download vLLM source with version matching patch
-        git clone --branch v${VLLM_REF} --depth 1 https://github.com/vllm-project/vllm.git /tmp/vllm/vllm-${VLLM_REF} && \
-        cd /tmp/vllm/vllm-${VLLM_REF}/ && \
-        # Patch vLLM source with dynamo additions
-        patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
-        # WAR: Set package version check to 'vllm' instead of 'ai_dynamo_vllm' to avoid
-        # platform detection issues on ARM install.
-        # TODO: Rename package from vllm to ai_dynamo_vllm like x86 path below to remove this WAR.
-        sed -i 's/version("ai_dynamo_vllm")/version("vllm")/g' vllm/platforms/__init__.py && \
-        # Remove pytorch from vllm install dependencies
-        python use_existing_torch.py && \
-        # Build/install vllm from source
-        uv pip install -r requirements/build.txt && \
-        # MAX_JOBS set to avoid running OOM on vllm-flash-attn build, this can
-        # significantly impact the overall build time. Each job can take up
-        # to -16GB RAM each, so tune according to available system memory.
-        MAX_JOBS=${VLLM_MAX_JOBS} uv pip install -vv . --no-build-isolation ; \
-    # Handle x86_64: Download wheel, unpack, setup for later steps
-    else \
-        python -m pip download --only-binary=:all: --no-deps --dest /tmp/vllm vllm==v${VLLM_REF} && \
-        # Patch vLLM pre-built download with dynamo additions
-        cd /tmp/vllm && \
-        wheel unpack *.whl && \
-        cd vllm-${VLLM_REF}/ && \
-        patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
-        # Rename the package from vllm to ai_dynamo_vllm
-        mv vllm-${VLLM_REF}.dist-info ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info && \
-        sed -i "s/^Name: vllm/Name: ${VLLM_PATCHED_PACKAGE_NAME}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/METADATA && \
-        sed -i "s/^Version: ${VLLM_REF}/Version: ${VLLM_PATCHED_PACKAGE_VERSION}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/METADATA && \
-        # Update wheel tag from linux_${ARCH_ALT} to manylinux1_${ARCH_ALT} in WHEEL file
-        sed -i "s/Tag: cp38-abi3-linux_${ARCH_ALT}/Tag: cp38-abi3-manylinux1_${ARCH_ALT}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/WHEEL && \
-        # Also update the tag in RECORD file to match
-        sed -i "s/-cp38-abi3-linux_${ARCH_ALT}.whl/-cp38-abi3-manylinux1_${ARCH_ALT}.whl/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/RECORD && \
-        mkdir -p /workspace/dist && \
-        wheel pack . --dest-dir /workspace/dist && \
-        uv pip install /workspace/dist/${VLLM_PATCHED_PACKAGE_NAME}-*.whl ; \
-    fi
+# Install sglang
+# Once either 0.4.6post6 or 0.4.7 is released, we can switch back to using the published version
+# This commit references a fix for DP attention and NIXL https://github.com/sgl-project/sglang/pull/6473
+ARG SGLANG_COMMIT="e806f708c954020bda7d1cc98035a44fd6a4eb96"
+RUN --mount=type=cache,target=/root/.cache/uv \
+    git clone https://github.com/sgl-project/sglang.git && \
+    cd sglang && \
+    git checkout ${SGLANG_COMMIT} && \
+    uv pip install -e "python[all]"
 
 # Common dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
@@ -296,11 +227,7 @@ COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
 USER $USERNAME
 ENV HOME=/home/$USERNAME
 ENV PYTHONPATH=$HOME/dynamo/deploy/sdk/src:$PYTHONPATH:$HOME/dynamo/components/planner/src:$PYTHONPATH
-ENV CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 WORKDIR $HOME
-
-# so we can use maturin develop
-RUN uv pip install maturin
 
 # https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
 RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.commandhistory/.bash_history" \

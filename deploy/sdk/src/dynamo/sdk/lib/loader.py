@@ -208,7 +208,7 @@ def _get_dir_size(path: str) -> int:
 
 
 def load_entry_service(
-    pipeline_tag: str, build_dir: str = "~/bentoml/bentos"
+    pipeline_tag: str, build_dir: str = "~/.dynamo/packages"
 ) -> Service:
     """
     Given a built pipeline tag (e.g. frontend:2uk2fwzvqsswvs7t), load the entry service as a deployment Service instance.
@@ -220,7 +220,7 @@ def load_entry_service(
     if not os.path.isdir(graph_dir):
         raise FileNotFoundError(f"Pipeline directory not found: {graph_dir}")
 
-    config_path = os.path.join(graph_dir, "bento.yaml")
+    config_path = os.path.join(graph_dir, "dynamo.yaml")
     if not os.path.isfile(config_path):
         raise FileNotFoundError(
             f"Pipeline config (bento.yaml) not found in {graph_dir}"
