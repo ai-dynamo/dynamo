@@ -52,9 +52,8 @@ class Processor(RequestTracingMixin):
     """
 
     def __init__(self):
-        # These will be properly initialized in async_init
-        self.prefiller_client: DynamoClient
-        self.decoder_client: DynamoClient  
+        self.prefiller_client: Optional[DynamoClient] = None
+        self.decoder_client: Optional[DynamoClient] = None
         self.request_count = 0
 
     @async_on_start
