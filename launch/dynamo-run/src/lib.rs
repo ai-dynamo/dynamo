@@ -223,6 +223,40 @@ pub async fn run(
             }));
             EngineConfig::Dynamic
         }
+        Output::Trtllm => {
+            if flags.base_gpu_id != 0 {
+                anyhow::bail!("TRTLLM does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
+            }
+
+            // If `in=dyn` we want the trtllm subprocess to listen on that endpoint.
+            // If not, then the endpoint isn't exposed so we invent an internal one.
+            let endpoint = match &in_opt {
+                Input::Endpoint(path) => path.parse()?,
+                _ => INTERNAL_ENDPOINT.parse()?,
+            };
+
+            let (py_script, child) = match subprocess::start(
+                subprocess::trtllm::PY,
+                &local_model,
+                &endpoint,
+                flags.clone(),
+                None, // multi-node config. trtlllm uses `mpi`, see guide
+            )
+            .await
+            {
+                Ok(x) => x,
+                Err(err) => {
+                    anyhow::bail!("Failed starting trtllm sub-process: {err}");
+                }
+            };
+            let cancel_token = cancel_token.clone();
+
+            // Sub-process cleanup
+            extra = Some(Box::pin(async move {
+                stopper(cancel_token, child, py_script).await;
+            }));
+            EngineConfig::Dynamic
+        }
 
         #[cfg(feature = "llamacpp")]
         Output::LlamaCpp => {
