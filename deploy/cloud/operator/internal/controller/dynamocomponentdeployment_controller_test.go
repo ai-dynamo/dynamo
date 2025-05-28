@@ -943,10 +943,10 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										},
 										Ports: []corev1.ContainerPort{
 											{
-												Protocol: corev1.ProtocolTCP, Name: "http", ContainerPort: 3000,
+												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoServicePortName, ContainerPort: commonconsts.DynamoServicePort,
 											},
 											{
-												Protocol: corev1.ProtocolTCP, Name: "health", ContainerPort: 5000,
+												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoHealthPortName, ContainerPort: commonconsts.DynamoHealthPort,
 											},
 										},
 										TTY:   true,
@@ -965,14 +965,14 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										LivenessProbe: &corev1.Probe{
 											ProbeHandler: corev1.ProbeHandler{
 												HTTPGet: &corev1.HTTPGetAction{
-													Path: "/healthz", Port: intstr.FromString("health"),
+													Path: "/healthz", Port: intstr.FromString(commonconsts.DynamoHealthPortName),
 												},
 											},
 										},
 										ReadinessProbe: &corev1.Probe{
 											ProbeHandler: corev1.ProbeHandler{
 												HTTPGet: &corev1.HTTPGetAction{
-													Path: "/readyz", Port: intstr.FromString("health"),
+													Path: "/readyz", Port: intstr.FromString(commonconsts.DynamoHealthPortName),
 												},
 											},
 										},
@@ -1005,8 +1005,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Args:         []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 										Env:          []corev1.EnvVar{{Name: "DYNAMO_PORT", Value: "3000"}},
 										VolumeMounts: []corev1.VolumeMount{{Name: "shared-memory", MountPath: "/dev/shm"}},
-										Ports: []corev1.ContainerPort{{Protocol: corev1.ProtocolTCP, Name: "http", ContainerPort: 3000}, {
-											Protocol: corev1.ProtocolTCP, Name: "health", ContainerPort: 5000,
+										Ports: []corev1.ContainerPort{{Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoServicePortName, ContainerPort: commonconsts.DynamoServicePort}, {
+											Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoHealthPortName, ContainerPort: commonconsts.DynamoHealthPort,
 										}},
 										TTY:   true,
 										Stdin: true,
@@ -1017,14 +1017,14 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										LivenessProbe: &corev1.Probe{
 											ProbeHandler: corev1.ProbeHandler{
 												HTTPGet: &corev1.HTTPGetAction{
-													Path: "/healthz", Port: intstr.FromString("health"),
+													Path: "/healthz", Port: intstr.FromString(commonconsts.DynamoHealthPortName),
 												},
 											},
 										},
 										ReadinessProbe: &corev1.Probe{
 											ProbeHandler: corev1.ProbeHandler{
 												HTTPGet: &corev1.HTTPGetAction{
-													Path: "/readyz", Port: intstr.FromString("health"),
+													Path: "/readyz", Port: intstr.FromString(commonconsts.DynamoHealthPortName),
 												},
 											},
 										},
