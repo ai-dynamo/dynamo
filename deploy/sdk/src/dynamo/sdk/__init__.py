@@ -27,8 +27,8 @@ from dynamo.sdk.request_tracing import (
     get_current_request_id,
     trace_frontend_endpoint,
     trace_processor_method,
-    with_request_tracing,
     with_request_id,
+    with_request_tracing,
 )
 
 dynamo_context: dict[str, Any] = {}

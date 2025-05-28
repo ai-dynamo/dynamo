@@ -21,12 +21,12 @@ request tracing for automatic request ID propagation across components.
 """
 
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List
 
 from dynamo.sdk import (
-    RequestTracingMixin, 
-    endpoint, 
-    get_current_request_id, 
+    RequestTracingMixin,
+    endpoint,
+    get_current_request_id,
     service,
     with_request_id,
 )
@@ -126,16 +126,14 @@ class Processor(RequestTracingMixin):
 
     @endpoint(is_api=True)
     @with_request_id()
-    async def get_system_stats(
-        self, request_id: str = None
-    ) -> Dict[str, Any]:
+    async def get_system_stats(self, request_id: str = None) -> Dict[str, Any]:
         """
         Get statistics from all components with request tracking.
-        
+
         Args:
             request_id: Request ID parameter. The @with_request_id decorator
                        ensures it's a non-None str inside the function body.
-            
+
         Returns:
             A dict containing stats from all components
         """

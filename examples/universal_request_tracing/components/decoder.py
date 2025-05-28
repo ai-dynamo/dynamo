@@ -22,12 +22,12 @@ request tracing for automatic request ID propagation and decode operations.
 
 import asyncio
 import logging
-from typing import AsyncIterator, Dict, List, Optional, Any
+from typing import Any, AsyncIterator, Dict, List
 
 from dynamo.sdk import (
-    RequestTracingMixin, 
-    endpoint, 
-    get_current_request_id, 
+    RequestTracingMixin,
+    endpoint,
+    get_current_request_id,
     service,
     with_request_id,
 )
@@ -65,7 +65,7 @@ class Decoder(RequestTracingMixin):
         Args:
             hidden_states: The hidden states to decode
             request_id: Request ID parameter. May be None in the signature,
-                       but the @with_request_id decorator ensures it's a 
+                       but the @with_request_id decorator ensures it's a
                        non-None str inside the function body.
 
         Returns:
@@ -94,7 +94,7 @@ class Decoder(RequestTracingMixin):
                 self.decode_stats["sequences_completed"] += 1
                 self.log(
                     "info",
-                    f"Decoding completed. Generated {sequence_info['tokens_generated']} tokens"
+                    f"Decoding completed. Generated {sequence_info['tokens_generated']} tokens",
                 )
 
     async def _decode_tokens(
@@ -131,9 +131,7 @@ class Decoder(RequestTracingMixin):
                 "sequence_id": sequence_id,
             }
 
-            self.log(
-                "debug", f"Generated token: '{token_text}' (id: {token_id})"
-            )
+            self.log("debug", f"Generated token: '{token_text}' (id: {token_id})")
 
             yield token_result
 
@@ -194,12 +192,12 @@ class Decoder(RequestTracingMixin):
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         Batch decode multiple sequences with request tracking.
-        
+
         Args:
             batch_hidden_states: List of hidden states to decode
             request_id: Request ID parameter. The @with_request_id decorator
                        ensures it's a non-None str inside the function body.
-            
+
         Returns:
             An async iterator of token results with batch information
         """
@@ -210,7 +208,7 @@ class Decoder(RequestTracingMixin):
         for batch_idx, hidden_states in enumerate(batch_hidden_states):
             self.log(
                 "debug",
-                f"Processing batch item {batch_idx + 1}/{len(batch_hidden_states)}"
+                f"Processing batch item {batch_idx + 1}/{len(batch_hidden_states)}",
             )
 
             sequence_id = f"batch_{request_id}_{batch_idx}"
@@ -227,16 +225,14 @@ class Decoder(RequestTracingMixin):
 
     @endpoint()
     @with_request_id()
-    async def get_stats(
-        self, request_id: str = None
-    ) -> Dict[str, Any]:
+    async def get_stats(self, request_id: str = None) -> Dict[str, Any]:
         """
         Get decoder statistics with request tracking.
-        
+
         Args:
             request_id: Request ID parameter. The @with_request_id decorator
                        ensures it's a non-None str inside the function body.
-            
+
         Returns:
             A dict containing decoder statistics
         """
@@ -259,12 +255,12 @@ class Decoder(RequestTracingMixin):
     ) -> Dict[str, Any]:
         """
         Stop a specific decoding sequence with request tracking.
-        
+
         Args:
             sequence_id: ID of the sequence to stop
             request_id: Request ID parameter. The @with_request_id decorator
                        ensures it's a non-None str inside the function body.
-            
+
         Returns:
             A dict containing the result of the stop operation
         """
@@ -274,7 +270,7 @@ class Decoder(RequestTracingMixin):
             sequence_info = self.active_sequences.pop(sequence_id)
             self.log(
                 "debug",
-                f"Stopped sequence with {sequence_info['tokens_generated']} tokens"
+                f"Stopped sequence with {sequence_info['tokens_generated']} tokens",
             )
             return {"status": "stopped", "sequence_info": sequence_info}
         else:

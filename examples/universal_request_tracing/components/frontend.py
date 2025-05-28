@@ -48,10 +48,10 @@ class Frontend:
     - Automatic header extraction/generation
     - Automatic response header injection
     - Request ID propagation to downstream components
-    
-    Note: Unlike other components that use @with_request_id decorator and a 
-    'request_id: str = None' parameter, frontend components can simply use 
-    the @auto_trace_endpoints class decorator which automatically wraps all 
+
+    Note: Unlike other components that use @with_request_id decorator and a
+    'request_id: str = None' parameter, frontend components can simply use
+    the @auto_trace_endpoints class decorator which automatically wraps all
     endpoints with request tracing.
     """
 

@@ -21,12 +21,12 @@ request tracing for automatic request ID propagation.
 """
 
 import logging
-from typing import Optional, Tuple
+from typing import Tuple
 
 from dynamo.sdk import (
-    RequestTracingMixin, 
-    endpoint, 
-    get_current_request_id, 
+    RequestTracingMixin,
+    endpoint,
+    get_current_request_id,
     service,
     with_request_id,
 )
@@ -59,12 +59,12 @@ class Router(RequestTracingMixin):
     ) -> Tuple[str, float]:
         """
         Route requests to optimal workers with automatic request ID tracking.
-        
+
         Args:
             request_data: The data to be routed
             request_id: Request ID parameter. The @with_request_id decorator
                        ensures it's a non-None str inside the function body.
-                       
+
         Returns:
             A tuple with (worker_id, hit_rate)
         """
@@ -98,20 +98,16 @@ class Router(RequestTracingMixin):
         """
         Calculate expected prefix hit rate for the selected worker.
         """
-        self.log(
-            "debug", f"Calculating prefix hit rate for {worker_id}"
-        )
+        self.log("debug", f"Calculating prefix hit rate for {worker_id}")
 
         return 0.75
 
     @endpoint()
     @with_request_id()
-    async def update_load(
-        self, worker_id: str, load: float, request_id: str = None
-    ):
+    async def update_load(self, worker_id: str, load: float, request_id: str = None):
         """
         Update worker load information with request tracking.
-        
+
         Args:
             worker_id: ID of the worker to update
             load: Current load value

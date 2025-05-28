@@ -22,12 +22,12 @@ request tracing for automatic request ID propagation and logging.
 
 import asyncio
 import logging
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator
 
 from dynamo.sdk import (
-    RequestTracingMixin, 
-    endpoint, 
-    get_current_request_id, 
+    RequestTracingMixin,
+    endpoint,
+    get_current_request_id,
     service,
     with_request_id,
 )
@@ -60,12 +60,12 @@ class Worker(RequestTracingMixin):
     ) -> AsyncIterator[str]:
         """
         Generate text with automatic request ID tracking.
-        
+
         Args:
             request_data: The input text for generation
             request_id: Request ID parameter. The @with_request_id decorator
                        ensures it's a non-None str inside the function body.
-                       
+
         Returns:
             An async iterator of generated tokens
         """
@@ -108,9 +108,7 @@ class Worker(RequestTracingMixin):
         ]
 
         for i, token in enumerate(tokens):
-            self.log(
-                "debug", f"Generated token {i+1}/{len(tokens)}: '{token}'"
-            )
+            self.log("debug", f"Generated token {i+1}/{len(tokens)}: '{token}'")
 
             await asyncio.sleep(0.1)
             yield token
@@ -120,11 +118,11 @@ class Worker(RequestTracingMixin):
     async def get_status(self, request_id: str = None) -> dict:
         """
         Get worker status with request tracking.
-        
+
         Args:
             request_id: Request ID parameter. The @with_request_id decorator
                        ensures it's a non-None str inside the function body.
-            
+
         Returns:
             A dict containing worker status information
         """
@@ -144,12 +142,12 @@ class Worker(RequestTracingMixin):
     ) -> AsyncIterator[str]:
         """
         Prefill operation with request tracking.
-        
+
         Args:
             request_data: The input text for prefill
             request_id: Request ID parameter. The @with_request_id decorator
                        ensures it's a non-None str inside the function body.
-            
+
         Returns:
             An async iterator of tokens after prefill
         """

@@ -25,8 +25,8 @@ import inspect
 import logging
 import threading
 import uuid
-from typing import Callable, Optional, Union, TypeVar, Any, cast
 from functools import wraps
+from typing import Any, Callable, Optional, TypeVar, Union, cast
 
 from fastapi import Request, Response
 from fastapi.responses import StreamingResponse
@@ -202,25 +202,25 @@ class RequestTracingMixin:
     def log(self, level: str, message: str):
         """
         Log message with request ID automatically retrieved from context.
-        
+
         When used with @with_request_id decorator, the request ID is automatically
         available in thread-local storage, so there's no need to pass it explicitly.
-        
+
         Args:
             level: Log level (info, debug, warning, error, etc.)
             message: The log message
         """
         # Get request ID from thread-local storage
         req_id = get_current_request_id()
-        
+
         # If not available, generate a new one
         if req_id is None:
             req_id = str(uuid.uuid4())
             set_request_context(req_id)
-            
+
         log_message = f"[request_id={req_id}] {message}"
         getattr(logger, level.lower())(log_message)
-    
+
     # For backward compatibility
     def log_with_request_id(
         self, level: str, message: str, request_id: Optional[str] = None
@@ -231,40 +231,42 @@ class RequestTracingMixin:
         """
         # Get request ID from parameter or thread-local storage
         req_id = request_id or get_current_request_id()
-        
+
         # If still None, generate a new one
         if req_id is None:
             req_id = str(uuid.uuid4())
             set_request_context(req_id)
-            
+
         log_message = f"[request_id={req_id}] {message}"
         getattr(logger, level.lower())(log_message)
 
 
 # Type variables for generic functions
-F = TypeVar('F', bound=Callable[..., Any])
+F = TypeVar("F", bound=Callable[..., Any])
 
-def with_request_id(param_name: str = 'request_id'):
+
+def with_request_id(param_name: str = "request_id"):
     """
     Decorator that ensures a non-None request ID is available in the function.
-    
+
     This decorator:
     1. Accepts a request ID parameter that may be None in the function signature
     2. Ensures the parameter is a non-None string when the function executes
     3. Sets the request ID in thread-local storage for logging
-    
+
     Usage:
         @with_request_id()
         async def process(self, data, request_id: str = None):
             # Inside the function, request_id is guaranteed to be a non-None str
             self.log("info", f"Processing data for request {request_id}")
-    
+
     Args:
         param_name: Name of the request ID parameter in the function signature (default: 'request_id')
     """
+
     def decorator(func: F) -> F:
         sig = inspect.signature(func)
-        
+
         @wraps(func)
         async def wrapper(self, *args, **kwargs):
             # Check if the function has the request ID parameter
@@ -280,24 +282,24 @@ def with_request_id(param_name: str = 'request_id'):
                         if param.name == param_name:
                             param_idx = i
                             break
-                    
+
                     if param_idx is not None and param_idx < len(args):
                         request_id = args[param_idx]
-                
+
                 # Ensure we have a non-None request ID
                 request_id = self.ensure_request_id(request_id)
-                
+
                 # Update the parameter value
                 kwargs[param_name] = request_id
-                
+
                 # Also set it in thread-local storage for logging
                 set_request_context(request_id)
-            
+
             # Call the original function
             return await func(self, *args, **kwargs)
-        
+
         return cast(F, wrapper)
-    
+
     return decorator
 
 

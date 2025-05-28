@@ -22,12 +22,12 @@ request tracing for automatic request ID propagation and KV cache management.
 
 import asyncio
 import logging
-from typing import AsyncIterator, Dict, Optional, Any
+from typing import Any, AsyncIterator, Dict
 
 from dynamo.sdk import (
-    RequestTracingMixin, 
-    endpoint, 
-    get_current_request_id, 
+    RequestTracingMixin,
+    endpoint,
+    get_current_request_id,
     service,
     with_request_id,
 )
@@ -82,9 +82,7 @@ class Prefiller(RequestTracingMixin):
             prefill_result = await self._perform_prefill(request_data, cache_key)
             self.cache_stats["prefills"] += 1
 
-            self.log(
-                "info", f"Prefill completed for cache key: {cache_key}"
-            )
+            self.log("info", f"Prefill completed for cache key: {cache_key}")
             return prefill_result
 
         except Exception as e:
@@ -124,17 +122,15 @@ class Prefiller(RequestTracingMixin):
 
     @endpoint()
     @with_request_id()
-    async def get_cache(
-        self, cache_key: str, request_id: str = None
-    ) -> Dict[str, Any]:
+    async def get_cache(self, cache_key: str, request_id: str = None) -> Dict[str, Any]:
         """
         Retrieve cached KV states with request tracking.
-        
+
         Args:
             cache_key: The cache key to retrieve
             request_id: Request ID parameter. The @with_request_id decorator
                        ensures it's a non-None str inside the function body.
-                   
+
         Returns:
             A dict containing cached KV states or cache miss status
         """
@@ -156,23 +152,19 @@ class Prefiller(RequestTracingMixin):
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         Batch prefill operation with request tracking.
-        
+
         Args:
             requests: List of request data to prefill
             request_id: Request ID parameter. The @with_request_id decorator
                        ensures it's a non-None str inside the function body.
-                   
+
         Returns:
             An async iterator of prefill results
         """
-        self.log(
-            "info", f"Starting batch prefill for {len(requests)} requests"
-        )
+        self.log("info", f"Starting batch prefill for {len(requests)} requests")
 
         for i, request_data in enumerate(requests):
-            self.log(
-                "debug", f"Processing batch item {i+1}/{len(requests)}"
-            )
+            self.log("debug", f"Processing batch item {i+1}/{len(requests)}")
 
             cache_key = self._generate_cache_key(request_data)
             result = await self._perform_prefill(request_data, cache_key)
@@ -198,16 +190,14 @@ class Prefiller(RequestTracingMixin):
 
     @endpoint()
     @with_request_id()
-    async def get_stats(
-        self, request_id: str = None
-    ) -> Dict[str, Any]:
+    async def get_stats(self, request_id: str = None) -> Dict[str, Any]:
         """
         Get prefiller statistics with request tracking.
-        
+
         Args:
             request_id: Request ID parameter. The @with_request_id decorator
                        ensures it's a non-None str inside the function body.
-                   
+
         Returns:
             A dict containing prefiller statistics
         """
