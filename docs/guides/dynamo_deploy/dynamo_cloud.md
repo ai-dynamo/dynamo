@@ -62,6 +62,7 @@ export IMAGE_TAG=<TAG>
 ```
 
 Where:
+
 - `<CONTAINER_REGISTRY>`: Your container registry (e.g., `nvcr.io`, `docker.io/<your-username>`, etc.)
 - `<TAG>`: The version tag for your images (e.g., `latest`, `0.0.1`, `v1.0.0`)
 
@@ -88,6 +89,7 @@ Once you've built and pushed the components, you can deploy the platform to your
 Before deploying Dynamo Cloud, ensure your Kubernetes cluster meets the following requirements:
 
 #### PVC Support with Default Storage Class
+
 Dynamo Cloud requires Persistent Volume Claim (PVC) support with a default storage class. Verify your cluster configuration:
 
 ```bash
@@ -103,6 +105,7 @@ kubectl get storageclass
 ### Installation
 
 1. Set the required environment variables:
+
 ```bash
 export DOCKER_USERNAME=<your-docker-username>
 export DOCKER_PASSWORD=<your-docker-password>
@@ -116,9 +119,9 @@ DOCKER_USERNAME and DOCKER_PASSWORD are optional and only needed if you want to 
 A docker image pull secret is created automatically if these variables are set. Its name is `docker-imagepullsecret` unless overridden by the `DOCKER_SECRET_NAME` environment variable.
 ```
 
-The Dynamo Cloud Platform auto-generates docker images for pipelines and pushes them to a container registry.
+The Dynamo Cloud Platform auto-generates docker images for dynamo graphs and pushes them to a container registry.
 By default, the platform uses the same container registry as the platform components (specified by `DOCKER_SERVER`).
-However, you can specify a different container registry for pipelines by additionally setting the following environment variables:
+However, you can specify a different container registry for dynamo graphs by additionally setting the following environment variables:
 
 ```bash
 export PIPELINES_DOCKER_SERVER=<your-docker-server>
@@ -178,7 +181,7 @@ export DYNAMO_CLOUD=http://localhost:<local-port>
 After deploying the Dynamo cloud platform, you can:
 
 1. Deploy your first inference graph using the [Dynamo CLI](operator_deployment.md)
-2. Deploy Dynamo LLM pipelines to Kubernetes using the [Dynamo CLI](../../examples/llm_deployment.md)!
+2. Deploy Dynamo LLM graphs to Kubernetes using the [Dynamo CLI](../../examples/llm_deployment.md)!
 3. Manage your deployments using the Dynamo CLI
 
 For more detailed information about deploying inference graphs, see the [Dynamo Deploy Guide](README.md).

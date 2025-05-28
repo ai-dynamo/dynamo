@@ -44,17 +44,16 @@ Dynamo operator is a Kubernetes operator that simplifies the deployment, configu
 
 ### CRD: `DynamoGraphDeployment`
 
-
 | Field            | Type   | Description                                                                                                                                          | Required | Default |
 |------------------|--------|------------------------------------------------------------------------------------------------------------------------------------------------------|----------|---------|
 | `dynamoComponent`| string | Reference to the dynamoComponent identifier                                                                                                          | Yes      |         |
 | `services`       | map    | Map of service names to runtime configurations. This allows the user to override the service configuration defined in the DynamoComponentDeployment. | No       |         |
 
-
 **API Version:** `nvidia.com/v1alpha1`
 **Scope:** Namespaced
 
 #### Example
+
 ```yaml
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -122,6 +121,7 @@ spec:
 **Scope:** Namespaced
 
 #### Example
+
 ```yaml
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoComponentDeployment
@@ -172,6 +172,7 @@ spec:
 **Scope:** Namespaced
 
 #### Example
+
 ```yaml
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoComponent
@@ -181,7 +182,6 @@ spec:
   dynamoComponent: frontend:jh2o6dqzpsgfued4
 ```
 
-
 ---
 
 ## Installation
@@ -190,7 +190,7 @@ spec:
 
 ---
 
-## Deploying a Dynamo Pipeline using the Operator
+## Deploying a Dynamo Graph using the Operator
 
 [See deployment steps](operator_deployment.md)
 
@@ -225,7 +225,6 @@ spec:
 
 ## Configuration
 
-
 - **Environment Variables:**
 
 | Name                                               | Description                          | Default                                                |
@@ -245,11 +244,11 @@ spec:
 | `DYNAMO_SYSTEM_NAMESPACE`                          | System namespace                     | `dynamo`                                               |
 
 - **Flags:**
+
   | Flag                  | Description                                | Default |
   |-----------------------|--------------------------------------------|---------|
   | `--natsAddr`          | Address of NATS server                     | ""      |
   | `--etcdAddr`          | Address of etcd server                     | ""      |
-
 
 ---
 
@@ -269,9 +268,9 @@ spec:
 
 The operator is built using Kubebuilder and the operator-sdk, with the following structure:
 
-  - `controllers/` – Reconciliation logic
-  - `api/v1alpha1/` – CRD types
-  - `config/` – Manifests and Helm charts
+- `controllers/` – Reconciliation logic
+- `api/v1alpha1/` – CRD types
+- `config/` – Manifests and Helm charts
 
 ---
 

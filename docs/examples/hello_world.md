@@ -19,14 +19,14 @@ limitations under the License.
 
 ## Overview
 
-This example demonstrates the basic concepts of Dynamo by creating a simple multi-service pipeline. It shows how to:
+This example demonstrates the basic concepts of Dynamo by creating a simple multi-service graph. It shows how to:
 
 1. Create and connect multiple Dynamo services
 2. Pass data between services using Dynamo's runtime
 3. Set up a simple HTTP API endpoint
 4. Deploy and interact with a Dynamo service graph
 
-Pipeline Architecture:
+Graph Architecture:
 
 ```
 Users/Clients (HTTP)
@@ -50,17 +50,20 @@ Users/Clients (HTTP)
 ## Component Descriptions
 
 ### Frontend Service
+
 - Serves as the entry point for external HTTP requests
 - Exposes a `/generate` HTTP API endpoint that clients can call
 - Processes incoming text and passes it to the Middle service
 
 ### Middle Service
-- Acts as an intermediary service in the pipeline
+
+- Acts as an intermediary service in the graph
 - Receives requests from the Frontend
 - Appends "-mid" to the text and forwards it to the Backend
 
 ### Backend Service
-- Functions as the final service in the pipeline
+
+- Functions as the final service in the graph
 - Processes requests from the Middle service
 - Appends "-back" to the text and yields tokens
 
@@ -150,6 +153,7 @@ Frontend: Middle: Backend: test-mid-back
 ```
 
 This demonstrates how:
+
 1. The Frontend receives "test"
 2. The Middle service adds "-mid" to create "test-mid"
 3. The Backend service adds "-back" to create "test-mid-back"

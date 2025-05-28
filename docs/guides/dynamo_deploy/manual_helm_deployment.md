@@ -16,6 +16,7 @@ limitations under the License.
 -->
 
 <a id="k8-helm-deploy"></a>
+
 # Deploying Dynamo Inference Graphs to Kubernetes using Helm
 
 This guide describes the deployment process of an inference graph created using the Dynamo SDK onto a Kubernetes cluster.
@@ -36,11 +37,13 @@ Once an inference graph is defined using the Dynamo SDK, it can be deployed onto
 Follow these steps to set up a local Kubernetes cluster using MicroK8s:
 
 1. Install MicroK8s:
+
 ```bash
 sudo snap install microk8s --classic
 ```
 
 2. Configure user permissions:
+
 ```bash
 sudo usermod -a -G microk8s $USER
 sudo chown -R $USER ~/.kube
@@ -49,11 +52,13 @@ sudo chown -R $USER ~/.kube
 3. **Important**: Log out and log back in for the permissions to take effect
 
 4. Start MicroK8s:
+
 ```bash
 microk8s start
 ```
 
 5. Enable required addons:
+
 ```bash
 # Enable GPU support
 microk8s enable gpu
@@ -64,6 +69,7 @@ microk8s enable storage
 ```
 
 6. Configure kubectl:
+
 ```bash
 mkdir -p ~/.kube
 microk8s config >> ~/.kube/config
@@ -76,6 +82,7 @@ After completing these steps, you should be able to use the `kubectl` command to
 Follow these steps to set up the namespace and install required components:
 
 1. Set environment variables:
+
 ```bash
 export NAMESPACE=dynamo-playground
 export RELEASE_NAME=dynamo-platform
@@ -83,6 +90,7 @@ export PROJECT_ROOT=$(pwd)
 ```
 
 2. Install NATS messaging system:
+
 ```bash
 # Navigate to dependencies directory
 cd $PROJECT_ROOT/deploy/helm/dependencies
@@ -97,6 +105,7 @@ helm install --namespace ${NAMESPACE} ${RELEASE_NAME}-nats nats/nats \
 ```
 
 3. Install etcd key-value store:
+
 ```bash
 # Install etcd using Bitnami chart
 helm install --namespace ${NAMESPACE} ${RELEASE_NAME}-etcd \
@@ -106,11 +115,11 @@ helm install --namespace ${NAMESPACE} ${RELEASE_NAME}-etcd \
 
 After completing these steps, your cluster has the necessary messaging and storage infrastructure for running Dynamo inference graphs.
 
-### Building and Deploying the Pipeline
+### Building and Deploying the dynamo graph
 
-Follow these steps to containerize and deploy your inference pipeline:
+Follow these steps to containerize and deploy your inference graph:
 
-1. Build and containerize the pipeline:
+1. Build and containerize the dynamo graph:
 
 ``` {note}
 For instructions on building and pushing the Dynamo base image, see [Building the Dynamo Base Image](../../get_started.md#building-the-dynamo-base-image).
@@ -128,6 +137,7 @@ dynamo build --containerize hello_world:Frontend
 ```
 
 2. Push container to registry:
+
 ```bash
 # Tag the built image for your registry
 docker tag <BUILT_IMAGE_TAG> <TAG>
@@ -137,6 +147,7 @@ docker push <TAG>
 ```
 
 3. Deploy using Helm:
+
 ```bash
 # Navigate to the deployment directory
 cd $PROJECT_ROOT/deploy/helm
@@ -145,17 +156,18 @@ cd $PROJECT_ROOT/deploy/helm
 export HELM_RELEASE=hello-world-manual
 
 # Generate Helm values file from Frontend service
-dynamo get frontend > pipeline-values.yaml
+dynamo get frontend > graph-values.yaml
 
 # Install/upgrade Helm release
 helm upgrade -i "$HELM_RELEASE" ./chart \
-    -f pipeline-values.yaml \
+    -f graph-values.yaml \
     --set image=<TAG> \
     --set dynamoIdentifier="hello_world:Frontend" \
     -n "$NAMESPACE"
 ```
 
 4. Test the deployment:
+
 ```bash
 # Forward the service port to localhost
 kubectl -n ${NAMESPACE} port-forward svc/${HELM_RELEASE}-frontend 3000:80
@@ -181,6 +193,7 @@ export DYNAMO_IMAGE=<dynamo_docker_image_name>
 ```
 
 This script handles:
+
 1. Building and pushing the Docker image
 2. Setting up the Helm values
 3. Installing/upgrading the Helm release

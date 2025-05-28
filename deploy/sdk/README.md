@@ -9,6 +9,7 @@ pip install ai-dynamo
 ```
 
 ## Quickstart
+
 Lets build a simple distributed graph with 3 components: `Frontend`, `Middle` and `Backend`. The structure of the graph looks like this:
 
 ```
@@ -33,7 +34,7 @@ Users/Clients (HTTP)
 The code for the graph looks like this:
 
 ```python
-# filename: pipeline.py
+# filename: dynamo_graph.py
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -104,7 +105,7 @@ then
 
 ```bash
 # Run the graph
-dynamo serve pipeline:Frontend
+dynamo serve graph:Frontend
 ```
 
 Once it's up and running, you can make a request to the graph using

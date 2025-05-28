@@ -23,7 +23,7 @@ limitations under the License.
 
 | **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[Support Matrix](docs/support_matrix.md)** | **[Guides](docs/guides)** | **[Architecture and Features](docs/architecture/architecture.md)** | **[APIs](lib/bindings/python/README.md)** | **[SDK](deploy/dynamo/sdk/README.md)** |
 
-### 📢 **Please join us for our** [ **first Dynamo in-person meetup with vLLM and SGLang leads**](https://events.nvidia.com/nvidiadynamousermeetups) **on 6/5 (Thu) in SF!** ###
+### 📢 **Please join us for our** [**first Dynamo in-person meetup with vLLM and SGLang leads**](https://events.nvidia.com/nvidiadynamousermeetups) **on 6/5 (Thu) in SF!** ###
 
 NVIDIA Dynamo is a high-throughput low-latency inference framework designed for serving generative AI and reasoning models in multi-node distributed environments. Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLang or others) and captures LLM-specific capabilities such as:
 
@@ -48,12 +48,14 @@ source venv/bin/activate
 
 pip install "ai-dynamo[all]"
 ```
+
 > [!NOTE]
 > To ensure compatibility, please refer to the examples in the release branch or tag that matches the version you installed.
 
 ### Building the Dynamo Base Image
 
-Although not needed for local development, deploying your Dynamo pipelines to Kubernetes will require you to build and push a Dynamo base image to your container registry. You can use any container registry of your choice, such as:
+Although not needed for local development, deploying your Dynamo graphs to Kubernetes will require you to build and push a Dynamo base image to your container registry. You can use any container registry of your choice, such as:
+
 - Docker Hub (docker.io)
 - NVIDIA NGC Container Registry (nvcr.io)
 - Any private registry
@@ -68,10 +70,12 @@ docker push <your-registry>/dynamo-base:latest-vllm
 ```
 
 Notes about builds for specific frameworks:
+
 - For specific details on the `--framework vllm` build, see [here](examples/llm/README.md).
 - For specific details on the `--framework tensorrtllm` build, see [here](examples/tensorrt_llm/README.md).
 
 After building, you can use this image by setting the `DYNAMO_IMAGE` environment variable to point to your built image:
+
 ```bash
 export DYNAMO_IMAGE=<your-registry>/dynamo-base:latest-vllm
 ```
@@ -116,6 +120,7 @@ First start the Dynamo Distributed Runtime services:
 ```bash
 docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
+
 #### Start Dynamo LLM Serving Components
 
 Next serve a minimal configuration with an http server, basic
@@ -161,7 +166,6 @@ cp /workspace/target/release/dynamo-run /workspace/deploy/sdk/src/dynamo/sdk/cli
 uv pip install -e .
 export PYTHONPATH=$PYTHONPATH:/workspace/deploy/sdk/src:/workspace/components/planner/src
 ```
-
 
 #### Conda Environment
 
