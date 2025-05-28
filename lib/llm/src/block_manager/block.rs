@@ -1611,7 +1611,7 @@ mod tests {
 
     // Helper to create a default reset block
     fn create_reset_block() -> Block<impl Storage, BasicMetadata> {
-        let layout = setup_layout(None).unwrap();
+        let layout = setup_layout(None, None).unwrap();
         let data = BlockData::new(Arc::new(layout), 0, 42, 0);
         Block::new(data, BasicMetadata::default()).unwrap()
     }
