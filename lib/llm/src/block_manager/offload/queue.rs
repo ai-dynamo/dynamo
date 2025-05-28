@@ -27,27 +27,18 @@ use std::collections::{HashMap, HashSet, VecDeque};
 struct OffloadTreeNode<S: Storage, M: BlockMetadata> {
     request: OffloadRequest<S, M>,
     parent: Option<SequenceHash>,
-    children: Vec<SequenceHash>,
 }
 
 /// A collection of trees (*forest*) that indexes blocks currently waiting in
 /// the offload queue.
-///
-/// Internal data-structures:
-/// * `entries` – mapping `sequence_hash → OffloadTreeNode`.
-/// * `ends`    – `HashSet` satisfying **Invariant A**.
-/// * `end_queue` – `VecDeque` to store sequence ends for round-robin consumption.
-/// * `waiting` – `HashMap` to store children that arrived *before* their parent.
-///   - This can happen with blocks registered after an offload request.
 pub struct OffloadTreeQueue<S: Storage, M: BlockMetadata> {
     entries: HashMap<SequenceHash, OffloadTreeNode<S, M>>,
     // Current sequence ends (may converge later).
     ends: HashSet<SequenceHash>,
     /// Round-robin queue of sequence ends. Stale hashes are skipped lazily.
     end_queue: VecDeque<SequenceHash>,
-    /// Children that appeared *before* their parent.  Keyed by the missing
-    /// `parent_sequence_hash` and containing the hashes of its children.
-    waiting: HashMap<SequenceHash, Vec<SequenceHash>>,
+    /// A map of unregistered sequence hashes to their waiting children.
+    waiting_children: HashMap<SequenceHash, Vec<SequenceHash>>,
 }
 
 impl<S: Storage, M: BlockMetadata> OffloadTreeQueue<S, M> {
@@ -56,11 +47,11 @@ impl<S: Storage, M: BlockMetadata> OffloadTreeQueue<S, M> {
             entries: HashMap::new(),
             ends: HashSet::new(),
             end_queue: VecDeque::new(),
-            waiting: HashMap::new(),
+            waiting_children: HashMap::new(),
         }
     }
 
-    // TODO: Incorporate priorities into this.
+    // TODO: Incorporate request priority into this.
     pub fn insert(&mut self, request: OffloadRequest<S, M>) -> anyhow::Result<()> {
         // `sequence_hash` uniquely identifies the *current* block, whereas
         // `parent` (if `Some`) points to its immediate predecessor.
@@ -72,49 +63,36 @@ impl<S: Storage, M: BlockMetadata> OffloadTreeQueue<S, M> {
             return Ok(());
         }
 
-        // Create the node, and fill in the children (if any) later.
-        let mut entry = OffloadTreeNode::<S, M> {
-            parent,
-            children: Vec::new(),
-            request,
-        };
-
-        // A brand-new node starts as a leaf by definition.
-        if self.ends.insert(sequence_hash) {
-            self.end_queue.push_back(sequence_hash);
-        }
+        let entry = OffloadTreeNode::<S, M> { parent, request };
 
         if let Some(parent_hash) = parent {
             // Parent already present: append ourselves to its `children` list
             // and ensure the parent is no longer considered a leaf.
-            if let Some(parent_node) = self.entries.get_mut(&parent_hash) {
-                parent_node.children.push(sequence_hash);
-                // If the sequence hasn't been forked (i.e. This is the only child), the parent is no longer a sequence end.
-                if parent_node.children.len() == 1 {
-                    self.ends.remove(&parent_hash);
-                }
+            if self.entries.get_mut(&parent_hash).is_some() {
+                self.ends.remove(&parent_hash);
             } else {
-                // Parent not yet present: mark this node as a temporary root
-                self.waiting
+                // Otherwise, we need to wait for the parent to be registered.
+                self.waiting_children
                     .entry(parent_hash)
                     .or_default()
                     .push(sequence_hash);
             }
-        } else {
-            // No parent => unconditional root.
-            // root-less sequence end already inserted above
         }
 
-        // Any children that arrived *before* their parent were stored in the
-        // `waiting` map.  Retrieve and re-link them.
-        if let Some(orphans) = self.waiting.remove(&sequence_hash) {
-            // Drain the orphan list into the parent's `children` vector.
-            entry.children.extend(orphans.iter().copied());
+        let mut is_end = true;
 
-            if !orphans.is_empty() {
-                // Parent now definitely has at least one child.
-                self.ends.remove(&sequence_hash);
+        // If there are waiting children, and any of the children are present, this is not a sequence end.
+        if let Some(children) = self.waiting_children.remove(&sequence_hash) {
+            if children
+                .into_iter()
+                .any(|child| self.entries.contains_key(&child))
+            {
+                is_end = false;
             }
+        }
+
+        if is_end && self.ends.insert(sequence_hash) {
+            self.end_queue.push_back(sequence_hash);
         }
 
         self.entries.insert(sequence_hash, entry);
@@ -122,17 +100,11 @@ impl<S: Storage, M: BlockMetadata> OffloadTreeQueue<S, M> {
         Ok(())
     }
 
-    /// Remove and return any leaf block from the queue.
-    ///
-    /// The current implementation picks the first leaf returned by the
-    /// iteration order of the underlying `HashSet` which is effectively
-    /// deterministic within a single process execution but otherwise
-    /// arbitrary.  This keeps the API simple while still ensuring that *only*
-    /// leaves are removed and all invariants (`roots`, `leaves`, `waiting`)
-    /// remain valid.
+    /// Remove and return a sequence end from the queue.
+    /// Use the end_queue to enforce a FIFO order.
     pub fn remove(&mut self) -> Option<OffloadRequest<S, M>> {
-        // Pop until we find a still-valid leaf.
-        let leaf_hash = loop {
+        // Pop until we find a still-valid sequence end.
+        let end_hash = loop {
             let hash = self.end_queue.pop_front()?; // None => queue empty
             if self.ends.contains(&hash) {
                 break hash;
@@ -141,20 +113,15 @@ impl<S: Storage, M: BlockMetadata> OffloadTreeQueue<S, M> {
         };
 
         // Remove the end from auxiliary sets.
-        self.ends.remove(&leaf_hash);
+        self.ends.remove(&end_hash);
 
         // Remove the node from the main map.
-        let node = self.entries.remove(&leaf_hash)?;
+        let node = self.entries.remove(&end_hash)?;
 
-        // Detach from parent if we know it.
+        // The parent is now a sequence end.
         if let Some(parent_hash) = node.parent {
-            if let Some(parent_node) = self.entries.get_mut(&parent_hash) {
-                // Remove this child from the parent's list.
-                parent_node.children.retain(|c| *c != leaf_hash);
-
-                if self.ends.insert(parent_hash) {
-                    self.end_queue.push_back(parent_hash);
-                }
+            if self.entries.get_mut(&parent_hash).is_some() && self.ends.insert(parent_hash) {
+                self.end_queue.push_back(parent_hash);
             }
         }
 
@@ -250,8 +217,6 @@ mod tests {
         for i in 0..3 {
             assert_eq!(extract(queue.remove()), sequence_hashes[2 - i]);
         }
-
-        let mut queue = OffloadTreeQueue::new();
 
         for i in (0..3).rev() {
             queue.insert(make_request(&block_sequence[i])?)?;
@@ -409,6 +374,56 @@ mod tests {
         // Calling `remove` on an empty queue should immediately return `None`.
         let mut queue: OffloadTreeQueue<NullDeviceStorage, BasicMetadata> = OffloadTreeQueue::new();
         assert!(queue.remove().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_re_add() -> Result<()> {
+        let mut blocks = make_blocks(8)?;
+
+        let (block_sequence, sequence_hashes) = tokens_to_blocks(vec![0; 13], &mut blocks)?;
+
+        let mut queue = OffloadTreeQueue::new();
+
+        for block in &block_sequence {
+            queue.insert(make_request(block)?)?;
+        }
+
+        assert_eq!(extract(queue.remove()), sequence_hashes[2]);
+
+        queue.insert(make_request(&block_sequence[2])?)?;
+
+        assert_eq!(extract(queue.remove()), sequence_hashes[2]);
+        assert_eq!(extract(queue.remove()), sequence_hashes[1]);
+        assert_eq!(extract(queue.remove()), sequence_hashes[0]);
+
+        assert!(queue.remove().is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_sequence_end_rebuild() -> Result<()> {
+        let mut blocks = make_blocks(8)?;
+
+        let (block_sequence, sequence_hashes) = tokens_to_blocks(vec![0; 13], &mut blocks)?;
+
+        let mut queue = OffloadTreeQueue::new();
+
+        for block in block_sequence.iter().rev() {
+            queue.insert(make_request(block)?)?;
+        }
+
+        let (new_sequence_blocks, new_sequence_hashes) =
+            tokens_to_blocks(vec![0, 0, 0, 0, 1, 1, 1, 1, 1], &mut blocks)?;
+
+        queue.insert(make_request(&new_sequence_blocks[1])?)?;
+
+        assert_eq!(extract(queue.remove()), sequence_hashes[2]);
+        assert_eq!(extract(queue.remove()), new_sequence_hashes[1]);
+        assert_eq!(extract(queue.remove()), sequence_hashes[1]);
+        assert_eq!(extract(queue.remove()), sequence_hashes[0]);
+
         Ok(())
     }
 }
