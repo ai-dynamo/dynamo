@@ -148,8 +148,8 @@ class VllmEncodeWorker:
                 request_id=request.request_id,
             ).model_dump_json()
 
-    @async_on_start()
-    async def on_start(self):
+    @async_on_start
+    async def async_init(self):
         logger.info("Startup started.")
         # Create and initialize a dynamo connector for this worker.
         # We'll needs this to move data between this worker and remote workers efficiently.

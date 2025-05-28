@@ -15,6 +15,7 @@ use dynamo_llm::local_model::LocalModel;
 use dynamo_runtime::protocols::Endpoint as EndpointId;
 
 pub mod sglang;
+pub mod trtllm;
 pub mod vllm;
 
 pub async fn start(

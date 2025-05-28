@@ -101,16 +101,12 @@ pub enum Output {
     /// Run inference using sglang
     SgLang,
 
+    /// Run inference using trtllm
+    Trtllm,
+
     // Start vllm in a sub-process connecting via nats
     // Sugar for `python vllm_inc.py --endpoint <thing> --model <thing>`
     Vllm,
-
-    /// Run inference using a user supplied python file that accepts and returns
-    /// strings. It does it's own pre-processing.
-    #[cfg(feature = "python")]
-    PythonStr(String),
-    // DEVELOPER NOTE
-    // If you add an engine add it to `available_engines` below, and to Default if it makes sense
 }
 
 impl TryFrom<&str> for Output {
@@ -125,6 +121,7 @@ impl TryFrom<&str> for Output {
             "llamacpp" | "llama_cpp" => Ok(Output::LlamaCpp),
 
             "sglang" => Ok(Output::SgLang),
+            "trtllm" => Ok(Output::Trtllm),
             "vllm" => Ok(Output::Vllm),
 
             "echo_full" => Ok(Output::EchoFull),
@@ -139,14 +136,6 @@ impl TryFrom<&str> for Output {
                 );
                 //let path = endpoint_path.strip_prefix(ENDPOINT_SCHEME).unwrap();
                 Ok(Output::Dynamic)
-            }
-
-            #[cfg(feature = "python")]
-            python_str_gen if python_str_gen.starts_with(crate::PYTHON_STR_SCHEME) => {
-                let path = python_str_gen
-                    .strip_prefix(crate::PYTHON_STR_SCHEME)
-                    .unwrap();
-                Ok(Output::PythonStr(path.to_string()))
             }
 
             e => Err(anyhow::anyhow!("Invalid out= option '{e}'")),
@@ -164,15 +153,13 @@ impl fmt::Display for Output {
             Output::LlamaCpp => "llamacpp",
 
             Output::SgLang => "sglang",
+            Output::Trtllm => "trtllm",
             Output::Vllm => "vllm",
 
             Output::EchoFull => "echo_full",
             Output::EchoCore => "echo_core",
 
             Output::Dynamic => "dyn",
-
-            #[cfg(feature = "python")]
-            Output::PythonStr(_) => "pystr",
         };
         write!(f, "{s}")
     }
@@ -210,12 +197,8 @@ impl Output {
         }
 
         out.push(Output::SgLang.to_string());
+        out.push(Output::Trtllm.to_string());
         out.push(Output::Vllm.to_string());
-
-        #[cfg(feature = "python")]
-        {
-            out.push(Output::PythonStr("file.py".to_string()).to_string());
-        }
 
         out
     }

@@ -29,7 +29,6 @@ description = "Dynamo Run CLI"
 default = ["mistralrs"]
 mistralrs = ["dep:dynamo-engine-mistralrs"]
 llamacpp = ["dep:dynamo-engine-llamacpp"]
-python = ["dep:dynamo-engine-python"]
 
 cuda = ["dynamo-engine-llamacpp/cuda", "dynamo-engine-mistralrs/cuda"]
 metal = ["dynamo-engine-llamacpp/metal", "dynamo-engine-mistralrs/metal"]
@@ -41,7 +40,6 @@ dynamo-runtime = { workspace = true }
 
 dynamo-engine-llamacpp = { path = "../../lib/engines/llamacpp", optional = true }
 dynamo-engine-mistralrs = { path = "../../lib/engines/mistralrs", optional = true }
-dynamo-engine-python = { path = "../../lib/engines/python", optional = true }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }

@@ -16,6 +16,7 @@
 ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
 ARG BASE_IMAGE_TAG="25.04-py3"
 ARG RELEASE_BUILD
+ARG GENAI_PERF_VERSION=0.0.13
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -162,10 +163,11 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
          "${TENSORRTLLM_PIP_WHEEL}" ; \
     fi
 
+ARG GENAI_PERF_VERSION
+
 # Install genai-perf for benchmarking
-# TODO: Move to published pypi tags
-ARG GENAI_PERF_TAG="e67e853413a07a778dd78a55e299be7fba9c9c24"
-RUN pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
+
+RUN uv pip install genai-perf==$GENAI_PERF_VERSION
 
 # Install test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
@@ -273,7 +275,7 @@ COPY launch /workspace/launch
 COPY deploy/sdk /workspace/deploy/sdk
 
 # Build Rust crate binaries packaged with the wheel
-RUN cargo build --release --locked --features mistralrs,python \
+RUN cargo build --release --locked \
     -p dynamo-run \
     -p llmctl \
     # Multiple http named crates are present in dependencies, need to specify the path

@@ -12,44 +12,41 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-Common:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  block-size: 64
-  max-model-len: 16384
-  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-  router: kv-load
 
 Frontend:
   served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  endpoint: dynamo.Processor.chat/completions
+  endpoint: dynamo.SGLangWorker.generate
   port: 8000
 
-Processor:
-  router: kv-load
-  common-configs: [model, block-size, router]
-
-Router:
-  min-workers: 1
-  common-configs: [model, block-size, router]
-
-VllmWorker:
-  remote-prefill: true
-  conditional-disagg: false
+SGLangWorker:
+  model-path: silence09/DeepSeek-R1-Small-2layers
+  served-model-name: silence09/DeepSeek-R1-Small-2layers
+  tp: 2
+  dp-size: 2
+  enable-dp-attention: true
+  trust-remote-code: true
+  skip-tokenizer-init: true
+  disaggregation-mode: prefill
+  disaggregation-transfer-backend: nixl
+  port: 30000
   ServiceArgs:
-    workers: 2
+    workers: 1
     resources:
-      gpu: 1
-  common-configs: [model, block-size, max-model-len, kv-transfer-config]
+      gpu: 2
 
-PrefillWorker:
-  max-num-batched-tokens: 16384
+SGLangDecodeWorker:
+  model-path: silence09/DeepSeek-R1-Small-2layers
+  served-model-name: silence09/DeepSeek-R1-Small-2layers
+  tp: 2
+  dp-size: 2
+  enable-dp-attention: true
+  trust-remote-code: true
+  skip-tokenizer-init: true
+  disaggregation-mode: decode
+  disaggregation-transfer-backend: nixl
+  # SGLang requires a port delta between prefill and decode workers when using enable-dp-attention
+  port: 31000
   ServiceArgs:
-    workers: 2
+    workers: 1
     resources:
-      gpu: 1
-  common-configs: [model, block-size, max-model-len, kv-transfer-config]
-
-Planner:
-  environment: local
-  no-operation: true
-  log-dir: log/2p2d
+      gpu: 2
