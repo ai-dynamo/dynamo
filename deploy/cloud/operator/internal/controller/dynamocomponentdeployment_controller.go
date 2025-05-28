@@ -1399,6 +1399,14 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		}
 	}
 
+	// finally set the DYN_DEPLOYMENT_CONFIG env var
+	if opt.dynamoComponentDeployment.Spec.Config != nil && opt.dynamoComponentDeployment.Spec.Config.Raw != nil && len(opt.dynamoComponentDeployment.Spec.Config.Raw) > 0 {
+		envs = append(envs, corev1.EnvVar{
+			Name:  "DYN_DEPLOYMENT_CONFIG",
+			Value: string(opt.dynamoComponentDeployment.Spec.Config.Raw),
+		})
+	}
+
 	var livenessProbe *corev1.Probe
 	if opt.dynamoComponentDeployment.Spec.LivenessProbe != nil {
 		livenessProbe = opt.dynamoComponentDeployment.Spec.LivenessProbe

@@ -76,6 +76,7 @@ def create_dynamo_deployment(
     dynamo_component: str,
     labels: Dict[str, str],
     envs: Optional[List[Dict[str, str]]] = None,
+    config: Optional[Dict[str, Dict]] = None,
 ) -> Dict[str, Any]:
     """
     Create a DynamoGraphDeployment custom resource.
@@ -98,6 +99,7 @@ def create_dynamo_deployment(
             "dynamoGraph": dynamo_component,
             "services": {},
             "envs": envs if envs else [],
+            "config": config if config else {},
         },
     }
 
@@ -208,6 +210,7 @@ def update_dynamo_deployment(
     dynamo_nim: str,
     labels: Dict[str, str],
     envs: Optional[List[Dict[str, str]]] = None,
+    config: Optional[Dict[str, Dict]] = None,
 ) -> Dict[str, Any]:
     """
     Update a DynamoGraphDeployment custom resource.
@@ -241,6 +244,7 @@ def update_dynamo_deployment(
             "dynamoGraph": dynamo_nim,
             "services": {},
             "envs": envs if envs else [],
+            "config": config if config else {},
         },
     }
     api = client.CustomObjectsApi()

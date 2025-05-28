@@ -24,6 +24,7 @@ import (
 
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -42,6 +43,8 @@ type DynamoComponentDeploymentSpec struct {
 	DynamoTag string `json:"dynamoTag"`
 
 	DynamoComponentDeploymentSharedSpec `json:",inline"`
+	// application specific config
+	Config *apiextensionsv1.JSON `json:"config,omitempty"`
 }
 
 type DynamoComponentDeploymentOverridesSpec struct {
