@@ -19,7 +19,7 @@
 
 [package]
 name = "dynamo-py3"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
@@ -72,3 +72,4 @@ pyo3-async-runtimes = { version = "0.23.0", default-features = false, features =
 pythonize = "0.23"
 
 dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
+

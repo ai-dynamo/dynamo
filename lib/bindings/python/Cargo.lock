@@ -564,9 +564,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.20"
+version = "1.2.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04da6a0d40b948dfc4fa8f5bbf402b0fc1a64a28dbf7d12ffd683550f2c1b63a"
+checksum = "16595d3be041c03b09d08d0858631facccee9221e579704070e6e9e4915d3bc7"
 dependencies = [
  "jobserver",
  "libc",
@@ -1066,7 +1066,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-python"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1087,7 +1087,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "akin",
  "anyhow",
@@ -1148,7 +1148,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-py3"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dlpark",
  "dynamo-engine-python",
@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -2794,13 +2794,14 @@ dependencies = [
 
 [[package]]
 name = "nixl-sys"
-version = "0.2.1"
+version = "0.3.0-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84bf333c75733cad60b29873d84168f841c6bd5207ae9dfbda7490a99c1ebe94"
+checksum = "d5273ad6fc7b77c414ea42656ab06ecefd025109f9075fd8270f1052cd6e6d6b"
 dependencies = [
  "bindgen",
  "cc",
  "libc",
+ "os_info",
  "pkg-config",
  "serde",
  "thiserror 2.0.12",
@@ -3048,6 +3049,17 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "os_info"
+version = "3.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41fc863e2ca13dc2d5c34fb22ea4a588248ac14db929616ba65c45f21744b1e9"
+dependencies = [
+ "log",
+ "serde",
+ "windows-sys 0.52.0",
+]
 
 [[package]]
 name = "overload"
