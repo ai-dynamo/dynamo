@@ -60,7 +60,7 @@ impl KvEventPublisher {
     }
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
-        tracing::info!("Publish event: {:?}", event);
+        tracing::trace!("Publish event: {:?}", event);
         self.tx.send(event)
     }
 
@@ -90,6 +90,7 @@ fn start_publish_task(
 
 pub struct KvEventPublisherFromZmq {
     kv_block_size: usize,
+    processor_handle: Option<tokio::task::JoinHandle<()>>,
     zmq_handle: Option<tokio::task::JoinHandle<()>>,
     zmq_token: Option<dynamo_runtime::CancellationToken>,
 }
@@ -98,6 +99,7 @@ impl KvEventPublisherFromZmq {
     pub fn new(kv_block_size: usize) -> Self {
         Self {
             kv_block_size,
+            processor_handle: None,
             zmq_handle: None,
             zmq_token: None,
         }
@@ -126,20 +128,13 @@ impl KvEventPublisherFromZmq {
                     zmq_endpoint,
                     zmq_topic,
                     raw_tx,
-                    zmq_token,
+                    zmq_token.clone(),
                 )),
         );
 
-        component
-            .drt()
-            .runtime()
-            .secondary()
-            .spawn(start_event_processor(
-                raw_rx,
-                component,
-                worker_id,
-                kv_block_size,
-            ));
+        self.processor_handle = Some(component.drt().runtime().secondary().spawn(
+            start_event_processor(raw_rx, component, worker_id, kv_block_size, zmq_token),
+        ));
     }
 
     pub fn shutdown(&mut self) {
@@ -147,6 +142,9 @@ impl KvEventPublisherFromZmq {
             token.cancel();
         }
         if let Some(handle) = self.zmq_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.processor_handle.take() {
             handle.abort();
         }
     }
@@ -157,24 +155,45 @@ async fn start_event_processor<P: EventPublisher>(
     component: P,
     worker_id: i64,
     kv_block_size: usize,
+    cancellation_token: dynamo_runtime::CancellationToken,
 ) {
-    while let Some((seq, payload)) = raw_rx.recv().await {
-        match rmps::from_slice::<KvEventBatch>(&payload) {
-            Ok(batch) => {
-                for raw_evt in batch.events.into_iter() {
-                    if let Some(event) = convert_event(raw_evt, seq, kv_block_size) {
-                        let router_event = RouterEvent::new(worker_id, event);
-                        if let Err(e) = component.publish(KV_EVENT_SUBJECT, &router_event).await {
-                            tracing::warn!("Failed to publish router event: {}", e);
+    loop {
+        tokio::select! {
+            // Check for cancellation
+            _ = cancellation_token.cancelled() => {
+                tracing::debug!("Event processor received cancellation signal");
+                break;
+            }
+
+            // Process incoming messages
+            msg = raw_rx.recv() => {
+                match msg {
+                    Some((seq, payload)) => {
+                        match rmps::from_slice::<KvEventBatch>(&payload) {
+                            Ok(batch) => {
+                                for raw_evt in batch.events.into_iter() {
+                                    if let Some(event) = convert_event(raw_evt, seq, kv_block_size) {
+                                        let router_event = RouterEvent::new(worker_id, event);
+                                        if let Err(e) = component.publish(KV_EVENT_SUBJECT, &router_event).await {
+                                            tracing::warn!(error=%e, "Failed to publish router event.");
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(error=%e, "Failed to decode KVEventBatch msgpack");
+                            }
                         }
+                    }
+                    None => {
+                        tracing::debug!("Event processor channel closed");
+                        break;
                     }
                 }
             }
-            Err(e) => {
-                tracing::warn!("Failed to decode KVEventBatch msgpack: {}", e);
-            }
         }
     }
+    tracing::debug!("Event processor exiting");
 }
 
 async fn start_zmq_listener(
@@ -183,7 +202,7 @@ async fn start_zmq_listener(
     raw_tx: mpsc::UnboundedSender<(u64, Vec<u8>)>,
     zmq_token: dynamo_runtime::CancellationToken,
 ) {
-    tracing::info!(
+    tracing::debug!(
         "KVEventPublisher connecting to ZMQ endpoint {} (topic '{}')",
         zmq_endpoint,
         zmq_topic
@@ -217,26 +236,26 @@ async fn start_zmq_listener(
                         // We expect multipart frames: [topic, seq, payload]
                         let mut frames: Vec<Vec<u8>> = msg.into_vec().into_iter().map(|frame| frame.to_vec()).collect();
 
-                        if frames.len() == 3 {
-                            let payload = frames.remove(2);
-                            let seq_bytes = frames.remove(1);
+                        if frames.len() != 3 {
+                            tracing::warn!(expected=3, actual=%frames.len(), "Received unexpected ZMQ frame count");
+                            continue;
+                        }
+                        let payload = frames.remove(2);
+                        let seq_bytes = frames.remove(1);
 
-                            if seq_bytes.len() != 8 {
-                                tracing::warn!("Invalid sequence number frame len={}", seq_bytes.len());
-                                continue;
-                            }
+                        if seq_bytes.len() != 8 {
+                            tracing::warn!(expected=8, actual=%seq_bytes.len(), "Invalid sequence number byte length");
+                            continue;
+                        }
 
-                            let seq = u64::from_be_bytes(seq_bytes.try_into().unwrap());
-                            if raw_tx.send((seq, payload)).is_err() {
-                                tracing::warn!("Failed to send message to channel - receiver dropped");
-                                break;
-                            }
-                        } else {
-                            tracing::warn!("Received unexpected ZMQ frame count: {}", frames.len());
+                        let seq = u64::from_be_bytes(seq_bytes.try_into().unwrap());
+                        if raw_tx.send((seq, payload)).is_err() {
+                            tracing::warn!("Failed to send message to channel - receiver dropped");
+                            break;
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("Error reading from ZMQ socket: {}", e);
+                        tracing::warn!(error=%e, "Error reading from ZMQ socket");
                         // Brief sleep to avoid tight error loop
                         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                     }
@@ -244,7 +263,7 @@ async fn start_zmq_listener(
             }
         }
     }
-    tracing::info!("ZMQ listener exiting");
+    tracing::debug!("ZMQ listener exiting");
 }
 
 /// Convert a raw event coming from the ZMQ channel into the internal
@@ -355,7 +374,6 @@ struct KvEventBatch {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type")] // msgspec encodes variant tag as a string when `tag=True`
 enum RawKvEvent {
-    #[serde(rename = "BlockStored")]
     BlockStored {
         block_hashes: Vec<i64>,
         parent_block_hash: Option<i64>,
@@ -363,9 +381,9 @@ enum RawKvEvent {
         block_size: usize,
         lora_id: Option<u64>,
     },
-    #[serde(rename = "BlockRemoved")]
-    BlockRemoved { block_hashes: Vec<i64> },
-    #[serde(rename = "AllBlocksCleared")]
+    BlockRemoved {
+        block_hashes: Vec<i64>,
+    },
     AllBlocksCleared,
 }
 
@@ -620,6 +638,8 @@ mod tests_startup_helpers {
         };
         let payload = rmps::to_vec(&batch).unwrap();
 
+        let token = dynamo_runtime::CancellationToken::new();
+
         // 2) channel feeding the processor
         let (tx, rx) = mpsc::unbounded_channel::<(u64, Vec<u8>)>();
         tx.send((123, payload.clone())).unwrap(); // seq = 123
@@ -629,7 +649,13 @@ mod tests_startup_helpers {
         let (comp, published) = MockComponent::new();
 
         // 4) run the function under test (let it consume exactly one msg)
-        let handle = tokio::spawn(start_event_processor(rx, comp, worker_id, kv_block_size));
+        let handle = tokio::spawn(start_event_processor(
+            rx,
+            comp,
+            worker_id,
+            kv_block_size,
+            token,
+        ));
 
         tokio::time::timeout(std::time::Duration::from_secs(1), handle)
             .await

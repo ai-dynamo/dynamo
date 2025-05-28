@@ -41,6 +41,7 @@ pub struct WorkerSelectionResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ForwardPassMetrics {
+    pub data_parallel_rank: Option<u32>, // backwards compatible
     pub request_active_slots: u64,
     pub request_total_slots: u64,
     pub kv_active_blocks: u64,

@@ -5,9 +5,13 @@
 # Can also be used standalone: `python3 vllm_inc.py` - lots of optional cmd line params
 
 # Setup checklist:
-# - We are in a virtualenv with vllm installed - and patched if using kv routing.
-# - `libdynamo_llm_capi.so` is in system lib path or it's containing folder is in LD_LIBRARY_PATH
-#   It builds in target/debug/ by default.
+# - We are in a virtualenv with vllm installed. Must be newer than v0.9.0 (currently pre-release)
+# 1f079540db5f1080a2f61a730da50d3009934c5a - this commit is working for me
+# Steps:
+# git clone https://github.com/vllm-project/vllm.git
+# cd vllm && git checkout 1f079540db5f1080a2f61a730da50d3009934c5a
+# uv pip uninstall ai-dynamo-vllm
+# VLLM_USE_PRECOMPILED=1 uv pip install --editable .
 
 import argparse
 import asyncio
@@ -56,15 +60,17 @@ class Config:
     model_name: Optional[str]
     tensor_parallel_size: int
     kv_block_size: int
+    context_length: int
     extra_engine_args: str
 
 
 class DynamoStatLoggerPublisher(StatLoggerBase):
     """Stat logger publisher. Wrapper for the KvMetricsPublisher to match the StatLoggerBase interface."""
 
-    def __init__(self, component: Component) -> None:
+    def __init__(self, component: Component, dp_rank: int) -> None:
         self.inner = KvMetricsPublisher()
         self.inner.create_endpoint(component)
+        self.dp_rank = dp_rank
 
     def record(
         self, scheduler_stats: SchedulerStats, iteration_stats: Optional[IterationStats]
@@ -79,7 +85,9 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
                 / scheduler_stats.prefix_cache_stats.queries
             )
 
+        # TODO Manage DP Ranks in metrics aggregation.
         self.inner.publish(
+            data_parallel_rank=self.dp_rank,
             request_active_slots=scheduler_stats.num_running_reqs,
             request_total_slots=0,  # TODO - remove from metrics
             kv_active_blocks=0,  # TODO - need to calculate this
@@ -99,12 +107,11 @@ class StatLoggerFactory:
     def __init__(self, component: Component) -> None:
         self.component = component
 
-    def create_stat_logger(self) -> StatLoggerBase:
-        return DynamoStatLoggerPublisher(self.component)
+    def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
+        return DynamoStatLoggerPublisher(self.component, dp_rank)
 
-    # TODO investigate if rank is imporant. Do I need to only do for rank 0?
-    def __call__(self, vllm_config: VllmConfig, rank: int) -> StatLoggerBase:
-        return self.create_stat_logger()
+    def __call__(self, vllm_config: VllmConfig, dp_rank: int) -> StatLoggerBase:
+        return self.create_stat_logger(dp_rank=dp_rank)
 
 
 class RequestHandler:
@@ -172,8 +179,13 @@ async def init(runtime: DistributedRuntime, config: Config):
     await component.create_service()
 
     endpoint = component.endpoint(config.endpoint)
+    print(f"BLOCK SIZE: {config.kv_block_size}")
     await register_llm(
-        ModelType.Backend, endpoint, config.model_path, config.model_name
+        ModelType.Backend,
+        endpoint,
+        config.model_path,
+        config.model_name,
+        kv_cache_block_size=config.kv_block_size,
     )
 
     arg_map = {
@@ -183,13 +195,20 @@ async def init(runtime: DistributedRuntime, config: Config):
         "skip_tokenizer_init": True,
         "disable_log_requests": True,
         "enable_prefix_caching": True,
-        "block_size": config.kv_block_size,
         # KV routing relies on logging KV metrics
         "disable_log_stats": False,
         "kv_events_config": KVEventsConfig(
             enable_kv_cache_events=True, publisher="zmq"
         ),
     }
+
+    if config.context_length:
+        # Usually we want it to default to the max (from tokenizer_config.json)
+        arg_map["max_model_len"] = config.context_length
+
+    if config.kv_block_size > 0:
+        arg_map["block_size"] = config.kv_block_size
+
     if config.extra_engine_args != "":
         json_map = {}
         # extra_engine_args is a filename
@@ -272,6 +291,12 @@ def cmd_line_args():
         "--kv-block-size", type=int, default=16, help="Size of a KV cache block."
     )
     parser.add_argument(
+        "--context-length",
+        type=int,
+        default=None,
+        help="Max model context length. Defaults to models max, usually model_max_length from tokenizer_config.json. Reducing this reduces VRAM requirements.",
+    )
+    parser.add_argument(
         "--extra-engine-args",
         type=str,
         default="",
@@ -302,6 +327,7 @@ def cmd_line_args():
     config.endpoint = parsed_endpoint_name
     config.tensor_parallel_size = args.tensor_parallel_size
     config.kv_block_size = args.kv_block_size
+    config.context_length = args.context_length
     config.extra_engine_args = args.extra_engine_args
 
     return config

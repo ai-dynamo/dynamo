@@ -97,6 +97,7 @@ impl KvMetricsPublisher {
     fn publish(
         &self,
         _py: Python,
+        data_parallel_rank: u32,
         request_active_slots: u64,
         request_total_slots: u64,
         kv_active_blocks: u64,
@@ -108,6 +109,7 @@ impl KvMetricsPublisher {
         self.inner
             .publish(
                 llm_rs::kv_router::protocols::ForwardPassMetrics {
+                    data_parallel_rank: Some(data_parallel_rank),
                     request_active_slots,
                     request_total_slots,
                     kv_active_blocks,
@@ -161,15 +163,21 @@ impl KvEventPublisherFromZmqConfig {
 
 #[pyclass]
 pub(crate) struct KvEventPublisherFromZmq {
-    inner: llm_rs::kv_router::publisher::KvEventPublisherFromZmq
+    inner: llm_rs::kv_router::publisher::KvEventPublisherFromZmq,
 }
 
 #[pymethods]
 impl KvEventPublisherFromZmq {
     #[new]
     fn new(component: Component, config: KvEventPublisherFromZmqConfig) -> PyResult<Self> {
-        let mut inner = llm_rs::kv_router::publisher::KvEventPublisherFromZmq::new(config.kv_block_size);
-        inner.start_background_task(component.inner, config.worker_id, config.zmq_endpoint, config.zmq_topic);
+        let mut inner =
+            llm_rs::kv_router::publisher::KvEventPublisherFromZmq::new(config.kv_block_size);
+        inner.start_background_task(
+            component.inner,
+            config.worker_id,
+            config.zmq_endpoint,
+            config.zmq_topic,
+        );
         Ok(Self { inner })
     }
 
@@ -191,12 +199,12 @@ impl KvEventPublisher {
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
             component.inner,
             worker_id,
-            kv_block_size
+            kv_block_size,
         )
         .map_err(to_pyerr)?;
         Ok(Self {
             inner: inner.into(),
-            kv_block_size
+            kv_block_size,
         })
     }
 
@@ -242,7 +250,6 @@ impl KvEventPublisher {
         self.inner.publish(event).map_err(to_pyerr)
     }
 }
-
 
 #[pyclass]
 #[derive(Clone)]

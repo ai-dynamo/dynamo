@@ -364,10 +364,14 @@ class KvMetricsPublisher:
 
     def publish(
         self,
+        data_parallel_rank: int,
         request_active_slots: int,
         request_total_slots: int,
         kv_active_blocks: int,
         kv_total_blocks: int,
+        num_requests_waiting: int,
+        gpu_cache_usage_perc: float,
+        gpu_prefix_cache_hit_rate: float,
     ) -> None:
         """
         Update the KV metrics being reported.
@@ -637,7 +641,7 @@ class ModelType:
     """What type of request this model needs: Chat, Component or Backend (pre-processed)"""
     ...
 
-async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str]) -> None:
+async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str] = None, context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None) -> None:
     """Attach the model at path to the given endpoint, and advertise it as model_type"""
     ...
 
