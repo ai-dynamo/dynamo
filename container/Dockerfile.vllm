@@ -490,7 +490,9 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 # Install build-essential and python3-dev as apt dependencies
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential python3-dev && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential \
+        python3-dev && \
     rm -rf /var/lib/apt/lists/*
 
 ### COPY BINDINGS ###
