@@ -37,9 +37,9 @@ dynamo-operator:
       gateway: ${ISTIO_GATEWAY}
     ingressHostSuffix: ${DYNAMO_INGRESS_SUFFIX}
     dockerRegistry:
-      server: ${PIPELINES_DOCKER_SERVER}
-      username: ${PIPELINES_DOCKER_USERNAME}
-      password: ${PIPELINES_DOCKER_PASSWORD}
+      server: ${DYNAMO_GRAPH_DOCKER_SERVER}
+      username: ${DYNAMO_GRAPH_DOCKER_USERNAME}
+      password: ${DYNAMO_GRAPH_DOCKER_PASSWORD}
     imageBuildEngine: buildkit
     virtualServiceSupportsHTTPS: ${VIRTUAL_SERVICE_SUPPORTS_HTTPS}
 

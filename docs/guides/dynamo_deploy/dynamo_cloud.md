@@ -124,9 +124,9 @@ By default, the platform uses the same container registry as the platform compon
 However, you can specify a different container registry for dynamo graphs by additionally setting the following environment variables:
 
 ```bash
-export PIPELINES_DOCKER_SERVER=<your-docker-server>
-export PIPELINES_DOCKER_USERNAME=<your-docker-username>
-export PIPELINES_DOCKER_PASSWORD=<your-docker-password>
+export DYNAMO_GRAPH_DOCKER_SERVER=<your-docker-server>
+export DYNAMO_GRAPH_DOCKER_USERNAME=<your-docker-username>
+export DYNAMO_GRAPH_DOCKER_PASSWORD=<your-docker-password>
 ```
 
 If you wish to expose your Dynamo Cloud Platform externally, you can setup the following environment variables:
