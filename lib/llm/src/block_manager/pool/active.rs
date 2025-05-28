@@ -18,18 +18,20 @@ use super::*;
 /// Manages active blocks being used by sequences
 pub struct ActiveBlockPool<S: Storage, M: BlockMetadata> {
     pub(super) map: HashMap<SequenceHash, Weak<MutableBlock<S, M>>>,
+    pending_parents: HashMap<SequenceHash, Vec<Weak<MutableBlock<S, M>>>>,
 }
 
 impl<S: Storage, M: BlockMetadata> ActiveBlockPool<S, M> {
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
+            pending_parents: HashMap::new(),
         }
     }
 
     pub fn register(
         &mut self,
-        mut block: MutableBlock<S, M>,
+        block: MutableBlock<S, M>,
     ) -> Result<ImmutableBlock<S, M>, BlockPoolError> {
         if !block.state().is_registered() {
             return Err(BlockPoolError::InvalidMutableBlock(
@@ -41,15 +43,29 @@ impl<S: Storage, M: BlockMetadata> ActiveBlockPool<S, M> {
             BlockPoolError::InvalidMutableBlock("block has no sequence hash".to_string())
         })?;
 
-        // Set the parent of the block if it has one.
-        // This is needed to ensure the lifetime of the parent is at least as long as the child.
-        if let Ok(Some(parent)) = block.parent_sequence_hash() {
-            if let Some(parent_block) = self.match_sequence_hash(parent) {
-                block.set_parent(parent_block.mutable_block().clone());
+        let shared = Arc::new(block);
+
+        // Check if there are children waiting for this block to be registered.
+        if let Some(waiting_children) = self.pending_parents.remove(&sequence_hash) {
+            for child in waiting_children {
+                if let Some(child) = child.upgrade() {
+                    child.set_parent(shared.clone());
+                }
             }
         }
 
-        let shared = Arc::new(block);
+        // Set the parent of the block if it has one.
+        // This is needed to ensure the lifetime of the parent is at least as long as the child.
+        if let Ok(Some(parent)) = shared.parent_sequence_hash() {
+            if let Some(parent_block) = self.match_sequence_hash(parent) {
+                shared.set_parent(parent_block.mutable_block().clone());
+            } else {
+                self.pending_parents
+                    .entry(parent)
+                    .or_default()
+                    .push(Arc::downgrade(&shared));
+            }
+        }
 
         match self.map.entry(sequence_hash) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {

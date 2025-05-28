@@ -44,7 +44,7 @@ use derive_getters::Getters;
 use std::{
     fmt::Debug,
     ops::{Deref, DerefMut},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 use thiserror::Error;
 
@@ -611,12 +611,14 @@ pub(crate) fn layout_to_blocks<S: Storage, M: BlockMetadata>(
         .collect()
 }
 
+type MutableBlockArc<S, M> = Arc<MutableBlock<S, M>>;
+
 pub struct MutableBlock<S: Storage, M: BlockMetadata> {
     block: Option<Block<S, M>>,
     return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, M>>,
     // Use to track parent relationship, as well as ensure that parents of registered blocks stay
     // alive as long as the child is alive.
-    parent: Option<Arc<MutableBlock<S, M>>>,
+    parent: Arc<Mutex<Option<MutableBlockArc<S, M>>>>,
 }
 
 impl<S: Storage + NixlDescriptor, M: BlockMetadata> WritableBlock for MutableBlock<S, M> {
@@ -638,12 +640,12 @@ impl<S: Storage, M: BlockMetadata> MutableBlock<S, M> {
         Self {
             block: Some(block),
             return_tx,
-            parent: None,
+            parent: Arc::new(Mutex::new(None)),
         }
     }
 
-    pub fn set_parent(&mut self, parent: Arc<MutableBlock<S, M>>) {
-        self.parent = Some(parent);
+    pub fn set_parent(&self, parent: Arc<MutableBlock<S, M>>) {
+        self.parent.lock().unwrap().replace(parent);
     }
 }
 
