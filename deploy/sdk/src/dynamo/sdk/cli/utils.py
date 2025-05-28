@@ -346,15 +346,15 @@ def resolve_service_config(
                     for key, value in configs.items():
                         service_configs[service][key] = value
 
-        # Process service-specific options
-        if args:
-            cmdline_overrides = _parse_service_args(args)
-            logger.debug(f"Applying command line overrides: {cmdline_overrides}")
-            for service, configs in cmdline_overrides.items():
-                if service not in service_configs:
-                    service_configs[service] = {}
-                for key, value in configs.items():
-                    service_configs[service][key] = value
+    # Process command line overrides
+    if args:
+        cmdline_overrides = _parse_service_args(args)
+        logger.info(f"Applying command line overrides: {cmdline_overrides}")
+        for service, configs in cmdline_overrides.items():
+            if service not in service_configs:
+                service_configs[service] = {}
+            for key, value in configs.items():
+                service_configs[service][key] = value
 
     logger.info(f"Running dynamo serve with config: {service_configs}")
     return service_configs
