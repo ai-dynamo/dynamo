@@ -2,16 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # TODO:
-# - Add event and metrics publishers
-# - Support default dynamo-run out=trtllm launch
 # - Support disaggregated serving
+# - Update examples to use this engine.
 #
+# `dynamo-run out=trtllm` runs this script
 # Can be used standalone: `python3 trtllm_inc.py` - lots of optional cmd line params
 
 import argparse
 import asyncio
 import logging
 import sys
+import warnings
 from typing import Optional
 
 import uvloop
@@ -20,10 +21,13 @@ import uvloop
 from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
-from trtllm.engine import get_llm_engine
-from trtllm.publishers import Publishers
 
-from dynamo.llm import ModelType, register_llm
+from dynamo.llm import (
+    ModelType,
+    get_tensorrtllm_engine,
+    get_tensorrtllm_publisher,
+    register_llm,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 # Only used if you run it manually from the command line
@@ -44,7 +48,7 @@ class Config:
     component: str
     endpoint: str
     model_path: str
-    model_name: Optional[str]
+    model_name: Optional[str] = None
     tensor_parallel_size: int
     kv_block_size: int
     extra_engine_args: str
@@ -65,7 +69,9 @@ class RequestHandler:
 
     async def generate(self, request):
         # Check if there is an error in the publishers error queue
-        publishers_error = self.publishers.check_error_queue()
+        publishers_error = (
+            self.publishers.check_error_queue() if self.publishers else None
+        )
         if publishers_error:
             raise publishers_error
 
@@ -90,7 +96,7 @@ class RequestHandler:
             # TRTLLM engine needs to start generating tokens first before stats
             # can be retrieved.
             if self.first_generation and self.publishers:
-                self.publishers.start_publish_threads()
+                self.publishers.start()
                 self.first_generation = False
 
             if res.finished:
@@ -137,6 +143,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         "disable_log_stats": False,
     }
     if config.extra_engine_args != "":
+        # TODO: Support extra engine args from json file as well.
         arg_map = update_llm_args_with_extra_options(arg_map, config.extra_engine_args)
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
@@ -168,34 +175,33 @@ async def init(runtime: DistributedRuntime, config: Config):
     default_sampling_params._setup(tokenizer)
     default_sampling_params.stop = None
 
-    async with get_llm_engine(engine_args) as engine:
+    async with get_tensorrtllm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
         await register_llm(
             ModelType.Backend, endpoint, config.model_path, config.model_name
         )
 
-        publishers = None
         if config.publish_events_and_metrics:
+            # Initialize and pass in the publishers to the request handler to
+            # publish events and metrics.
             kv_listener = runtime.namespace(config.namespace).component(
                 config.component
             )
-            publishers = Publishers(
+            async with get_tensorrtllm_publisher(
                 component,
                 engine,
                 kv_listener,
                 int(endpoint.lease_id()),
                 config.kv_block_size,
-            )
-
-        handler = RequestHandler(component, engine, default_sampling_params, publishers)
-
-        try:
-            # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
-            # after the lease is revoked
+            ) as publisher:
+                handler = RequestHandler(
+                    component, engine, default_sampling_params, publisher
+                )
+                await endpoint.serve_endpoint(handler.generate)
+        else:
+            # No publishers, so just pass in None to the request handler.
+            handler = RequestHandler(component, engine, default_sampling_params, None)
             await endpoint.serve_endpoint(handler.generate)
-        finally:
-            if publishers:
-                await publishers.cleanup()
 
 
 def cmd_line_args():
@@ -229,6 +235,12 @@ def cmd_line_args():
         "--kv-block-size", type=int, default=32, help="Size of a KV cache block."
     )
     parser.add_argument(
+        "--context-length",
+        type=int,
+        default=None,
+        help="This argument is not used by TRTLLM. Please provide max_input_len, max_seq_len and max_output_len in yaml file and point --extra-engine-args to the yaml file.",
+    )
+    parser.add_argument(
         "--extra-engine-args",
         type=str,
         default="",
@@ -240,6 +252,12 @@ def cmd_line_args():
         help="Publish events and metrics to the dynamo components.",
     )
     args = parser.parse_args()
+
+    if args.context_length is not None:
+        warnings.warn(
+            "--context-length is accepted for compatibility but will be ignored for TensorRT-LLM. Please provide max_input_len, max_seq_len and max_output_len in yaml file and point --extra-engine-args to the yaml file.",
+            UserWarning,
+        )
 
     config = Config()
     config.model_path = args.model_path

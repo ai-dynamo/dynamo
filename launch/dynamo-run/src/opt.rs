@@ -101,6 +101,9 @@ pub enum Output {
     /// Run inference using sglang
     SgLang,
 
+    /// Run inference using trtllm
+    Trtllm,
+
     // Start vllm in a sub-process connecting via nats
     // Sugar for `python vllm_inc.py --endpoint <thing> --model <thing>`
     Vllm,
@@ -125,6 +128,7 @@ impl TryFrom<&str> for Output {
             "llamacpp" | "llama_cpp" => Ok(Output::LlamaCpp),
 
             "sglang" => Ok(Output::SgLang),
+            "trtllm" => Ok(Output::Trtllm),
             "vllm" => Ok(Output::Vllm),
 
             "echo_full" => Ok(Output::EchoFull),
@@ -164,6 +168,7 @@ impl fmt::Display for Output {
             Output::LlamaCpp => "llamacpp",
 
             Output::SgLang => "sglang",
+            Output::Trtllm => "trtllm",
             Output::Vllm => "vllm",
 
             Output::EchoFull => "echo_full",
@@ -210,6 +215,7 @@ impl Output {
         }
 
         out.push(Output::SgLang.to_string());
+        out.push(Output::Trtllm.to_string());
         out.push(Output::Vllm.to_string());
 
         #[cfg(feature = "python")]
