@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # TODO:
-# - Add event and metrics publishers
-# - Support default dynamo-run out=trtllm launch
 # - Support disaggregated serving
+# - Update examples to use this engine.
 #
+# `dynamo-run out=trtllm` runs this script
 # Can be used standalone: `python3 trtllm_inc.py` - lots of optional cmd line params
 
 import argparse
