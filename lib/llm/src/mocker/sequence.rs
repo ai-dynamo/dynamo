@@ -53,9 +53,6 @@ pub struct ActiveSequence {
     block_size: usize,
 
     #[getter(copy)]
-    chunk_size: usize, // TODO: not actually used
-
-    #[getter(copy)]
     max_output_tokens: usize,
 
     #[getter(copy)]
@@ -69,15 +66,9 @@ pub struct ActiveSequence {
 
 impl ActiveSequence {
     /// Create a new ActiveSequence instance with the provided tokens
-    pub fn new(
-        tokens: Vec<u32>,
-        max_output_tokens: usize,
-        block_size: Option<usize>,
-        chunk_size: Option<usize>,
-    ) -> Self {
+    pub fn new(tokens: Vec<u32>, max_output_tokens: usize, block_size: Option<usize>) -> Self {
         let block_size = block_size.unwrap_or(64);
         assert!(block_size > 1, "block_size must be greater than 1");
-        let chunk_size = chunk_size.unwrap_or(256);
         let num_input_tokens = tokens.len();
 
         let tokens = Tokens::from(tokens).into_sequence(block_size, None);
@@ -88,7 +79,6 @@ impl ActiveSequence {
             unique_blocks,
             tokens,
             block_size,
-            chunk_size,
             max_output_tokens,
             generated_tokens: 0,
             num_input_tokens,
@@ -113,9 +103,8 @@ impl ActiveSequence {
         tokens: Vec<u32>,
         max_output_tokens: usize,
         block_size: Option<usize>,
-        chunk_size: Option<usize>,
     ) -> (Self, Option<MoveBlock>) {
-        let mut sequence = Self::new(tokens, max_output_tokens, block_size, chunk_size);
+        let mut sequence = Self::new(tokens, max_output_tokens, block_size);
         let signal = sequence.creation_signal.take();
         (sequence, signal)
     }
@@ -237,8 +226,7 @@ mod tests {
     fn test_active_sequence_push() {
         // Create a sequence with block size 16 initialized with tokens [0..15]
         let initial_tokens: Vec<u32> = (0..15).collect();
-        let (mut seq1, signal1) =
-            ActiveSequence::new_with_signal(initial_tokens, 100, Some(16), Some(256));
+        let (mut seq1, signal1) = ActiveSequence::new_with_signal(initial_tokens, 100, Some(16));
         assert_eq!(seq1.num_input_tokens(), 15);
         assert_eq!(seq1.len(), 15);
 
@@ -289,8 +277,7 @@ mod tests {
 
         // Create another sequence with block size 16 initialized with tokens [0..17]
         let extended_tokens: Vec<u32> = (0..16).collect();
-        let (mut seq2, _) =
-            ActiveSequence::new_with_signal(extended_tokens, 100, Some(16), Some(256));
+        let (mut seq2, _) = ActiveSequence::new_with_signal(extended_tokens, 100, Some(16));
         seq2.push(16);
         seq2.pop();
         seq2.push(16);
@@ -363,8 +350,7 @@ mod tests {
     fn test_active_sequence_generate_signals() {
         // Create a sequence with block size 16, max_output_tokens 4, initialized with tokens [0..14)
         let initial_tokens: Vec<u32> = (0..14).collect();
-        let (mut seq, signal) =
-            ActiveSequence::new_with_signal(initial_tokens, 5, Some(16), Some(256));
+        let (mut seq, signal) = ActiveSequence::new_with_signal(initial_tokens, 5, Some(16));
 
         // Initial signal - should have received a Use signal for the partial block
         assert!(signal.is_some());

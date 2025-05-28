@@ -178,7 +178,7 @@ impl KvManager {
     pub fn probe_new_blocks(&self, blocks: &[UniqueBlock]) -> usize {
         blocks
             .iter()
-            .filter(|&block| !self.all_blocks.contains(block))
+            .filter(|&block| !self.active_blocks.contains_key(block))
             .count()
     }
 
@@ -200,6 +200,11 @@ impl KvManager {
         self.active_blocks.len()
     }
 
+    /// Get the percentage of active blocks relative to maximum capacity
+    pub fn get_active_perc(&self) -> f64 {
+        self.active_blocks.len() as f64 / self.max_capacity as f64
+    }
+
     /// Get the number of inactive blocks
     pub fn num_inactive_blocks(&self) -> usize {
         self.inactive_blocks.len()
@@ -216,57 +221,21 @@ impl KvManager {
     }
 
     /// Check if a sequence can be scheduled and calculate cost if possible
-    pub fn try_schedule(
-        &self,
-        sequence: &ActiveSequence,
-        watermark: f64,
-        tokens_budget: usize,
-    ) -> Option<PrefillCost> {
-        // Return None immediately if tokens_budget is 0
-        if tokens_budget == 0 {
-            return None;
-        }
-
-        // Get unique blocks from the sequence
-        let unique_blocks = sequence.unique_blocks();
-
-        // Get the count of new blocks
-        let new_blocks = self.probe_new_blocks(unique_blocks);
-
-        // Calculate current usage and available capacity
-        let active_count = self.active_blocks.len();
-
-        // Check if we can schedule based on the watermark
-        if (active_count + new_blocks) as f64 > (1.0 - watermark) * self.max_capacity as f64 {
-            return None;
-        }
-
-        // Calculate overlap blocks
-        let overlap_blocks = unique_blocks.len() - new_blocks;
-
-        // Calculate new tokens
+    pub fn get_prefill_cost(&self, sequence: &ActiveSequence) -> PrefillCost {
+        let seq_blocks = sequence.unique_blocks();
+        let new_blocks = self.probe_new_blocks(seq_blocks);
+        let overlap_blocks = seq_blocks.len() - new_blocks;
         let new_tokens = sequence.num_input_tokens() - overlap_blocks * self.block_size;
-
-        // // Print the full equation with actual values substituted
-        // println!("{} = {} - ({} * {}) (new_tokens = num_input_tokens - overlap_blocks * block_size)",
-        //     new_tokens,
-        //     sequence.num_input_tokens(),
-        //     overlap_blocks,
-        //     self.block_size);
-
-        // Return None if new_tokens exceeds tokens_budget
-        if new_tokens > tokens_budget {
-            return None;
-        }
 
         // Calculate prefill compute
         let prefill_compute =
-            new_tokens as f64 * (new_tokens + overlap_blocks * self.block_size) as f64;
+            1.25e-6 * (new_tokens as f64).powi(2) + 7.41e-2 * (new_tokens as f64) + 2.62e1;
 
-        Some(PrefillCost {
+        PrefillCost {
+            new_blocks,
             new_tokens,
             prefill_compute,
-        })
+        }
     }
 }
 

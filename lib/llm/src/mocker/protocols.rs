@@ -57,6 +57,7 @@ pub struct DirectRequest {
 /// Represents the cost of prefilling content in the cache
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrefillCost {
+    pub new_blocks: usize,
     pub new_tokens: usize,
     pub prefill_compute: f64,
 }
