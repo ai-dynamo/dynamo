@@ -35,43 +35,48 @@ class Frontend:
             yield response
 ```
 
-### 2. Processor Component - Using Mixin Class
+### 2. Processor Component - Using Mixin Class and Decorator
 
 ```python
-from dynamo.sdk import RequestTracingMixin, service, endpoint
-from typing import Optional
+from dynamo.sdk import RequestTracingMixin, service, endpoint, with_request_id
 
 @service(dynamo={"enabled": True, "namespace": "dynamo"})
 class Processor(RequestTracingMixin):  # Inherit Mixin to get request ID utilities
     worker = depends(VllmWorker)
 
     @endpoint(name="chat/completions")
-    async def chat_completions(self, raw_request: ChatCompletionRequest, request_id: Optional[str] = None):
-        # Use Mixin method to ensure we have request_id
-        request_id = self.ensure_request_id(request_id)
+    @with_request_id()  # Ensure request_id is non-None in function body
+    async def chat_completions(self, raw_request: ChatCompletionRequest, request_id: str = None):
+        # No need for ensure_request_id - decorator handles it
+        # request_id is guaranteed to be non-None here
 
-        # Log with request_id
-        self.log_with_request_id("info", f"Processing chat completion: {raw_request.model}")
+        # Log with automatic request_id from thread-local storage
+        self.log("info", f"Processing chat completion: {raw_request.model}")
 
         # Pass request_id to downstream components
-        async for response in self._generate(raw_request, request_id):
+        async for response in self._generate(raw_request, request_id=request_id):
             yield response
 ```
 
 ### 3. Manual Decorator Usage
 
 ```python
-from dynamo.sdk import trace_frontend_endpoint, trace_processor_method
+from dynamo.sdk import trace_frontend_endpoint, trace_processor_method, with_request_id
 
-class MyComponent:
+class MyComponent(RequestTracingMixin):
     @trace_frontend_endpoint  # Specifically for frontend endpoints
     @endpoint(is_api=True)
     async def my_endpoint(self, request: Request, data: MyData):
         # X-Request-Id automatically handled
         pass
 
-    @trace_processor_method  # Specifically for processor methods
-    async def process_data(self, data, request_id: Optional[str] = None):
+    @with_request_id()  # Modern approach - ensures request_id is non-None
+    async def process_data(self, data, request_id: str = None):
+        # request_id is guaranteed to be non-None here
+        self.log("info", "Processing data")
+
+    @trace_processor_method  # Legacy approach
+    async def legacy_process(self, data, request_id: str = None):
         # request_id automatically obtained from context or generated
         pass
 ```
@@ -126,8 +131,7 @@ class Frontend:
 ### Processor Component
 
 ```python
-from dynamo.sdk import RequestTracingMixin, service, endpoint, depends
-from typing import Optional
+from dynamo.sdk import RequestTracingMixin, service, endpoint, depends, with_request_id
 
 @service(dynamo={"enabled": True, "namespace": "dynamo"})
 class Processor(RequestTracingMixin):
@@ -135,33 +139,32 @@ class Processor(RequestTracingMixin):
     router = depends(Router)
 
     @endpoint(name="chat/completions")
-    async def chat_completions(self, raw_request: ChatCompletionRequest, request_id: Optional[str] = None):
-        # Ensure we have request_id (from parameter, context, or generate new)
-        request_id = self.ensure_request_id(request_id)
-
-        # Log with request_id
-        self.log_with_request_id("info", f"Processing chat completion for model: {raw_request.model}")
+    @with_request_id()
+    async def chat_completions(self, raw_request: ChatCompletionRequest, request_id: str = None):
+        # request_id is guaranteed to be non-None by the decorator
+        # Log with automatic request_id
+        self.log("info", f"Processing chat completion for model: {raw_request.model}")
 
         async for response in self._generate(raw_request, RequestType.CHAT, request_id):
             yield response
 
     @endpoint(name="completions")
-    async def completions(self, raw_request: CompletionRequest, request_id: Optional[str] = None):
-        request_id = self.ensure_request_id(request_id)
-        self.log_with_request_id("info", f"Processing completion for model: {raw_request.model}")
+    @with_request_id()
+    async def completions(self, raw_request: CompletionRequest, request_id: str = None):
+        self.log("info", f"Processing completion for model: {raw_request.model}")
 
         async for response in self._generate(raw_request, RequestType.COMPLETION, request_id):
             yield response
 
     async def _generate(self, raw_request, request_type: RequestType, request_id: str):
-        # request_id automatically propagates to router and worker through Dynamo's Context system
-        self.log_with_request_id("debug", f"Starting generation with request_id: {request_id}")
+        # request_id automatically propagates to router and worker
+        self.log("debug", f"Starting generation with request_id: {request_id}")
 
         # Processing logic...
         if self.use_router:
-            engine_generator = await self.router_client.generate(request_obj)
+            engine_generator = await self.router_client.generate(request_obj, request_id=request_id)
         else:
-            engine_generator = await self.worker_client.generate(request_obj)
+            engine_generator = await self.worker_client.generate(request_obj, request_id=request_id)
 
         async for response in engine_generator:
             yield response
@@ -174,11 +177,11 @@ examples/universal_request_tracing/
 ├── README.md                    # This document
 ├── components/
 │   ├── frontend.py             # Frontend with @auto_trace_endpoints
-│   ├── processor.py            # Processor with RequestTracingMixin
-│   ├── router.py               # Router with RequestTracingMixin
-│   ├── worker.py               # Worker with RequestTracingMixin
-│   ├── prefiller.py            # Prefiller with RequestTracingMixin
-│   └── decoder.py              # Decoder with RequestTracingMixin
+│   ├── processor.py            # Processor with RequestTracingMixin and @with_request_id
+│   ├── router.py               # Router with RequestTracingMixin and @with_request_id
+│   ├── worker.py               # Worker with RequestTracingMixin and @with_request_id
+│   ├── prefiller.py            # Prefiller with RequestTracingMixin and @with_request_id
+│   └── decoder.py              # Decoder with RequestTracingMixin and @with_request_id
 ├── test_universal_tracing.py   # Complete test script
 ```
 
@@ -187,14 +190,15 @@ examples/universal_request_tracing/
 ### Router Component
 
 ```python
-from dynamo.sdk import RequestTracingMixin, endpoint, service
+from dynamo.sdk import RequestTracingMixin, endpoint, service, with_request_id
 
 @service(dynamo={"enabled": True, "namespace": "dynamo"})
 class Router(RequestTracingMixin):
     @endpoint(name="route")
-    async def route(self, request_data: str, request_id: Optional[str] = None):
-        request_id = self.ensure_request_id(request_id)
-        self.log_with_request_id("info", "Routing request to optimal worker")
+    @with_request_id()
+    async def route(self, request_data: str, request_id: str = None):
+        # request_id is guaranteed to be non-None by the decorator
+        self.log("info", "Routing request to optimal worker")
 
         optimal_worker = await self._find_optimal_worker(request_data)
         return optimal_worker, 0.75  # worker_id, prefix_hit_rate
@@ -203,14 +207,15 @@ class Router(RequestTracingMixin):
 ### Worker Component
 
 ```python
-from dynamo.sdk import RequestTracingMixin, endpoint, service
+from dynamo.sdk import RequestTracingMixin, endpoint, service, with_request_id
 
 @service(dynamo={"enabled": True, "namespace": "dynamo"})
 class Worker(RequestTracingMixin):
     @endpoint(name="generate")
-    async def generate(self, request_data: str, request_id: Optional[str] = None):
-        request_id = self.ensure_request_id(request_id)
-        self.log_with_request_id("info", "Starting text generation")
+    @with_request_id()
+    async def generate(self, request_data: str, request_id: str = None):
+        # request_id is guaranteed to be non-None by the decorator
+        self.log("info", "Starting text generation")
 
         async for token in self._generate_tokens(request_data):
             yield token
@@ -219,14 +224,15 @@ class Worker(RequestTracingMixin):
 ### Prefiller Component
 
 ```python
-from dynamo.sdk import RequestTracingMixin, endpoint, service
+from dynamo.sdk import RequestTracingMixin, endpoint, service, with_request_id
 
 @service(dynamo={"enabled": True, "namespace": "dynamo"})
 class Prefiller(RequestTracingMixin):
     @endpoint(name="prefill")
-    async def prefill(self, request_data: str, request_id: Optional[str] = None):
-        request_id = self.ensure_request_id(request_id)
-        self.log_with_request_id("info", "Starting KV cache prefill")
+    @with_request_id()
+    async def prefill(self, request_data: str, request_id: str = None):
+        # request_id is guaranteed to be non-None by the decorator
+        self.log("info", "Starting KV cache prefill")
 
         cache_key = self._generate_cache_key(request_data)
         return await self._perform_prefill(request_data, cache_key)
@@ -235,14 +241,15 @@ class Prefiller(RequestTracingMixin):
 ### Decoder Component
 
 ```python
-from dynamo.sdk import RequestTracingMixin, endpoint, service
+from dynamo.sdk import RequestTracingMixin, endpoint, service, with_request_id
 
 @service(dynamo={"enabled": True, "namespace": "dynamo"})
 class Decoder(RequestTracingMixin):
     @endpoint(name="decode")
-    async def decode(self, hidden_states: List[float], request_id: Optional[str] = None):
-        request_id = self.ensure_request_id(request_id)
-        self.log_with_request_id("info", "Starting token decoding")
+    @with_request_id()
+    async def decode(self, hidden_states: List[float], request_id: str = None):
+        # request_id is guaranteed to be non-None by the decorator
+        self.log("info", "Starting token decoding")
 
         async for token_result in self._decode_tokens(hidden_states):
             yield token_result
