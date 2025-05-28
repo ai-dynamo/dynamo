@@ -28,6 +28,7 @@ from dynamo.sdk.request_tracing import (
     trace_frontend_endpoint,
     trace_processor_method,
     with_request_tracing,
+    with_request_id,
 )
 
 dynamo_context: dict[str, Any] = {}
@@ -48,6 +49,7 @@ __all__ = [
     "trace_frontend_endpoint",
     "trace_processor_method",
     "with_request_tracing",
+    "with_request_id",
     "liveness",
     "readiness",
 ]

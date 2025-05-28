@@ -14,127 +14,142 @@
 # limitations under the License.
 
 """
-Universal Request Tracing Processor Example
+Main Processor Component with Universal X-Request-Id Support
 
-This example shows how to use RequestTracingMixin for automatic request ID handling
-in processor components without manual implementation.
+This example shows how the main processor component can use Dynamo SDK's built-in
+request tracing for automatic request ID propagation across components.
 """
 
 import logging
-from enum import Enum
-from typing import Optional, Union
+from typing import Dict, Any, List, Optional
 
-from components.worker import VllmWorker
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
-
-from components.router import Router
 from dynamo.sdk import (
-    RequestTracingMixin,
-    depends,
-    endpoint,
-    get_current_request_id,
+    RequestTracingMixin, 
+    endpoint, 
+    get_current_request_id, 
     service,
+    with_request_id,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class RequestType(Enum):
-    CHAT = "chat"
-    COMPLETION = "completion"
-
-
 @service(
     dynamo={"enabled": True, "namespace": "dynamo"},
-    resources={"cpu": "10", "memory": "20Gi"},
-    workers=1,
+    resources={"cpu": "2", "memory": "4Gi"},
 )
 class Processor(RequestTracingMixin):
     """
-    Processor with automatic X-Request-Id support via RequestTracingMixin.
+    Main processor component with automatic X-Request-Id support.
 
-    Benefits:
-    - ensure_request_id(): Get request ID from parameter, context, or generate new
-    - log_with_request_id(): Automatic logging with request ID
-    - get_current_request_id(): Access request ID anywhere in the call stack
+    Benefits of using RequestTracingMixin:
+    - ensure_request_id(): Automatic request ID management
+    - log_with_request_id(): Consistent logging with request ID
+    - get_current_request_id(): Access request ID anywhere in call stack
     """
 
-    worker = depends(VllmWorker)
-    router = depends(Router)
-
     def __init__(self):
-        self.model_name = "meta-llama/Llama-3.2-3B-Instruct"
-        self.use_router = True
+        self.prefiller_client = None
+        self.decoder_client = None
+        self.request_count = 0
 
-    @endpoint()
-    async def chat_completions(
-        self, raw_request: ChatCompletionRequest, request_id: Optional[str] = None
-    ):
+    @endpoint(is_api=True)
+    @with_request_id()
+    async def process(
+        self, request_text: str, request_id: str = None
+    ) -> Dict[str, Any]:
         """
-        Chat completions with automatic request ID handling.
+        Process request with automatic request ID tracking.
 
-        The RequestTracingMixin provides:
-        - ensure_request_id(): Gets request_id from parameter, context, or generates new
-        - log_with_request_id(): Logs with automatic request ID prefix
+        Args:
+            request_text: The text to process
+            request_id: Request ID parameter. The @with_request_id decorator
+                       ensures it's a non-None str inside the function body.
+
+        Returns:
+            A dict containing the processing results
         """
-        request_id = self.ensure_request_id(request_id)
+        self.log("info", "Processing request")
+        self.request_count += 1
 
-        self.log_with_request_id(
-            "info", f"Processing chat completion for model: {raw_request.model}"
-        )
+        try:
+            # Initialize clients for each component (if needed)
+            await self._init_component_clients()
 
-        async for response in self._generate(raw_request, RequestType.CHAT, request_id):
-            yield response
+            # Prefill KV cache
+            self.log("debug", "Calling prefiller service")
+            prefill_result = await self.prefiller_client.prefill(
+                request_text, request_id=request_id
+            )
 
-    @endpoint()
-    async def completions(
-        self, raw_request: CompletionRequest, request_id: Optional[str] = None
-    ):
+            # Pass hidden states to decoder
+            hidden_states = self._compute_hidden_states(request_text)
+            self.log("debug", "Calling decoder service")
+            token_results = []
+            async for token in self.decoder_client.decode(
+                hidden_states, request_id=request_id
+            ):
+                token_results.append(token)
+
+            # Format and return results
+            self.log("info", "Request processing completed")
+            return {
+                "input": request_text,
+                "request_id": request_id,
+                "prefill_status": prefill_result["status"],
+                "tokens": token_results,
+            }
+
+        except Exception as e:
+            self.log("error", f"Processing failed: {e}")
+            raise
+
+    async def _init_component_clients(self):
+        """Initialize component clients if not already done."""
+        current_req_id_opt = get_current_request_id()
+        if current_req_id_opt:
+            logger.debug(f"Initializing clients for request: {current_req_id_opt}")
+
+        if self.prefiller_client is None:
+            from dynamo.client import DynamoClient
+
+            self.prefiller_client = await DynamoClient.create("prefiller")
+            self.decoder_client = await DynamoClient.create("decoder")
+
+    def _compute_hidden_states(self, text: str) -> List[float]:
         """
-        Completions with automatic request ID handling.
+        Simplified hidden states computation.
+        In a real system, this would be a more complex operation.
         """
-        request_id = self.ensure_request_id(request_id)
-        self.log_with_request_id(
-            "info", f"Processing completion for model: {raw_request.model}"
-        )
+        self.log("debug", "Computing hidden states")
+        return [ord(c) / 256.0 for c in text]  # Simple mock computation
 
-        async for response in self._generate(
-            raw_request, RequestType.COMPLETION, request_id
-        ):
-            yield response
-
-    async def _generate(
-        self,
-        raw_request: Union[ChatCompletionRequest, CompletionRequest],
-        request_type: RequestType,
-        request_id: str,
-    ):
+    @endpoint(is_api=True)
+    @with_request_id()
+    async def get_system_stats(
+        self, request_id: str = None
+    ) -> Dict[str, Any]:
         """
-        Internal generation method with request ID propagation.
+        Get statistics from all components with request tracking.
+        
+        Args:
+            request_id: Request ID parameter. The @with_request_id decorator
+                       ensures it's a non-None str inside the function body.
+            
+        Returns:
+            A dict containing stats from all components
         """
-        self.log_with_request_id(
-            "debug", f"Starting generation with request_type: {request_type}"
-        )
+        self.log("info", "Retrieving system statistics")
 
-        if self.use_router:
-            self.log_with_request_id("debug", "Using router for request routing")
-            engine_generator = await self.router.generate(raw_request, request_id)
-        else:
-            self.log_with_request_id("debug", "Direct worker processing")
-            engine_generator = await self.worker.generate(raw_request, request_id)
+        await self._init_component_clients()
 
-        async for response in engine_generator:
-            current_id = get_current_request_id()
-            logger.debug(f"Processing response for request_id: {current_id}")
-            yield response
+        prefiller_stats = await self.prefiller_client.get_stats(request_id=request_id)
+        decoder_stats = await self.decoder_client.get_stats(request_id=request_id)
 
-    async def _some_internal_method(self):
-        """
-        Example of accessing request ID in any internal method.
-        """
-        request_id = get_current_request_id()
-        if request_id:
-            logger.info(f"Internal processing for request_id: {request_id}")
+        self.log("debug", "All stats retrieved successfully")
 
-        request_id = self.ensure_request_id()
-        self.log_with_request_id("debug", "Internal method processing")
+        return {
+            "processor": {"request_count": self.request_count},
+            "prefiller": prefiller_stats,
+            "decoder": decoder_stats,
+        }

@@ -22,9 +22,15 @@ request tracing for automatic request ID propagation and KV cache management.
 
 import asyncio
 import logging
-from typing import AsyncIterator, Dict, Optional
+from typing import AsyncIterator, Dict, Optional, Any
 
-from dynamo.sdk import RequestTracingMixin, endpoint, get_current_request_id, service
+from dynamo.sdk import (
+    RequestTracingMixin, 
+    endpoint, 
+    get_current_request_id, 
+    service,
+    with_request_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,50 +55,53 @@ class Prefiller(RequestTracingMixin):
         self.cache_stats = {"hits": 0, "misses": 0, "prefills": 0}
 
     @endpoint()
+    @with_request_id()
     async def prefill(
-        self, request_data: str, request_id: Optional[str] = None
-    ) -> Dict[str, any]:
+        self, request_data: str, request_id: str = None
+    ) -> Dict[str, Any]:
         """
         Prefill KV cache with automatic request ID tracking.
 
-        The RequestTracingMixin automatically handles request ID management.
-        """
-        request_id = self.ensure_request_id(request_id)
+        Args:
+            request_data: The input data to process
+            request_id: Request ID parameter. The @with_request_id decorator
+                       ensures it's a non-None str inside the function body.
 
-        self.log_with_request_id("info", "Starting KV cache prefill operation")
+        Returns:
+            A dict containing the prefill result
+        """
+        self.log("info", "Starting KV cache prefill operation")
 
         try:
             cache_key = self._generate_cache_key(request_data)
             if cache_key in self.kv_cache:
-                self.log_with_request_id("debug", "Found existing KV cache entry")
+                self.log("debug", "Found existing KV cache entry")
                 self.cache_stats["hits"] += 1
                 return {"status": "cache_hit", "cache_key": cache_key}
 
             prefill_result = await self._perform_prefill(request_data, cache_key)
             self.cache_stats["prefills"] += 1
 
-            self.log_with_request_id(
+            self.log(
                 "info", f"Prefill completed for cache key: {cache_key}"
             )
             return prefill_result
 
         except Exception as e:
-            self.log_with_request_id("error", f"Prefill failed: {e}")
+            self.log("error", f"Prefill failed: {e}")
             raise
 
     async def _perform_prefill(
         self, request_data: str, cache_key: str
-    ) -> Dict[str, any]:
+    ) -> Dict[str, Any]:
         """
         Internal prefill operation that can access request ID from context.
         """
-        current_request_id = get_current_request_id()
-        if current_request_id:
-            logger.debug(f"Performing prefill for request: {current_request_id}")
+        current_req_id_opt = get_current_request_id()
+        if current_req_id_opt:
+            logger.debug(f"Performing prefill for request: {current_req_id_opt}")
 
-        self.log_with_request_id(
-            "debug", f"Computing KV states for cache key: {cache_key}"
-        )
+        self.log("debug", f"Computing KV states for cache key: {cache_key}")
 
         await asyncio.sleep(0.5)
 
@@ -105,47 +114,63 @@ class Prefiller(RequestTracingMixin):
 
         self.kv_cache[cache_key] = {
             "kv_states": kv_states,
-            "request_id": current_request_id,
+            "request_id": current_req_id_opt,
             "timestamp": asyncio.get_event_loop().time(),
         }
 
-        self.log_with_request_id("debug", "KV states computed and cached")
+        self.log("debug", "KV states computed and cached")
 
         return {"status": "prefilled", "cache_key": cache_key, "kv_states": kv_states}
 
     @endpoint()
+    @with_request_id()
     async def get_cache(
-        self, cache_key: str, request_id: Optional[str] = None
-    ) -> Dict[str, any]:
+        self, cache_key: str, request_id: str = None
+    ) -> Dict[str, Any]:
         """
         Retrieve cached KV states with request tracking.
+        
+        Args:
+            cache_key: The cache key to retrieve
+            request_id: Request ID parameter. The @with_request_id decorator
+                       ensures it's a non-None str inside the function body.
+                   
+        Returns:
+            A dict containing cached KV states or cache miss status
         """
-        request_id = self.ensure_request_id(request_id)
-        self.log_with_request_id("debug", f"Retrieving cache for key: {cache_key}")
+        self.log("debug", f"Retrieving cache for key: {cache_key}")
 
         if cache_key in self.kv_cache:
             self.cache_stats["hits"] += 1
-            self.log_with_request_id("debug", "Cache hit")
+            self.log("debug", "Cache hit")
             return self.kv_cache[cache_key]
         else:
             self.cache_stats["misses"] += 1
-            self.log_with_request_id("debug", "Cache miss")
+            self.log("debug", "Cache miss")
             return {"status": "cache_miss"}
 
     @endpoint()
+    @with_request_id()
     async def batch_prefill(
-        self, requests: list, request_id: Optional[str] = None
-    ) -> AsyncIterator[Dict[str, any]]:
+        self, requests: list, request_id: str = None
+    ) -> AsyncIterator[Dict[str, Any]]:
         """
         Batch prefill operation with request tracking.
+        
+        Args:
+            requests: List of request data to prefill
+            request_id: Request ID parameter. The @with_request_id decorator
+                       ensures it's a non-None str inside the function body.
+                   
+        Returns:
+            An async iterator of prefill results
         """
-        request_id = self.ensure_request_id(request_id)
-        self.log_with_request_id(
+        self.log(
             "info", f"Starting batch prefill for {len(requests)} requests"
         )
 
         for i, request_data in enumerate(requests):
-            self.log_with_request_id(
+            self.log(
                 "debug", f"Processing batch item {i+1}/{len(requests)}"
             )
 
@@ -158,26 +183,35 @@ class Prefiller(RequestTracingMixin):
         """
         Generate cache key for request data.
         """
-        current_request_id = get_current_request_id()
+        current_req_id_opt = get_current_request_id()
 
         import hashlib
 
         content_hash = hashlib.md5(request_data.encode()).hexdigest()[:8]
 
-        if current_request_id:
+        if current_req_id_opt:
             logger.debug(
-                f"Generated cache key {content_hash} for request {current_request_id}"
+                f"Generated cache key {content_hash} for request {current_req_id_opt}"
             )
 
         return f"cache_{content_hash}"
 
     @endpoint()
-    async def get_stats(self, request_id: Optional[str] = None) -> Dict[str, any]:
+    @with_request_id()
+    async def get_stats(
+        self, request_id: str = None
+    ) -> Dict[str, Any]:
         """
         Get prefiller statistics with request tracking.
+        
+        Args:
+            request_id: Request ID parameter. The @with_request_id decorator
+                       ensures it's a non-None str inside the function body.
+                   
+        Returns:
+            A dict containing prefiller statistics
         """
-        request_id = self.ensure_request_id(request_id)
-        self.log_with_request_id("debug", "Retrieving prefiller statistics")
+        self.log("debug", "Retrieving prefiller statistics")
 
         return {
             "cache_stats": self.cache_stats,

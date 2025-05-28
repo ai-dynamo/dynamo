@@ -41,13 +41,18 @@ app = FastAPI(title="Universal Request Tracing Frontend")
 )
 class Frontend:
     """
-    Frontend with automatic X-Request-Id support.
+    Frontend with automatic X-Request-Id support via @auto_trace_endpoints.
 
     Benefits:
     - Zero configuration required
     - Automatic header extraction/generation
     - Automatic response header injection
     - Request ID propagation to downstream components
+    
+    Note: Unlike other components that use @with_request_id decorator and a 
+    'request_id: str = None' parameter, frontend components can simply use 
+    the @auto_trace_endpoints class decorator which automatically wraps all 
+    endpoints with request tracing.
     """
 
     processor = depends(Processor)
@@ -64,6 +69,7 @@ class Frontend:
         2. Generates UUID if not provided
         3. Passes request_id to processor.chat_completions()
         4. Adds X-Request-Id header to response
+        5. Stores request_id in thread-local storage for logging
 
         No manual code needed! 🎉
         """

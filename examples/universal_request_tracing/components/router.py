@@ -23,7 +23,13 @@ request tracing for automatic request ID propagation.
 import logging
 from typing import Optional, Tuple
 
-from dynamo.sdk import RequestTracingMixin, endpoint, get_current_request_id, service
+from dynamo.sdk import (
+    RequestTracingMixin, 
+    endpoint, 
+    get_current_request_id, 
+    service,
+    with_request_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +44,7 @@ class Router(RequestTracingMixin):
 
     Benefits of using RequestTracingMixin:
     - ensure_request_id(): Automatic request ID management
-    - log_with_request_id(): Consistent logging with request ID
+    - log(): Consistent logging with request ID
     - get_current_request_id(): Access request ID anywhere in call stack
     """
 
@@ -47,24 +53,29 @@ class Router(RequestTracingMixin):
         self.worker_count = 3
 
     @endpoint()
+    @with_request_id()
     async def route(
-        self, request_data: str, request_id: Optional[str] = None
+        self, request_data: str, request_id: str = None
     ) -> Tuple[str, float]:
         """
         Route requests to optimal workers with automatic request ID tracking.
-
-        The RequestTracingMixin automatically handles request ID management.
+        
+        Args:
+            request_data: The data to be routed
+            request_id: Request ID parameter. The @with_request_id decorator
+                       ensures it's a non-None str inside the function body.
+                       
+        Returns:
+            A tuple with (worker_id, hit_rate)
         """
-        request_id = self.ensure_request_id(request_id)
-
-        self.log_with_request_id("info", "Routing request to optimal worker")
+        self.log("info", "Routing request to optimal worker")
 
         optimal_worker = await self._find_optimal_worker(request_data)
         prefix_hit_rate = await self._calculate_prefix_hit_rate(
             request_data, optimal_worker
         )
 
-        self.log_with_request_id(
+        self.log(
             "debug", f"Selected worker {optimal_worker} with hit rate {prefix_hit_rate}"
         )
 
@@ -87,20 +98,26 @@ class Router(RequestTracingMixin):
         """
         Calculate expected prefix hit rate for the selected worker.
         """
-        self.log_with_request_id(
+        self.log(
             "debug", f"Calculating prefix hit rate for {worker_id}"
         )
 
         return 0.75
 
     @endpoint()
+    @with_request_id()
     async def update_load(
-        self, worker_id: str, load: float, request_id: Optional[str] = None
+        self, worker_id: str, load: float, request_id: str = None
     ):
         """
         Update worker load information with request tracking.
+        
+        Args:
+            worker_id: ID of the worker to update
+            load: Current load value
+            request_id: Request ID parameter. The @with_request_id decorator
+                       ensures it's a non-None str inside the function body.
         """
-        request_id = self.ensure_request_id(request_id)
-        self.log_with_request_id("debug", f"Updating load for {worker_id}: {load}")
+        self.log("debug", f"Updating load for {worker_id}: {load}")
 
         self.worker_loads[worker_id] = load

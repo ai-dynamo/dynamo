@@ -22,9 +22,15 @@ request tracing for automatic request ID propagation and decode operations.
 
 import asyncio
 import logging
-from typing import AsyncIterator, Dict, List, Optional
+from typing import AsyncIterator, Dict, List, Optional, Any
 
-from dynamo.sdk import RequestTracingMixin, endpoint, get_current_request_id, service
+from dynamo.sdk import (
+    RequestTracingMixin, 
+    endpoint, 
+    get_current_request_id, 
+    service,
+    with_request_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,19 +55,26 @@ class Decoder(RequestTracingMixin):
         self.decode_stats = {"tokens_generated": 0, "sequences_completed": 0}
 
     @endpoint()
+    @with_request_id()
     async def decode(
-        self, hidden_states: List[float], request_id: Optional[str] = None
-    ) -> AsyncIterator[Dict[str, any]]:
+        self, hidden_states: List[float], request_id: str = None
+    ) -> AsyncIterator[Dict[str, Any]]:
         """
         Decode hidden states to tokens with automatic request ID tracking.
 
-        The RequestTracingMixin automatically handles request ID management.
-        """
-        request_id = self.ensure_request_id(request_id)
+        Args:
+            hidden_states: The hidden states to decode
+            request_id: Request ID parameter. May be None in the signature,
+                       but the @with_request_id decorator ensures it's a 
+                       non-None str inside the function body.
 
-        self.log_with_request_id("info", "Starting token decoding")
+        Returns:
+            An async iterator of token results
+        """
+        self.log("info", "Starting token decoding")
 
         try:
+            # Use request_id which is guaranteed to be non-None
             sequence_id = f"seq_{request_id}"
             self.active_sequences[sequence_id] = {
                 "request_id": request_id,
@@ -73,31 +86,31 @@ class Decoder(RequestTracingMixin):
                 yield token_result
 
         except Exception as e:
-            self.log_with_request_id("error", f"Decoding failed: {e}")
+            self.log("error", f"Decoding failed: {e}")
             raise
         finally:
             if sequence_id in self.active_sequences:
                 sequence_info = self.active_sequences.pop(sequence_id)
                 self.decode_stats["sequences_completed"] += 1
-                self.log_with_request_id(
+                self.log(
                     "info",
-                    f"Decoding completed. Generated {sequence_info['tokens_generated']} tokens",
+                    f"Decoding completed. Generated {sequence_info['tokens_generated']} tokens"
                 )
 
     async def _decode_tokens(
         self, hidden_states: List[float], sequence_id: str
-    ) -> AsyncIterator[Dict[str, any]]:
+    ) -> AsyncIterator[Dict[str, Any]]:
         """
         Internal token decoding method that can access request ID from context.
         """
-        current_request_id = get_current_request_id()
-        if current_request_id:
-            logger.debug(f"Decoding tokens for request: {current_request_id}")
+        current_req_id_opt = get_current_request_id()
+        if current_req_id_opt:
+            logger.debug(f"Decoding tokens for request: {current_req_id_opt}")
 
         max_tokens = 10
 
         for step in range(max_tokens):
-            self.log_with_request_id("debug", f"Decoding step {step + 1}/{max_tokens}")
+            self.log("debug", f"Decoding step {step + 1}/{max_tokens}")
 
             await asyncio.sleep(0.1)
 
@@ -118,14 +131,14 @@ class Decoder(RequestTracingMixin):
                 "sequence_id": sequence_id,
             }
 
-            self.log_with_request_id(
+            self.log(
                 "debug", f"Generated token: '{token_text}' (id: {token_id})"
             )
 
             yield token_result
 
             if is_eos:
-                self.log_with_request_id("debug", "End of sequence reached")
+                self.log("debug", "End of sequence reached")
                 break
 
     def _token_id_to_text(self, token_id: int) -> str:
@@ -175,21 +188,29 @@ class Decoder(RequestTracingMixin):
         return logprobs
 
     @endpoint()
+    @with_request_id()
     async def batch_decode(
-        self, batch_hidden_states: List[List[float]], request_id: Optional[str] = None
-    ) -> AsyncIterator[Dict[str, any]]:
+        self, batch_hidden_states: List[List[float]], request_id: str = None
+    ) -> AsyncIterator[Dict[str, Any]]:
         """
         Batch decode multiple sequences with request tracking.
+        
+        Args:
+            batch_hidden_states: List of hidden states to decode
+            request_id: Request ID parameter. The @with_request_id decorator
+                       ensures it's a non-None str inside the function body.
+            
+        Returns:
+            An async iterator of token results with batch information
         """
-        request_id = self.ensure_request_id(request_id)
-        self.log_with_request_id(
+        self.log(
             "info", f"Starting batch decode for {len(batch_hidden_states)} sequences"
         )
 
         for batch_idx, hidden_states in enumerate(batch_hidden_states):
-            self.log_with_request_id(
+            self.log(
                 "debug",
-                f"Processing batch item {batch_idx + 1}/{len(batch_hidden_states)}",
+                f"Processing batch item {batch_idx + 1}/{len(batch_hidden_states)}"
             )
 
             sequence_id = f"batch_{request_id}_{batch_idx}"
@@ -205,12 +226,21 @@ class Decoder(RequestTracingMixin):
                 yield token_result
 
     @endpoint()
-    async def get_stats(self, request_id: Optional[str] = None) -> Dict[str, any]:
+    @with_request_id()
+    async def get_stats(
+        self, request_id: str = None
+    ) -> Dict[str, Any]:
         """
         Get decoder statistics with request tracking.
+        
+        Args:
+            request_id: Request ID parameter. The @with_request_id decorator
+                       ensures it's a non-None str inside the function body.
+            
+        Returns:
+            A dict containing decoder statistics
         """
-        request_id = self.ensure_request_id(request_id)
-        self.log_with_request_id("debug", "Retrieving decoder statistics")
+        self.log("debug", "Retrieving decoder statistics")
 
         return {
             "decode_stats": self.decode_stats,
@@ -223,22 +253,30 @@ class Decoder(RequestTracingMixin):
         }
 
     @endpoint()
+    @with_request_id()
     async def stop_sequence(
-        self, sequence_id: str, request_id: Optional[str] = None
-    ) -> Dict[str, any]:
+        self, sequence_id: str, request_id: str = None
+    ) -> Dict[str, Any]:
         """
         Stop a specific decoding sequence with request tracking.
+        
+        Args:
+            sequence_id: ID of the sequence to stop
+            request_id: Request ID parameter. The @with_request_id decorator
+                       ensures it's a non-None str inside the function body.
+            
+        Returns:
+            A dict containing the result of the stop operation
         """
-        request_id = self.ensure_request_id(request_id)
-        self.log_with_request_id("info", f"Stopping sequence: {sequence_id}")
+        self.log("info", f"Stopping sequence: {sequence_id}")
 
         if sequence_id in self.active_sequences:
             sequence_info = self.active_sequences.pop(sequence_id)
-            self.log_with_request_id(
+            self.log(
                 "debug",
-                f"Stopped sequence with {sequence_info['tokens_generated']} tokens",
+                f"Stopped sequence with {sequence_info['tokens_generated']} tokens"
             )
             return {"status": "stopped", "sequence_info": sequence_info}
         else:
-            self.log_with_request_id("warning", f"Sequence {sequence_id} not found")
+            self.log("warning", f"Sequence {sequence_id} not found")
             return {"status": "not_found"}

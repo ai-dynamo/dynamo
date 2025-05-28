@@ -24,7 +24,13 @@ import asyncio
 import logging
 from typing import AsyncIterator, Optional
 
-from dynamo.sdk import RequestTracingMixin, endpoint, get_current_request_id, service
+from dynamo.sdk import (
+    RequestTracingMixin, 
+    endpoint, 
+    get_current_request_id, 
+    service,
+    with_request_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +45,7 @@ class Worker(RequestTracingMixin):
 
     Benefits of using RequestTracingMixin:
     - ensure_request_id(): Automatic request ID management
-    - log_with_request_id(): Consistent logging with request ID
+    - log(): Consistent logging with request ID
     - get_current_request_id(): Access request ID anywhere in call stack
     """
 
@@ -48,17 +54,22 @@ class Worker(RequestTracingMixin):
         self.current_requests = {}
 
     @endpoint()
+    @with_request_id()
     async def generate(
-        self, request_data: str, request_id: Optional[str] = None
+        self, request_data: str, request_id: str = None
     ) -> AsyncIterator[str]:
         """
         Generate text with automatic request ID tracking.
-
-        The RequestTracingMixin automatically handles request ID management.
+        
+        Args:
+            request_data: The input text for generation
+            request_id: Request ID parameter. The @with_request_id decorator
+                       ensures it's a non-None str inside the function body.
+                       
+        Returns:
+            An async iterator of generated tokens
         """
-        request_id = self.ensure_request_id(request_id)
-
-        self.log_with_request_id("info", f"Starting generation on {self.model_name}")
+        self.log("info", f"Starting generation on {self.model_name}")
 
         try:
             self.current_requests[request_id] = {
@@ -70,11 +81,11 @@ class Worker(RequestTracingMixin):
                 yield token
 
         except Exception as e:
-            self.log_with_request_id("error", f"Generation failed: {e}")
+            self.log("error", f"Generation failed: {e}")
             raise
         finally:
             self.current_requests.pop(request_id, None)
-            self.log_with_request_id("info", "Generation completed")
+            self.log("info", "Generation completed")
 
     async def _generate_tokens(self, request_data: str) -> AsyncIterator[str]:
         """
@@ -97,7 +108,7 @@ class Worker(RequestTracingMixin):
         ]
 
         for i, token in enumerate(tokens):
-            self.log_with_request_id(
+            self.log(
                 "debug", f"Generated token {i+1}/{len(tokens)}: '{token}'"
             )
 
@@ -105,12 +116,19 @@ class Worker(RequestTracingMixin):
             yield token
 
     @endpoint()
-    async def get_status(self, request_id: Optional[str] = None) -> dict:
+    @with_request_id()
+    async def get_status(self, request_id: str = None) -> dict:
         """
         Get worker status with request tracking.
+        
+        Args:
+            request_id: Request ID parameter. The @with_request_id decorator
+                       ensures it's a non-None str inside the function body.
+            
+        Returns:
+            A dict containing worker status information
         """
-        request_id = self.ensure_request_id(request_id)
-        self.log_with_request_id("debug", "Retrieving worker status")
+        self.log("debug", "Retrieving worker status")
 
         return {
             "model": self.model_name,
@@ -120,14 +138,22 @@ class Worker(RequestTracingMixin):
         }
 
     @endpoint()
+    @with_request_id()
     async def prefill(
-        self, request_data: str, request_id: Optional[str] = None
+        self, request_data: str, request_id: str = None
     ) -> AsyncIterator[str]:
         """
         Prefill operation with request tracking.
+        
+        Args:
+            request_data: The input text for prefill
+            request_id: Request ID parameter. The @with_request_id decorator
+                       ensures it's a non-None str inside the function body.
+            
+        Returns:
+            An async iterator of tokens after prefill
         """
-        request_id = self.ensure_request_id(request_id)
-        self.log_with_request_id("info", "Starting prefill operation")
+        self.log("info", "Starting prefill operation")
 
         await self._prefill_kv_cache(request_data)
 
@@ -138,8 +164,8 @@ class Worker(RequestTracingMixin):
         """
         Simulate KV cache prefilling with request tracking.
         """
-        self.log_with_request_id("debug", "Prefilling KV cache")
+        self.log("debug", "Prefilling KV cache")
 
         await asyncio.sleep(0.2)
 
-        self.log_with_request_id("debug", "KV cache prefill completed")
+        self.log("debug", "KV cache prefill completed")
