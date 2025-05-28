@@ -77,3 +77,13 @@ Because Dynamo has a discovery mechanism, we do not use a load balancer. Instead
 cd /workspace/examples/sglang
 dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
 ```
+
+##### Disaggregated with MoE and DP attention
+
+SGLang also support DP attention for MoE models. We provide an example config for this in `configs/disagg-dp-attention.yaml` which is based on the [DeepSeek-R1-Small-2layers](https://huggingface.co/silence09/DeepSeek-R1-Small-2layers) model. You can use this configuration to test out disaggregated serving on a single node before scaling to the full DeepSeek-R1 model across multiple nodes.
+
+```bash
+# note this will require 4 GPUs
+cd /workspace/examples/sglang
+dynamo serve graphs.disagg:Frontend -f ./configs/disagg-dp-attention.yaml
+```

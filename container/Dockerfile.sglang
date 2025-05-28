@@ -143,9 +143,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     git clone https://github.com/sgl-project/sglang.git && \
     cd sglang && \
     git checkout ${SGLANG_COMMIT} && \
-    uv pip install -e "python[all]" && \
-    cd .. && \
-    rm -rf sglang
+    uv pip install -e "python[all]"
 
 # Common dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
