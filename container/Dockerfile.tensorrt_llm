@@ -332,7 +332,7 @@ RUN . /opt/dynamo/venv/bin/activate && \
 
 # TODO: remove kantoku as a transitive dependency
 RUN . /opt/dynamo/venv/bin/activate && \
-    uv pip uninstall -y kantoku circus && uv pip install circus==0.19.0
+    uv pip uninstall kantoku circus && uv pip install circus==0.19.0
 
 # Install dynamo.runtime and dynamo.llm wheels globally in container for tests
 # TODO: In future, we may use a virtualenv for everything and remove this.
