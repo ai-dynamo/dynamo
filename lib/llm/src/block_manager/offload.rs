@@ -22,8 +22,6 @@
 //! Due to limited bandwidth, the offload manager must prioritize which offloads to perform.
 //! This is indicated by the `priority` parameter to [`OffloadManager::offload`].
 //! When a offload request is received, the offload manager will enqueue it into a priority queue.
-//! This priority queue is keyed by the `priority` parameter, where blocks with lower priority values are processed first.
-//! Within the same priority, blocks that were sent to the offload manager earlier are processed first.
 //!
 //! ## Onboarding
 //! Onboarding is the process of moving blocks to a cache level closer to the device.
