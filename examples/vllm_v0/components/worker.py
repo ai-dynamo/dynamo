@@ -225,7 +225,7 @@ class VllmWorker:
                 remote_prefill_request_callback=self.get_remote_prefill_request_callback(),
             )
             logger.info(
-                f"Prefilling remotely for request {request_id} with length {len(request.token_ids)} (estimated prefix hit length {request.estimated_prefix_hit_num_blocks * self.engine_args.block_size})"
+                f"Prefilling remotely for request {request_id} with length {len(request.token_ids)} (estimated prefix hit length {(request.estimated_prefix_hit_num_blocks or 0) * self.engine_args.block_size})"
             )
         else:
             remote_prefill_params = None
