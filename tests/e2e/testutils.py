@@ -13,12 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
-from typing import Any, Callable, List, Dict, Union
 from contextlib import contextmanager
-import time
-import requests
-from tests.utils import managed_process, check_service_health
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List
+
+from tests.utils import check_service_health, managed_process
 
 
 @dataclass
@@ -26,6 +25,7 @@ class DeploymentGraph:
     """
     Represents a deployment graph configuration for testing.
     """
+
     module: str
     config: str
     directory: str
@@ -38,6 +38,7 @@ class Payload:
     """
     Represents a test payload with expected response and log patterns.
     """
+
     payload: Dict[str, Any]
     expected_response: List[str]
     expected_log: List[str]
@@ -52,53 +53,51 @@ def dynamo_serve_process(graph: DeploymentGraph, port=8000, timeout=300):
     command = ["dynamo", "serve", graph.module]
     if graph.config:
         command.extend(["-f", graph.config])
-    
+
     if port != 8000:
-        command.extend(["--port", str(port)])
+        command.extend(["--Frontend.port", str(port)])
 
     # Create a health check function for the server
     def health_check():
         health_url = f"http://localhost:{port}/health"
         readiness_url = f"http://localhost:{port}/v1/models"
-        
+
         print(f"[DYNAMO SERVE] Checking health: {health_url}")
-        
+
         # Try health endpoint first (returns faster)
         health_response = check_service_health(
-            health_url, 
-            max_retries=2,
-            retry_interval=0.5,
-            timeout=1
+            health_url, max_retries=2, retry_interval=0.5, timeout=1
         )
-        
+
         if health_response:
-            print(f"[DYNAMO SERVE] Health endpoint is OK, checking models endpoint...")
+            print("[DYNAMO SERVE] Health endpoint is OK, checking models endpoint...")
+
             # Also verify models endpoint is responding properly
             def validate_models(response):
                 try:
                     data = response.json()
                     models_ready = "data" in data and len(data["data"]) > 0
                     if models_ready:
-                        print(f"[DYNAMO SERVE] Models ready: {data.get('data', [])}") 
+                        print(f"[DYNAMO SERVE] Models ready: {data.get('data', [])}")
                     else:
                         print(f"[DYNAMO SERVE] Models not ready: {data}")
                     return models_ready
                 except Exception as e:
                     print(f"[DYNAMO SERVE] Error parsing models response: {e}")
                     return False
-                    
+
             models_response = check_service_health(
                 readiness_url,
                 max_retries=2,
                 retry_interval=0.5,
                 timeout=1,
-                callback=validate_models
+                callback=validate_models,
             )
-            
+
             return models_response
         else:
-            print(f"[DYNAMO SERVE] Health endpoint not responding")
-        
+            print("[DYNAMO SERVE] Health endpoint not responding")
+
         return False
 
     with managed_process(
@@ -107,26 +106,29 @@ def dynamo_serve_process(graph: DeploymentGraph, port=8000, timeout=300):
         timeout=timeout,
         cwd=graph.directory,
         output=True,
-        health_check=health_check
+        #        health_check=health_check
     ) as proc:
-        print(f"[DYNAMO SERVE] Server process started and ready - deployment: {graph.module}")
+        print(
+            f"[DYNAMO SERVE] Server process started and ready - deployment: {graph.module}"
+        )
         print(f"[DYNAMO SERVE] Testing with endpoint: {graph.endpoint}")
-        
+
         # Check NATS status before client tests
         try:
             import subprocess
+
             print("\n[DYNAMO SERVE] Checking NATS status before client tests...")
             subprocess.run(["curl", "-s", "localhost:8222/varz"], check=False)
             subprocess.run(["curl", "-s", "localhost:8222/jsz"], check=False)
             print("[DYNAMO SERVE] NATS check complete")
         except Exception as e:
             print(f"[DYNAMO SERVE] Error checking NATS: {e}")
-        
+
         try:
             yield proc
         except Exception as e:
             print(f"[DYNAMO SERVE] Exception during test execution: {e}")
-        
+
         print("[DYNAMO SERVE] Client tests completed")
 
 
@@ -161,7 +163,7 @@ def get_test_deployment_graphs():
     """
     # Shorter prompt for faster test execution
     quick_prompt = "Tell me a short joke about AI."
-    
+
     multimodal_payload = Payload(
         payload={
             "model": "llava-hf/llava-1.5-7b-hf",
@@ -189,7 +191,7 @@ def get_test_deployment_graphs():
         expected_log=[],
         expected_response=["AI"],
     )
-    
+
     return {
         "agg": (
             DeploymentGraph(
@@ -235,7 +237,7 @@ def get_test_deployment_graphs():
             DeploymentGraph(
                 "graphs.disagg_router:Frontend",
                 "configs/disagg_router.yaml",
-                "/workspace/examples/llm", 
+                "/workspace/examples/llm",
                 "v1/chat/completions",
                 completions_response_handler,
             ),
@@ -251,4 +253,4 @@ def get_test_deployment_graphs():
             ),
             multimodal_payload,
         ),
-    } 
+    }

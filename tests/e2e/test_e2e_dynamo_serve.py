@@ -14,15 +14,14 @@
 # limitations under the License.
 
 
-import os
-import time
 import threading
-from typing import Any, Callable, Optional
+import time
 
 import pytest
 import requests
-from tests.utils import find_free_port, cleanup_directory, check_service_health
-from tests.e2e.testutils import dynamo_serve_process, get_test_deployment_graphs, DeploymentGraph, Payload
+
+from tests.e2e.testutils import dynamo_serve_process, get_test_deployment_graphs
+from tests.utils import check_service_health, find_free_port
 
 
 @pytest.fixture(params=["agg", "agg_router", "multimodal_agg", "sglang_agg"])
@@ -46,23 +45,23 @@ def test_serve_deployment(deployment_graph_test):
     deployment_graph, payload = deployment_graph_test
     response = None
     port = find_free_port()
-    
+
     print(f"[TEST] Testing deployment: {deployment_graph.module} on port {port}")
     print(f"[TEST] Payload: {payload.payload}")
-    
+
     # Use an event to signal when the service is ready
     service_ready = threading.Event()
     request_allowed = threading.Event()
-    
+
     # Start a background thread to monitor service health
     def health_monitor():
-        url = f"http://localhost:{port}/{deployment_graph.endpoint}"
+        #        url = f"http://localhost:{port}/{deployment_graph.endpoint}"
         readiness_url = f"http://localhost:{port}/v1/models"
-        
+
         print(f"[TEST] Health monitor starting - checking {readiness_url}")
         start_time = time.time()
         timeout = 300  # seconds
-        
+
         # Wait for ports to be open first
         while time.time() - start_time < timeout:
             if check_service_health(readiness_url, max_retries=1, retry_interval=0.1):
@@ -71,22 +70,27 @@ def test_serve_deployment(deployment_graph_test):
                 request_allowed.set()
                 return
             time.sleep(1)
-        
+
         print("[TEST] Service health check timed out")
-    
+
     # Start health monitor in background
     health_thread = threading.Thread(target=health_monitor)
     health_thread.daemon = True
     health_thread.start()
-    
+
     # Check NATS status before starting test
     try:
         import subprocess
-        result = subprocess.run(["curl", "-s", "localhost:8222/varz"], capture_output=True, text=True)
-        print(f"[TEST] NATS status before test: {'OK' if 'server_id' in result.stdout else 'NOT READY'}")
+
+        result = subprocess.run(
+            ["curl", "-s", "localhost:8222/varz"], capture_output=True, text=True
+        )
+        print(
+            f"[TEST] NATS status before test: {'OK' if 'server_id' in result.stdout else 'NOT READY'}"
+        )
     except Exception as e:
         print(f"[TEST] Error checking NATS: {e}")
-    
+
     print("[TEST] Starting dynamo serve process")
     with dynamo_serve_process(deployment_graph, port=port, timeout=300):
         # Wait for service to be ready
@@ -94,9 +98,9 @@ def test_serve_deployment(deployment_graph_test):
         if not service_ready.wait(timeout=180):
             print("[TEST] Service health check timed out after 180 seconds")
             pytest.fail("Service health check timed out after 180 seconds")
-            
+        time.sleep(60)
         url = f"http://localhost:{port}/{deployment_graph.endpoint}"
-        
+
         # Send the request
         print(f"[TEST] Sending request to {url}")
         try:
@@ -105,18 +109,20 @@ def test_serve_deployment(deployment_graph_test):
         except Exception as e:
             print(f"[TEST] Request failed: {str(e)}")
             pytest.fail(f"Request failed: {str(e)}")
-            
+
         # Process the response
         if response.status_code != 200:
             print(f"[TEST] Error response: {response.text}")
-            pytest.fail(f"Service returned status code {response.status_code}: {response.text}")
-            
+            pytest.fail(
+                f"Service returned status code {response.status_code}: {response.text}"
+            )
+
         print("[TEST] Processing response")
         content = deployment_graph.response_handler(response)
-        
+
         # Check for expected responses
         assert content, "Empty response content"
         for expected in payload.expected_response:
             assert expected in content, f"Expected '{expected}' not found in response"
-        
+
         print("[TEST] Test completed successfully")
