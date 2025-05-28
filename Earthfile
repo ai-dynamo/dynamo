@@ -112,7 +112,7 @@ dynamo-build:
     COPY deploy/ deploy/
 
     ENV CARGO_TARGET_DIR=/workspace/target
-    RUN cargo build --release --locked --features llamacpp,python,cuda && \
+    RUN cargo build --release --locked --features llamacpp,cuda && \
         cargo doc --no-deps
 
     # Create symlinks for wheel building

@@ -33,3 +33,13 @@ from dynamo._core import KvRouter as KvRouter
 from dynamo._core import ModelType as ModelType
 from dynamo._core import OverlapScores as OverlapScores
 from dynamo._core import register_llm as register_llm
+
+try:
+    from dynamo.llm.tensorrtllm import (  # noqa: F401
+        get_llm_engine as get_tensorrtllm_engine,
+    )
+    from dynamo.llm.tensorrtllm import (  # noqa: F401
+        get_publisher as get_tensorrtllm_publisher,
+    )
+except ImportError:
+    pass  # TensorRTLLM is not enabled by default

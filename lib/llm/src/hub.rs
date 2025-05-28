@@ -14,15 +14,28 @@
 // limitations under the License.
 
 use hf_hub::api::tokio::ApiBuilder;
+use std::env;
 use std::path::{Path, PathBuf};
 
-const IGNORED: [&str; 3] = [".gitattributes", "LICENSE", "README.md"];
+const IGNORED: [&str; 5] = [
+    ".gitattributes",
+    "LICENSE",
+    "LICENSE.txt",
+    "README.md",
+    "USE_POLICY.md",
+];
+
+const HF_TOKEN_ENV_VAR: &str = "HF_TOKEN";
 
 /// Attempt to download a model from Hugging Face
 /// Returns the directory it is in
 pub async fn from_hf(name: impl AsRef<Path>) -> anyhow::Result<PathBuf> {
     let name = name.as_ref();
-    let api = ApiBuilder::new().with_progress(true).build()?;
+    let token = env::var(HF_TOKEN_ENV_VAR).ok();
+    let api = ApiBuilder::new()
+        .with_progress(true)
+        .with_token(token)
+        .build()?;
     let model_name = name.display().to_string();
 
     let repo = api.model(model_name.clone());

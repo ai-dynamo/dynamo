@@ -7,6 +7,7 @@ import logging
 import threading
 import traceback
 import weakref
+from contextlib import asynccontextmanager
 from queue import Queue
 from typing import Callable, Optional, Union
 
@@ -80,7 +81,7 @@ class ManagedThread(threading.Thread):
             self._current_future.cancel()
 
 
-class Publishers:
+class Publisher:
     """
     A class to retrieve stats and kv cache events from TRTLLM engine and publish them to the metrics and events publishers.
     """
@@ -102,7 +103,6 @@ class Publishers:
         self.partial_block_hashes = set()
         self.error_queue: Queue = Queue()
         self._stop_event = threading.Event()
-        self._setup()
 
     async def _create_metrics_publisher_endpoint(self):
         logging.debug("Creating metrics publisher endpoint")
@@ -111,7 +111,7 @@ class Publishers:
             return
         await self.metrics_publisher.create_endpoint(self.component)
 
-    def _setup(self):
+    def initialize(self):
         # Setup the metrics publisher
         self.metrics_publisher = KvMetricsPublisher()
         self._init_publish_metrics_thread()
@@ -298,7 +298,7 @@ class Publishers:
                 self.kv_event_publisher.publish_removed(event_id, block_hashes)
         return True
 
-    def start_publish_threads(self):
+    def start(self):
         if (
             self.publish_kv_cache_events_thread
             and not self.publish_kv_cache_events_thread.is_alive()
@@ -342,3 +342,16 @@ class Publishers:
             self.publish_kv_cache_events_thread.join(timeout=cleanup_timeout)
             if self.publish_kv_cache_events_thread.is_alive():
                 logging.warning("KV cache events thread did not stop within timeout")
+
+
+@asynccontextmanager
+async def get_publisher(component, engine, kv_listener, worker_id, kv_block_size):
+    publisher = Publisher(component, engine, kv_listener, worker_id, kv_block_size)
+    try:
+        publisher.initialize()
+        yield publisher
+    except Exception as e:
+        logging.error(f"Error in engine context: {e}")
+        raise
+    finally:
+        await publisher.cleanup()
