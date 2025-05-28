@@ -72,15 +72,30 @@ RUN apt-get update -y && \
     autoconf \
     libtool
 
+# These headers are missing with the hpcx installer, required
+# by UCX to find RDMA devices
+RUN apt-get update -y && \
+    apt-get install -y   \
+    --reinstall libibverbs-dev rdma-core ibverbs-utils libibumad-dev
+
+ARG UCX_EFA=3842a65f02a8e2f3635a66189cd82dc86bf065c2
+ARG UCX_REF=v1.19.x
+
 WORKDIR /workspace
 
 ### UCX EFA Setup ###
 RUN rm -rf /opt/hpcx/ucx
 RUN rm -rf /usr/local/ucx
-RUN cd /usr/local/src && \
+RUN cd /usr/local/src &&                            \
     git clone https://github.com/openucx/ucx.git && \
-    cd ucx &&                   \
-    git checkout v1.19.x &&     \
+    cd ucx &&                                       \
+    if [ "$MAKE_EFA_UCX" = "true" ]; then           \
+        git checkout $UCX_EFA;                      \
+    else                                            \
+        git checkout $UCX_REF;                      \
+    fi
+
+RUN cd /usr/local/src/ucx &&    \
     ./autogen.sh && ./configure \
     --prefix=/usr/local/ucx     \
     --enable-shared             \

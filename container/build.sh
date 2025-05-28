@@ -247,6 +247,9 @@ get_options() {
         --release-build)
             RELEASE_BUILD=true
             ;;
+        --make-efa)
+            MAKE_EFA_UCX=true
+            ;;
         --)
             shift
             break
@@ -498,6 +501,10 @@ fi
 if [  ! -z ${RELEASE_BUILD} ]; then
     echo "Performing a release build!"
     BUILD_ARGS+=" --build-arg RELEASE_BUILD=${RELEASE_BUILD} "
+fi
+
+if [ ! -z ${MAKE_EFA_UCX} ]; then
+    BUILD_ARGS+=" --build-arg MAKE_EFA_UCX=${MAKE_EFA_UCX} "
 fi
 
 LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
