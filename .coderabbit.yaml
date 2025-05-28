@@ -9,7 +9,8 @@ reviews:
   profile: "chill"
   request_changes_workflow: false
   high_level_summary: true
-  poem: false
+  # John likes the poems, no messing
+  poem: true
   review_status: false
   collapse_walkthrough: false
   auto_review:
