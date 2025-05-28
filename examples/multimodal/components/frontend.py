@@ -42,7 +42,10 @@ class Frontend:
     async def generate(self, request: MultiModalRequest):
         async def content_generator():
             async for response in self.processor.generate(request.model_dump_json()):
-                s = json.loads(response)
-                yield s
+                try:
+                    s = json.loads(response)
+                    yield s
+                except json.JSONDecodeError as e:
+                    raise RuntimeError(f"Failed to parse JSON response: {e}")
 
         return StreamingResponse(content_generator(), media_type="text/event-stream")
