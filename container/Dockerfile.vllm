@@ -297,7 +297,11 @@ COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
 USER $USERNAME
 ENV HOME=/home/$USERNAME
 ENV PYTHONPATH=$HOME/dynamo/deploy/sdk/src:$PYTHONPATH:$HOME/dynamo/components/planner/src:$PYTHONPATH
+ENV CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 WORKDIR $HOME
+
+# so we can use maturin develop
+RUN uv pip install maturin
 
 # https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
 RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.commandhistory/.bash_history" \
