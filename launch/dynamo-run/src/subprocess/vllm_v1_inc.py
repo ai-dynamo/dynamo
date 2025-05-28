@@ -87,7 +87,6 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
 
         # TODO Manage DP Ranks in metrics aggregation.
         self.inner.publish(
-            data_parallel_rank=self.dp_rank,
             request_active_slots=scheduler_stats.num_running_reqs,
             request_total_slots=0,  # TODO - remove from metrics
             kv_active_blocks=0,  # TODO - need to calculate this
@@ -95,6 +94,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
             num_requests_waiting=scheduler_stats.num_waiting_reqs,  # used in current cost function
             gpu_cache_usage_perc=scheduler_stats.gpu_cache_usage,  # used in current cost function
             gpu_prefix_cache_hit_rate=hit_rate,
+            data_parallel_rank=self.dp_rank,
         )
 
     def log_engine_initialized(self) -> None:
@@ -179,7 +179,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     await component.create_service()
 
     endpoint = component.endpoint(config.endpoint)
-    print(f"BLOCK SIZE: {config.kv_block_size}")
     await register_llm(
         ModelType.Backend,
         endpoint,

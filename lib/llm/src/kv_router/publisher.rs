@@ -37,9 +37,8 @@ use rmp_serde as rmps;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 use zeromq::{Socket, SocketRecv, SubSocket};
-
-static WARNING_COUNT: AtomicU32 = AtomicU32::new(0);
 
 // -------------------------------------------------------------------------
 // KV Event Publishers -----------------------------------------------------
@@ -88,11 +87,17 @@ fn start_publish_task(
     });
 }
 
+// vLLM and SGLang use multi-processing to launch engine-core processes
+// We use zmq to publish events from these processes to a socket
+// For more info on zmq: https://zeromq.org/
+// This publisher reads those events and publishes them to NATS
+// The indexer will get the events from NATS and put them in the global prefix tree.
 pub struct KvEventPublisherFromZmq {
     kv_block_size: usize,
     processor_handle: Option<tokio::task::JoinHandle<()>>,
     zmq_handle: Option<tokio::task::JoinHandle<()>>,
     zmq_token: Option<dynamo_runtime::CancellationToken>,
+    warning_count: Arc<AtomicU32>,
 }
 
 impl KvEventPublisherFromZmq {
@@ -102,6 +107,7 @@ impl KvEventPublisherFromZmq {
             processor_handle: None,
             zmq_handle: None,
             zmq_token: None,
+            warning_count: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -113,6 +119,7 @@ impl KvEventPublisherFromZmq {
         zmq_topic: String,
     ) {
         let kv_block_size = self.kv_block_size;
+        let warning_count = self.warning_count.clone();
         let (raw_tx, raw_rx) = mpsc::unbounded_channel::<(u64, Vec<u8>)>();
 
         let zmq_token = component.rt().child_token();
@@ -133,7 +140,14 @@ impl KvEventPublisherFromZmq {
         );
 
         self.processor_handle = Some(component.drt().runtime().secondary().spawn(
-            start_event_processor(raw_rx, component, worker_id, kv_block_size, zmq_token),
+            start_event_processor(
+                raw_rx,
+                component,
+                worker_id,
+                kv_block_size,
+                warning_count,
+                zmq_token,
+            ),
         ));
     }
 
@@ -155,10 +169,13 @@ async fn start_event_processor<P: EventPublisher>(
     component: P,
     worker_id: i64,
     kv_block_size: usize,
+    warning_count: Arc<AtomicU32>,
     cancellation_token: dynamo_runtime::CancellationToken,
 ) {
     loop {
         tokio::select! {
+            biased;
+
             // Check for cancellation
             _ = cancellation_token.cancelled() => {
                 tracing::debug!("Event processor received cancellation signal");
@@ -167,33 +184,47 @@ async fn start_event_processor<P: EventPublisher>(
 
             // Process incoming messages
             msg = raw_rx.recv() => {
-                match msg {
-                    Some((seq, payload)) => {
-                        match rmps::from_slice::<KvEventBatch>(&payload) {
-                            Ok(batch) => {
-                                for raw_evt in batch.events.into_iter() {
-                                    if let Some(event) = convert_event(raw_evt, seq, kv_block_size) {
-                                        let router_event = RouterEvent::new(worker_id, event);
-                                        if let Err(e) = component.publish(KV_EVENT_SUBJECT, &router_event).await {
-                                            tracing::warn!(error=%e, "Failed to publish router event.");
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(error=%e, "Failed to decode KVEventBatch msgpack");
-                            }
-                        }
-                    }
-                    None => {
-                        tracing::debug!("Event processor channel closed");
-                        break;
+                let Some((seq, payload)) = msg else {
+                    tracing::debug!("Event processor channel closed");
+                    break;
+                };
+
+                let batch_result = rmps::from_slice::<KvEventBatch>(&payload);
+                let Ok(batch) = batch_result else {
+                    let e = batch_result.unwrap_err();
+                    tracing::warn!(error=%e, "Failed to decode KVEventBatch msgpack");
+                    continue;
+                };
+
+                for raw_evt in batch.events.into_iter() {
+                    let Some(event) = convert_event(raw_evt, seq, kv_block_size, &warning_count) else {
+                        // Case where convert_event returns None
+                        continue;
+                    };
+
+                    let router_event = RouterEvent::new(worker_id, event);
+                    if let Err(e) = component.publish(KV_EVENT_SUBJECT, &router_event).await {
+                        tracing::warn!(error=%e, "Failed to publish router event.");
                     }
                 }
             }
         }
     }
     tracing::debug!("Event processor exiting");
+}
+
+// Error handling configuration for ZMQ operations
+const INITIAL_BACKOFF_MS: u64 = 10;
+const MAX_BACKOFF_MS: u64 = 5000;
+const MAX_CONSECUTIVE_ERRORS: u32 = 10;
+const MAX_BACKOFF_EXPONENT: u32 = 8; // Cap at 2^8 = 256x multiplier to prevent overflow
+
+/// Calculate exponential backoff duration based on consecutive error count
+fn calculate_backoff_ms(consecutive_errors: u32) -> u64 {
+    std::cmp::min(
+        INITIAL_BACKOFF_MS * 2_u64.pow(consecutive_errors.min(MAX_BACKOFF_EXPONENT)),
+        MAX_BACKOFF_MS,
+    )
 }
 
 async fn start_zmq_listener(
@@ -221,8 +252,12 @@ async fn start_zmq_listener(
         return;
     }
 
+    let mut consecutive_errors = 0u32;
+
     loop {
         tokio::select! {
+            biased;
+
             // Check for cancellation
             _ = zmq_token.cancelled() => {
                 tracing::info!("ZMQ listener received cancellation signal");
@@ -231,34 +266,55 @@ async fn start_zmq_listener(
 
             // Receive message
             msg_result = socket.recv() => {
-                match msg_result {
-                    Ok(msg) => {
-                        // We expect multipart frames: [topic, seq, payload]
-                        let mut frames: Vec<Vec<u8>> = msg.into_vec().into_iter().map(|frame| frame.to_vec()).collect();
+                let Ok(msg) = msg_result else {
+                    let e = msg_result.unwrap_err();
+                    consecutive_errors += 1;
 
-                        if frames.len() != 3 {
-                            tracing::warn!(expected=3, actual=%frames.len(), "Received unexpected ZMQ frame count");
-                            continue;
-                        }
-                        let payload = frames.remove(2);
-                        let seq_bytes = frames.remove(1);
-
-                        if seq_bytes.len() != 8 {
-                            tracing::warn!(expected=8, actual=%seq_bytes.len(), "Invalid sequence number byte length");
-                            continue;
-                        }
-
-                        let seq = u64::from_be_bytes(seq_bytes.try_into().unwrap());
-                        if raw_tx.send((seq, payload)).is_err() {
-                            tracing::warn!("Failed to send message to channel - receiver dropped");
-                            break;
-                        }
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                        tracing::error!(
+                            error=%e,
+                            consecutive_errors=%consecutive_errors,
+                            "Too many consecutive ZMQ errors, terminating listener"
+                        );
+                        break;
                     }
-                    Err(e) => {
-                        tracing::warn!(error=%e, "Error reading from ZMQ socket");
-                        // Brief sleep to avoid tight error loop
-                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                    }
+
+                    // Simple exponential backoff with max exponent to prevent overflow
+                    let backoff_ms = calculate_backoff_ms(consecutive_errors);
+
+                    tracing::warn!(
+                        error=%e,
+                        consecutive_errors=%consecutive_errors,
+                        backoff_ms=%backoff_ms,
+                        "Error reading from ZMQ socket, applying exponential backoff"
+                    );
+
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    continue;
+                };
+
+                // Reset error count on successful message
+                consecutive_errors = 0;
+
+                // We expect multipart frames: [topic, seq, payload]
+                let mut frames: Vec<Vec<u8>> = msg.into_vec().into_iter().map(|frame| frame.to_vec()).collect();
+
+                if frames.len() != 3 {
+                    tracing::warn!(expected=3, actual=%frames.len(), "Received unexpected ZMQ frame count");
+                    continue;
+                }
+                let payload = frames.remove(2);
+                let seq_bytes = frames.remove(1);
+
+                if seq_bytes.len() != 8 {
+                    tracing::warn!(expected=8, actual=%seq_bytes.len(), "Invalid sequence number byte length");
+                    continue;
+                }
+
+                let seq = u64::from_be_bytes(seq_bytes.try_into().unwrap());
+                if raw_tx.send((seq, payload)).is_err() {
+                    tracing::warn!("Failed to send message to channel - receiver dropped");
+                    break;
                 }
             }
         }
@@ -270,7 +326,12 @@ async fn start_zmq_listener(
 /// [`KvCacheEvent`] representation used by the router. Returns `None` when the
 /// event cannot be represented with the current protocol (e.g., we ignore
 /// `AllBlocksCleared` until a concrete format is defined).
-fn convert_event(raw: RawKvEvent, event_id: u64, kv_block_size: usize) -> Option<KvCacheEvent> {
+fn convert_event(
+    raw: RawKvEvent,
+    event_id: u64,
+    kv_block_size: usize,
+    warning_count: &Arc<AtomicU32>,
+) -> Option<KvCacheEvent> {
     match raw {
         RawKvEvent::BlockStored {
             block_hashes,
@@ -290,6 +351,7 @@ fn convert_event(raw: RawKvEvent, event_id: u64, kv_block_size: usize) -> Option
                         &num_block_tokens,
                         &block_hashes,
                         lora_id.unwrap_or(0),
+                        warning_count,
                     ),
                 }),
             })
@@ -332,13 +394,14 @@ pub fn create_stored_blocks(
     num_block_tokens: &[u64],
     block_hashes: &[i64],
     lora_id: u64,
+    warning_count: &Arc<AtomicU32>,
 ) -> Vec<KvCacheStoredBlockData> {
     let mut blocks: Vec<KvCacheStoredBlockData> = Vec::new();
 
     let mut token_offset: usize = 0;
     for (num_tokens_it, block_hash_it) in num_block_tokens.iter().zip(block_hashes.iter()) {
         if *num_tokens_it != kv_block_size as u64 {
-            if WARNING_COUNT.fetch_add(1, Ordering::Relaxed) < 3 {
+            if warning_count.fetch_add(1, Ordering::Relaxed) < 3 {
                 tracing::warn!(
                     "Block not published. Block size must be {} tokens to be published. Block size is: {}",
                     kv_block_size,
@@ -496,6 +559,7 @@ mod test_event_processing {
             &num_block_tokens,
             &block_hashes,
             /*lora_id=*/ 0,
+            &Arc::new(AtomicU32::new(0)),
         );
 
         assert_eq!(blocks.len(), 2);
@@ -510,6 +574,7 @@ mod test_event_processing {
         let token_ids = vec![1, 2, 3, 4, 5, 6, 7];
         let num_block_tokens = vec![4_u64, 3_u64];
         let block_hashes = vec![111_i64, 222_i64];
+        let warning_count = Arc::new(AtomicU32::new(0));
 
         let blocks = create_stored_blocks(
             kv_block_size,
@@ -517,11 +582,12 @@ mod test_event_processing {
             &num_block_tokens,
             &block_hashes,
             /*lora_id=*/ 0,
+            &warning_count,
         );
 
         // should early-exit as second has mismatch
         assert!(blocks.len() == 1);
-        assert!(WARNING_COUNT.load(Ordering::Relaxed) == 1)
+        assert!(warning_count.load(Ordering::Relaxed) == 1)
     }
 
     // ---------------------------------------------------------------------
@@ -538,7 +604,7 @@ mod test_event_processing {
             lora_id: Some(0),
         };
 
-        let out = convert_event(raw_evt, 42, kv_block_size);
+        let out = convert_event(raw_evt, 42, kv_block_size, &Arc::new(AtomicU32::new(0)));
         assert!(matches!(out.unwrap().data, KvCacheEventData::Stored(_)));
     }
 
@@ -548,7 +614,7 @@ mod test_event_processing {
         let raw_evt = RawKvEvent::BlockRemoved {
             block_hashes: vec![123, 456],
         };
-        let out = convert_event(raw_evt, 7, kv_block_size);
+        let out = convert_event(raw_evt, 7, kv_block_size, &Arc::new(AtomicU32::new(0)));
 
         assert!(matches!(out.unwrap().data, KvCacheEventData::Removed(_)));
     }
@@ -557,7 +623,7 @@ mod test_event_processing {
     fn test_convert_event_all_blocks_cleared() {
         let kv_block_size = 4;
         let raw_evt = RawKvEvent::AllBlocksCleared;
-        assert!(convert_event(raw_evt, 1, kv_block_size).is_none());
+        assert!(convert_event(raw_evt, 1, kv_block_size, &Arc::new(AtomicU32::new(0))).is_none());
     }
 }
 
@@ -569,16 +635,19 @@ mod tests_startup_helpers {
     use std::sync::{Arc, Mutex};
     use zeromq::{PubSocket, Socket, SocketSend, ZmqMessage};
 
+    // Type alias to resolve clippy::type_complexity warning
+    type PublishedEvents = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
     //--------------------------------------------------------------------
     // A tiny stand-in for Component that just records every publish call
     //--------------------------------------------------------------------
     #[derive(Default)]
     struct MockComponent {
-        published: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+        published: PublishedEvents,
     }
 
     impl MockComponent {
-        fn new() -> (Self, Arc<Mutex<Vec<(String, Vec<u8>)>>>) {
+        fn new() -> (Self, PublishedEvents) {
             let published = Arc::new(Mutex::new(Vec::new()));
             (
                 Self {
@@ -654,6 +723,7 @@ mod tests_startup_helpers {
             comp,
             worker_id,
             kv_block_size,
+            Arc::new(AtomicU32::new(0)),
             token,
         ));
 
@@ -663,12 +733,11 @@ mod tests_startup_helpers {
             .unwrap();
 
         // 5) assert we have exactly one RouterEvent pushed with right worker_id
-        let published: std::sync::MutexGuard<'_, Vec<(String, Vec<u8>)>> =
-            published.lock().unwrap();
+        let published = published.lock().unwrap();
         let (subject, bytes) = &published[0];
 
         assert_eq!(subject, &KV_EVENT_SUBJECT.to_string());
-        assert_eq!(bytes.get(0), payload.get(0))
+        assert_eq!(bytes.first(), payload.first())
     }
 
     //--------------------------------------------------------------------
@@ -727,5 +796,54 @@ mod tests_startup_helpers {
         // Stop the listener
         token.cancel();
         let _ = listener_handle.await;
+    }
+}
+
+#[cfg(test)]
+mod test_exponential_backoff {
+    use super::*;
+
+    #[test]
+    fn test_backoff_calculation_progression() {
+        // Test the exponential progression
+        assert_eq!(calculate_backoff_ms(0), 10); // 10 * 2^0 = 10
+        assert_eq!(calculate_backoff_ms(1), 20); // 10 * 2^1 = 20
+        assert_eq!(calculate_backoff_ms(2), 40); // 10 * 2^2 = 40
+        assert_eq!(calculate_backoff_ms(3), 80); // 10 * 2^3 = 80
+        assert_eq!(calculate_backoff_ms(4), 160); // 10 * 2^4 = 160
+        assert_eq!(calculate_backoff_ms(5), 320); // 10 * 2^5 = 320
+        assert_eq!(calculate_backoff_ms(6), 640); // 10 * 2^6 = 640
+        assert_eq!(calculate_backoff_ms(7), 1280); // 10 * 2^7 = 1280
+        assert_eq!(calculate_backoff_ms(8), 2560); // 10 * 2^8 = 2560
+    }
+
+    #[test]
+    fn test_backoff_caps_at_max_exponent() {
+        // After MAX_BACKOFF_EXPONENT, should stay at 2^8 = 2560ms
+        assert_eq!(calculate_backoff_ms(8), 2560);
+        assert_eq!(calculate_backoff_ms(9), 2560); // Same as 8
+        assert_eq!(calculate_backoff_ms(100), 2560); // Same as 8
+    }
+
+    #[test]
+    fn test_backoff_never_exceeds_max() {
+        // Even if we somehow had a huge exponent, never exceed MAX_BACKOFF_MS
+        for i in 0..20 {
+            assert!(calculate_backoff_ms(i) <= MAX_BACKOFF_MS);
+        }
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn test_backoff_constants_are_sane() {
+        // Verify our constants make sense together
+        assert!(INITIAL_BACKOFF_MS > 0);
+        assert!(MAX_BACKOFF_MS > INITIAL_BACKOFF_MS);
+        assert!(MAX_BACKOFF_EXPONENT <= 10); // Prevent crazy exponents
+        assert!(MAX_CONSECUTIVE_ERRORS > 0);
+
+        // Max calculated value should be less than MAX_BACKOFF_MS
+        let max_calculated = INITIAL_BACKOFF_MS * 2_u64.pow(MAX_BACKOFF_EXPONENT);
+        assert!(max_calculated <= MAX_BACKOFF_MS);
     }
 }

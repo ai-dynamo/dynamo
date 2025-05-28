@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU32;
 
 use super::*;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
@@ -94,10 +95,10 @@ impl KvMetricsPublisher {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (request_active_slots, request_total_slots, kv_active_blocks, kv_total_blocks, num_requests_waiting, gpu_cache_usage_perc, gpu_prefix_cache_hit_rate, data_parallel_rank = 0))]
     fn publish(
         &self,
         _py: Python,
-        data_parallel_rank: u32,
         request_active_slots: u64,
         request_total_slots: u64,
         kv_active_blocks: u64,
@@ -105,6 +106,7 @@ impl KvMetricsPublisher {
         num_requests_waiting: u64,
         gpu_cache_usage_perc: f32,
         gpu_prefix_cache_hit_rate: f32,
+        data_parallel_rank: u32,
     ) -> PyResult<()> {
         self.inner
             .publish(
@@ -190,6 +192,7 @@ impl KvEventPublisherFromZmq {
 pub(crate) struct KvEventPublisher {
     inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
     kv_block_size: usize,
+    warning_count: Arc<AtomicU32>,
 }
 
 #[pymethods]
@@ -205,6 +208,7 @@ impl KvEventPublisher {
         Ok(Self {
             inner: inner.into(),
             kv_block_size,
+            warning_count: Arc::new(AtomicU32::new(0)),
         })
     }
 
@@ -230,6 +234,7 @@ impl KvEventPublisher {
                     &num_block_tokens,
                     &block_hashes,
                     lora_id,
+                    &self.warning_count,
                 ),
             }),
         };

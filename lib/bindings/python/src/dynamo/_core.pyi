@@ -364,7 +364,6 @@ class KvMetricsPublisher:
 
     def publish(
         self,
-        data_parallel_rank: int,
         request_active_slots: int,
         request_total_slots: int,
         kv_active_blocks: int,
@@ -372,6 +371,7 @@ class KvMetricsPublisher:
         num_requests_waiting: int,
         gpu_cache_usage_perc: float,
         gpu_prefix_cache_hit_rate: float,
+        data_parallel_rank: int = 0,
     ) -> None:
         """
         Update the KV metrics being reported.
