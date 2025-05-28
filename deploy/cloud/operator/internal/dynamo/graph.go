@@ -196,7 +196,7 @@ func RetrieveDynamoGraphConfigurationFile(ctx context.Context, url string) (*byt
 	}
 
 	// Extract the YAML file
-	yamlFileName := "bento.yaml"
+	yamlFileName := "dynamo.yaml"
 	yamlContent, err := archive.ExtractFileFromTar(tarData, yamlFileName)
 	if err != nil {
 		return nil, err
