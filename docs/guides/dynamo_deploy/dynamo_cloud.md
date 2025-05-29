@@ -148,16 +148,16 @@ kubectl create namespace $NAMESPACE
 kubectl config set-context --current --namespace=$NAMESPACE
 ```
 
-3. Deploy the helm chart using the deploy script:
+3. Deploy the helm charts using the deploy script:
 
 ```bash
-./deploy.sh
+./deploy.sh --crds
 ```
 
 if you wish to be guided through the deployment process, you can run the deploy script with the `--interactive` flag:
 
 ```bash
-./deploy.sh --interactive
+./deploy.sh --crds --interactive
 ```
 
 4. **Expose Dynamo Cloud Externally**

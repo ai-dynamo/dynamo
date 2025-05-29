@@ -116,3 +116,6 @@ metricsService:
     protocol: TCP
     targetPort: https
   type: ClusterIP
+
+natsAddr: ""
+etcdAddr: ""
