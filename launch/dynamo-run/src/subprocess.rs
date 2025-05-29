@@ -10,11 +10,10 @@ use anyhow::Context;
 use regex::Regex;
 use tokio::io::AsyncBufReadExt;
 
+use crate::flags::RouterMode;
 use dynamo_llm::engines::MultiNodeConfig;
 use dynamo_llm::local_model::LocalModel;
 use dynamo_runtime::protocols::Endpoint as EndpointId;
-use crate::flags::RouterMode;
-
 
 pub mod sglang;
 pub mod trtllm;
