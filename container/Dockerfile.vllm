@@ -70,7 +70,8 @@ RUN apt-get update -y && \
     tmux \
     vim \
     autoconf \
-    libtool
+    libtool \
+    libfontconfig1-dev
 
 WORKDIR /workspace
 
