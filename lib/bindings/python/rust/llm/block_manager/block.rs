@@ -174,21 +174,11 @@ impl Block {
             let mut mutable_block = self.inner.lock().unwrap();
             ptr = match &mut *mutable_block {
                 BlockType::Pinned(block) => {
-                    let mut block_view_mut = block.block_view_mut().map_err(|e| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!(
-                            "Failed to get mutable Pinned block view: {}",
-                            e
-                        ))
-                    })?;
+                    let mut block_view_mut = block.block_view_mut().map_err(to_pyerr)?;
                     (unsafe { block_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
                 }
                 BlockType::Device(block) => {
-                    let mut block_view_mut = block.block_view_mut().map_err(|e| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!(
-                            "Failed to get mutable Device block view: {}",
-                            e
-                        ))
-                    })?;
+                    let mut block_view_mut = block.block_view_mut().map_err(to_pyerr)?;
                     (unsafe { block_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
                 }
             };

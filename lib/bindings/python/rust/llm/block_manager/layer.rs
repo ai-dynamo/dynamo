@@ -88,22 +88,12 @@ impl Layer {
             ptr = match &mut *mutable_block {
                 block::BlockType::Pinned(block) => {
                     let mut layer_view_mut =
-                        block.layer_view_mut(self.layer_idx, 0).map_err(|e| {
-                            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                                "Failed to get mutable Pinned layer view: {}",
-                                e
-                            ))
-                        })?;
+                        block.layer_view_mut(self.layer_idx, 0).map_err(to_pyerr)?;
                     (unsafe { layer_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
                 }
                 block::BlockType::Device(block) => {
                     let mut layer_view_mut =
-                        block.layer_view_mut(self.layer_idx, 0).map_err(|e| {
-                            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                                "Failed to get mutable Device layer view: {}",
-                                e
-                            ))
-                        })?;
+                        block.layer_view_mut(self.layer_idx, 0).map_err(to_pyerr)?;
                     (unsafe { layer_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
                 }
             };
