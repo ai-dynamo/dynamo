@@ -97,7 +97,8 @@ impl BlockRegistry {
     ) -> Self {
         let (unregister_tx, mut unregister_rx) = mpsc::unbounded_channel();
 
-        let blocks = Arc::new(Mutex::new(HashMap::new()));
+        let blocks: Arc<Mutex<HashMap<SequenceHash, Weak<BlockHandle>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         let blocks_clone = blocks.clone();
         let global_registry_clone = global_registry.clone();
@@ -107,7 +108,12 @@ impl BlockRegistry {
             while let Some(sequence_hash) = unregister_rx.recv().await {
                 {
                     let mut blocks = blocks.lock().unwrap();
-                    blocks.remove(&sequence_hash);
+
+                    if let Some(handle) = blocks.get(&sequence_hash) {
+                        if handle.upgrade().is_none() {
+                            blocks.remove(&sequence_hash);
+                        }
+                    }
                 }
 
                 let mut global_registry = global_registry.lock().unwrap();
