@@ -16,6 +16,8 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
+  suggested_labels: false
+  suggested_reviewers: false
   finishing_touches:
     docstrings:
       enabled: false
