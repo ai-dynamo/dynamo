@@ -404,6 +404,10 @@ COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
 # Build C bindings, creates lib/bindings/c/include
+#
+# TODO: In theory the 'cargo build' in earlier stage covers this, we "just" need to copy the
+# `lib/bindings/c/include` folder that build.rs generated across.
+# I couldn't get that to work, hence TODO.
 RUN cd /workspace/lib/bindings/c && cargo build --release
 
 # Package the bindings
