@@ -128,7 +128,7 @@ impl KvMetricsPublisher {
 
 #[pyclass]
 #[derive(Clone)]
-pub struct KvEventPublisherFromZmqConfig {
+pub struct ZmqKvEventPublisherConfig {
     #[pyo3(get, set)]
     pub worker_id: i64,
     #[pyo3(get, set)]
@@ -140,7 +140,7 @@ pub struct KvEventPublisherFromZmqConfig {
 }
 
 #[pymethods]
-impl KvEventPublisherFromZmqConfig {
+impl ZmqKvEventPublisherConfig {
     #[new]
     #[pyo3(signature = (
         worker_id,
@@ -164,16 +164,16 @@ impl KvEventPublisherFromZmqConfig {
 }
 
 #[pyclass]
-pub(crate) struct KvEventPublisherFromZmq {
-    inner: llm_rs::kv_router::publisher::KvEventPublisherFromZmq,
+pub(crate) struct ZmqKvEventPublisher {
+    inner: llm_rs::kv_router::publisher::ZmqKvEventPublisher,
 }
 
 #[pymethods]
-impl KvEventPublisherFromZmq {
+impl ZmqKvEventPublisher {
     #[new]
-    fn new(component: Component, config: KvEventPublisherFromZmqConfig) -> PyResult<Self> {
+    fn new(component: Component, config: ZmqKvEventPublisherConfig) -> PyResult<Self> {
         let mut inner =
-            llm_rs::kv_router::publisher::KvEventPublisherFromZmq::new(config.kv_block_size);
+            llm_rs::kv_router::publisher::ZmqKvEventPublisher::new(config.kv_block_size);
         inner.start_background_task(
             component.inner,
             config.worker_id,

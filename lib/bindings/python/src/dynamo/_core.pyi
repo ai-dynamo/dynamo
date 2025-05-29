@@ -579,7 +579,7 @@ class KvEventPublisher:
         """
         ...
 
-class KvEventPublisherFromZmqConfig:
+class ZmqKvEventPublisherConfig:
     def __init__(
         self,
         worker_id: int,
@@ -588,7 +588,7 @@ class KvEventPublisherFromZmqConfig:
         zmq_topic: str = ""
     ) -> None:
         """
-        Configuration for the KvEventPublisherFromZmq.
+        Configuration for the ZmqKvEventPublisher.
 
         :param worker_id: The worker ID.
         :param kv_block_size: The block size for the key-value store.
@@ -597,10 +597,10 @@ class KvEventPublisherFromZmqConfig:
         """
         ...
 
-class KvEventPublisherFromZmq:
-    def __init__(self, component: Component, config: KvEventPublisherFromZmqConfig) -> None:
+class ZmqKvEventPublisher:
+    def __init__(self, component: Component, config: ZmqKvEventPublisherConfig) -> None:
         """
-        Initializes a new KvEventPublisherFromZmq instance.
+        Initializes a new ZmqKvEventPublisher instance.
 
         :param component: The component to be used.
         :param config: Configuration for the event publisher.

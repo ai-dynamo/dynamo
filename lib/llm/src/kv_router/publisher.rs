@@ -92,7 +92,7 @@ fn start_publish_task(
 // For more info on zmq: https://zeromq.org/
 // This publisher reads those events and publishes them to NATS
 // The indexer will get the events from NATS and put them in the global prefix tree.
-pub struct KvEventPublisherFromZmq {
+pub struct ZmqKvEventPublisher {
     kv_block_size: usize,
     processor_handle: Option<tokio::task::JoinHandle<()>>,
     zmq_handle: Option<tokio::task::JoinHandle<()>>,
@@ -100,7 +100,7 @@ pub struct KvEventPublisherFromZmq {
     warning_count: Arc<AtomicU32>,
 }
 
-impl KvEventPublisherFromZmq {
+impl ZmqKvEventPublisher {
     pub fn new(kv_block_size: usize) -> Self {
         Self {
             kv_block_size,
