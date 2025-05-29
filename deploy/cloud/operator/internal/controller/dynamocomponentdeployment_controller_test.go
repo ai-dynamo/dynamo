@@ -934,7 +934,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Name:    "main",
 										Image:   "test-image:latest",
 										Command: []string{"sh", "-c"},
-										Args:    []string{"ray start --head --port=6379 && cd src && uv run dynamo serve --system-app-port 5000 --enable-system-app --use-default-health-checks --service-name test-lws-deploy-service test-tag --test-lws-deploy-service.ServiceArgs.dynamo.namespace=default --test-lws-deploy-service.environment=kubernetes"},
+										Args:    []string{"ray start --head --port=6379 && cd src && uv run dynamo serve --system-app-port 5000 --enable-system-app --use-default-health-checks --service-name test-lws-deploy-service test-tag --test-lws-deploy-service.ServiceArgs.dynamo.namespace=default"},
 										Env:     []corev1.EnvVar{{Name: "DYNAMO_PORT", Value: "3000"}},
 										VolumeMounts: []corev1.VolumeMount{
 											{
