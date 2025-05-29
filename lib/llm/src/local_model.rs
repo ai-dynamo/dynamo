@@ -62,6 +62,12 @@ impl LocalModel {
         &self.card.service_name
     }
 
+    pub fn is_gguf(&self) -> bool {
+        // GGUF is the only file (not-folder) we accept, so we don't need to check the extension
+        // We will error when we come to parse it
+        self.full_path.is_file()
+    }
+
     /// Override max number of tokens in context. We usually only do this to limit kv cache allocation.
     pub fn set_context_length(&mut self, context_length: usize) {
         self.card.context_length = context_length;
