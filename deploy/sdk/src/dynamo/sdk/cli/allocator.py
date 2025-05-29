@@ -21,8 +21,6 @@ import logging
 import os
 from typing import Any
 
-from simple_di import inject
-
 from dynamo.sdk.core.protocol.interface import ServiceInterface
 
 # Import our own resource module
@@ -150,7 +148,6 @@ class ResourceAllocator:
         """Get detailed statistics for all GPUs."""
         return self.gpu_manager.get_gpu_stats()
 
-    @inject
     def get_resource_envs(
         self,
         service: ServiceInterface[Any],
