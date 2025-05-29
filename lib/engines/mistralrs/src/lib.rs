@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::collections::HashMap;
 use std::{num::NonZero, sync::Arc};
@@ -42,7 +30,7 @@ use dynamo_llm::protocols::openai::{
 };
 
 use dynamo_llm::engines::{EngineDispatcher, StreamingEngine};
-use dynamo_llm::LocalModel;
+use dynamo_llm::local_model::LocalModel;
 
 /// How many requests mistral will run at once in the paged attention scheduler.
 /// It actually runs 1 fewer than this.
@@ -139,7 +127,11 @@ impl MistralRsEngine {
             .build(None)?
         };
 
-        let max_seq_len = AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN;
+        let mut max_seq_len = model.card().context_length;
+        if max_seq_len == 0 {
+            tracing::info!("context_length is 0. Probably error reading from model.");
+            max_seq_len = AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN;
+        }
 
         // Paged attention requires cuda
         let paged_attention_config = if cfg!(feature = "cuda") && EXP_ENABLE_PAGED_ATTENTION {

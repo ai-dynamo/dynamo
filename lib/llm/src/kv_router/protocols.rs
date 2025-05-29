@@ -41,6 +41,7 @@ pub struct WorkerSelectionResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ForwardPassMetrics {
+    pub data_parallel_rank: Option<u32>, // backwards compatible
     pub request_active_slots: u64,
     pub request_total_slots: u64,
     pub kv_active_blocks: u64,
@@ -64,6 +65,21 @@ pub struct LocalBlockHash(pub u64);
 /// In this case, the hashing function is external and unknown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct ExternalSequenceBlockHash(pub u64);
+
+// Implement From trait for convenient conversion
+impl From<u64> for ExternalSequenceBlockHash {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl From<i64> for ExternalSequenceBlockHash {
+    /// Bitwise reinterpretation: preserves all bits, including negatives.
+    /// This is lossless, but negative i64 values will appear as large u64 values.
+    fn from(value: i64) -> Self {
+        Self(value as u64)
+    }
+}
 
 /// Represents a collection of cache events and a shutdown flag.
 #[derive(Serialize, Deserialize, Debug, Clone)]

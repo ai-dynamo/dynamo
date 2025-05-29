@@ -22,11 +22,10 @@ import inspect
 import json
 import logging
 import os
-import time
 import typing as t
 from typing import Any
 
-import click
+import typer
 import uvicorn
 import uvloop
 from fastapi.responses import StreamingResponse
@@ -34,8 +33,12 @@ from fastapi.responses import StreamingResponse
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 from dynamo.sdk import dynamo_context
 from dynamo.sdk.core.protocol.interface import DynamoTransport, LinkedServices
+from dynamo.sdk.core.runner.health import (
+    register_liveness_probe,
+    register_readiness_probe,
+)
 from dynamo.sdk.lib.loader import find_and_load_service
-from dynamo.sdk.lib.utils import get_host_port
+from dynamo.sdk.lib.utils import get_host_port, get_system_app_host_port
 
 logger = logging.getLogger(__name__)
 
@@ -84,46 +87,31 @@ def add_fastapi_routes(app, service, class_instance):
     return added_routes
 
 
-@click.command()
-@click.argument("bento_identifier", type=click.STRING, required=False, default=".")
-@click.option("--service-name", type=click.STRING, required=False, default="")
-@click.option(
-    "--runner-map",
-    type=click.STRING,
-    envvar="BENTOML_RUNNER_MAP",
-    help="JSON string of runners map, default sets to envars `BENTOML_RUNNER_MAP`",
-)
-@click.option(
-    "--worker-env", type=click.STRING, default=None, help="Environment variables"
-)
-@click.option(
-    "--worker-id",
-    required=False,
-    type=click.INT,
-    default=None,
-    help="If set, start the server as a bare worker with the given worker ID. Otherwise start a standalone server with a supervisor process.",
-)
-@click.option(
-    "--custom-component-name",
-    required=False,
-    type=click.STRING,
-    default=None,
-    help="If set, use this custom component name instead of the default service name",
-)
-@click.option(
-    "--target",
-    type=click.STRING,
-    default="dynamo",
-    help="Specify the target: 'dynamo' or 'bento'.",
-)
+app = typer.Typer()
+
+
+@app.command()
 def main(
-    bento_identifier: str,
-    service_name: str,
-    runner_map: str | None,
-    worker_env: str | None,
-    worker_id: int | None,
-    custom_component_name: str | None,
-    target: str,
+    bento_identifier: str = typer.Argument(".", help="The bento identifier"),
+    service_name: str = typer.Option("", help="Service name"),
+    runner_map: str = typer.Option(
+        None,
+        envvar="BENTOML_RUNNER_MAP",
+        help="JSON string of runners map, default sets to envars `BENTOML_RUNNER_MAP`",
+    ),
+    worker_env: str = typer.Option(None, help="Environment variables"),
+    worker_id: int = typer.Option(
+        None,
+        help="If set, start the server as a bare worker with the given worker ID. Otherwise start a standalone server with a supervisor process.",
+    ),
+    custom_component_name: str = typer.Option(
+        None,
+        help="If set, use this custom component name instead of the default service name",
+    ),
+    target: str = typer.Option(
+        "dynamo",
+        help="Specify the target: 'dynamo' or 'bento'.",
+    ),
 ) -> None:
     # hack to avoid bentoml from respawning the workers after their leases are revoked
     os.environ["BENTOML_CONTAINERIZED"] = "true"
@@ -173,8 +161,14 @@ def main(
     if worker_id is not None:
         server_context.worker_index = worker_id
 
+    # Instance of the inner class of the service should be the same across the dynamo_worker, web_worker, and system_app_worker
+    class_instance: Any = None
+    # will be set once dyn_worker has created class_instance
+    instanceReady = asyncio.Event()
+
     @dynamo_worker()
-    async def worker(runtime: DistributedRuntime):
+    async def dyn_worker(runtime: DistributedRuntime):
+        nonlocal class_instance
         global dynamo_context
         dynamo_context["runtime"] = runtime
         if service_name and service_name != service.name:
@@ -203,23 +197,27 @@ def main(
 
             endpoints = []
             for name, endpoint in dynamo_endpoints.items():
-                td_endpoint = component.endpoint(name)
-                logger.debug(f"Registering endpoint '{name}'")
-                endpoints.append(td_endpoint)
-                # Bind an instance of inner to the endpoint
+                if DynamoTransport.DEFAULT in endpoint.transports:
+                    td_endpoint = component.endpoint(name)
+                    logger.debug(
+                        f"Registering endpoint '{name}' with DEFAULT transport"
+                    )
+                    endpoints.append(td_endpoint)
+                    # Bind an instance of inner to the endpoint
             dynamo_context["component"] = component
             dynamo_context["endpoints"] = endpoints
             class_instance = service.inner()
             dynamo_handlers = []
             for name, endpoint in dynamo_endpoints.items():
-                bound_method = endpoint.func.__get__(class_instance)
-                # Only pass request type for now, use Any for response
-                # TODO: Handle a dynamo_endpoint not having types
-                # TODO: Handle multiple endpoints in a single component
-                dynamo_wrapped_method = dynamo_endpoint(endpoint.request_type, Any)(
-                    bound_method
-                )
-                dynamo_handlers.append(dynamo_wrapped_method)
+                if DynamoTransport.DEFAULT in endpoint.transports:
+                    bound_method = endpoint.func.__get__(class_instance)
+                    # Only pass request type for now, use Any for response
+                    # TODO: Handle an endpoint not having types
+                    # TODO: Handle multiple endpoints in a single component
+                    dynamo_wrapped_method = dynamo_endpoint(endpoint.request_type, Any)(
+                        bound_method
+                    )
+                    dynamo_handlers.append(dynamo_wrapped_method)
             # Run startup hooks before setting up endpoints
             for name, member in vars(class_instance.__class__).items():
                 if callable(member) and getattr(
@@ -236,6 +234,8 @@ def main(
             logger.info(
                 f"Starting {service.name} instance with all registered endpoints"
             )
+            # signal that class_instance (and its setup) is done
+            instanceReady.set()
             # Launch serve_endpoint for all endpoints concurrently
             tasks = [
                 endpoint.serve_endpoint(handler)
@@ -269,37 +269,68 @@ def main(
             raise
 
     # if the service has a FastAPI app, add the worker as an event handler
-    def web_worker():
+    async def web_worker():
+        # We want to wait until dyn_worker has initialized class_instance
+        await instanceReady.wait()
         if not service.app:
             return
 
-        # Create the class instance
-        class_instance = service.inner()
         # TODO: init hooks
         # Add API routes to the FastAPI app
         added_routes = add_fastapi_routes(service.app, service, class_instance)
         if added_routes:
             # Configure uvicorn with graceful shutdown
             host, port = get_host_port()
-            config = uvicorn.Config(service.app, host=host, port=port, log_level="info")
+            # Pass None to uvicorn setting to unify log style
+            config = uvicorn.Config(service.app, host=host, port=port, log_config=None)
             server = uvicorn.Server(config)
 
             # Start the server with graceful shutdown handling
             logger.info(
                 f"Starting FastAPI server on {config.host}:{config.port} with routes: {added_routes}"
             )
-            server.run()
+            await server.serve()
         else:
             logger.warning("No API routes found, not starting FastAPI server")
-            # Keep the process running until interrupted
-            logger.info("Service is running, press Ctrl+C to stop")
-            while True:
-                try:
-                    # Sleep in small increments to respond to signals quickly
-                    time.sleep(0.1)
-                except KeyboardInterrupt:
-                    logger.info("Gracefully shutting down FastAPI process")
-                    break
+
+    async def system_app_worker():
+        # We want to wait until dyn_worker has initialized class_instance
+        await instanceReady.wait()
+        if not service.system_app:
+            raise ValueError("System app not defined for service")
+
+        # Register system endpoints
+        use_default_health_checks = (
+            os.environ.get(
+                "DYNAMO_SYSTEM_APP_USE_DEFAULT_HEALTH_CHECKS", "false"
+            ).lower()
+            == "true"
+        )
+        if use_default_health_checks:
+            logger.info("Using default health checks for liveness and readiness probes")
+        register_liveness_probe(
+            service.system_app, class_instance, use_default=use_default_health_checks
+        )
+        register_readiness_probe(
+            service.system_app, class_instance, use_default=use_default_health_checks
+        )
+        # readiness, etc...
+
+        host, port = get_system_app_host_port()
+        server = uvicorn.Server(
+            uvicorn.Config(service.system_app, host=host, port=port, log_config=None)
+        )
+        logger.info(f"Starting system app on {host}:{port}")
+        await server.serve()
+
+    def should_start_system_app():
+        return os.environ.get("DYNAMO_SYSTEM_APP_ENABLED", "false").lower() == "true"
+
+    # Helper to launch fastapi server and dynamo worker concurrently
+    async def run_concurrent_workers(tasks):
+        await asyncio.gather(*tasks)
+
+    worker_tasks = []
 
     uvloop.install()
     start_http_server = False
@@ -309,10 +340,16 @@ def main(
             start_http_server = True
             break
     if start_http_server:
-        web_worker()
-    else:
-        asyncio.run(worker())
+        worker_tasks.append(web_worker())
+
+    if should_start_system_app():
+        logger.info("Starting system app")
+        worker_tasks.append(system_app_worker())
+
+    # Always start the dynamo worker, no reason not to
+    worker_tasks.append(dyn_worker())
+    asyncio.run(run_concurrent_workers(worker_tasks))
 
 
 if __name__ == "__main__":
-    main()
+    app()

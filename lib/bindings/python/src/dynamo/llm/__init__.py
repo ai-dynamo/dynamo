@@ -25,6 +25,8 @@ from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
 from dynamo._core import HttpError as HttpError
 from dynamo._core import HttpService as HttpService
 from dynamo._core import KvEventPublisher as KvEventPublisher
+from dynamo._core import KvEventPublisherFromZmq as KvEventPublisherFromZmq
+from dynamo._core import KvEventPublisherFromZmqConfig as KvEventPublisherFromZmqConfig
 from dynamo._core import KvIndexer as KvIndexer
 from dynamo._core import KvMetricsAggregator as KvMetricsAggregator
 from dynamo._core import KvMetricsPublisher as KvMetricsPublisher
@@ -33,3 +35,13 @@ from dynamo._core import KvRouter as KvRouter
 from dynamo._core import ModelType as ModelType
 from dynamo._core import OverlapScores as OverlapScores
 from dynamo._core import register_llm as register_llm
+
+try:
+    from dynamo.llm.tensorrtllm import (  # noqa: F401
+        get_llm_engine as get_tensorrtllm_engine,
+    )
+    from dynamo.llm.tensorrtllm import (  # noqa: F401
+        get_publisher as get_tensorrtllm_publisher,
+    )
+except ImportError:
+    pass  # TensorRTLLM is not enabled by default

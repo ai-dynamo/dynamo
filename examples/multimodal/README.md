@@ -55,21 +55,35 @@ dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
 
 In another terminal:
 ```bash
-curl -X 'POST' \
-  'http://localhost:8000/generate' \
-  -H 'accept: text/event-stream' \
-  -H 'Content-Type: application/json' \
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
   -d '{
-  "model":"llava-hf/llava-1.5-7b-hf",
-  "image":"http://images.cocodataset.org/test2017/000000155781.jpg",
-  "prompt":"Describe the image",
-  "max_tokens":300
-}' | jq
+    "model": "llava-hf/llava-1.5-7b-hf",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "What is in this image?"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+            }
+          }
+        ]
+      }
+    ],
+    "max_tokens": 300,
+    "stream": false
+  }'
 ```
 
 You should see a response similar to this:
 ```
-" The image features a close-up view of the front of a bus, with a prominent neon sign clearly displayed. The bus appears to be slightly past its prime condition, beyond its out-of-service section. Inside the bus, we see a depth of text, with the sign saying \"out of service\". A wide array of windows line the side of the double-decker bus, making its overall appearance quite interesting and vintage."
+{"id": "c37b946e-9e58-4d54-88c8-2dbd92c47b0c", "object": "chat.completion", "created": 1747725277, "model": "llava-hf/llava-1.5-7b-hf", "choices": [{"index": 0, "message": {"role": "assistant", "content": " In the image, there is a city bus parked on a street, with a street sign nearby on the right side. The bus appears to be stopped out of service. The setting is in a foggy city, giving it a slightly moody atmosphere."}, "finish_reason": "stop"}]}
 ```
 
 ## Multimodal Disaggregated serving
@@ -108,19 +122,33 @@ dynamo serve graphs.disagg:Frontend -f configs/disagg.yaml
 
 In another terminal:
 ```bash
-curl -X 'POST' \
-  'http://localhost:8000/generate' \
-  -H 'accept: text/event-stream' \
-  -H 'Content-Type: application/json' \
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
   -d '{
-  "model":"llava-hf/llava-1.5-7b-hf",
-  "image":"http://images.cocodataset.org/val2017/000000324158.jpg",
-  "prompt":"Describe the mood and setting of this image in two sentences. What time of day do you think it is?",
-  "max_tokens":300
-}' | jq
+    "model": "llava-hf/llava-1.5-7b-hf",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "What is in this image?"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+            }
+          }
+        ]
+      }
+    ],
+    "max_tokens": 300,
+    "stream": false
+  }'
 ```
 
 You should see a response similar to this:
 ```
-" The image depicts a man moving across a field on a skateboard. The setting appears to be joyful, and this activity suggests that the man is enjoying an outdoor adventure. Additionally, a pet dog is probably accompanying, contributing to the positive mood. The mood and setting of the image appear lively and shoal. The sun is most likely low in the sky, as this would produce a nice daylight."
+{"id": "c1774d61-3299-4aa3-bea1-a0af6c055ba8", "object": "chat.completion", "created": 1747725645, "model": "llava-hf/llava-1.5-7b-hf", "choices": [{"index": 0, "message": {"role": "assistant", "content": " This image shows a passenger bus traveling down the road near power lines and trees. The bus displays a sign that says \"OUT OF SERVICE\" on its front."}, "finish_reason": "stop"}]}
 ```

@@ -16,13 +16,37 @@
 
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Dict, Generic, List, Optional, Set, Tuple, Type, TypeVar
 
 from fastapi import FastAPI
+from pydantic import BaseModel
+
+from dynamo.sdk.core.protocol.deployment import Env
 
 T = TypeVar("T", bound=object)
+
+
+class LeaseConfig(BaseModel):
+    """Configuration for custom dynamo leases"""
+
+    ttl: int = 1  # seconds
+
+
+class ComponentType:
+    """Types of Dynamo components"""
+
+    PLANNER = "planner"
+
+
+class DynamoConfig(BaseModel):
+    """Configuration for Dynamo components"""
+
+    enabled: bool = True
+    name: str | None = None
+    namespace: str | None = None
+    custom_lease: LeaseConfig | None = None
+    component_type: str | None = None  # Indicates if this is a meta/system component
 
 
 class DynamoTransport(Enum):
@@ -32,10 +56,23 @@ class DynamoTransport(Enum):
     HTTP = auto()
 
 
-class ServiceConfig(Dict[str, Any]):
+class ResourceConfig(BaseModel):
+    """Configuration for Dynamo resources"""
+
+    cpu: int = 1
+    memory: str = "100Mi"
+    gpu: str = "0"
+
+
+class ServiceConfig(BaseModel):
     """Base service configuration that can be extended by adapters"""
 
-    pass
+    dynamo: DynamoConfig
+    resource: ResourceConfig = ResourceConfig()
+    workers: int = 1
+    image: str | None = None
+    envs: List[Env] | None = None
+    labels: Dict[str, str] | None = None
 
 
 class DynamoEndpointInterface(ABC):
@@ -75,6 +112,17 @@ class ServiceInterface(Generic[T], ABC):
         pass
 
     @property
+    def dependencies(self) -> Dict[str, "DependencyInterface"]:
+        """Get the service dependencies"""
+        return {}
+
+    @property
+    @abstractmethod
+    def envs(self) -> List[Env]:
+        """Get the service's environment variables"""
+        return []
+
+    @property
     @abstractmethod
     def inner(self) -> Type[T]:
         """Get the inner service implementation class"""
@@ -110,20 +158,12 @@ class ServiceInterface(Generic[T], ABC):
         """Inject configuration from environment into service configs"""
         pass
 
-    @property
-    # @abstractmethod
-    def dependencies(self) -> Dict[str, "DependencyInterface"]:
-        """Get the service dependencies"""
-        return {}
-
-    # @property
     @abstractmethod
     def get_service_configs(self) -> Dict[str, ServiceConfig]:
         """Get all services"""
         return {}
 
     @property
-    # @abstractmethod
     def service_configs(self) -> List[ServiceConfig]:
         """Get all service configs"""
         return []
@@ -152,32 +192,6 @@ class ServiceInterface(Generic[T], ABC):
         raise NotImplementedError()
 
 
-@dataclass
-class LeaseConfig:
-    """Configuration for custom dynamo leases"""
-
-    ttl: int = 1  # seconds
-
-
-class ComponentType(str, Enum):
-    """Types of Dynamo components"""
-
-    PLANNER = "planner"
-
-
-@dataclass
-class DynamoConfig:
-    """Configuration for Dynamo components"""
-
-    enabled: bool = True
-    name: str | None = None
-    namespace: str | None = None
-    custom_lease: LeaseConfig | None = None
-    component_type: ComponentType | None = (
-        None  # Indicates if this is a meta/system component
-    )
-
-
 class DeploymentTarget(ABC):
     """Interface for service provider implementations"""
 
@@ -186,7 +200,6 @@ class DeploymentTarget(ABC):
         self,
         service_cls: Type[T],
         config: ServiceConfig,
-        dynamo_config: Optional[DynamoConfig] = None,
         app: Optional[FastAPI] = None,
         **kwargs,
     ) -> ServiceInterface[T]:

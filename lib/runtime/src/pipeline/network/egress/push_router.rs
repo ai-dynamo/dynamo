@@ -188,7 +188,7 @@ where
     U: Data + for<'de> Deserialize<'de>,
 {
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
-        match &self.client.instances {
+        match self.client.instance_source.as_ref() {
             InstanceSource::Static => self.r#static(request).await,
             InstanceSource::Dynamic(_) => match self.router_mode {
                 RouterMode::Random => self.random(request).await,

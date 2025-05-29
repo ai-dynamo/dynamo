@@ -18,7 +18,11 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Weak},
+};
+use tokio::sync::Mutex;
 
 pub use anyhow::{
     anyhow as error, bail as raise, Context as ErrorContext, Error, Ok as OK, Result,
@@ -49,6 +53,8 @@ pub mod distributed;
 pub use futures::stream;
 pub use tokio_util::sync::CancellationToken;
 pub use worker::Worker;
+
+use component::{Endpoint, InstanceSource};
 
 /// Types of Tokio runtimes that can be used to construct a Dynamo [Runtime].
 #[derive(Clone)]
@@ -88,4 +94,6 @@ pub struct DistributedRuntime {
     // Will only have static components that are not discoverable via etcd, they must be know at
     // startup. Will not start etcd.
     is_static: bool,
+
+    instance_sources: Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
 }

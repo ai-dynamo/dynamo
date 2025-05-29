@@ -55,6 +55,7 @@ api_server_models/
 server/
 # Replay/Snapshot test artifacts
 *.new
+lib/llm/tests/data/sample-models/models--meta-llama--Llama-3.1-70B-Instruct/
 
 **/*backups*
 

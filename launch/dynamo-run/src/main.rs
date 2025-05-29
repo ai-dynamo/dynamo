@@ -26,11 +26,11 @@ dynamo-run is a single binary that wires together the various inputs (http, text
 Example:
 - cargo build --features cuda -p dynamo-run
 - cd target/debug
-- ./dynamo-run Qwen/Qwen2.5-3B-Instruct
+- ./dynamo-run Qwen/Qwen3-0.6B
 - OR: ./dynamo-run /data/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf
 "#;
 
-const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=ENGINE_LIST|dyn://<path> [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv]";
+const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=ENGINE_LIST|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--kv-cache-block-size=16] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv]";
 
 fn main() -> anyhow::Result<()> {
     // Set log level based on verbosity flag

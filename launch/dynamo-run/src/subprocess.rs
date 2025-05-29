@@ -3,7 +3,6 @@
 
 use std::borrow::Cow;
 use std::io::Write;
-use std::path::Path;
 use std::process::Stdio;
 use std::sync::LazyLock;
 
@@ -12,10 +11,11 @@ use regex::Regex;
 use tokio::io::AsyncBufReadExt;
 
 use dynamo_llm::engines::MultiNodeConfig;
-use dynamo_llm::LocalModel;
+use dynamo_llm::local_model::LocalModel;
 use dynamo_runtime::protocols::Endpoint as EndpointId;
 
 pub mod sglang;
+pub mod trtllm;
 pub mod vllm;
 
 pub async fn start(
@@ -25,21 +25,17 @@ pub async fn start(
     local_model: &LocalModel,
     // Endpoint to connect the subprocess over etcd/nats
     endpoint: &EndpointId,
-    // How many GPUs to use
-    tensor_parallel_size: u32,
-    // sglang which GPU to start from, on a multi-GPU system
-    // vllm uses CUDA_VISIBLE_DEVICES
-    base_gpu_id: Option<u32>,
+    // Command line flags for user overrides
+    flags: super::Flags,
     // sglang multi-node config. vllm uses `ray` externally
     multi_node_config: Option<MultiNodeConfig>,
-    // Path to a JSON file containing extra arguments to the backend engine
-    extra_engine_args: Option<&Path>,
 ) -> anyhow::Result<(tempfile::TempPath, tokio::process::Child)> {
     let mut tmp = tempfile::NamedTempFile::new()?;
     // Writes on Linux don't block
     tmp.write_all(py_script.as_bytes())?;
     let script_path = tmp.into_temp_path();
 
+    let card = local_model.card();
     let mut args = vec![
         script_path.to_string_lossy().to_string(),
         "--endpoint".to_string(),
@@ -49,14 +45,17 @@ pub async fn start(
         "--model-name".to_string(),
         local_model.display_name().to_string(),
         "--tensor-parallel-size".to_string(),
-        tensor_parallel_size.to_string(),
+        flags.tensor_parallel_size.to_string(),
         "--kv-block-size".to_string(),
-        dynamo_llm::DEFAULT_KV_BLOCK_SIZE.to_string(),
+        card.kv_cache_block_size.to_string(),
+        "--context-length".to_string(),
+        card.context_length.to_string(),
     ];
     // sglang only
-    if let Some(base_gpu_id) = base_gpu_id {
+    // vllm uses CUDA_VISIBLE_DEVICES
+    if flags.base_gpu_id != 0 {
         args.push("--base-gpu-id".to_string());
-        args.push(base_gpu_id.to_string());
+        args.push(flags.base_gpu_id.to_string());
     }
     // sglang only
     if let Some(multi_node_config) = multi_node_config {
@@ -67,7 +66,7 @@ pub async fn start(
         args.push("--dist-init-addr".to_string());
         args.push(multi_node_config.leader_addr);
     }
-    if let Some(extra_engine_args) = extra_engine_args {
+    if let Some(extra_engine_args) = flags.extra_engine_args {
         args.push("--extra-engine-args".to_string());
         args.push(extra_engine_args.to_string_lossy().to_string());
     }

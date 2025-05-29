@@ -8,10 +8,13 @@ use std::sync::Arc;
 use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 
-use crate::http::service::discovery::{ModelEntry, ModelNetworkName};
+use crate::discovery::ModelEntry;
 use crate::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager};
 use crate::model_card::{self, ModelDeploymentCard};
 use crate::model_type::ModelType;
+
+mod network_name;
+pub use network_name::ModelNetworkName;
 
 /// Prefix for Hugging Face model repository
 const HF_SCHEME: &str = "hf://";
@@ -57,6 +60,15 @@ impl LocalModel {
 
     pub fn service_name(&self) -> &str {
         &self.card.service_name
+    }
+
+    /// Override max number of tokens in context. We usually only do this to limit kv cache allocation.
+    pub fn set_context_length(&mut self, context_length: usize) {
+        self.card.context_length = context_length;
+    }
+
+    pub fn set_kv_cache_block_size(&mut self, block_size: usize) {
+        self.card.kv_cache_block_size = block_size;
     }
 
     /// Make an LLM ready for use:
@@ -146,7 +158,7 @@ impl LocalModel {
         let network_name = ModelNetworkName::from_local(endpoint, etcd_client.lease_id());
         tracing::debug!("Registering with etcd as {network_name}");
         let model_registration = ModelEntry {
-            name: self.service_name().to_string(),
+            name: self.display_name().to_string(),
             endpoint: endpoint.id(),
             model_type,
         };
