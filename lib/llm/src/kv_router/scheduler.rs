@@ -324,7 +324,7 @@ impl WorkerSelector for DefaultWorkerSelector {
         tracing::debug!("Selected worker: {worker_id}, logit: {best_logit:.3}");
 
         // Log selection metrics
-        let total_blocks = std::cmp::min(request.isl_tokens / block_size, 1) as u64;
+        let total_blocks = std::cmp::max(request.isl_tokens / block_size, 1) as u64;
         let overlap_blocks = request.overlap.scores.get(&worker_id).copied().unwrap_or(0) as usize;
 
         Ok(WorkerSelectionResult {

@@ -29,7 +29,7 @@ Processor:
 
 Router:
   min-workers: 1
-  common-configs: [model, router]
+  common-configs: [model, block-size, router]
 
 VllmWorker:
   enforce-eager: true

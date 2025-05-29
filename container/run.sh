@@ -24,7 +24,7 @@ RUN_PREFIX=
 # dependencies are specified in the /container/deps folder and
 # installed within framework specific sections of the Dockerfile.
 
-declare -A FRAMEWORKS=(["VLLM"]=1 ["TENSORRTLLM"]=2)
+declare -A FRAMEWORKS=(["VLLM"]=1 ["TENSORRTLLM"]=2 ["SGLANG"]=3)
 DEFAULT_FRAMEWORK=VLLM
 
 SOURCE_DIR=$(dirname "$(readlink -f "$0")")

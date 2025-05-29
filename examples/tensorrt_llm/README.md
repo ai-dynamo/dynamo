@@ -56,7 +56,7 @@ apt-get update && apt-get -y install git git-lfs
 > [!NOTE]
 > Because of a known issue of C++11 ABI compatibility within the NGC pytorch container,
 > we rebuild TensorRT-LLM from source. See [here](https://nvidia.github.io/TensorRT-LLM/installation/linux.html)
-> for more informantion.
+> for more information.
 >
 > Hence, when running this script for the first time, the time taken by this script can be
 > quite long.

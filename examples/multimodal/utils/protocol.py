@@ -15,8 +15,9 @@
 
 
 import json
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional, Union
 
+import connect
 import msgspec
 from pydantic import BaseModel, ConfigDict, field_validator
 from pydantic_core import core_schema
@@ -91,12 +92,34 @@ class vLLMGenerateRequest(BaseModel):
     )
 
 
+class TextContent(BaseModel):
+    type: Literal["text"]
+    text: str
+
+
+class ImageURLDetail(BaseModel):
+    url: str
+
+
+class ImageContent(BaseModel):
+    type: Literal["image_url"]
+    image_url: ImageURLDetail
+
+
+MessageContent = Union[TextContent, ImageContent]
+
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "system", "assistant"]
+    content: List[MessageContent]
+
+
 class MultiModalRequest(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     model: str
-    image: str
-    max_tokens: int
-    prompt: str
+    messages: List[ChatMessage]
+    max_tokens: Optional[int] = None
+    stream: Optional[bool] = True
 
 
 class vLLMMultimodalRequest(vLLMGenerateRequest):
@@ -111,12 +134,13 @@ class EncodeRequest(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
     image_url: str
+    request_id: str
+    serialized_request: Optional[connect.SerializedRequest] = None
 
 
 class EncodeResponse(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    image_features: List[List[List[float]]]
+    request_id: str
 
 
 class MyRequestOutput(BaseModel):
@@ -129,7 +153,6 @@ class MyRequestOutput(BaseModel):
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
-
     request_id: str
     prompt: Optional[str] = None
     prompt_token_ids: Optional[List[int]] = None

@@ -30,7 +30,6 @@ for concurrency in 1 2 4 8 16 32 64 128 256; do
   genai-perf profile \
     --model ${model} \
     --tokenizer ${model} \
-    --service-kind openai \
     --endpoint-type chat \
     --endpoint /v1/chat/completions \
     --streaming \

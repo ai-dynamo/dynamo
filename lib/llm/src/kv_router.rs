@@ -144,6 +144,11 @@ impl KvRouter {
         let worker_id = self.scheduler.schedule(overlap_scores, isl_tokens).await?;
         Ok(worker_id)
     }
+
+    /// Get the block size this router was configured with
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
 }
 
 #[async_trait]
