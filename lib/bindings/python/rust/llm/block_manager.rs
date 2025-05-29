@@ -59,7 +59,12 @@ impl BlockManager {
             dynamo_llm::block_manager::KvManagerRuntimeConfig::builder()
                 .worker_id(worker_id)
                 .build()
-                .unwrap(),
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Failed to build runtime config: {}",
+                        e
+                    ))
+                })?,
         );
         let mut model_config = dynamo_llm::block_manager::KvManagerModelConfig::builder()
             .num_layers(num_layer)
@@ -90,14 +95,33 @@ impl BlockManager {
             };
         }
         model_config = model_config.dtype(dtype_.clone());
-        config = config.model(model_config.build().unwrap());
+        config = config.model(model_config.build().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Failed to build model config: {}",
+                e
+            ))
+        })?);
         if let Some(host_num_blocks) = host_num_blocks {
             config = config.host_layout(
                 dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
                     .num_blocks(host_num_blocks)
-                    .allocator(dynamo_llm::block_manager::storage::PinnedAllocator::new().unwrap())
+                    .allocator(
+                        dynamo_llm::block_manager::storage::PinnedAllocator::new().map_err(
+                            |e| {
+                                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                    "Failed to create pinned allocator: {}",
+                                    e
+                                ))
+                            },
+                        )?,
+                    )
                     .build()
-                    .unwrap(),
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "Failed to build host layout config: {}",
+                            e
+                        ))
+                    })?,
             );
         }
         if let Some(device_num_blocks) = device_num_blocks {
@@ -106,18 +130,42 @@ impl BlockManager {
                     .num_blocks(device_num_blocks)
                     .allocator(
                         dynamo_llm::block_manager::storage::DeviceAllocator::new(device_id)
-                            .unwrap(),
+                            .map_err(|e| {
+                                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                    "Failed to create device allocator: {}",
+                                    e
+                                ))
+                            })?,
                     )
                     .build()
-                    .unwrap(),
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "Failed to build device layout config: {}",
+                            e
+                        ))
+                    })?,
             );
         }
-        let config = config.build().unwrap();
+        let config = config.build().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Failed to build block manager config: {}",
+                e
+            ))
+        })?;
         let tokio_runtime = pyo3_async_runtimes::tokio::get_runtime();
         Ok(BlockManager {
-            inner: Arc::from(tokio_runtime.block_on(async {
-                dynamo_llm::block_manager::ReferenceBlockManager::new(config).unwrap()
-            })),
+            inner: Arc::from(
+                tokio_runtime
+                    .block_on(async {
+                        dynamo_llm::block_manager::ReferenceBlockManager::new(config)
+                    })
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "Failed to create reference block manager: {}",
+                            e
+                        ))
+                    })?,
+            ),
             dtype: dtype_,
             device_id: device_id,
         })
@@ -127,9 +175,16 @@ impl BlockManager {
         let blocks = self
             .inner
             .host()
-            .unwrap()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("Host allocator not available")
+            })?
             .allocate_blocks_blocking(count)
-            .unwrap();
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to allocate host blocks: {}",
+                    e
+                ))
+            })?;
         // Wrap each block in an enum accounting for Pinned & Device block
         let blocks = blocks
             .into_iter()
@@ -152,7 +207,19 @@ impl BlockManager {
         let dtype = self.dtype.clone();
         let device_id = self.device_id;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let blocks = inner.host().unwrap().allocate_blocks(count).await.unwrap();
+            let blocks = inner
+                .host()
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err("Host allocator not available")
+                })?
+                .allocate_blocks(count)
+                .await
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Failed to allocate host blocks: {}",
+                        e
+                    ))
+                })?;
             // Wrap each block in an enum accounting for Pinned & Device block
             let blocks = blocks
                 .into_iter()
@@ -166,9 +233,16 @@ impl BlockManager {
         let blocks = self
             .inner
             .device()
-            .unwrap()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("Device allocator not available")
+            })?
             .allocate_blocks_blocking(count)
-            .unwrap();
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to allocate device blocks: {}",
+                    e
+                ))
+            })?;
         // Wrap each block in an enum accounting for Pinned & Device block
         let blocks = blocks
             .into_iter()
@@ -193,10 +267,17 @@ impl BlockManager {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let blocks = inner
                 .device()
-                .unwrap()
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err("Device allocator not available")
+                })?
                 .allocate_blocks(count)
                 .await
-                .unwrap();
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Failed to allocate device blocks: {}",
+                        e
+                    ))
+                })?;
             // Wrap each block in an enum accounting for Pinned & Device block
             let blocks = blocks
                 .into_iter()

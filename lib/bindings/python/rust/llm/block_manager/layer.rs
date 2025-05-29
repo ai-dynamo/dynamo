@@ -16,11 +16,9 @@
 #![cfg(feature = "block-manager")]
 
 use super::*;
-
+use dynamo_llm::block_manager::block::BlockDataExt;
 use pyo3::{types::PyTuple, PyObject, PyResult, Python};
 use std::sync::{Arc, Mutex};
-
-use dynamo_llm::block_manager::block::BlockDataExt;
 
 // Layer struct that represents a layer within a block
 #[pyclass]
@@ -58,18 +56,26 @@ impl Layer {
         dl_device: Option<PyObject>,
         copy: Option<bool>,
     ) -> PyResult<PyObject> {
-        // Panic if any arguments are provided
+        // Return error if any arguments are provided
         if stream.is_some() {
-            panic!("stream argument is not supported");
+            return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "stream argument is not supported",
+            ));
         }
         if max_version.is_some() {
-            panic!("max_version argument is not supported");
+            return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "max_version argument is not supported",
+            ));
         }
         if dl_device.is_some() {
-            panic!("dl_device argument is not supported");
+            return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "dl_device argument is not supported",
+            ));
         }
         if copy.is_some() {
-            panic!("copy argument is not supported");
+            return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "copy argument is not supported",
+            ));
         }
 
         // Extract all necessary data for dlpack
@@ -81,15 +87,23 @@ impl Layer {
             let mut mutable_block = self.inner.lock().unwrap();
             ptr = match &mut *mutable_block {
                 block::BlockType::Pinned(block) => {
-                    let mut layer_view_mut = block
-                        .layer_view_mut(self.layer_idx, 0)
-                        .expect("Failed to get mutable Pinned layer view");
+                    let mut layer_view_mut =
+                        block.layer_view_mut(self.layer_idx, 0).map_err(|e| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "Failed to get mutable Pinned layer view: {}",
+                                e
+                            ))
+                        })?;
                     (unsafe { layer_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
                 }
                 block::BlockType::Device(block) => {
-                    let mut layer_view_mut = block
-                        .layer_view_mut(self.layer_idx, 0)
-                        .expect("Failed to get mutable Device layer view");
+                    let mut layer_view_mut =
+                        block.layer_view_mut(self.layer_idx, 0).map_err(|e| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "Failed to get mutable Device layer view: {}",
+                                e
+                            ))
+                        })?;
                     (unsafe { layer_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
                 }
             };

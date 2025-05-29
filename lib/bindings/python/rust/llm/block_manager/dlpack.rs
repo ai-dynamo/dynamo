@@ -18,7 +18,6 @@
 #![allow(deprecated)]
 
 use super::*;
-
 use dlpark::prelude::{DataType, Device, ManagerCtx, ShapeAndStrides, ToTensor};
 use pyo3::{ffi::c_str, prelude::IntoPy, types::PyTuple, PyObject, PyResult, Python};
 use std::sync::{Arc, Mutex};

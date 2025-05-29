@@ -16,7 +16,6 @@
 #![cfg(feature = "block-manager")]
 
 use super::*;
-
 use pyo3::{types::PyList, PyResult, Python};
 use std::sync::{Arc, Mutex};
 
