@@ -55,7 +55,6 @@ pub async fn start(
     // TRTLLM only
     // The worker node will only publish events and metrics if the router mode is KV
     if flags.router_mode == RouterMode::KV {
-        println!("Setting publishers");
         args.push("--publish-events-and-metrics".to_string());
     }
 
