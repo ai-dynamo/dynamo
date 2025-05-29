@@ -28,7 +28,6 @@ from typing import Any, Dict, Optional
 
 from circus.sockets import CircusSocket
 from circus.watcher import Watcher
-from simple_di import inject
 
 from dynamo.sdk.cli.circus import CircusRunner
 from dynamo.sdk.core.runner import TargetEnum
@@ -150,7 +149,6 @@ def clear_namespace(namespace: str) -> None:
         )
 
 
-@inject(squeeze_none=True)
 def serve_dynamo_graph(
     dynamo_pipeline: str,
     working_dir: str | None = None,
