@@ -96,7 +96,8 @@ impl BlockManager {
                 dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
                     .num_blocks(host_num_blocks)
                     .allocator(
-                        dynamo_llm::block_manager::storage::PinnedAllocator::new().map_err(to_pyerr)?,
+                        dynamo_llm::block_manager::storage::PinnedAllocator::new()
+                            .map_err(to_pyerr)?,
                     )
                     .build()
                     .map_err(to_pyerr)?,
