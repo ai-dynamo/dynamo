@@ -2794,9 +2794,9 @@ dependencies = [
 
 [[package]]
 name = "nixl-sys"
-version = "0.3.0-rc.1"
+version = "0.3.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5273ad6fc7b77c414ea42656ab06ecefd025109f9075fd8270f1052cd6e6d6b"
+checksum = "6a1727039c315bf41aeadcdbea02522b8a3df69a77bd732996243502a5fb6f07"
 dependencies = [
  "bindgen",
  "cc",
