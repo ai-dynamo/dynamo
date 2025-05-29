@@ -297,7 +297,7 @@ COPY deploy/sdk /workspace/deploy/sdk
 RUN cargo build \
 	--release \
 	--locked \
-	--features mistralrs,python,dynamo-llm/block-manager \
+	--features dynamo-llm/block-manager \
 	--workspace
 
 # Build dynamo wheel
