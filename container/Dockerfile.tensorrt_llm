@@ -301,7 +301,7 @@ COPY --from=wheel_builder /workspace /workspace
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
 # Build C bindings, creates lib/bindings/c/include
-RUN cd /workspace/lib/bindings/c && cargo build --release
+RUN cd /workspace/lib/bindings/c && cargo build --release --locked
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
