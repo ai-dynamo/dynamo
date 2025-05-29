@@ -43,6 +43,6 @@ def test_gpu_resources(setup_and_teardown):
 
     dyn_svc: ServiceInterface = MyService
     assert dyn_svc.config is not None  # type: ignore
-    assert dyn_svc.config.resources.cpu == 2
+    assert dyn_svc.config.resources.cpu == "2"
     assert dyn_svc.config.resources.gpu == "1"
     assert dyn_svc.config.resources.memory == "4Gi"
