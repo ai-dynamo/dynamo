@@ -184,8 +184,8 @@ impl LocalModel {
         };
         for endpoint_info in component.list_instances().await? {
             let network_name: ModelNetworkName = (&endpoint_info).into();
-            if endpoint_info.endpoint == "generate" {
-                let entry = network_name.load_entry(&etcd_client).await?;
+
+            if let Ok(entry) = network_name.load_entry(&etcd_client).await {
                 if entry.name != model_name {
                     anyhow::bail!("Duplicate component. Attempt to register model {model_name} at {component}, which is already used by {network_name} running model {}.", entry.name);
                 }
