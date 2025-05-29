@@ -113,13 +113,7 @@ def main(
         help="Specify the target: 'dynamo' or 'bento'.",
     ),
 ) -> None:
-    # hack to avoid bentoml from respawning the workers after their leases are revoked
-    os.environ["BENTOML_CONTAINERIZED"] = "true"
-
     """Start a worker for the given service - either Dynamo or regular service"""
-    from bentoml._internal.container import BentoMLContainer
-    from bentoml._internal.context import server_context
-
     from dynamo.runtime.logging import configure_dynamo_logging
     from dynamo.sdk.cli.utils import configure_target_environment
     from dynamo.sdk.core.runner import TargetEnum
@@ -150,17 +144,8 @@ def main(
     dynamo_context["namespace"] = namespace
 
     configure_dynamo_logging(service_name=service_name, worker_id=worker_id)
-    if runner_map:
-        BentoMLContainer.remote_runner_mapping.set(
-            t.cast(t.Dict[str, str], json.loads(runner_map))
-        )
-
     # TODO: test this with a deep chain of services
     LinkedServices.remove_unused_edges()
-    # Check if Dynamo is enabled for this service
-    if worker_id is not None:
-        server_context.worker_index = worker_id
-
     # Instance of the inner class of the service should be the same across the dynamo_worker, web_worker, and system_app_worker
     class_instance: Any = None
     # will be set once dyn_worker has created class_instance
@@ -171,12 +156,6 @@ def main(
         nonlocal class_instance
         global dynamo_context
         dynamo_context["runtime"] = runtime
-        if service_name and service_name != service.name:
-            server_context.service_type = "service"
-        else:
-            server_context.service_type = "entry_service"
-
-        server_context.service_name = service.name
         # Get Dynamo configuration and create component
         namespace, component_name = service.dynamo_address()
         logger.info(f"Registering component {namespace}/{component_name}")
