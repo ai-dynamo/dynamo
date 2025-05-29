@@ -18,7 +18,9 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use super::super::events::{EventManager, EventReleaseManager, PublishHandle};
+use super::super::events::{
+    EventManager, EventPublisher, EventReleaseManager, EventType, PublishHandle,
+};
 use super::state::BlockState;
 
 use crate::tokens::{BlockHash, SequenceHash, TokenBlock};
@@ -42,14 +44,14 @@ pub struct UnregisterFailure(SequenceHash);
 #[derive()]
 pub struct BlockRegistry {
     blocks: HashMap<SequenceHash, Weak<RegistrationHandle>>,
-    event_manager: Arc<dyn EventManager>,
+    event_managers: Vec<Arc<dyn EventManager>>,
 }
 
 impl BlockRegistry {
-    pub fn new(event_manager: Arc<dyn EventManager>) -> Self {
+    pub fn new(event_managers: Vec<Arc<dyn EventManager>>) -> Self {
         Self {
             blocks: HashMap::new(),
-            event_manager,
+            event_managers,
         }
     }
 
@@ -84,7 +86,7 @@ impl BlockRegistry {
 
                 // Create the [RegistrationHandle] and [PublishHandle]
                 let publish_handle =
-                    Self::create_publish_handle(state.token_block(), self.event_manager.clone());
+                    Self::create_publish_handle(state.token_block(), self.event_managers.clone());
                 let reg_handle = publish_handle.remove_handle();
 
                 // Insert the [RegistrationHandle] into the registry
@@ -119,11 +121,22 @@ impl BlockRegistry {
 
     fn create_publish_handle(
         token_block: &TokenBlock,
-        event_manager: Arc<dyn EventManager>,
+        event_managers: Vec<Arc<dyn EventManager>>,
     ) -> PublishHandle {
-        let reg_handle = RegistrationHandle::from_token_block(token_block, event_manager.clone());
+        // Convert event_managers to release_managers and publishers in one pass
+        let (release_managers, publishers): (Vec<_>, Vec<_>) = event_managers
+            .into_iter()
+            .map(|em| {
+                (
+                    em.clone() as Arc<dyn EventReleaseManager>,
+                    em as Arc<dyn EventPublisher>,
+                )
+            })
+            .unzip();
 
-        PublishHandle::new(reg_handle, event_manager)
+        let reg_handle = RegistrationHandle::from_token_block(token_block, release_managers);
+
+        PublishHandle::new(Arc::new(reg_handle), publishers, EventType::Register)
     }
 }
 
@@ -139,7 +152,7 @@ pub struct RegistrationHandle {
     parent_sequence_hash: Option<SequenceHash>,
 
     #[getter(skip)]
-    release_manager: Arc<dyn EventReleaseManager>,
+    release_managers: Vec<Arc<dyn EventReleaseManager>>,
 
     token_block: TokenBlock,
 }
@@ -147,13 +160,13 @@ pub struct RegistrationHandle {
 impl RegistrationHandle {
     fn from_token_block(
         token_block: &TokenBlock,
-        release_manager: Arc<dyn EventReleaseManager>,
+        release_managers: Vec<Arc<dyn EventReleaseManager>>,
     ) -> Self {
         Self {
             block_hash: token_block.block_hash(),
             sequence_hash: token_block.sequence_hash(),
             parent_sequence_hash: token_block.parent_sequence_hash(),
-            release_manager,
+            release_managers,
             token_block: token_block.clone(),
         }
     }
@@ -171,7 +184,9 @@ impl std::fmt::Debug for RegistrationHandle {
 
 impl Drop for RegistrationHandle {
     fn drop(&mut self) {
-        self.release_manager.block_release(self);
+        for release_manager in &self.release_managers {
+            release_manager.block_release(self);
+        }
     }
 }
 
@@ -179,7 +194,7 @@ impl Drop for RegistrationHandle {
 mod tests {
     use super::*;
 
-    use crate::block_manager::events::tests::{EventType, MockEventManager};
+    use crate::block_manager::events::tests::{MockEventManager, MockEventType};
     use crate::tokens::{TokenBlockSequence, Tokens};
 
     fn create_sequence() -> TokenBlockSequence {
@@ -208,8 +223,10 @@ mod tests {
 
         let (event_manager, mut rx) = MockEventManager::new();
 
-        let publish_handle =
-            BlockRegistry::create_publish_handle(&sequence.blocks()[0], event_manager.clone());
+        let publish_handle = BlockRegistry::create_publish_handle(
+            &sequence.blocks()[0],
+            vec![event_manager.clone()],
+        );
 
         // no event should have been triggered
         assert!(rx.try_recv().is_err());
@@ -222,7 +239,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0],
-            EventType::Register(sequence.blocks()[0].sequence_hash())
+            MockEventType::Register(sequence.blocks()[0].sequence_hash())
         );
 
         // the second event should be a Remove event
@@ -230,7 +247,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0],
-            EventType::Remove(sequence.blocks()[0].sequence_hash())
+            MockEventType::Remove(sequence.blocks()[0].sequence_hash())
         );
 
         // there should be no more events
@@ -246,7 +263,7 @@ mod tests {
         let (event_manager, mut rx) = MockEventManager::new();
 
         let publish_handle =
-            BlockRegistry::create_publish_handle(block_to_test, event_manager.clone());
+            BlockRegistry::create_publish_handle(block_to_test, vec![event_manager.clone()]);
 
         // Remove the registration handle before dropping the publish handle
         let reg_handle = publish_handle.remove_handle();
@@ -264,7 +281,7 @@ mod tests {
         );
         assert_eq!(
             register_events[0],
-            EventType::Register(expected_sequence_hash),
+            MockEventType::Register(expected_sequence_hash),
             "Expected Register event"
         );
 
@@ -275,7 +292,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0],
-            EventType::Remove(expected_sequence_hash),
+            MockEventType::Remove(expected_sequence_hash),
             "Only Remove event should be triggered"
         );
 
@@ -294,8 +311,10 @@ mod tests {
         let (event_manager, mut rx) = MockEventManager::new();
         let mut publisher = event_manager.publisher();
 
-        let publish_handle1 = BlockRegistry::create_publish_handle(block1, event_manager.clone());
-        let publish_handle2 = BlockRegistry::create_publish_handle(block2, event_manager.clone());
+        let publish_handle1 =
+            BlockRegistry::create_publish_handle(block1, vec![event_manager.clone()]);
+        let publish_handle2 =
+            BlockRegistry::create_publish_handle(block2, vec![event_manager.clone()]);
 
         // Remove handles before adding to publisher
         let reg_handle1 = publish_handle1.remove_handle();
@@ -318,8 +337,8 @@ mod tests {
             "Should receive two Register events in one batch"
         );
         // Order isn't guaranteed, so check for both
-        assert!(events.contains(&EventType::Register(hash1)));
-        assert!(events.contains(&EventType::Register(hash2)));
+        assert!(events.contains(&MockEventType::Register(hash1)));
+        assert!(events.contains(&MockEventType::Register(hash2)));
 
         // no more events immediately after publish
         assert!(rx.try_recv().is_err());
@@ -328,12 +347,12 @@ mod tests {
         drop(reg_handle1);
         let events1 = rx.try_recv().unwrap();
         assert_eq!(events1.len(), 1);
-        assert_eq!(events1[0], EventType::Remove(hash1));
+        assert_eq!(events1[0], MockEventType::Remove(hash1));
 
         drop(reg_handle2);
         let events2 = rx.try_recv().unwrap();
         assert_eq!(events2.len(), 1);
-        assert_eq!(events2[0], EventType::Remove(hash2));
+        assert_eq!(events2[0], MockEventType::Remove(hash2));
 
         // no more events
         assert!(rx.try_recv().is_err());
@@ -358,7 +377,8 @@ mod tests {
         let (event_manager, mut rx) = MockEventManager::new();
         let mut publisher = event_manager.publisher();
 
-        let publish_handle1 = BlockRegistry::create_publish_handle(block1, event_manager.clone());
+        let publish_handle1 =
+            BlockRegistry::create_publish_handle(block1, vec![event_manager.clone()]);
 
         publisher.take_handle(publish_handle1);
 
@@ -366,7 +386,7 @@ mod tests {
         publisher.publish();
         let events = rx.try_recv().unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0], EventType::Register(hash1));
+        assert_eq!(events[0], MockEventType::Register(hash1));
 
         // The RegistrationHandle Arc was taken by the publisher and dropped after the publish call
         // So, the Remove event should follow immediately.
@@ -378,7 +398,7 @@ mod tests {
         );
         assert_eq!(
             remove_events[0],
-            EventType::Remove(hash1),
+            MockEventType::Remove(hash1),
             "Expected Remove event"
         );
 
@@ -388,6 +408,48 @@ mod tests {
 
         // Drop publisher (should also do nothing)
         drop(publisher);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_publisher_cache_hit() {
+        let sequence = create_sequence();
+        let block1 = &sequence.blocks()[0];
+        let hash1 = block1.sequence_hash();
+
+        let (event_manager, mut rx) = MockEventManager::new();
+        let mut publisher = event_manager.publisher();
+
+        let reg_handle = Arc::new(RegistrationHandle::from_token_block(
+            block1,
+            vec![event_manager.clone()],
+        ));
+
+        let handle = PublishHandle::new(
+            reg_handle.clone(),
+            vec![event_manager.clone()],
+            EventType::CacheHit,
+        );
+
+        publisher.take_handle(handle);
+
+        assert!(rx.try_recv().is_err());
+
+        publisher.publish();
+
+        let events = rx.try_recv().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], MockEventType::CacheHit(hash1));
+
+        assert!(rx.try_recv().is_err());
+
+        drop(reg_handle);
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(events) if events.len() == 1 && events[0] == MockEventType::Remove(hash1)
+        ));
+
         assert!(rx.try_recv().is_err());
     }
 }

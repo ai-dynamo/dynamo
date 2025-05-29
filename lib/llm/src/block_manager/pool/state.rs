@@ -15,22 +15,25 @@
 
 use crate::block_manager::{
     block::{registry::BlockRegistationError, BlockState, PrivateBlockExt},
-    events::Publisher,
+    events::{EventPublisher, Publisher},
 };
 
 use super::*;
 
 impl<S: Storage, M: BlockMetadata> State<S, M> {
     fn new(
-        event_manager: Arc<dyn EventManager>,
+        event_managers: Vec<Arc<dyn EventManager>>,
         return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, M>>,
     ) -> Self {
         Self {
-            active: ActiveBlockPool::new(),
+            active: ActiveBlockPool::new(event_managers.clone()),
             inactive: InactiveBlockPool::new(),
-            registry: BlockRegistry::new(event_manager.clone()),
+            registry: BlockRegistry::new(event_managers.clone()),
             return_tx,
-            event_manager,
+            event_publishers: event_managers
+                .into_iter()
+                .map(|em| em as Arc<dyn EventPublisher>)
+                .collect(),
         }
     }
 
@@ -239,25 +242,25 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
 
     /// Returns a block to the inactive pool
     pub fn return_block(&mut self, mut block: Block<S, M>) {
-        self.active.remove(&mut block);
-        self.inactive.return_block(block);
+        let cache_stats = self.active.remove(&mut block);
+        self.inactive.return_block(block, cache_stats);
     }
 
     fn publisher(&self) -> Publisher {
-        Publisher::new(self.event_manager.clone())
+        Publisher::new(self.event_publishers.clone())
     }
 }
 
 impl<S: Storage, M: BlockMetadata> ProgressEngine<S, M> {
     pub fn new(
-        event_manager: Arc<dyn EventManager>,
+        event_managers: Vec<Arc<dyn EventManager>>,
         priority_rx: tokio::sync::mpsc::UnboundedReceiver<PriorityRequest<S, M>>,
         ctrl_rx: tokio::sync::mpsc::UnboundedReceiver<ControlRequest<S, M>>,
         cancel_token: CancellationToken,
         blocks: Vec<Block<S, M>>,
     ) -> Self {
         let (return_tx, return_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = State::<S, M>::new(event_manager, return_tx);
+        let mut state = State::<S, M>::new(event_managers, return_tx);
 
         tracing::debug!(count = blocks.len(), "adding blocks to inactive pool");
         state.inactive.add_blocks(blocks);

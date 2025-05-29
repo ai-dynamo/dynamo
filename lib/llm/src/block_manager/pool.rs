@@ -71,7 +71,7 @@ pub use super::block::{ImmutableBlock, MutableBlock};
 use super::block::{
     nixl::short_type_name, registry::BlockRegistry, Block, BlockError, BlockMetadata,
 };
-use super::events::{EventManager, NullEventManager};
+use super::events::{EventManager, EventPublisher};
 use super::storage::Storage;
 
 use crate::tokens::{SequenceHash, TokenBlock};
@@ -108,8 +108,8 @@ pub enum BlockPoolError {
 #[derive(Builder, Dissolve)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
 pub struct BlockPoolArgs<S: Storage, M: BlockMetadata> {
-    #[builder(default = "NullEventManager::new()")]
-    event_manager: Arc<dyn EventManager>,
+    #[builder(default = "vec![]")]
+    event_managers: Vec<Arc<dyn EventManager>>,
 
     #[builder(default = "CancellationToken::new()")]
     cancel_token: CancellationToken,
@@ -121,10 +121,10 @@ pub struct BlockPoolArgs<S: Storage, M: BlockMetadata> {
 impl<S: Storage, M: BlockMetadata> BlockPoolArgsBuilder<S, M> {
     pub fn build(self) -> anyhow::Result<BlockPool<S, M>> {
         let args = self.build_internal()?;
-        let (event_manager, cancel_token, blocks) = args.dissolve();
+        let (event_managers, cancel_token, blocks) = args.dissolve();
 
         tracing::info!("building block pool");
-        let pool = BlockPool::new(event_manager, cancel_token, blocks);
+        let pool = BlockPool::new(event_managers, cancel_token, blocks);
 
         Ok(pool)
     }
@@ -197,12 +197,12 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
     ///
     /// A new [`BlockPool`] instance.
     fn new(
-        event_manager: Arc<dyn EventManager>,
+        event_managers: Vec<Arc<dyn EventManager>>,
         cancel_token: CancellationToken,
         blocks: Vec<Block<S, M>>,
     ) -> Self {
         let (pool, progress_engine) =
-            Self::with_progress_engine(event_manager, cancel_token, blocks);
+            Self::with_progress_engine(event_managers, cancel_token, blocks);
 
         // pool.runtime.handle().spawn(async move {
         //     let mut progress_engine = progress_engine;
@@ -236,7 +236,7 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
     }
 
     fn with_progress_engine(
-        event_manager: Arc<dyn EventManager>,
+        event_managers: Vec<Arc<dyn EventManager>>,
         cancel_token: CancellationToken,
         blocks: Vec<Block<S, M>>,
     ) -> (Self, ProgressEngine<S, M>) {
@@ -244,7 +244,7 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
         let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let progress_engine =
-            ProgressEngine::<S, M>::new(event_manager, priority_rx, ctrl_rx, cancel_token, blocks);
+            ProgressEngine::<S, M>::new(event_managers, priority_rx, ctrl_rx, cancel_token, blocks);
 
         (
             Self {
@@ -443,7 +443,7 @@ struct State<S: Storage, M: BlockMetadata> {
     inactive: InactiveBlockPool<S, M>,
     registry: BlockRegistry,
     return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, M>>,
-    event_manager: Arc<dyn EventManager>,
+    event_publishers: Vec<Arc<dyn EventPublisher>>,
 }
 
 struct ProgressEngine<S: Storage, M: BlockMetadata> {
@@ -614,5 +614,68 @@ mod tests {
             .unwrap();
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].sequence_hash().unwrap(), sequence_hash);
+    }
+
+    #[test]
+    fn test_block_pool_cache_stats() {
+        let layout = setup_layout(None).unwrap();
+        let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)
+            .unwrap()
+            .into_blocks()
+            .unwrap();
+
+        let pool = BlockPool::builder().blocks(blocks).build().unwrap();
+
+        let mut block = pool.allocate_blocks_blocking(1).unwrap().pop().unwrap();
+        block.init_sequence(1337).unwrap();
+        block.add_token(1).unwrap();
+        block.add_token(2).unwrap();
+        block.add_token(3).unwrap();
+        block.add_token(4).unwrap();
+        block.commit().unwrap();
+
+        let registered_block = pool
+            .register_blocks_blocking(vec![block])
+            .unwrap()
+            .pop()
+            .unwrap();
+        let seq_hash = registered_block.sequence_hash().unwrap();
+
+        drop(registered_block);
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // 1 cache hit
+        let block = pool
+            .match_sequence_hashes_blocking(&[seq_hash])
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        // Cache hit counter incremented upon reacquisition
+        assert_eq!(block.metadata().cache_hits(), 1);
+
+        // 10 more cache hits while the block is in the active pool.
+        // These hits won't be flushed to the metadata until the block is returned to the inactive pool.
+        for _ in 0..10 {
+            let _ = pool
+                .match_sequence_hashes_blocking(&[seq_hash])
+                .unwrap()
+                .pop()
+                .unwrap();
+        }
+
+        // Return block to inactive pool, and flush cache hits to metadata.
+        drop(block);
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // 1 more cache hit on reacquisition
+        let block = pool
+            .match_sequence_hashes_blocking(&[seq_hash])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(block.metadata().cache_hits(), 12);
     }
 }

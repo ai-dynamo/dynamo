@@ -195,7 +195,7 @@ where
                 Ok(())
             }
             TransferStrategy::Nixl(transfer_type) => {
-                std::mem::drop(nixl::write_blocks_to(
+                drop(nixl::write_blocks_to(
                     self,
                     dst,
                     ctx,

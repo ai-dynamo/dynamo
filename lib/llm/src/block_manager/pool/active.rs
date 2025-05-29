@@ -15,15 +15,27 @@
 
 use super::*;
 
+use crate::block_manager::{
+    block::{BlockState, CacheStats},
+    events::{EventPublisher, EventType, PublishHandle},
+};
+
 /// Manages active blocks being used by sequences
 pub struct ActiveBlockPool<S: Storage, M: BlockMetadata> {
     pub(super) map: HashMap<SequenceHash, Weak<MutableBlock<S, M>>>,
+    cache_hits: HashMap<SequenceHash, CacheStats>,
+    event_publishers: Vec<Arc<dyn EventPublisher>>,
 }
 
 impl<S: Storage, M: BlockMetadata> ActiveBlockPool<S, M> {
-    pub fn new() -> Self {
+    pub fn new(event_managers: Vec<Arc<dyn EventManager>>) -> Self {
         Self {
             map: HashMap::new(),
+            cache_hits: HashMap::new(),
+            event_publishers: event_managers
+                .into_iter()
+                .map(|em| em as Arc<dyn EventPublisher>)
+                .collect(),
         }
     }
 
@@ -61,15 +73,18 @@ impl<S: Storage, M: BlockMetadata> ActiveBlockPool<S, M> {
         }
     }
 
-    pub fn remove(&mut self, block: &mut Block<S, M>) {
+    pub fn remove(&mut self, block: &mut Block<S, M>) -> Option<CacheStats> {
         if let Ok(sequence_hash) = block.sequence_hash() {
             if let Some(weak) = self.map.get(&sequence_hash) {
                 if let Some(_arc) = weak.upgrade() {
                     block.reset();
-                    return;
+                } else {
+                    self.map.remove(&sequence_hash);
                 }
-                self.map.remove(&sequence_hash);
             }
+            Some(self.cache_hits.remove(&sequence_hash).unwrap_or_default())
+        } else {
+            None
         }
     }
 
@@ -79,6 +94,19 @@ impl<S: Storage, M: BlockMetadata> ActiveBlockPool<S, M> {
     ) -> Option<ImmutableBlock<S, M>> {
         if let Some(weak) = self.map.get(&sequence_hash) {
             if let Some(arc) = weak.upgrade() {
+                match arc.state() {
+                    BlockState::Registered(reg_handle) => {
+                        drop(PublishHandle::new(
+                            reg_handle.clone(),
+                            self.event_publishers.clone(),
+                            EventType::CacheHit,
+                        ));
+                    }
+                    _ => panic!("Block must be registered. This should never happen."),
+                }
+
+                self.cache_hits.entry(sequence_hash).or_default().hits += 1;
+
                 Some(ImmutableBlock::new(arc))
             } else {
                 // Weak reference is no longer alive, remove it from the map
