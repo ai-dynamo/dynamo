@@ -46,7 +46,7 @@ pub struct CriticalTaskExecutionHandle {
 }
 
 impl CriticalTaskExecutionHandle {
-    pub async fn new<Fut>(
+    pub fn new<Fut>(
         task_fn: impl FnOnce(CancellationToken) -> Fut + Send + 'static,
         parent_token: CancellationToken,
         description: &str,
@@ -54,7 +54,7 @@ impl CriticalTaskExecutionHandle {
     where
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
-        Self::new_with_runtime(task_fn, parent_token, description, &Handle::try_current()?).await
+        Self::new_with_runtime(task_fn, parent_token, description, &Handle::try_current()?)
     }
 
     /// Create a new [CriticalTaskExecutionHandle] for a critical task.
@@ -64,7 +64,7 @@ impl CriticalTaskExecutionHandle {
     /// * `parent_token` - Token that will be cancelled if this critical task fails
     /// * `description` - Description for logging purposes
     /// * `runtime` - The runtime to use for the task.
-    pub async fn new_with_runtime<Fut>(
+    pub fn new_with_runtime<Fut>(
         task_fn: impl FnOnce(CancellationToken) -> Fut + Send + 'static,
         parent_token: CancellationToken,
         description: &str,
@@ -232,7 +232,6 @@ mod tests {
             parent_token.clone(),
             "test-success-task",
         )
-        .await
         .unwrap();
 
         // Task should complete successfully
@@ -259,7 +258,6 @@ mod tests {
             parent_token.clone(),
             "test-failure-task",
         )
-        .await
         .unwrap();
 
         // Task should fail and cancel parent token
@@ -298,7 +296,6 @@ mod tests {
             parent_token.clone(),
             "test-panic-task",
         )
-        .await
         .unwrap();
 
         // Panic should be caught and converted to error
@@ -342,7 +339,6 @@ mod tests {
             parent_token.clone(),
             "test-graceful-shutdown",
         )
-        .await
         .unwrap();
 
         // Let task do some work
@@ -395,7 +391,6 @@ mod tests {
             parent_token.clone(),
             "long-running-task",
         )
-        .await
         .unwrap();
 
         let handle2 = CriticalTaskExecutionHandle::new(
@@ -407,7 +402,6 @@ mod tests {
             parent_token.clone(),
             "failing-task",
         )
-        .await
         .unwrap();
 
         // Wait for task 2 to fail
@@ -446,7 +440,6 @@ mod tests {
             parent_token,
             "status-test-task",
         )
-        .await
         .unwrap();
 
         // Initially task should be running
@@ -493,7 +486,6 @@ mod tests {
             parent_token,
             "select-pattern-task",
         )
-        .await
         .unwrap();
 
         // Cancel after a short time
@@ -525,7 +517,6 @@ mod tests {
             parent_token,
             "long-task",
         )
-        .await
         .unwrap();
 
         // Test with timeout
@@ -554,7 +545,6 @@ mod tests {
             parent_token.clone(),
             "immediate-panic-task",
         )
-        .await
         .unwrap();
 
         // Wait for the panic to be detected by monitor task
@@ -585,7 +575,6 @@ mod tests {
             parent_token.clone(),
             "immediate-error-task",
         )
-        .await
         .unwrap();
 
         // Don't call join() - just wait for the error to be detected

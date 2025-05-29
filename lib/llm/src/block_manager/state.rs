@@ -212,6 +212,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
             device_pool.clone(),
             nixl_agent.clone(),
             async_rt_handle,
+            cancellation_token.clone(),
         )?;
 
         let state = Arc::new(Self {
