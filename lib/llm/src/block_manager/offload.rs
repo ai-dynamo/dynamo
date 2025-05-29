@@ -139,6 +139,8 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             Arc::new(TransferBatcher::new(
                 CudaTransferManager::new(device_offload_transfer_ctx, MAX_CONCURRENT_TRANSFERS),
                 MAX_TRANSFER_BATCH_SIZE,
+                &async_rt_handle,
+                cancellation_token.clone(),
             )),
             cancellation_token.clone(),
         );
@@ -160,8 +162,15 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             this.disk.clone(),
             host_offload_rx,
             Arc::new(TransferBatcher::new(
-                DiskTransferManager::new(transfer_ctx.clone(), MAX_CONCURRENT_TRANSFERS),
+                DiskTransferManager::new(
+                    transfer_ctx.clone(),
+                    MAX_CONCURRENT_TRANSFERS,
+                    &async_rt_handle,
+                    cancellation_token.clone(),
+                ),
                 MAX_TRANSFER_BATCH_SIZE,
+                &async_rt_handle,
+                cancellation_token.clone(),
             )),
             cancellation_token.clone(),
         );
@@ -180,6 +189,8 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             Arc::new(TransferBatcher::new(
                 CudaTransferManager::new(transfer_ctx.clone(), MAX_CONCURRENT_TRANSFERS),
                 MAX_TRANSFER_BATCH_SIZE,
+                &async_rt_handle,
+                cancellation_token.clone(),
             )),
             cancellation_token.clone(),
         );
@@ -196,8 +207,15 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             this.device.clone(),
             disk_onboard_rx,
             Arc::new(TransferBatcher::new(
-                DiskTransferManager::new(transfer_ctx.clone(), MAX_CONCURRENT_TRANSFERS),
+                DiskTransferManager::new(
+                    transfer_ctx.clone(),
+                    MAX_CONCURRENT_TRANSFERS,
+                    &async_rt_handle,
+                    cancellation_token.clone(),
+                ),
                 MAX_TRANSFER_BATCH_SIZE,
+                &async_rt_handle,
+                cancellation_token.clone(),
             )),
             cancellation_token.clone(),
         );
@@ -241,7 +259,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     Err(TryRecvError::Empty) => {
                         break;
                     }
-                    Err(_) => return Ok(()),
+                    Err(e) => return Err(e.into()),
                 }
             }
 
