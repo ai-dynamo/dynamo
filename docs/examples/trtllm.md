@@ -22,7 +22,7 @@ This directory contains examples and reference implementations for deploying Lar
 
 ## Deployment Architectures
 
-See [deployment architectures](llm_deployment.md#Deployment Architectures) to learn about the general idea of the architecture.
+See [Deployment Architectures](llm_deployment.md#deployment-architectures) to learn about the general idea of the architecture.
 Note that this TensorRT-LLM version does not support all the options yet.
 
 ```{note}
@@ -37,7 +37,7 @@ TensorRT-LLM disaggregation does not support conditional disaggregation yet. You
 
 ### Prerequisites
 
-Start required services (etcd and NATS) using [Docker Compose](../../deploy/docker-compose.yml)
+Start required services (etcd and NATS) using [Docker Compose](../../deploy/metrics/docker-compose.yml)
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
@@ -110,9 +110,8 @@ This figure shows an overview of the major components to deploy:
 
 ```
 
-```{note}
-The above architecture illustrates all the components. The final components that get spawned depend upon the chosen graph.
-```
+Note: The above architecture illustrates all the components. The final components
+that get spawned depend upon the chosen graph.
 
 ### Example architectures
 

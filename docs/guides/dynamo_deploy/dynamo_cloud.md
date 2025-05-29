@@ -23,7 +23,8 @@ The Dynamo Cloud platform is a comprehensive solution for deploying and managing
 
 The Dynamo cloud platform consists of several key components:
 
-- **Dynamo Operator**: A Kubernetes operator that manages the lifecycle of Dynamo inference graphs from build ➡️ deploy. For more information on the operator, see the [Dynamo Operator Page](dynamo_operator.md).
+- **Dynamo Operator**: A Kubernetes operator that manages the lifecycle of Dynamo inference graphs from build ➡️ deploy. For more information on the operator, see [Dynamo Operator](dynamo_operator.md).
+[Dynamo Kubernetes Operator Documentation](../dynamo_deploy/dynamo_operator.md)
 - **API Store**: Stores and manages service configurations and metadata related to Dynamo deployments. Needs to be exposed externally.
 - **Custom Resources**: Kubernetes custom resources for defining and managing Dynamo services
 
@@ -154,7 +155,7 @@ kubectl config set-context --current --namespace=$NAMESPACE
 ./deploy.sh
 ```
 
-if you wish to be guided through the deployment process, you can run the deploy script with the `--interactive` flag:
+if you want guidance during the deployment process, you can run the deploy script with the `--interactive` flag:
 
 ```bash
 ./deploy.sh --interactive

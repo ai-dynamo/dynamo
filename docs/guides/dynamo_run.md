@@ -1,25 +1,5 @@
 # Running Dynamo (`dynamo run`)
 
-* [Quickstart with pip and vllm](#quickstart-with-pip-and-vllm)
-    * [Automatically download a model from Hugging Face](#use-model-from-hugging-face)
-    * [Run a model from local file](#run-a-model-from-local-file)
-    * [Distributed system](#distributed-system)
-    * [Network names](#network-names)
-    * [KV-aware routing](#kv-aware-routing)
-* [Full usage details](#full-usage-details)
-    * [Setup](#setup)
-    * [mistral.rs](#mistralrs)
-    * [llama.cpp](#llamacpp)
-    * [Sglang](#sglang)
-    * [Vllm](#vllm)
-    * [TensorRT-LLM](#trtllm)
-    * [Echo Engines](#echo-engines)
-    * [Writing your own engine in Python](#writing-your-own-engine-in-python)
-* [Batch mode](#batch-mode)
-* [Defaults](#defaults)
-* [Extra engine arguments](#extra-engine-arguments)
-
-
 This guide explains the`dynamo run` command.
 
 `dynamo-run` is a CLI tool for exploring the Dynamo components. It's also an example of how to use components from Rust. If you use the Python wheel, it's available as `dynamo run` .
@@ -395,7 +375,9 @@ uv pip install pip
 uv pip install vllm==0.8.4 setuptools
 ```
 
-**Note: If you're on Ubuntu 22.04 or earlier, you must add `--python=python3.10` to your `uv venv` command**
+```{note}
+If you're on Ubuntu 22.04 or earlier, you must add `--python=python3.10` to your `uv venv` command.
+```
 
 2. Build:
 ```
@@ -412,7 +394,7 @@ Inside that virtualenv:
 
 ```
 
-To pass extra arguments to the vllm engine see [Extra engine arguments](#extra-engine-arguments) below.
+To pass extra arguments to the vllm engine see [Extra engine arguments](#extra-engine-arguments).
 
 vllm attempts to allocate enough KV cache for the full context length at startup. If that does not fit in your available memory pass `--context-length <value>`.
 
@@ -548,8 +530,6 @@ dynamo-run in=http out=trtllm TinyLlama/TinyLlama-1.1B-Chat-v1.0 --extra-engine-
 
 ### Writing your own engine in Python
 
-Note: This section replaces "bring-your-own-engine".
-
 The [dynamo](https://pypi.org/project/ai-dynamo/) Python library allows you to build your own engine and attach it to Dynamo.
 
 The Python file must do three things:
@@ -561,10 +541,10 @@ The Python file must do three things:
 from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
-# 1. Decorate a function to get the runtime
-#
-@dynamo_worker(static=False)
-async def worker(runtime: DistributedRuntime):
+   # 1. Decorate a function to get the runtime
+   #
+   @dynamo_worker(static=False)
+   async def worker(runtime: DistributedRuntime):
 
     # 2. Register ourselves on the network
     #
