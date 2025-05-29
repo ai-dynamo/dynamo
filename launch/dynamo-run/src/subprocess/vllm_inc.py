@@ -11,6 +11,7 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -157,8 +158,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         # KV routing relies on logging KV metrics
         "disable_log_stats": False,
     }
-    if config.kv_block_size:
-        arg_map["block_size"] = config.kv_block_size
+    assert config.kv_block_size > 0, "Must use non-negative integer for KV Block Size"
+    arg_map["block_size"] = config.kv_block_size
 
     if config.context_length:
         # Usually we want it to default to the max (from tokenizer_config.json)
@@ -201,7 +202,14 @@ async def init(runtime: DistributedRuntime, config: Config):
     engine_client = await engine_context.__aenter__()
 
     await register_llm(
-        ModelType.Backend, endpoint, config.model_path, config.model_name
+        ModelType.Backend,
+        endpoint,
+        config.model_path,
+        config.model_name,
+        context_length=arg_map.get(
+            "max_model_len", None
+        ),  # if None, takes length from tokenizer
+        kv_cache_block_size=arg_map["block_size"],
     )
     handler = RequestHandler(component, engine_client, default_sampling_params)
     handler.setup_kv_metrics()

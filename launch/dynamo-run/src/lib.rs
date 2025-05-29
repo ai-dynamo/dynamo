@@ -18,10 +18,6 @@ mod subprocess;
 
 const CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// How we identify a python string endpoint
-#[cfg(feature = "python")]
-const PYTHON_STR_SCHEME: &str = "pystr:";
-
 /// Where we will attach the vllm/sglang subprocess. Invisible to users.
 pub const INTERNAL_ENDPOINT: &str = "dyn://dynamo.internal.worker";
 
@@ -223,6 +219,40 @@ pub async fn run(
             }));
             EngineConfig::Dynamic
         }
+        Output::Trtllm => {
+            if flags.base_gpu_id != 0 {
+                anyhow::bail!("TRTLLM does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
+            }
+
+            // If `in=dyn` we want the trtllm subprocess to listen on that endpoint.
+            // If not, then the endpoint isn't exposed so we invent an internal one.
+            let endpoint = match &in_opt {
+                Input::Endpoint(path) => path.parse()?,
+                _ => INTERNAL_ENDPOINT.parse()?,
+            };
+
+            let (py_script, child) = match subprocess::start(
+                subprocess::trtllm::PY,
+                &local_model,
+                &endpoint,
+                flags.clone(),
+                None, // multi-node config. trtlllm uses `mpi`, see guide
+            )
+            .await
+            {
+                Ok(x) => x,
+                Err(err) => {
+                    anyhow::bail!("Failed starting trtllm sub-process: {err}");
+                }
+            };
+            let cancel_token = cancel_token.clone();
+
+            // Sub-process cleanup
+            extra = Some(Box::pin(async move {
+                stopper(cancel_token, child, py_script).await;
+            }));
+            EngineConfig::Dynamic
+        }
 
         #[cfg(feature = "llamacpp")]
         Output::LlamaCpp => {
@@ -232,18 +262,6 @@ pub async fn run(
             let engine =
                 dynamo_engine_llamacpp::make_engine(cancel_token.clone(), &local_model).await?;
             EngineConfig::StaticCore {
-                engine,
-                model: Box::new(local_model),
-            }
-        }
-        #[cfg(feature = "python")]
-        Output::PythonStr(path_str) => {
-            let card = local_model.card();
-            let py_args = flags.as_vec(&path_str, &card.service_name);
-            let p = std::path::PathBuf::from(path_str);
-            let engine =
-                dynamo_engine_python::make_string_engine(cancel_token.clone(), &p, py_args).await?;
-            EngineConfig::StaticFull {
                 engine,
                 model: Box::new(local_model),
             }
