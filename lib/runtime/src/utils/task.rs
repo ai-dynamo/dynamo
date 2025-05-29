@@ -17,6 +17,7 @@
 
 use anyhow::{Context, Result};
 use std::future::Future;
+use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -45,16 +46,29 @@ pub struct CriticalTaskExecutionHandle {
 }
 
 impl CriticalTaskExecutionHandle {
+    pub async fn new<Fut>(
+        task_fn: impl FnOnce(CancellationToken) -> Fut + Send + 'static,
+        parent_token: CancellationToken,
+        description: &str,
+    ) -> Result<Self>
+    where
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        Self::new_with_runtime(task_fn, parent_token, description, &Handle::try_current()?).await
+    }
+
     /// Create a new [CriticalTaskExecutionHandle] for a critical task.
     ///
     /// # Arguments
     /// * `task_fn` - A function that takes a cancellation token and returns the critical task future
     /// * `parent_token` - Token that will be cancelled if this critical task fails
     /// * `description` - Description for logging purposes
-    pub async fn new<Fut>(
+    /// * `runtime` - The runtime to use for the task.
+    pub async fn new_with_runtime<Fut>(
         task_fn: impl FnOnce(CancellationToken) -> Fut + Send + 'static,
         parent_token: CancellationToken,
         description: &str,
+        runtime: &Handle,
     ) -> Result<Self>
     where
         Fut: Future<Output = Result<()>> + Send + 'static,
@@ -68,7 +82,7 @@ impl CriticalTaskExecutionHandle {
 
         let graceful_shutdown_token_clone = graceful_shutdown_token.clone();
         let description_clone = description.to_string();
-        let task = tokio::spawn(async move {
+        let task = runtime.spawn(async move {
             let future = task_fn(graceful_shutdown_token_clone);
 
             match future.await {
@@ -92,7 +106,7 @@ impl CriticalTaskExecutionHandle {
             let parent_token_monitor = parent_token_clone.clone();
             let description_monitor = description.clone();
 
-            tokio::spawn(async move {
+            runtime.spawn(async move {
                 let result = match main_task_handle.await {
                     Ok(task_result) => {
                         // Task completed normally (success or error)
