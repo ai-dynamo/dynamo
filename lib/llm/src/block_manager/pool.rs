@@ -72,10 +72,12 @@ use super::block::{
     nixl::short_type_name, registry::BlockRegistry, Block, BlockError, BlockMetadata,
 };
 use super::events::{EventManager, NullEventManager};
+use super::metrics::{BlockManagerMetrics, PoolMetrics};
 use super::storage::Storage;
 
 use crate::tokens::{SequenceHash, TokenBlock};
 
+use prometheus::Registry;
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
     sync::{Arc, Weak},
@@ -116,15 +118,20 @@ pub struct BlockPoolArgs<S: Storage, M: BlockMetadata> {
 
     #[builder(default)]
     blocks: Vec<Block<S, M>>,
+
+    #[builder(
+        default = "BlockManagerMetrics::new(&Arc::new(Registry::new())).unwrap().pool(\"pool\")"
+    )]
+    pool_metrics: Arc<PoolMetrics>,
 }
 
 impl<S: Storage, M: BlockMetadata> BlockPoolArgsBuilder<S, M> {
     pub fn build(self) -> anyhow::Result<BlockPool<S, M>> {
         let args = self.build_internal()?;
-        let (event_manager, cancel_token, blocks) = args.dissolve();
+        let (event_manager, cancel_token, blocks, metrics) = args.dissolve();
 
         tracing::info!("building block pool");
-        let pool = BlockPool::new(event_manager, cancel_token, blocks);
+        let pool = BlockPool::new(event_manager, cancel_token, blocks, metrics);
 
         Ok(pool)
     }
@@ -200,9 +207,10 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
         event_manager: Arc<dyn EventManager>,
         cancel_token: CancellationToken,
         blocks: Vec<Block<S, M>>,
+        metrics: Arc<PoolMetrics>,
     ) -> Self {
         let (pool, progress_engine) =
-            Self::with_progress_engine(event_manager, cancel_token, blocks);
+            Self::with_progress_engine(event_manager, cancel_token, blocks, metrics);
 
         // pool.runtime.handle().spawn(async move {
         //     let mut progress_engine = progress_engine;
@@ -239,12 +247,19 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
         event_manager: Arc<dyn EventManager>,
         cancel_token: CancellationToken,
         blocks: Vec<Block<S, M>>,
+        metrics: Arc<PoolMetrics>,
     ) -> (Self, ProgressEngine<S, M>) {
         let (priority_tx, priority_rx) = tokio::sync::mpsc::unbounded_channel();
         let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let progress_engine =
-            ProgressEngine::<S, M>::new(event_manager, priority_rx, ctrl_rx, cancel_token, blocks);
+        let progress_engine = ProgressEngine::<S, M>::new(
+            event_manager,
+            priority_rx,
+            ctrl_rx,
+            cancel_token,
+            blocks,
+            metrics,
+        );
 
         (
             Self {
@@ -444,6 +459,7 @@ struct State<S: Storage, M: BlockMetadata> {
     registry: BlockRegistry,
     return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, M>>,
     event_manager: Arc<dyn EventManager>,
+    metrics: Arc<PoolMetrics>,
 }
 
 struct ProgressEngine<S: Storage, M: BlockMetadata> {
@@ -452,6 +468,7 @@ struct ProgressEngine<S: Storage, M: BlockMetadata> {
     cancel_token: CancellationToken,
     state: State<S, M>,
     return_rx: tokio::sync::mpsc::UnboundedReceiver<Block<S, M>>,
+    metrics: Arc<PoolMetrics>,
 }
 
 #[cfg(test)]
@@ -468,9 +485,9 @@ mod tests {
             self,
         ) -> anyhow::Result<(BlockPool<S, M>, ProgressEngine<S, M>)> {
             let args = self.build_internal()?;
-            let (event_manager, cancel_token, blocks) = args.dissolve();
+            let (event_manager, cancel_token, blocks, metrics) = args.dissolve();
             let (pool, progress_engine) =
-                BlockPool::with_progress_engine(event_manager, cancel_token, blocks);
+                BlockPool::with_progress_engine(event_manager, cancel_token, blocks, metrics);
 
             Ok((pool, progress_engine))
         }
