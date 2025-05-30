@@ -52,10 +52,10 @@ dynamo serve graphs.disagg:Frontend -f configs/disagg.yaml
 
 Send a test request using curl:
 ```bash
-curl eos0509:8000/v1/completions \
+curl localhost:8000/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-R1",
+    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "prompt": "In the heart of Eldoria...",
     "stream": false,
     "max_tokens": 30
@@ -98,3 +98,16 @@ cd examples/vllm_v1
 dynamo serve components.worker:VllmPrefillWorker -f configs/r1_disagg.yaml
 ```
 
+## Testing
+
+Send a test request using curl:
+```bash
+curl localhost:8000/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-ai/DeepSeek-R1",
+    "prompt": "In the heart of Eldoria...",
+    "stream": false,
+    "max_tokens": 30
+  }'
+```
