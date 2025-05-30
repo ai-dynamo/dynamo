@@ -21,6 +21,7 @@ request tracing for automatic request ID propagation across components.
 """
 
 import logging
+import asyncio
 from typing import Any, Dict, List, Optional
 
 from dynamo.client import DynamoClient
