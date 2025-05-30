@@ -26,7 +26,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from dynamo.sdk.cli.utils import resolve_service_config
-from dynamo.sdk.core.deploy.bento_cloud import BentoCloudDeploymentManager
+from dynamo.sdk.core.deploy.consts import DeploymentTargetType
 from dynamo.sdk.core.deploy.kubernetes import KubernetesDeploymentManager
 from dynamo.sdk.core.protocol.deployment import (
     Deployment,
@@ -46,12 +46,22 @@ console = Console(highlight=False)
 
 def get_deployment_manager(target: str, endpoint: str) -> DeploymentManager:
     """Return the appropriate DeploymentManager for the given target and endpoint."""
-    if target == "kubernetes":
+    try:
+        target_enum = DeploymentTargetType(target)
+    except ValueError:
+        valid_targets = ", ".join([e.value for e in DeploymentTargetType])
+        console.print(
+            Panel(
+                f"Invalid deployment target: {target}\nSupported targets: {valid_targets}",
+                title="Error",
+                style="red",
+            )
+        )
+        raise typer.Exit(1)
+    if target_enum == DeploymentTargetType.KUBERNETES:
         return KubernetesDeploymentManager(endpoint)
-    elif target == "bento_cloud":
-        return BentoCloudDeploymentManager(endpoint)
     else:
-        raise ValueError(f"Unknown deployment target: {target}")
+        raise ValueError(f"Unknown deployment target: {target_enum}")
 
 
 def display_deployment_info(
@@ -146,7 +156,12 @@ def _handle_deploy_create(
         "--env",
         help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo pipeline.",
     ),
-    target: str = typer.Option(..., "--target", "-t", help="Deployment target"),
+    target: str = typer.Option(
+        DeploymentTargetType.KUBERNETES.value,
+        "--target",
+        "-t",
+        help="Deployment target",
+    ),
     dev: bool = typer.Option(False, "--dev", help="Development mode for deployment"),
     env_secrets_name: t.Optional[str] = typer.Option(
         None, "--env-secrets-name", help="Environment secrets name"
@@ -269,7 +284,12 @@ def create(
         "--env",
         help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo pipeline.",
     ),
-    target: str = typer.Option(..., "--target", "-t", help="Deployment target"),
+    target: str = typer.Option(
+        DeploymentTargetType.KUBERNETES.value,
+        "--target",
+        "-t",
+        help="Deployment target",
+    ),
     dev: bool = typer.Option(False, "--dev", help="Development mode for deployment"),
     env_secrets_name: t.Optional[str] = typer.Option(
         None, "--env-secrets-name", help="Environment secrets name"
@@ -294,7 +314,12 @@ def create(
 @app.command()
 def get(
     name: str = typer.Argument(..., help="Deployment name"),
-    target: str = typer.Option(..., "--target", "-t", help="Deployment target"),
+    target: str = typer.Option(
+        DeploymentTargetType.KUBERNETES.value,
+        "--target",
+        "-t",
+        help="Deployment target",
+    ),
     endpoint: str = typer.Option(
         ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD"
     ),
@@ -308,7 +333,7 @@ def get(
             return deployment
     except Exception as e:
         if isinstance(e, RuntimeError) and isinstance(e.args[0], tuple):
-            status, msg, url = e.args[0]
+            status, msg, _ = e.args[0]
             if status == 404:
                 console.print(
                     Panel(
@@ -330,7 +355,12 @@ def get(
 
 @app.command("list")
 def list_deployments(
-    target: str = typer.Option(..., "--target", "-t", help="Deployment target"),
+    target: str = typer.Option(
+        DeploymentTargetType.KUBERNETES.value,
+        "--target",
+        "-t",
+        help="Deployment target",
+    ),
     endpoint: str = typer.Option(
         ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD"
     ),
@@ -374,7 +404,12 @@ def list_deployments(
 def update(
     ctx: typer.Context,
     name: str = typer.Argument(..., help="Deployment name to update"),
-    target: str = typer.Option(..., "--target", "-t", help="Deployment target"),
+    target: str = typer.Option(
+        DeploymentTargetType.KUBERNETES.value,
+        "--target",
+        "-t",
+        help="Deployment target",
+    ),
     config_file: t.Optional[typer.FileText] = typer.Option(
         None, "--config-file", "-f", help="Configuration file path"
     ),
@@ -438,7 +473,12 @@ def update(
 @app.command()
 def delete(
     name: str = typer.Argument(..., help="Deployment name"),
-    target: str = typer.Option(..., "--target", "-t", help="Deployment target"),
+    target: str = typer.Option(
+        DeploymentTargetType.KUBERNETES.value,
+        "--target",
+        "-t",
+        help="Deployment target",
+    ),
     endpoint: str = typer.Option(
         ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD"
     ),
@@ -496,7 +536,12 @@ def deploy(
         "--env",
         help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo pipeline.",
     ),
-    target: str = typer.Option(..., "--target", "-t", help="Deployment target"),
+    target: str = typer.Option(
+        DeploymentTargetType.KUBERNETES.value,
+        "--target",
+        "-t",
+        help="Deployment target",
+    ),
     dev: bool = typer.Option(False, "--dev", help="Development mode for deployment"),
     env_secrets_name: t.Optional[str] = typer.Option(
         None, "--env-secrets-name", help="Environment secrets name"

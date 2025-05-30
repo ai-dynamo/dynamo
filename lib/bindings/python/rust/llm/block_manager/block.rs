@@ -14,16 +14,14 @@
 // limitations under the License.
 
 #![cfg(feature = "block-manager")]
-// Silence warnings about deprecated features (like pyo3::IntoPy::into_py)
-#![allow(deprecated)]
 
 use super::*;
-
-use dlpark::prelude::{DataType, Device, ManagerCtx, ShapeAndStrides, ToTensor};
-use pyo3::{ffi::c_str, prelude::IntoPy, types::PyTuple, PyObject, PyResult, Python};
-use std::sync::{Arc, Mutex};
-
 use dynamo_llm::block_manager::block::BlockDataExt;
+use pyo3::{
+    types::{PyList, PyTuple},
+    PyObject, PyResult, Python,
+};
+use std::sync::{Arc, Mutex};
 
 pub enum BlockType {
     Pinned(
@@ -40,111 +38,14 @@ pub enum BlockType {
     ),
 }
 
-struct DlPackTensor {
-    block: Arc<Mutex<BlockType>>,
-    // TODO: Metadata should be stored in the block manager?
-    dtype: dynamo_llm::common::dtype::DType,
-    device_id: usize,
-}
-
-impl ToTensor for DlPackTensor {
-    fn data_ptr(&self) -> *mut std::ffi::c_void {
-        let mut mutable_block = self.block.lock().unwrap();
-        let ptr = match &mut *mutable_block {
-            BlockType::Pinned(block) => {
-                let mut block_view_mut = block
-                    .block_view_mut()
-                    .expect("Failed to get mutable Pinned block view");
-                unsafe { block_view_mut.as_mut_ptr() }
-            }
-            BlockType::Device(block) => {
-                let mut block_view_mut = block
-                    .block_view_mut()
-                    .expect("Failed to get mutable Device block view");
-                unsafe { block_view_mut.as_mut_ptr() }
-            }
-        };
-        ptr as *mut std::ffi::c_void
-    }
-
-    fn byte_offset(&self) -> u64 {
-        0
-    }
-
-    fn device(&self) -> Device {
-        let mutable_block = self.block.lock().unwrap();
-        match &*mutable_block {
-            BlockType::Pinned(_) => {
-                // TODO: Why torch does not support CPU_PINNED here?
-                /*Device {
-                    device_type: DeviceType::CudaHost,
-                    device_id: 0,
-                }*/
-                Device::CPU
-            }
-            BlockType::Device(_) => Device::cuda(self.device_id),
-        }
-    }
-
-    fn dtype(&self) -> DataType {
-        // Map from dynamo_llm::common::dtype::DType to dlpark::prelude::DataType
-        match self.dtype {
-            dynamo_llm::common::dtype::DType::FP8 => {
-                // No direct FP8 equivalent, use U8 as closest alternative
-                DataType::U8
-            }
-            dynamo_llm::common::dtype::DType::FP16 => DataType::F16,
-            dynamo_llm::common::dtype::DType::BF16 => DataType::BF16,
-            dynamo_llm::common::dtype::DType::FP32 => DataType::F32,
-            dynamo_llm::common::dtype::DType::U8 => DataType::U8,
-            dynamo_llm::common::dtype::DType::U16 => DataType::U16,
-            dynamo_llm::common::dtype::DType::U32 => DataType::U32,
-            dynamo_llm::common::dtype::DType::U64 => DataType::U64,
-            dynamo_llm::common::dtype::DType::I8 => DataType::I8,
-            dynamo_llm::common::dtype::DType::I16 => DataType::I16,
-            dynamo_llm::common::dtype::DType::I32 => DataType::I32,
-            dynamo_llm::common::dtype::DType::I64 => DataType::I64,
-        }
-    }
-
-    fn shape_and_strides(&self) -> ShapeAndStrides {
-        let mutable_block = self.block.lock().unwrap();
-        let (num_blocks, num_layers, page_size, inner_dim) = match &*mutable_block {
-            BlockType::Pinned(block) => (
-                block.num_blocks(),
-                block.num_layers(),
-                block.page_size(),
-                block.inner_dim(),
-            ),
-            BlockType::Device(block) => (
-                block.num_blocks(),
-                block.num_layers(),
-                block.page_size(),
-                block.inner_dim(),
-            ),
-        };
-        let shape_i64: Vec<i64> = vec![
-            num_blocks as i64,
-            num_layers as i64,
-            page_size as i64,
-            inner_dim as i64,
-        ];
-        ShapeAndStrides::new_contiguous(&shape_i64)
-    }
-}
-
-/*impl Drop for DlPackTensor {
-    fn drop(&mut self) {
-        println!("Dropping DlPackTensor");
-    }
-}*/
-
 #[pyclass]
 pub struct Block {
     inner: Arc<Mutex<BlockType>>,
     // TODO: Metadata should be stored in the block manager?
     dtype: dynamo_llm::common::dtype::DType,
     device_id: usize,
+    // Python iterator state
+    py_itr_idx: usize,
 }
 
 impl Block {
@@ -157,69 +58,161 @@ impl Block {
             inner: block,
             dtype: dtype,
             device_id: device_id,
+            py_itr_idx: 0,
+        }
+    }
+
+    fn num_layers(&self) -> usize {
+        let mutable_block = self.inner.lock().unwrap();
+        match &*mutable_block {
+            BlockType::Pinned(block) => block.num_layers(),
+            BlockType::Device(block) => block.num_layers(),
         }
     }
 }
 
 #[pymethods]
 impl Block {
+    #[pyo3(signature = ())]
+    fn to_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let layers: Vec<layer::Layer> = (0..self.num_layers())
+            .map(|layer_idx| {
+                layer::Layer::from_rust(
+                    self.inner.clone(),
+                    layer_idx,
+                    self.dtype.clone(),
+                    self.device_id,
+                )
+            })
+            .collect();
+        PyList::new(py, layers)
+    }
+
+    fn __len__(&self) -> PyResult<usize> {
+        Ok(self.num_layers())
+    }
+
+    fn __getitem__(&self, index: usize) -> PyResult<layer::Layer> {
+        let num_layers = self.num_layers();
+        if index >= num_layers {
+            return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                "Index {} out of range for Block with {} layers",
+                index, num_layers
+            )));
+        }
+        let layer = layer::Layer::from_rust(
+            self.inner.clone(),
+            index,
+            self.dtype.clone(),
+            self.device_id,
+        );
+        Ok(layer)
+    }
+
+    fn __iter__(mut slf: PyRefMut<'_, Self>) -> PyResult<PyRefMut<'_, Self>> {
+        // Reset iterator index at the beginning of each iteration
+        // Use to_list() for iterating concurrently
+        slf.py_itr_idx = 0;
+        Ok(slf)
+    }
+
+    fn __next__(&mut self) -> PyResult<layer::Layer> {
+        if self.py_itr_idx >= self.num_layers() {
+            return Err(pyo3::exceptions::PyStopIteration::new_err(
+                "No more items in Block",
+            ));
+        }
+        let layer = layer::Layer::from_rust(
+            self.inner.clone(),
+            self.py_itr_idx,
+            self.dtype.clone(),
+            self.device_id,
+        );
+        self.py_itr_idx += 1;
+        Ok(layer)
+    }
+
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
-    fn __dlpack__(
+    fn __dlpack__<'py>(
         &self,
+        py: Python<'py>,
         stream: Option<PyObject>,
         max_version: Option<PyObject>,
         dl_device: Option<PyObject>,
         copy: Option<bool>,
     ) -> PyResult<PyObject> {
-        // Panic if any arguments are provided
+        // Return error if any arguments are provided
         if stream.is_some() {
-            panic!("stream argument is not supported");
+            return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "stream argument is not supported",
+            ));
         }
         if max_version.is_some() {
-            panic!("max_version argument is not supported");
+            return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "max_version argument is not supported",
+            ));
         }
         if dl_device.is_some() {
-            panic!("dl_device argument is not supported");
+            return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "dl_device argument is not supported",
+            ));
         }
         if copy.is_some() {
-            panic!("copy argument is not supported");
+            return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "copy argument is not supported",
+            ));
         }
 
-        // Create DLPack PyCapsule
-        let manager_ctx = ManagerCtx::new(DlPackTensor {
-            block: self.inner.clone(),
-            dtype: self.dtype.clone(),
-            device_id: self.device_id,
-        });
-        let py_capsule = Python::with_gil(|py| manager_ctx.into_py(py));
-        Ok(py_capsule)
+        // Extract all necessary data for dlpack
+        let ptr: *mut std::ffi::c_void;
+        let num_blocks: i64;
+        let num_layers: i64;
+        let num_outer_dims: i64;
+        let page_size: i64;
+        let inner_dim: i64;
+        {
+            let mut mutable_block = self.inner.lock().unwrap();
+            ptr = match &mut *mutable_block {
+                BlockType::Pinned(block) => {
+                    let mut block_view_mut = block.block_view_mut().map_err(to_pyerr)?;
+                    (unsafe { block_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
+                }
+                BlockType::Device(block) => {
+                    let mut block_view_mut = block.block_view_mut().map_err(to_pyerr)?;
+                    (unsafe { block_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
+                }
+            };
+            (num_blocks, num_layers, num_outer_dims, page_size, inner_dim) = match &*mutable_block {
+                BlockType::Pinned(block) => (
+                    block.num_blocks() as i64,
+                    block.num_layers() as i64,
+                    block.num_outer_dims() as i64,
+                    block.page_size() as i64,
+                    block.inner_dim() as i64,
+                ),
+                BlockType::Device(block) => (
+                    block.num_blocks() as i64,
+                    block.num_layers() as i64,
+                    block.num_outer_dims() as i64,
+                    block.page_size() as i64,
+                    block.inner_dim() as i64,
+                ),
+            };
+        }
+
+        // Create the DLPack tensor
+        dlpack::dlpack(
+            py,
+            self.inner.clone(),
+            ptr,
+            vec![num_blocks, num_layers, num_outer_dims, page_size, inner_dim],
+            self.dtype.clone(),
+            self.device_id,
+        )
     }
 
-    fn __dlpack_device__(&self) -> PyResult<Py<PyTuple>> {
-        let dlpack_device = Python::with_gil(|py| {
-            let device_type_list = py.eval(c_str!("[('CPU', 1), ('CUDA', 2), ('CPU_PINNED', 3), ('OPENCL', 4), ('VULKAN', 7), ('METAL', 8), ('VPI', 9), ('ROCM', 10)]"), None, None).unwrap();
-            let device_type_enum = py
-                .import("enum")
-                .unwrap()
-                .getattr("Enum")
-                .unwrap()
-                .call1(("DLDeviceType", device_type_list))
-                .unwrap();
-            let block = self.inner.lock().unwrap();
-            let device_type = match &*block {
-                BlockType::Pinned(_) => device_type_enum.getattr("CPU_PINNED").unwrap(),
-                BlockType::Device(_) => device_type_enum.getattr("CUDA").unwrap(),
-            };
-            let device_id = self.device_id.into_py(py).into_bound(py);
-            let device = vec![device_type, device_id];
-            PyTuple::new(py, device).unwrap().unbind()
-        });
-        Ok(dlpack_device)
+    #[pyo3(signature = ())]
+    fn __dlpack_device__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        dlpack::dlpack_device(py, self.inner.clone(), self.device_id)
     }
 }
-
-/*impl Drop for Block {
-    fn drop(&mut self) {
-        println!("Dropping Block");
-    }
-}*/

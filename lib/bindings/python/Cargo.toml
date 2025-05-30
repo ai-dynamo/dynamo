@@ -19,7 +19,7 @@
 
 [package]
 name = "dynamo-py3"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
@@ -40,8 +40,11 @@ block-manager = ["dynamo-llm/block-manager", "dep:dlpark"]
 [dependencies]
 dynamo-llm = { path = "../../llm" }
 dynamo-runtime = { path = "../../runtime" }
-dynamo-engine-python = { path = "../../engines/python" }
 
+anyhow = { version = "1" }
+async-stream = { version = "0.3" }
+async-trait = { version = "0.1" }
+async-openai = "0.27.2"
 futures = { version = "0.3" }
 once_cell = { version = "1.20.3" }
 serde = { version = "1" }
@@ -72,3 +75,4 @@ pyo3-async-runtimes = { version = "0.23.0", default-features = false, features =
 pythonize = "0.23"
 
 dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
+

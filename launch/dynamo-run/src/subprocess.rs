@@ -10,11 +10,13 @@ use anyhow::Context;
 use regex::Regex;
 use tokio::io::AsyncBufReadExt;
 
+use crate::flags::RouterMode;
 use dynamo_llm::engines::MultiNodeConfig;
 use dynamo_llm::local_model::LocalModel;
 use dynamo_runtime::protocols::Endpoint as EndpointId;
 
 pub mod sglang;
+pub mod trtllm;
 pub mod vllm;
 
 pub async fn start(
@@ -50,6 +52,12 @@ pub async fn start(
         "--context-length".to_string(),
         card.context_length.to_string(),
     ];
+    // TRTLLM only
+    // The worker node will only publish events and metrics if the router mode is KV
+    if flags.router_mode == RouterMode::KV {
+        args.push("--publish-events-and-metrics".to_string());
+    }
+
     // sglang only
     // vllm uses CUDA_VISIBLE_DEVICES
     if flags.base_gpu_id != 0 {

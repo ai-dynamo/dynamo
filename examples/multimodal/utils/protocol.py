@@ -15,7 +15,7 @@
 
 
 import json
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional, Union
 
 import connect
 import msgspec
@@ -92,12 +92,34 @@ class vLLMGenerateRequest(BaseModel):
     )
 
 
+class TextContent(BaseModel):
+    type: Literal["text"]
+    text: str
+
+
+class ImageURLDetail(BaseModel):
+    url: str
+
+
+class ImageContent(BaseModel):
+    type: Literal["image_url"]
+    image_url: ImageURLDetail
+
+
+MessageContent = Union[TextContent, ImageContent]
+
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "system", "assistant"]
+    content: List[MessageContent]
+
+
 class MultiModalRequest(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     model: str
-    image: str
-    max_tokens: int
-    prompt: str
+    messages: List[ChatMessage]
+    max_tokens: Optional[int] = None
+    stream: Optional[bool] = True
 
 
 class vLLMMultimodalRequest(vLLMGenerateRequest):
