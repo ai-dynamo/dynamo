@@ -188,7 +188,7 @@ impl<S: Storage, M: BlockMetadata> Block<S, M> {
     pub fn parent_sequence_hash(&self) -> Result<Option<SequenceHash>, BlockError> {
         match self.state() {
             BlockState::Complete(state) => Ok(state.token_block().parent_sequence_hash()),
-            BlockState::Registered(state) => Ok(state.parent_sequence_hash()),
+            BlockState::Registered(state, _) => Ok(state.parent_sequence_hash()),
             _ => Err(BlockError::InvalidState(
                 "Block is not complete nor registered.".to_string(),
             )),
