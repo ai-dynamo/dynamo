@@ -230,7 +230,7 @@ class VllmWorker:
         else:
             remote_prefill_params = None
             logger.info(
-                f"Prefilling locally for request {request_id} with length {len(request.token_ids)} (estimated prefix hit length {request.estimated_prefix_hit_num_blocks * self.engine_args.block_size})"
+                f"Prefilling locally for request {request_id} with length {len(request.token_ids)} (estimated prefix hit length {(request.estimated_prefix_hit_num_blocks or 0) * self.engine_args.block_size})"
             )
 
         sampling_params = SamplingParams(**self.default_sampling_params)
