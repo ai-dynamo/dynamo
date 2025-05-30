@@ -9,7 +9,7 @@ use dynamo_llm::{
     engines::StreamingEngineAdapter,
     model_card::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
-    protocols::common::llm_backend::{BackendInput, BackendOutput},
+    protocols::common::llm_backend::{BackendOutput, PreprocessedRequest},
     types::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -113,7 +113,7 @@ where
     OpenAIPreprocessor: Operator<
         Context<Req>,
         Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
-        Context<BackendInput>,
+        Context<PreprocessedRequest>,
         Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
     >,
 {

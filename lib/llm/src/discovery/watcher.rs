@@ -20,7 +20,7 @@ use crate::{
     backend::Backend,
     kv_router::KvPushRouter,
     model_type::ModelType,
-    preprocessor::{BackendInput, OpenAIPreprocessor},
+    preprocessor::{OpenAIPreprocessor, PreprocessedRequest},
     protocols::common::llm_backend::LLMEngineOutput,
     protocols::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -196,11 +196,12 @@ impl ModelWatcher {
                 >::new();
                 let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
                 let backend = Backend::from_mdc(card.clone()).await?.into_operator();
-                let router = PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
-                    client.clone(),
-                    self.router_mode,
-                )
-                .await?;
+                let router =
+                    PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
+                        client.clone(),
+                        self.router_mode,
+                    )
+                    .await?;
                 let service_backend = match self.router_mode {
                     RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
                         ServiceBackend::from_engine(Arc::new(router))
@@ -231,11 +232,12 @@ impl ModelWatcher {
                 >::new();
                 let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
                 let backend = Backend::from_mdc(card.clone()).await?.into_operator();
-                let router = PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
-                    client,
-                    self.router_mode,
-                )
-                .await?;
+                let router =
+                    PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
+                        client,
+                        self.router_mode,
+                    )
+                    .await?;
                 let service_backend = match self.router_mode {
                     RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
                         ServiceBackend::from_engine(Arc::new(router))
