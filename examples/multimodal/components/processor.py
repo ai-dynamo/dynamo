@@ -19,7 +19,7 @@ import uuid
 from enum import Enum
 from typing import AsyncIterator, Tuple, Union
 
-from components.worker import VllmWorker
+from components.decode_worker import VllmDecodeWorker
 from transformers import AutoTokenizer
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.logging import check_required_workers
@@ -53,7 +53,7 @@ class Processor(ProcessMixIn):
     vLLM pre and post processing
     """
 
-    worker = depends(VllmWorker)
+    worker = depends(VllmDecodeWorker)
 
     def __init__(self):
         class_name = self.__class__.__name__
@@ -83,7 +83,7 @@ class Processor(ProcessMixIn):
     @async_on_start
     async def async_init(self):
         runtime = dynamo_context["runtime"]
-        comp_ns, comp_name = VllmWorker.dynamo_address()  # type: ignore
+        comp_ns, comp_name = VllmDecodeWorker.dynamo_address()  # type: ignore
         self.worker_client = (
             await runtime.namespace(comp_ns)
             .component(comp_name)
@@ -145,20 +145,10 @@ class Processor(ProcessMixIn):
 
         output = self._generate_responses(response_generator, request_type)
 
-        # TODO: This is a temporary solution to combine the content from the engine generator.
-        # After having the multimodal support in OpenAI compatible frontend, we can use that directly without the need to manually combine the content.
-        combined_content = ""
         async for response in await self._stream_response(
             request, output, request_id, conversation
         ):
-            if "choices" in response and len(response["choices"]) > 0:
-                delta = response["choices"][0].get("delta", {})
-                content = delta.get("content", "")
-                combined_content += content
-
-                # Yield complete content on final response
-                if response["choices"][0].get("finish_reason") is not None:
-                    yield combined_content
+            yield response
 
     # This method is used to process the responses from the engine generator.
     async def _generate_responses(
@@ -196,22 +186,29 @@ class Processor(ProcessMixIn):
 
     # The generate endpoint will be used by the frontend to handle incoming requests.
     @endpoint()
-    async def generate(self, request: MultiModalRequest):
-        # TODO: After having the multimodal support in OpenAI compatible frontend, we can use that directly and remove the custom endpoint.
+    async def generate(self, raw_request: MultiModalRequest):
         msg = {
             "role": "user",
-            "content": "USER: <image>\nQuestion:" + request.prompt + " Answer:",
+            "content": "USER: <image>\nQuestion:"
+            + raw_request.messages[0].content[0].text
+            + " Answer:",
         }
 
         chat_request = ChatCompletionRequest(
-            model=request.model,
+            model=raw_request.model,
             messages=[msg],
-            stream=True,
-            max_tokens=request.max_tokens,
+            stream=raw_request.stream,
+            max_tokens=raw_request.max_tokens,
             request_id=str(uuid.uuid4()),
         )
+        image_url = None
 
-        async for response in self._generate(
-            chat_request, request.image, RequestType.CHAT
-        ):
+        for message in raw_request.messages:
+            for item in message.content:
+                if item.type == "image_url":
+                    image_url = item.image_url.url
+        if image_url is None:
+            raise ValueError("Image URL is required")
+
+        async for response in self._generate(chat_request, image_url, RequestType.CHAT):
             yield json.dumps(response)

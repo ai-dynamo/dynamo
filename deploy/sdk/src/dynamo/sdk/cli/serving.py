@@ -167,6 +167,10 @@ def serve_dynamo_graph(
     service_name: str = "",
     enable_local_planner: bool = False,
     target: TargetEnum = TargetEnum.DYNAMO,
+    system_app_port: Optional[int] = None,
+    system_app_host: Optional[str] = None,
+    enable_system_app: bool = False,
+    use_default_health_checks: bool = False,
 ) -> CircusRunner:
     from dynamo.runtime.logging import configure_dynamo_logging
     from dynamo.sdk.cli.circus import create_arbiter, create_circus_watcher
@@ -198,11 +202,30 @@ def serve_dynamo_graph(
     if dependency_map is None:
         dependency_map = {}
 
-    # TODO: Only for testing, this will prevent any other dep services from getting started, relying entirely on configured deps in the runner-map
     standalone = False
     if service_name:
         logger.info(f"Service '{service_name}' running in standalone mode")
         standalone = True
+
+    # TODO: We are signaling by setting env vars to downstream subprocesses. Let's pass flags on our invokation of serve_dynamo instead. That way the API is defined at the top level.
+    # Signal downstream workers to start system app by setting DYNAMO_SYSTEM_APP_* env vars for each worker. They are respectively consumed in serve_dynamo.py
+    if enable_system_app:
+        env["DYNAMO_SYSTEM_APP_ENABLED"] = "true"
+        if system_app_port:
+            # Throw if not standalone mode. Should only be set in standalone mode.
+            # TODO: This might still cause issues if we are running in standalone, but have multiple workers, need to figure this one out
+            if not standalone:
+                raise ValueError(
+                    "Specifying system app port is only supported in standalone mode (i.e --service-name is set)"
+                )
+            env["DYNAMO_SYSTEM_APP_PORT"] = str(system_app_port)
+        if system_app_host:
+            env["DYNAMO_SYSTEM_APP_HOST"] = system_app_host
+        # Only set use_default_health_checks if explicitly enabled
+        if use_default_health_checks:
+            env["DYNAMO_SYSTEM_APP_USE_DEFAULT_HEALTH_CHECKS"] = "true"
+            logger.info("Default health checks enabled for system app")
+
     if service_name and service_name != svc.name:
         svc = svc.find_dependent_by_name(service_name)
     num_workers, resource_envs = allocator.get_resource_envs(svc)
@@ -244,7 +267,8 @@ def serve_dynamo_graph(
                     dependency_map[name] = uri
                 # reserve one more to avoid conflicts
                 port_stack.enter_context(reserve_free_port())
-
+        else:
+            namespace, _ = svc.dynamo_address()
         dynamo_args = [
             "-m",
             _DYNAMO_WORKER_SCRIPT,

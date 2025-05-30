@@ -38,3 +38,11 @@ dependencies:
     version: 11.1.0
     repository: "https://charts.bitnami.com/bitnami"
     condition: etcd.enabled
+  - name: postgresql
+    version: 16.6.2
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: postgresql.enabled
+  - name: minio
+    version: 16.0.2
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: minio.enabled

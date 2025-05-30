@@ -12,7 +12,7 @@
     * [llama.cpp](#llamacpp)
     * [Sglang](#sglang)
     * [Vllm](#vllm)
-    * [TensorRT-LLM](#tensorrt-llm-engine)
+    * [TensorRT-LLM](#trtllm)
     * [Echo Engines](#echo-engines)
     * [Writing your own engine in Python](#writing-your-own-engine-in-python)
 * [Batch mode](#batch-mode)
@@ -28,7 +28,7 @@ It supports these engines: mistralrs, llamacpp, sglang, vllm, and tensorrt-llm. 
 
 Usage:
 ```
-dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv]
+dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv]
 ```
 
 Example: `dynamo run Qwen/Qwen3-0.6B`
@@ -305,10 +305,10 @@ If you have multiple GPUs, mistral.rs does automatic tensor parallelism. You do 
 
 #### llamacpp
 
-Currently [llama.cpp](https://github.com/ggml-org/llama.cpp) is not included by default. Build it like this:
+[llama.cpp](https://github.com/ggml-org/llama.cpp) is built for CPU by default. For an optimized build pass the appropriate feature flag (highly recommended):
 
 ```
-cargo build --features llamacpp[,cuda|metal|vulkan] -p dynamo-run
+cargo build --features cuda|metal|vulkan -p dynamo-run
 ```
 
 ```
@@ -318,7 +318,7 @@ dynamo-run out=llamacpp ~/llms/Qwen3-0.6B-Q8_0.gguf # From https://huggingface.c
 
 Note that in some cases we are unable to extract the tokenizer from the GGUF, and so a Hugging Face checkout of a matching model must also be passed. Dynamo uses the weights from the GGUF and the pre-processor (`tokenizer.json`, etc) from the `--model-config`:
 ```
-dynamo-run out=llamacpp ~/llms/Llama-4-Scout-17B-16E-Instruct-UD-IQ1_S.gguf --model-config ~/llms/Llama-4-Scout-17B-16E-Instruct
+dynamo-run out=llamacpp ~/llms/Llama-4-Scout-17B-16E-Instruct-UD-IQ1_S.gguf --context-length 32768 --model-config ~/llms/Llama-4-Scout-17B-16E-Instruct
 ```
 
 If you have multiple GPUs, llama.cpp does automatic tensor parallelism. You do not need to pass any extra flags to dynamo-run to enable it.
@@ -414,6 +414,8 @@ Inside that virtualenv:
 
 To pass extra arguments to the vllm engine see [Extra engine arguments](#extra-engine-arguments) below.
 
+vllm attempts to allocate enough KV cache for the full context length at startup. If that does not fit in your available memory pass `--context-length <value>`.
+
 **Multi-GPU**
 
 Pass `--tensor-parallel-size <NUM-GPUS>` to `dynamo-run`.
@@ -435,10 +437,13 @@ Startup can be slow so you may want to `export DYN_LOG=debug` to see progress.
 
 Shutdown: `ray stop`
 
-#### TensorRT-LLM engine
+#### trtllm
 
-To run a TRT-LLM model with dynamo-run we have included a python based [async engine] (https://github.com/ai-dynamo/dynamo/blob/main/examples/tensorrt_llm/engines/agg_engine.py).
-To configure the TensorRT-LLM async engine please see [llm_api_config.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/tensorrt_llm/configs/llm_api_config.yaml). The file defines the options that need to be passed to the LLM engine. Follow the steps below to serve trtllm on dynamo run.
+Using [TensorRT-LLM's LLM API](https://nvidia.github.io/TensorRT-LLM/llm-api/), a high-level Python API.
+
+You can use `--extra-engine-args` to pass extra arguments to LLM API engine.
+
+The trtllm engine requires requires [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`) to be running.
 
 ##### Step 1: Build the environment
 
@@ -452,7 +457,7 @@ See instructions [here](https://github.com/ai-dynamo/dynamo/blob/main/examples/t
 
 Execute the following to load the TensorRT-LLM model specified in the configuration.
 ```
-dynamo run out=pystr:/workspace/examples/tensorrt_llm/engines/trtllm_engine.py  -- --engine_args /workspace/examples/tensorrt_llm/configs/llm_api_config.yaml
+dynamo-run in=http out=trtllm TinyLlama/TinyLlama-1.1B-Chat-v1.0
 ```
 
 #### Echo Engines
@@ -527,6 +532,20 @@ Pass it like this:
 ```
 dynamo-run out=sglang ~/llms/Llama-3.2-3B-Instruct --extra-engine-args sglang_extra.json
 ```
+
+The tensorrtllm backend also support passing any argument the engine accepts. However, in this case config should be a yaml file.
+
+```
+backend: pytorch
+kv_cache_config:
+  event_buffer_max_size: 1024
+```
+
+Pass it like this:
+```
+dynamo-run in=http out=trtllm TinyLlama/TinyLlama-1.1B-Chat-v1.0 --extra-engine-args trtllm_extra.yaml
+```
+
 ### Writing your own engine in Python
 
 Note: This section replaces "bring-your-own-engine".
@@ -589,6 +608,11 @@ The `model_type` can be:
 - ModelType.Backend. Dynamo handles pre-processing. Your `generate` method receives a `request` dict containing a `token_ids` array of int. It must return a dict also containing a `token_ids` array and an optional `finish_reason` string.
 - ModelType.Chat. Your `generate` method receives a `request` and must return a response dict of type [OpenAI Chat Completion](https://platform.openai.com/docs/api-reference/chat). Your engine handles pre-processing.
 - ModelType.Completion. Your `generate` method receives a `request` and must return a response dict of the older [Completions](https://platform.openai.com/docs/api-reference/completions). Your engine handles pre-processing.
+
+`register_llm` can also take the following kwargs:
+- `model_name`: The name to call the model. Your incoming HTTP requests model name must match this. Defaults to the hugging face repo name, the folder name, or the GGUF file name.
+- `context_length`: Max model length in tokens. Defaults to the model's set max. Only set this if you need to reduce KV cache allocation to fit into VRAM.
+- `kv_cache_block_size`: Size of a KV block for the engine, in tokens. Defaults to 16.
 
 Here are some example engines:
 

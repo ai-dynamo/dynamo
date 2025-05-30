@@ -208,7 +208,7 @@ impl ModelWatcher {
                     RouterMode::KV => {
                         let chooser = self
                             .manager
-                            .kv_chooser_for(&model_entry.name, &component)
+                            .kv_chooser_for(&model_entry.name, &component, card.kv_cache_block_size)
                             .await?;
                         let kv_push_router = KvPushRouter::new(router, chooser);
                         ServiceBackend::from_engine(Arc::new(kv_push_router))
@@ -243,7 +243,7 @@ impl ModelWatcher {
                     RouterMode::KV => {
                         let chooser = self
                             .manager
-                            .kv_chooser_for(&model_entry.name, &component)
+                            .kv_chooser_for(&model_entry.name, &component, card.kv_cache_block_size)
                             .await?;
                         let kv_push_router = KvPushRouter::new(router, chooser);
                         ServiceBackend::from_engine(Arc::new(kv_push_router))

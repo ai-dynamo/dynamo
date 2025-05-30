@@ -46,7 +46,7 @@ use derive_getters::Getters;
 use educe::Educe;
 use serde::{Deserialize, Serialize};
 use service::EndpointStatsHandler;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, hash::Hash, sync::Arc};
 use validator::{Validate, ValidationError};
 
 mod client;
@@ -122,6 +122,24 @@ pub struct Component {
     // fixed at startup time.
     is_static: bool,
 }
+
+impl Hash for Component {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.namespace.name().hash(state);
+        self.name.hash(state);
+        self.is_static.hash(state);
+    }
+}
+
+impl PartialEq for Component {
+    fn eq(&self, other: &Self) -> bool {
+        self.namespace.name() == other.namespace.name()
+            && self.name == other.name
+            && self.is_static == other.is_static
+    }
+}
+
+impl Eq for Component {}
 
 impl std::fmt::Display for Component {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -237,6 +255,24 @@ pub struct Endpoint {
 
     is_static: bool,
 }
+
+impl Hash for Endpoint {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.component.hash(state);
+        self.name.hash(state);
+        self.is_static.hash(state);
+    }
+}
+
+impl PartialEq for Endpoint {
+    fn eq(&self, other: &Self) -> bool {
+        self.component == other.component
+            && self.name == other.name
+            && self.is_static == other.is_static
+    }
+}
+
+impl Eq for Endpoint {}
 
 impl DistributedRuntimeProvider for Endpoint {
     fn drt(&self) -> &DistributedRuntime {

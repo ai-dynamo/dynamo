@@ -23,7 +23,7 @@ The Dynamo Cloud platform is a comprehensive solution for deploying and managing
 
 The Dynamo cloud platform consists of several key components:
 
-- **Dynamo Operator**: A Kubernetes operator that manages the lifecycle of Dynamo inference graphs from build ➡️ deploy.
+- **Dynamo Operator**: A Kubernetes operator that manages the lifecycle of Dynamo inference graphs from build ➡️ deploy. For more information on the operator, see the [Dynamo Operator Page](dynamo_operator.md).
 - **API Store**: Stores and manages service configurations and metadata related to Dynamo deployments. Needs to be exposed externally.
 - **Custom Resources**: Kubernetes custom resources for defining and managing Dynamo services
 
@@ -148,17 +148,19 @@ kubectl create namespace $NAMESPACE
 kubectl config set-context --current --namespace=$NAMESPACE
 ```
 
-3. Deploy the helm chart using the deploy script:
+3. Deploy the Helm charts (install CRDs first, then platform) using the deployment script:
 
 ```bash
-./deploy.sh
+./deploy.sh --crds
 ```
 
 if you wish to be guided through the deployment process, you can run the deploy script with the `--interactive` flag:
 
 ```bash
-./deploy.sh --interactive
+./deploy.sh --crds --interactive
 ```
+
+omitting `--crds` will skip the CRDs installation/upgrade. This is useful when installing on a shared cluster as CRDs are cluster-scoped resources.
 
 4. **Expose Dynamo Cloud Externally**
 

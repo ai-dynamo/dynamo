@@ -51,7 +51,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AsyncResponseStream>()?;
     m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<llm::disagg_router::DisaggregatedRouter>()?;
-    m.add_class::<llm::kv::KvMetricsPublisher>()?;
+    m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?;
     m.add_class::<llm::preprocessor::OAIChatPreprocessor>()?;
     m.add_class::<llm::backend::Backend>()?;
@@ -61,6 +61,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::AggregatedMetrics>()?;
     m.add_class::<llm::kv::KvMetricsAggregator>()?;
     m.add_class::<llm::kv::KvEventPublisher>()?;
+    m.add_class::<llm::kv::ZmqKvEventPublisher>()?;
+    m.add_class::<llm::kv::ZmqKvEventPublisherConfig>()?;
     m.add_class::<llm::kv::KvRecorder>()?;
     m.add_class::<llm::nats::NatsQueue>()?;
     m.add_class::<http::HttpService>()?;
@@ -92,13 +94,15 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
 }
 
 #[pyfunction]
-#[pyo3(signature = (model_type, endpoint, model_path, model_name=None))]
+#[pyo3(signature = (model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None))]
 fn register_llm<'p>(
     py: Python<'p>,
     model_type: ModelType,
     endpoint: Endpoint,
     model_path: &str,
     model_name: Option<&str>,
+    context_length: Option<usize>,
+    kv_cache_block_size: Option<usize>,
 ) -> PyResult<Bound<'p, PyAny>> {
     let model_type_obj = match model_type {
         ModelType::Chat => llm_rs::model_type::ModelType::Chat,
@@ -115,6 +119,12 @@ fn register_llm<'p>(
             llm_rs::local_model::LocalModel::prepare(&inner_path, None, model_name)
                 .await
                 .map_err(to_pyerr)?;
+        if let Some(context_length) = context_length {
+            local_model.set_context_length(context_length);
+        }
+        if let Some(kv_cache_block_size) = kv_cache_block_size {
+            local_model.set_kv_cache_block_size(kv_cache_block_size);
+        }
 
         // Advertise ourself on etcd so ingress can find us
         local_model

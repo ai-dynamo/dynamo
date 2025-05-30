@@ -21,6 +21,8 @@ pub mod view;
 pub use crate::tokens::TokenBlockError;
 pub use anyhow::Result;
 use nixl_sys::NixlDescriptor;
+
+pub use registry::{GlobalRegistry, RegistrationHandle};
 pub use state::{BlockState, BlockStateInvalid};
 
 use crate::block_manager::{
@@ -38,12 +40,12 @@ use super::{
     WorkerID,
 };
 
+use derive_getters::Getters;
 use std::{
     fmt::Debug,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
-
 use thiserror::Error;
 
 mod private {
@@ -82,6 +84,10 @@ pub trait BlockMetadata: Default + std::fmt::Debug + Clone + Ord + Send + Sync +
     /// Resets the metadata to the default value
     /// If called, the [BlockMetadata::is_reset()] should return true
     fn reset_metadata(&mut self);
+
+    /// The offload priority of the block. Higher priority blocks are offloaded first.
+    /// If the block should not be offloaded, return None.
+    fn offload_priority(&self) -> Option<u64>;
 }
 
 /// Marker trait for types that are mutable blocks
@@ -172,7 +178,7 @@ impl<S: Storage, M: BlockMetadata> Block<S, M> {
     pub fn sequence_hash(&self) -> Result<SequenceHash, BlockError> {
         match self.state() {
             BlockState::Complete(state) => Ok(state.token_block().sequence_hash()),
-            BlockState::Registered(state) => Ok(state.sequence_hash()),
+            BlockState::Registered(state, _) => Ok(state.sequence_hash()),
             _ => Err(BlockError::InvalidState(
                 "Block is not complete".to_string(),
             )),
@@ -188,8 +194,6 @@ impl<S: Storage, M: BlockMetadata> Block<S, M> {
         self.manager = Some(manager);
     }
 
-    // TODO(#967) - Enable with TransferEngine
-    #[allow(dead_code)]
     pub(crate) fn manager(&self) -> Option<&Arc<BlockManager<M>>> {
         self.manager.as_ref()
     }
@@ -248,14 +252,14 @@ pub(crate) trait PrivateBlockExt {
     fn register(
         &mut self,
         registry: &mut registry::BlockRegistry,
-    ) -> Result<PublishHandle, registry::BlockRegistationError>;
+    ) -> Result<Option<PublishHandle>, registry::BlockRegistationError>;
 }
 
 impl<S: Storage, M: BlockMetadata> PrivateBlockExt for Block<S, M> {
     fn register(
         &mut self,
         registry: &mut registry::BlockRegistry,
-    ) -> Result<PublishHandle, registry::BlockRegistationError> {
+    ) -> Result<Option<PublishHandle>, registry::BlockRegistationError> {
         registry.register_block(&mut self.state)
     }
 }
@@ -517,11 +521,24 @@ pub trait BlockDataProviderMut: BlockDataProvider {
     fn block_data_mut(&mut self, _: private::PrivateToken) -> &mut BlockData<Self::StorageType>;
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Getters)]
 pub struct BasicMetadata {
+    #[getter(copy)]
     priority: u32,
+    #[getter(copy)]
     returned_tick: u64,
+    #[getter(copy)]
     acquired_tick: u64,
+}
+
+impl BasicMetadata {
+    pub fn update_priority(&self, priority: u32) -> Self {
+        BasicMetadata {
+            priority,
+            returned_tick: self.returned_tick,
+            acquired_tick: self.acquired_tick,
+        }
+    }
 }
 
 impl BlockMetadata for BasicMetadata {
@@ -535,6 +552,10 @@ impl BlockMetadata for BasicMetadata {
 
     fn reset_metadata(&mut self) {
         self.priority = 0;
+    }
+
+    fn offload_priority(&self) -> Option<u64> {
+        Some(self.priority as u64)
     }
 }
 /// Collection that holds shared storage and layout
@@ -747,11 +768,6 @@ impl<S: Storage, M: BlockMetadata> ImmutableBlock<S, M> {
         Self { block }
     }
 
-    pub fn manager(&self) -> Option<&Arc<BlockManager<M>>> {
-        // Access the underlying Block's manager field directly through deref
-        self.manager.as_ref()
-    }
-
     pub fn mutable_block(&self) -> &Arc<MutableBlock<S, M>> {
         &self.block
     }
@@ -851,9 +867,10 @@ impl<'a, S: Storage, M: BlockMetadata> AsBlockSlice<'a, ImmutableBlock<S, M>>
 
 impl<S: Storage, M: BlockMetadata> ImmutableBlock<S, M> {
     pub async fn enqueue_offload(&self, priority: u64) -> Result<()> {
-        // TODO: Is it ok to silently fail if the block is not managed?
         if let Some(manager) = self.manager() {
             manager.enqueue_offload_block(self, priority).await?;
+        } else {
+            tracing::warn!("Block is not managed. Unable to enqueue offload.");
         }
         Ok(())
     }

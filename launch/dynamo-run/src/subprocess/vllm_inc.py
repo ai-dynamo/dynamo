@@ -11,6 +11,7 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -25,7 +26,7 @@ from vllm.entrypoints.openai.api_server import (
 )
 from vllm.inputs import TokensPrompt
 
-from dynamo.llm import KvMetricsPublisher, ModelType, register_llm
+from dynamo.llm import ModelType, WorkerMetricsPublisher, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 # Only used if you run it manually from the command line
@@ -45,6 +46,7 @@ class Config:
     model_name: Optional[str]
     tensor_parallel_size: int
     kv_block_size: int
+    context_length: int
     extra_engine_args: str
 
 
@@ -57,7 +59,7 @@ class RequestHandler:
         self.component = component
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
-        self.metrics_publisher = KvMetricsPublisher()
+        self.metrics_publisher = WorkerMetricsPublisher()
 
     def setup_kv_metrics(self):
         if not hasattr(self.engine_client, "set_metrics_publisher"):
@@ -153,10 +155,16 @@ async def init(runtime: DistributedRuntime, config: Config):
         "skip_tokenizer_init": True,
         "disable_log_requests": True,
         "enable_prefix_caching": True,
-        "block_size": config.kv_block_size,
         # KV routing relies on logging KV metrics
         "disable_log_stats": False,
     }
+    assert config.kv_block_size > 0, "Must use non-negative integer for KV Block Size"
+    arg_map["block_size"] = config.kv_block_size
+
+    if config.context_length:
+        # Usually we want it to default to the max (from tokenizer_config.json)
+        arg_map["max_model_len"] = config.context_length
+
     if config.extra_engine_args != "":
         json_map = {}
         # extra_engine_args is a filename
@@ -194,7 +202,14 @@ async def init(runtime: DistributedRuntime, config: Config):
     engine_client = await engine_context.__aenter__()
 
     await register_llm(
-        ModelType.Backend, endpoint, config.model_path, config.model_name
+        ModelType.Backend,
+        endpoint,
+        config.model_path,
+        config.model_name,
+        context_length=arg_map.get(
+            "max_model_len", None
+        ),  # if None, takes length from tokenizer
+        kv_cache_block_size=arg_map["block_size"],
     )
     handler = RequestHandler(component, engine_client, default_sampling_params)
     handler.setup_kv_metrics()
@@ -233,6 +248,12 @@ def cmd_line_args():
         "--kv-block-size", type=int, default=16, help="Size of a KV cache block."
     )
     parser.add_argument(
+        "--context-length",
+        type=int,
+        default=None,
+        help="Max model context length. Defaults to models max, usually model_max_length from tokenizer_config.json. Reducing this reduces VRAM requirements.",
+    )
+    parser.add_argument(
         "--extra-engine-args",
         type=str,
         default="",
@@ -263,6 +284,7 @@ def cmd_line_args():
     config.endpoint = parsed_endpoint_name
     config.tensor_parallel_size = args.tensor_parallel_size
     config.kv_block_size = args.kv_block_size
+    config.context_length = args.context_length
     config.extra_engine_args = args.extra_engine_args
 
     return config

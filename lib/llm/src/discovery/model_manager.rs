@@ -58,6 +58,10 @@ impl ModelManager {
         }
     }
 
+    pub fn get_model_entries(&self) -> Vec<ModelEntry> {
+        self.entries.lock().unwrap().values().cloned().collect()
+    }
+
     pub fn has_model_any(&self, model: &str) -> bool {
         self.chat_completion_engines.read().unwrap().contains(model)
             || self.completion_engines.read().unwrap().contains(model)
@@ -178,11 +182,23 @@ impl ModelManager {
         &self,
         model_name: &str,
         component: &Component,
+        kv_cache_block_size: usize,
     ) -> anyhow::Result<Arc<KvRouter>> {
         if let Some(kv_chooser) = self.get_kv_chooser(model_name) {
+            // Check if the existing router has a different block size
+            if kv_chooser.block_size() != kv_cache_block_size {
+                tracing::warn!(
+                    model_name = %model_name,
+                    existing_block_size = %kv_chooser.block_size(),
+                    requested_block_size = %kv_cache_block_size,
+                    "KV Router block size mismatch! Model is requesting a different kv_cache_block_size than the existing router. \
+                     This will cause routing to fail silently. Consider using the same block size or restarting the router."
+                );
+            }
             return Ok(kv_chooser);
         }
-        self.create_kv_chooser(model_name, component).await
+        self.create_kv_chooser(model_name, component, kv_cache_block_size)
+            .await
     }
 
     fn get_kv_chooser(&self, model_name: &str) -> Option<Arc<KvRouter>> {
@@ -194,14 +210,10 @@ impl ModelManager {
         &self,
         model_name: &str,
         component: &Component,
+        kv_cache_block_size: usize,
     ) -> anyhow::Result<Arc<KvRouter>> {
         let selector = Box::new(DefaultWorkerSelector {});
-        let chooser = KvRouter::new(
-            component.clone(),
-            crate::DEFAULT_KV_BLOCK_SIZE,
-            Some(selector),
-        )
-        .await?;
+        let chooser = KvRouter::new(component.clone(), kv_cache_block_size, Some(selector)).await?;
         let new_kv_chooser = Arc::new(chooser);
         self.kv_choosers
             .lock()

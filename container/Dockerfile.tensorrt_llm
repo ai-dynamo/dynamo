@@ -16,6 +16,7 @@
 ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
 ARG BASE_IMAGE_TAG="25.04-py3"
 ARG RELEASE_BUILD
+ARG GENAI_PERF_VERSION=0.0.13
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -162,10 +163,10 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
          "${TENSORRTLLM_PIP_WHEEL}" ; \
     fi
 
+ARG GENAI_PERF_VERSION
+
 # Install genai-perf for benchmarking
-# TODO: Move to published pypi tags
-ARG GENAI_PERF_TAG="e67e853413a07a778dd78a55e299be7fba9c9c24"
-RUN pip install "git+https://github.com/triton-inference-server/perf_analyzer.git@${GENAI_PERF_TAG}#subdirectory=genai-perf"
+RUN pip install genai-perf==$GENAI_PERF_VERSION
 
 # Install test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
@@ -194,7 +195,7 @@ RUN apt-get update && \
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.86.0
+    RUST_VERSION=1.87.0
 
 # Define Rust target based on ARCH_ALT ARG
 ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
@@ -203,7 +204,7 @@ ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
 RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
     # TODO: Add SHA check back based on RUSTARCH
     chmod +x rustup-init && \
-    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
+    ./rustup-init -y --no-modify-path --profile default --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
     rm rustup-init && \
     chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
@@ -272,13 +273,11 @@ COPY components /workspace/components
 COPY launch /workspace/launch
 COPY deploy/sdk /workspace/deploy/sdk
 
-# Build Rust crate binaries packaged with the wheel
-RUN cargo build --release --locked --features mistralrs,python \
-    -p dynamo-run \
-    -p llmctl \
-    # Multiple http named crates are present in dependencies, need to specify the path
-    -p file://$PWD/components/http \
-    -p metrics
+RUN cargo build \
+	--release \
+	--locked \
+	--features dynamo-llm/block-manager \
+	--workspace
 
 # Build dynamo wheels
 RUN uv build --wheel --out-dir /workspace/dist && \
@@ -296,20 +295,16 @@ RUN uv build --wheel --out-dir /workspace/dist && \
 FROM build AS dev
 
 WORKDIR /workspace
-COPY --from=wheel_builder /workspace/dist/ /workspace/dist/
-COPY --from=wheel_builder /workspace/target/ /workspace/target/
+
+COPY --from=wheel_builder /workspace /workspace
 # Copy Cargo cache to avoid re-downloading dependencies
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
+# Copy rest of the code
 COPY . /workspace
 
-# Build rest of the crates
-# Need to figure out rust caching to avoid rebuilding and remove exclude flags
-RUN cargo build --release --locked --workspace \
-    --exclude dynamo-run \
-    --exclude llmctl \
-    --exclude file://$PWD/components/http \
-    --exclude metrics
+# Build C bindings, creates lib/bindings/c/include
+RUN cd /workspace/lib/bindings/c && cargo build --release --locked
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
@@ -327,6 +322,10 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
 RUN . /opt/dynamo/venv/bin/activate && \
     uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/dist/ai_dynamo*any.whl
+
+# TODO: remove kantoku as a transitive dependency
+RUN . /opt/dynamo/venv/bin/activate && \
+    uv pip uninstall kantoku circus && uv pip install circus==0.19.0
 
 # Install dynamo.runtime and dynamo.llm wheels globally in container for tests
 # TODO: In future, we may use a virtualenv for everything and remove this.

@@ -70,8 +70,8 @@ The script will first detect the number of available GPUs on the current nodes (
 
 After the profiling finishes, two plots will be generated in the `output-dir`. For example, here are the profiling results for `examples/llm/configs/disagg.yaml`:
 
-![Prefill Performance](images/h100_prefill_performance.png)
-![Decode Performance](images/h100_decode_performance.png)
+![Prefill Performance](../images/h100_prefill_performance.png)
+![Decode Performance](../images/h100_decode_performance.png)
 
 For the prefill performance, the script will plot the TTFT for different TP sizes and select the best TP size that meet the target TTFT SLA and delivers the best throughput per GPU. Based on how close the TTFT of the selected TP size is to the SLA, the script will also recommend the upper and lower bounds of the prefill queue size to be used in planner.
 
@@ -83,8 +83,10 @@ The following information will be printed out in the terminal:
 2025-05-16 15:20:24 - __main__ - INFO - Suggested prefill TP:4 (TTFT 48.37 ms, throughput 15505.23 tokens/s/GPU)
 2025-05-16 15:20:24 - __main__ - INFO - Suggested planner upper/lower bound for prefill queue size: 0.24/0.10
 2025-05-16 15:20:24 - __main__ - INFO - Suggested decode TP:4 (ITL 4.83 ms, throughput 51.22 tokens/s/GPU)
-2025-05-16 15:20:24 - __main__ - INFO - Suggested planner upper/lower bound for decode kv cache utilization: 0.10/0.2
+2025-05-16 15:20:24 - __main__ - INFO - Suggested planner upper/lower bound for decode kv cache utilization: 0.20/0.10
 ```
+
+After finding the best TP size for prefill and decode, the script will then interpolate the TTFT with ISL and ITL with active KV cache and decode context length. This is to provide a more accurate estimation of the performance when ISL and OSL changes. The results will be saved to `<output_dir>/<decode/prefill>_tp<best_tp>_interploation`.
 
 ## Usage
 The planner is started automatically as part of Dynamo pipelines when running `dynamo serve`. You can configure the planner just as you would any other component in your pipeline either via YAML configuration or through CLI arguments.
@@ -107,8 +109,9 @@ dynamo serve graphs.disagg:Frontend -f disagg.yaml --Planner.environment=local -
 
 The planner accepts the following configuration options:
 * `namespace` (str, default: "dynamo"): Namespace planner will look at
-* `served-model-name` (str, default: "vllm"): Model name that is being served`
-* `no-operation` (bool, default: false): Do not make any adjustments, just observe the metrics and log to tensorboard.
+* `environment` (str, default: "local"): Environment to run the planner in (local, kubernetes)
+* `served-model-name` (str, default: "vllm"): Model name that is being served
+* `no-operation` (bool, default: false): Do not make any adjustments, just observe the metrics and log to tensorboard
 * `log-dir` (str, default: None): Tensorboard logging directory
 * `adjustment-interval` (int, default: 30): Interval in seconds between scaling adjustments
 * `metric-pulling-interval` (int, default: 1): Interval in seconds between metric pulls
