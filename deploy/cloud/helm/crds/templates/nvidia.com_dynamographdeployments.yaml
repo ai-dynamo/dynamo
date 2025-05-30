@@ -19,6 +19,8 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.4
+    # never delete this resource with helm delete
+    helm.sh/resource-policy: keep
   name: dynamographdeployments.nvidia.com
 spec:
   group: nvidia.com

@@ -22,7 +22,7 @@ use rs::traits::events::EventSubscriber;
 use tracing;
 
 use llm_rs::kv_router::protocols::*;
-use llm_rs::kv_router::publisher::create_stored_blocks;
+use llm_rs::kv_router::publisher::{create_stored_blocks, KvEventSourceConfig};
 
 #[pyclass]
 pub(crate) struct KvRouter {
@@ -63,15 +63,16 @@ impl KvRouter {
 }
 
 #[pyclass]
-pub(crate) struct KvMetricsPublisher {
-    inner: Arc<llm_rs::kv_router::publisher::KvMetricsPublisher>,
+pub(crate) struct WorkerMetricsPublisher {
+    inner: Arc<llm_rs::kv_router::publisher::WorkerMetricsPublisher>,
 }
 
 #[pymethods]
-impl KvMetricsPublisher {
+impl WorkerMetricsPublisher {
     #[new]
     fn new() -> PyResult<Self> {
-        let inner = llm_rs::kv_router::publisher::KvMetricsPublisher::new().map_err(to_pyerr)?;
+        let inner =
+            llm_rs::kv_router::publisher::WorkerMetricsPublisher::new().map_err(to_pyerr)?;
         Ok(Self {
             inner: inner.into(),
         })
@@ -128,7 +129,7 @@ impl KvMetricsPublisher {
 
 #[pyclass]
 #[derive(Clone)]
-pub struct KvEventPublisherFromZmqConfig {
+pub struct ZmqKvEventPublisherConfig {
     #[pyo3(get, set)]
     pub worker_id: i64,
     #[pyo3(get, set)]
@@ -140,7 +141,7 @@ pub struct KvEventPublisherFromZmqConfig {
 }
 
 #[pymethods]
-impl KvEventPublisherFromZmqConfig {
+impl ZmqKvEventPublisherConfig {
     #[new]
     #[pyo3(signature = (
         worker_id,
@@ -164,22 +165,24 @@ impl KvEventPublisherFromZmqConfig {
 }
 
 #[pyclass]
-pub(crate) struct KvEventPublisherFromZmq {
-    inner: llm_rs::kv_router::publisher::KvEventPublisherFromZmq,
+pub(crate) struct ZmqKvEventPublisher {
+    inner: llm_rs::kv_router::publisher::KvEventPublisher,
 }
 
 #[pymethods]
-impl KvEventPublisherFromZmq {
+impl ZmqKvEventPublisher {
     #[new]
-    fn new(component: Component, config: KvEventPublisherFromZmqConfig) -> PyResult<Self> {
-        let mut inner =
-            llm_rs::kv_router::publisher::KvEventPublisherFromZmq::new(config.kv_block_size);
-        inner.start_background_task(
+    fn new(component: Component, config: ZmqKvEventPublisherConfig) -> PyResult<Self> {
+        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
             component.inner,
             config.worker_id,
-            config.zmq_endpoint,
-            config.zmq_topic,
-        );
+            config.kv_block_size,
+            Some(KvEventSourceConfig::Zmq {
+                endpoint: config.zmq_endpoint,
+                topic: config.zmq_topic,
+            }),
+        )
+        .map_err(to_pyerr)?;
         Ok(Self { inner })
     }
 
@@ -203,8 +206,10 @@ impl KvEventPublisher {
             component.inner,
             worker_id,
             kv_block_size,
+            None,
         )
         .map_err(to_pyerr)?;
+
         Ok(Self {
             inner: inner.into(),
             kv_block_size,

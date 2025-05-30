@@ -82,7 +82,7 @@ metrics --component VllmWorker --endpoint load_metrics
 
 **NOTE**: `load_metrics` is currently a
 [hard-coded](https://github.com/ai-dynamo/dynamo/blob/d5220c7b1151372ba3d2a061c7d0a7ed72724789/lib/llm/src/kv_router/publisher.rs#L108)
-endpoint name used for python-based workers that register a `KvMetricsPublisher`.
+endpoint name used for python-based workers that register a `WorkerMetricsPublisher`.
 
 ## Visualization
 

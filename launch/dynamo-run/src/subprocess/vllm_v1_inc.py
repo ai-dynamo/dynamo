@@ -5,11 +5,10 @@
 # Can also be used standalone: `python3 vllm_inc.py` - lots of optional cmd line params
 
 # Setup checklist:
-# - We are in a virtualenv with vllm installed. Must be newer than v0.9.0 (currently pre-release)
-# 1f079540db5f1080a2f61a730da50d3009934c5a - this commit is working for me
+# - We are in a virtualenv with vllm installed. V1 is compatible with v0.9.0
 # Steps:
 # git clone https://github.com/vllm-project/vllm.git
-# cd vllm && git checkout 1f079540db5f1080a2f61a730da50d3009934c5a
+# cd vllm && git checkout v0.9.0
 # uv pip uninstall ai-dynamo-vllm
 # VLLM_USE_PRECOMPILED=1 uv pip install --editable .
 
@@ -34,10 +33,10 @@ from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo.llm import (
-    KvEventPublisherFromZmq,
-    KvEventPublisherFromZmqConfig,
-    KvMetricsPublisher,
     ModelType,
+    WorkerMetricsPublisher,
+    ZmqKvEventPublisher,
+    ZmqKvEventPublisherConfig,
     register_llm,
 )
 from dynamo.runtime import Component, DistributedRuntime, dynamo_worker
@@ -65,10 +64,10 @@ class Config:
 
 
 class DynamoStatLoggerPublisher(StatLoggerBase):
-    """Stat logger publisher. Wrapper for the KvMetricsPublisher to match the StatLoggerBase interface."""
+    """Stat logger publisher. Wrapper for the WorkerMetricsPublisher to match the StatLoggerBase interface."""
 
     def __init__(self, component: Component, dp_rank: int) -> None:
-        self.inner = KvMetricsPublisher()
+        self.inner = WorkerMetricsPublisher()
         self.inner.create_endpoint(component)
         self.dp_rank = dp_rank
 
@@ -248,11 +247,11 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     logger.info("VllmWorker has been initialized")
 
-    zmq_config = KvEventPublisherFromZmqConfig(
+    zmq_config = ZmqKvEventPublisherConfig(
         worker_id=endpoint.lease_id(), kv_block_size=engine_args.block_size
     )
 
-    _ = KvEventPublisherFromZmq(component=component, config=zmq_config)
+    _ = ZmqKvEventPublisher(component=component, config=zmq_config)
 
     handler = RequestHandler(component, engine_client, default_sampling_params)
 

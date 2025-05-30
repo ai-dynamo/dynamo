@@ -60,7 +60,6 @@ def service(
 ) -> Any:
     """Service decorator that's adapter-agnostic"""
     config = ServiceConfig(**kwargs)
-    logger.info(f"inner: {inner} config: {config}")
 
     def decorator(inner: Type[G]) -> ServiceInterface[G]:
         provider = get_target()

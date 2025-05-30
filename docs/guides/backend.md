@@ -73,7 +73,7 @@ see the [Dynamo SDK Docs](../API/sdk.md).
 
 ### Request/Response Types
 
-Request/Response types of endpoints can be defined arbitraily for your use case's needs, as long as
+Request/Response types of endpoints can be defined arbitrarily for your use case's needs, as long as
 the client calling your worker matches the expectations.
 
 Define your request and response types using Pydantic models:
@@ -210,7 +210,7 @@ KV-aware routing is a powerful feature of Dynamo that optimizes for routing
 requests to specific workers while minimizing a specific KV-cache based cost function.
 
 In its simplest form, all a worker needs to do to enable KV-aware routing is to
-publish KV metrics through the `KvMetricsPublisher`, which is consumed
+publish KV metrics through the `WorkerMetricsPublisher`, which is consumed
 by a Dynamo KV Router through the `KvMetricsAggregator`:
 
 ```python
@@ -221,7 +221,7 @@ import logging
 import random
 
 from pydantic import BaseModel
-from dynamo.llm import KvMetricsPublisher
+from dynamo.llm import WorkerMetricsPublisher
 from dynamo.sdk import endpoint, service, dynamo_context
 
 logger = logging.getLogger(__name__)
@@ -241,7 +241,7 @@ class YourWorker:
     def __init__(self):
         # Initialize metrics publisher from Dynamo
         self.component = dynamo_context["component"]
-        self.metrics_publisher = KvMetricsPublisher()
+        self.metrics_publisher = WorkerMetricsPublisher()
         # Register an endpoint for consumers of the KV Metrics
         # (KvMetricsAggregator) to listen/gather on.
         self.metrics_publisher.create_endpoint(self.component)
