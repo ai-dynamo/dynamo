@@ -120,16 +120,16 @@ impl KvEventPublisher {
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
 
         // Create our event source (if any)
-        let source = source_config.map(|config| {
-            KvEventSource::start(
+        let mut source = None;
+        if let Some(config) = source_config {
+            source = Some(KvEventSource::start(
                 component.clone(),
                 kv_block_size,
                 config,
                 cancellation_token.clone(),
                 tx.clone(),
-            )
-            .unwrap()
-        });
+            )?);
+        }
 
         component
             .drt()
@@ -196,10 +196,9 @@ async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
 
                 // Encapsulate in a router event and publish.
                 let router_event = RouterEvent::new(worker_id, event);
-                publisher
-                    .publish(KV_EVENT_SUBJECT, &router_event)
-                    .await
-                    .unwrap();
+                if let Err(e) = publisher.publish(KV_EVENT_SUBJECT, &router_event).await {
+                    tracing::error!("Failed to publish event: {}", e);
+                }
             }
         }
     }
@@ -322,7 +321,7 @@ async fn start_zmq_listener(
                     if let Some(event) = convert_event(raw_event, seq, kv_block_size, &warning_count) {
                         if tx.send(event).is_err() {
                             tracing::warn!("Failed to send message to channel - receiver dropped");
-                            break;
+                            return;
                         }
                     }
                 }
