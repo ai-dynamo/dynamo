@@ -175,7 +175,7 @@ def get_test_deployment_graphs():
         expected_response=["bus"],
     )
 
-    eldoria_payload = Payload(
+    text_payload = Payload(
         payload={
             "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             "messages": [
@@ -201,7 +201,7 @@ def get_test_deployment_graphs():
                 "v1/chat/completions",
                 completions_response_handler,
             ),
-            eldoria_payload,
+            text_payload,
         ),
         "sglang_agg": (
             DeploymentGraph(
@@ -211,7 +211,7 @@ def get_test_deployment_graphs():
                 "v1/chat/completions",
                 completions_response_handler,
             ),
-            eldoria_payload,
+            text_payload,
         ),
         "disagg": (
             DeploymentGraph(
@@ -221,7 +221,7 @@ def get_test_deployment_graphs():
                 "v1/chat/completions",
                 completions_response_handler,
             ),
-            eldoria_payload,
+            text_payload,
         ),
         "agg_router": (
             DeploymentGraph(
@@ -231,7 +231,7 @@ def get_test_deployment_graphs():
                 "v1/chat/completions",
                 completions_response_handler,
             ),
-            eldoria_payload,
+            text_payload,
         ),
         "disagg_router": (
             DeploymentGraph(
@@ -241,7 +241,7 @@ def get_test_deployment_graphs():
                 "v1/chat/completions",
                 completions_response_handler,
             ),
-            eldoria_payload,
+            text_payload,
         ),
         "multimodal_agg": (
             DeploymentGraph(

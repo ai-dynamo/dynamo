@@ -19,9 +19,91 @@ import socket
 import subprocess
 import time
 from contextlib import contextmanager
-from typing import Optional, Union, List
+from typing import List, Optional, Union
 
 import requests
+
+
+class ManagedProcess:
+    _processes = []
+
+    def __init__(
+        self,
+        command: List[str],
+        env: Optional[dict] = None,
+        check_ports: Optional[List[int]] = None,
+        timeout: int = 300,
+        cwd: Optional[str] = None,
+        output: bool = False,
+        data_dir: Optional[str] = None,
+        ensure_not_running: bool = False,
+    ):
+        self.command = command
+        self.env = env
+        self.check_ports = check_ports or []
+        self.timeout = timeout
+        self.cwd = cwd
+        self.output = output
+        self.data_dir = data_dir
+        self.ensure_not_running = ensure_not_running
+        self.proc = None
+
+    def __enter__(self):
+        global _processes
+        if self.data_dir:
+            cleanup_directory(self.data_dir)
+        if self.ensure_not_running:
+            for proc in _processes:
+                if proc.command == self.command:
+                    raise RuntimeError("Process is already running")
+        print(f"Running command: {' '.join(self.command)} in {self.cwd or os.getcwd()}")
+
+        stdin = subprocess.DEVNULL
+        stdout = subprocess.DEVNULL
+        stderr = subprocess.DEVNULL
+        if self.output:
+            stdin = None
+            stdout = None
+            stderr = None
+
+        self.proc = subprocess.Popen(
+            self.command,
+            env=self.env or os.environ.copy(),
+            cwd=self.cwd,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        start_time = time.time()
+
+        if self.check_ports:
+            print(f"Waiting for ports: {self.check_ports}")
+            while time.time() - start_time < self.timeout:
+                if all(is_port_open(p) for p in self.check_ports):
+                    print(f"All ports {self.check_ports} are ready")
+                    break
+                time.sleep(0.1)
+            else:
+                self.proc.terminate()
+                raise TimeoutError(f"Ports {self.check_ports} not ready in time")
+
+        _processes.append(self)
+        return self.proc
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        global _processes
+        if self.proc:
+            print(f"Terminating process: {self.command[0]}")
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                print("Process did not terminate gracefully, killing it")
+                self.proc.kill()
+                self.proc.wait()
+            _processes.remove(self)
+        if self.data_dir:
+            cleanup_directory(self.data_dir)
 
 
 @contextmanager
@@ -102,7 +184,9 @@ def cleanup_directory(path: str) -> None:
         print(f"Warning: Failed to clean up directory {path}: {e}")
 
 
-def check_service_health(url: str, timeout: int = 5, max_retries: int = 3, retry_interval: float = 1.0) -> bool:
+def check_service_health(
+    url: str, timeout: int = 5, max_retries: int = 3, retry_interval: float = 1.0
+) -> bool:
     """Check if a service is healthy by making HTTP requests."""
     for attempt in range(max_retries):
         try:
@@ -120,13 +204,15 @@ def check_service_health(url: str, timeout: int = 5, max_retries: int = 3, retry
                     return True
         except requests.RequestException as e:
             print(f"Health check failed: {e}")
-        
+
         time.sleep(retry_interval)
-    
+
     return False
 
 
-def wait_for_service_health(url: str, timeout: int = 60, check_interval: float = 1.0) -> bool:
+def wait_for_service_health(
+    url: str, timeout: int = 60, check_interval: float = 1.0
+) -> bool:
     """Wait for a service to become healthy."""
     start_time = time.time()
     while time.time() - start_time < timeout:

@@ -12,3 +12,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import pytest
+
+from tests.e2e.dynamo_client import DynamoRunProcess
+from tests.utils import find_free_port
+
+
+# pytest fixture for DynamoRunProcess
+@pytest.fixture()
+def dynamo_run(backend, model, input_type, timeout):
+    """
+    Create and start a DynamoRunProcess for testing.
+    """
+    port = find_free_port()
+    with DynamoRunProcess(
+        model=model, backend=backend, port=port, input_type=input_type, timeout=timeout
+    ) as process:
+        yield process

@@ -22,14 +22,15 @@ from io import StringIO
 from typing import Optional
 
 import requests
-from tests.utils import find_free_port, check_service_health
-import pytest
+
+from tests.utils import check_service_health, find_free_port
 
 
 class DynamoRunProcess:
     """
     Manages a dynamo-run process with various input/output options.
     """
+
     def __init__(self, model, backend, port=None, input_type="text", timeout=300):
         self.port = port or find_free_port()
         self.model = model
@@ -89,6 +90,7 @@ class DynamoRunProcess:
                     return "data" in data and len(data["data"]) > 0
                 except Exception:
                     return False
+
             ready = check_service_health(
                 f"{self.url}/v1/models",
                 max_retries=int(self._timeout * 2),  # retry every 0.5s
@@ -100,17 +102,21 @@ class DynamoRunProcess:
                 self._ready.set()
             else:
                 self.stop()
-                raise TimeoutError(f"DynamoRun process failed to start within {self._timeout}s (HTTP health check)")
+                raise TimeoutError(
+                    f"DynamoRun process failed to start within {self._timeout}s (HTTP health check)"
+                )
         else:
             # Wait for prompt in text mode
             if not self._wait_for_ready(self._timeout):
                 self.stop()
-                raise TimeoutError(f"DynamoRun process failed to start within {self._timeout}s")
+                raise TimeoutError(
+                    f"DynamoRun process failed to start within {self._timeout}s"
+                )
 
     def _capture_pty_output(self):
         assert self.parent_fd
         assert self.process
-        
+
         while True:
             try:
                 data = os.read(self.parent_fd, 1024).decode(errors="replace")
@@ -175,22 +181,35 @@ def send_chat_completion_request(url, model, prompt, stream=False, max_tokens=10
     # Define a retry mechanism for the request
     max_retries = 5
     retry_delay = 1
-    
+
     for attempt in range(max_retries):
         try:
             if stream:
-                with requests.post(f"{url}/v1/chat/completions", json=payload, stream=True) as response:
+                with requests.post(
+                    f"{url}/v1/chat/completions", json=payload, stream=True
+                ) as response:
                     if response.status_code != 200:
-                        raise RuntimeError(f"Request failed with status {response.status_code}: {response.text}")
-                        
+                        raise RuntimeError(
+                            f"Request failed with status {response.status_code}: {response.text}"
+                        )
+
                     chunks = []
                     for line in response.iter_lines():
                         if line and b"DONE" not in line:
                             try:
                                 completion = json.loads(line.replace(b"data:", b""))
-                                if "choices" in completion and len(completion["choices"]) > 0:
-                                    if "delta" in completion["choices"][0] and "content" in completion["choices"][0]["delta"]:
-                                        chunks.append(completion["choices"][0]["delta"]["content"])
+                                if (
+                                    "choices" in completion
+                                    and len(completion["choices"]) > 0
+                                ):
+                                    if (
+                                        "delta" in completion["choices"][0]
+                                        and "content"
+                                        in completion["choices"][0]["delta"]
+                                    ):
+                                        chunks.append(
+                                            completion["choices"][0]["delta"]["content"]
+                                        )
                             except json.JSONDecodeError:
                                 pass  # Skip malformed lines
 
@@ -200,17 +219,24 @@ def send_chat_completion_request(url, model, prompt, stream=False, max_tokens=10
             else:
                 response = requests.post(f"{url}/v1/chat/completions", json=payload)
                 if response.status_code != 200:
-                    raise RuntimeError(f"Request failed with status {response.status_code}: {response.text}")
-                    
+                    raise RuntimeError(
+                        f"Request failed with status {response.status_code}: {response.text}"
+                    )
+
                 completion = response.json()
                 if "choices" in completion and len(completion["choices"]) > 0:
-                    if "message" in completion["choices"][0] and "content" in completion["choices"][0]["message"]:
+                    if (
+                        "message" in completion["choices"][0]
+                        and "content" in completion["choices"][0]["message"]
+                    ):
                         return completion["choices"][0]["message"]["content"]
-                
+
                 return None
         except Exception as e:
             if attempt == max_retries - 1:
                 raise  # Re-raise on last attempt
             print(f"Request attempt {attempt+1} failed: {e}. Retrying...")
             time.sleep(retry_delay)
-            retry_delay = int(retry_delay * 1.5)  # Exponential backoff, converted to int 
+            retry_delay = int(
+                retry_delay * 1.5
+            )  # Exponential backoff, converted to int
