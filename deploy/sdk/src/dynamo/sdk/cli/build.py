@@ -129,13 +129,18 @@ class ServiceInfo(BaseModel):
             if DynamoTransport.HTTP in endpoint.transports:
                 api_endpoints.append(f"/{ep_name}")
 
+        image = service.config.image or DYNAMO_IMAGE
+        assert (
+            image is not None
+        ), "Please set DYNAMO_IMAGE environment variable or image field in service config"
+
         # Create config
         config = ServiceConfig(
             name=name,
             service="",
-            resource=service.config.resource.model_dump(),
+            resource=service.config.resources.model_dump(),
             workers=service.config.workers,
-            image=service.config.image,
+            image=image,
             dynamo=service.config.dynamo.model_dump(),
             http_exposed=len(api_endpoints) > 0,
             api_endpoints=api_endpoints,
@@ -423,7 +428,6 @@ class Package:
         s1 = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", name)
         s2 = re.sub("([a-z0-9])([A-Z])", r"\1_\2", s1)
         ret = s2.replace(":", "_")
-        print(f"Converting {name} to snake_case: {ret}")
         return ret
 
     @staticmethod
