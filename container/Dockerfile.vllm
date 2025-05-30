@@ -77,6 +77,11 @@ WORKDIR /workspace
 ### UCX EFA Setup ###
 RUN rm -rf /opt/hpcx/ucx
 RUN rm -rf /usr/local/ucx
+# These headers are missing with the hpcx installer, required
+# by UCX to find RDMA devices
+RUN apt-get update -y && \
+    apt-get install -y   \
+    --reinstall libibverbs-dev rdma-core ibverbs-utils libibumad-dev
 RUN cd /usr/local/src && \
     git clone https://github.com/openucx/ucx.git && \
     cd ucx &&                   \
@@ -91,7 +96,6 @@ RUN cd /usr/local/src && \
     --enable-devel-headers      \
     --with-cuda=/usr/local/cuda \
     --with-verbs                \
-    --with-efa                  \
     --with-dm                   \
     --with-gdrcopy=/usr/local   \
     --enable-mt &&              \
