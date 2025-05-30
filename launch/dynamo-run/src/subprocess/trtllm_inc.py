@@ -178,7 +178,11 @@ async def init(runtime: DistributedRuntime, config: Config):
     async with get_tensorrtllm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
         await register_llm(
-            ModelType.Backend, endpoint, config.model_path, config.model_name
+            ModelType.Backend,
+            endpoint,
+            config.model_path,
+            config.model_name,
+            kv_cache_block_size=config.kv_block_size,
         )
 
         if config.publish_events_and_metrics:

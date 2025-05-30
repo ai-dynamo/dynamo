@@ -38,7 +38,7 @@ spec:
       initContainers:
         - name: wait-for-postgres
           image: busybox
-          command: [ 'sh', '-c', 'until nc -z {{ .Release.Name }}-postgresql 5432; do echo "PostgreSQL is unavailable. Sleeping for 5 seconds"; sleep 5; done;' ]
+          command: [ 'sh', '-c', 'until nc -z {{ .Values.postgresql.host | default (printf "%s-postgresql" .Release.Name) }} {{ .Values.postgresql.port | default 5432 }}; do echo "PostgreSQL is unavailable. Sleeping for 5 seconds"; sleep 5; done;' ]
       containers:
         - name: "api-store"
           securityContext:
@@ -61,17 +61,17 @@ spec:
           {{- end }}
           env:
             - name: DB_HOST
-              value:  "{{ .Release.Name }}-postgresql"
+              value: '{{ .Values.postgresql.host | default (printf "%s-postgresql" .Release.Name) }}'
             - name: DB_USER
-              value: {{ .Values.postgresql.auth.username | quote }}
+              value: '{{ .Values.postgresql.user | default "admin" }}'
             - name: DB_NAME
-              value: {{ .Values.postgresql.auth.database | quote }}
+              value: '{{ .Values.postgresql.database | default "dynamo" }}'
             - name: DB_PORT
-              value: "5432"
+              value: '{{ .Values.postgresql.port | default 5432 }}'
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: "{{ .Release.Name }}-postgresql"
+                  name: '{{ .Values.postgresql.passwordSecret | default (printf "%s-postgresql" .Release.Name) }}'
                   key: password
             - name: SERVICE_PORT
               value: "8000"
@@ -84,15 +84,15 @@ spec:
             - name: DYN_OBJECT_STORE_ID
               valueFrom:
                 secretKeyRef:
-                  name: "{{ .Release.Name }}-minio"
+                  name: '{{ .Values.minio.passwordSecret | default (printf "%s-minio" .Release.Name) }}'
                   key: root-user
             - name: DYN_OBJECT_STORE_KEY
               valueFrom:
                 secretKeyRef:
-                  name: "{{ .Release.Name }}-minio"
+                  name: '{{ .Values.minio.passwordSecret | default (printf "%s-minio" .Release.Name) }}'
                   key: root-password
             - name: DYN_OBJECT_STORE_ENDPOINT
-              value: "http://{{ .Release.Name }}-minio:9000"
+              value: 'http://{{ .Values.minio.host | default (printf "%s-minio" .Release.Name) }}:{{ .Values.minio.port | default 9000 }}'
           envFrom:
           - secretRef:
               name: dynamo-deployment-env

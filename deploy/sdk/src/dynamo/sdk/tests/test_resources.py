@@ -16,6 +16,7 @@
 import pytest
 
 from dynamo.sdk.cli.utils import configure_target_environment
+from dynamo.sdk.core.protocol.interface import ServiceInterface
 from dynamo.sdk.core.runner import TargetEnum
 
 pytestmark = pytest.mark.pre_merge
@@ -40,4 +41,8 @@ def test_gpu_resources(setup_and_teardown):
         def __init__(self) -> None:
             pass
 
-    assert MyService.config is not None  # type: ignore
+    dyn_svc: ServiceInterface = MyService
+    assert dyn_svc.config is not None  # type: ignore
+    assert dyn_svc.config.resources.cpu == "2"
+    assert dyn_svc.config.resources.gpu == "1"
+    assert dyn_svc.config.resources.memory == "4Gi"

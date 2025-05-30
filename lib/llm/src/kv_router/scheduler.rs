@@ -277,8 +277,7 @@ impl WorkerSelector for DefaultWorkerSelector {
             let score = worker_scores.get(&worker_id).copied().unwrap_or(0.0);
 
             // Calculate normalized metrics
-            assert!(ep.data.kv_total_blocks > 0);
-            let gpu_cache_usage = ep.data.kv_active_blocks as f64 / ep.data.kv_total_blocks as f64;
+            let gpu_cache_usage = ep.data.gpu_cache_usage_perc as f64;
             let normalized_waiting = if max_waiting > 0.0 {
                 ep.data.num_requests_waiting as f64 / max_waiting
             } else {
@@ -325,7 +324,7 @@ impl WorkerSelector for DefaultWorkerSelector {
         tracing::debug!("Selected worker: {worker_id}, logit: {best_logit:.3}");
 
         // Log selection metrics
-        let total_blocks = std::cmp::min(request.isl_tokens / block_size, 1) as u64;
+        let total_blocks = std::cmp::max(request.isl_tokens / block_size, 1) as u64;
         let overlap_blocks = request.overlap.scores.get(&worker_id).copied().unwrap_or(0) as usize;
 
         Ok(WorkerSelectionResult {

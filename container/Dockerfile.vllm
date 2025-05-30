@@ -100,9 +100,9 @@ RUN cd /usr/local/src && \
     ldconfig
 
 ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
-ENV CPATH=/usr/include:$CPATH
+ENV CPATH=/usr/include
 ENV PATH=/usr/bin:$PATH
-ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
+ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig
 SHELL ["/bin/bash", "-c"]
 
 WORKDIR /workspace
@@ -154,17 +154,22 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # Install NIXL Python module
 # TODO: Move gds_path selection based on arch into NIXL build
 RUN if [ "$ARCH" = "arm64" ]; then \
-        cd /opt/nixl && uv pip install . --config-settings=setup-args="-Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
+        cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl \
+        --config-settings=setup-args="-Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
     else \
-        cd /opt/nixl && uv pip install . ; \
+        cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl; \
     fi
+
+# Install the wheel
+# TODO: Move NIXL wheel install to the wheel_builder stage
+RUN uv pip install /workspace/wheels/nixl/*.whl
 
 # Install patched vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
 ARG VLLM_REF="0.8.4"
 ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
 ARG VLLM_PATCHED_PACKAGE_NAME="ai_dynamo_vllm"
-ARG VLLM_PATCHED_PACKAGE_VERSION="0.8.4.post1"
+ARG VLLM_PATCHED_PACKAGE_VERSION="0.8.4.post2"
 ARG VLLM_MAX_JOBS=4
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
@@ -254,7 +259,7 @@ ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
 RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
     # TODO: Add SHA check back based on RUSTARCH
     chmod +x rustup-init && \
-    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
+    ./rustup-init -y --no-modify-path --profile default --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
     rm rustup-init && \
     chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
@@ -293,14 +298,14 @@ COPY --from=base --chown=$USER_UID:$USER_GID /opt/dynamo/venv/ /opt/dynamo/venv/
 RUN chown $USERNAME:$USERNAME /opt/dynamo/venv
 COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
 
+# so we can use maturin develop
+RUN uv pip install maturin
+
 USER $USERNAME
 ENV HOME=/home/$USERNAME
 ENV PYTHONPATH=$HOME/dynamo/deploy/sdk/src:$PYTHONPATH:$HOME/dynamo/components/planner/src:$PYTHONPATH
 ENV CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 WORKDIR $HOME
-
-# so we can use maturin develop
-RUN uv pip install maturin
 
 # https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
 RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.commandhistory/.bash_history" \
@@ -367,13 +372,11 @@ COPY components /workspace/components
 COPY launch /workspace/launch
 COPY deploy/sdk /workspace/deploy/sdk
 
-# Build Rust crate binaries packaged with the wheel
-RUN cargo build --release --locked --features mistralrs,python,dynamo-llm/block-manager \
-    -p dynamo-run \
-    -p llmctl \
-    # Multiple http named crates are present in dependencies, need to specify the path
-    -p file://$PWD/components/http \
-    -p metrics
+RUN cargo build \
+	--release \
+	--locked \
+	--features dynamo-llm/block-manager \
+	--workspace
 
 # Build dynamo wheel
 RUN uv build --wheel --out-dir /workspace/dist && \
@@ -395,21 +398,20 @@ ENV CARGO_TARGET_DIR=/workspace/target
 
 WORKDIR /workspace
 
-COPY --from=wheel_builder /workspace/dist/ /workspace/dist/
-COPY --from=wheel_builder /workspace/target/ /workspace/target/
+COPY --from=wheel_builder /workspace /workspace
 COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
 # Copy Cargo cache to avoid re-downloading dependencies
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
+# Copy rest of the code
 COPY . /workspace
 
-# Build rest of the crates
-# Need to figure out rust caching to avoid rebuilding and remove exclude flags
-RUN cargo build --release --locked --features block-manager --workspace \
-    --exclude dynamo-run \
-    --exclude llmctl \
-    --exclude file://$PWD/components/http \
-    --exclude metrics
+# Build C bindings, creates lib/bindings/c/include
+#
+# TODO: In theory the 'cargo build' in earlier stage covers this, we "just" need to copy the
+# `lib/bindings/c/include` folder that build.rs generated across.
+# I couldn't get that to work, hence TODO.
+RUN cd /workspace/lib/bindings/c && cargo build --release --locked
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
@@ -425,6 +427,9 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
 
 RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/dist/ai_dynamo*any.whl
+
+# TODO: remove kantoku as a transitive dependency
+RUN uv pip uninstall kantoku circus && uv pip install circus==0.19.0
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
@@ -445,8 +450,6 @@ ARG GENAI_PERF_VERSION
 # Install genai-perf for benchmarking
 RUN uv pip install genai-perf==$GENAI_PERF_VERSION
 
-COPY . /workspace
-
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
 CMD []
@@ -462,20 +465,50 @@ ENV DYNAMO_HOME=/workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
+# Install build-essential and python3-dev as apt dependencies
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential \
+        python3-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+### COPY BINDINGS ###
+# Copy all bindings (wheels, lib, include) from ci_minimum
+COPY --from=ci_minimum /opt/dynamo/bindings /opt/dynamo/bindings
+### COPY NATS & ETCD ###
+# Copy nats and etcd from base image
+COPY --from=base /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+
+# Copy UCX from base image as plugin for NIXL
+# Copy NIXL source from base image (required for NIXL plugins)
+COPY --from=base /usr/local/ucx /usr/local/ucx
+COPY --from=base /usr/local/nixl /usr/local/nixl
+ARG ARCH_ALT
+ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins
+ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:$LD_LIBRARY_PATH
+
 # Setup the python environment
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3-dev && \
-    rm -rf /var/lib/apt/lists/* && \
-    uv venv $VIRTUAL_ENV --python 3.12 && \
+RUN uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
+
+# Common dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
 
 # Install the wheels and symlink executables to /usr/local/bin so dynamo components can use them
 # Dynamo components currently do not have the VIRTUAL_ENV in their PATH, so we need to symlink the executables
+#Copy NIXL and Dynamo wheels into wheelhouse
+COPY --from=base /workspace/wheels/nixl/*.whl wheelhouse/
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
+    uv pip install nixl --find-links wheelhouse && \
     ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
     rm -r wheelhouse
+
+# TODO: remove kantoku as a transitive dependency
+RUN uv pip uninstall kantoku circus && uv pip install circus==0.19.0
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"

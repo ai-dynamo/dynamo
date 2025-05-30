@@ -88,20 +88,69 @@ dynamo-api-store:
         paths:
           - path: /
             pathType: Prefix
-  postgresql:
-    primary:
-      persistence:
-        enabled: false
-  minio:
+
+## In-cluster minio deployment configuration
+## ref: https://github.com/bitnami/charts/blob/minio/13.3.1/bitnami/minio/values.yaml
+## @param minio.apiIngress.enabled Enable ingress controller resource for MinIO API
+## @param minio.apiIngress.ingressClassName IngressClass that will be be used to implement the Ingress (Kubernetes 1.18+)
+## @param minio.apiIngress.hostname Default host for the ingress resource
+minio:
+  enabled: false
+  mode: standalone
+  auth:
+    rootUser: minioadmin
+    rootPassword: minioadmin
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+    mountPath: /data
+    annotations:
+      helm.sh/resource-policy: keep
+  apiIngress:
+    enabled: false
+    ingressClassName: ""
+    hostname: ""
+    pathType: ImplementationSpecific
+    annotations: {}
+  podSecurityContext:
+    enabled: true
+    fsGroup: 1000
+  containerSecurityContext:
+    enabled: true
+    runAsUser: 1000
+    runAsNonRoot: true
+    readOnlyRootFilesystem: false
+  startupProbe:
+    enabled: true
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  service:
+    type: ClusterIP
+    ports:
+      api: 9000
+      console: 9001
+
+postgresql:
+  enabled: false
+  auth:
+    existingSecret: ""
+    postgresPassword: ""
+    username: "admin"
+    password: "password"
+    database: "dynamo"
+  primary:
     persistence:
-      enabled: true
-      size: 5Gi
-      storageClass: ""
-    apiIngress:
       enabled: false
-      ingressClassName: nginx
-      hostname: minio.example.com
-      pathType: Prefix
 
 etcd:
   enabled: false

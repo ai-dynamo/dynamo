@@ -64,8 +64,7 @@ class Frontend:
 
     def __init__(self):
         """Initialize Frontend service with HTTP server and model configuration."""
-        config = ServiceConfig.get_instance()
-        frontend_config = FrontendConfig(**config.get("Frontend", {}))
+        frontend_config = FrontendConfig(**ServiceConfig.get_parsed_config("Frontend"))
         self.frontend_config = frontend_config
         self.process = None
         self.setup_model()

@@ -63,9 +63,12 @@ class Frontend:
 
     def __init__(self):
         """Initialize Frontend service with HTTP server and model configuration."""
-        config = ServiceConfig.get_instance()
-        self.frontend_config = FrontendConfig(**config.get("Frontend", {}))
+        self.frontend_config = FrontendConfig(
+            **ServiceConfig.get_parsed_config("Frontend")
+        )
         self.process = None
+
+        logger.warning(f"Frontend config: {self.frontend_config}")
 
         self.start_ingress_and_processor()
 
@@ -86,6 +89,8 @@ class Frontend:
             "--router-mode",
             self.frontend_config.router,
         ]
+
+        logger.info(f"Frontend cmd: {cmd}")
 
         self.process = subprocess.Popen(
             cmd,

@@ -294,13 +294,11 @@ COPY components /workspace/components
 COPY launch /workspace/launch
 COPY deploy/sdk /workspace/deploy/sdk
 
-# Build Rust crate binaries packaged with the wheel
-RUN cargo build --release --locked --features mistralrs,python,dynamo-llm/block-manager \
-    -p dynamo-run \
-    -p llmctl \
-    # Multiple http named crates are present in dependencies, need to specify the path
-    -p file://$PWD/components/http \
-    -p metrics
+RUN cargo build \
+	--release \
+	--locked \
+	--features dynamo-llm/block-manager \
+	--workspace
 
 # Build dynamo wheel
 RUN uv build --wheel --out-dir /workspace/dist && \
@@ -322,21 +320,16 @@ ENV CARGO_TARGET_DIR=/workspace/target
 
 WORKDIR /workspace
 
-COPY --from=wheel_builder /workspace/dist/ /workspace/dist/
-COPY --from=wheel_builder /workspace/target/ /workspace/target/
+COPY --from=wheel_builder /workspace /workspace
 COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
 # Copy Cargo cache to avoid re-downloading dependencies
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
+# Copy rest of the code
 COPY . /workspace
 
-# Build rest of the crates
-# Need to figure out rust caching to avoid rebuilding and remove exclude flags
-RUN cargo build --release --locked --features block-manager --workspace \
-    --exclude dynamo-run \
-    --exclude llmctl \
-    --exclude file://$PWD/components/http \
-    --exclude metrics
+# Build C bindings, creates lib/bindings/c/include
+RUN cd /workspace/lib/bindings/c && cargo build --release --locked
 
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
@@ -352,6 +345,9 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
 
 RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/dist/ai_dynamo*any.whl
+
+# TODO: remove kantoku as a transitive dependency
+RUN uv pip uninstall kantoku circus && uv pip install circus==0.19.0
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
@@ -371,8 +367,6 @@ ARG GENAI_PERF_VERSION
 
 # Install genai-perf for benchmarking
 RUN uv pip install genai-perf==$GENAI_PERF_VERSION
-
-COPY . /workspace
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
@@ -403,6 +397,9 @@ COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
     ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
     rm -r wheelhouse
+
+# TODO: remove kantoku as a transitive dependency
+RUN uv pip uninstall kantoku circus && uv pip install circus==0.19.0
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"

@@ -25,7 +25,7 @@ import os
 import typing as t
 from typing import Any
 
-import click
+import typer
 import uvicorn
 import uvloop
 from fastapi.responses import StreamingResponse
@@ -87,46 +87,31 @@ def add_fastapi_routes(app, service, class_instance):
     return added_routes
 
 
-@click.command()
-@click.argument("bento_identifier", type=click.STRING, required=False, default=".")
-@click.option("--service-name", type=click.STRING, required=False, default="")
-@click.option(
-    "--runner-map",
-    type=click.STRING,
-    envvar="BENTOML_RUNNER_MAP",
-    help="JSON string of runners map, default sets to envars `BENTOML_RUNNER_MAP`",
-)
-@click.option(
-    "--worker-env", type=click.STRING, default=None, help="Environment variables"
-)
-@click.option(
-    "--worker-id",
-    required=False,
-    type=click.INT,
-    default=None,
-    help="If set, start the server as a bare worker with the given worker ID. Otherwise start a standalone server with a supervisor process.",
-)
-@click.option(
-    "--custom-component-name",
-    required=False,
-    type=click.STRING,
-    default=None,
-    help="If set, use this custom component name instead of the default service name",
-)
-@click.option(
-    "--target",
-    type=click.STRING,
-    default="dynamo",
-    help="Specify the target: 'dynamo' or 'bento'.",
-)
+app = typer.Typer()
+
+
+@app.command()
 def main(
-    bento_identifier: str,
-    service_name: str,
-    runner_map: str | None,
-    worker_env: str | None,
-    worker_id: int | None,
-    custom_component_name: str | None,
-    target: str,
+    bento_identifier: str = typer.Argument(".", help="The bento identifier"),
+    service_name: str = typer.Option("", help="Service name"),
+    runner_map: str = typer.Option(
+        None,
+        envvar="BENTOML_RUNNER_MAP",
+        help="JSON string of runners map, default sets to envars `BENTOML_RUNNER_MAP`",
+    ),
+    worker_env: str = typer.Option(None, help="Environment variables"),
+    worker_id: int = typer.Option(
+        None,
+        help="If set, start the server as a bare worker with the given worker ID. Otherwise start a standalone server with a supervisor process.",
+    ),
+    custom_component_name: str = typer.Option(
+        None,
+        help="If set, use this custom component name instead of the default service name",
+    ),
+    target: str = typer.Option(
+        "dynamo",
+        help="Specify the target: 'dynamo' or 'bento'.",
+    ),
 ) -> None:
     # hack to avoid bentoml from respawning the workers after their leases are revoked
     os.environ["BENTOML_CONTAINERIZED"] = "true"
@@ -367,4 +352,4 @@ def main(
 
 
 if __name__ == "__main__":
-    main()
+    app()

@@ -14,7 +14,7 @@
 # limitations under the License.
 apiVersion: v2
 name: dynamo-crds
-description: A Helm chart for CRDs of dynamo operator
+description: A Helm chart for dynamo CRDs
 type: application
 version: 0.1.6
 dependencies: []

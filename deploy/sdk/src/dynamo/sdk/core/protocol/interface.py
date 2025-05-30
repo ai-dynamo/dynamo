@@ -17,10 +17,10 @@
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from enum import Enum, auto
-from typing import Any, Dict, Generic, List, Optional, Set, Tuple, Type, TypeVar
+from typing import Any, Dict, Generic, List, Optional, Set, Tuple, Type, TypeVar, Union
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from dynamo.sdk.core.protocol.deployment import Env
 
@@ -59,16 +59,22 @@ class DynamoTransport(Enum):
 class ResourceConfig(BaseModel):
     """Configuration for Dynamo resources"""
 
-    cpu: int = 1
-    memory: str = "100Mi"
-    gpu: str = "0"
+    cpu: str = Field(default="1")
+    memory: str = Field(default="500Mi")
+    gpu: str = Field(default="0")
+
+    @field_validator("gpu", mode="before")
+    @classmethod
+    def convert_gpu_to_string(cls, v: Union[str, int]) -> str:
+        """Convert gpu value to string if it's an integer"""
+        return str(v)
 
 
 class ServiceConfig(BaseModel):
     """Base service configuration that can be extended by adapters"""
 
     dynamo: DynamoConfig
-    resource: ResourceConfig = ResourceConfig()
+    resources: ResourceConfig = ResourceConfig()
     workers: int = 1
     image: str | None = None
     envs: List[Env] | None = None

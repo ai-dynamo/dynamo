@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use super::tokcfg::{raise_exception, tojson, ChatTemplate};
+use super::tokcfg::{raise_exception, strftime_now, tojson, ChatTemplate};
 use super::{ContextMixins, HfTokenizerConfigJsonFormatter, JinjaEnvironment};
 use either::Either;
 use minijinja::Environment;
@@ -50,9 +50,10 @@ impl HfTokenizerConfigJsonFormatter {
         // todo: should we use this: minijinja_contrib::add_to_environment(&mut env);
         env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
 
-        // add custom functions and filters
-        env.add_function("raise_exception", raise_exception);
         env.add_filter("tojson", tojson);
+
+        env.add_function("raise_exception", raise_exception);
+        env.add_function("strftime_now", strftime_now);
 
         let mut supports_add_generation_prompt = None;
 
