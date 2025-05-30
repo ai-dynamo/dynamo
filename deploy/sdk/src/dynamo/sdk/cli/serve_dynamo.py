@@ -87,7 +87,7 @@ def add_fastapi_routes(app, service, class_instance):
     return added_routes
 
 
-app = typer.Typer()
+app = typer.Typer(pretty_exceptions_enable=False)
 
 
 @app.command()
