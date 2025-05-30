@@ -84,6 +84,7 @@
 //! let config = LayoutConfig::builder()
 //!     .num_blocks(10)
 //!     .num_layers(4)
+//!     .outer_dim(1)
 //!     .page_size(16)
 //!     .inner_dim(128)
 //!     .dtype(DType::FP16)
@@ -109,8 +110,12 @@
 //! which extends these layout concepts for NIXL (NVIDIA Interface eXchange Layer), enabling
 //! layouts to be registered and serialized for use in distributed environments.
 
+// todo: coming soon...
+// pub mod distributed;
+
 pub mod nixl;
 
+use derive_getters::Getters;
 use thiserror::Error;
 
 use crate::block_manager::storage::{Storage, StorageAllocator};
@@ -137,6 +142,9 @@ pub enum LayoutError {
 
     #[error("Invalid layer index: {0}")]
     InvalidLayerIndex(usize),
+
+    #[error("Invalid outer index: {0}")]
+    InvalidOuterIndex(usize),
 
     #[error("Operation failed: {0}")]
     OperationFailed(String),
@@ -165,10 +173,18 @@ pub enum LayoutType {
     // Null,
 }
 
+/// Local Memory Region
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Getters)]
+pub struct LocalMemoryRegion {
+    #[getter(copy)]
+    addr: usize,
+
+    #[getter(copy)]
+    size: usize,
+}
+
 /// Core trait for block layouts
-pub trait BlockLayout:
-    BlockLayoutConfig + BlockLayoutLookup + Send + Sync + std::fmt::Debug
-{
+pub trait BlockLayout: BlockLayoutConfig + Send + Sync + std::fmt::Debug {
     /// The type of storage this layout uses
     type StorageType: Storage;
 
@@ -180,6 +196,21 @@ pub trait BlockLayout:
 
     /// Storage type for the layout
     fn storage_type(&self) -> StorageType;
+
+    /// Get the memory region for a specific page [page_size, inner_dim]
+    ///
+    /// # Arguments
+    ///
+    /// * `block_idx` - The index of the block
+    /// * `layer_idx` - The index of the layer
+    /// * `outer_idx` - The index of the outer dimension, e.g. if
+    ///
+    fn memory_region(
+        &self,
+        block_idx: usize,
+        layer_idx: usize,
+        outer_idx: usize,
+    ) -> Result<LocalMemoryRegion, LayoutError>;
 }
 
 /// Configuration for block layouts
@@ -193,20 +224,17 @@ pub trait BlockLayoutConfig: std::fmt::Debug {
     /// Returns the number of layers per block
     fn num_layers(&self) -> usize;
 
+    /// Returns the number of outer dimensions per block
+    /// In some cases, K and V might be indexed separately, so in that example one might have 2 outer dimensions
+    /// For MLA, this is 1.
+    /// The location of the outer dimension in the shape of the tensor layout is defined by the layout type.
+    fn outer_dim(&self) -> usize;
+
     /// Returns the size of each block in bytes
     fn page_size(&self) -> usize;
 
     /// Returns the inner dimension size
     fn inner_dim(&self) -> usize;
-}
-
-/// Trait for looking up memory regions in a block layout
-pub trait BlockLayoutLookup {
-    /// Get the memory region for a specific page [page_size, inner_dim]
-    fn memory_region_addr(&self, block_idx: usize, layer_idx: usize) -> Result<u64, LayoutError>;
-
-    /// Get the memory region for a specific page [page_size, inner_dim]
-    fn memory_region_size(&self) -> usize;
 }
 
 /// Configuration for block layouts
@@ -219,6 +247,10 @@ pub struct LayoutConfig {
     /// Number of layers
     #[validate(range(min = 1))]
     pub num_layers: usize,
+
+    /// Number of outer dimensions
+    #[validate(range(min = 1, max = 2))]
+    pub outer_dim: usize,
 
     /// Page size
     #[validate(range(min = 1))]
@@ -268,11 +300,25 @@ fn align_up(value: usize, alignment: usize) -> usize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct FullyContiguousConfig {
     inner: LayoutConfig,
+
+    /// Minimum contiguous memory region size
+    /// Inner dimension * page size * dtype size
     memory_region_size: usize,
+
+    /// Stride between outer dimensions
+    outer_dim_stride_in_bytes: usize,
+
+    /// Stride between layers
     layer_stride_in_bytes: usize,
+
+    /// Natural block stride
     natural_block_stride: usize,
+
+    /// Block stride in bytes
     block_stride_in_bytes: usize, // Aligned if necessary
-    layout_data_bytes: usize,     // Size of the layout data itself (post base offset)
+
+    /// Size of the layout data itself (post base offset)
+    layout_data_bytes: usize, // Size of the layout data itself (post base offset)
 }
 
 impl FullyContiguousConfig {
@@ -284,7 +330,8 @@ impl FullyContiguousConfig {
 
         let alignment = config.alignment;
         let memory_region_size = config.page_size * config.inner_dim * config.dtype.size_in_bytes();
-        let layer_stride_in_bytes = memory_region_size;
+        let outer_dim_stride_in_bytes = memory_region_size;
+        let layer_stride_in_bytes = outer_dim_stride_in_bytes * config.outer_dim;
         let natural_block_stride = config.num_layers * layer_stride_in_bytes;
 
         let block_stride_in_bytes = if alignment > 1 {
@@ -299,6 +346,7 @@ impl FullyContiguousConfig {
         Ok(Self {
             inner: config,
             memory_region_size,
+            outer_dim_stride_in_bytes,
             layer_stride_in_bytes,
             natural_block_stride,
             block_stride_in_bytes,
@@ -309,11 +357,7 @@ impl FullyContiguousConfig {
     /// Calculate the total number of bytes required for allocation, including initial alignment padding.
     /// Panics if the provided configuration is invalid.
     pub fn required_allocation_size(&self) -> usize {
-        let initial_padding = if self.inner.alignment > 1 {
-            self.inner.alignment - 1
-        } else {
-            0
-        };
+        let initial_padding = self.inner.alignment.saturating_sub(1);
         self.layout_data_bytes + initial_padding
     }
 }
@@ -329,6 +373,10 @@ impl BlockLayoutConfig for FullyContiguousConfig {
 
     fn num_layers(&self) -> usize {
         self.inner.num_layers
+    }
+
+    fn outer_dim(&self) -> usize {
+        self.inner.outer_dim
     }
 
     fn page_size(&self) -> usize {
@@ -508,6 +556,39 @@ impl<S: Storage> BlockLayout for FullyContiguous<S> {
     fn storage_type(&self) -> StorageType {
         self.storage_type.clone()
     }
+
+    fn memory_region(
+        &self,
+        block_idx: usize,
+        layer_idx: usize,
+        outer_idx: usize,
+    ) -> Result<LocalMemoryRegion, LayoutError> {
+        if block_idx >= self.num_blocks() {
+            return Err(LayoutError::InvalidBlockIndex(block_idx));
+        }
+
+        if layer_idx >= self.num_layers() {
+            return Err(LayoutError::InvalidLayerIndex(layer_idx));
+        }
+
+        if outer_idx >= self.outer_dim() {
+            return Err(LayoutError::InvalidOuterIndex(outer_idx));
+        }
+
+        // Start from the aligned base address
+        let aligned_start_addr = self.storage.addr() as usize + self.base_offset;
+
+        // Calculate offset relative to the aligned start using stored config
+        let block_offset = block_idx * self.config.block_stride_in_bytes;
+        let layer_offset = layer_idx * self.config.layer_stride_in_bytes;
+        let outer_offset = outer_idx * self.config.outer_dim_stride_in_bytes;
+        let final_addr = aligned_start_addr + block_offset + layer_offset + outer_offset;
+
+        Ok(LocalMemoryRegion {
+            addr: final_addr,
+            size: self.config.memory_region_size,
+        })
+    }
 }
 
 impl<S: Storage> BlockLayoutConfig for FullyContiguous<S> {
@@ -523,39 +604,16 @@ impl<S: Storage> BlockLayoutConfig for FullyContiguous<S> {
         self.config.inner.num_layers
     }
 
+    fn outer_dim(&self) -> usize {
+        self.config.inner.outer_dim
+    }
+
     fn page_size(&self) -> usize {
         self.config.inner.page_size
     }
 
     fn inner_dim(&self) -> usize {
         self.config.inner.inner_dim
-    }
-}
-
-impl<S: Storage> BlockLayoutLookup for FullyContiguous<S> {
-    fn memory_region_addr(&self, block_idx: usize, layer_idx: usize) -> Result<u64, LayoutError> {
-        if block_idx >= self.num_blocks() {
-            return Err(LayoutError::InvalidBlockIndex(block_idx));
-        }
-
-        if layer_idx >= self.num_layers() {
-            return Err(LayoutError::InvalidLayerIndex(layer_idx));
-        }
-
-        // Start from the aligned base address
-        let aligned_start_addr = self.storage.addr() + self.base_offset as u64;
-
-        // Calculate offset relative to the aligned start using stored config
-        let block_offset = block_idx * self.config.block_stride_in_bytes;
-        let layer_offset = layer_idx * self.config.layer_stride_in_bytes;
-        let final_addr = aligned_start_addr + block_offset as u64 + layer_offset as u64;
-
-        Ok(final_addr)
-    }
-
-    fn memory_region_size(&self) -> usize {
-        // Access via stored dims
-        self.config.memory_region_size
     }
 }
 
@@ -570,6 +628,7 @@ pub mod tests {
 
     const NUM_BLOCKS: usize = 7;
     const NUM_LAYERS: usize = 5;
+    const OUTER_DIM: usize = 2;
     const PAGE_SIZE: usize = 4;
     const INNER_DIM: usize = 13;
     const DTYPE: DType = DType::FP32; // Example dtype
@@ -592,6 +651,7 @@ pub mod tests {
         let config = LayoutConfig {
             num_blocks: NUM_BLOCKS,
             num_layers: NUM_LAYERS,
+            outer_dim: OUTER_DIM,
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: alignment.unwrap_or(1),
@@ -606,6 +666,7 @@ pub mod tests {
         let config = LayoutConfig::builder()
             .num_blocks(NUM_BLOCKS)
             .num_layers(NUM_LAYERS)
+            .outer_dim(OUTER_DIM)
             .page_size(PAGE_SIZE)
             .inner_dim(INNER_DIM)
             .alignment(3)
@@ -632,6 +693,7 @@ pub mod tests {
         let config = LayoutConfig {
             num_blocks: NUM_BLOCKS,
             num_layers: NUM_LAYERS,
+            outer_dim: OUTER_DIM,
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: 1,
@@ -656,15 +718,9 @@ pub mod tests {
 
         assert_eq!(layout.num_blocks(), NUM_BLOCKS);
         assert_eq!(layout.num_layers(), NUM_LAYERS);
+        assert_eq!(layout.outer_dim(), OUTER_DIM);
         assert_eq!(layout.page_size(), PAGE_SIZE);
         assert_eq!(layout.inner_dim(), INNER_DIM);
-    }
-
-    #[test]
-    fn test_fc_memory_region_size() {
-        let layout = setup_layout(None).expect("Layout setup failed");
-        let expected_region_size = PAGE_SIZE * INNER_DIM * DTYPE.size_in_bytes();
-        assert_eq!(layout.memory_region_size(), expected_region_size);
     }
 
     #[test]
@@ -680,7 +736,7 @@ pub mod tests {
         let expected_offset_0_0 =
             calculate_expected_offset(base_addr, 0, 0, block_stride, layer_stride);
         assert_eq!(
-            layout.memory_region_addr(0, 0).unwrap(),
+            layout.memory_region(0, 0, 0).unwrap().addr as u64,
             expected_offset_0_0
         );
 
@@ -689,7 +745,7 @@ pub mod tests {
         let expected_offset_0_last =
             calculate_expected_offset(base_addr, 0, last_layer_idx, block_stride, layer_stride);
         assert_eq!(
-            layout.memory_region_addr(0, last_layer_idx).unwrap(),
+            layout.memory_region(0, last_layer_idx, 0).unwrap().addr as u64,
             expected_offset_0_last
         );
 
@@ -698,7 +754,7 @@ pub mod tests {
         let expected_offset_last_0 =
             calculate_expected_offset(base_addr, last_block_idx, 0, block_stride, layer_stride);
         assert_eq!(
-            layout.memory_region_addr(last_block_idx, 0).unwrap(),
+            layout.memory_region(last_block_idx, 0, 0).unwrap().addr as u64,
             expected_offset_last_0
         );
 
@@ -712,8 +768,9 @@ pub mod tests {
         );
         assert_eq!(
             layout
-                .memory_region_addr(last_block_idx, last_layer_idx)
-                .unwrap(),
+                .memory_region(last_block_idx, last_layer_idx, 0)
+                .unwrap()
+                .addr as u64,
             expected_offset_last_last
         );
 
@@ -729,8 +786,9 @@ pub mod tests {
         );
         assert_eq!(
             layout
-                .memory_region_addr(mid_block_idx, mid_layer_idx)
-                .unwrap(),
+                .memory_region(mid_block_idx, mid_layer_idx, 0)
+                .unwrap()
+                .addr as u64,
             expected_offset_mid_mid
         );
     }
@@ -738,7 +796,7 @@ pub mod tests {
     #[test]
     fn test_fc_invalid_block_index() {
         let layout = setup_layout(None).expect("Layout setup failed");
-        let result = layout.memory_region_addr(NUM_BLOCKS, 0); // Index == num_blocks (out of bounds)
+        let result = layout.memory_region(NUM_BLOCKS, 0, 0); // Index == num_blocks (out of bounds)
         assert!(result.is_err());
         assert!(matches!(
             result.err().unwrap(),
@@ -749,11 +807,22 @@ pub mod tests {
     #[test]
     fn test_fc_invalid_layer_index() {
         let layout = setup_layout(None).expect("Layout setup failed");
-        let result = layout.memory_region_addr(0, NUM_LAYERS); // Index == num_layers (out of bounds)
+        let result = layout.memory_region(0, NUM_LAYERS, 0); // Index == num_layers (out of bounds)
         assert!(result.is_err());
         assert!(matches!(
             result.err().unwrap(),
             LayoutError::InvalidLayerIndex(NUM_LAYERS)
+        ));
+    }
+
+    #[test]
+    fn test_fc_invalid_outer_index() {
+        let layout = setup_layout(None).expect("Layout setup failed");
+        let result = layout.memory_region(0, 0, OUTER_DIM); // Index == num_outer_dims (out of bounds)
+        assert!(result.is_err());
+        assert!(matches!(
+            result.err().unwrap(),
+            LayoutError::InvalidOuterIndex(OUTER_DIM)
         ));
     }
 
@@ -763,6 +832,7 @@ pub mod tests {
         let config = LayoutConfig {
             num_blocks: NUM_BLOCKS,
             num_layers: NUM_LAYERS,
+            outer_dim: OUTER_DIM,
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: 1,
@@ -788,7 +858,7 @@ pub mod tests {
 
         assert_eq!(
             layout.storage.size(),
-            NUM_BLOCKS * NUM_LAYERS * PAGE_SIZE * INNER_DIM * DTYPE.size_in_bytes()
+            NUM_BLOCKS * NUM_LAYERS * OUTER_DIM * PAGE_SIZE * INNER_DIM * DTYPE.size_in_bytes()
         );
     }
 
@@ -800,6 +870,7 @@ pub mod tests {
         let config = LayoutConfig {
             num_blocks: NUM_BLOCKS,
             num_layers: NUM_LAYERS,
+            outer_dim: OUTER_DIM,
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: ALIGNMENT,
@@ -810,11 +881,11 @@ pub mod tests {
         let memory_region_size = PAGE_SIZE * INNER_DIM * DTYPE.size_in_bytes();
         assert_eq!(memory_region_size, 208);
 
-        let natural_block_stride = NUM_LAYERS * memory_region_size;
-        assert_eq!(natural_block_stride, 1040);
+        let natural_block_stride = OUTER_DIM * NUM_LAYERS * memory_region_size;
+        assert_eq!(natural_block_stride, 2080);
 
         let aligned_block_stride = align_up(natural_block_stride, ALIGNMENT);
-        assert_eq!(aligned_block_stride, 1280);
+        assert_eq!(aligned_block_stride, 2304);
 
         // Calculate the expected *allocated* size (data + initial padding)
         let fc_config = FullyContiguousConfig::new(config.clone()).unwrap();
@@ -844,40 +915,40 @@ pub mod tests {
 
         // Check alignment of block starts
         let addr_block_0 = layout
-            .memory_region_addr(0, 0)
+            .memory_region(0, 0, 0)
             .expect("Failed to get addr block 0");
         let addr_block_1 = layout
-            .memory_region_addr(1, 0)
+            .memory_region(1, 0, 0)
             .expect("Failed to get addr block 1");
         let addr_block_2 = layout
-            .memory_region_addr(2, 0)
+            .memory_region(2, 0, 0)
             .expect("Failed to get addr block 2");
 
         // All blocks should now be aligned due to base_offset adjustment
         assert_eq!(
-            addr_block_0 % ALIGNMENT as u64,
+            addr_block_0.addr as u64 % ALIGNMENT as u64,
             0,
             "Block 0 start address is not aligned"
         );
         assert_eq!(
-            addr_block_1 % ALIGNMENT as u64,
+            addr_block_1.addr as u64 % ALIGNMENT as u64,
             0,
             "Block 1 start address is not aligned"
         );
         assert_eq!(
-            addr_block_2 % ALIGNMENT as u64,
+            addr_block_2.addr as u64 % ALIGNMENT as u64,
             0,
             "Block 2 start address is not aligned"
         );
 
         // Verify the difference matches the aligned stride
         assert_eq!(
-            addr_block_1 - addr_block_0,
+            addr_block_1.addr as u64 - addr_block_0.addr as u64,
             aligned_block_stride as u64,
             "Stride between block 0 and 1 mismatch"
         );
         assert_eq!(
-            addr_block_2 - addr_block_1,
+            addr_block_2.addr as u64 - addr_block_1.addr as u64,
             aligned_block_stride as u64,
             "Stride between block 1 and 2 mismatch"
         );

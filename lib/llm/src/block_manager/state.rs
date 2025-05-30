@@ -17,7 +17,7 @@ use super::*;
 
 use super::offload::OffloadManager;
 use super::{
-    block::{Block, ImmutableBlock},
+    block::{Block, GlobalRegistry, ImmutableBlock},
     config::NixlOptions,
 };
 use cudarc::driver::CudaStream;
@@ -51,9 +51,9 @@ pub struct KvBlockManagerState<Metadata: BlockMetadata> {
     nixl_agent: Arc<Option<NixlAgent>>,
     nixl_backends: HashMap<String, Arc<nixl_sys::Backend>>,
 
-    disk_pool: Arc<Option<BlockPool<DiskStorage, Metadata>>>,
-    host_pool: Arc<Option<BlockPool<PinnedStorage, Metadata>>>,
-    device_pool: Arc<Option<BlockPool<DeviceStorage, Metadata>>>,
+    disk_pool: Option<Arc<BlockPool<DiskStorage, Metadata>>>,
+    host_pool: Option<Arc<BlockPool<PinnedStorage, Metadata>>>,
+    device_pool: Option<Arc<BlockPool<DeviceStorage, Metadata>>>,
 
     local_block_set: NixlBlockSet,
     remote_block_sets: RwLock<HashMap<WorkerID, HashMap<usize, RemoteBlocks>>>,
@@ -75,6 +75,8 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
 
         // Create a map of NIXL backends
         let mut nixl_backends: HashMap<String, Arc<nixl_sys::Backend>> = HashMap::new();
+
+        let global_registry = GlobalRegistry::default();
 
         // Create a NIXL agent if NIXL is enabled and instantiate requested backends
         // TODO: Build a map of NIXL backends to block pools/sets
@@ -115,6 +117,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
 
         layout_builder
             .num_layers(model.num_layers)
+            .outer_dim(model.outer_dim)
             .page_size(model.page_size)
             .inner_dim(model.inner_dim)
             .dtype(model.dtype);
@@ -122,10 +125,18 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
         let mut next_block_set_idx = 0;
         let mut local_block_set = block::nixl::NixlBlockSet::new(worker_id);
 
+        let async_rt_handle = match config.runtime.async_runtime {
+            Some(rt) => rt.handle().clone(),
+            None => match Handle::try_current() {
+                Ok(handle) => handle,
+                Err(e) => anyhow::bail!(e),
+            },
+        };
+
         let (disk_pool, disk_blocks) = if let Some(config) = config.disk_layout {
             if nixl_agent.is_none() {
                 tracing::warn!("NIXL is disabled; will not allocate disk blocks.");
-                (Arc::new(None), None)
+                (None, None)
             } else {
                 next_block_set_idx += 1;
                 tracing::debug!("Constructing disk pool.");
@@ -137,12 +148,14 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                     next_block_set_idx,
                     cancellation_token.clone(),
                     worker_id,
+                    global_registry.clone(),
+                    async_rt_handle.clone(),
                 )?;
-                (Arc::new(Some(pool)), Some(blocks))
+                (Some(Arc::new(pool)), Some(blocks))
             }
         } else {
             tracing::debug!("No disk layout provided; will not allocate disk blocks.");
-            (Arc::new(None), None)
+            (None, None)
         };
 
         // Create the host block pool if a host layout is provided
@@ -157,11 +170,13 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 next_block_set_idx,
                 cancellation_token.clone(),
                 worker_id,
+                global_registry.clone(),
+                async_rt_handle.clone(),
             )?;
-            (Arc::new(Some(pool)), Some(blocks))
+            (Some(Arc::new(pool)), Some(blocks))
         } else {
             tracing::debug!("No host layout provided; will not allocate host blocks.");
-            (Arc::new(None), None)
+            (None, None)
         };
 
         // Create the device block pool if a device layout is provided
@@ -176,11 +191,13 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 next_block_set_idx,
                 cancellation_token.clone(),
                 worker_id,
+                global_registry.clone(),
+                async_rt_handle.clone(),
             )?;
-            (Arc::new(Some(pool)), Some(blocks))
+            (Some(Arc::new(pool)), Some(blocks))
         } else {
             tracing::debug!("No device layout provided; will not allocate device blocks.");
-            (Arc::new(None), None)
+            (None, None)
         };
 
         // Finalize the local block set by adding NIXL metadata
@@ -189,20 +206,12 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
             local_block_set.set_nixl_metadata(nixl_agent.get_local_md()?);
         }
 
-        let offload_async_rt_handle = match config.runtime.async_runtime {
-            Some(rt) => rt.handle().clone(),
-            None => match Handle::try_current() {
-                Ok(handle) => handle,
-                Err(e) => anyhow::bail!(e),
-            },
-        };
-
         let offload_manager = OffloadManager::new(
             disk_pool.clone(),
             host_pool.clone(),
             device_pool.clone(),
             nixl_agent.clone(),
-            offload_async_rt_handle,
+            async_rt_handle,
         )?;
 
         let state = Arc::new(Self {
@@ -413,15 +422,15 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
     }
 
     pub fn disk(&self) -> Option<&BlockPool<DiskStorage, Metadata>> {
-        self.disk_pool.as_ref().as_ref()
+        self.disk_pool.as_ref().map(|pool| pool.as_ref())
     }
 
     pub fn host(&self) -> Option<&BlockPool<PinnedStorage, Metadata>> {
-        self.host_pool.as_ref().as_ref()
+        self.host_pool.as_ref().map(|pool| pool.as_ref())
     }
 
     pub fn device(&self) -> Option<&BlockPool<DeviceStorage, Metadata>> {
-        self.device_pool.as_ref().as_ref()
+        self.device_pool.as_ref().map(|pool| pool.as_ref())
     }
 
     pub fn worker_id(&self) -> WorkerID {
@@ -483,10 +492,14 @@ fn create_block_pool<S: Storage + NixlRegisterableStorage, M: BlockMetadata>(
     block_set_idx: usize,
     cancellation_token: CancellationToken,
     worker_id: WorkerID,
+    global_registry: GlobalRegistry,
+    async_runtime: Handle,
 ) -> Result<(BlockPool<S, M>, Vec<Block<S, M>>)> {
     let blocks = block::layout_to_blocks::<_, M>(layout, block_set_idx, worker_id)?;
     let pool = BlockPool::<S, M>::builder()
         .cancel_token(cancellation_token)
+        .global_registry(global_registry)
+        .async_runtime(async_runtime)
         .build()?;
     Ok((pool, blocks))
 }

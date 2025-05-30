@@ -14,18 +14,18 @@
 // limitations under the License.
 
 #![cfg(feature = "block-manager")]
-// Silence warnings about deprecated features (like pyo3::IntoPy::into_py)
-#![allow(deprecated)]
 
 use super::*;
 use pyo3::PyResult;
-use tokio;
 
 mod block;
 mod block_list;
+mod dlpack;
+mod layer;
 
 /// Add bingings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<layer::Layer>()?;
     m.add_class::<block::Block>()?;
     m.add_class::<block_list::BlockList>()?;
     m.add_class::<BlockManager>()?;
@@ -34,9 +34,6 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[pyclass]
 pub struct BlockManager {
-    // TODO: Can this be implicitly created and referenced?
-    tokio_runtime: tokio::runtime::Runtime,
-    // Block manager
     inner: Arc<dynamo_llm::block_manager::ReferenceBlockManager>,
     // TODO: Metadata should be stored in the block manager?
     dtype: dynamo_llm::common::dtype::DType,
@@ -46,10 +43,11 @@ pub struct BlockManager {
 #[pymethods]
 impl BlockManager {
     #[new]
-    #[pyo3(signature = (worker_id, num_layer, page_size, inner_dim, dtype=None, host_num_blocks=None, device_num_blocks=None, device_id=0))]
+    #[pyo3(signature = (worker_id, num_layer, outer_dim, page_size, inner_dim, dtype=None, host_num_blocks=None, device_num_blocks=None, device_id=0))]
     fn new(
         worker_id: u64,
         num_layer: usize,
+        outer_dim: usize,
         page_size: usize,
         inner_dim: usize,
         dtype: Option<String>,
@@ -61,10 +59,11 @@ impl BlockManager {
             dynamo_llm::block_manager::KvManagerRuntimeConfig::builder()
                 .worker_id(worker_id)
                 .build()
-                .unwrap(),
+                .map_err(to_pyerr)?,
         );
         let mut model_config = dynamo_llm::block_manager::KvManagerModelConfig::builder()
             .num_layers(num_layer)
+            .outer_dim(outer_dim)
             .page_size(page_size)
             .inner_dim(inner_dim);
         let mut dtype_ = dynamo_llm::common::dtype::DType::FP16; // Default in block_manager config
@@ -91,14 +90,17 @@ impl BlockManager {
             };
         }
         model_config = model_config.dtype(dtype_.clone());
-        config = config.model(model_config.build().unwrap());
+        config = config.model(model_config.build().map_err(to_pyerr)?);
         if let Some(host_num_blocks) = host_num_blocks {
             config = config.host_layout(
                 dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
                     .num_blocks(host_num_blocks)
-                    .allocator(dynamo_llm::block_manager::storage::PinnedAllocator::new().unwrap())
+                    .allocator(
+                        dynamo_llm::block_manager::storage::PinnedAllocator::new()
+                            .map_err(to_pyerr)?,
+                    )
                     .build()
-                    .unwrap(),
+                    .map_err(to_pyerr)?,
             );
         }
         if let Some(device_num_blocks) = device_num_blocks {
@@ -107,23 +109,22 @@ impl BlockManager {
                     .num_blocks(device_num_blocks)
                     .allocator(
                         dynamo_llm::block_manager::storage::DeviceAllocator::new(device_id)
-                            .unwrap(),
+                            .map_err(to_pyerr)?,
                     )
                     .build()
-                    .unwrap(),
+                    .map_err(to_pyerr)?,
             );
         }
-        let config = config.build().unwrap();
-        let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let block_manager = tokio_runtime.block_on(async {
-            dynamo_llm::block_manager::ReferenceBlockManager::new(config).unwrap()
-        });
+        let config = config.build().map_err(to_pyerr)?;
+        let tokio_runtime = pyo3_async_runtimes::tokio::get_runtime();
         Ok(BlockManager {
-            tokio_runtime: tokio_runtime,
-            inner: Arc::from(block_manager),
+            inner: Arc::from(
+                tokio_runtime
+                    .block_on(async {
+                        dynamo_llm::block_manager::ReferenceBlockManager::new(config)
+                    })
+                    .map_err(to_pyerr)?,
+            ),
             dtype: dtype_,
             device_id: device_id,
         })
@@ -133,9 +134,11 @@ impl BlockManager {
         let blocks = self
             .inner
             .host()
-            .unwrap()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("Host allocator not available")
+            })?
             .allocate_blocks_blocking(count)
-            .unwrap();
+            .map_err(to_pyerr)?;
         // Wrap each block in an enum accounting for Pinned & Device block
         let blocks = blocks
             .into_iter()
@@ -148,13 +151,42 @@ impl BlockManager {
         ))
     }
 
+    #[pyo3(signature = (count))]
+    fn allocate_host_blocks<'py>(
+        &self,
+        py: Python<'py>,
+        count: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let dtype = self.dtype.clone();
+        let device_id = self.device_id;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let blocks = inner
+                .host()
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err("Host allocator not available")
+                })?
+                .allocate_blocks(count)
+                .await
+                .map_err(to_pyerr)?;
+            // Wrap each block in an enum accounting for Pinned & Device block
+            let blocks = blocks
+                .into_iter()
+                .map(|b| block::BlockType::Pinned(b))
+                .collect();
+            Ok(block_list::BlockList::from_rust(blocks, dtype, device_id))
+        })
+    }
+
     fn allocate_device_blocks_blocking(&self, count: usize) -> PyResult<block_list::BlockList> {
         let blocks = self
             .inner
             .device()
-            .unwrap()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("Device allocator not available")
+            })?
             .allocate_blocks_blocking(count)
-            .unwrap();
+            .map_err(to_pyerr)?;
         // Wrap each block in an enum accounting for Pinned & Device block
         let blocks = blocks
             .into_iter()
@@ -165,5 +197,32 @@ impl BlockManager {
             self.dtype.clone(),
             self.device_id,
         ))
+    }
+
+    #[pyo3(signature = (count))]
+    fn allocate_device_blocks<'py>(
+        &self,
+        py: Python<'py>,
+        count: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let dtype = self.dtype.clone();
+        let device_id = self.device_id;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let blocks = inner
+                .device()
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err("Device allocator not available")
+                })?
+                .allocate_blocks(count)
+                .await
+                .map_err(to_pyerr)?;
+            // Wrap each block in an enum accounting for Pinned & Device block
+            let blocks = blocks
+                .into_iter()
+                .map(|b| block::BlockType::Device(b))
+                .collect();
+            Ok(block_list::BlockList::from_rust(blocks, dtype, device_id))
+        })
     }
 }

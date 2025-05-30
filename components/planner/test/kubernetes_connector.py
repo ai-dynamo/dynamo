@@ -25,6 +25,7 @@ def mock_kube_api():
     mock_api = Mock()
     mock_api.get_graph_deployment = AsyncMock()
     mock_api.update_graph_replicas = AsyncMock()
+    mock_api.wait_for_graph_deployment_ready = AsyncMock()
     return mock_api
 
 
@@ -41,9 +42,7 @@ def kubernetes_connector(mock_kube_api_class, monkeypatch):
     monkeypatch.setattr(
         "dynamo.planner.kubernetes_connector.KubernetesAPI", mock_kube_api_class
     )
-    connector = KubernetesConnector()
-    # Set the namespace attribute that's being accessed in the error
-    connector.namespace = "default"
+    connector = KubernetesConnector("default")
     return connector
 
 
@@ -56,15 +55,20 @@ async def test_add_component_increases_replicas(kubernetes_connector, mock_kube_
         "spec": {"services": {"test-component": {"replicas": 1}}},
     }
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.update_graph_replicas.return_value = None
+    mock_kube_api.wait_for_graph_deployment_ready.return_value = None
 
     # Act
     await kubernetes_connector.add_component(component_name)
 
     # Assert
-    mock_kube_api.get_graph_deployment.assert_called_once_with(component_name)
+    mock_kube_api.get_graph_deployment.assert_called_once_with(
+        component_name, kubernetes_connector.namespace
+    )
     mock_kube_api.update_graph_replicas.assert_called_once_with(
         "test-graph", component_name, 2
     )
+    mock_kube_api.wait_for_graph_deployment_ready.assert_called_once_with("test-graph")
 
 
 @pytest.mark.asyncio
@@ -86,6 +90,7 @@ async def test_add_component_with_no_replicas_specified(
     mock_kube_api.update_graph_replicas.assert_called_once_with(
         "test-graph", component_name, 2
     )
+    mock_kube_api.wait_for_graph_deployment_ready.assert_called_once_with("test-graph")
 
 
 @pytest.mark.asyncio

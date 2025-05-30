@@ -71,6 +71,9 @@ pub struct KvManagerModelConfig {
     #[validate(range(min = 1))]
     pub num_layers: usize,
 
+    #[validate(range(min = 1, max = 2))]
+    pub outer_dim: usize,
+
     #[validate(range(min = 1))]
     pub page_size: usize,
 

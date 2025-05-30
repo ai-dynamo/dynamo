@@ -21,6 +21,8 @@ pub mod view;
 pub use crate::tokens::TokenBlockError;
 pub use anyhow::Result;
 use nixl_sys::NixlDescriptor;
+
+pub use registry::{GlobalRegistry, RegistrationHandle};
 pub use state::{BlockState, BlockStateInvalid};
 
 use crate::block_manager::{
@@ -38,12 +40,12 @@ use super::{
     WorkerID,
 };
 
+use derive_getters::Getters;
 use std::{
     fmt::Debug,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
-
 use thiserror::Error;
 
 mod private {
@@ -82,6 +84,10 @@ pub trait BlockMetadata: Default + std::fmt::Debug + Clone + Ord + Send + Sync +
     /// Resets the metadata to the default value
     /// If called, the [BlockMetadata::is_reset()] should return true
     fn reset_metadata(&mut self);
+
+    /// The offload priority of the block. Higher priority blocks are offloaded first.
+    /// If the block should not be offloaded, return None.
+    fn offload_priority(&self) -> Option<u64>;
 }
 
 /// Marker trait for types that are mutable blocks
@@ -172,7 +178,7 @@ impl<S: Storage, M: BlockMetadata> Block<S, M> {
     pub fn sequence_hash(&self) -> Result<SequenceHash, BlockError> {
         match self.state() {
             BlockState::Complete(state) => Ok(state.token_block().sequence_hash()),
-            BlockState::Registered(state) => Ok(state.sequence_hash()),
+            BlockState::Registered(state, _) => Ok(state.sequence_hash()),
             _ => Err(BlockError::InvalidState(
                 "Block is not complete".to_string(),
             )),
@@ -188,8 +194,6 @@ impl<S: Storage, M: BlockMetadata> Block<S, M> {
         self.manager = Some(manager);
     }
 
-    // TODO(#967) - Enable with TransferEngine
-    #[allow(dead_code)]
     pub(crate) fn manager(&self) -> Option<&Arc<BlockManager<M>>> {
         self.manager.as_ref()
     }
@@ -248,14 +252,14 @@ pub(crate) trait PrivateBlockExt {
     fn register(
         &mut self,
         registry: &mut registry::BlockRegistry,
-    ) -> Result<PublishHandle, registry::BlockRegistationError>;
+    ) -> Result<Option<PublishHandle>, registry::BlockRegistationError>;
 }
 
 impl<S: Storage, M: BlockMetadata> PrivateBlockExt for Block<S, M> {
     fn register(
         &mut self,
         registry: &mut registry::BlockRegistry,
-    ) -> Result<PublishHandle, registry::BlockRegistationError> {
+    ) -> Result<Option<PublishHandle>, registry::BlockRegistationError> {
         registry.register_block(&mut self.state)
     }
 }
@@ -393,11 +397,18 @@ pub trait BlockDataExt<S: Storage + NixlDescriptor> {
     /// Returns the number of layers in the block
     fn num_layers(&self) -> usize;
 
+    /// Returns the number of outer dimensions in the block
+    fn num_outer_dims(&self) -> usize;
+
     /// Get a read-only view of this block's storage for a layer
-    fn layer_view(&self, layer_idx: usize) -> BlockResult<view::LayerView<S>>;
+    fn layer_view(&self, layer_idx: usize, outer_idx: usize) -> BlockResult<view::LayerView<S>>;
 
     /// Get a mutable view of this block's storage for a layer
-    fn layer_view_mut(&mut self, layer_idx: usize) -> BlockResult<view::LayerViewMut<S>>;
+    fn layer_view_mut(
+        &mut self,
+        layer_idx: usize,
+        outer_idx: usize,
+    ) -> BlockResult<view::LayerViewMut<S>>;
 
     /// Get a read-only view of this block's storage
     fn block_view(&self) -> BlockResult<view::BlockView<S>>;
@@ -451,21 +462,34 @@ where
         self.layout.num_layers()
     }
 
-    fn layer_view(&self, layer_idx: usize) -> BlockResult<view::LayerView<S>> {
-        let offset = self.layout.memory_region_addr(self.block_idx, layer_idx)?;
-        unsafe { view::LayerView::new(self, offset as usize, self.layout.memory_region_size()) }
+    fn num_outer_dims(&self) -> usize {
+        self.layout.outer_dim()
     }
 
-    fn layer_view_mut(&mut self, layer_idx: usize) -> BlockResult<view::LayerViewMut<S>> {
-        let offset = self.layout.memory_region_addr(self.block_idx, layer_idx)?;
-        unsafe { view::LayerViewMut::new(self, offset as usize, self.layout.memory_region_size()) }
+    fn layer_view(&self, layer_idx: usize, outer_idx: usize) -> BlockResult<view::LayerView<S>> {
+        let mr = self
+            .layout
+            .memory_region(self.block_idx, layer_idx, outer_idx)?;
+        unsafe { view::LayerView::new(self, mr.addr(), mr.size()) }
+    }
+
+    fn layer_view_mut(
+        &mut self,
+        layer_idx: usize,
+        outer_idx: usize,
+    ) -> BlockResult<view::LayerViewMut<S>> {
+        let mr = self
+            .layout
+            .memory_region(self.block_idx, layer_idx, outer_idx)?;
+        unsafe { view::LayerViewMut::new(self, mr.addr(), mr.size()) }
     }
 
     fn block_view(&self) -> BlockResult<view::BlockView<S>> {
         if self.is_fully_contiguous() {
-            let offset = self.layout.memory_region_addr(self.block_idx, 0)?;
-            let size = self.layout.memory_region_size() * self.layout.num_layers();
-            unsafe { view::BlockView::new(self, offset as usize, size) }
+            let mr = self.layout.memory_region(self.block_idx, 0, 0)?;
+            let offset = mr.addr();
+            let size = mr.size() * self.num_layers();
+            unsafe { view::BlockView::new(self, offset, size) }
         } else {
             Err(BlockError::InvalidState(
                 "Block is not fully contiguous".to_string(),
@@ -475,9 +499,10 @@ where
 
     fn block_view_mut(&mut self) -> BlockResult<view::BlockViewMut<S>> {
         if self.is_fully_contiguous() {
-            let offset = self.layout.memory_region_addr(self.block_idx, 0)?;
-            let size = self.layout.memory_region_size() * self.layout.num_layers();
-            unsafe { view::BlockViewMut::new(self, offset as usize, size) }
+            let mr = self.layout.memory_region(self.block_idx, 0, 0)?;
+            let offset = mr.addr();
+            let size = mr.size() * self.num_layers();
+            unsafe { view::BlockViewMut::new(self, offset, size) }
         } else {
             Err(BlockError::InvalidState(
                 "Block is not fully contiguous".to_string(),
@@ -496,11 +521,24 @@ pub trait BlockDataProviderMut: BlockDataProvider {
     fn block_data_mut(&mut self, _: private::PrivateToken) -> &mut BlockData<Self::StorageType>;
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Getters)]
 pub struct BasicMetadata {
+    #[getter(copy)]
     priority: u32,
+    #[getter(copy)]
     returned_tick: u64,
+    #[getter(copy)]
     acquired_tick: u64,
+}
+
+impl BasicMetadata {
+    pub fn update_priority(&self, priority: u32) -> Self {
+        BasicMetadata {
+            priority,
+            returned_tick: self.returned_tick,
+            acquired_tick: self.acquired_tick,
+        }
+    }
 }
 
 impl BlockMetadata for BasicMetadata {
@@ -514,6 +552,10 @@ impl BlockMetadata for BasicMetadata {
 
     fn reset_metadata(&mut self) {
         self.priority = 0;
+    }
+
+    fn offload_priority(&self) -> Option<u64> {
+        Some(self.priority as u64)
     }
 }
 /// Collection that holds shared storage and layout
@@ -626,12 +668,20 @@ impl<S: Storage + NixlDescriptor, M: BlockMetadata> BlockDataExt<S> for MutableB
         self.data.num_layers()
     }
 
-    fn layer_view(&self, layer_idx: usize) -> BlockResult<view::LayerView<S>> {
-        self.data.layer_view(layer_idx)
+    fn num_outer_dims(&self) -> usize {
+        self.data.num_outer_dims()
     }
 
-    fn layer_view_mut(&mut self, layer_idx: usize) -> BlockResult<view::LayerViewMut<S>> {
-        self.data.layer_view_mut(layer_idx)
+    fn layer_view(&self, layer_idx: usize, outer_idx: usize) -> BlockResult<view::LayerView<S>> {
+        self.data.layer_view(layer_idx, outer_idx)
+    }
+
+    fn layer_view_mut(
+        &mut self,
+        layer_idx: usize,
+        outer_idx: usize,
+    ) -> BlockResult<view::LayerViewMut<S>> {
+        self.data.layer_view_mut(layer_idx, outer_idx)
     }
 
     fn block_view(&self) -> BlockResult<view::BlockView<S>> {
@@ -718,11 +768,6 @@ impl<S: Storage, M: BlockMetadata> ImmutableBlock<S, M> {
         Self { block }
     }
 
-    pub fn manager(&self) -> Option<&Arc<BlockManager<M>>> {
-        // Access the underlying Block's manager field directly through deref
-        self.manager.as_ref()
-    }
-
     pub fn mutable_block(&self) -> &Arc<MutableBlock<S, M>> {
         &self.block
     }
@@ -755,11 +800,15 @@ impl<S: Storage + NixlDescriptor, M: BlockMetadata> BlockDataExt<S> for Immutabl
         self.block.num_layers()
     }
 
-    fn layer_view(&self, layer_idx: usize) -> BlockResult<view::LayerView<S>> {
-        self.block.layer_view(layer_idx)
+    fn num_outer_dims(&self) -> usize {
+        self.block.num_outer_dims()
     }
 
-    fn layer_view_mut(&mut self, _: usize) -> BlockResult<view::LayerViewMut<S>> {
+    fn layer_view(&self, layer_idx: usize, outer_idx: usize) -> BlockResult<view::LayerView<S>> {
+        self.block.layer_view(layer_idx, outer_idx)
+    }
+
+    fn layer_view_mut(&mut self, _: usize, _: usize) -> BlockResult<view::LayerViewMut<S>> {
         // This should never be called since ImmutableBlock is immutable,
         // but we need to implement the full trait
         Err(BlockError::InvalidState(
@@ -818,9 +867,10 @@ impl<'a, S: Storage, M: BlockMetadata> AsBlockSlice<'a, ImmutableBlock<S, M>>
 
 impl<S: Storage, M: BlockMetadata> ImmutableBlock<S, M> {
     pub async fn enqueue_offload(&self, priority: u64) -> Result<()> {
-        // TODO: Is it ok to silently fail if the block is not managed?
         if let Some(manager) = self.manager() {
             manager.enqueue_offload_block(self, priority).await?;
+        } else {
+            tracing::warn!("Block is not managed. Unable to enqueue offload.");
         }
         Ok(())
     }
@@ -946,6 +996,7 @@ pub mod nixl {
         fn as_layer_descriptor(
             &self,
             layer_idx: usize,
+            outer_idx: usize,
         ) -> BlockResult<NixlMemoryDescriptor<'_, LayerKind, IsImmutable>>;
     }
 
@@ -961,6 +1012,7 @@ pub mod nixl {
         fn as_layer_descriptor_mut(
             &mut self,
             layer_idx: usize,
+            outer_idx: usize,
         ) -> BlockResult<NixlMemoryDescriptor<'_, LayerKind, IsMutable>>;
     }
 
@@ -974,8 +1026,9 @@ pub mod nixl {
         fn as_layer_descriptor(
             &self,
             layer_idx: usize,
+            outer_idx: usize,
         ) -> BlockResult<NixlMemoryDescriptor<'_, LayerKind, IsImmutable>> {
-            Ok(self.layer_view(layer_idx)?.as_nixl_descriptor())
+            Ok(self.layer_view(layer_idx, outer_idx)?.as_nixl_descriptor())
         }
     }
 
@@ -989,8 +1042,11 @@ pub mod nixl {
         fn as_layer_descriptor_mut(
             &mut self,
             layer_idx: usize,
+            outer_idx: usize,
         ) -> BlockResult<NixlMemoryDescriptor<'_, LayerKind, IsMutable>> {
-            Ok(self.layer_view_mut(layer_idx)?.as_nixl_descriptor_mut())
+            Ok(self
+                .layer_view_mut(layer_idx, outer_idx)?
+                .as_nixl_descriptor_mut())
         }
     }
 
@@ -1188,15 +1244,24 @@ pub mod nixl {
             self.data.num_layers()
         }
 
-        fn layer_view(&self, layer_idx: usize) -> BlockResult<view::LayerView<NixlStorage>> {
-            self.data.layer_view(layer_idx)
+        fn num_outer_dims(&self) -> usize {
+            self.data.num_outer_dims()
+        }
+
+        fn layer_view(
+            &self,
+            layer_idx: usize,
+            outer_idx: usize,
+        ) -> BlockResult<view::LayerView<NixlStorage>> {
+            self.data.layer_view(layer_idx, outer_idx)
         }
 
         fn layer_view_mut(
             &mut self,
             layer_idx: usize,
+            outer_idx: usize,
         ) -> BlockResult<view::LayerViewMut<NixlStorage>> {
-            self.data.layer_view_mut(layer_idx)
+            self.data.layer_view_mut(layer_idx, outer_idx)
         }
 
         fn block_view(&self) -> BlockResult<view::BlockView<NixlStorage>> {
@@ -1224,8 +1289,9 @@ pub mod nixl {
         fn as_layer_descriptor(
             &self,
             layer_idx: usize,
+            outer_idx: usize,
         ) -> BlockResult<NixlMemoryDescriptor<'_, LayerKind, IsImmutable>> {
-            self.data.as_layer_descriptor(layer_idx)
+            self.data.as_layer_descriptor(layer_idx, outer_idx)
         }
     }
 
@@ -1244,8 +1310,9 @@ pub mod nixl {
         fn as_layer_descriptor_mut(
             &mut self,
             layer_idx: usize,
+            outer_idx: usize,
         ) -> BlockResult<NixlMemoryDescriptor<'_, LayerKind, IsMutable>> {
-            self.data.as_layer_descriptor_mut(layer_idx)
+            self.data.as_layer_descriptor_mut(layer_idx, outer_idx)
         }
     }
 
@@ -1733,7 +1800,8 @@ mod tests {
 
         let config = LayoutConfig::builder()
             .num_blocks(10)
-            .num_layers(2)
+            .num_layers(3)
+            .outer_dim(2)
             .page_size(4)
             .inner_dim(13)
             .build()
@@ -1780,6 +1848,7 @@ mod tests {
         let config = LayoutConfig::builder()
             .num_blocks(10)
             .num_layers(2)
+            .outer_dim(1)
             .page_size(4)
             .inner_dim(13)
             .build()
@@ -1803,12 +1872,12 @@ mod tests {
         assert_eq!(mutable_block.num_layers(), 2);
 
         // Test layer_view()
-        let layer_view = mutable_block.layer_view(0).unwrap();
+        let layer_view = mutable_block.layer_view(0, 0).unwrap();
         assert_eq!(layer_view.size(), 4 * 13 * 2); // page_size x inner_dim x dtype_bytes
         assert!(!unsafe { layer_view.as_ptr() }.is_null());
 
         // Test layer_view_mut()
-        let mut layer_view_mut = mutable_block.layer_view_mut(1).unwrap();
+        let mut layer_view_mut = mutable_block.layer_view_mut(1, 0).unwrap();
         assert_eq!(layer_view_mut.size(), 4 * 13 * 2); // page_size x inner_dim x dtype_bytes
         assert!(!unsafe { layer_view_mut.as_mut_ptr() }.is_null());
 
@@ -1833,6 +1902,7 @@ mod tests {
         let config = LayoutConfig::builder()
             .num_blocks(10)
             .num_layers(2)
+            .outer_dim(1)
             .page_size(4)
             .inner_dim(13)
             .build()
@@ -1860,7 +1930,7 @@ mod tests {
         assert_eq!(immutable_block.num_layers(), 2);
 
         // Test layer_view()
-        let layer_view = immutable_block.layer_view(0).unwrap();
+        let layer_view = immutable_block.layer_view(0, 0).unwrap();
         assert_eq!(layer_view.size(), 4 * 13 * 2); // page_size x inner_dim x dtype_bytes
         assert!(!unsafe { layer_view.as_ptr() }.is_null());
 
@@ -1872,7 +1942,7 @@ mod tests {
         // Test that mutable methods return errors
         let mut mut_immutable_block = immutable_block; // We need a mutable reference for these tests
 
-        let layer_view_mut_res = mut_immutable_block.layer_view_mut(0);
+        let layer_view_mut_res = mut_immutable_block.layer_view_mut(0, 0);
         assert!(layer_view_mut_res.is_err());
         if let Err(BlockError::InvalidState(msg)) = layer_view_mut_res {
             assert!(msg.contains("immutable block"));

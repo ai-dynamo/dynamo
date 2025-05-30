@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::sync::Arc;
 
@@ -50,9 +38,6 @@ use crate::{
 
 use dynamo_runtime::traits::events::EventSubscriber;
 
-// TODO: Allow user to change
-pub const DEFAULT_KV_BLOCK_SIZE: usize = 16;
-
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
 pub const KV_EVENT_SUBJECT: &str = "kv_events";
@@ -88,7 +73,7 @@ impl KvRouter {
             .primary_lease()
             .expect("Cannot KV route static workers")
             .primary_token();
-
+        tracing::info!("KV Routing initialized");
         let metrics_aggregator =
             KvMetricsAggregator::new(component.clone(), cancellation_token.clone()).await;
         let indexer = KvIndexer::new(cancellation_token.clone(), block_size);
@@ -144,7 +129,8 @@ impl KvRouter {
     }
 
     /// Give these tokens, find the worker with the best match in it's KV cache.
-    async fn find_best_match(&self, tokens: &[u32]) -> anyhow::Result<i64> {
+    /// Returned overlap amount is in number of blocks.
+    async fn find_best_match(&self, tokens: &[u32]) -> anyhow::Result<(i64, u32)> {
         let isl_tokens = tokens.len();
         let block_size = self.block_size;
 
@@ -156,8 +142,17 @@ impl KvRouter {
             .map(|block| LocalBlockHash(block.block_hash()))
             .collect();
         let overlap_scores = self.indexer.find_matches(local_block_hashes).await?;
-        let worker_id = self.scheduler.schedule(overlap_scores, isl_tokens).await?;
-        Ok(worker_id)
+        let worker_id = self
+            .scheduler
+            .schedule(overlap_scores.clone(), isl_tokens)
+            .await?;
+        let overlap_amount = overlap_scores.scores.get(&worker_id).copied().unwrap_or(0);
+        Ok((worker_id, overlap_amount))
+    }
+
+    /// Get the block size this router was configured with
+    pub fn block_size(&self) -> usize {
+        self.block_size
     }
 }
 
@@ -168,7 +163,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         request: SingleIn<RouterRequest>,
     ) -> Result<ManyOut<Annotated<RouterResponse>>> {
         let (request, ctx) = request.into_parts();
-        let worker_id = self.find_best_match(&request.tokens).await?;
+        let (worker_id, _) = self.find_best_match(&request.tokens).await?;
 
         let response = RouterResponse { worker_id };
         let response = Annotated::from_data(response);
@@ -199,11 +194,16 @@ impl AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<LLMEngineOutput>>, Er
         &self,
         request: SingleIn<BackendInput>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        match &self.inner.client.instances {
+        match self.inner.client.instance_source.as_ref() {
             InstanceSource::Static => self.inner.r#static(request).await,
             InstanceSource::Dynamic(_) => {
-                let instance_id = self.chooser.find_best_match(&request.token_ids).await?;
-                self.inner.direct(request, instance_id).await
+                let (instance_id, overlap_amount) =
+                    self.chooser.find_best_match(&request.token_ids).await?;
+                // Update the request with the estimated prefix hit blocks
+                let (mut backend_input, context) = request.into_parts();
+                backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
+                let updated_request = context.map(|_| backend_input);
+                self.inner.direct(updated_request, instance_id).await
             }
         }
     }

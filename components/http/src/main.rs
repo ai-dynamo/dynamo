@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::Parser;
-use std::sync::Arc;
 
-use dynamo_llm::http::service::{discovery::ModelWatcher, service_v2::HttpService};
+use dynamo_llm::discovery::{ModelWatcher, MODEL_ROOT_PATH};
+use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_runtime::{
-    component, logging, pipeline::RouterMode, transports::etcd::PrefixWatcher, DistributedRuntime,
-    Result, Runtime, Worker,
+    logging, pipeline::RouterMode, transports::etcd::PrefixWatcher, DistributedRuntime, Result,
+    Runtime, Worker,
 };
 
 #[derive(Parser)]
@@ -45,7 +45,7 @@ async fn app(runtime: Runtime) -> Result<()> {
         .port(args.port)
         .host(args.host)
         .build()?;
-    let manager = http_service.model_manager().clone();
+    let manager = http_service.state().manager_clone();
 
     // todo - use the IntoComponent trait to register the component
     // todo - start a service
@@ -56,17 +56,16 @@ async fn app(runtime: Runtime) -> Result<()> {
     // the cli when operating on an `http` component will validate the namespace.component is
     // registered with HttpServiceComponentDefinition
 
-    let watch_obj = Arc::new(
-        ModelWatcher::new(distributed.clone(), manager.clone(), RouterMode::Random).await?,
-    );
+    let watch_obj = ModelWatcher::new(distributed.clone(), manager, RouterMode::Random);
 
     if let Some(etcd_client) = distributed.etcd_client() {
-        let models_watcher: PrefixWatcher = etcd_client
-            .kv_get_and_watch_prefix(component::MODEL_ROOT_PATH)
-            .await?;
+        let models_watcher: PrefixWatcher =
+            etcd_client.kv_get_and_watch_prefix(MODEL_ROOT_PATH).await?;
 
         let (_prefix, _watcher, receiver) = models_watcher.dissolve();
-        tokio::spawn(watch_obj.watch(receiver));
+        tokio::spawn(async move {
+            watch_obj.watch(receiver).await;
+        });
     }
 
     // Run the service

@@ -11,6 +11,7 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -45,6 +46,7 @@ class Config:
     model_name: Optional[str]
     tensor_parallel_size: int
     kv_block_size: int
+    context_length: int
     extra_engine_args: str
 
 
@@ -133,17 +135,18 @@ async def worker(runtime: DistributedRuntime):
     await init(runtime, cmd_line_args())
 
 
+def _check_and_set_env_value(key, expected, allow_override=False):
+    if not allow_override and key in os.environ and os.environ[key] != expected:
+        raise ValueError(
+            f"{key} is set and doesn't equal expected {expected}. Please unset variable before launch."
+        )
+    os.environ.setdefault(key, expected)
+
+
 async def init(runtime: DistributedRuntime, config: Config):
     """
     Instantiate and serve
     """
-    component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
-
-    endpoint = component.endpoint(config.endpoint)
-    await register_llm(
-        ModelType.Backend, endpoint, config.model_path, config.model_name
-    )
 
     arg_map = {
         "model": config.model_path,
@@ -152,10 +155,16 @@ async def init(runtime: DistributedRuntime, config: Config):
         "skip_tokenizer_init": True,
         "disable_log_requests": True,
         "enable_prefix_caching": True,
-        "block_size": config.kv_block_size,
         # KV routing relies on logging KV metrics
         "disable_log_stats": False,
     }
+    assert config.kv_block_size > 0, "Must use non-negative integer for KV Block Size"
+    arg_map["block_size"] = config.kv_block_size
+
+    if config.context_length:
+        # Usually we want it to default to the max (from tokenizer_config.json)
+        arg_map["max_model_len"] = config.context_length
+
     if config.extra_engine_args != "":
         json_map = {}
         # extra_engine_args is a filename
@@ -170,14 +179,20 @@ async def init(runtime: DistributedRuntime, config: Config):
         arg_map = {**arg_map, **json_map}  # json_map gets precedence
 
     # Patch won't start KVCacheEventManager unless these four are set
-    os.environ["VLLM_WORKER_ID"] = str(endpoint.lease_id())
-    os.environ[
-        "VLLM_KV_CAPI_PATH"
-    ] = "libdynamo_llm_capi.so"  # Must be on LD_LIBRARY_PATH
-    os.environ["VLLM_KV_NAMESPACE"] = config.namespace
-    os.environ["VLLM_KV_COMPONENT"] = config.component
 
-    os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
+    component = runtime.namespace(config.namespace).component(config.component)
+    await component.create_service()
+    endpoint = component.endpoint(config.endpoint)
+
+    _check_and_set_env_value("VLLM_WORKER_ID", str(endpoint.lease_id()))
+    _check_and_set_env_value(
+        "VLLM_KV_CAPI_PATH", "libdynamo_llm_capi.so", allow_override=True
+    )
+    _check_and_set_env_value("VLLM_KV_NAMESPACE", config.namespace)
+    _check_and_set_env_value("VLLM_KV_COMPONENT", config.component)
+    _check_and_set_env_value(
+        "VLLM_NO_USAGE_STATS", "1", allow_override=True
+    )  # Avoid internal HTTP requests
     engine_args = AsyncEngineArgs(**arg_map)
     model_config = engine_args.create_model_config()
     # Load default sampling params from `generation_config.json`
@@ -186,6 +201,16 @@ async def init(runtime: DistributedRuntime, config: Config):
     engine_context = build_async_engine_client_from_engine_args(engine_args)
     engine_client = await engine_context.__aenter__()
 
+    await register_llm(
+        ModelType.Backend,
+        endpoint,
+        config.model_path,
+        config.model_name,
+        context_length=arg_map.get(
+            "max_model_len", None
+        ),  # if None, takes length from tokenizer
+        kv_cache_block_size=arg_map["block_size"],
+    )
     handler = RequestHandler(component, engine_client, default_sampling_params)
     handler.setup_kv_metrics()
 
@@ -223,6 +248,12 @@ def cmd_line_args():
         "--kv-block-size", type=int, default=16, help="Size of a KV cache block."
     )
     parser.add_argument(
+        "--context-length",
+        type=int,
+        default=None,
+        help="Max model context length. Defaults to models max, usually model_max_length from tokenizer_config.json. Reducing this reduces VRAM requirements.",
+    )
+    parser.add_argument(
         "--extra-engine-args",
         type=str,
         default="",
@@ -253,6 +284,7 @@ def cmd_line_args():
     config.endpoint = parsed_endpoint_name
     config.tensor_parallel_size = args.tensor_parallel_size
     config.kv_block_size = args.kv_block_size
+    config.context_length = args.context_length
     config.extra_engine_args = args.extra_engine_args
 
     return config

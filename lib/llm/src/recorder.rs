@@ -22,7 +22,6 @@ use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
-use tracing as log;
 
 /// Record entry that will be serialized to JSONL
 #[derive(Serialize, Deserialize)]
@@ -116,10 +115,10 @@ where
                 // Check time limit if set
                 if let Some(deadline) = max_time_deadline {
                     if Instant::now() >= deadline {
-                        log::info!("Recorder reached max time limit, shutting down");
+                        tracing::info!("Recorder reached max time limit, shutting down");
                         // Flush and cancel
                         if let Err(e) = writer.flush().await {
-                            log::error!("Failed to flush on time limit shutdown: {}", e);
+                            tracing::error!("Failed to flush on time limit shutdown: {}", e);
                         }
                         cancel_clone.cancel();
                         return;
@@ -132,10 +131,10 @@ where
                     _ = cancel_clone.cancelled() => {
                         // Flush any pending writes before shutting down
                         if let Err(e) = writer.flush().await {
-                            log::error!("Failed to flush on shutdown: {}", e);
+                            tracing::error!("Failed to flush on shutdown: {}", e);
                         }
 
-                        log::debug!("Recorder task shutting down");
+                        tracing::debug!("Recorder task shutting down");
                         return;
                     }
 
@@ -161,20 +160,20 @@ where
                         let json = match serde_json::to_string(&entry) {
                             Ok(json) => json,
                             Err(e) => {
-                                log::error!("Failed to serialize event: {}", e);
+                                tracing::error!("Failed to serialize event: {}", e);
                                 continue;
                             }
                         };
 
                         // Write JSON line
                         if let Err(e) = writer.write_all(json.as_bytes()).await {
-                            log::error!("Failed to write event: {}", e);
+                            tracing::error!("Failed to write event: {}", e);
                             continue;
                         }
 
                         // Add a newline
                         if let Err(e) = writer.write_all(b"\n").await {
-                            log::error!("Failed to write newline: {}", e);
+                            tracing::error!("Failed to write newline: {}", e);
                             continue;
                         }
 
@@ -186,7 +185,7 @@ where
                             if line_count >= max_lines {
                                 // Flush the current file
                                 if let Err(e) = writer.flush().await {
-                                    log::error!("Failed to flush file before rotation: {}", e);
+                                    tracing::error!("Failed to flush file before rotation: {}", e);
                                 }
 
                                 // Create new filename with suffix
@@ -204,10 +203,10 @@ where
                                     Ok(new_file) => {
                                         writer = BufWriter::with_capacity(32768, new_file);
                                         line_count = 0;
-                                        log::info!("Rotated to new file: {}", new_path.display());
+                                        tracing::info!("Rotated to new file: {}", new_path.display());
                                     },
                                     Err(e) => {
-                                        log::error!("Failed to open rotated file {}: {}", new_path.display(), e);
+                                        tracing::error!("Failed to open rotated file {}: {}", new_path.display(), e);
                                         // Continue with the existing file if rotation fails
                                     }
                                 }
@@ -221,10 +220,10 @@ where
                         // Check if we've reached the maximum count
                         if let Some(max) = max_count {
                             if *count >= max {
-                                log::info!("Recorder reached max event count ({}), shutting down", max);
+                                tracing::info!("Recorder reached max event count ({}), shutting down", max);
                                 // Flush buffer before shutting down
                                 if let Err(e) = writer.flush().await {
-                                    log::error!("Failed to flush on count limit shutdown: {}", e);
+                                    tracing::error!("Failed to flush on count limit shutdown: {}", e);
                                 }
                                 // Drop the lock before cancelling
                                 drop(count);
@@ -262,10 +261,7 @@ where
         let first_time = self.first_event_time.lock().await;
         match *first_time {
             Some(time) => Ok(time.elapsed()),
-            None => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "No events received yet",
-            )),
+            None => Err(io::Error::other("No events received yet")),
         }
     }
 
@@ -324,7 +320,7 @@ where
             // Check if we've reached the maximum count
             if let Some(max) = max_count {
                 if count >= max {
-                    log::info!("Reached maximum event count ({}), stopping", max);
+                    tracing::info!("Reached maximum event count ({}), stopping", max);
                     break;
                 }
             }
@@ -332,7 +328,7 @@ where
             // Check if we've exceeded the time limit
             if let Some(end_time) = deadline {
                 if Instant::now() >= end_time {
-                    log::info!("Reached maximum time limit, stopping");
+                    tracing::info!("Reached maximum time limit, stopping");
                     break;
                 }
             }
@@ -348,7 +344,7 @@ where
             let record: RecordEntry<T> = match serde_json::from_str(&line) {
                 Ok(record) => record,
                 Err(e) => {
-                    log::warn!(
+                    tracing::warn!(
                         "Failed to parse JSON on line {}: {}. Skipping.",
                         line_number,
                         e
@@ -370,9 +366,10 @@ where
             }
 
             // Send the event
-            event_tx.send(event).await.map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("Failed to send event: {}", e))
-            })?;
+            event_tx
+                .send(event)
+                .await
+                .map_err(|e| io::Error::other(format!("Failed to send event: {e}")))?;
 
             // Update previous timestamp and count
             prev_timestamp = Some(timestamp);
@@ -380,9 +377,9 @@ where
         }
 
         if count == 0 {
-            log::warn!("No events to send from file: {}", display_name);
+            tracing::warn!("No events to send from file: {}", display_name);
         } else {
-            log::info!("Sent {} events from {}", count, display_name);
+            tracing::info!("Sent {} events from {}", count, display_name);
         }
 
         Ok(count)

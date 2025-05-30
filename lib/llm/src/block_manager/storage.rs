@@ -81,6 +81,8 @@ pub mod cuda;
 pub mod disk;
 pub mod nixl;
 
+pub mod arena;
+
 pub use cuda::*;
 pub use disk::*;
 
@@ -157,6 +159,9 @@ pub enum StorageError {
 
     #[error("NIXL error: {0}")]
     NixlError(#[from] nixl_sys::NixlError),
+
+    #[error("Out of bounds: {0}")]
+    OutOfBounds(String),
 }
 
 /// Core storage trait that provides access to memory regions

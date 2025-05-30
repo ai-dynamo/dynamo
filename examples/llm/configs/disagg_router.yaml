@@ -29,7 +29,7 @@ Processor:
 
 Router:
   min-workers: 1
-  common-configs: [model, router]
+  common-configs: [model, block-size, router]
 
 VllmWorker:
   max-num-batched-tokens: 16384
@@ -42,7 +42,7 @@ VllmWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 1
+      gpu: '1'
   common-configs: [model, block-size, max-model-len, router, kv-transfer-config]
 
 PrefillWorker:
@@ -50,7 +50,7 @@ PrefillWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 1
+      gpu: '1'
   common-configs: [model, block-size, max-model-len, kv-transfer-config]
 
 Planner:
