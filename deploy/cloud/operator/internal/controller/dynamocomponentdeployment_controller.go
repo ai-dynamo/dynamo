@@ -595,6 +595,12 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx 
 		return nil, fmt.Errorf("generateLeaderPodTemplateSpec: GPU limit is not set for Ray leader pod")
 	}
 
+	// TODO: Liveness and readiness probes are temporarily disabled for leader worker sets
+	// until we implement proper probe configuration that can differentiate between
+	// leader and worker pods.
+	leaderPodTemplateSpec.Spec.Containers[0].LivenessProbe = nil
+	leaderPodTemplateSpec.Spec.Containers[0].ReadinessProbe = nil
+
 	leaderPodTemplateSpec.Spec.Containers[0].Args[0] = fmt.Sprintf("ray start --head --port=6379 && %s", currentArgs)
 
 	return leaderPodTemplateSpec, nil
@@ -633,6 +639,12 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 	if opt.dynamoComponentDeployment.Spec.Resources == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits.GPU == "" {
 		return nil, fmt.Errorf("generateWorkerPodTemplateSpec: GPU limit is not set for Ray worker pod")
 	}
+
+	// TODO: Liveness and readiness probes are temporarily disabled for leader worker sets
+	// until we implement proper probe configuration that can differentiate between
+	// leader and worker pods.
+	workerPodTemplateSpec.Spec.Containers[0].LivenessProbe = nil
+	workerPodTemplateSpec.Spec.Containers[0].ReadinessProbe = nil
 
 	workerPodTemplateSpec.Spec.Containers[0].Args[0] = "ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"
 
