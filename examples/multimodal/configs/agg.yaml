@@ -20,6 +20,7 @@ Common:
 Processor:
   router: round-robin
   common-configs: [model, block-size, max-model-len]
+  prompt-template: "USER: <image>\n<prompt> ASSISTANT:"
 
 VllmDecodeWorker:
   enforce-eager: true

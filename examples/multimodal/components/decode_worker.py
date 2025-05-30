@@ -241,8 +241,8 @@ class VllmDecodeWorker:
             # The decode worker will pre-allocate the memory based on the prompt token length for the prefill worker to transfer the kv cache.
             # As a workaround, here we manually insert some placeholder dummy tokens based on the embedding size
             # so that decode worker can pre-allocate the memory with the correct size.
-            # The structure of the prompt will be like: "\nUSER: <image> <dummy_tokens>\n<user_prompt>\nASSISTANT:".
             # Since the "<image>" token is included in the prompt, only need to insert (embedding_size - 1) dummy tokens after the image token.
+            # TODO: make this more flexible/model-dependent
             IMAGE_TOKEN_ID = 32000
             DUMMY_TOKEN_ID = 0
             # Find the index of the image token in the prompt token ids
