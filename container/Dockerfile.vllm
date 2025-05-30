@@ -403,6 +403,9 @@ COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
 # Copy Cargo cache to avoid re-downloading dependencies
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
+# Copy rest of the code
+COPY . /workspace
+
 # Build C bindings, creates lib/bindings/c/include
 #
 # TODO: In theory the 'cargo build' in earlier stage covers this, we "just" need to copy the
@@ -446,8 +449,6 @@ ARG GENAI_PERF_VERSION
 
 # Install genai-perf for benchmarking
 RUN uv pip install genai-perf==$GENAI_PERF_VERSION
-
-COPY . /workspace
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
