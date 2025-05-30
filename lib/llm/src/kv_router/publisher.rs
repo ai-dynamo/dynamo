@@ -463,15 +463,15 @@ enum RawKvEvent {
 // Metrics Publishers ------------------------------------------------------
 // -------------------------------------------------------------------------
 
-pub struct KvMetricsPublisher {
+pub struct WorkerMetricsPublisher {
     tx: tokio::sync::watch::Sender<Arc<ForwardPassMetrics>>,
     rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>,
 }
 
-impl KvMetricsPublisher {
+impl WorkerMetricsPublisher {
     pub fn new() -> Result<Self> {
         let (tx, rx) = tokio::sync::watch::channel(Arc::new(ForwardPassMetrics::default()));
-        Ok(KvMetricsPublisher { tx, rx })
+        Ok(WorkerMetricsPublisher { tx, rx })
     }
 
     pub fn publish(

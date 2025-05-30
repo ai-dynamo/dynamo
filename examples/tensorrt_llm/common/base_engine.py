@@ -42,7 +42,7 @@ from tensorrt_llm.llmapi.disagg_utils import (
 )
 from tensorrt_llm.serve.openai_protocol import DisaggregatedParams
 
-from dynamo.llm import KvEventPublisher, KvMetricsPublisher
+from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.sdk import dynamo_context
 
 logger = logging.getLogger(__name__)
@@ -134,7 +134,7 @@ class BaseTensorrtLLMEngine:
             self._publish_events = False
 
         if self._publish_stats:
-            self._kv_metrics_publisher = KvMetricsPublisher()
+            self._kv_metrics_publisher = WorkerMetricsPublisher()
 
         if self._publish_events:
             if self._worker_id is None:
