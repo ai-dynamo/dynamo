@@ -91,55 +91,18 @@ istio:
   host: ""
   gateway: ""
 
-## In-cluster minio deployment configuration
-## ref: https://github.com/bitnami/charts/blob/minio/13.3.1/bitnami/minio/values.yaml
-## @param minio.apiIngress.enabled Enable ingress controller resource for MinIO API
-## @param minio.apiIngress.ingressClassName IngressClass that will be be used to implement the Ingress (Kubernetes 1.18+)
-## @param minio.apiIngress.hostname Default host for the ingress resource
+postgresql:
+  host: ""
+  port: 5432
+  # allow to override the secret name containing the postgres password
+  passwordSecret: ""
+  database: "dynamo"
+
 minio:
-  mode: standalone
-  auth:
-    rootUser: minioadmin
-    rootPassword: minioadmin
-  persistence:
-    enabled: true
-    size: 10Gi
-    storageClass: ""
-    mountPath: /data
-    annotations:
-      helm.sh/resource-policy: keep
-  apiIngress:
-    enabled: false
-    ingressClassName: ""
-    hostname: ""
-    pathType: ImplementationSpecific
-    annotations: {}
-  podSecurityContext:
-    enabled: true
-    fsGroup: 1000
-  containerSecurityContext:
-    enabled: true
-    runAsUser: 1000
-    runAsNonRoot: true
-    readOnlyRootFilesystem: false
-  startupProbe:
-    enabled: true
-    initialDelaySeconds: 10
-    periodSeconds: 10
-    timeoutSeconds: 5
-    failureThreshold: 6
-  resources:
-    requests:
-      memory: "256Mi"
-      cpu: "250m"
-    limits:
-      memory: "512Mi"
-      cpu: "500m"
-  service:
-    type: ClusterIP
-    ports:
-      api: 9000
-      console: 9001
+  host: ""
+  port: 9000
+  # allow to override the secret name containing the minio username and password
+  passwordSecret: ""
 
 resources: {}
   # We usually recommend not to specify default resources and to leave this as a conscious
@@ -156,14 +119,6 @@ resources: {}
 dynamo:
   apiStore:
     port: 8000
-
-postgresql:
-  auth:
-    existingSecret: ""
-    postgresPassword: ""
-    username: "admin"
-    password: "password"
-    database: "dynamo"
 
 # This is to setup the liveness and readiness probes more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
 livenessProbe:
