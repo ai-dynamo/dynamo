@@ -50,6 +50,7 @@ pub async fn prepare_engine(
                 distributed_runtime,
                 model_manager.clone(),
                 dynamo_runtime::pipeline::RouterMode::RoundRobin,
+                None,
             ));
             let models_watcher = etcd_client.kv_get_and_watch_prefix(MODEL_ROOT_PATH).await?;
             let (_prefix, _watcher, receiver) = models_watcher.dissolve();

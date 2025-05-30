@@ -18,7 +18,7 @@ use dynamo_runtime::{
 
 use crate::{
     backend::Backend,
-    kv_router::KvPushRouter,
+    kv_router::{KvPushRouter, KvRouterConfig},
     model_type::ModelType,
     preprocessor::{BackendInput, OpenAIPreprocessor},
     protocols::common::llm_backend::LLMEngineOutput,
@@ -36,6 +36,7 @@ pub struct ModelWatcher {
     drt: DistributedRuntime,
     router_mode: RouterMode,
     notify_on_model: Notify,
+    kv_router_config: Option<KvRouterConfig>,
 }
 
 impl ModelWatcher {
@@ -43,12 +44,14 @@ impl ModelWatcher {
         runtime: DistributedRuntime,
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
+        kv_router_config: Option<KvRouterConfig>,
     ) -> ModelWatcher {
         Self {
             manager: model_manager,
             drt: runtime,
             router_mode,
             notify_on_model: Notify::new(),
+            kv_router_config,
         }
     }
 
@@ -208,7 +211,12 @@ impl ModelWatcher {
                     RouterMode::KV => {
                         let chooser = self
                             .manager
-                            .kv_chooser_for(&model_entry.name, &component, card.kv_cache_block_size)
+                            .kv_chooser_for(
+                                &model_entry.name,
+                                &component,
+                                card.kv_cache_block_size,
+                                self.kv_router_config.clone(),
+                            )
                             .await?;
                         let kv_push_router = KvPushRouter::new(router, chooser);
                         ServiceBackend::from_engine(Arc::new(kv_push_router))
@@ -243,7 +251,12 @@ impl ModelWatcher {
                     RouterMode::KV => {
                         let chooser = self
                             .manager
-                            .kv_chooser_for(&model_entry.name, &component, card.kv_cache_block_size)
+                            .kv_chooser_for(
+                                &model_entry.name,
+                                &component,
+                                card.kv_cache_block_size,
+                                self.kv_router_config.clone(),
+                            )
                             .await?;
                         let kv_push_router = KvPushRouter::new(router, chooser);
                         ServiceBackend::from_engine(Arc::new(kv_push_router))
