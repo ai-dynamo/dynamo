@@ -32,7 +32,7 @@ enable_chunked_prefill: true
 
 kv_cache_config:
   free_gpu_memory_fraction: 0.95
-  event_buffer_max_size: 1024
+  event_buffer_max_size: 8192
   enable_block_reuse: true
 
 pytorch_backend_config:
