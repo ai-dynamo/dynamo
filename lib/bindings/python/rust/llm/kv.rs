@@ -22,9 +22,7 @@ use rs::traits::events::EventSubscriber;
 use tracing;
 
 use llm_rs::kv_router::protocols::*;
-use llm_rs::kv_router::publisher::{
-    create_stored_blocks, KvEventInternalSourceConfig, KvEventSourceConfig,
-};
+use llm_rs::kv_router::publisher::{create_stored_blocks, KvEventSourceConfig};
 
 #[pyclass]
 pub(crate) struct KvRouter {
@@ -178,7 +176,7 @@ impl ZmqKvEventPublisher {
             component.inner,
             config.worker_id,
             config.kv_block_size,
-            KvEventSourceConfig::Internal(KvEventInternalSourceConfig::Zmq {
+            Some(KvEventSourceConfig::Zmq {
                 endpoint: config.zmq_endpoint,
                 topic: config.zmq_topic,
             }),
@@ -207,7 +205,7 @@ impl KvEventPublisher {
             component.inner,
             worker_id,
             kv_block_size,
-            KvEventSourceConfig::External,
+            None,
         )
         .map_err(to_pyerr)?;
 
