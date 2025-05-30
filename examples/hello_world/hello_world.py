@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 """
-Pipeline Architecture:
+Graph Architecture:
 
 Users/Clients (HTTP)
       │
@@ -136,7 +136,7 @@ class Frontend:
     # alternative syntax: @endpoint(transports=[DynamoTransport.HTTP])
     @api()
     async def generate(self, request: RequestType):
-        """Stream results from the pipeline."""
+        """Stream results from the graph."""
         logger.info(f"Frontend received: {request.text}")
 
         async def content_generator():

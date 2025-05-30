@@ -197,7 +197,7 @@ class DynamoService(Service[T]):
                 del self.dependencies[dep_key]
 
     def link(self, next_service: DynamoService):
-        """Link this service to another service, creating a pipeline."""
+        """Link this service to another service, creating a graph."""
         self._linked_services.append(next_service)
         LinkedServices.add((self, next_service))
         return next_service

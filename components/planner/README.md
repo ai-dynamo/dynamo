@@ -37,6 +37,7 @@ PYTHONPATH=/workspace/examples/llm python components/planner.py --namespace <nam
 The LocalPlanner is built on top of circus, which is what we use to manage component subprocesses when running dynamo serve. LocalPlanner allows the planner component to scale workers up and down based on system metrics.
 
 **Current limitations**
+
 1. Single node only
 2. Workers must be using only a single GPU
 3. Your initial deployment must be replicas=1 for both prefill and decode
@@ -46,6 +47,7 @@ We are working on addressing these as fast as possible.
 ### Under the Hood
 
 Circus has a concept of an arbiter and a watcher:
+
 - **Arbiter**: The supervisor process that manages all watchers
 - **Watcher**: A process that encodes environment variables, command, name, and other information needed to run a component
 
@@ -71,6 +73,7 @@ The arbiter exposes an endpoint allowing messages to add/remove/change watchers.
 ### Implementation
 
 The planner architecture is designed to be simple and extensible:
+
 - An abstract class supports basic add/remove component operations
 - This is implemented in `local_connector.py`
 - Circus interaction logic is in `circusd.py`, which reads the statefile, connects to the endpoint, and provides add/remove functionality
@@ -83,6 +86,7 @@ The statefile maintains the current state of all running workers and is used by 
 #### Example: Adding and Removing Workers
 
 Starting with a single decode worker:
+
 ```json
 {
   "dynamo_VllmWorker": {..., "resources":{...}}
@@ -90,6 +94,7 @@ Starting with a single decode worker:
 ```
 
 After adding a worker:
+
 ```json
 {
   "dynamo_VllmWorker": {..., "resources":{...}},
@@ -98,6 +103,7 @@ After adding a worker:
 ```
 
 After removing a worker (removes the highest suffix):
+
 ```json
 {
   "dynamo_VllmWorker": {..., "resources":{...}}
@@ -105,6 +111,7 @@ After removing a worker (removes the highest suffix):
 ```
 
 If scaled to zero, the initial entry is kept without resources to maintain configuration information:
+
 ```json
 {
   "dynamo_VllmWorker": {...}
@@ -118,12 +125,10 @@ If scaled to zero, the initial entry is kept without resources to maintain confi
 
 ### Testing
 
-For manual testing, you can use the controller_test.py file to add/remove components after you've run a serve command on a Dynamo pipeline where the planner is linked.
+For manual testing, you can use the controller_test.py file to add/remove components after you've run a serve command on a Dynamo graph where the planner is linked.
 
 ## Kubernetes Backend
 
 The Kubernetes backend works by updating the replicas count of the DynamoGraphDeployment custom resource. When the planner determines that workers need to be scaled up or down based on workload metrics, it uses the Kubernetes API to patch the DynamoGraphDeployment resource specification, changing the replicas count for the appropriate worker component. The Kubernetes operator then reconciles this change by creating or terminating the necessary pods. This provides a seamless autoscaling experience in Kubernetes environments without requiring manual intervention.
 
-The Kubernetes backend will automatically be used by Planner when your pipeline is deployed with `dynamo deployment create`. By default, the planner will run in no-op mode, which means it will monitor metrics but not take scaling actions. To enable actual scaling, you should also specify `--Planner.no-operation=false`.
-
-
+The Kubernetes backend will automatically be used by Planner when your dynamo graph is deployed with `dynamo deployment create`. By default, the planner will run in no-op mode, which means it will monitor metrics but not take scaling actions. To enable actual scaling, you should also specify `--Planner.no-operation=false`.

@@ -59,6 +59,7 @@ The deployment process involves two main steps:
 First, set up your environment variables for working with Dynamo Cloud. You have two options for accessing the `dynamo-store` service:
 
 #### Option 1: Using Port-Forward (Local Development)
+
 This is the simplest approach for local development and testing:
 
 ```bash
@@ -76,6 +77,7 @@ export DYNAMO_CLOUD=http://localhost:8080
 ```
 
 #### Option 2: Using Ingress/VirtualService (Production)
+
 For production environments, you should use proper ingress configuration:
 
 ```bash
@@ -101,6 +103,7 @@ Before building your service, you need to ensure the base image is properly set 
 1. For detailed instructions on building and pushing the Dynamo base image, see the [Building the Dynamo Base Image](../../get_started.md#building-the-dynamo-base-image) section in the main README.
 
 2. Export the image from the previous step to your environment.
+
 ```bash
 # Export the image from the previous step to your environment
 export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
@@ -133,6 +136,7 @@ To see a list of all deployments in your namespace:
 ```bash
 dynamo deployment list
 ```
+
 This command displays a table of all deployments.
 
 To get detailed information about a specific deployment:
@@ -160,6 +164,7 @@ This command permanently deletes the deployment and all associated resources. Ma
 ### 4. Test the Deployment
 
 The deployment process creates several pods:
+
 1. A `yatai-dynamonim-image-builder` pod for building the container image
 2. Service pods prefixed with `$DEPLOYMENT_NAME` once the build is complete
 
@@ -184,7 +189,8 @@ When you send a request with "test" as input, you'll see how the text flows thro
 Frontend: Middle: Backend: test-mid-back
 ```
 
-This demonstrates the service pipeline:
+This demonstrates the service dynamo graph
+
 1. The Frontend receives "test"
 2. The Middle service adds "-mid" to create "test-mid"
 3. The Backend service adds "-back" to create "test-mid-back"

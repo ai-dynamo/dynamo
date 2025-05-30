@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This is a simple example of a pipeline that uses Dynamo to deploy a backend, middle, and frontend service.
+# This is a simple example of a graph that uses Dynamo to deploy a backend, middle, and frontend service.
 # Use this to test changes made to CLI, SDK, etc
 
 
@@ -24,7 +24,7 @@ from dynamo.sdk import depends, endpoint, service
 from dynamo.sdk.core.protocol.interface import DynamoTransport
 
 """
-Pipeline Architecture:
+Graph Architecture:
 
 Users/Clients (HTTP)
       │
@@ -157,7 +157,7 @@ class Frontend:
 
     @endpoint(transports=[DynamoTransport.HTTP])
     async def generate(self, request: RequestType):
-        """Stream results from the pipeline."""
+        """Stream results from the graph."""
         print(f"Frontend received: {request.text}")
 
         async def content_generator():

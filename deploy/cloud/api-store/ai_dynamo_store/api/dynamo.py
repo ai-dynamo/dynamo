@@ -436,7 +436,7 @@ async def create_dynamo_component_version(
     session: AsyncSession = Depends(get_session),
 ):
     """
-    Create a new nim
+    Create a new component.
     """
     print("[DEBUG]request", request)
     try:

@@ -43,17 +43,16 @@ Dynamo operator is a Kubernetes operator that simplifies the deployment, configu
 
 ### CRD: `DynamoGraphDeployment`
 
-
 | Field            | Type   | Description                                                                                                                                          | Required | Default |
 |------------------|--------|------------------------------------------------------------------------------------------------------------------------------------------------------|----------|---------|
 | `dynamoComponent`| string | Reference to the dynamoComponent identifier                                                                                                          | Yes      |         |
 | `services`       | map    | Map of service names to runtime configurations. This allows the user to override the service configuration defined in the DynamoComponentDeployment. | No       |         |
 
-
 **API Version:** `nvidia.com/v1alpha1`
 **Scope:** Namespaced
 
 #### Example
+
 ```yaml
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -121,6 +120,7 @@ spec:
 **Scope:** Namespaced
 
 #### Example
+
 ```yaml
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoComponentDeployment
@@ -171,6 +171,7 @@ spec:
 **Scope:** Namespaced
 
 #### Example
+
 ```yaml
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoComponent
@@ -179,7 +180,6 @@ metadata:
 spec:
   dynamoComponent: frontend:jh2o6dqzpsgfued4
 ```
-
 
 ---
 
@@ -204,13 +204,13 @@ This section describes how to use FluxCD for GitOps-based deployment of Dynamo i
 
 The GitOps workflow for Dynamo deployments consists of three main steps:
 
-1. Build and push a pipeline to the Dynamo API store
+1. Build and push the dynamo graph to the Dynamo API store
 2. Create and commit a DynamoGraphDeployment custom resource for initial deployment
-3. Update the pipeline by building a new version and updating the CR for subsequent updates
+3. Update the dynamo graph by building a new version and updating the CR for subsequent updates
 
-### Step 1: Build and Push Pipeline
+### Step 1: Build and Push Dynamo Graph
 
-First, build and push your pipeline using the Dynamo CLI:
+First, build and push your dynamo graph using the Dynamo CLI:
 
 ```bash
 # Set your project root directory
@@ -227,7 +227,7 @@ cd $PROJECT_ROOT/examples/llm
 DYNAMO_TAG=$(dynamo build --push graphs.agg:Frontend | grep "Successfully built" |  awk '{ print $NF }' | sed 's/\.$//')
 ```
 
-The `--push` flag ensures the pipeline is pushed to the remote API store, making it available for deployment.
+The `--push` flag ensures the dynamo graph is pushed to the remote API store, making it available for deployment.
 
 ### Step 2: Create Initial Deployment
 
@@ -270,9 +270,9 @@ Commit and push this file to your Git repository. FluxCD will detect the new CR 
 
 ### Step 3: Update Existing Deployment
 
-To update your pipeline:
+To update your dynamo graph:
 
-1. Build and push a new version of your pipeline:
+1. Build and push a new version of your dynamo graph:
 ```bash
 DYNAMO_TAG=$(dynamo build --push graphs.agg:Frontend | grep "Successfully built" |  awk '{ print $NF }' | sed 's/\.$//')
 ```
@@ -304,7 +304,7 @@ kubectl get dynamocomponentdeployment -n $KUBE_NS
 
 ---
 
-## Deploying a Dynamo Pipeline using the Operator
+## Deploying a Dynamo Graph using the Operator
 
 [See deployment steps](operator_deployment.md)
 
@@ -339,7 +339,6 @@ kubectl get dynamocomponentdeployment -n $KUBE_NS
 
 ## Configuration
 
-
 - **Environment Variables:**
 
 | Name                                               | Description                          | Default                                                |
@@ -359,11 +358,11 @@ kubectl get dynamocomponentdeployment -n $KUBE_NS
 | `DYNAMO_SYSTEM_NAMESPACE`                          | System namespace                     | `dynamo`                                               |
 
 - **Flags:**
+
   | Flag                  | Description                                | Default |
   |-----------------------|--------------------------------------------|---------|
   | `--natsAddr`          | Address of NATS server                     | ""      |
   | `--etcdAddr`          | Address of etcd server                     | ""      |
-
 
 ---
 
@@ -383,9 +382,9 @@ kubectl get dynamocomponentdeployment -n $KUBE_NS
 
 The operator is built using Kubebuilder and the operator-sdk, with the following structure:
 
-  - `controllers/` – Reconciliation logic
-  - `api/v1alpha1/` – CRD types
-  - `config/` – Manifests and Helm charts
+- `controllers/` – Reconciliation logic
+- `api/v1alpha1/` – CRD types
+- `config/` – Manifests and Helm charts
 
 ---
 
