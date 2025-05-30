@@ -17,13 +17,13 @@ Common:
   block-size: 64
   max-model-len: 16384
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
+  router: kv
 
 Frontend:
   served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   endpoint: dynamo.VllmWorker.generate
   port: 8000
-  router: kv
-  common-configs: [block-size]
+  common-configs: [block-size, router]
 
 VllmWorker:
   remote-prefill: true
@@ -35,7 +35,7 @@ VllmWorker:
     workers: 1
     resources:
       gpu: 1
-  common-configs: [model, block-size, max-model-len, kv-transfer-config]
+  common-configs: [model, block-size, max-model-len, kv-transfer-config, router]
 
 PrefillWorker:
   max-num-batched-tokens: 16384

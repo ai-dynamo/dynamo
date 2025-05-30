@@ -24,6 +24,8 @@ class ServiceConfig(dict):
     """Configuration store that inherits from dict for simpler access patterns"""
 
     _instance = None
+    COMMON_CONFIG_SERVICE = "Common"
+    COMMON_CONFIG_KEY = "common-configs"
 
     @classmethod
     def get_instance(cls):
@@ -49,6 +51,33 @@ class ServiceConfig(dict):
             raise ValueError(f"{service_name}.{key} must be specified in configuration")
         return self[service_name][key]
 
+    @classmethod
+    def get_parsed_config(cls, service_name):
+        """Get parsed config for a service with common configs applied, returned as dict"""
+        instance = cls.get_instance()
+
+        if service_name not in instance:
+            return {}
+
+        # Get service config excluding ServiceArgs if it exists
+        service_config = instance[service_name].copy()
+        if "ServiceArgs" in service_config:
+            del service_config["ServiceArgs"]
+
+        # Apply common configs if they exist
+        if (common := instance.get(cls.COMMON_CONFIG_SERVICE)) is not None and (
+            common_config_keys := service_config.get(cls.COMMON_CONFIG_KEY)
+        ) is not None:
+            for key in common_config_keys:
+                if key in common and key not in service_config:
+                    service_config[key] = common[key]
+
+        # Remove the common-configs key itself from the final config
+        if cls.COMMON_CONFIG_KEY in service_config:
+            del service_config[cls.COMMON_CONFIG_KEY]
+
+        return service_config
+
     def as_args(self, service_name, prefix=""):
         """Extract configs as CLI args for a service, with optional prefix filtering.
 
@@ -57,8 +86,6 @@ class ServiceConfig(dict):
         the component's `common-configs` setting, and that key has not been overriden by the
         component's config.
         """
-        COMMON_CONFIG_SERVICE = "Common"
-        COMMON_CONFIG_KEY = "common-configs"
 
         if service_name not in self:
             return []
@@ -69,7 +96,7 @@ class ServiceConfig(dict):
             if prefix and not key.startswith(prefix):
                 return
 
-            if key.endswith(COMMON_CONFIG_KEY):
+            if key.endswith(self.COMMON_CONFIG_KEY):
                 return
 
             # Strip prefix if needed
@@ -90,8 +117,8 @@ class ServiceConfig(dict):
         if "ServiceArgs" in service_config:
             del service_config["ServiceArgs"]
 
-        if (common := self.get(COMMON_CONFIG_SERVICE)) is not None and (
-            common_config_keys := service_config.get(COMMON_CONFIG_KEY)
+        if (common := self.get(self.COMMON_CONFIG_SERVICE)) is not None and (
+            common_config_keys := service_config.get(self.COMMON_CONFIG_KEY)
         ) is not None:
             for key in common_config_keys:
                 if key in common and key not in service_config:

@@ -15,7 +15,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.2.1"
+version = "0.3.0"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -29,7 +29,7 @@ dependencies = [
     "bentoml==1.4.8",
     "types-psutil==7.0.0.20250218",
     "kubernetes==32.0.1",
-    "ai-dynamo-runtime==0.2.1",
+    "ai-dynamo-runtime==0.3.0",
     "fastapi==0.115.6",
     "distro",
     "typer",
@@ -64,10 +64,6 @@ all = [
 
 vllm = [
     "ai-dynamo-vllm~=0.8.4"
-]
-
-sglang = [
-    "sglang[all]@git+https://github.com/sgl-project/sglang@e806f708c954020bda7d1cc98035a44fd6a4eb96#subdirectory=python"
 ]
 
 [project.scripts]

@@ -197,13 +197,11 @@ class VllmDecodeWorker:
     async def generate(self, request: vLLMMultimodalRequest):
         request_id = request.request_id
         image_url = request.image_url
-        logger.info(
-            f"Received multimodal request {{ id: {request_id}, image_url: '{image_url}' }}."
-        )
+        logger.info(f"Received multimodal request {{ id: {request_id} }}.")
         embeddings = None
         if self.do_remote_prefill:
             logger.debug(
-                f"Disaggregated: request {{ id: {request_id}, image_url: '{image_url}' }}"
+                f"Disaggregated: request {{ id: {request_id} }}"
                 " prefill worker will populate the decode model's key-value cache ahead of time;"
                 " no direct encode worker interaction required."
             )
@@ -224,7 +222,7 @@ class VllmDecodeWorker:
 
             if self.do_remote_prefill and disagg_router_decision:
                 logger.debug(
-                    f"Prefilling remotely for request {{ id: {request_id}, image_url: '{image_url}' }} with length {len(request.engine_prompt['prompt_token_ids'])}"
+                    f"Prefilling remotely for request {{ id: {request_id} }} with length {len(request.engine_prompt['prompt_token_ids'])}"
                 )
                 remote_prefill_params = RemotePrefillParams(
                     is_remote_prefill=True,
@@ -237,7 +235,7 @@ class VllmDecodeWorker:
             else:
                 remote_prefill_params = None
                 logger.debug(
-                    f"Prefilling locally for request {{ id: {request_id}, image_url: '{image_url}' }} with length {len(request.engine_prompt['prompt_token_ids'])}"
+                    f"Prefilling locally for request {{ id: {request_id} }} with length {len(request.engine_prompt['prompt_token_ids'])}"
                 )
 
             # The decode worker will pre-allocate the memory based on the prompt token length for the prefill worker to transfer the kv cache.
@@ -260,7 +258,7 @@ class VllmDecodeWorker:
 
         else:
             logger.debug(
-                f"Aggregated: request {{ id: {request_id}, image_url: '{image_url}' }}"
+                f"Aggregated: request {{ id: {request_id} }}"
                 " no prefill worker available, embeddings directly from encode worker."
             )
             # Extract the pre-allocated, reusable image embeddings tensor and its descriptor.
@@ -295,8 +293,8 @@ class VllmDecodeWorker:
                 # At this point, the `embeddings` tensor is filled with the image embeddings from the remote encode worker.
 
             remote_prefill_params = None
-            logger.info(
-                f"Prefilling locally for request {{ id: {request_id}, image_url: '{image_url}' }} with length {len(request.engine_prompt['prompt_token_ids'])}"
+            logger.debug(
+                f"Prefilling locally for request {{ id: {request_id} }} with length {len(request.engine_prompt['prompt_token_ids'])}"
             )
             prompt_ids = request.engine_prompt["prompt_token_ids"]
 

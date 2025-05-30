@@ -115,6 +115,7 @@ fn mock_stats_handler(_stats: EndpointStats) -> serde_json::Value {
     let gpu_cache_usage_perc = rand::rng().random_range(0.0..=1.0);
     let gpu_prefix_cache_hit_rate = rand::rng().random_range(0.0..=1.0);
     let stats = ForwardPassMetrics {
+        data_parallel_rank: None, // Default for backwards compatibility
         request_active_slots,
         request_total_slots,
         kv_active_blocks,

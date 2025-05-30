@@ -174,21 +174,65 @@ class ChatProcessor:
         conversation: List,
     ):
         request_metadata = RequestResponseMetadata(request_id=request_id)
-        if not request.stream:
-            raise ValueError("Only streaming responses are supported")
-        async for raw_response in self.openai_serving.chat_completion_stream_generator(
-            request,
-            result_generator,
-            request_id,
-            request.model,
-            conversation,
-            self.tokenizer,
-            request_metadata,
-        ):
-            if raw_response.startswith("data: [DONE]"):
-                break
-            response = json.loads(raw_response.lstrip("data: "))
-            yield response
+        if request.stream:
+            # Handle streaming response
+            async for raw_response in self.openai_serving.chat_completion_stream_generator(
+                request,
+                result_generator,
+                request_id,
+                request.model,
+                conversation,
+                self.tokenizer,
+                request_metadata,
+            ):
+                yield raw_response
+        else:
+            # Handle non-streaming response
+            # Collect all chunks into a single response
+            full_response = None
+            async for raw_response in self.openai_serving.chat_completion_stream_generator(
+                request,
+                result_generator,
+                request_id,
+                request.model,
+                conversation,
+                self.tokenizer,
+                request_metadata,
+            ):
+                if raw_response.startswith("data: [DONE]"):
+                    break
+                response = json.loads(raw_response.lstrip("data: "))
+                if full_response is None:
+                    # Initialize the full response structure
+                    full_response = {
+                        "id": response.get("id", ""),
+                        "object": "chat.completion",
+                        "created": int(time.time()),
+                        "model": request.model,
+                        "choices": [
+                            {
+                                "index": response.get("index", 0),
+                                "message": {"role": "assistant", "content": ""},
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+
+                # Concatenate content if it exists
+                if "choices" in response and len(response["choices"]) > 0:
+                    if "delta" in response["choices"][0]:
+                        content = response["choices"][0]["delta"].get("content", "")
+                        if content:
+                            full_response["choices"][0]["message"]["content"] += content
+
+                    # Update finish reason if present
+                    if "finish_reason" in response["choices"][0]:
+                        full_response["choices"][0]["finish_reason"] = response[
+                            "choices"
+                        ][0]["finish_reason"]
+
+            if full_response is not None:
+                yield json.dumps(full_response)
 
 
 class CompletionsProcessor:

@@ -191,7 +191,7 @@ class VllmPrefillWorker:
         image_url = request.multimodal_data_source["image_url"]
 
         logger.info(
-            f"Received prefill request {{ id: {request_id}, engine_id: {engine_id}, image_url: '{image_url}' }}."
+            f"Received prefill request {{ id: {request_id}, engine_id: {engine_id} }}."
         )
 
         # Extract the pre-allocated, reusable image embeddings tensor and its descriptor.

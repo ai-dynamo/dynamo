@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+
 from dynamo._core import AggregatedMetrics as AggregatedMetrics
 
 try:
@@ -32,6 +34,8 @@ from dynamo._core import KvRecorder as KvRecorder
 from dynamo._core import KvRouter as KvRouter
 from dynamo._core import ModelType as ModelType
 from dynamo._core import OverlapScores as OverlapScores
+from dynamo._core import ZmqKvEventPublisher as ZmqKvEventPublisher
+from dynamo._core import ZmqKvEventPublisherConfig as ZmqKvEventPublisherConfig
 from dynamo._core import register_llm as register_llm
 
 try:
@@ -43,3 +47,7 @@ try:
     )
 except ImportError:
     pass  # TensorRTLLM is not enabled by default
+except Exception as e:
+    # Don't let TensorRTLLM break other engines
+    logger = logging.getLogger(__name__)
+    logger.exception(f"Error importing TensorRT-LLM components: {e}")
