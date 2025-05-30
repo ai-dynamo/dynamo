@@ -363,12 +363,10 @@ fn convert_event(
                 }),
             }
         }
-        RawKvEvent::AllBlocksCleared => {
-            KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Cleared,
-            }
-        }
+        RawKvEvent::AllBlocksCleared => KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Cleared,
+        },
     }
 }
 

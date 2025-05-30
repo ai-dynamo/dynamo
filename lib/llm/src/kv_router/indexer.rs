@@ -1224,19 +1224,28 @@ mod tests {
         assert!(result.len() == 2 && result[&worker_0] == 1 && result[&worker_1] == 1);
 
         trie.clear_all_blocks(worker_0);
-        
+
         assert!(trie.lookup.get(&worker_0).is_some());
         assert!(trie.lookup.get(&worker_0).unwrap().is_empty());
-        let result = trie.find_matches(vec![LocalBlockHash(0), LocalBlockHash(2)], false).scores;
+        let result = trie
+            .find_matches(vec![LocalBlockHash(0), LocalBlockHash(2)], false)
+            .scores;
         assert_eq!(result.len(), 1);
         assert_eq!(result[&worker_1], 2);
-        let result = trie.find_matches(vec![LocalBlockHash(0), LocalBlockHash(1), LocalBlockHash(3)], false).scores;
+        let result = trie
+            .find_matches(
+                vec![LocalBlockHash(0), LocalBlockHash(1), LocalBlockHash(3)],
+                false,
+            )
+            .scores;
         assert_eq!(result.len(), 1);
         assert_eq!(result[&worker_1], 1);
-        
+
         // Test re-adding blocks after clearing worker
         trie.apply_event(create_store_event(worker_0, 0, vec![4, 5], None));
-        let result = trie.find_matches(vec![LocalBlockHash(4), LocalBlockHash(5)], false).scores;
+        let result = trie
+            .find_matches(vec![LocalBlockHash(4), LocalBlockHash(5)], false)
+            .scores;
         assert_eq!(result.len(), 1);
         assert_eq!(result[&worker_0], 2);
 
@@ -1261,7 +1270,6 @@ mod tests {
         let result = trie.find_matches(vec![LocalBlockHash(6)], false).scores;
         assert_eq!(result.len(), 1);
         assert_eq!(result[&worker_1], 1);
-
 
         // Test clearing a worker that doesn't exist
         let worker_fake = 2;
