@@ -52,6 +52,7 @@ class PreprocessedRequest(BaseModel):
     eos_token_ids: List[TokenIdType] = Field(default_factory=list)
     mdc_sum: Optional[str] = None
     annotations: List[str] = Field(default_factory=list)
+    estimated_prefix_hit_num_blocks: Optional[int] = None
 
 
 class DisaggPreprocessedRequest(BaseModel):

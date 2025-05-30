@@ -82,6 +82,7 @@ const (
 	KubeAnnotationLWSSize        = "nvidia.com/lws-size"
 	DeploymentTypeStandard       = "standard"
 	DeploymentTypeLeaderWorker   = "leader-worker"
+	ComponentTypePlanner         = "Planner"
 )
 
 // DynamoComponentDeploymentReconciler reconciles a DynamoComponentDeployment object
@@ -1454,7 +1455,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		if opt.dynamoComponentDeployment.Spec.DynamoNamespace != nil && *opt.dynamoComponentDeployment.Spec.DynamoNamespace != "" {
 			args = append(args, fmt.Sprintf("--%s.ServiceArgs.dynamo.namespace=%s", opt.dynamoComponentDeployment.Spec.ServiceName, *opt.dynamoComponentDeployment.Spec.DynamoNamespace))
 		}
-		args = append(args, fmt.Sprintf("--%s.environment=%s", opt.dynamoComponentDeployment.Spec.ServiceName, KubernetesDeploymentStrategy))
+		if componentType, exists := opt.dynamoComponentDeployment.Labels[commonconsts.KubeLabelDynamoComponent]; exists && componentType == ComponentTypePlanner {
+			args = append(args, fmt.Sprintf("--%s.environment=%s", opt.dynamoComponentDeployment.Spec.ServiceName, KubernetesDeploymentStrategy))
+		}
 	}
 
 	if len(opt.dynamoComponentDeployment.Spec.Envs) > 0 {

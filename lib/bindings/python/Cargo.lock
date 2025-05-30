@@ -251,6 +251,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "asynchronous-codec"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a860072022177f903e59730004fb5dc13db9275b79bb2aef7ba8ce831956c233"
+dependencies = [
+ "bytes",
+ "futures-sink",
+ "futures-util",
+ "memchr",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "atomic"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -564,9 +577,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.20"
+version = "1.2.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04da6a0d40b948dfc4fa8f5bbf402b0fc1a64a28dbf7d12ffd683550f2c1b63a"
+checksum = "16595d3be041c03b09d08d0858631facccee9221e579704070e6e9e4915d3bc7"
 dependencies = [
  "jobserver",
  "libc",
@@ -888,6 +901,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "5.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
+dependencies = [
+ "cfg-if 1.0.0",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1065,29 +1091,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-engine-python"
-version = "0.2.1"
-dependencies = [
- "anyhow",
- "async-openai",
- "async-stream",
- "async-trait",
- "dynamo-llm",
- "dynamo-runtime",
- "pyo3",
- "pyo3-async-runtimes",
- "pythonize",
- "serde",
- "serde_json",
- "thiserror 2.0.12",
- "tokio",
- "tokio-stream",
- "tracing",
-]
-
-[[package]]
 name = "dynamo-llm"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "akin",
  "anyhow",
@@ -1127,6 +1132,7 @@ dependencies = [
  "rand 0.9.1",
  "rayon",
  "regex",
+ "rmp-serde",
  "serde",
  "serde_json",
  "strum",
@@ -1144,14 +1150,18 @@ dependencies = [
  "uuid",
  "validator",
  "xxhash-rust",
+ "zeromq",
 ]
 
 [[package]]
 name = "dynamo-py3"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
+ "anyhow",
+ "async-openai",
+ "async-stream",
+ "async-trait",
  "dlpark",
- "dynamo-engine-python",
  "dynamo-llm",
  "dynamo-runtime",
  "futures",
@@ -1170,7 +1180,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -1926,6 +1936,12 @@ name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
+
+[[package]]
+name = "hashbrown"
+version = "0.14.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
 
 [[package]]
 name = "hashbrown"
@@ -2794,13 +2810,14 @@ dependencies = [
 
 [[package]]
 name = "nixl-sys"
-version = "0.2.1"
+version = "0.3.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84bf333c75733cad60b29873d84168f841c6bd5207ae9dfbda7490a99c1ebe94"
+checksum = "6a1727039c315bf41aeadcdbea02522b8a3df69a77bd732996243502a5fb6f07"
 dependencies = [
  "bindgen",
  "cc",
  "libc",
+ "os_info",
  "pkg-config",
  "serde",
  "thiserror 2.0.12",
@@ -3048,6 +3065,17 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "os_info"
+version = "3.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41fc863e2ca13dc2d5c34fb22ea4a588248ac14db929616ba65c45f21744b1e9"
+dependencies = [
+ "log",
+ "serde",
+ "windows-sys 0.52.0",
+]
 
 [[package]]
 name = "overload"
@@ -3837,6 +3865,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "rmp"
+version = "0.8.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "228ed7c16fa39782c3b3468e974aec2795e9089153cd08ee2e9aefb3613334c4"
+dependencies = [
+ "byteorder",
+ "num-traits",
+ "paste",
+]
+
+[[package]]
+name = "rmp-serde"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52e599a477cf9840e92f2cde9a7189e67b42c57532749bf90aea6ec10facd4db"
+dependencies = [
+ "byteorder",
+ "rmp",
+ "serde",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4619,6 +4669,7 @@ checksum = "66a539a9ad6d5d281510d5bd368c973d636c02dbf8a67300bfb6b950696ad7df"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "pin-project-lite",
  "tokio",
@@ -5709,6 +5760,33 @@ name = "zeroize"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ced3678a2879b30306d323f4542626697a464a97c0a07c9aebf7ebca65cd4dde"
+
+[[package]]
+name = "zeromq"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a4528179201f6eecf211961a7d3276faa61554c82651ecc66387f68fc3004bd"
+dependencies = [
+ "async-trait",
+ "asynchronous-codec",
+ "bytes",
+ "crossbeam-queue",
+ "dashmap",
+ "futures-channel",
+ "futures-io",
+ "futures-task",
+ "futures-util",
+ "log",
+ "num-traits",
+ "once_cell",
+ "parking_lot",
+ "rand 0.8.5",
+ "regex",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
 
 [[package]]
 name = "zeromq-src"

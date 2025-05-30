@@ -13,9 +13,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! # KV Cache Block Registration
+//!
+//! - This module is responsible for maintaining a registry of all blocks currently within a pool.
+//!   This consists of two components: A global registry of all blocks, and a per-pool registry of blocks.
+//! - The global registry is a mapping of sequences hashes to registration handles. If two blocks in different pools
+//!   have the same sequence hash, then they will share the same registration handle. The global registry is shared across all pools.
+//! - The per-pool registry is a mapping of sequence hashes to block handles. This is used to track which blocks are
+//!   currently within a specific pool. The block handle is unique across pools, and is used to track the block's lifetime.
+//! - When a block is in the registered state, it has a unique block handle and a possibly shared registration handle.
+//!
+//! ## Workflow
+//!
+//! 1. When a block is registered into a pool, we create a unique block handle.
+//! 2. We then check the global registry to see if the block already exists in any other pool.
+//! 3. If it does, we use the existing registration handle. Otherwise, we create a new one.
+//! 4. When the block handle is dropped, it means that the block is no longer in the pool.
+//! 5. When the registration handle is dropped, it means that the block is no longer in any pool.
+
 use std::{
     collections::HashMap,
-    sync::{Arc, Weak},
+    sync::{Arc, Mutex, Weak},
 };
 
 use super::super::events::{EventManager, EventReleaseManager, PublishHandle};
@@ -24,6 +42,9 @@ use super::state::BlockState;
 use crate::tokens::{BlockHash, SequenceHash, TokenBlock};
 
 use derive_getters::Getters;
+use tokio::{runtime::Handle, sync::mpsc};
+
+pub type GlobalRegistry = Arc<Mutex<HashMap<SequenceHash, Weak<RegistrationHandle>>>>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlockRegistationError {
@@ -34,27 +55,88 @@ pub enum BlockRegistationError {
     InvalidState(String),
 }
 
-/// Error returned when an attempt is made to unregister a block that is still active.
-#[derive(Debug, thiserror::Error)]
-#[error("Failed to unregister block: {0}")]
-pub struct UnregisterFailure(SequenceHash);
+/// A block entry is a handle to a block that is registered in the pool.
+/// On drop, we need to notify the pool that the block has been unregistered.
+/// This is different than the registration handle, which is only dropped when the block is no longer in ANY pool.
+#[derive(Debug)]
+pub struct BlockHandle {
+    sequence_hash: SequenceHash,
+    unregister_tx: mpsc::UnboundedSender<SequenceHash>,
+}
 
-#[derive()]
+impl BlockHandle {
+    pub fn new(
+        sequence_hash: SequenceHash,
+        unregister_tx: mpsc::UnboundedSender<SequenceHash>,
+    ) -> Self {
+        Self {
+            sequence_hash,
+            unregister_tx,
+        }
+    }
+}
+
+impl Drop for BlockHandle {
+    fn drop(&mut self) {
+        let _ = self.unregister_tx.send(self.sequence_hash);
+    }
+}
+
 pub struct BlockRegistry {
-    blocks: HashMap<SequenceHash, Weak<RegistrationHandle>>,
+    blocks: Arc<Mutex<HashMap<SequenceHash, Weak<BlockHandle>>>>,
     event_manager: Arc<dyn EventManager>,
+    global_registry: GlobalRegistry,
+    unregister_tx: mpsc::UnboundedSender<SequenceHash>,
 }
 
 impl BlockRegistry {
-    pub fn new(event_manager: Arc<dyn EventManager>) -> Self {
+    pub fn new(
+        event_manager: Arc<dyn EventManager>,
+        global_registry: GlobalRegistry,
+        async_runtime: Handle,
+    ) -> Self {
+        let (unregister_tx, mut unregister_rx) = mpsc::unbounded_channel();
+
+        let blocks: Arc<Mutex<HashMap<SequenceHash, Weak<BlockHandle>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        let blocks_clone = blocks.clone();
+        let global_registry_clone = global_registry.clone();
+        async_runtime.spawn(async move {
+            let blocks = blocks_clone;
+            let global_registry = global_registry_clone;
+            while let Some(sequence_hash) = unregister_rx.recv().await {
+                {
+                    let mut blocks = blocks.lock().unwrap();
+
+                    if let Some(handle) = blocks.get(&sequence_hash) {
+                        if handle.upgrade().is_none() {
+                            blocks.remove(&sequence_hash);
+                        }
+                    }
+                }
+
+                let mut global_registry = global_registry.lock().unwrap();
+
+                if let Some(entry) = global_registry.get(&sequence_hash) {
+                    if entry.upgrade().is_none() {
+                        global_registry.remove(&sequence_hash);
+                    }
+                }
+            }
+        });
+
         Self {
-            blocks: HashMap::new(),
+            blocks,
             event_manager,
+            global_registry,
+            unregister_tx,
         }
     }
 
     pub fn is_registered(&self, sequence_hash: SequenceHash) -> bool {
-        if let Some(handle) = self.blocks.get(&sequence_hash) {
+        let blocks = self.blocks.lock().unwrap();
+        if let Some(handle) = blocks.get(&sequence_hash) {
             if let Some(_handle) = handle.upgrade() {
                 return true;
             }
@@ -65,7 +147,7 @@ impl BlockRegistry {
     pub fn register_block(
         &mut self,
         block_state: &mut BlockState,
-    ) -> Result<PublishHandle, BlockRegistationError> {
+    ) -> Result<Option<PublishHandle>, BlockRegistationError> {
         match block_state {
             BlockState::Reset => Err(BlockRegistationError::InvalidState(
                 "Block is in Reset state".to_string(),
@@ -76,45 +158,58 @@ impl BlockRegistry {
 
             BlockState::Complete(state) => {
                 let sequence_hash = state.token_block().sequence_hash();
-                if let Some(handle) = self.blocks.get(&sequence_hash) {
+                let mut blocks = self.blocks.lock().unwrap();
+
+                // If an identical block already exists in this pool, return an error.
+                if let Some(handle) = blocks.get(&sequence_hash) {
                     if let Some(_handle) = handle.upgrade() {
                         return Err(BlockRegistationError::BlockAlreadyRegistered(sequence_hash));
                     }
                 }
 
-                // Create the [RegistrationHandle] and [PublishHandle]
-                let publish_handle =
-                    Self::create_publish_handle(state.token_block(), self.event_manager.clone());
-                let reg_handle = publish_handle.remove_handle();
+                let mut publish_handle = None;
 
-                // Insert the [RegistrationHandle] into the registry
-                self.blocks
-                    .insert(sequence_hash, Arc::downgrade(&reg_handle));
+                let block_handle =
+                    Arc::new(BlockHandle::new(sequence_hash, self.unregister_tx.clone()));
+
+                let reg_handle = 'reg_block: {
+                    // Now, check the global registry.
+                    let mut global_registry = self.global_registry.lock().unwrap();
+
+                    // If an identical block exists in other pool, use the same registration handle.
+                    if let Some(handle) = global_registry.get(&sequence_hash) {
+                        if let Some(handle) = handle.upgrade() {
+                            break 'reg_block handle;
+                        }
+                    }
+
+                    // Otherwise, create a new registration handle.
+                    publish_handle = Some(Self::create_publish_handle(
+                        state.token_block(),
+                        self.event_manager.clone(),
+                    ));
+                    let reg_handle = publish_handle.as_ref().unwrap().remove_handle();
+
+                    // Insert the registration handle into the global registry.
+                    global_registry.insert(sequence_hash, Arc::downgrade(&reg_handle));
+
+                    reg_handle
+                };
+
+                blocks.insert(sequence_hash, Arc::downgrade(&block_handle));
 
                 // Update the [BlockState] to [BlockState::Registered]
-                let _ = std::mem::replace(block_state, BlockState::Registered(reg_handle));
+                let _ = std::mem::replace(
+                    block_state,
+                    BlockState::Registered(reg_handle, block_handle),
+                );
 
                 Ok(publish_handle)
             }
-            BlockState::Registered(registered) => Err(
+            BlockState::Registered(registered, _) => Err(
                 BlockRegistationError::BlockAlreadyRegistered(registered.sequence_hash()),
             ),
         }
-    }
-
-    pub fn unregister_block(
-        &mut self,
-        sequence_hash: SequenceHash,
-    ) -> Result<(), UnregisterFailure> {
-        if let Some(handle) = self.blocks.get(&sequence_hash) {
-            if handle.upgrade().is_none() {
-                self.blocks.remove(&sequence_hash);
-                return Ok(());
-            } else {
-                return Err(UnregisterFailure(sequence_hash));
-            }
-        }
-        Ok(())
     }
 
     fn create_publish_handle(

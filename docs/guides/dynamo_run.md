@@ -12,7 +12,7 @@
     * [llama.cpp](#llamacpp)
     * [Sglang](#sglang)
     * [Vllm](#vllm)
-    * [TensorRT-LLM](#tensorrt-llm-engine)
+    * [TensorRT-LLM](#trtllm)
     * [Echo Engines](#echo-engines)
     * [Writing your own engine in Python](#writing-your-own-engine-in-python)
 * [Batch mode](#batch-mode)
@@ -305,10 +305,10 @@ If you have multiple GPUs, mistral.rs does automatic tensor parallelism. You do 
 
 #### llamacpp
 
-Currently [llama.cpp](https://github.com/ggml-org/llama.cpp) is not included by default. Build it like this:
+[llama.cpp](https://github.com/ggml-org/llama.cpp) is built for CPU by default. For an optimized build pass the appropriate feature flag (highly recommended):
 
 ```
-cargo build --features llamacpp[,cuda|metal|vulkan] -p dynamo-run
+cargo build --features cuda|metal|vulkan -p dynamo-run
 ```
 
 ```
@@ -437,10 +437,13 @@ Startup can be slow so you may want to `export DYN_LOG=debug` to see progress.
 
 Shutdown: `ray stop`
 
-#### TensorRT-LLM engine
+#### trtllm
 
-To run a TRT-LLM model with dynamo-run we have included a python based [async engine] (https://github.com/ai-dynamo/dynamo/blob/main/examples/tensorrt_llm/engines/agg_engine.py).
-To configure the TensorRT-LLM async engine please see [llm_api_config.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/tensorrt_llm/configs/llm_api_config.yaml). The file defines the options that need to be passed to the LLM engine. Follow the steps below to serve trtllm on dynamo run.
+Using [TensorRT-LLM's LLM API](https://nvidia.github.io/TensorRT-LLM/llm-api/), a high-level Python API.
+
+You can use `--extra-engine-args` to pass extra arguments to LLM API engine.
+
+The trtllm engine requires requires [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`) to be running.
 
 ##### Step 1: Build the environment
 
@@ -454,7 +457,7 @@ See instructions [here](https://github.com/ai-dynamo/dynamo/blob/main/examples/t
 
 Execute the following to load the TensorRT-LLM model specified in the configuration.
 ```
-dynamo run out=pystr:/workspace/examples/tensorrt_llm/engines/trtllm_engine.py  -- --engine_args /workspace/examples/tensorrt_llm/configs/llm_api_config.yaml
+dynamo-run in=http out=trtllm TinyLlama/TinyLlama-1.1B-Chat-v1.0
 ```
 
 #### Echo Engines
@@ -529,6 +532,20 @@ Pass it like this:
 ```
 dynamo-run out=sglang ~/llms/Llama-3.2-3B-Instruct --extra-engine-args sglang_extra.json
 ```
+
+The tensorrtllm backend also support passing any argument the engine accepts. However, in this case config should be a yaml file.
+
+```
+backend: pytorch
+kv_cache_config:
+  event_buffer_max_size: 1024
+```
+
+Pass it like this:
+```
+dynamo-run in=http out=trtllm TinyLlama/TinyLlama-1.1B-Chat-v1.0 --extra-engine-args trtllm_extra.yaml
+```
+
 ### Writing your own engine in Python
 
 Note: This section replaces "bring-your-own-engine".
