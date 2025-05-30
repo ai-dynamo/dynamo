@@ -34,7 +34,9 @@ context_servers:
   cache_transceiver_config:
     max_num_tokens: 10240
   pytorch_backend_config:
-    enable_overlap_scheduler: false
+    # NOTE: This field is called 'enable_overlap_scheduler' in older TRTLLM versions
+    # Overlap scheduler not currently supported in context-only
+    disable_overlap_scheduler: true
     use_cuda_graph: false
   urls:
       - "localhost:8001"
@@ -49,7 +51,8 @@ generation_servers:
   cache_transceiver_config:
     max_num_tokens: 256
   pytorch_backend_config:
-    enable_overlap_scheduler: true
+    # NOTE: This field is called 'enable_overlap_scheduler' in older TRTLLM versions
+    disable_overlap_scheduler: false
     use_cuda_graph: false
   urls:
       - "localhost:8002"
