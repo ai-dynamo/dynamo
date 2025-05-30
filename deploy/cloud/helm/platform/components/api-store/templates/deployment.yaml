@@ -84,7 +84,7 @@ spec:
             - name: DYN_OBJECT_STORE_ID
               valueFrom:
                 secretKeyRef:
-                  name: '{{ .Values.minio.host | default (printf "%s-minio" .Release.Name) }}'
+                  name: '{{ .Values.minio.passwordSecret | default (printf "%s-minio" .Release.Name) }}'
                   key: root-user
             - name: DYN_OBJECT_STORE_KEY
               valueFrom:

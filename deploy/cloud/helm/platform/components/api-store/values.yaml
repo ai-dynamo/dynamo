@@ -94,15 +94,14 @@ istio:
 postgresql:
   host: ""
   port: 5432
-  user: "admin"
+  # allow to override the secret name containing the postgres password
   passwordSecret: ""
   database: "dynamo"
 
 minio:
   host: ""
   port: 9000
-  accessKey: "minioadmin"
-  secretKey: "minioadmin"
+  # allow to override the secret name containing the minio username and password
   passwordSecret: ""
 
 resources: {}

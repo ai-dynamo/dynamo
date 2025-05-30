@@ -149,8 +149,8 @@ postgresql:
     password: "password"
     database: "dynamo"
   primary:
-      persistence:
-        enabled: false
+    persistence:
+      enabled: false
 
 etcd:
   enabled: false

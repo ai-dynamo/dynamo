@@ -46,4 +46,3 @@ dependencies:
     version: 16.0.2
     repository: "https://charts.bitnami.com/bitnami"
     condition: minio.enabled
-  

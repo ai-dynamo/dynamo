@@ -157,7 +157,7 @@ cd ..
 # Install/upgrade the helm chart for the CRDs
 if [ "$INSTALL_CRDS" = true ]; then
   echo "Installing/upgrading helm chart for the CRDs..."
-  $HELM_CMD upgrade --install dynamo-crds crds/ --namespace default
+  $HELM_CMD upgrade --install dynamo-crds crds/ --namespace default --wait --atomic
 fi
 
 # Install/upgrade the helm chart
