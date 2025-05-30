@@ -38,7 +38,6 @@ _local = threading.local()
 
 
 def extract_or_generate_request_id(
-    request: Optional[Request] = None,
     headers: Optional[dict] = None,
     existing_id: Optional[str] = None,
 ) -> str:
@@ -46,7 +45,6 @@ def extract_or_generate_request_id(
     Universal function to extract request ID from various sources or generate a new UUID.
 
     Args:
-        request: FastAPI Request object (optional)
         headers: Dictionary of headers (optional)
         existing_id: Already extracted request ID (optional)
 
@@ -57,9 +55,6 @@ def extract_or_generate_request_id(
         return existing_id
 
     request_id = None
-
-    if request is not None:
-        request_id = request.headers.get("x-request-id")
 
     if request_id is None and headers is not None:
         request_id = headers.get("x-request-id") or headers.get("X-Request-Id")
@@ -119,7 +114,8 @@ def with_request_tracing(func: Callable) -> Callable:
             request = kwargs["request"]
 
         if request:
-            request_id = extract_or_generate_request_id(request)
+            headers_opt = request.headers if hasattr(request, "headers") else None
+            request_id = extract_or_generate_request_id(headers_opt)
             set_request_context(request_id)
             logger.debug(
                 f"Request tracing: extracted/generated request_id={request_id}"
