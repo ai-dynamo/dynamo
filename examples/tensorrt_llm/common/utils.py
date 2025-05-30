@@ -21,7 +21,7 @@ import traceback
 import weakref
 from enum import Enum
 from queue import Queue
-from typing import Callable, Optional, TypedDict, Union
+from typing import Callable, Optional, TypedDict, Union, Coroutine, Any
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class ConversationMessage(TypedDict):
 class ManagedThread(threading.Thread):
     def __init__(
         self,
-        task: Optional[Union[Callable[..., bool], weakref.WeakMethod]],
+        task: Optional[Union[Callable[..., Coroutine[Any, Any, bool]], weakref.WeakMethod]],
         error_queue: Optional[Queue] = None,
         name: Optional[str] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
@@ -74,7 +74,7 @@ class ManagedThread(threading.Thread):
 
     def run(self):
         while not self.stop_event.is_set():
-            task: Optional[Union[Callable[..., bool], weakref.WeakMethod]] = self.task
+            task: Optional[Union[Callable[..., Coroutine[Any, Any, bool]], weakref.WeakMethod]] = self.task
             if isinstance(task, weakref.WeakMethod):
                 task = task()
                 if task is None:
