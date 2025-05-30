@@ -17,6 +17,7 @@ Common:
   block-size: 64
   max-model-len: 16384
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
+  router: kv-load
 
 Frontend:
   served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
@@ -24,8 +25,11 @@ Frontend:
   port: 8000
 
 Processor:
-  router: kv-load
-  common-configs: [model, block-size]
+  common-configs: [model, block-size, router]
+
+Router:
+  min-workers: 1
+  common-configs: [model, block-size, router]
 
 VllmWorker:
   remote-prefill: true
@@ -43,3 +47,14 @@ PrefillWorker:
     resources:
       gpu: 1
   common-configs: [model, block-size, max-model-len, kv-transfer-config]
+
+Planner:
+  environment: local
+  no-operation: false
+  metric-pulling-interval: 1
+  adjustment-interval: 10
+  prefill-queue-scale-down-threshold: 0.2
+  prefill-queue-scale-up-threshold: 10
+  decode-kv-scale-down-threshold: 0.3
+  decode-kv-scale-up-threshold: 0.6
+  log-dir: log/planner

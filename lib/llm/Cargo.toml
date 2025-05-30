@@ -27,10 +27,13 @@ description = "Dynamo LLM Library"
 [features]
 default = []
 
+# todo: enable this as default
+# default = ["block-manager", "testing-full"]
+
 testing-full  = ["testing-cuda", "testing-nixl"]
 testing-cuda  = ["dep:cudarc"]
 testing-nixl  = ["dep:nixl-sys"]
-block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray"]
+block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
 sentencepiece = ["dep:sentencepiece"]
 
 [dependencies]
@@ -55,6 +58,7 @@ oneshot = { workspace = true }
 prometheus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+strum = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -65,7 +69,6 @@ validator = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 xxhash-rust = { workspace = true }
-strum = { workspace = true }
 
 akin = "0.4.0"
 async-openai = "0.27.2"
@@ -73,13 +76,15 @@ blake3 = "1"
 bytemuck = "1.22"
 candle-core = { version = "0.8.0" }
 derive-getters = "0.5"
+offset-allocator = "0.2"
 regex = "1"
 rayon = "1"
 
 # block_manager
-nixl-sys = { version = "0.2.1-rc.1", optional = true }
+nixl-sys = { version = "0.3.0-rc.2", optional = true }
 cudarc = { version = "0.16.2", features = ["cuda-12020"], optional = true }
 ndarray = { version = "0.16", optional = true }
+nix = { version = "0.26", optional = true }
 
 # protocols
 unicode-segmentation = "1.12"
@@ -111,7 +116,12 @@ minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
 ggus = "0.4.0"
 memmap2 = "0.9.5"
 
+# Publishers
+zeromq = "0.4.1"
+rmp-serde = "1.3"
+
 [dev-dependencies]
+assert_matches = "1.5"
 hf-hub = { workspace = true }
 proptest = "1.5.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
@@ -124,3 +134,5 @@ insta = { version = "1.41", features = [
   "redactions",
   "filters",
 ] }
+aligned-vec = "0.6.4"
+lazy_static = "1.4"

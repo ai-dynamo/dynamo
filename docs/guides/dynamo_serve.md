@@ -15,18 +15,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Using `dynamo serve` to deploy inference graphs locally
+# Serving Inference Graphs (`dynamo serve`)
 
-This guide explains how to create, configure, and deploy inference graphs for large language models using the `dynamo serve` command.
-
-## Table of Contents
-
-- [What are inference graphs?](#what-are-inference-graphs)
-- [Creating an inference graph](#creating-an-inference-graph)
-- [Serving the inference graph](#deploying-the-inference-graph)
-- [Guided Example](#guided-example)
-
-## What are inference graphs?
+This guide explains how to create, configure, and deploy inference graphs locally for large language models using the `dynamo serve` command.
 
 Inference graphs are compositions of service components that work together to handle LLM inference. A typical graph might include:
 
@@ -37,9 +28,13 @@ Inference graphs are compositions of service components that work together to ha
 
 ## Creating an inference graph
 
-Once you've written your various Dynamo services (docs on how to write these can be found [here](../../deploy/sdk/docs/sdk/README.md)), you can create an inference graph by composing these services together using the following two mechanisms:
+Once you've written Dynamo services ([see the SDK](https://github.com/ai-dynamo/dynamo/blob/main/deploy/dynamo/sdk/docs/sdk/README.md)), create an inference graph by composing them together using the following mechanisms:
+1. Dependencies with `depends()`
+2. Dynamic composition with `.link()`
 
-### 1. Dependencies with `depends()`
+See the following sections for more details.
+
+### Dependencies with `depends()`
 
 ```python
 from components.worker import VllmWorker
@@ -58,7 +53,7 @@ Benefits of `depends()`:
 - Creates type-safe client connections between services
 - Allows calling dependent service methods directly
 
-### 2. Dynamic composition with `.link()`
+### Dynamic composition with `.link()`
 
 ```python
 # From examples/llm/graphs/agg.py
@@ -82,15 +77,24 @@ The `.link()` method is useful for:
 
 ## Deploying the inference graph
 
-Once you've defined your inference graph and its configuration, you can deploy it locally using the `dynamo serve` command! We recommend running the `--dry-run` command so you can see what arguments will be pasesd into your final graph. And then
+Once you've defined your inference graph and its configuration, deploy it locally using the `dynamo serve` command. We recommend running the `--dry-run` command to see what arguments will be pasesd into your final graph.
 
-Lets walk through an example.
+Consider the following example.
 
-## Guided Example
+### Guided Example
 
-The files referenced here can be found [here](../../examples/llm/components/). You will need 1 GPU minimum to run this example. This example can be run from the `examples/llm` directory
+The files referenced in this example can be found [here](https://github.com/ai-dynamo/dynamo/blob/main/examples/llm/components). You need 1 GPU minimum to run this example. This example can be run from the `examples/llm` directory.
 
-### 1. Define your components
+This example walks through:
+1. [Defining your components](#define-your-components)
+2. [Defining your graph](#define-your-graph)
+3. [Defining your configuration](#define-your-configuration)
+4. [Serving your graph](#serve-your-graph)
+
+See the following sections for details.
+
+
+#### Define your components
 
 In this example we'll be deploying an aggregated serving graph. Our components include:
 
@@ -125,9 +129,9 @@ class VllmWorker:
     ...
 ```
 
-Note that our prebuilt components have the maximal set of dependancies needed to run the component. This allows you to plug in different components to the same graph to create different architectures. When you write your own components, you can be as flexible as you'd like.
+Note that our prebuilt components have the maximal set of dependancies needed to run the component, which allows you to plug different components into the same graph to create different architectures. When writing your own components, you can be as flexible as you like.
 
-### 2. Define your graph
+#### Define your graph
 
 ```python
 # graphs/agg.py
@@ -138,18 +142,17 @@ from components.worker import VllmWorker
 Frontend.link(Processor).link(VllmWorker)
 ```
 
-### 3. Define your configuration
+#### Define your configuration
 
-We've provided a set of basic configurations for this example [here](../../examples/llm/configs/agg.yaml). All of these can be changed and also be overridden by passing in CLI flags to serve!
+We provide [basic configurations](https://github.com/ai-dynamo/dynamo/blob/main/examples/llm/configs/agg.yaml) that you can change; you can also override them by passing in CLI flags to `dynamo serve`.
 
-### 4. Serve your graph
+#### Serve your graph
 
-As a prerequisite, ensure you have NATS and etcd running by running the docker compose in the deploy directory. You can find it [here](../../deploy/metrics/docker-compose.yml).
+Before serving your graph, ensure that NATS and etcd are running using the [docker compose file](https://github.com/ai-dynamo/dynamo/blob/main/deploy/metrics/docker-compose.yml) file in the deploy directory.
 
 ```bash
 docker compose up -d
 ```
-
 Note that the we point toward the first node in our graph. In this case, it's the `Frontend` service.
 
 ```bash
@@ -157,7 +160,7 @@ Note that the we point toward the first node in our graph. In this case, it's th
 dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml --dry-run
 ```
 
-This will print out something like
+This returns output like:
 
 ```bash
 Service Configuration:
@@ -200,7 +203,7 @@ You can override any of these configuration options by passing in CLI flags to s
 dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml --Processor.router=random --dry-run
 ```
 
-Which will print out something like
+Which prints out output like:
 
 ```bash
   #...
@@ -237,8 +240,8 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ## Close deployment
 
-> [!IMPORTANT]
-> We are aware of an issue where vLLM subprocesses might not be killed when `ctrl-c` is pressed.
-> We are working on addressing this. Relevant vLLM issues can be found [here](https://github.com/vllm-project/vllm/pull/8492) and [here](https://github.com/vllm-project/vllm/issues/6219#issuecomment-2439257824).
+```{important}
+We are aware of an issue where vLLM subprocesses might not be killed when `ctrl-c` is pressed.
+We are working on addressing this. Relevant vLLM issues can be found [here](https://github.com/vllm-project/vllm/pull/8492) and [here](https://github.com/vllm-project/vllm/issues/6219#issuecomment-2439257824).
 
-To stop the serve, you can press `ctrl-c` which will kill the different components. In order to kill the remaining vLLM subprocesses you can run `nvidia-smi` and `kill -9` the remaining processes or run `pkill python3` from inside of the container.
+To stop the serve, you can press `ctrl-c` which kills the components. In order to kill the remaining vLLM subprocesses you can run `nvidia-smi` and `kill -9` the remaining processes or run `pkill python3` from inside of the container.

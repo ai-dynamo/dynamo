@@ -52,3 +52,11 @@ class PreprocessedRequest(BaseModel):
     eos_token_ids: List[TokenIdType] = Field(default_factory=list)
     mdc_sum: Optional[str] = None
     annotations: List[str] = Field(default_factory=list)
+
+
+class DisaggPreprocessedRequest(BaseModel):
+    request: PreprocessedRequest
+    sampling_params: dict
+    bootstrap_host: str
+    bootstrap_port: int
+    bootstrap_room: int

@@ -1,30 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+
+use std::sync::Arc;
 
 use anyhow::Result;
 use dynamo_runtime::{
-    component::Component,
+    component::{Component, InstanceSource},
     pipeline::{
-        async_trait, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream,
-        SingleIn,
+        async_trait, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
+        ResponseStream, SingleIn,
     },
     prelude::*,
     protocols::annotated::Annotated,
 };
 use futures::stream::{self, StreamExt};
-use std::sync::Arc;
 
 pub mod indexer;
 pub mod metrics_aggregator;
@@ -42,6 +31,8 @@ use crate::{
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
         scoring::ProcessedEndpoints,
     },
+    preprocessor::BackendInput,
+    protocols::common::llm_backend::LLMEngineOutput,
     tokens::TokenBlockSequence,
 };
 
@@ -63,6 +54,8 @@ pub trait WorkerSelector {
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
 }
 
+/// A KvRouter only decides which worker you should use. It doesn't send you there.
+/// TODO: Rename this to indicate it only selects a worker, it does not route.
 pub struct KvRouter {
     indexer: KvIndexer,
     scheduler: KvScheduler,
@@ -74,13 +67,13 @@ impl KvRouter {
         component: Component,
         block_size: usize,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
-    ) -> Result<Arc<Self>> {
+    ) -> Result<Self> {
         let cancellation_token = component
             .drt()
             .primary_lease()
             .expect("Cannot KV route static workers")
             .primary_token();
-
+        tracing::info!("KV Routing initialized");
         let metrics_aggregator =
             KvMetricsAggregator::new(component.clone(), cancellation_token.clone()).await;
         let indexer = KvIndexer::new(cancellation_token.clone(), block_size);
@@ -100,10 +93,7 @@ impl KvRouter {
         tokio::spawn(async move {
             while let Some(event) = kv_events_rx.next().await {
                 let event: RouterEvent = match serde_json::from_slice(&event.payload) {
-                    Ok(event) => {
-                        tracing::debug!("received kv event: {:?}", event);
-                        event
-                    }
+                    Ok(event) => event,
                     Err(e) => {
                         tracing::warn!("Failed to deserialize RouterEvent: {:?}", e);
                         // Choosing warn and continue to process other events from other workers
@@ -112,16 +102,16 @@ impl KvRouter {
                     }
                 };
                 if let Err(e) = kv_events_tx.send(event).await {
-                    tracing::trace!("failed to send kv event to indexer; shutting down: {:?}", e);
+                    tracing::debug!("failed to send kv event to indexer; shutting down: {:?}", e);
                 }
             }
         });
 
-        Ok(Arc::new(Self {
+        Ok(Self {
             scheduler,
             indexer,
             block_size,
-        }))
+        })
     }
 
     // [TODO] indexer needs to take 'lora_id' as parameter
@@ -137,6 +127,33 @@ impl KvRouter {
         let worker_id = self.scheduler.schedule(overlap_scores, isl_tokens).await?;
         Ok(worker_id)
     }
+
+    /// Give these tokens, find the worker with the best match in it's KV cache.
+    /// Returned overlap amount is in number of blocks.
+    async fn find_best_match(&self, tokens: &[u32]) -> anyhow::Result<(i64, u32)> {
+        let isl_tokens = tokens.len();
+        let block_size = self.block_size;
+
+        let (complete_blocks, _partial_block) =
+            TokenBlockSequence::split_tokens(tokens, block_size, 1337_u64);
+
+        let local_block_hashes = complete_blocks
+            .into_iter()
+            .map(|block| LocalBlockHash(block.block_hash()))
+            .collect();
+        let overlap_scores = self.indexer.find_matches(local_block_hashes).await?;
+        let worker_id = self
+            .scheduler
+            .schedule(overlap_scores.clone(), isl_tokens)
+            .await?;
+        let overlap_amount = overlap_scores.scores.get(&worker_id).copied().unwrap_or(0);
+        Ok((worker_id, overlap_amount))
+    }
+
+    /// Get the block size this router was configured with
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
 }
 
 #[async_trait]
@@ -146,23 +163,48 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         request: SingleIn<RouterRequest>,
     ) -> Result<ManyOut<Annotated<RouterResponse>>> {
         let (request, ctx) = request.into_parts();
-        let isl_tokens = request.tokens.len();
-        let block_size = self.block_size;
-
-        let (complete_blocks, _partial_block) =
-            TokenBlockSequence::split_tokens(&request.tokens, block_size, 1337_u64);
-
-        let local_block_hashes = complete_blocks
-            .into_iter()
-            .map(|block| LocalBlockHash(block.block_hash()))
-            .collect();
-
-        let overlap_scores = self.indexer.find_matches(local_block_hashes).await?;
-        let worker_id = self.scheduler.schedule(overlap_scores, isl_tokens).await?;
+        let (worker_id, _) = self.find_best_match(&request.tokens).await?;
 
         let response = RouterResponse { worker_id };
         let response = Annotated::from_data(response);
         let stream = stream::iter(vec![response]);
         Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
+    }
+}
+
+pub struct KvPushRouter {
+    inner: PushRouter<BackendInput, Annotated<LLMEngineOutput>>,
+    chooser: Arc<KvRouter>,
+}
+
+impl KvPushRouter {
+    pub fn new(
+        inner: PushRouter<BackendInput, Annotated<LLMEngineOutput>>,
+        chooser: Arc<KvRouter>,
+    ) -> Self {
+        KvPushRouter { inner, chooser }
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+    for KvPushRouter
+{
+    async fn generate(
+        &self,
+        request: SingleIn<BackendInput>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        match self.inner.client.instance_source.as_ref() {
+            InstanceSource::Static => self.inner.r#static(request).await,
+            InstanceSource::Dynamic(_) => {
+                let (instance_id, overlap_amount) =
+                    self.chooser.find_best_match(&request.token_ids).await?;
+                // Update the request with the estimated prefix hit blocks
+                let (mut backend_input, context) = request.into_parts();
+                backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
+                let updated_request = context.map(|_| backend_input);
+                self.inner.direct(updated_request, instance_id).await
+            }
+        }
     }
 }

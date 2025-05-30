@@ -14,7 +14,7 @@
 #  limitations under the License.
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -23,6 +23,7 @@ from ..models.schemas import (
     DeploymentFullSchema,
     DeploymentListResponse,
     ResourceSchema,
+    UpdateDeploymentSchema,
     create_default_cluster,
     create_default_user,
 )
@@ -32,18 +33,20 @@ from .k8s import (
     get_dynamo_deployment,
     get_namespace,
     list_dynamo_deployments,
+    update_dynamo_deployment,
 )
+from .utils import build_latest_revision_from_cr, get_deployment_status, get_urls
 
 router = APIRouter(prefix="/api/v2/deployments", tags=["deployments"])
 
 
-def sanitize_deployment_name(name: Optional[str], dynamo_nim: str) -> str:
+def sanitize_deployment_name(name: Optional[str], dynamo_component: str) -> str:
     """
     Resolve a name for the DynamoGraphDeployment that will work safely in k8s
 
     Args:
         name: Optional custom name
-        dynamo_nim: Bento name and version (format: name:version)
+        dynamo_component: Component name and version (format: name:version)
 
     Returns:
         A unique deployment name that is at most 63 characters
@@ -52,11 +55,11 @@ def sanitize_deployment_name(name: Optional[str], dynamo_nim: str) -> str:
         # If name is provided, truncate it to 63
         base_name = name[:63]
     else:
-        # Generate base name from dynamoNim
-        dynamo_nim_parts = dynamo_nim.split(":")
-        if len(dynamo_nim_parts) != 2:
-            raise ValueError("Invalid dynamoNim format, expected 'name:version'")
-        base_name = f"dep-{dynamo_nim_parts[0]}-{dynamo_nim_parts[1]}"
+        # Generate base name from dynamo_component
+        dynamo_component_parts = dynamo_component.split(":")
+        if len(dynamo_component_parts) != 2:
+            raise ValueError("Invalid dynamo_component format, expected 'name:version'")
+        base_name = f"dep-{dynamo_component_parts[0]}-{dynamo_component_parts[1]}"
         # Truncate to 63 chars
         base_name = base_name[:63]
 
@@ -88,7 +91,7 @@ async def create_deployment(deployment: CreateDeploymentSchema):
         created_crd = create_dynamo_deployment(
             name=deployment_name,
             namespace=kube_namespace,
-            dynamo_nim=deployment.bento,
+            dynamo_component=deployment.bento or deployment.component,
             labels={
                 "ngc-organization": ownership["organization_id"],
                 "ngc-user": ownership["user_id"],
@@ -116,7 +119,7 @@ async def create_deployment(deployment: CreateDeploymentSchema):
             kube_namespace=kube_namespace,
             creator=creator,
             cluster=cluster,
-            latest_revision=None,
+            latest_revision=build_latest_revision_from_cr(created_crd),
             manifest=None,
         )
 
@@ -130,6 +133,15 @@ async def create_deployment(deployment: CreateDeploymentSchema):
 
 @router.get("/{name}", response_model=DeploymentFullSchema)
 def get_deployment(name: str) -> DeploymentFullSchema:
+    """
+    Retrieve a deployment by name.
+
+    Args:
+        name: The name of the deployment to retrieve
+
+    Returns:
+        DeploymentFullSchema: The deployment details
+    """
     try:
         kube_namespace = get_namespace()
         cr = get_dynamo_deployment(
@@ -147,7 +159,7 @@ def get_deployment(name: str) -> DeploymentFullSchema:
             urls=get_urls(cr),
             creator=create_default_user(),
             cluster=create_default_cluster(create_default_user()),
-            latest_revision=None,
+            latest_revision=build_latest_revision_from_cr(cr),
             manifest=None,
         )
         return deployment_schema
@@ -159,58 +171,17 @@ def get_deployment(name: str) -> DeploymentFullSchema:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def get_deployment_status(resource: Dict[str, Any]) -> str:
-    """
-    Get the current status of a deployment.
-    Maps operator status to BentoML status values.
-    Returns lowercase status values matching BentoML's DeploymentStatus enum.
-    """
-    status = resource.get("status", {})
-    conditions = status.get("conditions", [])
-    state = status.get("state", "")
-
-    # First check Ready condition
-    for condition in conditions:
-        if condition.get("type") == "Ready":
-            if condition.get("status") == "True":
-                # If state is "successful", map to "running"
-                if state == "successful":
-                    return "running"
-                return condition.get("message", "running").lower()
-            elif condition.get("message"):
-                return condition.get("message").lower()
-
-    # If no Ready condition or not True, check state
-    if state == "failed":
-        return "failed"
-    elif state == "pending":
-        return "deploying"  # map pending to deploying to match BentoML states
-
-    # Default fallback
-    return "unknown"
-
-
-def get_urls(resource: Dict[str, Any]) -> List[str]:
-    """
-    Get the URLs for a deployment.
-    Returns URLs as soon as they are available from EndpointExposed condition.
-    """
-    urls = []
-    conditions = resource.get("status", {}).get("conditions", [])
-
-    # Check for EndpointExposed condition
-    for condition in conditions:
-        if (
-            condition.get("type") == "EndpointExposed"
-            and condition.get("status") == "True"
-        ):
-            if message := condition.get("message"):
-                urls.append(message)
-    return urls
-
-
 @router.delete("/{name}", response_model=DeploymentFullSchema)
 def delete_deployment(name: str) -> DeploymentFullSchema:
+    """
+    Delete a deployment by name.
+
+    Args:
+        name: The name of the deployment to delete
+
+    Returns:
+        DeploymentFullSchema: The deleted deployment details
+    """
     try:
         kube_namespace = get_namespace()
         # Get deployment details before deletion
@@ -226,7 +197,7 @@ def delete_deployment(name: str) -> DeploymentFullSchema:
             urls=get_urls(cr),
             creator=create_default_user(),
             cluster=create_default_cluster(create_default_user()),
-            latest_revision=None,
+            latest_revision=build_latest_revision_from_cr(cr),
             manifest=None,
         )
         # Delete the deployment
@@ -295,7 +266,7 @@ def list_deployments(
                 urls=get_urls(cr),
                 creator=create_default_user(),
                 cluster=create_default_cluster(create_default_user()),
-                latest_revision=None,
+                latest_revision=build_latest_revision_from_cr(cr),
                 manifest=None,
             )
 
@@ -332,5 +303,67 @@ def list_deployments(
         raise e
     except Exception as e:
         print("Error listing deployments:")
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/{name}", response_model=DeploymentFullSchema)
+def update_deployment(name: str, deployment: UpdateDeploymentSchema):
+    """
+    Update an existing deployment.
+
+    Args:
+        name: The name of the deployment to update (path param)
+        deployment: The new deployment configuration (body)
+
+    Returns:
+        updated deployment details
+    """
+    try:
+        ownership = {"organization_id": "default-org", "user_id": "default-user"}
+        kube_namespace = get_namespace()
+        existing_deployment = get_deployment(name)
+        if existing_deployment.bento != deployment.bento:
+            raise HTTPException(
+                status_code=422,
+                detail="Cannot update the Dynamo components of a deployment.",
+            )
+
+        deployment_name = sanitize_deployment_name(name, deployment.bento)
+        updated_crd = update_dynamo_deployment(
+            name=deployment_name,
+            namespace=kube_namespace,
+            dynamo_nim=deployment.bento,
+            labels={
+                "ngc-organization": ownership["organization_id"],
+                "ngc-user": ownership["user_id"],
+            },
+            envs=deployment.envs,
+        )
+        resource = ResourceSchema(
+            uid=updated_crd["metadata"]["uid"],
+            name=updated_crd["metadata"]["name"],
+            created_at=updated_crd["metadata"].get(
+                "creationTimestamp", datetime.utcnow()
+            ),
+            updated_at=datetime.utcnow(),
+            resource_type="deployment",
+            labels=[],
+        )
+        creator = create_default_user()
+        cluster = create_default_cluster(creator)
+        deployment_schema = DeploymentFullSchema(
+            **resource.dict(),
+            status=get_deployment_status(updated_crd),
+            kube_namespace=kube_namespace,
+            creator=creator,
+            cluster=cluster,
+            latest_revision=build_latest_revision_from_cr(updated_crd),
+            manifest=None,
+            urls=get_urls(updated_crd),
+        )
+        return deployment_schema
+    except Exception as e:
+        print("Error updating deployment:")
         print(e)
         raise HTTPException(status_code=500, detail=str(e))

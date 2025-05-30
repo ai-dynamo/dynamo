@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 from typing import Optional
 
 from kubernetes import client, config
@@ -124,4 +125,40 @@ class KubernetesAPI:
             plural="dynamographdeployments",
             name=graph_deployment_name,
             body=patch,
+        )
+
+    async def wait_for_graph_deployment_ready(
+        self,
+        graph_deployment_name: str,
+        max_attempts: int = 60,  # default: 10 minutes total
+        delay_seconds: int = 10,  # default: check every 10 seconds
+    ) -> None:
+        """Wait for a graph deployment to be ready"""
+
+        for attempt in range(max_attempts):
+            await asyncio.sleep(delay_seconds)
+            graph_deployment = await self.get_graph_deployment(
+                graph_deployment_name, self.current_namespace
+            )
+            if not graph_deployment:
+                raise ValueError(f"Graph deployment {graph_deployment_name} not found")
+
+            conditions = graph_deployment.get("status", {}).get("conditions", [])
+            ready_condition = next(
+                (c for c in conditions if c.get("type") == "Ready"), None
+            )
+
+            if ready_condition and ready_condition.get("status") == "True":
+                return  # Deployment is ready
+
+            print(
+                f"[Attempt {attempt + 1}/{max_attempts}] "
+                f"(status: {ready_condition.get('status') if ready_condition else 'N/A'}, "
+                f"message: {ready_condition.get('message') if ready_condition else 'no condition found'})"
+            )
+
+        # Raise after all attempts exhausted (without additional delay)
+        raise TimeoutError(
+            f"Graph deployment '{graph_deployment_name}' "
+            f"is not ready after {max_attempts * delay_seconds} seconds"
         )

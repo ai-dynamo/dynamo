@@ -26,11 +26,11 @@ dynamo-run is a single binary that wires together the various inputs (http, text
 Example:
 - cargo build --features cuda -p dynamo-run
 - cd target/debug
-- ./dynamo-run Qwen/Qwen2.5-3B-Instruct
+- ./dynamo-run Qwen/Qwen3-0.6B
 - OR: ./dynamo-run /data/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf
 "#;
 
-const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=ENGINE_LIST|dyn://<path> [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin]";
+const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=ENGINE_LIST|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--kv-cache-block-size=16] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv]";
 
 fn main() -> anyhow::Result<()> {
     // Set log level based on verbosity flag
@@ -103,21 +103,9 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
         }
         None => Input::default(),
     };
-    let out_opt = match out_opt {
-        Some(x) => {
-            non_flag_params += 1;
-            x
-        }
-        None => {
-            let default_engine = Output::default(); // smart default based on feature flags
-            tracing::info!(
-                "Using default engine: {default_engine}. Use out=<engine> to specify one of {}",
-                Output::available_engines().join(", ")
-            );
-            default_engine
-        }
-    };
-    print_cuda(&out_opt);
+    if out_opt.is_some() {
+        non_flag_params += 1;
+    }
 
     // Clap skips the first argument expecting it to be the binary name, so add it back
     // Note `--model-path` has index=1 (in lib.rs) so that doesn't need a flag.
@@ -129,39 +117,3 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
 
     dynamo_run::run(runtime, in_opt, out_opt, flags).await
 }
-
-/// If the user will benefit from CUDA/Metal/Vulkan, remind them to build with it.
-/// If they have it, celebrate!
-// Only mistralrs and llamacpp need to be built with CUDA.
-// The Python engines only need it at runtime.
-#[cfg(any(feature = "mistralrs", feature = "llamacpp"))]
-fn print_cuda(output: &Output) {
-    // These engines maybe be compiled in, but are they the chosen one?
-    match output {
-        #[cfg(feature = "mistralrs")]
-        Output::MistralRs => {}
-        #[cfg(feature = "llamacpp")]
-        Output::LlamaCpp => {}
-        _ => {
-            return;
-        }
-    }
-
-    #[cfg(feature = "cuda")]
-    {
-        tracing::info!("CUDA on");
-    }
-    #[cfg(feature = "metal")]
-    {
-        tracing::info!("Metal on");
-    }
-    #[cfg(feature = "vulkan")]
-    {
-        tracing::info!("Vulkan on");
-    }
-    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
-    tracing::info!("CPU mode. Rebuild with `--features cuda|metal|vulkan` for better performance");
-}
-
-#[cfg(not(any(feature = "mistralrs", feature = "llamacpp")))]
-fn print_cuda(_output: &Output) {}

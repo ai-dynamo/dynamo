@@ -25,7 +25,7 @@ from common.protocol import Tokens
 from components.worker import TensorRTLLMWorker
 
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
 logger = logging.getLogger(__name__)
@@ -90,10 +90,10 @@ class Router:
             .endpoint("generate")
             .client()
         )
-        while len(self.workers_client.endpoint_ids()) < self.args.min_workers:
+        while len(self.workers_client.instance_ids()) < self.args.min_workers:
             logger.info(
                 f"Waiting for more workers to be ready.\n"
-                f" Current: {len(self.workers_client.endpoint_ids())},"
+                f" Current: {len(self.workers_client.instance_ids())},"
                 f" Required: {self.args.min_workers}"
             )
             await asyncio.sleep(30)
@@ -144,7 +144,7 @@ class Router:
 
         # Get all worker IDs from the client. This is needed because scores / metrics may not have values for all workers
         # and we want all workers to be considered in the logit calculation
-        worker_ids = self.workers_client.endpoint_ids()
+        worker_ids = self.workers_client.instance_ids()
 
         worker_logits = {}
         for worker_id in worker_ids:
@@ -209,7 +209,7 @@ class Router:
 
         return best_worker_id, worker_scores.get(best_worker_id, 0.0)
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: Tokens) -> AsyncIterator[WorkerId]:
         if self.indexer is None or self.metrics_aggregator is None:
             yield "_0.0"

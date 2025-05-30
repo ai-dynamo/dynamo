@@ -13,20 +13,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+import base64
+import binascii
 import logging
 from io import BytesIO
-from typing import AsyncIterator
+from queue import Queue
+from typing import AsyncIterator, Optional
+from urllib.parse import urlparse
 
-import requests
+import connect
+import httpx
 import torch
 from PIL import Image
 from transformers import AutoImageProcessor, LlavaForConditionalGeneration
 from utils.protocol import EncodeRequest, EncodeResponse
 from utils.vllm import parse_vllm_args
 
-from dynamo.sdk import dynamo_endpoint, service
+from dynamo.sdk import async_on_start, endpoint, service
 
 logger = logging.getLogger(__name__)
+
+try:
+    import cupy as array_module
+
+    if not array_module.cuda.is_available():
+        raise ImportError("CUDA is not available.")
+    DEVICE = "cuda"
+    logger.info("Using cupy for array operations (GPU mode).")
+except ImportError as e:
+    logger.warning(f"Failed to import cupy, falling back to numpy: {e}.")
+    import numpy as array_module
+
+    DEVICE = "cpu"
+
+CACHE_SIZE_MAXIMUM = 8
 
 
 @service(
@@ -36,7 +57,7 @@ logger = logging.getLogger(__name__)
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
     workers=1,
 )
-class EncodeWorker:
+class VllmEncodeWorker:
     def __init__(self) -> None:
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
@@ -50,32 +71,148 @@ class EncodeWorker:
             self.MODEL_ID, device_map="auto", torch_dtype=torch.float16
         ).eval()
 
-    @dynamo_endpoint()
-    async def encode(self, request: EncodeRequest) -> AsyncIterator[EncodeResponse]:
-        image = self.open_image(request.image_url)
-        image_embeds = self.image_processor(images=image, return_tensors="pt")
+        self._image_cache: dict[str, Image.Image] = {}
+        self._cache_queue: Queue[str] = Queue(maxsize=CACHE_SIZE_MAXIMUM)
 
-        with torch.no_grad():
-            logger.debug(f"Vision model device: {self.vision_model.device}")
-            vision_outputs = self.vision_model.vision_tower(
-                image_embeds["pixel_values"].to(self.vision_model.device)
-            )
+        self._http_client: Optional[httpx.AsyncClient] = None
+        self._http_timeout = 30.0
 
-            image_features = vision_outputs.last_hidden_state
-            image_features = self.vision_model.multi_modal_projector(image_features)
-            yield EncodeResponse(
-                image_features=image_features.tolist()
-            ).model_dump_json()
+    async def load_image(self, image_url: str) -> Image.Image:
+        parsed_url = urlparse(image_url)
 
-    def open_image(self, image: str) -> Image.Image:
-        # TODO: Have a seperate field for url and non url - and avoid auto detection
+        # For HTTP(S) URLs, check cache first
+        if parsed_url.scheme in ("http", "https"):
+            image_url_lower = image_url.lower()
+            if image_url_lower in self._image_cache:
+                logger.debug(f"Image found in cache for URL: {image_url}")
+                return self._image_cache[image_url_lower]
+
         try:
-            if image.startswith("http") or image.startswith("https"):
-                response = requests.get(image)
-                image_data = Image.open(BytesIO(response.content)).convert("RGB")
+            if parsed_url.scheme == "data":
+                # Parse data URL format: data:[<media type>][;base64],<data>
+                if not parsed_url.path.startswith("image/"):
+                    raise ValueError("Data URL must be an image type")
+
+                # Split the path into media type and data
+                media_type, data = parsed_url.path.split(",", 1)
+                if ";base64" not in media_type:
+                    raise ValueError("Data URL must be base64 encoded")
+
+                try:
+                    image_bytes = base64.b64decode(data)
+                    image_data = BytesIO(image_bytes)
+                except binascii.Error as e:
+                    raise ValueError(f"Invalid base64 encoding: {e}")
+            elif parsed_url.scheme in ("http", "https"):
+                if not self._http_client:
+                    raise RuntimeError("HTTP client not initialized")
+
+                response = await self._http_client.get(image_url)
+                response.raise_for_status()
+
+                if not response.content:
+                    raise ValueError("Empty response content from image URL")
+
+                image_data = BytesIO(response.content)
             else:
-                image_data = Image.open(image).convert("RGB")
+                raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
+
+            # PIL is sync, so offload to a thread to avoid blocking the event loop
+            image = await asyncio.to_thread(Image.open, image_data)
+
+            # Validate image format and convert to RGB
+            if image.format not in ("JPEG", "PNG", "WEBP"):
+                raise ValueError(f"Unsupported image format: {image.format}")
+
+            image_converted = image.convert("RGB")
+
+            # Cache HTTP(S) URLs
+            if parsed_url.scheme in ("http", "https"):
+                image_url_lower = image_url.lower()
+                # Cache the image for future use, and evict the oldest image if the cache is full
+                if self._cache_queue.full():
+                    oldest_image_url = self._cache_queue.get()
+                    del self._image_cache[oldest_image_url]
+
+                self._image_cache[image_url_lower] = image_converted
+                self._cache_queue.put(image_url_lower)
+
+            return image
+
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP error loading image: {e}")
+            raise
         except Exception as e:
-            logger.error(f"Error opening image: {e}")
-            raise e
-        return image_data
+            logger.error(f"Error loading image: {e}")
+            raise ValueError(f"Failed to load image: {e}")
+
+    @endpoint()
+    async def encode(self, request: EncodeRequest) -> AsyncIterator[EncodeResponse]:
+        logger.debug(f"Received encode request: {{ id: {request.request_id} }}.")
+
+        request_id = request.request_id
+
+        # The following steps encode the requested image and provided useful embeddings.
+        # 1. Open the image from the provided URL.
+        # 2. Process the image using the image processor.
+        # 3. Run the image through the vision model's vision tower.
+        # 4. Run the results of the vision tower through the multi-modal projector.
+        # 5. Create a descriptor for the embeddings.
+        # 6. Create a write operation using the serialized request and the descriptor.
+        # 7. Await for the write operation to complete.
+        # 8. Yield the encode response.
+
+        try:
+            image = await self.load_image(request.image_url)
+
+            logger.debug(f"Processing image for request: {{ id: {request_id} }}")
+            image_embeds = self.image_processor(images=image, return_tensors="pt")
+
+            with torch.no_grad():
+                logger.debug(f"Vision model device: {self.vision_model.device}")
+                vision_outputs = self.vision_model.vision_tower(
+                    image_embeds["pixel_values"].to(self.vision_model.device)
+                )
+                logger.debug("Vision model completed.")
+
+                embeddings = vision_outputs.last_hidden_state
+                embeddings = self.vision_model.multi_modal_projector(embeddings)
+
+                logger.debug(
+                    f"Embeddings: {{ shape: {embeddings.shape}, dtype: {embeddings.dtype}, device: {embeddings.device}, ptr: {embeddings.data_ptr()}, elements: {{ count: {embeddings.numel()}, size: {embeddings.element_size()} }} }}."
+                )
+
+                if request.serialized_request is None:
+                    logger.error(
+                        f"Request serialized_request is None for request: {{ id: {request_id} }}."
+                    )
+
+                # Create a descriptor for the embeddings, this will register the memory with the connector (and the NIXL runtime).
+                descriptor = connect.Descriptor(embeddings)
+                # Create a write operation using the serialized request and the descriptor.
+                # This will begin the RDMA transfer of the embeddings to the remote worker.
+                write_op = await self._connector.begin_write(
+                    descriptor,
+                    request.serialized_request,
+                )
+                # Await for the write operation to complete.
+                # This will block until the data has been written to the remote worker or an error occurs.
+                await write_op.wait_for_completion()
+
+                yield EncodeResponse(
+                    request_id=request.request_id,
+                ).model_dump_json()
+        except Exception as e:
+            logger.error(f"Error processing request {request_id}: {e}")
+            raise
+
+    @async_on_start
+    async def async_init(self):
+        logger.info("Startup started.")
+        # Create and initialize a dynamo connector for this worker.
+        # We'll needs this to move data between this worker and remote workers efficiently.
+        self._connector = connect.Connector()
+        await self._connector.initialize()
+        # Initialize HTTP client with default limits
+        self._http_client = httpx.AsyncClient(timeout=self._http_timeout)
+        logger.info("Startup completed.")

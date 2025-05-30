@@ -23,13 +23,16 @@ use super::*;
 
 use crate::block_manager::storage::{
     nixl::{NixlRegisterableStorage, NixlStorage},
-    DeviceStorage, PinnedStorage, SystemStorage,
+    DeviceStorage, DiskStorage, PinnedStorage, SystemStorage,
 };
 
 use cudarc::driver::CudaStream;
 
+use nixl_sys::XferOp::{Read, Write};
+use std::future::Future;
 use std::ops::Range;
 
+pub use crate::block_manager::state::TransferContext;
 pub use crate::block_manager::storage::{CudaAccessible, Local, Remote};
 pub use async_trait::async_trait;
 
@@ -76,6 +79,21 @@ pub enum TransferError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NixlTransfer {
+    Read,
+    Write,
+}
+
+impl NixlTransfer {
+    pub fn as_xfer_op(&self) -> nixl_sys::XferOp {
+        match self {
+            NixlTransfer::Read => Read,
+            NixlTransfer::Write => Write,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferStrategy {
     Memcpy,
     CudaAsyncH2D,
@@ -83,8 +101,7 @@ pub enum TransferStrategy {
     CudaAsyncD2D,
     CudaBlockingH2D,
     CudaBlockingD2H,
-    NixlWrite, // aka PUT
-    NixlRead,  // aka GET
+    Nixl(NixlTransfer),
     Invalid,
 }
 
@@ -124,34 +141,96 @@ where
 {
     #[inline(always)]
     fn read_from_strategy() -> TransferStrategy {
-        TransferStrategy::NixlRead
+        TransferStrategy::Nixl(NixlTransfer::Read)
     }
 }
 
 pub trait WriteTo<Target> {
-    fn write_to(&self, dst: &mut Target, notify: Option<String>) -> Result<(), TransferError>;
+    fn write_to(
+        &self,
+        dst: &mut Vec<Target>,
+        notify: Option<String>,
+        ctx: Arc<TransferContext>,
+    ) -> Result<(), TransferError>;
+
+    /// A write_to implementation that expects a NIXL transfer.
+    /// If the transfer strategy is not NIXL, this method will return an error.
+    /// Returns a future that will complete when the transfer is complete.
+    fn nixl_write_to(
+        &self,
+        dst: &mut Vec<Target>,
+        notify: Option<String>,
+        ctx: Arc<TransferContext>,
+    ) -> Result<Box<dyn Future<Output = ()> + Send + Sync + Unpin>, TransferError>;
 }
 
-impl<RB: ReadableBlock, WB: WritableBlock> WriteTo<WB> for RB
+impl<RB: ReadableBlock, WB: WritableBlock> WriteTo<WB> for Vec<Arc<RB>>
 where
     RB: WriteToStrategy<WB> + Local,
 {
-    fn write_to(&self, dst: &mut WB, notify: Option<String>) -> Result<(), TransferError> {
-        let ctx = self.transfer_context();
-        match Self::write_to_strategy() {
-            TransferStrategy::Memcpy => memcpy::copy_block(self, dst),
+    fn write_to(
+        &self,
+        dst: &mut Vec<WB>,
+        notify: Option<String>,
+        ctx: Arc<TransferContext>,
+    ) -> Result<(), TransferError> {
+        match RB::write_to_strategy() {
+            TransferStrategy::Memcpy => {
+                for (src, dst) in self.iter().zip(dst.iter_mut()) {
+                    memcpy::copy_block(src.as_ref(), dst)?;
+                }
+                Ok(())
+            }
             TransferStrategy::CudaAsyncH2D
             | TransferStrategy::CudaAsyncD2H
             | TransferStrategy::CudaAsyncD2D => {
-                cuda::copy_block(self, dst, ctx.stream().as_ref(), RB::write_to_strategy())
+                for (src, dst) in self.iter().zip(dst.iter_mut()) {
+                    cuda::copy_block(
+                        src.as_ref(),
+                        dst,
+                        ctx.stream().as_ref(),
+                        RB::write_to_strategy(),
+                    )?;
+                }
+                Ok(())
             }
-            TransferStrategy::NixlWrite => Ok(nixl::write_block_to(self, dst, ctx, notify)?),
+            TransferStrategy::Nixl(transfer_type) => {
+                std::mem::drop(nixl::write_blocks_to(
+                    self,
+                    dst,
+                    ctx,
+                    notify,
+                    transfer_type,
+                )?);
+                Ok(())
+            }
             _ => Err(TransferError::IncompatibleTypes(format!(
                 "Unsupported copy strategy: {:?}",
                 RB::write_to_strategy()
             ))),
         }
-        // dispatch_copy_to(self, dst, self.transfer_context())
+    }
+
+    fn nixl_write_to(
+        &self,
+        dst: &mut Vec<WB>,
+        notify: Option<String>,
+        ctx: Arc<TransferContext>,
+    ) -> Result<Box<dyn Future<Output = ()> + Send + Sync + Unpin>, TransferError> {
+        if let TransferStrategy::Nixl(transfer_type) = RB::write_to_strategy() {
+            Ok(nixl::write_blocks_to(
+                self,
+                dst,
+                ctx,
+                notify,
+                transfer_type,
+            )?)
+        } else {
+            Err(TransferError::IncompatibleTypes(format!(
+                "Expected NIXL transfer strategy, got: {:?}",
+                RB::write_to_strategy()
+            )))?
+        }
     }
 }
 
@@ -574,7 +653,7 @@ mod tests {
 
         assert_eq!(
             <SystemStorage as WriteToStrategy<NixlStorage>>::write_to_strategy(),
-            TransferStrategy::NixlWrite
+            TransferStrategy::Nixl(NixlTransfer::Write)
         );
 
         // Pinned to ...
@@ -592,7 +671,7 @@ mod tests {
         );
         assert_eq!(
             <PinnedStorage as WriteToStrategy<NixlStorage>>::write_to_strategy(),
-            TransferStrategy::NixlWrite
+            TransferStrategy::Nixl(NixlTransfer::Write)
         );
 
         // Device to ...
@@ -610,7 +689,7 @@ mod tests {
         );
         assert_eq!(
             <DeviceStorage as WriteToStrategy<NixlStorage>>::write_to_strategy(),
-            TransferStrategy::NixlWrite
+            TransferStrategy::Nixl(NixlTransfer::Write)
         );
 
         // Nixl to ... should fail to compile

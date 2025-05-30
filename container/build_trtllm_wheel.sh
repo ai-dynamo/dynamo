@@ -55,7 +55,31 @@ git checkout $TRTLLM_COMMIT
 git submodule update --init --recursive
 git lfs pull
 
-# Build the TRT-LLM base image.
+VERSION_FILE="tensorrt_llm/version.py"
+
+# Check if file exists
+if [ ! -f "$VERSION_FILE" ]; then
+    echo "Error: $VERSION_FILE not found"
+    exit 1
+fi
+
+# Create a backup of the original version file
+cp $VERSION_FILE ${VERSION_FILE}.bak
+
+# Check if version line exists
+if ! grep -q "^__version__" "$VERSION_FILE"; then
+    echo "Error: __version__ not found in $VERSION_FILE"
+    exit 1
+fi
+
+# Append suffix to version
+COMMIT_VERSION=$(git rev-parse --short HEAD)
+sed -i "s/__version__ = \"\(.*\)\"/__version__ = \"\1+dev${COMMIT_VERSION}\"/" "$VERSION_FILE"
+
+echo "Updated version:"
+grep "__version__" "$VERSION_FILE"
+
+
 make -C docker wheel_build
 
 # Copy the wheel to the host
@@ -65,6 +89,10 @@ docker create --name trtllm_wheel_container docker.io/tensorrt_llm/wheel:latest
 docker cp trtllm_wheel_container:/src/tensorrt_llm/build $OUTPUT_DIR/
 cp $OUTPUT_DIR/build/*.whl $OUTPUT_DIR/
 docker rm trtllm_wheel_container || true
+
+# Restore the original version file
+mv ${VERSION_FILE}.bak $VERSION_FILE
+
 )
 
 # Store the commit hash in the output directory to ensure the wheel is built from the correct commit.

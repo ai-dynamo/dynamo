@@ -21,7 +21,7 @@ from typing import AsyncIterator
 from components.utils import check_required_workers
 from components.worker import DummyWorker
 
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 WorkerId = str
 
@@ -63,7 +63,7 @@ class Router:
         print("KV Router initialized")
 
     def _cost_function(self, request_prompt):
-        worker_ids = self.workers_client.endpoint_ids()
+        worker_ids = self.workers_client.instance_ids()
         num_workers = len(worker_ids)
         max_hit_rate = -1.0
         for curr_id in self.kv_cache.keys():
@@ -92,7 +92,7 @@ class Router:
     # A dummy hit rate checking endpoint
     # The actual worker selection is based on custom cost function
     # See details at examples/llm/components/kv_router.py
-    @dynamo_endpoint()
+    @endpoint()
     async def check_hit_rate(self, request_prompt: str) -> AsyncIterator[WorkerId]:
         max_id, max_hit_rate = self._cost_function(request_prompt)
         yield f"{max_id}_{max_hit_rate}"

@@ -28,16 +28,17 @@ from circus.watcher import Watcher
 from fastapi import FastAPI
 
 from dynamo.sdk.core.decorators.endpoint import DynamoClient, DynamoEndpoint
+from dynamo.sdk.core.protocol.deployment import Env
 from dynamo.sdk.core.protocol.interface import (
     DependencyInterface,
     DeploymentTarget,
-    DynamoConfig,
     DynamoEndpointInterface,
     DynamoTransport,
     LinkedServices,
     ServiceConfig,
     ServiceInterface,
 )
+from dynamo.sdk.core.runner.common import ServiceMixin
 
 logger = logging.getLogger(__name__)
 
@@ -61,27 +62,26 @@ class LocalEndpoint(DynamoEndpoint):
         return self._name
 
 
-class LocalService(ServiceInterface[T]):
+class LocalService(ServiceMixin, ServiceInterface[T]):
     """Circus implementation of the ServiceInterface"""
 
     def __init__(
         self,
         inner_cls: Type[T],
         config: ServiceConfig,
-        dynamo_config: Optional[DynamoConfig] = None,
         watcher: Optional[Watcher] = None,
         socket: Optional[CircusSocket] = None,
         app: Optional[FastAPI] = None,
+        system_app: Optional[FastAPI] = None,
     ):
         self._inner_cls = inner_cls
-        self._config = config
         name = inner_cls.__name__
-        self._dynamo_config = dynamo_config or DynamoConfig(
-            name=name, namespace="default"
-        )
+        # Add the dynamo config to the service config
+        self._config = config
         self._watcher = watcher
         self._socket = socket
         self.app = app or FastAPI(title=name)
+        self.system_app = system_app or FastAPI(title=f"{name}-system")
         self._dependencies: Dict[str, "DependencyInterface"] = {}
         self._endpoints: Dict[str, LocalEndpoint] = {}
         for field_name in dir(inner_cls):
@@ -112,6 +112,10 @@ class LocalService(ServiceInterface[T]):
         return self._config
 
     @property
+    def envs(self) -> List[Env]:
+        return self._config.envs or []
+
+    @property
     def inner(self) -> Type[T]:
         return self._inner_cls
 
@@ -137,7 +141,7 @@ class LocalService(ServiceInterface[T]):
                 del self._dependencies[dep_key]
 
     def dynamo_address(self) -> tuple[str, str]:
-        return (self._dynamo_config.namespace, self._dynamo_config.name)
+        return (self._config.dynamo.namespace, self._config.dynamo.name)
 
     @property
     def dependencies(self) -> dict[str, "DependencyInterface"]:
@@ -206,7 +210,8 @@ class LocalDeploymentTarget(DeploymentTarget):
         self,
         service_cls: Type[T],
         config: ServiceConfig,
-        dynamo_config: Optional[DynamoConfig] = None,
+        app: Optional[FastAPI] = None,
+        system_app: Optional[FastAPI] = None,
         **kwargs,
     ) -> ServiceInterface[T]:
         # Get parameters needed for creating a circus watcher
@@ -248,7 +253,6 @@ class LocalDeploymentTarget(DeploymentTarget):
         return LocalService(
             inner_cls=service_cls,
             config=config,
-            dynamo_config=dynamo_config,
             watcher=watcher,
             socket=socket,
         )

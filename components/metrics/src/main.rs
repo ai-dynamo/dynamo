@@ -123,7 +123,7 @@ async fn app(runtime: Runtime) -> Result<()> {
     let component = namespace.component("count")?;
 
     // Create unique instance of Count
-    let key = format!("{}/instance", component.etcd_path());
+    let key = format!("{}/instance", component.etcd_root());
     tracing::debug!("Creating unique instance of Count at {key}");
     drt.etcd_client()
         .expect("Unreachable because of DistributedRuntime::from_settings above")

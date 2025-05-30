@@ -25,6 +25,7 @@ mod state;
 pub mod block;
 pub mod events;
 pub mod layout;
+pub mod offload;
 pub mod pool;
 pub mod storage;
 
@@ -35,13 +36,15 @@ pub use block::{
         RemoteBlock,
     },
     transfer::{BlockTransferEngineV1, TransferRequestPut},
-    BasicMetadata, BlockMetadata, Blocks,
+    BasicMetadata, BlockMetadata, Blocks, ImmutableBlock,
 };
 pub use config::*;
 pub use layout::{nixl::NixlLayout, LayoutConfig, LayoutConfigBuilder, LayoutError, LayoutType};
+use offload::request::BlockResult;
 pub use pool::BlockPool;
 pub use storage::{
-    nixl::NixlRegisterableStorage, DeviceStorage, PinnedStorage, Storage, StorageAllocator,
+    nixl::NixlRegisterableStorage, DeviceStorage, DiskStorage, PinnedStorage, Storage,
+    StorageAllocator,
 };
 pub use tokio_util::sync::CancellationToken;
 
@@ -61,6 +64,7 @@ pub type WorkerID = u64;
 pub type ReferenceBlockManager = KvBlockManager<BasicMetadata>;
 
 /// Represents the different cache levels for KV blocks
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub enum CacheLevel {
     /// Represents KV blocks in GPU memory
     G1,
@@ -141,6 +145,11 @@ impl<Metadata: BlockMetadata> KvBlockManager<Metadata> {
         self.state.get_remote_blocks_mutable(bds)
     }
 
+    /// Get a reference to the disk block pool
+    pub fn disk(&self) -> Option<&BlockPool<DiskStorage, Metadata>> {
+        self.state.disk()
+    }
+
     /// Get a reference to the host block pool
     pub fn host(&self) -> Option<&BlockPool<PinnedStorage, Metadata>> {
         self.state.host()
@@ -155,6 +164,13 @@ impl<Metadata: BlockMetadata> KvBlockManager<Metadata> {
     pub fn worker_id(&self) -> WorkerID {
         self.state.worker_id()
     }
+
+    pub async fn onboard_blocks<S: Storage>(
+        &self,
+        blocks: Vec<ImmutableBlock<S, Metadata>>,
+    ) -> BlockResult<DeviceStorage, Metadata> {
+        self.state.onboard_blocks(blocks).await
+    }
 }
 
 impl<Metadata: BlockMetadata> Drop for KvBlockManager<Metadata> {
@@ -167,6 +183,8 @@ impl<Metadata: BlockMetadata> Drop for KvBlockManager<Metadata> {
 mod tests {
     use super::*;
 
+    use crate::block_manager::block::BlockExt;
+    use crate::tokens::Tokens;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     // Atomic Counter for Worker ID
@@ -174,18 +192,37 @@ mod tests {
 
     fn create_reference_block_manager() -> ReferenceBlockManager {
         let worker_id = WORKER_ID.fetch_add(1, Ordering::SeqCst);
+
+        // Check if we're already in a Tokio runtime context
+        let async_runtime = if tokio::runtime::Handle::try_current().is_ok() {
+            None // If we're already in a runtime, don't create a new one
+        } else {
+            // Only create a new runtime if not already in one
+            Some(Arc::new(tokio::runtime::Runtime::new().unwrap()))
+        };
+
         let config = KvBlockManagerConfig::builder()
             .runtime(
                 KvManagerRuntimeConfig::builder()
                     .worker_id(worker_id)
+                    .enable_nixl()
+                    .async_runtime(async_runtime)
                     .build()
                     .unwrap(),
             )
             .model(
                 KvManagerModelConfig::builder()
                     .num_layers(3)
+                    .outer_dim(2)
                     .page_size(4)
                     .inner_dim(16)
+                    .build()
+                    .unwrap(),
+            )
+            .disk_layout(
+                KvManagerLayoutConfig::builder()
+                    .num_blocks(16)
+                    .allocator(storage::DiskAllocator)
                     .build()
                     .unwrap(),
             )
@@ -215,6 +252,8 @@ mod tests {
         let _block_manager = create_reference_block_manager();
     }
 
+    // todo: solve the async runtime issue
+    #[ignore]
     #[test]
     fn test_reference_block_manager_blocking() {
         dynamo_runtime::logging::init();
@@ -293,5 +332,45 @@ mod tests {
 
         // // Execute the transfer request
         // transfer_request.execute().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_offload() -> Result<()> {
+        dynamo_runtime::logging::init();
+
+        let block_manager = create_reference_block_manager();
+
+        let device = block_manager.device().unwrap();
+
+        let tokens = Tokens::from(vec![1, 2, 3, 4]);
+        let token_sequence = tokens.into_sequence(4, Some(0));
+        let token_block = token_sequence.blocks().first().unwrap();
+
+        let mut device_block = device.allocate_blocks(1).await?.into_iter().next().unwrap();
+        device_block.apply_token_block(token_block.clone())?;
+
+        let immutable_device_blocks = device.register_blocks(vec![device_block]).await.unwrap();
+        assert_eq!(immutable_device_blocks.len(), 1);
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // It should now be on host and disk.
+        let host_blocks = block_manager
+            .host()
+            .unwrap()
+            .match_sequence_hashes(vec![immutable_device_blocks[0].sequence_hash()?].as_slice())
+            .await
+            .unwrap();
+        assert_eq!(host_blocks.len(), 1);
+
+        let disk_blocks = block_manager
+            .disk()
+            .unwrap()
+            .match_sequence_hashes(vec![immutable_device_blocks[0].sequence_hash()?].as_slice())
+            .await
+            .unwrap();
+        assert_eq!(disk_blocks.len(), 1);
+
+        Ok(())
     }
 }

@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use axum::{
     extract::State,
@@ -26,20 +14,20 @@ use axum::{
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     pin::Pin,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio_stream::wrappers::ReceiverStream;
 
-use super::DeploymentState;
 use super::{
     error::HttpError,
     metrics::{Endpoint, InflightGuard},
-    RouteDoc,
+    service_v2, RouteDoc,
 };
 
+use crate::protocols::openai::embeddings::NvCreateEmbeddingRequest;
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionResponse, completions::CompletionResponse,
 };
@@ -131,7 +119,7 @@ impl From<HttpError> for ErrorResponse {
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
 #[tracing::instrument(skip_all)]
 async fn completions(
-    State(state): State<Arc<DeploymentState>>,
+    State(state): State<Arc<service_v2::State>>,
     Json(request): Json<CompletionRequest>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     // return a 503 if the service is not ready
@@ -160,11 +148,15 @@ async fn completions(
 
     // todo - error handling should be more robust
     let engine = state
+        .manager()
         .get_completions_engine(model)
         .map_err(|_| ErrorResponse::model_not_found())?;
 
     // this will increment the inflight gauge for the model
-    let mut inflight = state.create_inflight_guard(model, Endpoint::Completions, streaming);
+    let mut inflight =
+        state
+            .metrics_clone()
+            .create_inflight_guard(model, Endpoint::Completions, streaming);
 
     // setup context
     // todo - inherit request_id from distributed trace details
@@ -188,7 +180,7 @@ async fn completions(
 
         let mut sse_stream = Sse::new(stream);
 
-        if let Some(keep_alive) = state.sse_keep_alive {
+        if let Some(keep_alive) = state.sse_keep_alive() {
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
 
@@ -210,6 +202,14 @@ async fn completions(
     }
 }
 
+#[tracing::instrument(skip_all)]
+async fn embeddings(
+    State(_state): State<Arc<service_v2::State>>,
+    Json(_request): Json<NvCreateEmbeddingRequest>,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    unimplemented!("embeddings are not supported yet");
+}
+
 /// OpenAI Chat Completions Request Handler
 ///
 /// This method will handle the incoming request for the /v1/chat/completions endpoint. The endpoint is a "source"
@@ -220,7 +220,7 @@ async fn completions(
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
 #[tracing::instrument(skip_all)]
 async fn chat_completions(
-    State((state, template)): State<(Arc<DeploymentState>, Option<RequestTemplate>)>,
+    State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     Json(mut request): Json<NvCreateChatCompletionRequest>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     // return a 503 if the service is not ready
@@ -265,11 +265,15 @@ async fn chat_completions(
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
     let engine = state
+        .manager()
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorResponse::model_not_found())?;
 
     // this will increment the inflight gauge for the model
-    let mut inflight = state.create_inflight_guard(model, Endpoint::ChatCompletions, streaming);
+    let mut inflight =
+        state
+            .metrics_clone()
+            .create_inflight_guard(model, Endpoint::ChatCompletions, streaming);
 
     // setup context
     // todo - inherit request_id from distributed trace details
@@ -295,7 +299,7 @@ async fn chat_completions(
 
         let mut sse_stream = Sse::new(stream);
 
-        if let Some(keep_alive) = state.sse_keep_alive {
+        if let Some(keep_alive) = state.sse_keep_alive() {
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
 
@@ -322,42 +326,11 @@ async fn chat_completions(
 
 // todo - abstract this to the top level lib.rs to be reused
 // todo - move the service_observer to its own state/arc
-fn check_ready(_state: &Arc<DeploymentState>) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     // if state.service_observer.stage() != ServiceStage::Ready {
     //     return Err(ErrorResponse::service_unavailable());
     // }
     Ok(())
-}
-
-/// list models handler, non-standard format
-async fn list_models_custom(
-    State(state): State<Arc<DeploymentState>>,
-) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
-    check_ready(&state)?;
-    let mut models = HashMap::new();
-
-    let chat_models = state
-        .chat_completion_engines
-        .lock()
-        .unwrap()
-        .engines
-        .keys()
-        .cloned()
-        .collect::<Vec<String>>();
-
-    let completion_models = state
-        .completion_engines
-        .lock()
-        .unwrap()
-        .engines
-        .keys()
-        .cloned()
-        .collect::<Vec<String>>();
-
-    models.insert("chat_completion_models", chat_models);
-    models.insert("completion_models", completion_models);
-
-    Ok(Json(models).into_response())
 }
 
 /// openai compatible format
@@ -374,7 +347,7 @@ async fn list_models_custom(
 ///    ]
 /// }
 async fn list_models_openai(
-    State(state): State<Arc<DeploymentState>>,
+    State(state): State<Arc<service_v2::State>>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     check_ready(&state)?;
 
@@ -384,19 +357,10 @@ async fn list_models_openai(
         .as_secs();
     let mut data = Vec::new();
 
-    let models: HashSet<String> = state
-        .chat_completion_engines
-        .lock()
-        .unwrap()
-        .engines
-        .keys()
-        .chain(state.completion_engines.lock().unwrap().engines.keys())
-        .cloned()
-        .collect();
-
-    for model_id in models {
+    let models: HashSet<String> = state.manager().model_display_names();
+    for model_name in models {
         data.push(ModelListing {
-            id: model_id.clone(),
+            id: model_name.clone(),
             object: "object",
             created,                        // Where would this come from? The GGUF?
             owned_by: "nvidia".to_string(), // Get organization from GGUF
@@ -512,7 +476,7 @@ impl<T: Serialize> TryFrom<EventConverter<T>> for Event {
 /// Create an Axum [`Router`] for the OpenAI API Completions endpoint
 /// If not path is provided, the default path is `/v1/completions`
 pub fn completions_router(
-    state: Arc<DeploymentState>,
+    state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/completions".to_string());
@@ -526,7 +490,7 @@ pub fn completions_router(
 /// Create an Axum [`Router`] for the OpenAI API Chat Completions endpoint
 /// If not path is provided, the default path is `/v1/chat/completions`
 pub fn chat_completions_router(
-    state: Arc<DeploymentState>,
+    state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
@@ -538,30 +502,39 @@ pub fn chat_completions_router(
     (vec![doc], router)
 }
 
-/// List Models
-pub fn list_models_router(
-    state: Arc<DeploymentState>,
+/// Create an Axum [`Router`] for the OpenAI API Embeddings endpoint
+/// If not path is provided, the default path is `/v1/embeddings`
+pub fn embeddings_router(
+    state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    // TODO: Why do we have this endpoint?
-    let custom_path = path.unwrap_or("/dynamo/alpha/list-models".to_string());
-    let doc_for_custom = RouteDoc::new(axum::http::Method::GET, &custom_path);
+    let path = path.unwrap_or("/v1/embeddings".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(embeddings))
+        .with_state(state);
+    (vec![doc], router)
+}
 
+/// List Models
+pub fn list_models_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
     // Standard OpenAI compatible list models endpoint
-    let openai_path = "/v1/models".to_string();
+    let openai_path = path.unwrap_or("/v1/models".to_string());
     let doc_for_openai = RouteDoc::new(axum::http::Method::GET, &openai_path);
 
     let router = Router::new()
-        .route(&custom_path, get(list_models_custom))
         .route(&openai_path, get(list_models_openai))
         .with_state(state);
 
-    (vec![doc_for_custom, doc_for_openai], router)
+    (vec![doc_for_openai], router)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::ServiceHttpError;
+    use crate::discovery::ModelManagerError;
 
     use super::*;
 
@@ -575,7 +548,7 @@ mod tests {
     }
 
     fn other_error_from_engine() -> Result<(), anyhow::Error> {
-        Err(ServiceHttpError::ModelNotFound("foo".to_string()))?
+        Err(ModelManagerError::ModelNotFound("foo".to_string()))?
     }
 
     #[test]

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
 
 from components.processor import Processor
@@ -20,7 +21,7 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from utils.protocol import MultiModalRequest
 
-from dynamo.sdk import DYNAMO_IMAGE, depends, dynamo_api, service
+from dynamo.sdk import DYNAMO_IMAGE, api, depends, service
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +38,14 @@ logger = logging.getLogger(__name__)
 class Frontend:
     processor = depends(Processor)
 
-    @dynamo_api()
+    @api(name="v1/chat/completions")
     async def generate(self, request: MultiModalRequest):
         async def content_generator():
             async for response in self.processor.generate(request.model_dump_json()):
-                yield response
+                try:
+                    s = json.loads(response)
+                    yield s
+                except json.JSONDecodeError as e:
+                    raise RuntimeError(f"Failed to parse JSON response: {e}")
 
-        return StreamingResponse(content_generator())
+        return StreamingResponse(content_generator(), media_type="text/event-stream")

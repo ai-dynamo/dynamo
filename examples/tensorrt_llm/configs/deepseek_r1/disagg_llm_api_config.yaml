@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Example Configs for Context & Generation on GB200 nodes
+# - Context on 1xGB200 (4xB00)
+# - Generation on 1xGB200 (4xB200)
+
+# NOTE: Fields like hostname, ports, urls, num_instances, etc. only used by trtllm-serve, not by dynamo
+
+backend: pytorch
+
+context_servers:
+  # Context/prefill processes many tokens at once, so for a large ISL, a large
+  # batch size may not be needed to saturate GPU utilization.
+  max_batch_size: 1
+  max_num_tokens: 8192
+  max_seq_len: 8192
+
+  # TP/EP/PP/DP
+  tensor_parallel_size: 4
+  moe_expert_parallel_size: 4
+  pipeline_parallel_size: 1
+  enable_attention_dp: true
+
+  free_gpu_memory_fraction: 0.75
+  pytorch_backend_config:
+    print_iter_log: true
+    # NOTE: This dtype must match in both context/generation configs
+    kv_cache_dtype: fp8
+
+generation_servers:
+  # Generation/decode processes one token per request at a time, so a larger
+  # batch size helps to saturate GPU utilization.
+  max_batch_size: 256
+  max_num_tokens: 256
+  # 8448 = 8192 ISL + 256 OSL
+  max_seq_len: 8448
+
+  # TP/EP/PP/DP
+  tensor_parallel_size: 4
+  moe_expert_parallel_size: 4
+  pipeline_parallel_size: 1
+  enable_attention_dp: false
+
+  # With dp attention disabled: high free_gpu_memory_fraction is fine.
+  free_gpu_memory_fraction: 0.85
+  # With dp attention enabled: large ISL at high concurrency may need
+  # free_gpu_memory_fraction low to have enough available memory.
+  # free_gpu_memory_fraction: 0.30
+
+  pytorch_backend_config:
+    use_cuda_graph: true
+    cuda_graph_padding_enabled: true
+    # NOTE: For larger max batch size, you may want to add larger cuda graph
+    # batch sizes below to match.
+    cuda_graph_batch_sizes:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    - 64
+    - 128
+    - 256
+    print_iter_log: true
+    enable_overlap_scheduler: true
+    # NOTE: This dtype must match in both context/generation configs
+    kv_cache_dtype: fp8

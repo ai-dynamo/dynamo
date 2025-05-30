@@ -61,8 +61,7 @@ class Frontend:
     processor = depends(Processor)
 
     def __init__(self):
-        config = ServiceConfig.get_instance()
-        frontend_config = FrontendConfig(**config.get("Frontend", {}))
+        frontend_config = FrontendConfig(**ServiceConfig.get_parsed_config("Frontend"))
 
         # Chat/completions Endpoint
         subprocess.run(

@@ -37,6 +37,9 @@ pub struct KvManagerRuntimeConfig {
 
     #[builder(default = "NixlOptions::Enabled")]
     pub nixl: NixlOptions,
+
+    #[builder(default)]
+    pub async_runtime: Option<Arc<tokio::runtime::Runtime>>,
 }
 
 impl KvManagerRuntimeConfig {
@@ -67,6 +70,9 @@ impl KvManagerRuntimeConfigBuilder {
 pub struct KvManagerModelConfig {
     #[validate(range(min = 1))]
     pub num_layers: usize,
+
+    #[validate(range(min = 1, max = 2))]
+    pub outer_dim: usize,
 
     #[validate(range(min = 1))]
     pub page_size: usize,
@@ -163,6 +169,10 @@ pub struct KvBlockManagerConfig {
     /// This includes the number of blocks and the layout of the data into the host memory/storage.
     #[builder(default, setter(strip_option))]
     pub host_layout: Option<KvManagerLayoutConfig<PinnedStorage>>,
+
+    // Specific configuration for the disk layout
+    #[builder(default, setter(strip_option))]
+    pub disk_layout: Option<KvManagerLayoutConfig<DiskStorage>>,
 }
 
 impl KvBlockManagerConfig {

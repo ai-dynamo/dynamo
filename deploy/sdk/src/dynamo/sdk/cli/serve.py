@@ -29,7 +29,11 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-from dynamo.sdk.cli.utils import resolve_service_config
+from dynamo.sdk.cli.utils import (
+    is_local_planner_enabled,
+    raise_local_planner_warning,
+    resolve_service_config,
+)
 from dynamo.sdk.core.runner import TargetEnum
 
 if t.TYPE_CHECKING:
@@ -74,6 +78,26 @@ def serve(
         help="The host to bind for the REST API server",
         envvar="DYNAMO_HOST",
     ),
+    system_app_port: Optional[int] = typer.Option(
+        None,
+        help="The port to listen on for the system app. This is only supported when --service-name is set (only one service is started).",
+        envvar="DYNAMO_SYSTEM_APP_PORT",
+    ),
+    system_app_host: Optional[str] = typer.Option(
+        None,
+        help="The host to bind for the system app.",
+        envvar="DYNAMO_SYSTEM_APP_HOST",
+    ),
+    enable_system_app: bool = typer.Option(
+        False,
+        help="Enable the system app.",
+        envvar="DYNAMO_SYSTEM_APP_ENABLED",
+    ),
+    use_default_health_checks: bool = typer.Option(
+        False,
+        "--use-default-health-checks",
+        help="Use default liveness and readiness health checks if none are provided.",
+    ),
     working_dir: Optional[Path] = typer.Option(
         None,
         help="When loading from source code, specify the directory to find the Service instance",
@@ -81,10 +105,6 @@ def serve(
     dry_run: bool = typer.Option(
         False,
         help="Print the final service configuration and exit without starting the server",
-    ),
-    enable_local_planner: bool = typer.Option(
-        False,
-        help="Save a snapshot of your service state to a file that allows planner to edit your deployment configuration",
     ),
     target: TargetEnum = typer.Option(
         TargetEnum.DYNAMO,
@@ -129,7 +149,6 @@ def serve(
     configure_dynamo_logging()
 
     if service_configs:
-        logger.info(f"Running dynamo serve with service configs {service_configs}")
         os.environ["DYNAMO_SERVICE_CONFIG"] = json.dumps(service_configs)
 
     if working_dir is None:
@@ -145,9 +164,15 @@ def serve(
         sys.path.insert(0, working_dir_str)
 
     svc = find_and_load_service(dynamo_pipeline, working_dir=working_dir)
-    logger.info(f"Loaded service: {svc.name}")
+    logger.debug(f"Loaded service: {svc.name}")
     logger.debug("Dependencies: %s", [dep.on.name for dep in svc.dependencies.values()])
     LinkedServices.remove_unused_edges()
+
+    # Check if local planner is enabled
+    enable_local_planner = is_local_planner_enabled(svc, service_configs)
+    if enable_local_planner:
+        # Raise warning if local planner is enabled, but workers for prefill or decode is > 1. Not supported.
+        raise_local_planner_warning(svc, service_configs)
 
     from dynamo.sdk.cli.serving import serve_dynamo_graph  # type: ignore
 
@@ -170,4 +195,8 @@ def serve(
         service_name=service_name,
         enable_local_planner=enable_local_planner,
         target=target,
+        system_app_port=system_app_port,
+        system_app_host=system_app_host,
+        enable_system_app=enable_system_app,
+        use_default_health_checks=use_default_health_checks,
     )

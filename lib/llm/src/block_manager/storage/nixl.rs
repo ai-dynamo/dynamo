@@ -82,9 +82,61 @@ use derive_getters::Getters;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CudaContextProivder, DeviceStorage, PinnedStorage, RegistationHandle, RegisterableStorage,
-    Remote, Storage, StorageError, StorageType, SystemStorage,
+    CudaContextProivder, DeviceStorage, DiskStorage, PinnedStorage, RegistationHandle,
+    RegisterableStorage, Remote, Storage, StorageError, StorageType, SystemStorage,
 };
+
+/// NIXL remote descriptor
+///
+/// This struct is used to describe a remote memory region that is accessible by a NIXL agent.
+///
+/// This object is capable of being serialized and transfered to other nodes.  It carries with it
+/// the necessary information to create [`nixl_sys::XferDescList`].
+///
+/// The [`NixlRemoteDescriptor`] can be used in traits that READ from remote memory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NixlRemoteDescriptor {
+    storage: NixlStorage,
+    agent: String,
+    notif: Option<String>,
+}
+
+impl NixlRemoteDescriptor {
+    pub(crate) fn new(storage: NixlStorage, agent: String) -> Self {
+        Self {
+            storage,
+            agent,
+            notif: None,
+        }
+    }
+
+    /// Size in bytes of the remote memory region
+    pub fn size(&self) -> usize {
+        *self.storage.size()
+    }
+
+    /// Notification to be delivered to remote agent after the memory is fetched by a
+    /// NIXL READ operation.
+    pub fn set_notif(&mut self, notif: String) {
+        self.notif = Some(notif);
+    }
+
+    /// Clear the notification.
+    pub fn clear_notif(&mut self) {
+        self.notif = None;
+    }
+
+    /// Get the notification value to be delivered to remote agent after the memory is fetched by a
+    /// NIXL READ operation.
+    pub fn get_notif(&self) -> Option<String> {
+        self.notif.clone()
+    }
+
+    /// Get the NIXL agent name for the storage.
+    pub fn agent_name(&self) -> &str {
+        self.agent.as_str()
+    }
+}
 
 /// Marker trait for storage types that can be accessed by NIXL.
 ///
@@ -104,17 +156,7 @@ impl StorageType {
             StorageType::Device(_) => MemType::Vram,
             StorageType::Nixl => MemType::Unknown,
             StorageType::Null => MemType::Unknown,
-        }
-    }
-
-    /// Get the NIXL device ID for a given storage type.
-    pub fn nixl_device_id(&self) -> u64 {
-        match self {
-            StorageType::System => 0,
-            StorageType::Pinned => 0,
-            StorageType::Device(id) => *id as u64,
-            StorageType::Nixl => 0,
-            StorageType::Null => 0,
+            StorageType::Disk => MemType::File,
         }
     }
 }
@@ -195,6 +237,30 @@ pub struct NixlStorage {
 
 impl Remote for NixlStorage {}
 impl NixlAccessible for NixlStorage {}
+
+impl NixlStorage {
+    pub(crate) fn from_storage_with_offset<S: Storage + NixlDescriptor>(
+        storage: &S,
+        offset: usize,
+        size: usize,
+    ) -> Result<Self, StorageError> {
+        if offset + size > Storage::size(storage) {
+            return Err(StorageError::OutOfBounds(format!(
+                "Offset: {}, Size: {}, Total Size: {}",
+                offset,
+                size,
+                Storage::size(storage)
+            )));
+        }
+
+        Ok(Self {
+            addr: storage.addr() + offset as u64,
+            size,
+            mem_type: storage.mem_type(),
+            device_id: storage.device_id(),
+        })
+    }
+}
 
 impl Storage for NixlStorage {
     fn storage_type(&self) -> StorageType {
@@ -309,5 +375,29 @@ impl NixlDescriptor for DeviceStorage {
 
     fn device_id(&self) -> u64 {
         CudaContextProivder::cuda_context(self).cu_device() as u64
+    }
+}
+
+impl NixlAccessible for DiskStorage {}
+impl NixlRegisterableStorage for DiskStorage {}
+
+impl MemoryRegion for DiskStorage {
+    unsafe fn as_ptr(&self) -> *const u8 {
+        Storage::as_ptr(self)
+    }
+
+    fn size(&self) -> usize {
+        Storage::size(self)
+    }
+}
+
+impl NixlDescriptor for DiskStorage {
+    fn mem_type(&self) -> MemType {
+        MemType::File
+    }
+
+    /// Nixl treats the file descriptor as the device ID.
+    fn device_id(&self) -> u64 {
+        self.fd()
     }
 }

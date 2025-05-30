@@ -26,7 +26,7 @@ from utils.protocol import Tokens
 from utils.vllm import RouterType
 
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
 WorkerId = str
@@ -170,7 +170,7 @@ class Router:
 
         # Get all worker IDs from the client. This is needed because scores / metrics may not have values for all workers
         # and we want all workers to be considered in the logit calculation
-        worker_ids = self.workers_client.endpoint_ids()
+        worker_ids = self.workers_client.instance_ids()
 
         worker_logits = {}
         for worker_id in worker_ids:
@@ -247,7 +247,7 @@ class Router:
         )
         return best_worker_id, kv_load[best_worker_id]
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: Tokens) -> AsyncIterator[Tuple[WorkerId, float]]:
         metrics = await self.metrics_aggregator.get_metrics()
 

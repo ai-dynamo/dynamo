@@ -15,7 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Dynamo Disaggregation: Performance Tuning
+# Disaggregation and Performance Tuning
 
 Disaggregation gains performance by separating the prefill and decode into different engines to reduce interferences between the two. However, performant disaggregation requires careful tuning of the inference parameters. Specifically, there are three sets of parameters that needs to be tuned:
 
@@ -23,7 +23,7 @@ Disaggregation gains performance by separating the prefill and decode into diffe
 1. Disaggregated router knobs.
 1. Number of prefill and decode engines.
 
-This guide will walk you through the process of tuning these parameters.
+This guide describes the process of tuning these parameters.
 
 ## Engine Knobs
 
@@ -48,13 +48,13 @@ TP Size | KV Cache Size (GB) | KV Cache per GPU (GB) | Per GPU Improvement over 
 
 The best number of GPUs to use in the prefill and decode engines can be determined by running a few fixed isl/osl/concurrency test using [GenAI-Perf](https://github.com/triton-inference-server/perf_analyzer/tree/main/genai-perf) and compare with the SLA. GenAI-Perf is pre-installed in the dynamo container.
 
-Besides the parallelization mapping, other common knobs to tune are maximum batch size, maximum number of tokens, and block size. For prefill engines, usually a small batch size and large max_num_token is preferred. For decode engines, usually a large batch size and medium max_num_token is preferred. More details on tuning the max_num_token and max_batch_size will be covered in the next section.
+Besides the parallelization mapping, other common knobs to tune are maximum batch size, maximum number of tokens, and block size. For prefill engines, usually a small batch size and large max_num_token is preferred. For decode engines, usually a large batch size and medium max_num_token is preferred. For details on tuning the max_num_token and max_batch_size, see the next section.
 
 For block size, if the block size is too small, it leads to small memory chunks in the P->D KV cache transfer and poor performance. Too small block size also leads to memory fragmentation in the attention calculation, but the impact is usually insignificant. If the block size is too large, it leads to low prefix cache hit ratio. For most dense models, we find block size 128 is a good choice.
 
 ## Disaggregated Router
 
-Disaggregated router decides whether to prefill a request in the remote prefill engine or locally in the decode engine using chunked prefill. For most frameworks, when chunked prefill is enabled and one forward iteration gets a mixture of prefilling and decoding request, three kernels will be launched:
+Disaggregated router decides whether to prefill a request in the remote prefill engine or locally in the decode engine using chunked prefill. For most frameworks, when chunked prefill is enabled and one forward iteration gets a mixture of prefilling and decoding request, three kernels are launched:
 1. The attention kernel for context tokens (context_fmha kernel in trtllm).
 2. The attention kernel for decode tokens (xqa kernel in trtllm).
 3. Dense kernel for the combined active tokens in prefills and decodes.
@@ -63,7 +63,7 @@ Disaggregated router decides whether to prefill a request in the remote prefill 
 
 In the prefill engine, the best strategy is to operate at the smallest batch size that saturates the GPUs so that the average TTFT is minimized. For example, for llama3.3 70b NVFP4 quantization on B200 TP1 in vllm, the below figure shows the prefill time with different isl (prefix caching is turned off):
 
-![Prefill Time](../images/prefill_time.png)
+![Combined bar and line chart showing "Prefill Time". Bar chart represents TTFT (Time To First Token) in milliseconds against ISL (Input Sequence Length). The line chart shows TTFT/ISL (milliseconds per token) against ISL.](../images/prefill_time.png)
 
 For isl less than 1000, the prefill efficiency is low because the GPU is not fully saturated. For isl larger than 4000, the prefill time per token increases because the attention takes longer to compute with a longer history.
 

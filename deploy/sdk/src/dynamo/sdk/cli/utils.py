@@ -27,18 +27,22 @@ import random
 import socket
 from typing import Any, DefaultDict, Dict, Iterator, Optional, Protocol, TextIO, Union
 
-import click
+import typer
 import yaml
-from click import Command, Context
+from rich.console import Console
 
+from dynamo.planner.defaults import PlannerDefaults  # type: ignore[attr-defined]
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sdk.core.protocol.interface import ComponentType
 from dynamo.sdk.core.runner import TargetEnum
 
 configure_dynamo_logging()
 
 logger = logging.getLogger(__name__)
+console = Console()
 
 DYN_LOCAL_STATE_DIR = "DYN_LOCAL_STATE_DIR"
+PLANNER_SERVICE_NAME = "Planner"
 
 
 # Define a Protocol for services to ensure type safety
@@ -53,62 +57,6 @@ class ServiceProtocol(Protocol):
 
     def dynamo_address(self) -> tuple[str, str]:
         ...
-
-
-class DynamoCommandGroup(click.Group):
-    """Simplified version of BentoMLCommandGroup for Dynamo CLI"""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        self.aliases = kwargs.pop("aliases", [])
-        super().__init__(*args, **kwargs)
-        self._commands: dict[str, list[str]] = {}
-        self._aliases: dict[str, str] = {}
-
-    def add_command(self, cmd: Command, name: str | None = None) -> None:
-        assert cmd.callback is not None
-        callback = cmd.callback
-        cmd.callback = callback
-        cmd.context_settings["max_content_width"] = 120
-        aliases = getattr(cmd, "aliases", None)
-        if aliases:
-            assert cmd.name
-            self._commands[cmd.name] = aliases
-            self._aliases.update({alias: cmd.name for alias in aliases})
-        return super().add_command(cmd, name)
-
-    def add_subcommands(self, group: click.Group) -> None:
-        if not isinstance(group, click.MultiCommand):
-            raise TypeError(
-                "DynamoCommandGroup.add_subcommands only accepts click.MultiCommand"
-            )
-        if isinstance(group, DynamoCommandGroup):
-            # Common wrappers are already applied, call the super() method
-            for name, cmd in group.commands.items():
-                super().add_command(cmd, name)
-            self._commands.update(group._commands)
-            self._aliases.update(group._aliases)
-        else:
-            for name, cmd in group.commands.items():
-                self.add_command(cmd, name)
-
-    def resolve_alias(self, cmd_name: str):
-        return self._aliases[cmd_name] if cmd_name in self._aliases else cmd_name
-
-    def get_command(self, ctx: Context, cmd_name: str) -> Command | None:
-        cmd_name = self.resolve_alias(cmd_name)
-        return super().get_command(ctx, cmd_name)
-
-    def add_single_command(self, group: click.Group, command_name: str) -> None:
-        """Add a single command from a group by name."""
-        if not isinstance(group, click.MultiCommand):
-            raise TypeError("Only accepts click.MultiCommand")
-
-        ctx = click.Context(group)
-        cmd = group.get_command(ctx, command_name)
-        if cmd is None:
-            raise ValueError(f"Command '{command_name}' not found in group")
-
-        self.add_command(cmd, command_name)
 
 
 @contextlib.contextmanager
@@ -340,32 +288,90 @@ def resolve_service_config(
                     for key, value in configs.items():
                         service_configs[service][key] = value
 
-        # Process service-specific options
-        if args:
-            cmdline_overrides = _parse_service_args(args)
-            logger.debug(f"Applying command line overrides: {cmdline_overrides}")
-            for service, configs in cmdline_overrides.items():
-                if service not in service_configs:
-                    service_configs[service] = {}
-                for key, value in configs.items():
-                    service_configs[service][key] = value
+    # Process command line overrides
+    if args:
+        cmdline_overrides = _parse_service_args(args)
+        logger.info(f"Applying command line overrides: {cmdline_overrides}")
+        for service, configs in cmdline_overrides.items():
+            if service not in service_configs:
+                service_configs[service] = {}
+            for key, value in configs.items():
+                service_configs[service][key] = value
 
-    logger.debug(f"Final resolved config: {service_configs}")
+    logger.info(f"Running dynamo serve with config: {service_configs}")
     return service_configs
 
 
 def configure_target_environment(target: TargetEnum):
     from dynamo.sdk.core.lib import set_target
 
-    if target == TargetEnum.BENTO:
-        from dynamo.sdk.core.runner.bentoml import BentoDeploymentTarget
-
-        target = BentoDeploymentTarget()
-    elif target == TargetEnum.DYNAMO:
+    if target == TargetEnum.DYNAMO:
         from dynamo.sdk.core.runner.dynamo import LocalDeploymentTarget
 
         target = LocalDeploymentTarget()
     else:
         raise ValueError(f"Invalid target: {target}")
-    logger.info(f"Setting deployment target to {target}")
+    logger.debug(f"Setting deployment target to {target}")
     set_target(target)
+
+
+def is_local_planner_enabled(svc: Any, service_configs: dict) -> bool:
+    """Check if local planner is enabled.
+
+    Args:
+        svc: The entrypoint service instance
+        service_configs: Dictionary of service configurations
+
+    Returns:
+        bool: True if local planner is enabled, False otherwise
+    """
+    # Check all nodes to find planner
+    nodes = [dep for dep in svc.all_services().values()]
+    nodes.append(svc)
+    planners = [
+        node
+        for node in nodes
+        if node.config.dynamo.component_type == ComponentType.PLANNER
+    ]
+
+    if len(planners) > 1:
+        console.print(
+            "[bold red]Error:[/bold red] More than one planner found in the pipeline"
+        )
+        raise typer.Exit(code=1)
+
+    # Exactly one planner
+    if planners:
+        # Get the config for the planner and check environment
+        planner_config = service_configs.get(PLANNER_SERVICE_NAME, {})
+        environment = planner_config.get("environment", PlannerDefaults.environment)
+        return environment == "local"
+
+    return False
+
+
+def raise_local_planner_warning(svc: Any, service_configs: dict) -> None:
+    """Warn if local planner is enabled and active (not set to no-op), but workers for prefill or decode is > 1. This is currently not supported.
+
+    Args:
+        svc: The service instance
+        service_configs: Dictionary of service configurations
+    """
+    planner_config = service_configs.get(PLANNER_SERVICE_NAME, {})
+
+    # Resolve no-op setting
+    no_op = planner_config.get("no-operation", PlannerDefaults.no_operation)
+
+    # Check worker counts across nodes
+    nodes = [dep for dep in svc.all_services().values()]
+    nodes.append(svc)
+    worker_names = ("PrefillWorker", "VllmWorker")
+    worker_counts_greater_than_one = [
+        node.config.workers > 1 for node in nodes if node.name in worker_names
+    ]
+
+    if any(worker_counts_greater_than_one) and not no_op:
+        logger.error(
+            "Local planner is enabled, but workers for prefill or decode is > 1. Local planner must be started with prefill and decode workers set to 1."
+        )
+        raise typer.Exit(code=1)

@@ -18,6 +18,41 @@
 
 use super::*;
 
+impl WriteToStrategy<DiskStorage> for DiskStorage {
+    #[inline(always)]
+    fn write_to_strategy() -> TransferStrategy {
+        TransferStrategy::Nixl(NixlTransfer::Write)
+    }
+}
+
+impl WriteToStrategy<SystemStorage> for DiskStorage {
+    #[inline(always)]
+    fn write_to_strategy() -> TransferStrategy {
+        TransferStrategy::Nixl(NixlTransfer::Read)
+    }
+}
+
+impl WriteToStrategy<PinnedStorage> for DiskStorage {
+    #[inline(always)]
+    fn write_to_strategy() -> TransferStrategy {
+        TransferStrategy::Nixl(NixlTransfer::Read)
+    }
+}
+
+impl WriteToStrategy<DeviceStorage> for DiskStorage {
+    #[inline(always)]
+    fn write_to_strategy() -> TransferStrategy {
+        TransferStrategy::Nixl(NixlTransfer::Read)
+    }
+}
+
+impl WriteToStrategy<DiskStorage> for SystemStorage {
+    #[inline(always)]
+    fn write_to_strategy() -> TransferStrategy {
+        TransferStrategy::Nixl(NixlTransfer::Write)
+    }
+}
+
 impl WriteToStrategy<SystemStorage> for SystemStorage {
     #[inline(always)]
     fn write_to_strategy() -> TransferStrategy {
@@ -39,6 +74,13 @@ impl WriteToStrategy<DeviceStorage> for SystemStorage {
     }
 }
 
+impl WriteToStrategy<DiskStorage> for PinnedStorage {
+    #[inline(always)]
+    fn write_to_strategy() -> TransferStrategy {
+        TransferStrategy::Nixl(NixlTransfer::Write)
+    }
+}
+
 impl WriteToStrategy<SystemStorage> for PinnedStorage {
     #[inline(always)]
     fn write_to_strategy() -> TransferStrategy {
@@ -57,6 +99,13 @@ impl WriteToStrategy<DeviceStorage> for PinnedStorage {
     #[inline(always)]
     fn write_to_strategy() -> TransferStrategy {
         TransferStrategy::CudaAsyncH2D
+    }
+}
+
+impl WriteToStrategy<DiskStorage> for DeviceStorage {
+    #[inline(always)]
+    fn write_to_strategy() -> TransferStrategy {
+        TransferStrategy::Nixl(NixlTransfer::Read)
     }
 }
 
@@ -84,7 +133,7 @@ impl WriteToStrategy<DeviceStorage> for DeviceStorage {
 impl<S: Storage + Local> WriteToStrategy<NixlStorage> for S {
     #[inline(always)]
     fn write_to_strategy() -> TransferStrategy {
-        TransferStrategy::NixlWrite
+        TransferStrategy::Nixl(NixlTransfer::Write)
     }
 }
 
@@ -121,7 +170,7 @@ where
 impl<S: Storage + Local> ReadFromStrategy<NixlStorage> for S {
     #[inline(always)]
     fn read_from_strategy() -> TransferStrategy {
-        TransferStrategy::NixlRead
+        TransferStrategy::Nixl(NixlTransfer::Read)
     }
 }
 
@@ -149,7 +198,7 @@ mod tests {
 
         assert_eq!(
             <SystemStorage as WriteToStrategy<NixlStorage>>::write_to_strategy(),
-            TransferStrategy::NixlWrite
+            TransferStrategy::Nixl(NixlTransfer::Write)
         );
 
         // Pinned to ...
@@ -167,7 +216,7 @@ mod tests {
         );
         assert_eq!(
             <PinnedStorage as WriteToStrategy<NixlStorage>>::write_to_strategy(),
-            TransferStrategy::NixlWrite
+            TransferStrategy::Nixl(NixlTransfer::Write)
         );
 
         // Device to ...
@@ -185,7 +234,7 @@ mod tests {
         );
         assert_eq!(
             <DeviceStorage as WriteToStrategy<NixlStorage>>::write_to_strategy(),
-            TransferStrategy::NixlWrite
+            TransferStrategy::Nixl(NixlTransfer::Write)
         );
 
         // Nixl to ... should fail to compile
@@ -227,7 +276,7 @@ mod tests {
 
         assert_eq!(
             <SystemStorage as ReadFromStrategy<NixlStorage>>::read_from_strategy(),
-            TransferStrategy::NixlRead
+            TransferStrategy::Nixl(NixlTransfer::Read)
         );
 
         // Pinned to ...
@@ -248,7 +297,7 @@ mod tests {
 
         assert_eq!(
             <PinnedStorage as ReadFromStrategy<NixlStorage>>::read_from_strategy(),
-            TransferStrategy::NixlRead
+            TransferStrategy::Nixl(NixlTransfer::Read)
         );
 
         // Device to ...
@@ -269,7 +318,7 @@ mod tests {
 
         assert_eq!(
             <DeviceStorage as ReadFromStrategy<NixlStorage>>::read_from_strategy(),
-            TransferStrategy::NixlRead
+            TransferStrategy::Nixl(NixlTransfer::Read)
         );
 
         // Nixl to ... should fail to compile

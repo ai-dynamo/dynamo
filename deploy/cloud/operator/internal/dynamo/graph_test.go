@@ -65,15 +65,16 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Name:      "service1",
 								},
 								Resources: &Resources{
-									CPU:    "1",
-									Memory: "1Gi",
-									GPU:    "0",
+									CPU:    &[]string{"1"}[0],
+									Memory: &[]string{"1Gi"}[0],
+									GPU:    &[]string{"0"}[0],
 									Custom: map[string]string{},
 								},
 								Autoscaling: &Autoscaling{
 									MinReplicas: 1,
 									MaxReplicas: 5,
 								},
+								Workers: &[]int32{3}[0],
 							},
 						},
 						{
@@ -105,6 +106,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName:     "service1",
 							DynamoNamespace: &[]string{"default"}[0],
+							Replicas:        &[]int32{3}[0],
 							Resources: &compounaiCommon.Resources{
 								Requests: &compounaiCommon.ResourceItem{
 									CPU:    "1",
@@ -184,9 +186,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 							Config: Config{
 								HttpExposed: true,
 								Resources: &Resources{
-									CPU:    "1",
-									Memory: "1Gi",
-									GPU:    "0",
+									CPU:    &[]string{"1"}[0],
+									Memory: &[]string{"1Gi"}[0],
+									GPU:    &[]string{"0"}[0],
 									Custom: map[string]string{},
 								},
 								Autoscaling: &Autoscaling{
@@ -328,9 +330,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 							Config: Config{
 								HttpExposed: true,
 								Resources: &Resources{
-									CPU:    "1",
-									Memory: "1Gi",
-									GPU:    "0",
+									CPU:    &[]string{"1"}[0],
+									Memory: &[]string{"1Gi"}[0],
+									GPU:    &[]string{"0"}[0],
 									Custom: map[string]string{},
 								},
 								Autoscaling: &Autoscaling{
@@ -479,9 +481,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Name:      "service1",
 								},
 								Resources: &Resources{
-									CPU:    "1",
-									Memory: "1Gi",
-									GPU:    "0",
+									CPU:    &[]string{"1"}[0],
+									Memory: &[]string{"1Gi"}[0],
+									GPU:    &[]string{"0"}[0],
 									Custom: map[string]string{},
 								},
 								Autoscaling: &Autoscaling{
@@ -532,9 +534,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									ComponentType: ComponentTypePlanner,
 								},
 								Resources: &Resources{
-									CPU:    "1",
-									Memory: "1Gi",
-									GPU:    "0",
+									CPU:    &[]string{"1"}[0],
+									Memory: &[]string{"1Gi"}[0],
+									GPU:    &[]string{"0"}[0],
 									Custom: map[string]string{},
 								},
 							},
@@ -613,9 +615,9 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Name:      "service1",
 								},
 								Resources: &Resources{
-									CPU:    "1",
-									Memory: "1Gi",
-									GPU:    "0",
+									CPU:    &[]string{"1"}[0],
+									Memory: &[]string{"1Gi"}[0],
+									GPU:    &[]string{"0"}[0],
 									Custom: map[string]string{},
 								},
 								Autoscaling: &Autoscaling{
@@ -896,6 +898,50 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 				return
 			}
 			g.Expect(got).To(gomega.Equal(tt.want))
+		})
+	}
+}
+
+func TestSetLwsAnnotations(t *testing.T) {
+	type args struct {
+		serviceArgs *ServiceArgs
+		deployment  *v1alpha1.DynamoComponentDeployment
+	}
+	tests := []struct {
+		name    string
+		args    args
+		wantErr bool
+		want    *v1alpha1.DynamoComponentDeployment
+	}{
+		{
+			name: "Test SetLwsAnnotations for 16 GPUs",
+			args: args{
+				serviceArgs: &ServiceArgs{
+					Resources: &Resources{
+						GPU: &[]string{"8"}[0],
+					},
+					TotalGpus: &[]int32{16}[0],
+				},
+				deployment: &v1alpha1.DynamoComponentDeployment{},
+			},
+			wantErr: false,
+			want: &v1alpha1.DynamoComponentDeployment{
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						Annotations: map[string]string{
+							"nvidia.com/deployment-type": "leader-worker",
+							"nvidia.com/lws-size":        "2",
+						},
+					},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := SetLwsAnnotations(tt.args.serviceArgs, tt.args.deployment); (err != nil) != tt.wantErr {
+				t.Errorf("SetLwsAnnotations() error = %v, wantErr %v", err, tt.wantErr)
+			}
 		})
 	}
 }

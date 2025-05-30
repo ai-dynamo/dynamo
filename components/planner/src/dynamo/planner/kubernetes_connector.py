@@ -22,7 +22,7 @@ class KubernetesConnector(PlannerConnector):
         self.kube_api = KubernetesAPI()
         self.namespace = namespace
 
-    async def add_component(self, component_name: str):
+    async def add_component(self, component_name: str, blocking: bool = True):
         """Add a component by increasing its replica count by 1"""
         deployment = await self.kube_api.get_graph_deployment(
             component_name, self.namespace
@@ -38,6 +38,10 @@ class KubernetesConnector(PlannerConnector):
             component_name,
             current_replicas + 1,
         )
+        if blocking:
+            await self.kube_api.wait_for_graph_deployment_ready(
+                self._get_graph_deployment_name(deployment)
+            )
 
     async def remove_component(self, component_name: str):
         """Remove a component by decreasing its replica count by 1"""

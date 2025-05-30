@@ -27,7 +27,7 @@ from common.utils import RequestType
 from components.kv_router import Router
 from components.worker import TensorRTLLMWorker
 
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
 logger = logging.getLogger(__name__)
@@ -78,10 +78,10 @@ class Processor(ChatProcessorMixin):
                 .client()
             )
 
-        while len(self.worker_client.endpoint_ids()) < self.min_workers:
+        while len(self.worker_client.instance_ids()) < self.min_workers:
             logger.info(
                 f"Waiting for workers to be ready.\n"
-                f" Current: {len(self.worker_client.endpoint_ids())},"
+                f" Current: {len(self.worker_client.instance_ids())},"
                 f" Required: {self.min_workers}"
             )
             await asyncio.sleep(30)
@@ -143,7 +143,7 @@ class Processor(ChatProcessorMixin):
                 logger.debug(f"[preprocessor] Response: {response}")
                 yield json.loads(response)
 
-    @dynamo_endpoint(name="chat/completions")
+    @endpoint(name="chat/completions")
     async def generate_chat(self, raw_request: DynamoTRTLLMChatCompletionRequest):
         # max_tokens is deprecated, however if the max_tokens is provided instead
         # of max_completion_tokens, we will use the value as max_completion_tokens.
@@ -172,7 +172,20 @@ class Processor(ChatProcessorMixin):
         async for response in self._generate(raw_request, RequestType.CHAT):
             yield response
 
-    @dynamo_endpoint(name="completions")
+    @endpoint(name="completions")
     async def completions(self, raw_request: DynamoTRTLLMCompletionRequest):
+        # min_tokens isn't currently propagated through the Rust OpenAI HTTP frontend,
+        # and ignore_eos is passed through the 'nvext' field, so set both when found.
+        if raw_request.nvext:
+            ignore_eos = raw_request.nvext.get("ignore_eos")
+            raw_request.ignore_eos = ignore_eos
+            # If ignore_eos is True, set min_tokens to max_tokens to guarantee
+            # the full expected OSL for consistent benchmarking purposes.
+            if ignore_eos:
+                logger.debug(
+                    f"[preprocessor] `ignore_eos` detected, setting `min_tokens` to `max_tokens`: {raw_request.max_tokens}"
+                )
+                raw_request.min_tokens = raw_request.max_tokens
+
         async for response in self._generate(raw_request, RequestType.COMPLETION):
             yield response

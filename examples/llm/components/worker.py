@@ -32,7 +32,7 @@ from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
 from dynamo.llm import KvMetricsPublisher
-from dynamo.sdk import async_on_start, depends, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,8 @@ class VllmWorker:
                 )
                 self.engine_args.enable_prefix_caching = True
 
-            os.environ["VLLM_WORKER_ID"] = str(dynamo_context.get("lease").id())
+            VLLM_WORKER_ID = dynamo_context["endpoints"][0].lease_id()
+            os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
             os.environ["VLLM_KV_NAMESPACE"] = "dynamo"
             os.environ["VLLM_KV_COMPONENT"] = class_name
 
@@ -182,7 +183,7 @@ class VllmWorker:
         return callback
 
     # TODO: use the same child lease for metrics publisher endpoint and generate endpoint
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, request: vLLMGenerateRequest):
         # TODO: consider prefix hit when deciding prefill locally or remotely
 

@@ -17,7 +17,7 @@
 #  - nats-server -js
 #
 # Window 1: `python server_sglang.py`. Wait for log "Starting endpoint".
-# Window 2: `dynamo-run out=dyn://dynamo.backend.generate`
+# Window 2: `dynamo-run out=dyn
 
 import argparse
 import asyncio
@@ -31,7 +31,7 @@ from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
-DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
 
 class Config:

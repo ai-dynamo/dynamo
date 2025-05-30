@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Router};
 use prometheus::{Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts};
@@ -19,7 +7,7 @@ use std::{sync::Arc, time::Instant};
 
 pub use prometheus::Registry;
 
-use super::{DeploymentState, RouteDoc};
+use super::RouteDoc;
 
 /// Value for the `status` label in the request counter for successful requests
 pub const REQUEST_STATUS_SUCCESS: &str = "success";
@@ -60,6 +48,9 @@ pub enum Endpoint {
 
     /// OAI Chat Completions
     ChatCompletions,
+
+    /// OAI Embeddings
+    Embeddings,
 }
 
 /// Metrics for the HTTP service
@@ -190,16 +181,14 @@ impl Metrics {
         registry.register(Box::new(self.request_duration.clone()))?;
         Ok(())
     }
-}
 
-impl DeploymentState {
     /// Create a new [`InflightGuard`] for the given model and annotate if its a streaming request,
     /// and the kind of endpoint that was hit
     ///
     /// The [`InflightGuard`] is an RAII object will handle incrementing the inflight gauge and
     /// request counters.
     pub fn create_inflight_guard(
-        &self,
+        self: Arc<Self>,
         model: &str,
         endpoint: Endpoint,
         streaming: bool,
@@ -210,12 +199,7 @@ impl DeploymentState {
             RequestType::Unary
         };
 
-        InflightGuard::new(
-            self.metrics.clone(),
-            model.to_string(),
-            endpoint,
-            request_type,
-        )
+        InflightGuard::new(self.clone(), model.to_string(), endpoint, request_type)
     }
 }
 
@@ -276,6 +260,7 @@ impl std::fmt::Display for Endpoint {
         match self {
             Endpoint::Completions => write!(f, "completions"),
             Endpoint::ChatCompletions => write!(f, "chat_completions"),
+            Endpoint::Embeddings => write!(f, "embeddings"),
         }
     }
 }
@@ -285,6 +270,7 @@ impl Endpoint {
         match self {
             Endpoint::Completions => "completions",
             Endpoint::ChatCompletions => "chat_completions",
+            Endpoint::Embeddings => "embeddings",
         }
     }
 }
