@@ -20,8 +20,8 @@ This example shows how the main processor component can use Dynamo SDK's built-i
 request tracing for automatic request ID propagation across components.
 """
 
-import logging
 import asyncio
+import logging
 from typing import Any, Dict, List, Optional
 
 from dynamo.client import DynamoClient
