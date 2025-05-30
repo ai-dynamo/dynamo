@@ -34,7 +34,7 @@ from vllm.inputs import TokensPrompt
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
-from dynamo.llm import KvMetricsPublisher, ModelType, register_llm
+from dynamo.llm import ModelType, WorkerMetricsPublisher, register_llm
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
@@ -90,7 +90,7 @@ class VllmWorker:
             os.environ["VLLM_KV_NAMESPACE"] = "dynamo"
             os.environ["VLLM_KV_COMPONENT"] = class_name
 
-        self.metrics_publisher = KvMetricsPublisher()
+        self.metrics_publisher = WorkerMetricsPublisher()
 
         model_config = self.engine_args.create_model_config()
         self.default_sampling_params = model_config.get_diff_sampling_param()
