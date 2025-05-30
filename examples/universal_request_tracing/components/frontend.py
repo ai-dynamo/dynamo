@@ -75,8 +75,8 @@ class Frontend:
         """
         logger.info("Processing chat completion request")
 
-        async for response in self.processor.chat_completions(chat_request):
-            yield response
+        result = await self.processor.process(chat_request.messages[0]["content"])
+        yield result
 
     @endpoint(is_api=True, path="/v1/completions", methods=["POST"])
     async def completions(

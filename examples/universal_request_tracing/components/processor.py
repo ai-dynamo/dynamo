@@ -58,8 +58,10 @@ class Processor(RequestTracingMixin):
     async def async_init(self):
         """Asynchronous initialization method that runs on service startup."""
         self.log("debug", "Initializing component clients")
-        self.prefiller_client = await DynamoClient.create("prefiller")
-        self.decoder_client = await DynamoClient.create("decoder")
+        self.prefiller_client, self.decoder_client = await asyncio.gather(
+            DynamoClient.create("prefiller"),
+            DynamoClient.create("decoder"),
+        )
         self.log("debug", "Component clients initialized successfully")
 
     @endpoint(is_api=True)

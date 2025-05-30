@@ -234,7 +234,11 @@ class RequestTracingMixin:
             set_request_context(req_id)
 
         log_message = f"[request_id={req_id}] {message}"
-        getattr(logger, level.lower())(log_message)
+        _method = getattr(logger, level.lower(), None)
+        if _method is None:
+            logger.warning(f"Unknown log level '{level}', defaulting to INFO")
+            _method = logger.info
+        _method(log_message)
 
 
 # Type variables for generic functions
@@ -272,18 +276,22 @@ def with_request_id(param_name: str = "request_id"):
                 if param_name in kwargs:
                     request_id = kwargs[param_name]
                 else:
-                    # Try to find it in positional args based on the signature
-                    param_idx = None
-                    for i, param in enumerate(sig.parameters.values()):
-                        if param.name == param_name:
-                            param_idx = i
-                            break
-
+                    # Locate positional parameter index
+                    param_idx = next(
+                        (i for i, p in enumerate(sig.parameters.values()) if p.name == param_name),
+                        None,
+                    )
                     if param_idx is not None and param_idx < len(args):
                         request_id = args[param_idx]
 
+                        # Replace value in the *args* tuple instead of duplicating it in **kwargs**
+                        args = (*args[:param_idx], None, *args[param_idx + 1:])  # placeholder
+
                 # Ensure we have a non-None request ID
-                request_id = self.ensure_request_id(request_id)
+                if hasattr(self, "ensure_request_id") and callable(self.ensure_request_id):
+                    request_id = self.ensure_request_id(request_id)
+                else:
+                    request_id = request_id or str(uuid.uuid4())
 
                 # Update the parameter value
                 kwargs[param_name] = request_id
@@ -310,7 +318,9 @@ def trace_processor_method(func: Callable) -> Callable:
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
         if "request_id" not in kwargs or not kwargs["request_id"]:
-            kwargs["request_id"] = get_current_request_id() or str(uuid.uuid4())
+            new_id = get_current_request_id() or str(uuid.uuid4())
+            kwargs["request_id"] = new_id
+            set_request_context(new_id)
 
         return await func(*args, **kwargs)
 

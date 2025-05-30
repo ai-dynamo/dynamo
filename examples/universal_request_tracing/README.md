@@ -172,7 +172,7 @@ class Processor(RequestTracingMixin):
 
 ## 📁 Directory Structure
 
-```
+```text
 examples/universal_request_tracing/
 ├── README.md                    # This document
 ├── components/

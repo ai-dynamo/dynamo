@@ -80,7 +80,9 @@ class Prefiller(RequestTracingMixin):
                 return {"status": "cache_hit", "cache_key": cache_key}
 
             prefill_result = await self._perform_prefill(request_data, cache_key)
-            self.cache_stats["prefills"] += 1
+            async with self._lock:
+                self.cache_stats["prefills"] += 1
+                self.cache_stats["misses"] += 1
 
             self.log("info", f"Prefill completed for cache key: {cache_key}")
             return prefill_result
