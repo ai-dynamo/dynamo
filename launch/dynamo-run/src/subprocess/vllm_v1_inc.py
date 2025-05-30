@@ -33,8 +33,8 @@ from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo.llm import (
-    KvMetricsPublisher,
     ModelType,
+    WorkerMetricsPublisher,
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
     register_llm,
@@ -64,10 +64,10 @@ class Config:
 
 
 class DynamoStatLoggerPublisher(StatLoggerBase):
-    """Stat logger publisher. Wrapper for the KvMetricsPublisher to match the StatLoggerBase interface."""
+    """Stat logger publisher. Wrapper for the WorkerMetricsPublisher to match the StatLoggerBase interface."""
 
     def __init__(self, component: Component, dp_rank: int) -> None:
-        self.inner = KvMetricsPublisher()
+        self.inner = WorkerMetricsPublisher()
         self.inner.create_endpoint(component)
         self.dp_rank = dp_rank
 

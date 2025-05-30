@@ -318,11 +318,10 @@ async fn start_zmq_listener(
 
                 // For each of our events, convert them to [`KvCacheEvent`] and send to the event_processor.
                 for raw_event in batch.events.into_iter() {
-                    if let Some(event) = convert_event(raw_event, seq, kv_block_size, &warning_count) {
-                        if tx.send(event).is_err() {
-                            tracing::warn!("Failed to send message to channel - receiver dropped");
-                            return;
-                        }
+                    let event = convert_event(raw_event, seq, kv_block_size, &warning_count);
+                    if tx.send(event).is_err() {
+                        tracing::warn!("Failed to send message to channel - receiver dropped");
+                        return;
                     }
                 }
             }
@@ -332,15 +331,13 @@ async fn start_zmq_listener(
 }
 
 /// Convert a raw event coming from the ZMQ channel into the internal
-/// [`KvCacheEvent`] representation used by the router. Returns `None` when the
-/// event cannot be represented with the current protocol (e.g., we ignore
-/// `AllBlocksCleared` until a concrete format is defined).
+/// [`KvCacheEvent`] representation used by the router.
 fn convert_event(
     raw: RawKvEvent,
     event_id: u64,
     kv_block_size: usize,
     warning_count: &Arc<AtomicU32>,
-) -> Option<KvCacheEvent> {
+) -> KvCacheEvent {
     match raw {
         RawKvEvent::BlockStored {
             block_hashes,
@@ -350,7 +347,7 @@ fn convert_event(
             lora_id,
         } => {
             let num_block_tokens = vec![block_size as u64; block_hashes.len()];
-            Some(KvCacheEvent {
+            KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: parent_block_hash.map(ExternalSequenceBlockHash::from),
@@ -363,24 +360,24 @@ fn convert_event(
                         warning_count,
                     ),
                 }),
-            })
+            }
         }
         RawKvEvent::BlockRemoved { block_hashes } => {
             let hashes = block_hashes
                 .into_iter()
                 .map(ExternalSequenceBlockHash::from)
                 .collect();
-            Some(KvCacheEvent {
+            KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
                     block_hashes: hashes,
                 }),
-            })
+            }
         }
-        RawKvEvent::AllBlocksCleared => {
-            tracing::debug!("Received AllBlocksCleared event – currently ignored");
-            None
-        }
+        RawKvEvent::AllBlocksCleared => KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Cleared,
+        },
     }
 }
 
@@ -463,15 +460,15 @@ enum RawKvEvent {
 // Metrics Publishers ------------------------------------------------------
 // -------------------------------------------------------------------------
 
-pub struct KvMetricsPublisher {
+pub struct WorkerMetricsPublisher {
     tx: tokio::sync::watch::Sender<Arc<ForwardPassMetrics>>,
     rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>,
 }
 
-impl KvMetricsPublisher {
+impl WorkerMetricsPublisher {
     pub fn new() -> Result<Self> {
         let (tx, rx) = tokio::sync::watch::channel(Arc::new(ForwardPassMetrics::default()));
-        Ok(KvMetricsPublisher { tx, rx })
+        Ok(WorkerMetricsPublisher { tx, rx })
     }
 
     pub fn publish(
@@ -614,7 +611,7 @@ mod test_event_processing {
         };
 
         let out = convert_event(raw_evt, 42, kv_block_size, &Arc::new(AtomicU32::new(0)));
-        assert!(matches!(out.unwrap().data, KvCacheEventData::Stored(_)));
+        assert!(matches!(out.data, KvCacheEventData::Stored(_)));
     }
 
     #[test]
@@ -625,14 +622,15 @@ mod test_event_processing {
         };
         let out = convert_event(raw_evt, 7, kv_block_size, &Arc::new(AtomicU32::new(0)));
 
-        assert!(matches!(out.unwrap().data, KvCacheEventData::Removed(_)));
+        assert!(matches!(out.data, KvCacheEventData::Removed(_)));
     }
 
     #[test]
     fn test_convert_event_all_blocks_cleared() {
         let kv_block_size = 4;
         let raw_evt = RawKvEvent::AllBlocksCleared;
-        assert!(convert_event(raw_evt, 1, kv_block_size, &Arc::new(AtomicU32::new(0))).is_none());
+        let out = convert_event(raw_evt, 1, kv_block_size, &Arc::new(AtomicU32::new(0)));
+        assert!(matches!(out.data, KvCacheEventData::Cleared));
     }
 }
 

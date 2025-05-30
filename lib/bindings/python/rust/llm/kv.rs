@@ -63,15 +63,16 @@ impl KvRouter {
 }
 
 #[pyclass]
-pub(crate) struct KvMetricsPublisher {
-    inner: Arc<llm_rs::kv_router::publisher::KvMetricsPublisher>,
+pub(crate) struct WorkerMetricsPublisher {
+    inner: Arc<llm_rs::kv_router::publisher::WorkerMetricsPublisher>,
 }
 
 #[pymethods]
-impl KvMetricsPublisher {
+impl WorkerMetricsPublisher {
     #[new]
     fn new() -> PyResult<Self> {
-        let inner = llm_rs::kv_router::publisher::KvMetricsPublisher::new().map_err(to_pyerr)?;
+        let inner =
+            llm_rs::kv_router::publisher::WorkerMetricsPublisher::new().map_err(to_pyerr)?;
         Ok(Self {
             inner: inner.into(),
         })
