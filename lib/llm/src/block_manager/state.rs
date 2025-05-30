@@ -437,12 +437,11 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
         self.worker_id
     }
 
-    pub(crate) async fn enqueue_offload_block<S: Storage + 'static>(
+    pub(crate) async fn offload_blocks<S: Storage + 'static>(
         &self,
-        block: &ImmutableBlock<S, Metadata>,
-        priority: u64,
+        blocks: Vec<ImmutableBlock<S, Metadata>>,
     ) -> Result<()> {
-        self.offload_manager.offload(block, priority).await?;
+        self.offload_manager.offload_batch(blocks).await?;
 
         Ok(())
     }

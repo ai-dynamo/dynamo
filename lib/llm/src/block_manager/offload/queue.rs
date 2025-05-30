@@ -93,8 +93,14 @@ impl<S: Storage, M: BlockMetadata> OffloadTreeQueue<S, M> {
         }
     }
 
-    // TODO: Incorporate request priority into this.
-    pub fn insert(&mut self, request: OffloadRequest<S, M>) -> anyhow::Result<()> {
+    pub fn insert(&mut self, requests: Vec<OffloadRequest<S, M>>) -> anyhow::Result<()> {
+        for request in requests {
+            self.insert_single(request)?;
+        }
+        Ok(())
+    }
+
+    fn insert_single(&mut self, request: OffloadRequest<S, M>) -> anyhow::Result<()> {
         // `sequence_hash` uniquely identifies the *current* block, whereas
         // `parent` (if `Some`) points to its immediate predecessor.
         // Note: The parent might not yet exist in the queue. This is fine, and is handled below.
@@ -250,18 +256,18 @@ mod tests {
     fn make_request_with_priority(
         block: &Arc<MutableBlock<NullDeviceStorage, BasicMetadata>>,
         priority: u64,
-    ) -> Result<OffloadRequest<NullDeviceStorage, BasicMetadata>> {
-        Ok(OffloadRequest {
+    ) -> Result<Vec<OffloadRequest<NullDeviceStorage, BasicMetadata>>> {
+        Ok(vec![OffloadRequest {
             block: Arc::downgrade(block),
             sequence_hash: block.sequence_hash()?,
             priority,
             parent_sequence_hash: block.parent_sequence_hash()?,
-        })
+        }])
     }
 
     fn make_request(
         block: &Arc<MutableBlock<NullDeviceStorage, BasicMetadata>>,
-    ) -> Result<OffloadRequest<NullDeviceStorage, BasicMetadata>> {
+    ) -> Result<Vec<OffloadRequest<NullDeviceStorage, BasicMetadata>>> {
         make_request_with_priority(block, 0)
     }
 

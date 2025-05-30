@@ -140,6 +140,8 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
         // raii object that will collect all the publish handles and publish them when the object is dropped
         let mut publish_handles = self.publisher();
 
+        let mut offload_blocks = Vec::new();
+
         for mut block in blocks.into_iter() {
             let sequence_hash = block.sequence_hash()?;
 
@@ -185,15 +187,26 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
             let immutable = self.active.register(mutable)?;
 
             if offload {
-                if let Some(priority) = immutable.metadata().offload_priority() {
-                    immutable.enqueue_offload(priority).await.unwrap();
-                }
+                offload_blocks.push(immutable.clone());
             }
 
             immutable_blocks.push(immutable);
         }
 
         assert_eq!(immutable_blocks.len(), expected_len);
+
+        if !offload_blocks.is_empty() {
+            let manager = offload_blocks[0].manager().cloned();
+            if let Some(manager) = manager {
+                manager.offload_blocks(offload_blocks).await.map_err(|_| {
+                    BlockPoolError::BlockError(BlockError::Other(anyhow::anyhow!(
+                        "failed to offload blocks"
+                    )))
+                })?;
+            } else {
+                tracing::warn!("Block is not managed. Unable to enqueue offload.");
+            }
+        }
 
         Ok(immutable_blocks)
     }
