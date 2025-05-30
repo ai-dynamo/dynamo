@@ -31,7 +31,7 @@ from vllm.entrypoints.openai.api_server import (
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
-from dynamo.llm import KvMetricsPublisher
+from dynamo.llm import WorkerMetricsPublisher
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
@@ -87,7 +87,7 @@ class VllmWorker:
             os.environ["VLLM_KV_NAMESPACE"] = "dynamo"
             os.environ["VLLM_KV_COMPONENT"] = class_name
 
-        self.metrics_publisher = KvMetricsPublisher()
+        self.metrics_publisher = WorkerMetricsPublisher()
 
         signal.signal(signal.SIGTERM, self.shutdown_vllm_engine)
         signal.signal(signal.SIGINT, self.shutdown_vllm_engine)

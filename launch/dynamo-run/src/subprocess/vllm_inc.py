@@ -26,7 +26,7 @@ from vllm.entrypoints.openai.api_server import (
 )
 from vllm.inputs import TokensPrompt
 
-from dynamo.llm import KvMetricsPublisher, ModelType, register_llm
+from dynamo.llm import ModelType, WorkerMetricsPublisher, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 # Only used if you run it manually from the command line
@@ -59,7 +59,7 @@ class RequestHandler:
         self.component = component
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
-        self.metrics_publisher = KvMetricsPublisher()
+        self.metrics_publisher = WorkerMetricsPublisher()
 
     def setup_kv_metrics(self):
         if not hasattr(self.engine_client, "set_metrics_publisher"):
