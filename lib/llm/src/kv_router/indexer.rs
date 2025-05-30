@@ -1214,7 +1214,7 @@ mod tests {
 
         // Test clearing an empty worker
         trie.clear_all_blocks(worker_0);
-        assert!(trie.lookup.get(&worker_0).is_none());
+        assert!(!trie.lookup.contains_key(&worker_0));
 
         // Test clearing a worker with shared blocks
         trie.apply_event(create_store_event(worker_0, 0, vec![0, 1, 3], None));
@@ -1225,7 +1225,7 @@ mod tests {
 
         trie.clear_all_blocks(worker_0);
 
-        assert!(trie.lookup.get(&worker_0).is_some());
+        assert!(trie.lookup.contains_key(&worker_0));
         assert!(trie.lookup.get(&worker_0).unwrap().is_empty());
         let result = trie
             .find_matches(vec![LocalBlockHash(0), LocalBlockHash(2)], false)
