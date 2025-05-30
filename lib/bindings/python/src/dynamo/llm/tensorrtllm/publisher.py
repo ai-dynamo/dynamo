@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from queue import Queue
 from typing import Callable, Optional, Union
 
-from dynamo.llm import KvEventPublisher, KvMetricsPublisher
+from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -113,7 +113,7 @@ class Publisher:
 
     def initialize(self):
         # Setup the metrics publisher
-        self.metrics_publisher = KvMetricsPublisher()
+        self.metrics_publisher = WorkerMetricsPublisher()
         self._init_publish_metrics_thread()
         task = asyncio.create_task(self._create_metrics_publisher_endpoint())
         task.add_done_callback(
