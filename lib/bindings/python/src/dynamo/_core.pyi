@@ -346,7 +346,7 @@ class DisaggregatedRouter:
 
 class WorkerMetricsPublisher:
     """
-    A metrics publisher will provide KV metrics to the router.
+    A metrics publisher will provide metrics to the router.
     """
 
     ...
