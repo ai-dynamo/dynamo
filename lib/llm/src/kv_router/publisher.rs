@@ -32,6 +32,7 @@ use dynamo_runtime::{
 use futures::stream;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use rmp_serde as rmps;
 use serde::Deserialize;
@@ -44,127 +45,205 @@ use zeromq::{Socket, SocketRecv, SubSocket};
 // KV Event Publishers -----------------------------------------------------
 // -------------------------------------------------------------------------
 
+pub enum KvEventInternalSourceConfig {
+    Zmq { endpoint: String, topic: String },
+}
+
+enum KvEventInternalSource {
+    Zmq {
+        zmq_handle: tokio::task::JoinHandle<()>,
+        processor_handle: tokio::task::JoinHandle<()>,
+    },
+}
+
+impl KvEventInternalSource {
+    fn start(
+        component: Component,
+        worker_id: i64,
+        cancellation_token: CancellationToken,
+        kv_block_size: usize,
+        source_config: KvEventInternalSourceConfig,
+    ) -> Result<Self> {
+        match source_config {
+            KvEventInternalSourceConfig::Zmq { endpoint, topic } => {
+                let (raw_tx, raw_rx) = mpsc::unbounded_channel::<(u64, Vec<u8>)>();
+                let warning_count = Arc::new(AtomicU32::new(0));
+
+                let zmq_handle = component
+                    .drt()
+                    .runtime()
+                    .secondary()
+                    .spawn(start_zmq_listener(
+                        endpoint,
+                        topic,
+                        raw_tx,
+                        cancellation_token.clone(),
+                    ));
+
+                let processor_handle = component.drt().runtime().secondary().spawn(start_zmq_event_processor(
+                    raw_rx,
+                    component,
+                    worker_id,
+                    kv_block_size,
+                    warning_count,
+                    cancellation_token,
+                ));
+
+                Ok(KvEventInternalSource::Zmq {
+                    zmq_handle,
+                    processor_handle,
+                })
+            }
+        }
+    }
+
+    fn shutdown(&self) {
+        match self {
+            KvEventInternalSource::Zmq { zmq_handle, processor_handle } => {
+                zmq_handle.abort();
+                processor_handle.abort();
+            }
+        }
+    }
+}
+
+pub enum KvEventSourceConfig {
+    Internal(KvEventInternalSourceConfig),
+    External,
+}
+
+enum KvEventSource {
+    Internal(KvEventInternalSource),
+    External {
+        tx: mpsc::UnboundedSender<KvCacheEvent>,
+    },
+}
+
+impl KvEventSource {
+    fn start(
+        component: Component,
+        worker_id: i64,
+        cancellation_token: CancellationToken,
+        kv_block_size: usize,
+        source_config: KvEventSourceConfig,
+    ) -> Result<Self> {
+        match source_config {
+            KvEventSourceConfig::Internal(internal_source_config) => {
+                let source = KvEventInternalSource::start(
+                    component,
+                    worker_id,
+                    cancellation_token,
+                    kv_block_size,
+                    internal_source_config,
+                )?;
+                Ok(Self::Internal(source))
+            }
+            KvEventSourceConfig::External => {
+                let (tx, mut rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+                tracing::info!("Publishing KV Events to subject: {}", KV_EVENT_SUBJECT);
+
+                _ = component.drt().runtime().secondary().spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = cancellation_token.cancelled() => {
+                                tracing::info!("KV Event source received cancellation signal");
+                                break;
+                            }
+                            Some(event) = rx.recv() => {
+                                let router_event = RouterEvent::new(worker_id, event);
+                                component
+                                    .publish(KV_EVENT_SUBJECT, &router_event)
+                                    .await
+                                    .unwrap();
+                            }
+                        }
+                    }
+                });
+
+                Ok(Self::External { tx })
+            }
+        }
+    }
+}
+
+impl KvEventSource {
+    fn publish(&self, event: KvCacheEvent) -> Result<()> {
+        match self {
+            KvEventSource::Internal(_) => {
+                anyhow::bail!("Internal source does not support manual publishing");
+            }
+
+            KvEventSource::External { tx } => {
+                tx.send(event)?;
+                Ok(())
+            }
+        }
+    }
+
+    fn shutdown(&self) {
+        match self {
+            KvEventSource::Internal(source) => {
+                source.shutdown();
+            }
+            KvEventSource::External { tx: _ } => {}
+        }
+    }
+}
+
 pub struct KvEventPublisher {
     kv_block_size: usize,
-    tx: mpsc::UnboundedSender<KvCacheEvent>,
+    source: KvEventSource,
+    cancellation_token: CancellationToken,
 }
 
 impl KvEventPublisher {
-    pub fn new(component: Component, worker_id: i64, kv_block_size: usize) -> Result<Self> {
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
-        let p = KvEventPublisher { tx, kv_block_size };
+    pub fn new(
+        component: Component,
+        worker_id: i64,
+        kv_block_size: usize,
+        source_config: KvEventSourceConfig,
+    ) -> Result<Self> {
+        let cancellation_token = CancellationToken::new();
 
-        start_publish_task(component, worker_id, rx);
-        Ok(p)
+        let source = KvEventSource::start(
+            component,
+            worker_id,
+            cancellation_token.clone(),
+            kv_block_size,
+            source_config,
+        )?;
+
+        Ok(Self {
+            kv_block_size,
+            source,
+            cancellation_token,
+        })
     }
 
-    pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
+    pub fn publish(&self, event: KvCacheEvent) -> Result<()> {
         tracing::trace!("Publish event: {:?}", event);
-        self.tx.send(event)
+        self.source.publish(event)
     }
 
     pub fn kv_block_size(&self) -> usize {
         self.kv_block_size
     }
-}
 
-fn start_publish_task(
-    component: Component,
-    worker_id: i64,
-    mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
-) {
-    let component_clone = component.clone();
-    tracing::info!("Publishing KV Events to subject: {}", KV_EVENT_SUBJECT);
-
-    _ = component.drt().runtime().secondary().spawn(async move {
-        while let Some(event) = rx.recv().await {
-            let router_event = RouterEvent::new(worker_id, event);
-            component_clone
-                .publish(KV_EVENT_SUBJECT, &router_event)
-                .await
-                .unwrap();
+    pub fn shutdown(&self) {
+        if !self.cancellation_token.is_cancelled() {
+            self.cancellation_token.cancel();
         }
-    });
-}
-
-// vLLM and SGLang use multi-processing to launch engine-core processes
-// We use zmq to publish events from these processes to a socket
-// For more info on zmq: https://zeromq.org/
-// This publisher reads those events and publishes them to NATS
-// The indexer will get the events from NATS and put them in the global prefix tree.
-pub struct ZmqKvEventPublisher {
-    kv_block_size: usize,
-    processor_handle: Option<tokio::task::JoinHandle<()>>,
-    zmq_handle: Option<tokio::task::JoinHandle<()>>,
-    zmq_token: Option<dynamo_runtime::CancellationToken>,
-    warning_count: Arc<AtomicU32>,
-}
-
-impl ZmqKvEventPublisher {
-    pub fn new(kv_block_size: usize) -> Self {
-        Self {
-            kv_block_size,
-            processor_handle: None,
-            zmq_handle: None,
-            zmq_token: None,
-            warning_count: Arc::new(AtomicU32::new(0)),
-        }
-    }
-
-    pub fn start_background_task(
-        &mut self,
-        component: Component,
-        worker_id: i64,
-        zmq_endpoint: String,
-        zmq_topic: String,
-    ) {
-        let kv_block_size = self.kv_block_size;
-        let warning_count = self.warning_count.clone();
-        let (raw_tx, raw_rx) = mpsc::unbounded_channel::<(u64, Vec<u8>)>();
-
-        let zmq_token = component.rt().child_token();
-        self.zmq_token = Some(zmq_token.clone());
-
-        // Spawn async ZMQ listener
-        self.zmq_handle = Some(
-            component
-                .drt()
-                .runtime()
-                .secondary()
-                .spawn(start_zmq_listener(
-                    zmq_endpoint,
-                    zmq_topic,
-                    raw_tx,
-                    zmq_token.clone(),
-                )),
-        );
-
-        self.processor_handle = Some(component.drt().runtime().secondary().spawn(
-            start_event_processor(
-                raw_rx,
-                component,
-                worker_id,
-                kv_block_size,
-                warning_count,
-                zmq_token,
-            ),
-        ));
-    }
-
-    pub fn shutdown(&mut self) {
-        if let Some(token) = self.zmq_token.take() {
-            token.cancel();
-        }
-        if let Some(handle) = self.zmq_handle.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.processor_handle.take() {
-            handle.abort();
-        }
+        self.source.shutdown();
     }
 }
 
-async fn start_event_processor<P: EventPublisher>(
+impl Drop for KvEventPublisher {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+async fn start_zmq_event_processor<P: EventPublisher>(
     mut raw_rx: mpsc::UnboundedReceiver<(u64, Vec<u8>)>,
     component: P,
     worker_id: i64,
@@ -691,10 +770,10 @@ mod tests_startup_helpers {
     }
 
     //--------------------------------------------------------------------
-    // Test start_event_processor in isolation
+    // Test start_zmq_event_processor in isolation
     //--------------------------------------------------------------------
     #[tokio::test]
-    async fn test_start_event_processor_sends_router_event() {
+    async fn test_start_zmq_event_processor_sends_router_event() {
         let kv_block_size = 4;
         let worker_id = 99;
 
@@ -718,7 +797,7 @@ mod tests_startup_helpers {
         let (comp, published) = MockComponent::new();
 
         // 4) run the function under test (let it consume exactly one msg)
-        let handle = tokio::spawn(start_event_processor(
+        let handle = tokio::spawn(start_zmq_event_processor(
             rx,
             comp,
             worker_id,
