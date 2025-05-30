@@ -96,6 +96,7 @@ RUN cd /usr/local/src && \
     --enable-devel-headers      \
     --with-cuda=/usr/local/cuda \
     --with-verbs                \
+    --with-efa                  \
     --with-dm                   \
     --with-gdrcopy=/usr/local   \
     --enable-mt &&              \
