@@ -29,11 +29,11 @@ from dynamo._core import HttpService as HttpService
 from dynamo._core import KvEventPublisher as KvEventPublisher
 from dynamo._core import KvIndexer as KvIndexer
 from dynamo._core import KvMetricsAggregator as KvMetricsAggregator
-from dynamo._core import KvMetricsPublisher as KvMetricsPublisher
 from dynamo._core import KvRecorder as KvRecorder
 from dynamo._core import KvRouter as KvRouter
 from dynamo._core import ModelType as ModelType
 from dynamo._core import OverlapScores as OverlapScores
+from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher
 from dynamo._core import ZmqKvEventPublisher as ZmqKvEventPublisher
 from dynamo._core import ZmqKvEventPublisherConfig as ZmqKvEventPublisherConfig
 from dynamo._core import register_llm as register_llm

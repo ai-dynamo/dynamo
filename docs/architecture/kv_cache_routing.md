@@ -113,7 +113,7 @@ In the above image, our cost function is (KV match - Load) so we select Worker 2
 
 ## Events
 
-In Dynamo, we want to support KV Cache Routing and load balancing for many backends that have different implementations of KV Cache and record different metrics. To that end, we built a KVPublisher that can be plugged into any framework to publish KV Events and a KvMetricsPublisher that can publish Metric Events.
+In Dynamo, we want to support KV Cache Routing and load balancing for many backends that have different implementations of KV Cache and record different metrics. To that end, we built a KVPublisher that can be plugged into any framework to publish KV Events and a WorkerMetricsPublisher that can publish Metric Events.
 
 On the receiving side we have a KVIndexer which accepts events from the KVPublisher and puts them into a global prefix tree and a KvMetricsAggregator which aggregates metric events by worker.
 
@@ -174,7 +174,7 @@ Sample Output:
 This example is designed to help you understand KV cache routing; it won't run outside of the context of dynamo serve. See the examples/ directory for runnable examples.
 ```
 
-### KvMetricsPublisher
+### WorkerMetricsPublisher
 We added a KvMetrics Publisher which sends the following metrics to the KvMetricsAggregator:
 - num_requests_waiting
 - gpu_cache_usage_perc
@@ -184,7 +184,7 @@ We added a KvMetrics Publisher which sends the following metrics to the KvMetric
 - kv_active_blocks
 - kv_total_blocks
 
-Currently, the KvMetricsPublisher exists as a Python binding.
+Currently, the WorkerMetricsPublisher exists as a Python binding.
 
 ### KvMetricsAggregator
 The KvMetricsAggregator receives these metrics and aggregates them. It has a method `get_metrics` which returns an object of `AggregatedMetrics`.
