@@ -19,7 +19,7 @@ use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_ENDPOINT,
 };
 use async_trait::async_trait;
-use dynamo_runtime::traits::{events::EventPublisher, DistributedRuntimeProvider, RuntimeProvider};
+use dynamo_runtime::traits::{events::EventPublisher, DistributedRuntimeProvider};
 use dynamo_runtime::{
     component::Component,
     pipeline::{
@@ -127,6 +127,7 @@ impl KvEventSource {
         kv_block_size: usize,
         source_config: KvEventSourceConfig,
     ) -> Result<Self> {
+        tracing::info!("Publishing KV Events to subject: {}", KV_EVENT_SUBJECT);
         match source_config {
             KvEventSourceConfig::Internal(internal_source_config) => {
                 let source = KvEventInternalSource::start(
@@ -140,8 +141,6 @@ impl KvEventSource {
             }
             KvEventSourceConfig::External => {
                 let (tx, mut rx) = mpsc::unbounded_channel::<KvCacheEvent>();
-                tracing::info!("Publishing KV Events to subject: {}", KV_EVENT_SUBJECT);
-
                 _ = component.drt().runtime().secondary().spawn(async move {
                     loop {
                         tokio::select! {
