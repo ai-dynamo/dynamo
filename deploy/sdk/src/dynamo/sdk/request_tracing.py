@@ -278,17 +278,27 @@ def with_request_id(param_name: str = "request_id"):
                 else:
                     # Locate positional parameter index
                     param_idx = next(
-                        (i for i, p in enumerate(sig.parameters.values()) if p.name == param_name),
+                        (
+                            i
+                            for i, p in enumerate(sig.parameters.values())
+                            if p.name == param_name
+                        ),
                         None,
                     )
                     if param_idx is not None and param_idx < len(args):
                         request_id = args[param_idx]
 
                         # Replace value in the *args* tuple instead of duplicating it in **kwargs**
-                        args = (*args[:param_idx], None, *args[param_idx + 1:])  # placeholder
+                        args = (
+                            *args[:param_idx],
+                            None,
+                            *args[param_idx + 1 :],
+                        )  # placeholder
 
                 # Ensure we have a non-None request ID
-                if hasattr(self, "ensure_request_id") and callable(self.ensure_request_id):
+                if hasattr(self, "ensure_request_id") and callable(
+                    self.ensure_request_id
+                ):
                     request_id = self.ensure_request_id(request_id)
                 else:
                     request_id = request_id or str(uuid.uuid4())
