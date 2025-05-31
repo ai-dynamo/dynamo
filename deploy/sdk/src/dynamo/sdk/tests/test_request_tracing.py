@@ -338,10 +338,7 @@ class TestWithRequestIdDecorator:
     @patch("dynamo.sdk.request_tracing.uuid.uuid4")
     async def test_uuid_generation_called(self, mock_uuid):
         """Test that uuid.uuid4() is called when generating request IDs."""
-        mock_uuid.return_value.side_effect = lambda: type(
-            "MockUUID", (), {"__str__": lambda self: "mocked-uuid-1234"}
-        )()
-        mock_uuid.return_value.__str__ = lambda: "mocked-uuid-1234"
+        mock_uuid.return_value = "mocked-uuid-1234"
 
         processor = MockProcessor()
 
@@ -349,8 +346,8 @@ class TestWithRequestIdDecorator:
 
         # Verify UUID generation was called
         mock_uuid.assert_called()
-        # Note: The actual implementation calls str(uuid.uuid4()), so we verify the behavior
-        assert processor.received_request_id is not None
+        # Verify the mocked UUID was used
+        assert processor.received_request_id == "mocked-uuid-1234"
 
     async def test_edge_case_empty_args(self):
         """Test edge case with minimal arguments."""

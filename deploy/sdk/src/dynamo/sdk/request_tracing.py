@@ -292,14 +292,11 @@ def with_request_id(param_name: str = "request_id"):
                         if 0 <= adj_idx < len(args):
                             request_id = args[adj_idx]
 
-                            # Replace value in the *args* tuple instead of duplicating it in **kwargs**
+                            # Remove the positional argument completely to avoid duplicate argument error
                             args = (
                                 *args[:adj_idx],
-                                None,
                                 *args[adj_idx + 1 :],
                             )
-
-                # … rest of wrapper …
 
                 # Ensure we have a non-None request ID
                 if hasattr(self, "ensure_request_id") and callable(
@@ -314,6 +311,12 @@ def with_request_id(param_name: str = "request_id"):
 
                 # Also set it in thread-local storage for logging
                 set_request_context(request_id)
+            else:
+                # If the function doesn't have the request_id parameter, still set context for logging
+                existing_context = get_current_request_id()
+                if not existing_context:
+                    new_id = str(uuid.uuid4())
+                    set_request_context(new_id)
 
             # Call the original function
             return await func(self, *args, **kwargs)
