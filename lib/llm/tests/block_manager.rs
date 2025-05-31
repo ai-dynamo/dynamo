@@ -61,52 +61,6 @@ pub mod llm_kvbm {
         Remove(RouterEvent),
     }
 
-    async fn handle_store_event(
-        buffer: &mut VecDeque<RouterEvent>,
-        data: RouterEvent,
-        max_batch_size: usize,
-        component: &Arc<KVBMDynamoRuntimeComponent>,
-        interval: &mut tokio::time::Interval,
-        timer_active: &mut bool,
-    ) {
-        let was_empty = buffer.is_empty();
-        buffer.push_back(data);
-
-        // Start timer when buffer transitions from empty to non-empty
-        if was_empty {
-            interval.reset();
-            *timer_active = true;
-        }
-
-        if buffer.len() >= max_batch_size {
-            let events: Vec<RouterEvent> = buffer.drain(..).collect();
-            let _ = component.publish(KV_EVENT_SUBJECT, &events).await;
-            *timer_active = false;
-        }
-    }
-
-    async fn handle_remove_event(
-        buffer: &mut VecDeque<RouterEvent>,
-        data: RouterEvent,
-        component: &Arc<KVBMDynamoRuntimeComponent>,
-        interval: &mut tokio::time::Interval,
-        timer_active: &mut bool,
-    ) {
-        let was_empty = buffer.is_empty();
-        buffer.push_back(data);
-
-        // Start timer when buffer transitions from empty to non-empty
-        if was_empty {
-            interval.reset();
-            *timer_active = true;
-        }
-
-        // On remove, always flush immediately
-        let events: Vec<RouterEvent> = buffer.drain(..).collect();
-        let _ = component.publish(KV_EVENT_SUBJECT, &events).await;
-        *timer_active = false;
-    }
-
     // TODO[oandreeva] The potential issue with the start_batching_publisher
     // same as with the worker task, it's potentially a slow subscriber.
     // Needs to be perf tested and improved.
@@ -119,43 +73,31 @@ pub mod llm_kvbm {
         let mut buffer: VecDeque<RouterEvent> = VecDeque::new();
         let mut interval = tokio::time::interval(deadline);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut timer_active = false;
 
         loop {
             tokio::select! {
-                // Deadline fired
-                _ = interval.tick(), if timer_active => {
+                _ = interval.tick() => {
                     if !buffer.is_empty() {
                         let events: Vec<RouterEvent> = buffer.drain(..).collect();
                         let _ = component.publish(KV_EVENT_SUBJECT, &events).await;
-                        timer_active = false;
                     }
                 }
 
-                // New event received
                 maybe_evt = rx.recv() => {
                     match maybe_evt {
                         Some(PublisherEvent::Store(data)) => {
-                            handle_store_event(
-                                &mut buffer,
-                                data,
-                                max_batch_size,
-                                &component,
-                                &mut interval,
-                                &mut timer_active,
-                            ).await;
+                            buffer.push_back(data);
+                            if buffer.len() >= max_batch_size {
+                                let events: Vec<RouterEvent> = buffer.drain(..).collect();
+                                let _ = component.publish(KV_EVENT_SUBJECT, &events).await;
+                            }
                         }
                         Some(PublisherEvent::Remove(data)) => {
-                            handle_remove_event(
-                                &mut buffer,
-                                data,
-                                &component,
-                                &mut interval,
-                                &mut timer_active,
-                            ).await;
+                            buffer.push_back(data);
+                            let events: Vec<RouterEvent> = buffer.drain(..).collect();
+                            let _ = component.publish(KV_EVENT_SUBJECT, &events).await;
                         }
                         None => {
-                            // Channel closed, flush remaining
                             if !buffer.is_empty() {
                                 let events: Vec<RouterEvent> = buffer.drain(..).collect();
                                 let _ = component.publish(KV_EVENT_SUBJECT, &events).await;
@@ -279,10 +221,7 @@ pub mod llm_kvbm {
     impl DynamoKvbmRuntimeConfigBuilder {
         pub fn build(self) -> Result<kvbm::config::KvManagerRuntimeConfig> {
             let (runtime, nixl) = self.build_internal()?.dissolve();
-            let worker_id = runtime
-                .primary_lease()
-                .unwrap()
-                .id() as u64;
+            let worker_id = runtime.primary_lease().unwrap().id() as u64;
             Ok(kvbm::config::KvManagerRuntimeConfig::builder()
                 .worker_id(worker_id)
                 .cancellation_token(runtime.primary_token().child_token())
@@ -313,11 +252,7 @@ pub mod llm_kvbm {
     impl DynamoEventManager {
         pub fn new(component: Arc<KVBMDynamoRuntimeComponent>) -> Self {
             let (tx, rx) = mpsc::unbounded_channel();
-            let worker_id = component
-                .drt()
-                .primary_lease()
-                .unwrap()
-                .id() as u64;
+            let worker_id = component.drt().primary_lease().unwrap().id() as u64;
             worker_task(component, rx);
             Self {
                 tx,
