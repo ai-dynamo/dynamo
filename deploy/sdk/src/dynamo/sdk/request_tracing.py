@@ -212,14 +212,10 @@ class RequestTracingMixin:
         # Get request ID from thread-local storage
         req_id = get_current_request_id()
 
-        # If not available, generate a new one
-        if req_id is None:
-            log_message = f"[no_request_id] {message}"
-        else:
-            log_message = f"[request_id={req_id}] {message}"
+        prefix = "[no_request_id]" if req_id is None else f"[request_id={req_id}]"
 
-        getattr(logger, level.lower())(log_message)
-
+        log_fn = getattr(logger, level.lower(), None) or logger.info
+        log_fn("%s %s", prefix, message)
     # For backward compatibility
     def log_with_request_id(
         self, level: str, message: str, request_id: Optional[str] = None
