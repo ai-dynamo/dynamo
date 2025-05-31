@@ -23,7 +23,6 @@ without requiring manual implementation in each frontend/processor/router/worker
 import functools
 import inspect
 import logging
-import threading
 import uuid
 from functools import wraps
 from typing import Any, Callable, Optional, TypeVar, Union, cast
@@ -33,8 +32,13 @@ from fastapi.responses import StreamingResponse
 
 logger = logging.getLogger(__name__)
 
-# Thread-local storage for request context
-_local = threading.local()
+
+import contextvars
+
+# Async-safe storage for request context
+_request_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "request_id", default=None
+)
 
 
 def extract_or_generate_request_id(
@@ -65,18 +69,17 @@ def extract_or_generate_request_id(
 
 def set_request_context(request_id: str) -> None:
     """Set the current request ID in thread-local context."""
-    _local.request_id = request_id
+    _request_id_ctx.set(request_id)
 
 
 def get_current_request_id() -> Optional[str]:
     """Get the current request ID from thread-local context."""
-    return getattr(_local, "request_id", None)
+    return _request_id_ctx.get()
 
 
 def clear_request_context() -> None:
     """Clear the current request context."""
-    if hasattr(_local, "request_id"):
-        delattr(_local, "request_id")
+    _request_id_ctx.set(None)
 
 
 def add_request_id_to_response(
@@ -209,10 +212,10 @@ class RequestTracingMixin:
 
         # If not available, generate a new one
         if req_id is None:
-            req_id = str(uuid.uuid4())
-            set_request_context(req_id)
+            log_message = f"[no_request_id] {message}"
+        else:
+            log_message = f"[request_id={req_id}] {message}"
 
-        log_message = f"[request_id={req_id}] {message}"
         getattr(logger, level.lower())(log_message)
 
     # For backward compatibility
