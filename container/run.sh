@@ -38,8 +38,10 @@ VOLUME_MOUNTS=
 MOUNT_WORKSPACE=
 ENVIRONMENT_VARIABLES=
 REMAINING_ARGS=
+RUNTIME=nvidia
 INTERACTIVE=
 USE_NIXL_GDS=
+WORKDIR=/workspace
 
 get_options() {
     while :; do
@@ -97,6 +99,14 @@ get_options() {
 		missing_requirement "$1"
             fi
             ;;
+	--runtime)
+            if [ "$2" ]; then
+                RUNTIME=$2
+                shift
+            else
+		missing_requirement "$1"
+            fi
+            ;;
 	--entrypoint)
             if [ "$2" ]; then
                 ENTRYPOINT=$2
@@ -113,6 +123,14 @@ get_options() {
 		missing_requirement "$1"
             fi
             ;;
+	--workdir)
+	    if [ "$2" ]; then
+	        WORKDIR="/workspace/$2"
+	        shift
+	    else
+	        missing_requirement "$1"
+	    fi
+	    ;;
 	--rm)
             if [ "$2" ]; then
                 RM=$2
@@ -262,6 +280,10 @@ get_options() {
         NIXL_GDS_CAPS=""
     fi
 
+    if [[ "$GPUS" == "none" || "$GPUS" == "NONE" ]]; then
+    	RUNTIME=""
+    fi
+
     REMAINING_ARGS=("$@")
 }
 
@@ -271,12 +293,14 @@ show_help() {
     echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
     echo "  [--name name for launched container, default NONE] "
     echo "  [--privileged whether to launch in privileged mode, default FALSE unless mounting workspace]"
+    echo "  [--workdir relative_path_inside_workspace]"
     echo "  [--dry-run print docker commands without running]"
     echo "  [--hf-cache directory to volume mount as the hf cache, default is NONE unless mounting workspace]"
     echo "  [--gpus gpus to enable, default is 'all', 'none' disables gpu support]"
     echo "  [--use-nixl-gds add volume mounts and capabilities needed for NVIDIA GPUDirect Storage]"
     echo "  [-v add volume mount]"
     echo "  [-e add environment variable]"
+    echo "  [--runtime add runtime variables]"
     echo "  [--mount-workspace set up for local development]"
     echo "  [-- stop processing and pass remaining args as command to docker run]"
     exit 0
@@ -304,13 +328,14 @@ ${RUN_PREFIX} docker run \
     ${INTERACTIVE} \
     ${RM_STRING} \
     --network host \
+    ${RUNTIME:+--runtime $RUNTIME} \
     --shm-size=10G \
     --ulimit memlock=-1 \
     --ulimit stack=67108864 \
     --ulimit nofile=65536:65536 \
     ${ENVIRONMENT_VARIABLES} \
     ${VOLUME_MOUNTS} \
-    -w /workspace \
+    -w "$WORKDIR" \
     --cap-add CAP_SYS_PTRACE \
     ${NIXL_GDS_CAPS} \
     --ipc host \
