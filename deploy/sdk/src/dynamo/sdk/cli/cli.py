@@ -23,6 +23,7 @@ import typer
 from rich.console import Console
 
 from dynamo.sdk.cli.build import build
+from dynamo.sdk.cli.containerize import containerize
 from dynamo.sdk.cli.deployment import app as deployment_app
 from dynamo.sdk.cli.deployment import deploy
 from dynamo.sdk.cli.env import env
@@ -81,6 +82,7 @@ cli.command(
 cli.add_typer(deployment_app, name="deployment")
 cli.command()(deploy)
 cli.command()(build)
+cli.command()(containerize)
 cli.command()(get)
 
 if __name__ == "__main__":
