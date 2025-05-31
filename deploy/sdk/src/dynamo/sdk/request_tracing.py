@@ -20,6 +20,7 @@ This module provides automatic X-Request-Id header support across all Dynamo com
 without requiring manual implementation in each frontend/processor/router/worker.
 """
 
+import contextvars
 import functools
 import inspect
 import logging
@@ -32,8 +33,6 @@ from fastapi.responses import StreamingResponse
 
 logger = logging.getLogger(__name__)
 
-
-import contextvars
 
 # Async-safe storage for request context
 _request_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
