@@ -87,9 +87,9 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
 
                 tracing::debug!("Creating NIXL backends");
 
-                if let Ok((_, ucx_params)) = agent.get_plugin_params("UCX") {
-                    let backend = agent.create_backend("UCX", &ucx_params)?;
-                    nixl_backends.insert("UCX".to_string(), Arc::new(backend));
+                if let Ok((_, ucx_params)) = agent.get_plugin_params("UCX_MO") {
+                    let backend = agent.create_backend("UCX_MO", &ucx_params)?;
+                    nixl_backends.insert("UCX_MO".to_string(), Arc::new(backend));
                 } else {
                     tracing::warn!("No UCX plugin found; will not create UCX backend");
                 }
@@ -100,6 +100,13 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                         nixl_backends.insert("GDS".to_string(), Arc::new(backend));
                     } else {
                         tracing::warn!("No GDS plugin found; will not create GDS backend");
+                    }
+
+                    if let Ok((_, posix_params)) = agent.get_plugin_params("POSIX") {
+                        let backend = agent.create_backend("POSIX", &posix_params)?;
+                        nixl_backends.insert("POSIX".to_string(), Arc::new(backend));
+                    } else {
+                        tracing::warn!("No POSIX plugin found; will not create POSIX backend");
                     }
                 }
 
