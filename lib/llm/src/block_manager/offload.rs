@@ -471,7 +471,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
 }
 
 #[cfg(all(test, feature = "testing-cuda"))]
-pub mod tests {
+mod tests {
     use super::*;
     use crate::block_manager::block::test_utils::get_private_token;
 
