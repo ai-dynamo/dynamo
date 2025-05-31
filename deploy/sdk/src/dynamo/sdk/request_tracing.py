@@ -287,15 +287,19 @@ def with_request_id(param_name: str = "request_id"):
                         ),
                         None,
                     )
-                    if param_idx is not None and param_idx < len(args):
-                        request_id = args[param_idx]
+                    if param_idx is not None:
+                        adj_idx = param_idx - 1  # skip `self`
+                        if 0 <= adj_idx < len(args):
+                            request_id = args[adj_idx]
 
-                        # Replace value in the *args* tuple instead of duplicating it in **kwargs**
-                        args = (
-                            *args[:param_idx],
-                            None,
-                            *args[param_idx + 1 :],
-                        )  # placeholder
+                            # Replace value in the *args* tuple instead of duplicating it in **kwargs**
+                            args = (
+                                *args[:adj_idx],
+                                None,
+                                *args[adj_idx + 1 :],
+                            )
+
+            # … rest of wrapper …
 
                 # Ensure we have a non-None request ID
                 if hasattr(self, "ensure_request_id") and callable(
