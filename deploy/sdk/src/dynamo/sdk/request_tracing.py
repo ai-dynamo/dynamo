@@ -275,11 +275,9 @@ def with_request_id(param_name: str = "request_id"):
             if param_name in sig.parameters:
                 # Extract the request ID parameter from kwargs or args
                 request_id = None
-                extracted_from_args = False
 
                 if param_name in kwargs:
                     request_id = kwargs[param_name]
-                    extracted_from_args = True
                 else:
                     # Locate positional parameter index
                     param_idx = next(
