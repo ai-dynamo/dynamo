@@ -184,7 +184,7 @@ mod tests {
     use super::*;
 
     use crate::block_manager::block::BlockExt;
-    use crate::tokens::Tokens;
+    use crate::tokens::{TokenBlockSequence, Tokens};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     // Atomic Counter for Worker ID
@@ -221,21 +221,21 @@ mod tests {
             )
             .disk_layout(
                 KvManagerLayoutConfig::builder()
-                    .num_blocks(16)
+                    .num_blocks(4)
                     .allocator(storage::DiskAllocator)
                     .build()
                     .unwrap(),
             )
             .host_layout(
                 KvManagerLayoutConfig::builder()
-                    .num_blocks(16)
+                    .num_blocks(4)
                     .allocator(storage::PinnedAllocator::default())
                     .build()
                     .unwrap(),
             )
             .device_layout(
                 KvManagerLayoutConfig::builder()
-                    .num_blocks(8)
+                    .num_blocks(4)
                     .allocator(storage::DeviceAllocator::new(0).unwrap())
                     .build()
                     .unwrap(),
@@ -370,6 +370,88 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(disk_blocks.len(), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_offload_order() -> Result<()> {
+        let block_manager = create_reference_block_manager();
+        let device = block_manager.device().unwrap();
+        let host = block_manager.host().unwrap();
+        let disk = block_manager.disk().unwrap();
+
+        let mut blocks = Vec::new();
+        let mut sequence_hashes = Vec::new();
+
+        let sequence = TokenBlockSequence::new(Tokens::from(vec![0; 17]), 4, None);
+
+        assert_eq!(sequence.blocks().len(), 4);
+
+        for token_block in sequence.blocks().iter() {
+            let mut block = device.allocate_blocks(1).await?.into_iter().next().unwrap();
+            block.apply_token_block(token_block.clone())?;
+            sequence_hashes.push(block.sequence_hash()?);
+            blocks.push(block);
+        }
+
+        let _ = device.register_blocks(blocks).await?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Check that all four blocks are on the host.
+        let host_blocks = host
+            .match_sequence_hashes(sequence_hashes.as_slice())
+            .await?;
+
+        assert_eq!(host_blocks.len(), 4);
+        let host_metadatas = host_blocks
+            .iter()
+            .map(|block| block.metadata())
+            .collect::<Vec<_>>();
+
+        // The returned_tick value should be in descending order,
+        // indicating that the blocks were offloaded from leaf to root.
+        for i in 0..host_metadatas.len() - 1 {
+            assert!(host_metadatas[i].returned_tick() > host_metadatas[i + 1].returned_tick());
+        }
+
+        // Drop the host blocks and wait for them to be returned
+        // to the inactive pool.
+        drop(host_blocks);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Allocate a new block and check that the leaf was evicted.
+        let _ = host.allocate_blocks(1).await?;
+        let new_host_blocks = host
+            .match_sequence_hashes(sequence_hashes.as_slice())
+            .await?;
+        assert_eq!(new_host_blocks.len(), 3);
+
+        // Check that all four blocks are on the disk.
+        let disk_blocks = disk
+            .match_sequence_hashes(sequence_hashes.as_slice())
+            .await?;
+        assert_eq!(disk_blocks.len(), 4);
+        let disk_metadatas = disk_blocks
+            .iter()
+            .map(|block| block.metadata())
+            .collect::<Vec<_>>();
+
+        // Same criteria here. Check offload was done from leaf to root.
+        for i in 0..disk_metadatas.len() - 1 {
+            assert!(disk_metadatas[i].returned_tick() > disk_metadatas[i + 1].returned_tick());
+        }
+
+        // Same test as above, but with the disk.
+        drop(disk_blocks);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let _ = disk.allocate_blocks(1).await?;
+        let new_disk_blocks = disk
+            .match_sequence_hashes(sequence_hashes.as_slice())
+            .await?;
+        assert_eq!(new_disk_blocks.len(), 3);
 
         Ok(())
     }

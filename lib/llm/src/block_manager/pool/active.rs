@@ -18,12 +18,15 @@ use super::*;
 /// Manages active blocks being used by sequences
 pub struct ActiveBlockPool<S: Storage, M: BlockMetadata> {
     pub(super) map: HashMap<SequenceHash, Weak<MutableBlock<S, M>>>,
+    /// A map of unregistered sequence hashes to their waiting children.
+    waiting_children: HashMap<SequenceHash, Vec<Weak<MutableBlock<S, M>>>>,
 }
 
 impl<S: Storage, M: BlockMetadata> ActiveBlockPool<S, M> {
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
+            waiting_children: HashMap::new(),
         }
     }
 
@@ -42,6 +45,28 @@ impl<S: Storage, M: BlockMetadata> ActiveBlockPool<S, M> {
         })?;
 
         let shared = Arc::new(block);
+
+        // Check if there are children waiting for this block to be registered.
+        if let Some(waiting_children) = self.waiting_children.remove(&sequence_hash) {
+            for child in waiting_children {
+                if let Some(child) = child.upgrade() {
+                    child.set_parent(shared.clone());
+                }
+            }
+        }
+
+        // Set the parent of the block if it has one.
+        // This is needed to ensure the lifetime of the parent is at least as long as the child.
+        if let Ok(Some(parent)) = shared.parent_sequence_hash() {
+            if let Some(parent_block) = self.match_sequence_hash(parent) {
+                shared.set_parent(parent_block.mutable_block().clone());
+            } else {
+                self.waiting_children
+                    .entry(parent)
+                    .or_default()
+                    .push(Arc::downgrade(&shared));
+            }
+        }
 
         match self.map.entry(sequence_hash) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {

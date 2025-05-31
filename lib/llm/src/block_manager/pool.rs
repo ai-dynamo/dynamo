@@ -486,11 +486,12 @@ struct ProgressEngine<S: Storage, M: BlockMetadata> {
 
 #[cfg(test)]
 mod tests {
-    use crate::block_manager::block::BlockExt;
-
     use super::super::block::{BasicMetadata, Blocks};
     use super::super::layout::tests::setup_layout;
     use super::*;
+
+    use crate::block_manager::block::BlockExt;
+    use crate::tokens::{TokenBlockSequence, Tokens};
 
     /// Helper method to build a [`BlockPool`] with a [`ProgressEngine`] for unit testing
     impl<S: Storage, M: BlockMetadata> BlockPoolArgsBuilder<S, M> {
@@ -514,7 +515,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_block_pool_state() {
-        let layout = setup_layout(None).unwrap();
+        let layout = setup_layout(None, None).unwrap();
         let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)
             .unwrap()
             .into_blocks()
@@ -552,7 +553,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_block_pool() {
-        let layout = setup_layout(None).unwrap();
+        let layout = setup_layout(None, None).unwrap();
         let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)
             .unwrap()
             .into_blocks()
@@ -588,7 +589,7 @@ mod tests {
         const EXPECTED_SEQUENCE_HASH: u64 = 14643705804678351452;
 
         // Create a new layout
-        let layout = setup_layout(None).unwrap();
+        let layout = setup_layout(None, None).unwrap();
 
         // Create the Blocks
         let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)
@@ -656,5 +657,143 @@ mod tests {
             .unwrap();
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].sequence_hash().unwrap(), sequence_hash);
+    }
+
+    #[tokio::test]
+    async fn test_block_pool_evict_leaves() -> anyhow::Result<()> {
+        let layout = setup_layout(None, Some(4))?;
+
+        // Create the Blocks
+        let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)
+            .unwrap()
+            .into_blocks()
+            .unwrap();
+
+        // Create the BlockPool and add the blocks
+        let pool = BlockPool::builder().blocks(blocks).build().unwrap();
+
+        let mut sequence = TokenBlockSequence::new(Tokens::from(Vec::<i32>::new()), 4, None);
+
+        // Create a test sequence with 4 completed blocks.
+        for i in 0..17 {
+            sequence.append(i)?;
+        }
+
+        assert_eq!(sequence.blocks().len(), 4);
+
+        let mut blocks = Vec::new();
+        let mut sequence_hashes = Vec::new();
+
+        // Create and commit each block from the sequence.
+        for token_block in sequence.blocks().iter() {
+            let mut block = pool.allocate_blocks(1).await?.pop().unwrap();
+            block.apply_token_block(token_block.clone())?;
+            sequence_hashes.push(block.sequence_hash().unwrap());
+            blocks.push(block);
+        }
+
+        let blocks = pool.register_blocks(blocks).await?;
+        // Drop all our blocks.
+        drop(blocks);
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        pool.allocate_blocks(1).await?;
+
+        // The newly allocated block should have evicted block #4
+        let matched = pool
+            .match_sequence_hashes(sequence_hashes.as_slice())
+            .await?;
+        assert_eq!(matched.len(), 3);
+        drop(matched);
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Now, block #3 should get evicted, giving us a match of only 2 blocks.
+        pool.allocate_blocks(2).await.unwrap();
+
+        let matched = pool
+            .match_sequence_hashes(sequence_hashes.as_slice())
+            .await?;
+        assert_eq!(matched.len(), 2);
+
+        drop(matched);
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Try allocating all 4 blocks again, which should remove all the remaining blocks.
+        let blocks = pool.allocate_blocks(4).await?;
+        assert_eq!(blocks.len(), 4);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_block_pool_parent_child() -> anyhow::Result<()> {
+        let layout = setup_layout(None, Some(3))?;
+
+        // Create the Blocks
+        let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)
+            .unwrap()
+            .into_blocks()
+            .unwrap();
+
+        // Create the BlockPool and add the blocks
+        let pool = BlockPool::builder().blocks(blocks).build().unwrap();
+
+        let tokens = vec![1, 2, 3, 4, 5];
+
+        let sequence = TokenBlockSequence::new(Tokens::from(tokens.clone()), 4, None);
+
+        // Create a root block, with two child blocks.
+
+        let mut root_block = pool.allocate_blocks(1).await?.pop().unwrap();
+        root_block.apply_token_block(sequence.blocks().first().unwrap().clone())?;
+
+        let root_block_hash = root_block.sequence_hash().unwrap();
+
+        let mut child_blocks = Vec::new();
+        let mut child_block_hashes = Vec::new();
+
+        for i in 0..2 {
+            let mut tokens = tokens.clone();
+            for _ in 0..4 {
+                tokens.push(i);
+            }
+            let seq = TokenBlockSequence::new(Tokens::from(tokens), 4, None);
+
+            let mut child_block = pool.allocate_blocks(1).await?.pop().unwrap();
+            child_block.apply_token_block(seq.blocks()[1].clone())?;
+
+            child_block_hashes.push(child_block.sequence_hash().unwrap());
+            child_blocks.push(child_block);
+        }
+
+        // Register the children first. This can happen with offloading.
+        let child_blocks = pool.register_blocks(child_blocks).await?;
+
+        // After the children are registered, we can register the root block.
+        let root_block = pool.register_blocks(vec![root_block]).await?;
+
+        // Drop both of them.
+        drop(root_block);
+        drop(child_blocks);
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Allocate two new blocks, which should evict both children.
+        pool.allocate_blocks(2).await?;
+
+        // Now, the root block should be the only block left.
+
+        for child_block_hash in child_block_hashes {
+            let matched = pool.match_sequence_hashes(&[child_block_hash]).await?;
+            assert_eq!(matched.len(), 0);
+        }
+
+        let matched = pool.match_sequence_hashes(&[root_block_hash]).await?;
+        assert_eq!(matched.len(), 1);
+
+        Ok(())
     }
 }

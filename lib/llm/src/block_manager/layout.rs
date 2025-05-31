@@ -647,9 +647,10 @@ pub mod tests {
     // Updated setup_layout: Calculates size internally, uses default alignment for simplicity in non-alignment tests.
     pub fn setup_layout(
         alignment: Option<usize>, // Option to override default alignment
+        num_blocks: Option<usize>,
     ) -> Result<FullyContiguous<NullDeviceStorage>, LayoutError> {
         let config = LayoutConfig {
-            num_blocks: NUM_BLOCKS,
+            num_blocks: num_blocks.unwrap_or(NUM_BLOCKS),
             num_layers: NUM_LAYERS,
             outer_dim: OUTER_DIM,
             page_size: PAGE_SIZE,
@@ -679,7 +680,7 @@ pub mod tests {
     #[test]
     fn test_fc_creation_success() {
         // Setup with default (None) alignment
-        let layout_result = setup_layout(None);
+        let layout_result = setup_layout(None, None);
         assert!(
             layout_result.is_ok(),
             "Layout creation failed: {:?}",
@@ -714,7 +715,7 @@ pub mod tests {
 
     #[test]
     fn test_fc_accessor_methods() {
-        let layout = setup_layout(None).expect("Layout setup failed");
+        let layout = setup_layout(None, None).expect("Layout setup failed");
 
         assert_eq!(layout.num_blocks(), NUM_BLOCKS);
         assert_eq!(layout.num_layers(), NUM_LAYERS);
@@ -725,7 +726,7 @@ pub mod tests {
 
     #[test]
     fn test_fc_offset_calculation() {
-        let layout = setup_layout(None).expect("Layout setup failed");
+        let layout = setup_layout(None, None).expect("Layout setup failed");
 
         let dims = layout.config.clone();
         let block_stride = dims.block_stride_in_bytes;
@@ -795,7 +796,7 @@ pub mod tests {
 
     #[test]
     fn test_fc_invalid_block_index() {
-        let layout = setup_layout(None).expect("Layout setup failed");
+        let layout = setup_layout(None, None).expect("Layout setup failed");
         let result = layout.memory_region(NUM_BLOCKS, 0, 0); // Index == num_blocks (out of bounds)
         assert!(result.is_err());
         assert!(matches!(
@@ -806,7 +807,7 @@ pub mod tests {
 
     #[test]
     fn test_fc_invalid_layer_index() {
-        let layout = setup_layout(None).expect("Layout setup failed");
+        let layout = setup_layout(None, None).expect("Layout setup failed");
         let result = layout.memory_region(0, NUM_LAYERS, 0); // Index == num_layers (out of bounds)
         assert!(result.is_err());
         assert!(matches!(
@@ -817,7 +818,7 @@ pub mod tests {
 
     #[test]
     fn test_fc_invalid_outer_index() {
-        let layout = setup_layout(None).expect("Layout setup failed");
+        let layout = setup_layout(None, None).expect("Layout setup failed");
         let result = layout.memory_region(0, 0, OUTER_DIM); // Index == num_outer_dims (out of bounds)
         assert!(result.is_err());
         assert!(matches!(
