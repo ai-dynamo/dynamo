@@ -138,6 +138,7 @@ def with_request_tracing(func: Callable) -> Callable:
             # restore previous request-id (or None)
             if request_id is not None:
                 _request_id_ctx.reset(_token)
+
     return wrapper
 
 
@@ -299,7 +300,7 @@ def with_request_id(param_name: str = "request_id"):
                                 *args[adj_idx + 1 :],
                             )
 
-            # … rest of wrapper …
+                # … rest of wrapper …
 
                 # Ensure we have a non-None request ID
                 if hasattr(self, "ensure_request_id") and callable(
