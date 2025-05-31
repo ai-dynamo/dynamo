@@ -275,8 +275,11 @@ def with_request_id(param_name: str = "request_id"):
             if param_name in sig.parameters:
                 # Extract the request ID parameter from kwargs or args
                 request_id = None
+                extracted_from_args = False
+
                 if param_name in kwargs:
                     request_id = kwargs[param_name]
+                    extracted_from_args = True
                 else:
                     # Locate positional parameter index
                     param_idx = next(
@@ -292,11 +295,34 @@ def with_request_id(param_name: str = "request_id"):
                         if 0 <= adj_idx < len(args):
                             request_id = args[adj_idx]
 
-                            # Remove the positional argument completely to avoid duplicate argument error
-                            args = (
+                            # Remove the positional argument and convert remaining args to kwargs
+                            # to avoid position mismatches
+                            remaining_args = (
                                 *args[:adj_idx],
                                 *args[adj_idx + 1 :],
                             )
+
+                            # Convert remaining positional args to keyword args using function signature
+                            param_names = list(sig.parameters.keys())[1:]  # Skip 'self'
+
+                            # Remove the request_id parameter from the param_names list
+                            param_names_without_request_id = [
+                                name for name in param_names if name != param_name
+                            ]
+
+                            # Map remaining args to their parameter names
+                            for i, arg_value in enumerate(remaining_args):
+                                if i < len(param_names_without_request_id):
+                                    param_name_for_arg = param_names_without_request_id[
+                                        i
+                                    ]
+                                    if (
+                                        param_name_for_arg not in kwargs
+                                    ):  # Don't override existing kwargs
+                                        kwargs[param_name_for_arg] = arg_value
+
+                            # Clear args since we've converted everything to kwargs
+                            args = ()
 
                 # Ensure we have a non-None request ID
                 if hasattr(self, "ensure_request_id") and callable(
