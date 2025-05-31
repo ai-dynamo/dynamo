@@ -129,9 +129,7 @@ impl ModelManager {
         clients.remove(model)
     }
 
-    // TODO: Remove this allow once `embeddings` is implemented in lib/llm/src/http/service/openai.rs
-    #[allow(dead_code)]
-    fn get_embeddings_engine(
+    pub fn get_embeddings_engine(
         &self,
         model: &str,
     ) -> Result<OpenAIEmbeddingsStreamingEngine, ModelManagerError> {
