@@ -116,7 +116,8 @@ def with_request_tracing(func: Callable) -> Callable:
         if request:
             headers_opt = request.headers if hasattr(request, "headers") else None
             request_id = extract_or_generate_request_id(headers_opt)
-            set_request_context(request_id)
+            # preserve previous value (if any) for nested invocations
+            _token = _request_id_ctx.set(request_id)
             logger.debug(
                 f"Request tracing: extracted/generated request_id={request_id}"
             )
@@ -134,8 +135,9 @@ def with_request_tracing(func: Callable) -> Callable:
             return result
 
         finally:
-            clear_request_context()
-
+            # restore previous request-id (or None)
+            if request_id is not None:
+                _request_id_ctx.reset(_token)
     return wrapper
 
 
