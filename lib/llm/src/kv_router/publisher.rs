@@ -14,9 +14,7 @@
 // limitations under the License.
 
 use crate::kv_router::{
-    indexer::{compute_block_hash_for_seq, RouterEvent},
-    protocols::*,
-    KV_EVENT_SUBJECT, KV_METRICS_ENDPOINT,
+    indexer::compute_block_hash_for_seq, protocols::*, KV_EVENT_SUBJECT, KV_METRICS_ENDPOINT,
 };
 use async_trait::async_trait;
 use dynamo_runtime::traits::{events::EventPublisher, DistributedRuntimeProvider};
@@ -45,6 +43,13 @@ use zeromq::{Socket, SocketRecv, SubSocket};
 // KV Event Publishers -----------------------------------------------------
 // -------------------------------------------------------------------------
 
+/// Represents a single cache event with an ID and associated data.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct KvCacheEventWithDp {
+    pub kv_cache_event: KvCacheEvent,
+    pub dp_rank: Option<DpRank>,
+}
+
 /// Configure the source of KV events.
 /// Currently, only ZMQ is supported.
 pub enum KvEventSourceConfig {
@@ -65,7 +70,7 @@ impl KvEventSource {
         kv_block_size: usize,
         source_config: KvEventSourceConfig,
         cancellation_token: CancellationToken,
-        tx: mpsc::UnboundedSender<KvCacheEvent>,
+        tx: mpsc::UnboundedSender<KvCacheEventWithDp>,
     ) -> Result<Self> {
         match source_config {
             KvEventSourceConfig::Zmq { endpoint, topic } => {
@@ -97,7 +102,6 @@ impl KvEventSource {
 
 /// A publisher of KV events.
 pub struct KvEventPublisher {
-    /// The size of the KV block.
     kv_block_size: usize,
     /// The source of KV events.
     /// Can be `None` if all events provided through [`KvEventPublisher::publish`].
@@ -105,19 +109,19 @@ pub struct KvEventPublisher {
     /// The cancellation token.
     cancellation_token: CancellationToken,
     /// The channel to send events to.
-    tx: mpsc::UnboundedSender<KvCacheEvent>,
+    tx: mpsc::UnboundedSender<KvCacheEventWithDp>,
 }
 
 impl KvEventPublisher {
     pub fn new(
         component: Component,
-        worker_id: i64,
+        worker_id: WorkerId,
         kv_block_size: usize,
         source_config: Option<KvEventSourceConfig>,
     ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
 
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEventWithDp>();
 
         // Create our event source (if any)
         let mut source = None;
@@ -150,7 +154,10 @@ impl KvEventPublisher {
         })
     }
 
-    pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
+    pub fn publish(
+        &self,
+        event: KvCacheEventWithDp,
+    ) -> Result<(), mpsc::error::SendError<KvCacheEventWithDp>> {
         tracing::trace!("Publish event: {:?}", event);
         self.tx.send(event)
     }
@@ -178,9 +185,9 @@ impl Drop for KvEventPublisher {
 
 async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
     publisher: P,
-    worker_id: i64,
+    worker_id: WorkerId,
     cancellation_token: CancellationToken,
-    mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
+    mut rx: mpsc::UnboundedReceiver<KvCacheEventWithDp>,
 ) {
     loop {
         tokio::select! {
@@ -188,14 +195,17 @@ async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
                 tracing::info!("KV Event source received cancellation signal");
                 break;
             }
-            event = rx.recv() => {
-                let Some(event) = event else {
+            maybe_data = rx.recv() => {
+                let Some(data) = maybe_data else {
                     tracing::debug!("Event processor channel closed.");
                     break;
                 };
 
                 // Encapsulate in a router event and publish.
-                let router_event = RouterEvent::new(worker_id, event);
+                let event = data.kv_cache_event;
+                let dp_rank = data.dp_rank.unwrap_or(0);
+
+                let router_event = RouterEvent::new((worker_id, dp_rank), event);
                 if let Err(e) = publisher.publish(KV_EVENT_SUBJECT, &router_event).await {
                     tracing::error!("Failed to publish event: {}", e);
                 }
@@ -221,7 +231,7 @@ fn calculate_backoff_ms(consecutive_errors: u32) -> u64 {
 async fn start_zmq_listener(
     zmq_endpoint: String,
     zmq_topic: String,
-    tx: mpsc::UnboundedSender<KvCacheEvent>,
+    tx: mpsc::UnboundedSender<KvCacheEventWithDp>,
     cancellation_token: CancellationToken,
     kv_block_size: usize,
 ) {
@@ -317,9 +327,10 @@ async fn start_zmq_listener(
                 };
 
                 // For each of our events, convert them to [`KvCacheEvent`] and send to the event_processor.
+                let dp_rank = batch.dp_rank;
                 for raw_event in batch.events.into_iter() {
-                    let event = convert_event(raw_event, seq, kv_block_size, &warning_count);
-                    if tx.send(event).is_err() {
+                    let kv_cache_event = convert_event(raw_event, seq, kv_block_size, &warning_count);
+                    if tx.send(KvCacheEventWithDp { kv_cache_event, dp_rank }).is_err() {
                         tracing::warn!("Failed to send message to channel - receiver dropped");
                         return;
                     }
@@ -438,6 +449,7 @@ pub fn create_stored_blocks(
 struct KvEventBatch {
     ts: f64,
     events: Vec<RawKvEvent>,
+    dp_rank: Option<DpRank>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -705,15 +717,20 @@ mod tests_startup_helpers {
     async fn test_start_event_processor() {
         let (component, published) = MockComponent::new();
 
-        let event = KvCacheEvent {
+        let kv_cache_event = KvCacheEvent {
             event_id: 1,
             data: KvCacheEventData::Removed(KvCacheRemoveData {
                 block_hashes: vec![ExternalSequenceBlockHash(1), ExternalSequenceBlockHash(2)],
             }),
         };
 
+        let event = KvCacheEventWithDp {
+            kv_cache_event,
+            dp_rank: None,
+        };
+
         let token = CancellationToken::new();
-        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEventWithDp>();
         tx.send(event).unwrap();
         drop(tx);
 
@@ -737,7 +754,7 @@ mod tests_startup_helpers {
     #[tokio::test]
     async fn test_start_zmq_listener_pushes_to_channel() {
         // Prepare channel that listener should fill
-        let (tx, mut rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<KvCacheEventWithDp>();
 
         // ZMQ TCP endpoint using localhost with fixed port
         let endpoint = "tcp://127.0.0.1:15555";
@@ -770,7 +787,11 @@ mod tests_startup_helpers {
             lora_id: None,
         }];
 
-        let batch = KvEventBatch { ts: 0.0, events };
+        let batch = KvEventBatch {
+            ts: 0.0,
+            events,
+            dp_rank: None,
+        };
 
         let payload = Bytes::from(rmps::to_vec(&batch).unwrap());
 
@@ -795,7 +816,7 @@ mod tests_startup_helpers {
         let KvCacheEventData::Stored(KvCacheStoreData {
             parent_hash,
             blocks,
-        }) = event.data
+        }) = event.kv_cache_event.data
         else {
             panic!("expected KvCacheStoreData");
         };

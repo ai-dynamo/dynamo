@@ -18,11 +18,36 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::kv_router::scheduler::Endpoint;
+use crate::kv_router::protocols::{ForwardPassMetrics, WorkerId};
+
+/// [gluo FIXME] exactly the same as EndpointInfo except that 'data'
+/// is cleaned (not optional)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Endpoint {
+    pub name: String,
+    pub subject: String,
+    // one set of metrics for each dp worker
+    pub data: Vec<ForwardPassMetrics>,
+}
+
+impl Endpoint {
+    pub fn worker_id(&self) -> i64 {
+        i64::from_str_radix(
+            self.subject
+                .split("-")
+                .last()
+                .expect("invalid subject")
+                .to_string()
+                .as_str(),
+            16,
+        )
+        .expect("invalid worker id")
+    }
+}
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct ProcessedEndpoints {
-    pub endpoints: HashMap<i64, Endpoint>,
+    pub endpoints: HashMap<WorkerId, Endpoint>,
     pub load_avg: f64,
     pub load_std: f64,
 }
@@ -32,8 +57,12 @@ impl ProcessedEndpoints {
         // compute some basic statistics
         let load_values: Vec<f64> = endpoints
             .iter()
-            .map(|x| x.data.kv_active_blocks as f64)
+            .flat_map(|endpoint| endpoint.data.iter())
+            .map(|metrics| metrics.kv_active_blocks as f64)
             .collect();
+        if load_values.is_empty() {
+            panic!("No endpoints to process!")
+        };
         let load_avg = load_values.iter().copied().sum::<f64>() / load_values.len() as f64;
         let variance = load_values
             .iter()

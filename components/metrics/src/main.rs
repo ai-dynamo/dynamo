@@ -27,7 +27,7 @@
 //!   - ISL Blocks: Cumulative count of total blocks in all KV hit rate events
 //!   - Overlap Blocks: Cumulative count of blocks that were already in the KV cache
 use clap::Parser;
-use dynamo_llm::kv_router::scheduler::KVHitRateEvent;
+use dynamo_llm::kv_router::protocols::{KVHitRateEvent, WorkerDp};
 use dynamo_llm::kv_router::KV_HIT_RATE_SUBJECT;
 use dynamo_runtime::{
     error, logging,
@@ -180,14 +180,15 @@ async fn app(runtime: Runtime) -> Result<()> {
                 tracing::debug!("Successfully subscribed to KV hit rate events");
 
                 while let Some(msg) = subscriber.next().await {
-                    match serde_json::from_slice::<KVHitRateEvent>(&msg.payload) {
+                    match serde_json::from_slice::<KVHitRateEvent<WorkerDp>>(&msg.payload) {
                         Ok(event) => {
                             // TODO: Lower to debug
                             let cache_hit_pct =
                                 (event.overlap_blocks as f64 / event.isl_blocks as f64) * 100.0;
                             tracing::debug!(
-                                "Received KV hit rate event: worker_id={}, isl_blocks={}, overlap_blocks={}, cache_hit_pct={:.2}%",
-                                event.worker_id,
+                                "Received KV hit rate event: worker_id={}, dp_rank={}, isl_blocks={}, overlap_blocks={}, cache_hit_pct={:.2}%",
+                                event.worker.worker_id,
+                                event.worker.dp_rank.unwrap_or(0),
                                 event.isl_blocks,
                                 event.overlap_blocks,
                                 cache_hit_pct
@@ -197,7 +198,8 @@ async fn app(runtime: Runtime) -> Result<()> {
                             let mut metrics = metrics_collector_clone.lock().await;
                             metrics.update_kv_hit_rate(
                                 &config_clone,
-                                event.worker_id,
+                                // TODO: this will not take care of dp ranks
+                                event.worker.worker_id,
                                 event.isl_blocks,
                                 event.overlap_blocks,
                             );

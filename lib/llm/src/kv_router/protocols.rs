@@ -14,7 +14,30 @@
 // limitations under the License.
 
 use crate::tokens::Token;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::cmp::Eq;
+use std::fmt::Debug;
+use std::hash::Hash;
+
+pub type WorkerId = i64;
+pub type DpRank = u32;
+
+#[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub struct WorkerDp {
+    pub worker_id: WorkerId,
+    pub dp_rank: Option<DpRank>,
+}
+
+pub trait WorkerGeneral:
+    Hash + Eq + Debug + Clone + Send + Sync + Default + 'static + Serialize
+{
+}
+
+impl<T> WorkerGeneral for T where
+    T: Hash + Eq + Debug + Clone + Send + Sync + Default + 'static + Serialize + DeserializeOwned
+{
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RouterRequest {
@@ -22,14 +45,14 @@ pub struct RouterRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct RouterResponse {
-    pub worker_id: i64,
+pub struct RouterResponse<T: WorkerGeneral> {
+    pub worker: T,
 }
 
 #[derive(Debug)]
-pub struct WorkerSelectionResult {
+pub struct WorkerSelectionResult<T: WorkerGeneral> {
     /// The worker id of the selected worker
-    pub worker_id: i64,
+    pub worker: T,
 
     /// The total number of blocks required to prefill the request
     pub required_blocks: u64,
@@ -58,14 +81,14 @@ pub struct ForwardPassMetrics {
 
 /// A [`LocalBlockHash`] is a hash computed from the tokens_ids, extra_token_ids and the optional
 /// lora_id of a block.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LocalBlockHash(pub u64);
 
 /// A sequence aware hash of a block where the hash is computed from the tokens_ids, extra_token_ids
 /// and the optional lora_id of a block, PLUS the hash of the parent block.
 ///
 /// In this case, the hashing function is external and unknown.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ExternalSequenceBlockHash(pub u64);
 
 // Implement From trait for convenient conversion
@@ -135,6 +158,38 @@ pub struct KvCacheStoredBlockData {
 pub struct KvCacheRemoveData {
     /// A list of block hashes to remove.
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KVHitRateEvent<T: WorkerGeneral> {
+    pub worker: T,
+    pub isl_blocks: usize,
+    pub overlap_blocks: usize,
+}
+
+/// A [`KvCacheEvent`] on a specific LLM worker denoted by [`WorkerId`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouterEvent<T: WorkerGeneral> {
+    /// The ID of the worker emitting the event.
+    pub worker: T,
+    /// The cache event associated with the worker.
+    pub event: KvCacheEvent,
+}
+
+impl<T: WorkerGeneral> RouterEvent<T> {
+    /// Create a new `RouterEvent`.
+    ///
+    /// ### Arguments
+    ///
+    /// * `worker_id` - The ID of the worker emitting the event.
+    /// * `event` - The cache event.
+    ///
+    /// ### Returns
+    ///
+    /// A new `RouterEvent`.
+    pub fn new(worker: T, event: KvCacheEvent) -> Self {
+        Self { worker, event }
+    }
 }
 
 impl Serialize for LocalBlockHash {
