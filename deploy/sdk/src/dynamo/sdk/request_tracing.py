@@ -216,6 +216,7 @@ class RequestTracingMixin:
 
         log_fn = getattr(logger, level.lower(), None) or logger.info
         log_fn("%s %s", prefix, message)
+
     # For backward compatibility
     def log_with_request_id(
         self, level: str, message: str, request_id: Optional[str] = None
