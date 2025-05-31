@@ -24,7 +24,7 @@ This guide explains the`dynamo run` command.
 
 `dynamo-run` is a CLI tool for exploring the Dynamo components. It's also an example of how to use components from Rust. If you use the Python wheel, it's available as `dynamo run` .
 
-It supports these engines: mistralrs, llamacpp, sglang, vllm, and tensorrt-llm. `mistralrs` is the default.
+It supports these engines: mistralrs, llamacpp, sglang, vllm, and tensorrt-llm.
 
 Usage:
 ```
@@ -35,11 +35,15 @@ Example: `dynamo run Qwen/Qwen3-0.6B`
 
 Set the environment variable `DYN_LOG` to adjust the logging level; for example, `export DYN_LOG=debug`. It has the same syntax as `RUST_LOG`.
 
+`dynamo-run` is build for CUDA by default. For other builds (CPU, Metal, etc) see the [Setup section](#setup).
+
 ## Quickstart with pip and vllm
 
 If you used `pip` to install `dynamo`, you have the `dynamo-run` binary pre-installed with the `vllm` engine. You must be in a virtual environment with vllm installed to use this engine. To compile from source, see [Full usage details](#full-usage-details) below.
 
 The vllm and sglang engines require [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`). Mistralrs and llamacpp do not.
+
+The default engine for safetensors is `mistral.rs`. The default model for GGUF is `llama.cpp`.
 
 ### Use model from Hugging Face
 
@@ -252,19 +256,30 @@ source $HOME/.cargo/env
 
 ##### Step 3: Build
 
-- Linux with GPU and CUDA (tested on Ubuntu):
+- Linux with GPU and CUDA (tested on Ubuntu). This is the default.
 ```
-cargo build --features cuda
+cargo build
+```
+
+which is equivalent to
+
+```
+cargo build --features cuda,mistralrs,llamacpp
 ```
 
 - macOS with Metal:
 ```
-cargo build --features metal
+cargo build --no-default-features --features metal,mistralrs,llamacpp
+```
+
+- Vulkan (llama.cpp engine only), untested
+```
+cargo build --no-default-features --features vulkan,mistralrs,llamacpp
 ```
 
 - CPU only:
 ```
-cargo build
+cargo build --no-default-features --features mistralrs,llamacpp
 ```
 
 Optionally you can run `cargo build` from any location with arguments:

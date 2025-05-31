@@ -14,7 +14,7 @@ description = "Dynamo Run CLI"
 
 [features]
 # Build with `--no-default-features` to disable these defaults
-default = ["mistralrs", "llamacpp"]
+default = ["mistralrs", "llamacpp", "cuda"]
 mistralrs = ["dep:dynamo-engine-mistralrs"]
 llamacpp = ["dep:dynamo-engine-llamacpp"]
 
