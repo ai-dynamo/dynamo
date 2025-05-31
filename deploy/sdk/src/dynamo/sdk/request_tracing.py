@@ -121,6 +121,8 @@ def with_request_tracing(func: Callable) -> Callable:
             logger.debug(
                 f"Request tracing: extracted/generated request_id={request_id}"
             )
+        else:
+            _token = None
 
         sig = inspect.signature(func)
         if "request_id" in sig.parameters and request_id:
@@ -136,7 +138,7 @@ def with_request_tracing(func: Callable) -> Callable:
 
         finally:
             # restore previous request-id (or None)
-            if request_id is not None:
+            if request_id is not None and _token is not None:
                 _request_id_ctx.reset(_token)
 
     return wrapper
