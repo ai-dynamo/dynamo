@@ -37,6 +37,12 @@ pub struct Annotated<R> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<Vec<String>>,
 }
 
@@ -47,6 +53,9 @@ impl<R> Annotated<R> {
             data: None,
             id: None,
             event: Some("error".to_string()),
+            chunk_tokens: None,
+            input_tokens: None,
+            output_tokens: None,
             comment: Some(vec![error]),
         }
     }
@@ -57,6 +66,9 @@ impl<R> Annotated<R> {
             data: Some(data),
             id: None,
             event: None,
+            chunk_tokens: None,
+            input_tokens: None,
+            output_tokens: None,
             comment: None,
         }
     }
@@ -72,6 +84,9 @@ impl<R> Annotated<R> {
             data: None,
             id: None,
             event: Some(name.into()),
+            chunk_tokens: None,
+            input_tokens: None,
+            output_tokens: None,
             comment: Some(vec![serde_json::to_string(value)?]),
         })
     }
@@ -107,6 +122,9 @@ impl<R> Annotated<R> {
             data,
             id: self.id,
             event: self.event,
+            chunk_tokens: self.chunk_tokens,
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
             comment: self.comment,
         }
     }
@@ -122,6 +140,9 @@ impl<R> Annotated<R> {
                 data,
                 id: self.id,
                 event: self.event,
+                chunk_tokens: self.chunk_tokens,
+                input_tokens: self.input_tokens,
+                output_tokens: self.output_tokens,
                 comment: self.comment,
             },
             Err(e) => Annotated::from_error(e),

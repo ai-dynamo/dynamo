@@ -3,7 +3,10 @@
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Router};
 use prometheus::{Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts};
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 pub use prometheus::Registry;
 
@@ -25,6 +28,10 @@ pub struct Metrics {
     request_counter: IntCounterVec,
     inflight_gauge: IntGaugeVec,
     request_duration: HistogramVec,
+    input_sequence_length: HistogramVec,
+    output_sequence_length: HistogramVec,
+    time_to_first_token: HistogramVec,
+    inter_token_latency: HistogramVec,
 }
 
 /// RAII object for inflight gauge and request counters
@@ -38,6 +45,9 @@ pub struct InflightGuard {
     request_type: RequestType,
     status: Status,
     timer: Instant,
+    first_token: bool,
+    last_response: Option<Duration>,
+    osl: usize,
 }
 
 /// Requests will be logged by the type of endpoint hit
@@ -80,6 +90,10 @@ impl Metrics {
     /// - `{prefix}_http_service_requests_total` - IntCounterVec for the total number of requests processed
     /// - `{prefix}_http_service_inflight_requests` - IntGaugeVec for the number of inflight requests
     /// - `{prefix}_http_service_request_duration_seconds` - HistogramVec for the duration of requests
+    /// - `{prefix}_http_service_input_sequence_length` - HistogramVec for input sequence length in tokens
+    /// - `{prefix}_http_service_output_sequence_length` - HistogramVec for output sequence length in tokens
+    /// - `{prefix}_http_service_time_to_first_token_seconds` - HistogramVec for time to first token in seconds
+    /// - `{prefix}_http_service_inter_token_latency_seconds` - HistogramVec for inter-token latency in seconds
     pub fn new(prefix: &str) -> Self {
         let request_counter = IntCounterVec::new(
             Opts::new(
@@ -111,10 +125,64 @@ impl Metrics {
         )
         .unwrap();
 
+        let input_sequence_length = HistogramVec::new(
+            HistogramOpts::new(
+                format!("{}_http_service_input_sequence_length", prefix),
+                "Input sequence length in tokens",
+            )
+            .buckets(vec![
+                0.0, 50.0, 100.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0, 64000.0,
+                128000.0,
+            ]),
+            &["model"],
+        )
+        .unwrap();
+
+        let output_sequence_length = HistogramVec::new(
+            HistogramOpts::new(
+                format!("{}_http_service_output_sequence_length", prefix),
+                "Output sequence length in tokens",
+            )
+            .buckets(vec![
+                0.0, 50.0, 100.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0,
+            ]),
+            &["model"],
+        )
+        .unwrap();
+
+        let time_to_first_token = HistogramVec::new(
+            HistogramOpts::new(
+                format!("{}_http_service_time_to_first_token_seconds", prefix),
+                "Time to first token in seconds",
+            )
+            .buckets(vec![
+                0.0, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0,
+                60.0, 120.0, 240.0, 480.0,
+            ]),
+            &["model"],
+        )
+        .unwrap();
+
+        let inter_token_latency = HistogramVec::new(
+            HistogramOpts::new(
+                format!("{}_http_service_inter_token_latency_seconds", prefix),
+                "Inter-token latency in seconds",
+            )
+            .buckets(vec![
+                0.0, 0.001, 0.005, 0.01, 0.015, 0.02, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0,
+            ]),
+            &["model"],
+        )
+        .unwrap();
+
         Metrics {
             request_counter,
             inflight_gauge,
             request_duration,
+            input_sequence_length,
+            output_sequence_length,
+            time_to_first_token,
+            inter_token_latency,
         }
     }
 
@@ -179,6 +247,10 @@ impl Metrics {
         registry.register(Box::new(self.request_counter.clone()))?;
         registry.register(Box::new(self.inflight_gauge.clone()))?;
         registry.register(Box::new(self.request_duration.clone()))?;
+        registry.register(Box::new(self.input_sequence_length.clone()))?;
+        registry.register(Box::new(self.output_sequence_length.clone()))?;
+        registry.register(Box::new(self.time_to_first_token.clone()))?;
+        registry.register(Box::new(self.inter_token_latency.clone()))?;
         Ok(())
     }
 
@@ -224,11 +296,59 @@ impl InflightGuard {
             request_type,
             status: Status::Error,
             timer,
+            first_token: true,
+            last_response: None,
+            osl: 0,
         }
     }
 
     pub(crate) fn mark_ok(&mut self) {
         self.status = Status::Success;
+        self.metrics
+            .output_sequence_length
+            .with_label_values(&[&self.model])
+            .observe(self.osl as f64);
+    }
+
+    pub(crate) fn observe_current_osl(&mut self, osl: usize) {
+        self.osl = osl;
+    }
+
+    pub(crate) fn observe_response(&mut self, isl: usize, num_tokens: usize) {
+        if self.first_token {
+            // NOTE: when there are multiple tokens in the first response,
+            // we use the full response time as TTFT and ignore the ITL
+            self.first_token = false;
+
+            // Publish TTFT
+            let ttft = self.timer.elapsed().as_secs_f64();
+            self.metrics
+                .time_to_first_token
+                .with_label_values(&[&self.model])
+                .observe(ttft);
+
+            // Publish ISL
+            // TODO: publish ITL as soon as the tokenization process completes
+            self.metrics
+                .input_sequence_length
+                .with_label_values(&[&self.model])
+                .observe(isl as f64);
+        }
+
+        let current_duration = self.timer.elapsed();
+
+        if let Some(last_response) = self.last_response {
+            let response_duration = current_duration - last_response;
+            let itl = response_duration.as_secs_f64() / num_tokens as f64;
+            for _ in 0..num_tokens {
+                self.metrics
+                    .inter_token_latency
+                    .with_label_values(&[&self.model])
+                    .observe(itl);
+            }
+        }
+
+        self.last_response = Some(current_duration);
     }
 }
 
