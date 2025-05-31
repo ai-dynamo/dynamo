@@ -23,7 +23,7 @@ use llama_cpp_2::{
     LogOptions,
 };
 
-use dynamo_llm::protocols::common::llm_backend::{BackendInput, LLMEngineOutput};
+use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_llm::{backend::ExecutionContext, local_model::LocalModel};
 
@@ -119,12 +119,12 @@ fn load_model(backend: &LlamaBackend, model_path: &Path) -> Result<LlamaModel> {
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for LlamacppEngine
 {
     async fn generate(
         &self,
-        request: SingleIn<BackendInput>,
+        request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, context) = request.into_parts();
         let ctx = context.context();

@@ -31,7 +31,7 @@ use crate::{
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
         scoring::ProcessedEndpoints,
     },
-    preprocessor::BackendInput,
+    preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
     tokens::TokenBlockSequence,
 };
@@ -173,13 +173,13 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
 }
 
 pub struct KvPushRouter {
-    inner: PushRouter<BackendInput, Annotated<LLMEngineOutput>>,
+    inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     chooser: Arc<KvRouter>,
 }
 
 impl KvPushRouter {
     pub fn new(
-        inner: PushRouter<BackendInput, Annotated<LLMEngineOutput>>,
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
     ) -> Self {
         KvPushRouter { inner, chooser }
@@ -187,12 +187,12 @@ impl KvPushRouter {
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for KvPushRouter
 {
     async fn generate(
         &self,
-        request: SingleIn<BackendInput>,
+        request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         match self.inner.client.instance_source.as_ref() {
             InstanceSource::Static => self.inner.r#static(request).await,

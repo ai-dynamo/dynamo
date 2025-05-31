@@ -18,7 +18,7 @@ use crate::llm::model_card::ModelDeploymentCard;
 
 use llm_rs::{
     preprocessor::OpenAIPreprocessor,
-    protocols::common::llm_backend::{BackendInput, BackendOutput},
+    protocols::common::llm_backend::{BackendOutput, PreprocessedRequest},
     types::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -60,7 +60,7 @@ impl OAIChatPreprocessor {
         >::new();
 
         let network =
-            SegmentSink::<SingleIn<BackendInput>, ManyOut<Annotated<BackendOutput>>>::new();
+            SegmentSink::<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>>::new();
 
         let preprocessor = self.inner.into_operator();
         let pipeline = frontend
@@ -77,7 +77,7 @@ impl OAIChatPreprocessor {
         let endpoint = Arc::new(self.next.inner.clone());
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let client = endpoint.client().await.map_err(to_pyerr)?;
-            let router = PushRouter::<BackendInput, Annotated<BackendOutput>>::from_client(
+            let router = PushRouter::<PreprocessedRequest, Annotated<BackendOutput>>::from_client(
                 client,
                 Default::default(),
             )
