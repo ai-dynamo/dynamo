@@ -114,7 +114,7 @@ def with_request_tracing(func: Callable) -> Callable:
             request = kwargs["request"]
 
         if request:
-            headers_opt = request.headers if hasattr(request, "headers") else None
+            headers_opt = dict(request.headers) if hasattr(request, "headers") else None
             request_id = extract_or_generate_request_id(headers_opt)
             # preserve previous value (if any) for nested invocations
             _token = _request_id_ctx.set(request_id)
