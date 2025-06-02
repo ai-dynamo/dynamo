@@ -207,10 +207,10 @@ kubectl create secret generic dynamo-env-secrets \
 
 ### Referencing Secrets in Your Deployment
 
-You can reference secret keys in your deployment using the `--env` flag:
+You can reference secret keys in your deployment using the `--env-from-secret` flag:
 
-- `--env HF_TOKEN=@huggingface.token` will set the `HF_TOKEN` environment variable from the `huggingface.token` key in the secret.
-- `--env @another_secret.key` will set the `another_secret.key` environment variable from the same-named key in the secret.
+- `--env-from-secret HF_TOKEN=huggingface.token` will set the `HF_TOKEN` environment variable from the `huggingface.token` key in the secret.
+- `--env-from-secret ANOTHER_SECRET=another_secret.key` will set the `ANOTHER_SECRET` environment variable from the same-named key in the secret.
 - You can also mix normal envs: `--env NORMAL_ENV_KEY=value`.
 
 By default, Dynamo will look for a secret named `dynamo-env-secrets`. You can override this with the `--env-secrets-name` flag or the `DYNAMO_ENV_SECRETS` environment variable.
@@ -220,9 +220,8 @@ By default, Dynamo will look for a secret named `dynamo-env-secrets`. You can ov
 ```bash
 dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml \
   --env NORMAL_ENV_KEY=value \
-  --env HF_TOKEN=@huggingface.token \
-  --env @another_secret.key \
+  --env-from-secret HF_TOKEN=huggingface.token \
+  --env-from-secret ANOTHER_SECRET=another_secret.key \
   --target kubernetes
 ```
 
-If you use `@`-style envs with a non-Kubernetes target, Dynamo will raise an error.

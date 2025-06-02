@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import json
-import os
 import typing as t
 
 import typer
@@ -36,7 +35,7 @@ from dynamo.sdk.core.protocol.deployment import (
 from dynamo.sdk.core.runner import TargetEnum
 
 app = typer.Typer(
-    help="Deploy Dynamo applications to Dynamo Cloud Kubernetes Platform",
+    help="Deploy Dynamo applications to Dynamo Cloud Platform",
     add_completion=True,
     no_args_is_help=True,
 )
@@ -86,18 +85,16 @@ def display_deployment_info(
 
 
 def _build_env_dicts(
-    target: str,
     config_file: t.Optional[t.TextIO] = None,
     args: t.Optional[t.List[str]] = None,
     envs: t.Optional[t.List[str]] = None,
-    env_secrets_name: t.Optional[str] = None,
+    envs_from_secret: t.Optional[t.List[str]] = None,
+    env_secrets_name: t.Optional[str] = "dynamo-env-secrets",
 ) -> t.List[t.Dict[str, t.Any]]:
     """
-    Build a list of environment variable dicts, supporting valueFrom for Kubernetes.
+    Build a list of environment variable dicts.
     """
-    if env_secrets_name is None:
-        env_secrets_name = os.environ.get("DYNAMO_ENV_SECRETS", "dynamo-env-secrets")
-    env_dicts: t.List[t.Dict[str, t.Any]] = []
+    env_dicts = []
     if config_file or args:
         service_configs = resolve_service_config(config_file=config_file, args=args)
         config_json = json.dumps(service_configs)
@@ -106,19 +103,13 @@ def _build_env_dicts(
         for env in envs:
             if "=" in env:
                 key, value = env.split("=", 1)
-            elif env.startswith("@"):  # --env @secret.key
-                key = env[1:]
-                value = f"@{key}"
+                env_dicts.append({"name": key, "value": value})
             else:
-                raise RuntimeError(
-                    f"Invalid env format: {env}. Use KEY=VALUE or @secret.key."
-                )
-            if value.startswith("@"):
-                if target != "kubernetes":
-                    raise RuntimeError(
-                        "Secret-based envs (with @) are only supported for --target kubernetes"
-                    )
-                secret_key = value[1:]
+                raise RuntimeError(f"Invalid env format: {env}. Use KEY=VALUE.")
+    if envs_from_secret:
+        for env in envs_from_secret:
+            if "=" in env:
+                key, secret_key = env.split("=", 1)
                 env_dicts.append(
                     {
                         "name": key,
@@ -131,41 +122,25 @@ def _build_env_dicts(
                     }
                 )
             else:
-                env_dicts.append({"name": key, "value": value})
+                raise RuntimeError(
+                    f"Invalid env-from-secret format: {env}. Use KEY=SECRET_KEY."
+                )
     return env_dicts
 
 
 def _handle_deploy_create(
     ctx: typer.Context,
-    pipeline: str = typer.Argument(..., help="Dynamo pipeline to deploy"),
-    name: t.Optional[str] = typer.Option(None, "--name", "-n", help="Deployment name"),
-    config_file: t.Optional[typer.FileText] = typer.Option(
-        None, "--config-file", "-f", help="Configuration file path"
-    ),
-    wait: bool = typer.Option(
-        True, "--wait/--no-wait", help="Do not wait for deployment to be ready"
-    ),
-    timeout: int = typer.Option(
-        3600, "--timeout", help="Timeout for deployment to be ready in seconds"
-    ),
-    endpoint: str = typer.Option(
-        ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD"
-    ),
-    envs: t.Optional[t.List[str]] = typer.Option(
-        None,
-        "--env",
-        help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo pipeline.",
-    ),
-    target: str = typer.Option(
-        DeploymentTargetType.KUBERNETES.value,
-        "--target",
-        "-t",
-        help="Deployment target",
-    ),
-    dev: bool = typer.Option(False, "--dev", help="Development mode for deployment"),
-    env_secrets_name: t.Optional[str] = typer.Option(
-        None, "--env-secrets-name", help="Environment secrets name"
-    ),
+    pipeline: str,
+    endpoint: str,
+    name: t.Optional[str] = None,
+    config_file: t.Optional[typer.FileText] = None,
+    wait: bool = True,
+    timeout: int = 3600,
+    envs: t.Optional[t.List[str]] = None,
+    envs_from_secret: t.Optional[t.List[str]] = None,
+    target: str = DeploymentTargetType.KUBERNETES.value,
+    dev: bool = False,
+    env_secrets_name: t.Optional[str] = "dynamo-env-secrets",
 ) -> DeploymentResponse:
     """Handle deployment creation. This is a helper function for the create and deploy commands.
 
@@ -188,7 +163,7 @@ def _handle_deploy_create(
         config_file=config_file,
         args=ctx.args,
         envs=envs,
-        target=target,
+        envs_from_secret=envs_from_secret,
         env_secrets_name=env_secrets_name,
     )
     deployment = Deployment(
@@ -284,6 +259,11 @@ def create(
         "--env",
         help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo pipeline.",
     ),
+    envs_from_secret: t.Optional[t.List[str]] = typer.Option(
+        None,
+        "--env-from-secret",
+        help="Environment variable(s) from secret (format: KEY=SECRET_KEY). These will be set from your Dynamo secrets.",
+    ),
     target: str = typer.Option(
         DeploymentTargetType.KUBERNETES.value,
         "--target",
@@ -292,22 +272,26 @@ def create(
     ),
     dev: bool = typer.Option(False, "--dev", help="Development mode for deployment"),
     env_secrets_name: t.Optional[str] = typer.Option(
-        None, "--env-secrets-name", help="Environment secrets name"
+        "dynamo-env-secrets",
+        "--env-secrets-name",
+        help="Environment secrets name",
+        envvar="DYNAMO_ENV_SECRETS",
     ),
 ) -> DeploymentResponse:
     """Create a deployment on Dynamo Cloud."""
     return _handle_deploy_create(
-        ctx,
-        pipeline,
-        name,
-        config_file,
-        wait,
-        timeout,
-        endpoint,
-        envs,
-        target,
-        dev,
-        env_secrets_name,
+        ctx=ctx,
+        pipeline=pipeline,
+        name=name,
+        config_file=config_file,
+        wait=wait,
+        timeout=timeout,
+        endpoint=endpoint,
+        envs=envs,
+        envs_from_secret=envs_from_secret,
+        target=target,
+        dev=dev,
+        env_secrets_name=env_secrets_name,
     )
 
 
@@ -418,8 +402,19 @@ def update(
         "--env",
         help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo pipeline.",
     ),
+    envs_from_secret: t.Optional[t.List[str]] = typer.Option(
+        None,
+        "--env-from-secret",
+        help="Environment variable(s) from secret (format: KEY=SECRET_KEY). These will be set from your Dynamo secrets.",
+    ),
     endpoint: str = typer.Option(
         ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD"
+    ),
+    env_secrets_name: t.Optional[str] = typer.Option(
+        "dynamo-env-secrets",
+        "--env-secrets-name",
+        help="Environment secrets name",
+        envvar="DYNAMO_ENV_SECRETS",
     ),
 ) -> None:
     """Update an existing deployment on Dynamo Cloud.
@@ -430,7 +425,11 @@ def update(
     try:
         with console.status(f"[bold green]Updating deployment '{name}'..."):
             env_dicts = _build_env_dicts(
-                config_file=config_file, args=ctx.args, envs=envs, target=target
+                config_file=config_file,
+                args=ctx.args,
+                envs=envs,
+                envs_from_secret=envs_from_secret,
+                env_secrets_name=env_secrets_name,
             )
             deployment = Deployment(
                 name=name,
@@ -536,6 +535,11 @@ def deploy(
         "--env",
         help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo pipeline.",
     ),
+    envs_from_secret: t.Optional[t.List[str]] = typer.Option(
+        None,
+        "--env-from-secret",
+        help="Environment variable(s) from secret (format: KEY=SECRET_KEY). These will be set from your Dynamo secrets.",
+    ),
     target: str = typer.Option(
         DeploymentTargetType.KUBERNETES.value,
         "--target",
@@ -544,20 +548,24 @@ def deploy(
     ),
     dev: bool = typer.Option(False, "--dev", help="Development mode for deployment"),
     env_secrets_name: t.Optional[str] = typer.Option(
-        None, "--env-secrets-name", help="Environment secrets name"
+        "dynamo-env-secrets",
+        "--env-secrets-name",
+        help="Environment secrets name",
+        envvar="DYNAMO_ENV_SECRETS",
     ),
 ) -> DeploymentResponse:
     """Deploy a Dynamo pipeline (same as deployment create)."""
     return _handle_deploy_create(
-        ctx,
-        pipeline,
-        name,
-        config_file,
-        wait,
-        timeout,
-        endpoint,
-        envs,
-        target,
-        dev,
-        env_secrets_name,
+        ctx=ctx,
+        pipeline=pipeline,
+        name=name,
+        config_file=config_file,
+        wait=wait,
+        timeout=timeout,
+        endpoint=endpoint,
+        envs=envs,
+        envs_from_secret=envs_from_secret,
+        target=target,
+        dev=dev,
+        env_secrets_name=env_secrets_name,
     )
