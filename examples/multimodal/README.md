@@ -97,7 +97,7 @@ You should see a response similar to this:
 - processor: Tokenizes the prompt and passes it to the decode worker.
 - frontend: HTTP endpoint to handle incoming requests.
 
-### Deployment
+### Local Serving
 
 In this deployment, we have three workers, [encode_worker](components/encode_worker.py), [decode_worker](components/decode_worker.py), and [prefill_worker](components/prefill_worker.py).
 For the Llava model, embeddings are only required during the prefill stage. As such, the encode worker is connected directly to the prefill worker.
@@ -158,3 +158,81 @@ You should see a response similar to this:
 ```json
 {"id": "c1774d61-3299-4aa3-bea1-a0af6c055ba8", "object": "chat.completion", "created": 1747725645, "model": "llava-hf/llava-1.5-7b-hf", "choices": [{"index": 0, "message": {"role": "assistant", "content": " This image shows a passenger bus traveling down the road near power lines and trees. The bus displays a sign that says \"OUT OF SERVICE\" on its front."}, "finish_reason": "stop"}]}
 ```
+
+## Deployment with Dynamo Operator
+
+These multimodal examples can be deployed to a Kubernetes cluster using [Dynamo Cloud](../../docs/guides/dynamo_deploy/dynamo_cloud.md) and the Dynamo CLI.
+
+### Prerequisites
+
+You must have first followed the instructions in [deploy/cloud/helm/README.md](../../deploy/cloud/helm/README.md) to install Dynamo Cloud on your Kubernetes cluster.
+
+**Note**: The `KUBE_NS` variable in the following steps must match the Kubernetes namespace where you installed Dynamo Cloud. You must also expose the `dynamo-store` service externally. This will be the endpoint the CLI uses to interface with Dynamo Cloud.
+
+### Deployment Steps
+
+For detailed deployment instructions, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md). The following are the specific commands for the multimodal examples:
+
+```bash
+# Set your project root directory
+export PROJECT_ROOT=$(pwd)
+
+# Configure environment variables (see operator_deployment.md for details)
+export KUBE_NS=dynamo-cloud
+export DYNAMO_CLOUD=http://localhost:8080  # If using port-forward
+# OR
+# export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com  # If using Ingress/VirtualService
+
+# Build the Dynamo base image (see operator_deployment.md for details)
+export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
+
+# Build the service
+cd $PROJECT_ROOT/examples/multimodal
+DYNAMO_TAG=$(dynamo build graphs.disagg:Frontend | grep "Successfully built" |  awk '{ print $NF }' | sed 's/\.$//')
+# For aggregated serving:
+# DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk '{ print $NF }' | sed 's/\.$//')
+
+# Deploy to Kubernetes
+export DEPLOYMENT_NAME=multimodal-disagg
+# For disaggregated serving:
+dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/disagg.yaml
+# For aggregated serving:
+# export DEPLOYMENT_NAME=multimodal-agg
+# dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
+```
+
+**Note**: To avoid rate limiting from unauthenticated requests to HuggingFace (HF), you can provide your `HF_TOKEN` as a secret in your deployment. See the [operator deployment guide](../../docs/guides/dynamo_deploy/operator_deployment.md#referencing-secrets-in-your-deployment) for instructions on referencing secrets like `HF_TOKEN` in your deployment configuration.
+
+**Note**: Optionally add `--Planner.no-operation=false` at the end of the deployment command to enable the planner component to take scaling actions on your deployment.
+
+### Testing the Deployment
+
+Once the deployment is complete, you can test it using:
+
+```bash
+# Find your frontend pod
+export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
+
+# Forward the pod's port to localhost
+kubectl port-forward pod/$FRONTEND_POD 8000:8000 -n ${KUBE_NS}
+
+# Test the API endpoint
+curl localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llava-hf/llava-1.5-7b-hf",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          { "type": "text", "text": "What is in this image?" },
+          { "type": "image_url", "image_url": { "url": "http://images.cocodataset.org/test2017/000000155781.jpg" } }
+        ]
+      }
+    ],
+    "max_tokens": 300,
+    "stream": false
+  }'
+```
+
+For more details on managing deployments, testing, and troubleshooting, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md).
