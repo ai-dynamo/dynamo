@@ -74,7 +74,7 @@ To run DSR1 model please first follow the Ray setup from the [multinode document
 
 ```bash
 cd examples/vllm_v1
-dynamo serve graphs.agg:Frontend -f configs/r1_agg.yaml
+dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/agg.yaml
 ```
 
 
@@ -83,19 +83,19 @@ dynamo serve graphs.agg:Frontend -f configs/r1_agg.yaml
 To create frontend with a single decode worker:
 ```bash
 cd examples/vllm_v1
-dynamo serve graphs.agg:Frontend -f configs/r1_disagg.yaml
+dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/disagg.yaml
 ```
 
 To create a single decode worker:
 ```bash
 cd examples/vllm_v1
-dynamo serve components.worker:VllmDecodeWorker -f configs/r1_disagg.yaml
+dynamo serve components.worker:VllmDecodeWorker -f configs/deepseek_r1/disagg.yaml
 ```
 
 To create a single prefill worker:
 ```bash
 cd examples/vllm_v1
-dynamo serve components.worker:VllmPrefillWorker -f configs/r1_disagg.yaml
+dynamo serve components.worker:VllmPrefillWorker -f configs/deepseek_r1/disagg.yaml
 ```
 
 ## Testing
