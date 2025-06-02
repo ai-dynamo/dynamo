@@ -73,7 +73,7 @@ see the [Dynamo SDK Docs](../API/sdk.md).
 
 ### Request/Response Types
 
-Request/Response types of endpoints can be defined arbitraily for your use case's needs, as long as
+Request/Response types of endpoints can be defined arbitrarily for your use case's needs, as long as
 the client calling your worker matches the expectations.
 
 Define your request and response types using Pydantic models:

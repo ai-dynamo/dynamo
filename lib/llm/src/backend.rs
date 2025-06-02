@@ -44,7 +44,7 @@ use dynamo_runtime::{
 
 use crate::protocols::{
     common::{
-        llm_backend::{BackendInput, BackendOutput, FinishReason, LLMEngineOutput},
+        llm_backend::{BackendOutput, FinishReason, LLMEngineOutput, PreprocessedRequest},
         StopConditions,
     },
     TokenIdType,
@@ -56,7 +56,7 @@ use tokenizers::Tokenizer as HfTokenizer;
 pub type ExecutionOutputStream = Annotated<LLMEngineOutput>;
 
 /// Context for executing LLM inference, engine consumes backend input and produces execution output stream
-pub type ExecutionContext = ServerStreamingEngine<BackendInput, ExecutionOutputStream>;
+pub type ExecutionContext = ServerStreamingEngine<PreprocessedRequest, ExecutionOutputStream>;
 
 /// Backend handles resource management and orchestrates LLM execution
 #[allow(dead_code)]
@@ -121,16 +121,16 @@ impl Backend {
 #[async_trait]
 impl
     Operator<
-        SingleIn<BackendInput>,
+        SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<BackendOutput>>,
-        SingleIn<BackendInput>,
+        SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<LLMEngineOutput>>,
     > for Backend
 {
     async fn generate(
         &self,
-        request: SingleIn<BackendInput>,
-        next: ServerStreamingEngine<BackendInput, Annotated<LLMEngineOutput>>,
+        request: SingleIn<PreprocessedRequest>,
+        next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<BackendOutput>>> {
         let stop_conditions = request.stop_conditions.clone();
         let next_stream = next.generate(request).await?;
