@@ -22,9 +22,9 @@ This guide explains the deployment options available for Dynamo inference graphs
 ## Deployment Options
 
 Dynamo provides two distinct deployment options that each serve different use cases:
+
 1. Dynamo Cloud Kubernetes Platform is preferred in cases that support it
 2. Manual Deployment with Helm Charts is suited to users who need more control over their deployments
-
 
 ### Dynamo Cloud Kubernetes Platform [PREFERRED]
 
@@ -35,6 +35,7 @@ The Dynamo Cloud Platform (`deploy/cloud/`) provides a managed deployment experi
 - Provides a managed deployment experience
 
 For detailed instructions on using the Dynamo Cloud Platform, see:
+
 - [Dynamo Cloud Platform Guide](dynamo_cloud.md): walks through installing and configuring the Dynamo cloud components on your Kubernetes cluster.
 - [Operator Deployment Guide](operator_deployment.md)
 
@@ -43,7 +44,7 @@ For detailed instructions on using the Dynamo Cloud Platform, see:
 Users who need more control over their deployments can use the manual deployment path (`deploy/helm/`):
 
 - Used for manually deploying inference graphs to Kubernetes
-- Contains Helm charts and configurations for deploying individual inference pipelines
+- Contains Helm charts and configurations for deploying individual inference graphs
 - Provides full control over deployment parameters
 - Requires manual management of infrastructure components
 - Documentation:
@@ -65,4 +66,4 @@ Users who need more control over their deployments can use the manual deployment
 
 See the [Hello World example](../../examples/hello_world.md#deploying-to-and-running-the-example-in-kubernetes) for a complete walkthrough of deploying a simple inference graph.
 
-See the [LLM example](../../examples/llm_deployment.md#deploy-to-kubernetes) for a complete walkthrough of deploying a production-ready LLM inference pipeline to Kubernetes.
+See the [LLM example](../../examples/llm_deployment.md#deploy-to-kubernetes) for a complete walkthrough of deploying a production-ready LLM inference graph to Kubernetes.

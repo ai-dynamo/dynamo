@@ -9,7 +9,8 @@ pip install ai-dynamo
 ```
 
 ## Quickstart
-Lets build a simple distributed pipeline with 3 components: `Frontend`, `Middle` and `Backend`. The structure of the pipeline looks like this:
+
+Let's build a simple distributed graph with 3 components: `Frontend`, `Middle` and `Backend`. The structure of the graph looks like this:
 
 ```
 Users/Clients (HTTP)
@@ -30,10 +31,10 @@ Users/Clients (HTTP)
 └─────────────┘
 ```
 
-The code for the pipeline looks like this:
+The code for the graph looks like this:
 
 ```python
-# filename: pipeline.py
+# filename: dynamo_graph.py
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -93,7 +94,7 @@ class Frontend:
 
 ```
 
-You can run this pipeline locally by spinning up ETCD and NATS and then running the pipeline:
+You can run this graph locally by spinning up ETCD and NATS and then running:
 
 ```bash
 # Spin up ETCD and NATS
@@ -103,11 +104,11 @@ docker compose -f deploy/metrics/docker-compose.yml up -d
 then
 
 ```bash
-# Run the pipeline
-dynamo serve pipeline:Frontend
+# Run the graph
+dynamo serve dynamo_graph:Frontend
 ```
 
-Once it's up and running, you can make a request to the pipeline using
+Once it's up and running, you can make a request to the graph using
 
 ```bash
 curl -X POST http://localhost:8000/generate \

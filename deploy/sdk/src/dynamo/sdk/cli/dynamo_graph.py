@@ -72,7 +72,7 @@ def build_bentofile(
     _bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
 ) -> Bento:
     """
-    Build a Dynamo pipeline based on options specified in a bentofile.yaml file.
+    Build a Dynamo graph based on options specified in a bentofile.yaml file.
     """
     if args is not None:
         set_arguments(**args)
@@ -120,8 +120,8 @@ def build_bentofile(
 
 
 def get(
-    pipeline_tag: str = typer.Argument(
-        ..., help="The tag of the Dynamo pipeline to display"
+    dynamograph_tag: str = typer.Argument(
+        ..., help="The tag of the Dynamo graph to display"
     ),
     output: str = typer.Option(
         "yaml",
@@ -131,9 +131,9 @@ def get(
         show_default=True,
     ),
 ) -> None:
-    """Display Dynamo pipeline details.
+    """Display Dynamo graph details.
 
-    Prints information about a Dynamo pipeline by its tag.
+    Prints information about a Dynamo graph by its tag.
     """
 
     # Validate output format
@@ -143,7 +143,7 @@ def get(
         raise typer.Exit(code=1)
 
     bento_store = BentoMLContainer.bento_store.get()
-    bento = bento_store.get(pipeline_tag)
+    bento = bento_store.get(dynamograph_tag)
 
     if output == "path":
         console.print(bento.path)
@@ -156,20 +156,18 @@ def get(
 
 
 def build(
-    dynamo_pipeline: str = typer.Argument(
-        ..., help="Path to the Dynamo pipeline to build"
-    ),
+    dynamo_graph: str = typer.Argument(..., help="Path to the Dynamo graph to build"),
     output: str = typer.Option(
         "default",
         "--output",
         "-o",
-        help="Output log format. Use 'tag' to display only pipeline tag.",
+        help="Output log format. Use 'tag' to display only the dyanmo graph tag.",
         show_default=True,
     ),
     containerize: bool = typer.Option(
         False,
         "--containerize",
-        help="Containerize the Dynamo pipeline after building. Shortcut for 'dynamo build && dynamo containerize'.",
+        help="Containerize the Dynamo graph after building. Shortcut for 'dynamo build && dynamo containerize'.",
     ),
     platform: str = typer.Option(None, "--platform", help="Platform to build for"),
     target: TargetEnum = typer.Option(
@@ -179,9 +177,9 @@ def build(
         case_sensitive=False,
     ),
 ) -> None:
-    """Build a new Dynamo pipeline from the specified path.
+    """Build a new Dynamo graph from the specified path.
 
-    Creates a packaged Dynamo pipeline ready for deployment. Optionally builds a docker container.
+    Creates a packaged Dynamo graph ready for deployment. Optionally builds a docker container.
     """
     from bentoml._internal.configuration import get_quiet_mode, set_quiet_mode
     from bentoml._internal.log import configure_logging
@@ -202,10 +200,10 @@ def build(
 
     service: str | None = None
     build_ctx = "."
-    if ":" in dynamo_pipeline:
-        service = dynamo_pipeline
+    if ":" in dynamo_graph:
+        service = dynamo_graph
     else:
-        build_ctx = dynamo_pipeline
+        build_ctx = dynamo_graph
 
     if target != TargetEnum.BENTO:
         raise NotImplementedError(
@@ -228,7 +226,7 @@ def build(
             next_steps = []
             if not containerize:
                 next_steps.append(
-                    "\n\n* Containerize your Dynamo pipeline with `dynamo containerize`:\n"
+                    "\n\n* Containerize your Dynamo graph with `dynamo containerize`:\n"
                     f"    $ {containerize_cmd} [or dynamo build --containerize]"
                 )
 
