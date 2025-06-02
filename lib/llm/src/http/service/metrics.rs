@@ -45,8 +45,12 @@ pub struct InflightGuard {
     request_type: RequestType,
     status: Status,
     timer: Instant,
-    first_token: bool,
-    last_response: Option<Duration>,
+    // we use is_first_token to distinguish TTFT from ITL. It is false by default and
+    // flip to true when the first token is returned and TTFT is published.
+    is_first_token: bool,
+    // we track the last response time so that ITL for the newly returned tokens can 
+    // be computed. 
+    last_response_time: Option<Duration>,
     osl: usize,
 }
 
@@ -296,8 +300,8 @@ impl InflightGuard {
             request_type,
             status: Status::Error,
             timer,
-            first_token: true,
-            last_response: None,
+            is_first_token: true,
+            last_response_time: None,
             osl: 0,
         }
     }
@@ -315,10 +319,10 @@ impl InflightGuard {
     }
 
     pub(crate) fn observe_response(&mut self, isl: usize, num_tokens: usize) {
-        if self.first_token {
+        if self.is_first_token {
             // NOTE: when there are multiple tokens in the first response,
             // we use the full response time as TTFT and ignore the ITL
-            self.first_token = false;
+            self.is_first_token = false;
 
             // Publish TTFT
             let ttft = self.timer.elapsed().as_secs_f64();
@@ -337,8 +341,8 @@ impl InflightGuard {
 
         let current_duration = self.timer.elapsed();
 
-        if let Some(last_response) = self.last_response {
-            let response_duration = current_duration - last_response;
+        if let Some(last_response_time) = self.last_response_time {
+            let response_duration = current_duration - last_response_time;
             let itl = response_duration.as_secs_f64() / num_tokens as f64;
             for _ in 0..num_tokens {
                 self.metrics
@@ -348,7 +352,7 @@ impl InflightGuard {
             }
         }
 
-        self.last_response = Some(current_duration);
+        self.last_response_time = Some(current_duration);
     }
 }
 
