@@ -23,7 +23,7 @@ This guide walks you through deploying an inference graph created with the Dynam
 
 Before proceeding with deployment, ensure you have:
 
-- [Dynamo Python package](../../get_started.md#installation) installed
+- [Dynamo Python package](../../get_started.md#alternative-setup-manual-installation) installed
 - A Kubernetes cluster with the [Dynamo cloud platform](dynamo_cloud.md) installed
 - Ubuntu 24.04 as the base image for your services
 - Required dependencies:
@@ -137,54 +137,4 @@ This command displays a table of all deployments.
 
 To get detailed information about a specific deployment:
 
-```bash
-dynamo deployment get $DEPLOYMENT_NAME
 ```
-
-To update a specific deployment:
-
-```bash
-dynamo deployment update $DEPLOYMENT_NAME [--config-file FILENAME] [--env ENV_VAR]
-```
-
-To remove a deployment and all its associated resources:
-
-```bash
-dynamo deployment delete $DEPLOYMENT_NAME
-```
-
-```{warning}
-This command permanently deletes the deployment and all associated resources. Make sure you have any necessary backups before proceeding.
-```
-
-### 4. Test the Deployment
-
-The deployment process creates several pods:
-1. A `yatai-dynamonim-image-builder` pod for building the container image
-2. Service pods prefixed with `$DEPLOYMENT_NAME` once the build is complete
-
-To test your deployment:
-
-```bash
-# Forward the service port to localhost
-kubectl -n ${KUBE_NS} port-forward svc/${DEPLOYMENT_NAME}-frontend 3000:3000
-
-# Test the API endpoint
-curl -X 'POST' 'http://localhost:3000/generate' \
-    -H 'accept: text/event-stream' \
-    -H 'Content-Type: application/json' \
-    -d '{"text": "test"}'
-```
-
-## Expected Output
-
-When you send a request with "test" as input, you'll see how the text flows through each service:
-
-```
-Frontend: Middle: Backend: test-mid-back
-```
-
-This demonstrates the service pipeline:
-1. The Frontend receives "test"
-2. The Middle service adds "-mid" to create "test-mid"
-3. The Backend service adds "-back" to create "test-mid-back"

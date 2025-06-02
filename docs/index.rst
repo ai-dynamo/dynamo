@@ -63,7 +63,7 @@ Dynamo is inference engine agnostic, supporting TRT-LLM, vLLM, SGLang, and other
 * **KV cache offloading** - Leverages several memory hierarchies for higher system throughput.
 
 Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source
-and driven by a transparent, OSS (Open Source Software) first development approach.
+and is driven by a transparent development approach. Check out our repo at https://github.com/ai-dynamo/.
 
 .. toctree::
    :hidden:
