@@ -120,7 +120,9 @@ spec:
           10 }}
         securityContext: {{- toYaml .Values.controllerManager.manager.containerSecurityContext
           | nindent 10 }}
-      imagePullSecrets: {{ .Values.imagePullSecrets | default list | toJson }}
+      {{ with .Values.imagePullSecrets }}
+        imagePullSecrets: {{ . | toJson }}
+      {{ end }}
       securityContext:
         runAsNonRoot: true
       serviceAccountName: {{ include "dynamo-operator.fullname" . }}-controller-manager
