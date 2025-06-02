@@ -6,6 +6,8 @@ use std::{io::Read, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use dynamo_llm::{backend::ExecutionContext, engines::StreamingEngine, local_model::LocalModel};
+use dynamo_runtime::protocols::Endpoint as EndpointId;
+use dynamo_runtime::slug::Slug;
 use dynamo_runtime::{CancellationToken, DistributedRuntime};
 
 mod flags;
@@ -17,9 +19,6 @@ pub use opt::{Input, Output};
 mod subprocess;
 
 const CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Where we will attach the vllm/sglang subprocess. Invisible to users.
-pub const INTERNAL_ENDPOINT: &str = "dyn://dynamo.internal.worker";
 
 /// Default size of a KV cache block. Override with --kv-cache-block-size
 const DEFAULT_KV_CACHE_BLOCK_SIZE: usize = 16;
@@ -171,7 +170,7 @@ pub async fn run(
             // If not, then the endpoint isn't exposed so we invent an internal one.
             let endpoint = match &in_opt {
                 Input::Endpoint(path) => path.parse()?,
-                _ => INTERNAL_ENDPOINT.parse()?,
+                _ => internal_endpoint(),
             };
 
             let multi_node_conf = dynamo_llm::engines::MultiNodeConfig {
@@ -214,7 +213,7 @@ pub async fn run(
             // If not, then the endpoint isn't exposed so we invent an internal one.
             let endpoint = match &in_opt {
                 Input::Endpoint(path) => path.parse()?,
-                _ => INTERNAL_ENDPOINT.parse()?,
+                _ => internal_endpoint(),
             };
 
             let (py_script, child) = match subprocess::start(
@@ -248,7 +247,7 @@ pub async fn run(
             // If not, then the endpoint isn't exposed so we invent an internal one.
             let endpoint = match &in_opt {
                 Input::Endpoint(path) => path.parse()?,
-                _ => INTERNAL_ENDPOINT.parse()?,
+                _ => internal_endpoint(),
             };
 
             let (py_script, child) = match subprocess::start(
@@ -403,19 +402,39 @@ fn print_cuda(_output: &Output) {}
 
 fn gguf_default() -> Output {
     #[cfg(feature = "llamacpp")]
-    return Output::LlamaCpp;
+    {
+        Output::LlamaCpp
+    }
 
     #[cfg(all(feature = "mistralrs", not(feature = "llamacpp")))]
-    return Output::MistralRs;
+    {
+        Output::MistralRs
+    }
 
     #[cfg(not(any(feature = "mistralrs", feature = "llamacpp")))]
-    return Output::EchoFull;
+    {
+        Output::EchoFull
+    }
 }
 
 fn safetensors_default() -> Output {
     #[cfg(feature = "mistralrs")]
-    return Output::MistralRs;
+    {
+        Output::MistralRs
+    }
 
     #[cfg(not(feature = "mistralrs"))]
-    return Output::EchoFull;
+    {
+        Output::EchoFull
+    }
+}
+
+/// A random endpoint to use for internal communication
+/// We can't hard code because we may be running several on the same machine (GPUs 0-3 and 4-7)
+fn internal_endpoint() -> EndpointId {
+    EndpointId {
+        namespace: "internal".to_string(),
+        component: Slug::slugify(&uuid::Uuid::new_v4().to_string()).to_string(),
+        name: "generate".to_string(),
+    }
 }
