@@ -275,7 +275,12 @@ impl Metrics {
             RequestType::Unary
         };
 
-        InflightGuard::new(self.clone(), model.to_string().to_lowercase(), endpoint, request_type)
+        InflightGuard::new(
+            self.clone(),
+            model.to_string().to_lowercase(),
+            endpoint,
+            request_type,
+        )
     }
 }
 
