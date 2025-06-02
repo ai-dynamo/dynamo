@@ -25,16 +25,6 @@ from typing import List, Optional
 import psutil
 import requests
 
-# Custom format inspired by your example
-LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format=LOG_FORMAT,
-    datefmt="%Y-%m-%dT%H:%M:%S",  # ISO 8601 UTC format with microseconds
-)
-
 
 @dataclass
 class ManagedProcess:
@@ -43,11 +33,12 @@ class ManagedProcess:
     health_check_ports: Optional[List[int]] = field(default_factory=list)
     health_check_urls: Optional[List[str]] = field(default_factory=list)
     timeout: int = 300
-    cwd: Optional[str] = None
+    working_dir: Optional[str] = None
     display_output: bool = False
     data_dir: Optional[str] = None
     terminate_existing: bool = True
-    log_dir = os.getcwd()
+    stragglers: Optional[List[str]] = field(default_factory=list)
+    log_dir: str = os.getcwd()
 
     _logger = None
     _command_name = None
@@ -76,21 +67,25 @@ class ManagedProcess:
             raise e
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.proc:
-            self._terminate_process_tree(self.proc.pid)
-            self.proc.wait()
-        if self._sed_proc:
-            self._terminate_process_tree(self._sed_proc.pid)
-            self._sed_proc.wait()
-        if self._tee_proc:
-            self._terminate_process_tree(self._tee_proc.pid)
-            self._tee_proc.wait()
+        process_list = [self.proc, self._tee_proc, self._sed_proc]
+        for proc in process_list:
+            if proc:
+                if proc.stdout:
+                    proc.stdout.close()
+                if proc.stdin:
+                    proc.stdin.close()
+                self._terminate_process_tree(proc.pid)
+                proc.wait()
         if self.data_dir:
             self._remove_directory(self.data_dir)
 
+        for proc in psutil.process_iter(["name", "cmdline"]):
+            if proc.name() in self.stragglers:
+                self._terminate_process_tree(proc.pid)
+
     def _start_process(self):
         self._logger.info(
-            f"Running command: {' '.join(self.command)} in {self.cwd or os.getcwd()}"
+            f"Running command: {' '.join(self.command)} in {self.working_dir or os.getcwd()}"
         )
 
         stdin = subprocess.DEVNULL
@@ -101,7 +96,7 @@ class ManagedProcess:
             self.proc = subprocess.Popen(
                 self.command,
                 env=self.env or os.environ.copy(),
-                cwd=self.cwd,
+                cwd=self.working_dir,
                 stdin=stdin,
                 stdout=stdout,
                 stderr=stderr,
@@ -121,7 +116,7 @@ class ManagedProcess:
                 self.proc = subprocess.Popen(
                     self.command,
                     env=self.env or os.environ.copy(),
-                    cwd=self.cwd,
+                    cwd=self.working_dir,
                     stdin=stdin,
                     stdout=stdout,
                     stderr=stderr,
@@ -132,7 +127,7 @@ class ManagedProcess:
                     stdin=self.proc.stdout,
                     stdout=f,
                 )
-                self._log_proc = None
+            self._tee_proc = None
 
     def _remove_directory(self, path: str) -> None:
         """Remove a directory."""
@@ -167,13 +162,25 @@ class ManagedProcess:
         return time_taken
 
     def _check_url(self, url, timeout=30, sleep=0.1):
+        if isinstance(url, tuple):
+            response_check = url[1]
+            url = url[0]
+        else:
+            response_check = None
         start_time = time.time()
         self._logger.info(f"Checking URL {url}")
         while time.time() - start_time < timeout:
             try:
                 response = requests.get(url, timeout=timeout)
+                print(response)
+                print(response.json())
                 if response.status_code == 200:
-                    return time.time() - start_time
+                    if response_check and response_check(response):
+                        self._logger.info(f"SUCCESS: Check URL:{url}")
+                        return time.time() - start_time
+                    else:
+                        self._logger.info(f"SUCCESS: Check URL:{url}")
+                        return time.time() - start_time
             except Exception:
                 pass
             time.sleep(sleep)
@@ -185,7 +192,7 @@ class ManagedProcess:
         if self.terminate_existing:
             self._logger.info(f"Terminating Existing {self._command_name}")
             for proc in psutil.process_iter(["name", "cmdline"]):
-                if proc.name() == self._command_name:
+                if proc.name() == self._command_name or proc.name() in self.stragglers:
                     self._terminate_process_tree(proc.pid)
 
     def _terminate_process(self, process):
