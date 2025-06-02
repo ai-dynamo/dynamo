@@ -112,6 +112,8 @@ SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 NIXL_COMMIT=f531404be4866d85ed618b3baf4008c636798d63
 NIXL_REPO=ai-dynamo/nixl.git
 
+NIXL_UCX_EFA_REF=3842a65f02a8e2f3635a66189cd82dc86bf065c2
+
 NO_CACHE=""
 
 get_options() {
@@ -248,7 +250,7 @@ get_options() {
             RELEASE_BUILD=true
             ;;
         --make-efa)
-            MAKE_EFA_UCX=true
+            NIXL_UCX_REF=$NIXL_UCX_EFA_REF
             ;;
         --)
             shift
@@ -505,8 +507,8 @@ if [  ! -z ${RELEASE_BUILD} ]; then
     BUILD_ARGS+=" --build-arg RELEASE_BUILD=${RELEASE_BUILD} "
 fi
 
-if [ ! -z ${MAKE_EFA_UCX} ]; then
-    BUILD_ARGS+=" --build-arg MAKE_EFA_UCX=${MAKE_EFA_UCX} "
+if [ ! -z ${NIXL_UCX_REF} ]; then
+    BUILD_ARGS+=" --build-arg NIXL_UCX_REF=${NIXL_UCX_REF} "
 fi
 
 LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"

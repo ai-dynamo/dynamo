@@ -79,40 +79,34 @@ RUN apt-get update -y && \
     --reinstall libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
     libnuma-dev librdmacm-dev ibverbs-providers
 
-ARG UCX_EFA=3842a65f02a8e2f3635a66189cd82dc86bf065c2
-ARG UCX_REF=v1.19.x
+ARG NIXL_UCX_REF=v1.19.x
 
 WORKDIR /workspace
 
 ### UCX EFA Setup ###
 RUN rm -rf /opt/hpcx/ucx
 RUN rm -rf /usr/local/ucx
+RUN echo "Building UCX with reference $NIXL_UCX_REF"
 RUN cd /usr/local/src &&                            \
     git clone https://github.com/openucx/ucx.git && \
     cd ucx &&                                       \
-    if [ "$MAKE_EFA_UCX" = "true" ]; then           \
-        git checkout $UCX_EFA;                      \
-    else                                            \
-        git checkout $UCX_REF;                      \
-    fi
-
-RUN cd /usr/local/src/ucx &&    \
-    ./autogen.sh && ./configure \
-    --prefix=/usr/local/ucx     \
-    --enable-shared             \
-    --disable-static            \
-    --disable-doxygen-doc       \
-    --enable-optimizations      \
-    --enable-cma                \
-    --enable-devel-headers      \
-    --with-cuda=/usr/local/cuda \
-    --with-verbs                \
-    --with-efa                  \
-    --with-dm                   \
-    --with-gdrcopy=/usr/local   \
-    --enable-mt &&              \
-    make -j &&                  \
-    make -j install-strip &&    \
+    git checkout $NIXL_UCX_REF &&                   \
+    ./autogen.sh && ./configure                     \
+    --prefix=/usr/local/ucx                         \
+    --enable-shared                                 \
+    --disable-static                                \
+    --disable-doxygen-doc                           \
+    --enable-optimizations                          \
+    --enable-cma                                    \
+    --enable-devel-headers                          \
+    --with-cuda=/usr/local/cuda                     \
+    --with-verbs                                    \
+    --with-efa                                      \
+    --with-dm                                       \
+    --with-gdrcopy=/usr/local                       \
+    --enable-mt &&                                  \
+    make -j &&                                      \
+    make -j install-strip &&                        \
     ldconfig
 
 ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
