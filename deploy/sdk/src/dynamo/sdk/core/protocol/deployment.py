@@ -18,6 +18,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 
+import typer
+
 
 @dataclass
 class Resources:
@@ -142,6 +144,21 @@ class Deployment:
 
 # Type alias for deployment responses (e.g., from backend APIs)
 DeploymentResponse = t.Dict[str, t.Any]
+
+
+@dataclass
+class DeploymentConfig:
+    pipeline: str
+    endpoint: str
+    name: t.Optional[str] = None
+    config_file: t.Optional[typer.FileText] = None
+    wait: bool = True
+    timeout: int = 3600
+    envs: t.Optional[t.List[str]] = None
+    envs_from_secret: t.Optional[t.List[str]] = None
+    target: str = "kubernetes"
+    dev: bool = False
+    env_secrets_name: t.Optional[str] = "dynamo-env-secrets"
 
 
 class DeploymentManager(ABC):

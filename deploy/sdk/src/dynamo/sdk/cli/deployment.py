@@ -29,6 +29,7 @@ from dynamo.sdk.core.deploy.consts import DeploymentTargetType
 from dynamo.sdk.core.deploy.kubernetes import KubernetesDeploymentManager
 from dynamo.sdk.core.protocol.deployment import (
     Deployment,
+    DeploymentConfig,
     DeploymentManager,
     DeploymentResponse,
 )
@@ -94,7 +95,7 @@ def _build_env_dicts(
     """
     Build a list of environment variable dicts.
     """
-    env_dicts = []
+    env_dicts: t.List[t.Dict[str, t.Any]] = []
     if config_file or args:
         service_configs = resolve_service_config(config_file=config_file, args=args)
         config_json = json.dumps(service_configs)
@@ -130,24 +131,13 @@ def _build_env_dicts(
 
 def _handle_deploy_create(
     ctx: typer.Context,
-    pipeline: str,
-    endpoint: str,
-    name: t.Optional[str] = None,
-    config_file: t.Optional[typer.FileText] = None,
-    wait: bool = True,
-    timeout: int = 3600,
-    envs: t.Optional[t.List[str]] = None,
-    envs_from_secret: t.Optional[t.List[str]] = None,
-    target: str = DeploymentTargetType.KUBERNETES.value,
-    dev: bool = False,
-    env_secrets_name: t.Optional[str] = "dynamo-env-secrets",
+    config: DeploymentConfig,
 ) -> DeploymentResponse:
     """Handle deployment creation. This is a helper function for the create and deploy commands.
 
     Args:
         ctx: typer context
-        pipeline: pipeline to deploy
-        name: name of the deployment
+        config: DeploymentConfig object
     """
 
     from dynamo.sdk.cli.utils import configure_target_environment
@@ -156,20 +146,21 @@ def _handle_deploy_create(
     # TODO: hardcoding this is a hack to get the services for the deployment
     # we should find a better way to do this once build is finished/generic
     configure_target_environment(TargetEnum.DYNAMO)
-    entry_service = load_entry_service(pipeline)
+    entry_service = load_entry_service(config.pipeline)
 
-    deployment_manager = get_deployment_manager(target, endpoint)
+    deployment_manager = get_deployment_manager(config.target, config.endpoint)
     env_dicts = _build_env_dicts(
-        config_file=config_file,
+        config_file=config.config_file,
         args=ctx.args,
-        envs=envs,
-        envs_from_secret=envs_from_secret,
-        env_secrets_name=env_secrets_name,
+        envs=config.envs,
+        envs_from_secret=config.envs_from_secret,
+        env_secrets_name=config.env_secrets_name,
     )
     deployment = Deployment(
-        name=name or (pipeline if pipeline else "unnamed-deployment"),
+        name=config.name
+        or (config.pipeline if config.pipeline else "unnamed-deployment"),
         namespace="default",
-        pipeline=pipeline,
+        pipeline=config.pipeline,
         entry_service=entry_service,
         envs=env_dicts,
     )
@@ -177,24 +168,24 @@ def _handle_deploy_create(
         console.print("[bold green]Creating deployment...")
         deployment = deployment_manager.create_deployment(
             deployment,
-            dev=dev,
+            dev=config.dev,
         )
-        console.print(f"[bold green]Deployment '{name}' created.")
-        if wait:
+        console.print(f"[bold green]Deployment '{config.name}' created.")
+        if config.wait:
             deployment, ready = deployment_manager.wait_until_ready(
-                name, timeout=timeout
+                config.name, timeout=config.timeout
             )
             if ready:
                 console.print(
                     Panel(
-                        f"Deployment [bold]{name}[/] is [green]ready[/]",
+                        f"Deployment [bold]{config.name}[/] is [green]ready[/]",
                         title="Status",
                     )
                 )
             else:
                 console.print(
                     Panel(
-                        f"Deployment [bold]{name}[/] did not become ready in time.",
+                        f"Deployment [bold]{config.name}[/] did not become ready in time.",
                         title="Status",
                         style="red",
                     )
@@ -207,7 +198,7 @@ def _handle_deploy_create(
             if status == 409:
                 console.print(
                     Panel(
-                        f"Cannot create deployment because deployment with name '{name}' already exists.",
+                        f"Cannot create deployment because deployment with name '{config.name}' already exists.",
                         title="Error",
                         style="red",
                     )
@@ -279,20 +270,20 @@ def create(
     ),
 ) -> DeploymentResponse:
     """Create a deployment on Dynamo Cloud."""
-    return _handle_deploy_create(
-        ctx=ctx,
+    config = DeploymentConfig(
         pipeline=pipeline,
+        endpoint=endpoint,
         name=name,
         config_file=config_file,
         wait=wait,
         timeout=timeout,
-        endpoint=endpoint,
         envs=envs,
         envs_from_secret=envs_from_secret,
         target=target,
         dev=dev,
         env_secrets_name=env_secrets_name,
     )
+    return _handle_deploy_create(ctx, config)
 
 
 @app.command()
@@ -492,7 +483,7 @@ def delete(
             )
     except Exception as e:
         if isinstance(e, RuntimeError) and isinstance(e.args[0], tuple):
-            status, msg, url = e.args[0]
+            status, msg, _ = e.args[0]
             if status == 404:
                 console.print(
                     Panel(
@@ -555,17 +546,17 @@ def deploy(
     ),
 ) -> DeploymentResponse:
     """Deploy a Dynamo pipeline (same as deployment create)."""
-    return _handle_deploy_create(
-        ctx=ctx,
+    config = DeploymentConfig(
         pipeline=pipeline,
+        endpoint=endpoint,
         name=name,
         config_file=config_file,
         wait=wait,
         timeout=timeout,
-        endpoint=endpoint,
         envs=envs,
         envs_from_secret=envs_from_secret,
         target=target,
         dev=dev,
         env_secrets_name=env_secrets_name,
     )
+    return _handle_deploy_create(ctx, config)
