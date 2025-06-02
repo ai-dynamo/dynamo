@@ -76,7 +76,8 @@ RUN apt-get update -y && \
 # by UCX to find RDMA devices
 RUN apt-get update -y && \
     apt-get install -y   \
-    --reinstall libibverbs-dev rdma-core ibverbs-utils libibumad-dev
+    --reinstall libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
+    libnuma-dev librdmacm-dev ibverbs-providers
 
 ARG UCX_EFA=3842a65f02a8e2f3635a66189cd82dc86bf065c2
 ARG UCX_REF=v1.19.x
