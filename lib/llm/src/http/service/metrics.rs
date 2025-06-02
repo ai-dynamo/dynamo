@@ -48,8 +48,8 @@ pub struct InflightGuard {
     // we use is_first_token to distinguish TTFT from ITL. It is false by default and
     // flip to true when the first token is returned and TTFT is published.
     is_first_token: bool,
-    // we track the last response time so that ITL for the newly returned tokens can 
-    // be computed. 
+    // we track the last response time so that ITL for the newly returned tokens can
+    // be computed.
     last_response_time: Option<Duration>,
     osl: usize,
 }
