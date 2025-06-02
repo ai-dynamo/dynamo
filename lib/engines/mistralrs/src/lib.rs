@@ -318,11 +318,13 @@ impl
                     .max_completion_tokens
                     .or(request.inner.max_tokens)
                     .map(|m| m as usize);
-                
+
                 // Ensure max_len doesn't exceed context length
                 match requested_max_tokens {
                     Some(max_tokens) => Some(std::cmp::min(max_tokens, self.context_length)),
-                    None => det.max_len.map(|len| std::cmp::min(len, self.context_length))
+                    None => det
+                        .max_len
+                        .map(|len| std::cmp::min(len, self.context_length)),
                 }
             },
             logits_bias: request
@@ -514,11 +516,13 @@ impl AsyncEngine<SingleIn<CompletionRequest>, ManyOut<Annotated<CompletionRespon
                     .max_tokens
                     .or(request.inner.max_tokens)
                     .map(|m| m as usize);
-                
+
                 // Ensure max_len doesn't exceed context length
                 match requested_max_tokens {
                     Some(max_tokens) => Some(std::cmp::min(max_tokens, self.context_length)),
-                    None => det.max_len.map(|len| std::cmp::min(len, self.context_length))
+                    None => det
+                        .max_len
+                        .map(|len| std::cmp::min(len, self.context_length)),
                 }
             },
             logits_bias: request
