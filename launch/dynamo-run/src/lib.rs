@@ -116,9 +116,9 @@ pub async fn run(
 
     let out_opt = out_opt.unwrap_or_else(|| {
         let default_engine = if card.is_gguf() {
-            Output::LlamaCpp
+            gguf_default()
         } else {
-            Output::MistralRs
+            safetensors_default()
         };
         tracing::info!(
             "Using default engine: {default_engine}. Use out=<engine> to specify one of {}",
@@ -400,3 +400,22 @@ fn print_cuda(output: &Output) {
 
 #[cfg(not(any(feature = "mistralrs", feature = "llamacpp")))]
 fn print_cuda(_output: &Output) {}
+
+fn gguf_default() -> Output {
+    #[cfg(feature = "llamacpp")]
+    return Output::LlamaCpp;
+
+    #[cfg(all(feature = "mistralrs", not(feature = "llamacpp")))]
+    return Output::MistralRs;
+
+    #[cfg(not(any(feature = "mistralrs", feature = "llamacpp")))]
+    return Output::EchoFull;
+}
+
+fn safetensors_default() -> Output {
+    #[cfg(feature = "mistralrs")]
+    return Output::MistralRs;
+
+    #[cfg(not(feature = "mistralrs"))]
+    return Output::EchoFull;
+}
