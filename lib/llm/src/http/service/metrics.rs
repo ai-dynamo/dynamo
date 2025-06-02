@@ -291,10 +291,7 @@ impl Metrics {
     }
 
     /// Create a new [`ResponseMetricCollector`] for collecting per-response metrics (i.e., TTFT, ITL)
-    pub fn create_response_collector(
-        self: Arc<Self>,
-        model: &str,
-    ) -> ResponseMetricCollector {
+    pub fn create_response_collector(self: Arc<Self>, model: &str) -> ResponseMetricCollector {
         ResponseMetricCollector::new(self, model.to_string().to_lowercase())
     }
 }

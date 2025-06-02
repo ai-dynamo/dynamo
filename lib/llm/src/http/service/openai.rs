@@ -152,11 +152,10 @@ async fn completions(
         .get_completions_engine(model)
         .map_err(|_| ErrorResponse::model_not_found())?;
 
-    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        model,
-        Endpoint::Completions,
-        streaming,
-    );
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(model, Endpoint::Completions, streaming);
 
     let response_collector = state.metrics_clone().create_response_collector(model);
 
@@ -275,11 +274,10 @@ async fn chat_completions(
         .map_err(|_| ErrorResponse::model_not_found())?;
 
     // Create separate guards - no Arc/Mutex needed
-    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        model,
-        Endpoint::ChatCompletions,
-        streaming,
-    );
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(model, Endpoint::ChatCompletions, streaming);
 
     let response_collector = state.metrics_clone().create_response_collector(model);
 
@@ -410,7 +408,7 @@ async fn monitor_for_disconnects(
         Box<dyn Stream<Item = Result<axum::response::sse::Event, axum::Error>> + std::marker::Send>,
     >,
     context: Arc<dyn AsyncEngineContext>,
-    mut inflight_guard: InflightGuard, 
+    mut inflight_guard: InflightGuard,
 ) -> ReceiverStream<Result<Event, axum::Error>> {
     let (tx, rx) = tokio::sync::mpsc::channel(8);
 
