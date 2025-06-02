@@ -34,5 +34,7 @@ kv_cache_config:
   free_gpu_memory_fraction: 0.95
 
 pytorch_backend_config:
-  enable_overlap_scheduler: true
+  # NOTE: overlap_scheduler enabled by default since this commit and changed
+  # config field from 'enable_overlap_scheduler' to 'disable_overlap_scheduler':
+  # https://github.com/NVIDIA/TensorRT-LLM/commit/b4e5df0ee0024eda3eeb83a6ba822245a30ab428
   use_cuda_graph: true

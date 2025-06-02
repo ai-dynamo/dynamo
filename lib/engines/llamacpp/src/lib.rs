@@ -4,7 +4,7 @@
 use std::{
     num::NonZeroU32,
     path::Path,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, Once, OnceLock},
 };
 
 use async_stream::stream;
@@ -20,6 +20,7 @@ use llama_cpp_2::{
     model::{params::LlamaModelParams, LlamaModel},
     sampling::LlamaSampler,
     token::LlamaToken,
+    LogOptions,
 };
 
 use dynamo_llm::protocols::common::llm_backend::{BackendInput, LLMEngineOutput};
@@ -35,6 +36,8 @@ pub(crate) static LLAMA_MODEL: tokio::sync::OnceCell<LlamaModel> =
 const NUM_CONTEXTS: usize = 3;
 static LLAMA_CONTEXTS: [OnceLock<Mutex<ContextWrapper>>; NUM_CONTEXTS] =
     [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+
+static LLAMA_CPP_LOG_REDIRECT: Once = Once::new();
 
 // Newtype to simplify LlamaContext lifetime
 #[derive(Debug)]
@@ -66,6 +69,9 @@ impl LlamacppEngine {
         cancel_token: CancellationToken,
         model_config: &LocalModel,
     ) -> pipeline_error::Result<Self> {
+        LLAMA_CPP_LOG_REDIRECT.call_once(|| {
+            llama_cpp_2::send_logs_to_tracing(LogOptions::default().with_logs_enabled(true));
+        });
         let backend = LlamaBackend::init()?;
         let model = load_model(&backend, model_config.path())?;
         LLAMA_MODEL.set(model)?;

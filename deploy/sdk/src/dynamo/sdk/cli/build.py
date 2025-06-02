@@ -101,7 +101,7 @@ class ServiceConfig(BaseModel):
     service: str = ""  # Fully qualified service name
     models: t.List[str] = Field(default_factory=list)
     dependencies: t.List[str] = Field(default_factory=list)
-    resource: t.Dict[str, t.Any] = Field(default_factory=dict)
+    resources: t.Dict[str, t.Any] = Field(default_factory=dict)
     workers: t.Optional[int] = None
     image: str = "dynamo:latest"
     dynamo: t.Dict[str, t.Any] = Field(default_factory=dict)
@@ -138,7 +138,7 @@ class ServiceInfo(BaseModel):
         config = ServiceConfig(
             name=name,
             service="",
-            resource=service.config.resources.model_dump(),
+            resources=service.config.resources.model_dump(),
             workers=service.config.workers,
             image=image,
             dynamo=service.config.dynamo.model_dump(),
@@ -212,7 +212,7 @@ class ManifestInfo(BaseModel):
                 "name": service["name"],
                 "service": service["config"]["service"],
                 "config": {
-                    "resource": service["config"]["resource"],
+                    "resources": service["config"]["resources"],
                     "workers": service["config"]["workers"],
                     "image": service["config"]["image"],
                     "dynamo": service["config"]["dynamo"],
