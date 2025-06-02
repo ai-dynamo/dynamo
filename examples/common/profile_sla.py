@@ -352,7 +352,9 @@ def get_gap_result(artifact_dir: str) -> dict:
             json_file_path = os.path.join(root, "profile_export_genai_perf.json")
             break
     if json_file_path is None:
-        raise FileNotFoundError(f"profile_export_genai_perf.json not found in {artifact_dir}")
+        raise FileNotFoundError(
+            f"profile_export_genai_perf.json not found in {artifact_dir}"
+        )
     with open(json_file_path, "r") as f:
         return json.load(f)
 
@@ -488,12 +490,16 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.example_dir is None:
-        logger.info("Example directory not provided, inferring from config file location...")
+        logger.info(
+            "Example directory not provided, inferring from config file location..."
+        )
         try:
             args.example_dir = os.path.dirname(os.path.dirname(args.config))
-        except Exception as e:
-            logger.error(f"Failed to infer example directory, please provide explicitly using --example-dir <path-to-example-dir>")
-            exit(1)            
+        except Exception:
+            logger.error(
+                "Failed to infer example directory, please provide explicitly using --example-dir <path-to-example-dir>"
+            )
+            exit(1)
 
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
@@ -744,11 +750,11 @@ if __name__ == "__main__":
     prefill_config = set_config_tp_size(prefill_config, tp_size)
     logger.info(f"Dynamo config: {prefill_config}")
 
-    work_dir = f"{args.output_dir}/prefill_tp{tp_size}_interpolation"
+    work_dir = f"{args.output_dir}/selected_prefill_interpolation"
     os.makedirs(work_dir, exist_ok=True)
 
     prefill_config_fn = f"{work_dir}/config.yaml"
-    
+
     dynamo_log_fn = f"{work_dir}/dynamo.log"
     with open(prefill_config_fn, "w") as f:
         yaml.dump(prefill_config, f)
@@ -795,6 +801,14 @@ if __name__ == "__main__":
         prefill_isl_np = np.array(prefill_isl)
         prefill_ttft_np = np.array(prefill_ttft)
         prefill_thpt_per_gpu_np = np.array(prefill_thpt_per_gpu)
+
+        save_path = f"{work_dir}/raw_data.npz"
+        np.savez(
+            save_path,
+            prefill_isl=prefill_isl_np,
+            prefill_ttft=prefill_ttft_np,
+            prefill_thpt_per_gpu=prefill_thpt_per_gpu_np,
+        )
 
         # Fit quadratic functions
         ttft_coeffs = np.polyfit(prefill_isl_np, prefill_ttft_np, 2)
@@ -869,7 +883,7 @@ if __name__ == "__main__":
     decode_config = set_config_tp_size(decode_config, best_decode_tp)
     logger.info(f"Dynamo config: {decode_config}")
 
-    work_dir = f"{args.output_dir}/decode_tp{best_decode_tp}_interpolation"
+    work_dir = f"{args.output_dir}/selected_decode_interpolation"
     os.makedirs(work_dir, exist_ok=True)
 
     decode_config_fn = f"{work_dir}/config.yaml"
@@ -928,7 +942,7 @@ if __name__ == "__main__":
         shutdown_deployment(dynamo_process)
 
         # Save the data points to a .npz file
-        save_path = f"{work_dir}/decode_tp{tp_size}_data.npz"
+        save_path = f"{work_dir}/raw_data.npz"
         np.savez(
             save_path,
             x_kv_usage=np.array(x_kv_usage),
