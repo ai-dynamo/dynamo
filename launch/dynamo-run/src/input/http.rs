@@ -32,6 +32,7 @@ pub async fn run(
         .port(flags.http_port)
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
+        .enable_embeddings_endpoints(true)
         .with_request_template(template)
         .build()?;
     match engine_config {

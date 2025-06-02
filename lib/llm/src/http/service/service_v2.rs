@@ -75,7 +75,7 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_cmpl_endpoints: bool,
 
-    #[builder(default = "false")]
+    #[builder(default = "true")]
     enable_embeddings_endpoints: bool,
 
     #[builder(default = "None")]
