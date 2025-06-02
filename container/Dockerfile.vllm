@@ -281,8 +281,8 @@ FROM base AS local-dev
 
 # Don't want ubuntu to be editable, just change uid and gid. User ubuntu is hardcoded in .devcontainer
 ENV USERNAME=ubuntu
-ARG USER_UID=361890967
-ARG USER_GID=361890967
+ARG USER_UID=1000
+ARG USER_GID=1000
 
 RUN apt-get update && apt-get install -y sudo gnupg2 gnupg1 \
     && echo "$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
@@ -377,12 +377,6 @@ RUN cargo build \
 	--locked \
 	--features dynamo-llm/block-manager \
 	--workspace
-
-# Create symlinks for wheel building
-RUN mkdir -p /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/ && \
-    ln -sf /workspace/target/release/dynamo-run /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/dynamo-run && \
-    ln -sf /workspace/target/release/http /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/http && \
-    ln -sf /workspace/target/release/llmctl /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/llmctl
 
 # Build dynamo wheel
 RUN uv build --wheel --out-dir /workspace/dist && \
