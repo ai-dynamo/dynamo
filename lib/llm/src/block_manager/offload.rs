@@ -137,7 +137,11 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             this.host.clone(),
             device_offload_rx,
             Arc::new(TransferBatcher::new(
-                CudaTransferManager::new(device_offload_transfer_ctx, MAX_CONCURRENT_TRANSFERS),
+                CudaTransferManager::new(
+                    device_offload_transfer_ctx,
+                    MAX_CONCURRENT_TRANSFERS,
+                    cancellation_token.clone(),
+                ),
                 MAX_TRANSFER_BATCH_SIZE,
                 &async_rt_handle,
                 cancellation_token.clone(),
@@ -187,7 +191,11 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             this.device.clone(),
             host_onboard_rx,
             Arc::new(TransferBatcher::new(
-                CudaTransferManager::new(transfer_ctx.clone(), MAX_CONCURRENT_TRANSFERS),
+                CudaTransferManager::new(
+                    transfer_ctx.clone(),
+                    MAX_CONCURRENT_TRANSFERS,
+                    cancellation_token.clone(),
+                ),
                 MAX_TRANSFER_BATCH_SIZE,
                 &async_rt_handle,
                 cancellation_token.clone(),
@@ -332,7 +340,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let target_pool = target_pool.as_ref().unwrap();
         loop {
             tokio::select! {
-                _ = cancellation_token.cancelled() => Ok::<(), anyhow::Error>(()),
+                _ = cancellation_token.cancelled() => return Ok::<(), anyhow::Error>(()),
                 Some(request) = onboard_rx.recv() => {
                     // Try to allocate blocks on the device.
                     let target_blocks = match target_pool.allocate_blocks(request.blocks.len()).await {
@@ -358,7 +366,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                         ))
                         .await?;
 
-                    Ok(())
+                    Ok::<(), anyhow::Error>(())
                 }
             }?;
         }

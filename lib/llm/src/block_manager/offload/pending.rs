@@ -157,7 +157,11 @@ pub struct CudaTransferManager<Source: Storage, Target: Storage, Metadata: Block
 impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
     CudaTransferManager<Source, Target, Metadata>
 {
-    pub fn new(transfer_ctx: Arc<TransferContext>, max_concurrent_transfers: usize) -> Self {
+    pub fn new(
+        transfer_ctx: Arc<TransferContext>,
+        max_concurrent_transfers: usize,
+        cancellation_token: CancellationToken,
+    ) -> Self {
         let (tx, mut rx) = mpsc::channel::<(PendingTransfer<Source, Target, Metadata>, CudaEvent)>(
             max_concurrent_transfers,
         );
@@ -174,6 +178,12 @@ impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
                         // This is not a problem, so we can just ignore it.
                         tracing::warn!("Error handling transfer completion: {:?}", e);
                     }
+                }
+
+                // Flush any remaining transfers.
+                if cancellation_token.is_cancelled() {
+                    while rx.blocking_recv().is_some() {}
+                    break;
                 }
             }
             Ok::<(), anyhow::Error>(())
@@ -249,6 +259,8 @@ impl DiskTransferManager {
                 tokio::select! {
 
                     _ = cancellation_token.cancelled() => {
+                        // Flush remaining transfers.
+                        while (pending_transfers.next().await).is_some() {}
                         return;
                     }
 
