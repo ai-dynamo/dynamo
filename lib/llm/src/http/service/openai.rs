@@ -273,7 +273,6 @@ async fn chat_completions(
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorResponse::model_not_found())?;
 
-    // Create separate guards - no Arc/Mutex needed
     let mut inflight_guard =
         state
             .metrics_clone()
@@ -429,7 +428,7 @@ async fn monitor_for_disconnects(
 
         // Stream completed successfully - mark as ok
         if tx.send(Ok(Event::default().data("[DONE]"))).await.is_ok() {
-            inflight_guard.mark_ok(); // Direct call, no mutex
+            inflight_guard.mark_ok();
         }
     });
 
@@ -446,7 +445,7 @@ impl<T> From<Annotated<T>> for EventConverter<T> {
 
 fn process_event_converter<T: Serialize>(
     annotated: EventConverter<T>,
-    response_collector: &mut ResponseMetricCollector, // Direct reference, no Arc/Mutex
+    response_collector: &mut ResponseMetricCollector,
 ) -> Result<Event, axum::Error> {
     let annotated = annotated.0;
 
@@ -466,7 +465,6 @@ fn process_event_converter<T: Serialize>(
         event = event.event(msg);
     }
 
-    // Use response_collector directly - no mutex needed
     if let Some(osl) = annotated.output_tokens {
         response_collector.observe_current_osl(osl);
     }
