@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 Common:
-  model: /lustre/share/coreai_dlalgo_ci/artifacts/model/deepseek-r1_pyt/safetensors_mode-instruct/hf-5dde110-nim_fp8
+  model: deepseek-ai/DeepSeek-R1
   served_model_name: deepseek-ai/DeepSeek-R1
 
 Frontend:
