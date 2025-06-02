@@ -15,6 +15,7 @@
 
 use crate::tokens::Token;
 use serde::{Deserialize, Serialize};
+use super::indexer::WorkerId;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RouterRequest {
@@ -39,22 +40,102 @@ pub struct WorkerSelectionResult {
     pub overlap_blocks: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+// #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+// pub struct ForwardPassMetrics {
+//     // https://lmsys.org/blog/2024-12-04-sglang-v0-4/#data-parallelism-attention-for-deepseek-models
+//     // Data parallel ranks are semi-independent, so we need to track metrics at the DP level
+//     pub data_parallel_rank: Option<u32>, // Optional for backwards compatibility
+//     pub request_active_slots: u64,
+//     pub request_total_slots: u64,
+//     pub kv_active_blocks: u64,
+//     pub kv_total_blocks: u64,
+//     // integer from 0 to large number
+//     pub num_requests_waiting: u64,
+//     // percentage represented as a float from 0 to 1
+//     pub gpu_cache_usage_perc: f32,
+//     // percentage represented as a float from 0 to 1
+//     pub gpu_prefix_cache_hit_rate: f32,
+}
+
+pub struct WorkerMetrics {
+    pub metadata: WorkerMetadata,
+    pub request: RequestMetrics,
+    pub forward_pass: ForwardPassMetrics,
+    pub kv_cache: KvCacheMetrics,
+    pub gpu: GpuMetrics,
+}
+
+#[allow(non_camel_case_types)]
+pub enum Framework {
+    trtllm,
+    vllm,
+    sglang
+}
+
+pub struct WorkerMetadata {
+    pub framework: Framework,
+    pub worker_id: WorkerId,
+    pub data_parallel_rank: Option<u32>,
+}
+
+pub struct RequestMetrics {
+    // Measurement over time interval
+    interval: u64, // should be able to change this live ...
+
+    avg_ttft: f32,
+    p95_ttft: f32,
+    p90_ttft: f32,
+    p50_ttft: f32,
+
+    avg_itl: f32,
+    p95_itl: f32,
+    p90_itl: f32,
+    p50_itl: f32,
+
+    avg_isl: u64,
+    p95_isl: u64,
+    p90_isl: u64,
+    p50_isl: u64,
+
+    avg_osl: u64,
+    p95_osl: u64,
+    p90_osl: u64,
+    p50_osl: u64,
+
+    avg_e2e_latency: f32,
+    p95_avg_e2e_latency: f32,
+    p90_avg_e2e_latency: f32,
+    p50_avg_e2e_latency: f32,
+}
+
 pub struct ForwardPassMetrics {
-    // https://lmsys.org/blog/2024-12-04-sglang-v0-4/#data-parallelism-attention-for-deepseek-models
-    // Data parallel ranks are semi-independent, so we need to track metrics at the DP level
-    pub data_parallel_rank: Option<u32>, // Optional for backwards compatibility
-    pub request_active_slots: u64,
-    pub request_total_slots: u64,
+    // Point in time measurements, emitted every forward pass
+
+    pub num_running_reqs: u64,
+    pub num_waiting_reqs: u64,
+    pub num_preemted_reqs: u64,
+    pub num_generation_toks: u64,
+}
+
+pub struct KvCacheMetrics {
+    // point in time measurements
     pub kv_active_blocks: u64,
     pub kv_total_blocks: u64,
-    // integer from 0 to large number
-    pub num_requests_waiting: u64,
-    // percentage represented as a float from 0 to 1
-    pub gpu_cache_usage_perc: f32,
-    // percentage represented as a float from 0 to 1
     pub gpu_prefix_cache_hit_rate: f32,
+    pub gpu_cache_usage_perc: f32,
 }
+
+pub struct GpuMetrics {
+    // point in time measurements
+    // Average over num_gpus
+    pub num_gpus: usize,
+    pub avg_utilization: f32,
+    pub avg_watts: u32,
+    pub avg_memory: u32, //mb
+}
+
+
+// What do I want my users experience to be?
 
 /// A [`LocalBlockHash`] is a hash computed from the tokens_ids, extra_token_ids and the optional
 /// lora_id of a block.
