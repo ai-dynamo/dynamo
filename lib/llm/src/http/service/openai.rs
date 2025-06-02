@@ -16,14 +16,14 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
     error::HttpError,
-    metrics::{Endpoint, InflightGuard},
+    metrics::{Endpoint, InflightGuard, ResponseMetricCollector},
     service_v2, RouteDoc,
 };
 
@@ -152,12 +152,13 @@ async fn completions(
         .get_completions_engine(model)
         .map_err(|_| ErrorResponse::model_not_found())?;
 
-    // this will increment the inflight gauge for the model
-    let inflight = Arc::new(Mutex::new(state.metrics_clone().create_inflight_guard(
+    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
         model,
         Endpoint::Completions,
         streaming,
-    )));
+    );
+
+    let response_collector = state.metrics_clone().create_response_collector(model);
 
     // setup context
     // todo - inherit request_id from distributed trace details
@@ -176,11 +177,11 @@ async fn completions(
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
-        let inflight_clone = inflight.clone();
+        let mut response_collector = response_collector; // Make it mutable
         let stream = stream.map(move |response| {
-            process_event_converter(EventConverter::from(response), &inflight_clone)
+            process_event_converter(EventConverter::from(response), &mut response_collector)
         });
-        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight).await;
+        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight_guard).await;
 
         let mut sse_stream = Sse::new(stream);
 
@@ -201,7 +202,7 @@ async fn completions(
                 ErrorResponse::internal_server_error("Failed to fold completions stream")
             })?;
 
-        inflight.lock().unwrap().mark_ok();
+        inflight_guard.mark_ok();
         Ok(Json(response).into_response())
     }
 }
@@ -273,12 +274,14 @@ async fn chat_completions(
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorResponse::model_not_found())?;
 
-    // this will increment the inflight gauge for the model
-    let inflight = Arc::new(Mutex::new(state.metrics_clone().create_inflight_guard(
+    // Create separate guards - no Arc/Mutex needed
+    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
         model,
         Endpoint::ChatCompletions,
         streaming,
-    )));
+    );
+
+    let response_collector = state.metrics_clone().create_response_collector(model);
 
     // setup context
     // todo - inherit request_id from distributed trace details
@@ -299,11 +302,11 @@ async fn chat_completions(
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
-        let inflight_clone = inflight.clone();
+        let mut response_collector = response_collector; // Make it mutable
         let stream = stream.map(move |response| {
-            process_event_converter(EventConverter::from(response), &inflight_clone)
+            process_event_converter(EventConverter::from(response), &mut response_collector)
         });
-        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight).await;
+        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight_guard).await;
 
         let mut sse_stream = Sse::new(stream);
 
@@ -327,7 +330,7 @@ async fn chat_completions(
                 ))
             })?;
 
-        inflight.lock().unwrap().mark_ok();
+        inflight_guard.mark_ok();
         Ok(Json(response).into_response())
     }
 }
@@ -407,7 +410,7 @@ async fn monitor_for_disconnects(
         Box<dyn Stream<Item = Result<axum::response::sse::Event, axum::Error>> + std::marker::Send>,
     >,
     context: Arc<dyn AsyncEngineContext>,
-    inflight: Arc<Mutex<InflightGuard>>,
+    mut inflight_guard: InflightGuard, 
 ) -> ReceiverStream<Result<Event, axum::Error>> {
     let (tx, rx) = tokio::sync::mpsc::channel(8);
 
@@ -426,10 +429,9 @@ async fn monitor_for_disconnects(
             }
         }
 
-        // the stream completed successfully - mark as ok
-        // this will increment the request counter with an "success" status
+        // Stream completed successfully - mark as ok
         if tx.send(Ok(Event::default().data("[DONE]"))).await.is_ok() {
-            inflight.lock().unwrap().mark_ok();
+            inflight_guard.mark_ok(); // Direct call, no mutex
         }
     });
 
@@ -446,7 +448,7 @@ impl<T> From<Annotated<T>> for EventConverter<T> {
 
 fn process_event_converter<T: Serialize>(
     annotated: EventConverter<T>,
-    inflight_guard: &Arc<Mutex<InflightGuard>>,
+    response_collector: &mut ResponseMetricCollector, // Direct reference, no Arc/Mutex
 ) -> Result<Event, axum::Error> {
     let annotated = annotated.0;
 
@@ -466,16 +468,14 @@ fn process_event_converter<T: Serialize>(
         event = event.event(msg);
     }
 
-    {
-        let mut inflight_guard = inflight_guard.lock().unwrap();
-        if let Some(osl) = annotated.output_tokens {
-            inflight_guard.observe_current_osl(osl);
-        }
+    // Use response_collector directly - no mutex needed
+    if let Some(osl) = annotated.output_tokens {
+        response_collector.observe_current_osl(osl);
+    }
 
-        if let Some(isl) = annotated.input_tokens {
-            if let Some(chunk_tokens) = annotated.chunk_tokens {
-                inflight_guard.observe_response(isl, chunk_tokens);
-            }
+    if let Some(isl) = annotated.input_tokens {
+        if let Some(chunk_tokens) = annotated.chunk_tokens {
+            response_collector.observe_response(isl, chunk_tokens);
         }
     }
 

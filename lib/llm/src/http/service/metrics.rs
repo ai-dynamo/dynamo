@@ -45,13 +45,6 @@ pub struct InflightGuard {
     request_type: RequestType,
     status: Status,
     timer: Instant,
-    // we use is_first_token to distinguish TTFT from ITL. It is true by default and
-    // flipped to false when the first token is returned and TTFT is published.
-    is_first_token: bool,
-    // we track the last response time so that ITL for the newly returned tokens can
-    // be computed.
-    last_response_time: Option<Duration>,
-    osl: usize,
 }
 
 /// Requests will be logged by the type of endpoint hit
@@ -80,6 +73,20 @@ pub enum RequestType {
 pub enum Status {
     Success,
     Error,
+}
+
+/// Track response-specific metrics
+pub struct ResponseMetricCollector {
+    metrics: Arc<Metrics>,
+    model: String,
+    start_time: Instant,
+    // we use is_first_token to distinguish TTFT from ITL. It is true by default and
+    // flipped to false when the first token is returned and TTFT is published.
+    is_first_token: bool,
+    // we track the last response time so that ITL for the newly returned tokens can
+    // be computed.
+    last_response_time: Option<Duration>,
+    osl: usize,
 }
 
 impl Default for Metrics {
@@ -282,6 +289,14 @@ impl Metrics {
             request_type,
         )
     }
+
+    /// Create a new [`ResponseMetricCollector`] for collecting per-response metrics (i.e., TTFT, ITL)
+    pub fn create_response_collector(
+        self: Arc<Self>,
+        model: &str,
+    ) -> ResponseMetricCollector {
+        ResponseMetricCollector::new(self, model.to_string().to_lowercase())
+    }
 }
 
 impl InflightGuard {
@@ -305,63 +320,11 @@ impl InflightGuard {
             request_type,
             status: Status::Error,
             timer,
-            is_first_token: true,
-            last_response_time: None,
-            osl: 0,
         }
     }
 
     pub(crate) fn mark_ok(&mut self) {
         self.status = Status::Success;
-        self.metrics
-            .output_sequence_length
-            .with_label_values(&[&self.model])
-            .observe(self.osl as f64);
-    }
-
-    pub(crate) fn observe_current_osl(&mut self, osl: usize) {
-        self.osl = osl;
-    }
-
-    pub(crate) fn observe_response(&mut self, isl: usize, num_tokens: usize) {
-        if num_tokens == 0 {
-            return;
-        }
-
-        if self.is_first_token {
-            // NOTE: when there are multiple tokens in the first response,
-            // we use the full response time as TTFT and ignore the ITL
-            self.is_first_token = false;
-
-            // Publish TTFT
-            let ttft = self.timer.elapsed().as_secs_f64();
-            self.metrics
-                .time_to_first_token
-                .with_label_values(&[&self.model])
-                .observe(ttft);
-
-            // Publish ISL
-            // TODO: publish ISL as soon as the tokenization process completes
-            self.metrics
-                .input_sequence_length
-                .with_label_values(&[&self.model])
-                .observe(isl as f64);
-        }
-
-        let current_duration = self.timer.elapsed();
-
-        if let Some(last_response_time) = self.last_response_time {
-            let response_duration = current_duration - last_response_time;
-            let itl = response_duration.as_secs_f64() / num_tokens as f64;
-            for _ in 0..num_tokens {
-                self.metrics
-                    .inter_token_latency
-                    .with_label_values(&[&self.model])
-                    .observe(itl);
-            }
-        }
-
-        self.last_response_time = Some(current_duration);
     }
 }
 
@@ -423,6 +386,76 @@ impl Status {
             Status::Success => REQUEST_STATUS_SUCCESS,
             Status::Error => REQUEST_STATUS_ERROR,
         }
+    }
+}
+
+impl ResponseMetricCollector {
+    fn new(metrics: Arc<Metrics>, model: String) -> Self {
+        ResponseMetricCollector {
+            metrics,
+            model,
+            is_first_token: true,
+            last_response_time: None,
+            start_time: Instant::now(),
+            osl: 0,
+        }
+    }
+
+    /// Observe the current output sequence length
+    pub fn observe_current_osl(&mut self, osl: usize) {
+        self.osl = osl;
+    }
+
+    /// Observe a response with input sequence length and number of new tokens
+    pub fn observe_response(&mut self, isl: usize, num_tokens: usize) {
+        if num_tokens == 0 {
+            return;
+        }
+
+        if self.is_first_token {
+            // NOTE: when there are multiple tokens in the first response,
+            // we use the full response time as TTFT and ignore the ITL
+            self.is_first_token = false;
+
+            // Publish TTFT
+            let ttft = self.start_time.elapsed().as_secs_f64();
+            self.metrics
+                .time_to_first_token
+                .with_label_values(&[&self.model])
+                .observe(ttft);
+
+            // Publish ISL
+            // TODO: publish ISL as soon as the tokenization process completes
+            self.metrics
+                .input_sequence_length
+                .with_label_values(&[&self.model])
+                .observe(isl as f64);
+        }
+
+        let current_duration = self.start_time.elapsed();
+
+        if let Some(last_response_time) = self.last_response_time {
+            let response_duration = current_duration - last_response_time;
+            let itl = response_duration.as_secs_f64() / num_tokens as f64;
+            for _ in 0..num_tokens {
+                self.metrics
+                    .inter_token_latency
+                    .with_label_values(&[&self.model])
+                    .observe(itl);
+            }
+        }
+
+        self.last_response_time = Some(current_duration);
+    }
+}
+
+impl Drop for ResponseMetricCollector {
+    fn drop(&mut self) {
+        // Publish final OSL when the collector is dropped
+        self.metrics
+            .output_sequence_length
+            .with_label_values(&[&self.model])
+            .observe(self.osl as f64);
     }
 }
 
