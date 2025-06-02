@@ -87,7 +87,7 @@ def add_fastapi_routes(app, service, class_instance):
     return added_routes
 
 
-app = typer.Typer()
+app = typer.Typer(pretty_exceptions_enable=False)
 
 
 @app.command()
@@ -207,6 +207,8 @@ def main(
             dynamo_context["component"] = component
             dynamo_context["endpoints"] = endpoints
             class_instance = service.inner()
+            # signal that class_instance (and its setup) is done
+            instanceReady.set()
             dynamo_handlers = []
             for name, endpoint in dynamo_endpoints.items():
                 if DynamoTransport.DEFAULT in endpoint.transports:
@@ -234,8 +236,6 @@ def main(
             logger.info(
                 f"Starting {service.name} instance with all registered endpoints"
             )
-            # signal that class_instance (and its setup) is done
-            instanceReady.set()
             # Launch serve_endpoint for all endpoints concurrently
             tasks = [
                 endpoint.serve_endpoint(handler)

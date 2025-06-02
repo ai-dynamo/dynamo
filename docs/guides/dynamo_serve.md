@@ -77,7 +77,7 @@ The `.link()` method is useful for:
 
 ## Deploying the inference graph
 
-Once you've defined your inference graph and its configuration, deploy it locally using the `dynamo serve` command. We recommend running the `--dry-run` command to see what arguments will be pasesd into your final graph.
+Once you've defined your inference graph and its configuration, deploy it locally using the `dynamo serve` command. We recommend running the `--dry-run` command to see what arguments will be passed into your final graph.
 
 Consider the following example.
 
@@ -129,7 +129,7 @@ class VllmWorker:
     ...
 ```
 
-Note that our prebuilt components have the maximal set of dependancies needed to run the component, which allows you to plug different components into the same graph to create different architectures. When writing your own components, you can be as flexible as you like.
+Note that our prebuilt components have the maximal set of dependencies needed to run the component, which allows you to plug different components into the same graph to create different architectures. When writing your own components, you can be as flexible as you like.
 
 #### Define your graph
 

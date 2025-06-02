@@ -67,7 +67,7 @@ dynamo serve  --service-name Middle hello_world:Frontend
 
 ### `build`
 
-The `build` commmand allows you to package up your inference graph and its dependancies and create an archive of it. This is commonly paired with the `--containerize` flag to create a single docker container that runs your inference graph. As with `serve`, you point toward the first service in your dependency graph. For details about `dynamo build`, see [Serving Inference Graphs](dynamo_serve.md).
+The `build` command allows you to package up your inference graph and its dependencies and create an archive of it. This is commonly paired with the `--containerize` flag to create a single docker container that runs your inference graph. As with `serve`, you point toward the first service in your dependency graph. For details about `dynamo build`, see [Serving Inference Graphs](dynamo_serve.md).
 
 **Usage**
 ```bash
@@ -89,7 +89,7 @@ dynamo build hello_world:Frontend
 
 ### `deploy`
 
-The `deploy` commmand creates a pipeline on Dynamo Cloud using parameters at the prompt or using a YAML configuration file. For details, see [Deploying Inference Graphs to Kubernetes](dynamo_deploy/README.md).
+The `deploy` command creates a pipeline on Dynamo Cloud using parameters at the prompt or using a YAML configuration file. For details, see [Deploying Inference Graphs to Kubernetes](dynamo_deploy/README.md).
 
 **Usage**
 ```bash
