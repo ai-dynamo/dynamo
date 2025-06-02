@@ -170,7 +170,7 @@ pub async fn run(
             // If not, then the endpoint isn't exposed so we invent an internal one.
             let endpoint = match &in_opt {
                 Input::Endpoint(path) => path.parse()?,
-                _ => internal_endpoint(),
+                _ => internal_endpoint("sglang"),
             };
 
             let multi_node_conf = dynamo_llm::engines::MultiNodeConfig {
@@ -213,7 +213,7 @@ pub async fn run(
             // If not, then the endpoint isn't exposed so we invent an internal one.
             let endpoint = match &in_opt {
                 Input::Endpoint(path) => path.parse()?,
-                _ => internal_endpoint(),
+                _ => internal_endpoint("vllm"),
             };
 
             let (py_script, child) = match subprocess::start(
@@ -247,7 +247,7 @@ pub async fn run(
             // If not, then the endpoint isn't exposed so we invent an internal one.
             let endpoint = match &in_opt {
                 Input::Endpoint(path) => path.parse()?,
-                _ => internal_endpoint(),
+                _ => internal_endpoint("trtllm"),
             };
 
             let (py_script, child) = match subprocess::start(
@@ -431,10 +431,10 @@ fn safetensors_default() -> Output {
 
 /// A random endpoint to use for internal communication
 /// We can't hard code because we may be running several on the same machine (GPUs 0-3 and 4-7)
-fn internal_endpoint() -> EndpointId {
+fn internal_endpoint(engine: &str) -> EndpointId {
     EndpointId {
-        namespace: "internal".to_string(),
-        component: Slug::slugify(&uuid::Uuid::new_v4().to_string()).to_string(),
+        namespace: Slug::slugify(&uuid::Uuid::new_v4().to_string()).to_string(),
+        component: engine.to_string(),
         name: "generate".to_string(),
     }
 }
