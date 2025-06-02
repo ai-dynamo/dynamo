@@ -157,7 +157,7 @@ async fn completions(
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::Completions, streaming);
 
-    let response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     // setup context
     // todo - inherit request_id from distributed trace details
@@ -176,7 +176,6 @@ async fn completions(
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
-        let mut response_collector = response_collector; // Make it mutable
         let stream = stream.map(move |response| {
             process_event_converter(EventConverter::from(response), &mut response_collector)
         });
@@ -279,7 +278,7 @@ async fn chat_completions(
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::ChatCompletions, streaming);
 
-    let response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     // setup context
     // todo - inherit request_id from distributed trace details
@@ -300,7 +299,6 @@ async fn chat_completions(
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
-        let mut response_collector = response_collector; // Make it mutable
         let stream = stream.map(move |response| {
             process_event_converter(EventConverter::from(response), &mut response_collector)
         });
