@@ -91,7 +91,7 @@ def _build_env_dicts(
     args: t.Optional[t.List[str]] = None,
     envs: t.Optional[t.List[str]] = None,
     env_secrets_name: t.Optional[str] = None,
-) -> t.List[dict]:
+) -> t.List[t.Dict[str, t.Any]]:
     """
     Build a list of environment variable dicts, supporting valueFrom for Kubernetes.
     """
@@ -430,7 +430,7 @@ def update(
     try:
         with console.status(f"[bold green]Updating deployment '{name}'..."):
             env_dicts = _build_env_dicts(
-                config_file=config_file, args=ctx.args, envs=envs
+                config_file=config_file, args=ctx.args, envs=envs, target=target
             )
             deployment = Deployment(
                 name=name,

@@ -137,7 +137,7 @@ class Deployment:
     namespace: str
     pipeline: t.Optional[str] = None
     entry_service: t.Optional[Service] = None
-    envs: t.Optional[t.List[dict]] = None
+    envs: t.Optional[t.List[t.Dict[str, t.Any]]] = None
 
 
 # Type alias for deployment responses (e.g., from backend APIs)
