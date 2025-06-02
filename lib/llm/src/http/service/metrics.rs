@@ -328,7 +328,7 @@ impl InflightGuard {
                 .observe(ttft);
 
             // Publish ISL
-            // TODO: publish ITL as soon as the tokenization process completes
+            // TODO: publish ISL as soon as the tokenization process completes
             self.metrics
                 .input_sequence_length
                 .with_label_values(&[&self.model])
