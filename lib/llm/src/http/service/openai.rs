@@ -190,6 +190,7 @@ async fn completions(
 
         Ok(sse_stream.into_response())
     } else {
+        // TODO: report ISL/OSL for non-streaming requests
         let response = CompletionResponse::from_annotated_stream(stream.into())
             .await
             .map_err(|e| {
@@ -313,6 +314,7 @@ async fn chat_completions(
 
         Ok(sse_stream.into_response())
     } else {
+        // TODO: report ISL/OSL for non-streaming requests
         let response = NvCreateChatCompletionResponse::from_annotated_stream(stream.into())
             .await
             .map_err(|e| {
