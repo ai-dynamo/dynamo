@@ -20,7 +20,7 @@ from enum import Enum, auto
 from typing import Any, Dict, Generic, List, Optional, Set, Tuple, Type, TypeVar
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from dynamo.sdk.core.protocol.deployment import Env
 
@@ -59,16 +59,19 @@ class DynamoTransport(Enum):
 class ResourceConfig(BaseModel):
     """Configuration for Dynamo resources"""
 
-    cpu: int = 1
-    memory: str = "100Mi"
-    gpu: str = "0"
+    # auto convert gpu and cpu values to string from int
+    model_config = ConfigDict(coerce_numbers_to_str=True)
+
+    cpu: str = Field(default="1")
+    memory: str = Field(default="500Mi")
+    gpu: str = Field(default="0")
 
 
 class ServiceConfig(BaseModel):
     """Base service configuration that can be extended by adapters"""
 
     dynamo: DynamoConfig
-    resource: ResourceConfig = ResourceConfig()
+    resources: ResourceConfig = ResourceConfig()
     workers: int = 1
     image: str | None = None
     envs: List[Env] | None = None

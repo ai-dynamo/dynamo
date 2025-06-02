@@ -226,6 +226,13 @@ impl ModelDeploymentCard {
         }
     }
 
+    pub fn is_gguf(&self) -> bool {
+        match &self.model_info {
+            Some(info) => info.is_gguf(),
+            None => false,
+        }
+    }
+
     /// Move the files this MDC uses into the NATS object store.
     /// Updates the URI's to point to NATS.
     pub async fn move_to_nats(&mut self, nats_client: nats::Client) -> Result<()> {
@@ -379,6 +386,9 @@ impl ModelInfoType {
             Self::HfConfigJson(info) => HFConfig::from_json_file(info).await,
             Self::GGUF(path) => HFConfig::from_gguf(path),
         }
+    }
+    pub fn is_gguf(&self) -> bool {
+        matches!(self, Self::GGUF(_))
     }
 }
 

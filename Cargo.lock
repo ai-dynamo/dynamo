@@ -814,9 +814,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.20"
+version = "1.2.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04da6a0d40b948dfc4fa8f5bbf402b0fc1a64a28dbf7d12ffd683550f2c1b63a"
+checksum = "16595d3be041c03b09d08d0858631facccee9221e579704070e6e9e4915d3bc7"
 dependencies = [
  "jobserver",
  "libc",
@@ -1555,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-llamacpp"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-stream",
  "dynamo-llm",
@@ -1567,7 +1567,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-mistralrs"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1586,7 +1586,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "akin",
  "aligned-vec",
@@ -1658,7 +1658,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-run"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1686,7 +1686,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -1735,7 +1735,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "bytemuck",
  "derive-getters",
@@ -2735,18 +2735,6 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "0.2.1"
-dependencies = [
- "clap",
- "dynamo-llm",
- "dynamo-runtime",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "http"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "601cbb57e577e2f5ef5be8e7b83f0f63994f25aa94d673e54a92d5c516d101f1"
@@ -2754,6 +2742,18 @@ dependencies = [
  "bytes",
  "fnv",
  "itoa",
+]
+
+[[package]]
+name = "http"
+version = "0.3.0"
+dependencies = [
+ "clap",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -3364,7 +3364,7 @@ checksum = "d750af042f7ef4f724306de029d18836c26c1765a54a6a3f094cbd23a7267ffa"
 
 [[package]]
 name = "libdynamo_llm"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -3435,9 +3435,9 @@ checksum = "23fb14cb19457329c82206317a5663005a4d404783dc74f4252769b0d5f42856"
 
 [[package]]
 name = "llama-cpp-2"
-version = "0.1.103"
+version = "0.1.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "401c708926326b1ee410735dc348882c73deeab78f1f89ff2c9caf148356feb4"
+checksum = "cdf1e72044420c92eb66ec70521cdcfe872b1fe7e7383edd932424d32289105d"
 dependencies = [
  "enumflags2",
  "llama-cpp-sys-2",
@@ -3477,7 +3477,7 @@ dependencies = [
 
 [[package]]
 name = "llmctl"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3677,7 +3677,7 @@ dependencies = [
 
 [[package]]
 name = "metrics"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "axum 0.6.20",
  "clap",
@@ -4084,13 +4084,14 @@ dependencies = [
 
 [[package]]
 name = "nixl-sys"
-version = "0.2.1-rc.3"
+version = "0.3.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfeec33e0229249e8688309a70c677f522446f9ac92105a85aad4a5ceef2dd2f"
+checksum = "6a1727039c315bf41aeadcdbea02522b8a3df69a77bd732996243502a5fb6f07"
 dependencies = [
  "bindgen 0.71.1",
  "cc",
  "libc",
+ "os_info",
  "pkg-config",
  "serde",
  "thiserror 2.0.12",
@@ -4385,6 +4386,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2c1f9f56e534ac6a9b8a4600bdf0f530fb393b5f393e7b4d03489c3cf0c3f01"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "os_info"
+version = "3.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41fc863e2ca13dc2d5c34fb22ea4a588248ac14db929616ba65c45f21744b1e9"
+dependencies = [
+ "log",
+ "serde",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5333,7 +5345,7 @@ dependencies = [
 
 [[package]]
 name = "router"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "clap",
  "dynamo-llm",

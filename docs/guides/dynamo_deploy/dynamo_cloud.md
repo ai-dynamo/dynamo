@@ -149,17 +149,19 @@ kubectl create namespace $NAMESPACE
 kubectl config set-context --current --namespace=$NAMESPACE
 ```
 
-3. Deploy the helm chart using the deploy script:
+3. Deploy the Helm charts (install CRDs first, then platform) using the deployment script:
 
 ```bash
-./deploy.sh
+./deploy.sh --crds
 ```
 
 if you want guidance during the deployment process, you can run the deploy script with the `--interactive` flag:
 
 ```bash
-./deploy.sh --interactive
+./deploy.sh --crds --interactive
 ```
+
+omitting `--crds` will skip the CRDs installation/upgrade. This is useful when installing on a shared cluster as CRDs are cluster-scoped resources.
 
 4. **Expose Dynamo Cloud Externally**
 

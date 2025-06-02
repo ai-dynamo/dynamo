@@ -38,7 +38,6 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
@@ -934,7 +933,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Name:    "main",
 										Image:   "test-image:latest",
 										Command: []string{"sh", "-c"},
-										Args:    []string{"ray start --head --port=6379 && cd src && uv run dynamo serve --system-app-port 5000 --enable-system-app --use-default-health-checks --service-name test-lws-deploy-service test-tag --test-lws-deploy-service.ServiceArgs.dynamo.namespace=default --test-lws-deploy-service.environment=kubernetes"},
+										Args:    []string{"ray start --head --port=6379 && cd src && uv run dynamo serve --system-app-port 5000 --enable-system-app --use-default-health-checks --service-name test-lws-deploy-service test-tag --test-lws-deploy-service.ServiceArgs.dynamo.namespace=default"},
 										Env:     []corev1.EnvVar{{Name: "DYNAMO_PORT", Value: "3000"}},
 										VolumeMounts: []corev1.VolumeMount{
 											{
@@ -960,20 +959,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 												corev1.ResourceCPU:    resource.MustParse("500m"),
 												corev1.ResourceMemory: resource.MustParse("1Gi"),
 												"nvidia.com/gpu":      resource.MustParse("1"),
-											},
-										},
-										LivenessProbe: &corev1.Probe{
-											ProbeHandler: corev1.ProbeHandler{
-												HTTPGet: &corev1.HTTPGetAction{
-													Path: "/healthz", Port: intstr.FromString(commonconsts.DynamoHealthPortName),
-												},
-											},
-										},
-										ReadinessProbe: &corev1.Probe{
-											ProbeHandler: corev1.ProbeHandler{
-												HTTPGet: &corev1.HTTPGetAction{
-													Path: "/readyz", Port: intstr.FromString(commonconsts.DynamoHealthPortName),
-												},
 											},
 										},
 									},
@@ -1013,20 +998,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Resources: corev1.ResourceRequirements{
 											Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("300m"), corev1.ResourceMemory: resource.MustParse("500Mi")},
 											Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("1Gi"), "nvidia.com/gpu": resource.MustParse("1")},
-										},
-										LivenessProbe: &corev1.Probe{
-											ProbeHandler: corev1.ProbeHandler{
-												HTTPGet: &corev1.HTTPGetAction{
-													Path: "/healthz", Port: intstr.FromString(commonconsts.DynamoHealthPortName),
-												},
-											},
-										},
-										ReadinessProbe: &corev1.Probe{
-											ProbeHandler: corev1.ProbeHandler{
-												HTTPGet: &corev1.HTTPGetAction{
-													Path: "/readyz", Port: intstr.FromString(commonconsts.DynamoHealthPortName),
-												},
-											},
 										},
 									},
 								},

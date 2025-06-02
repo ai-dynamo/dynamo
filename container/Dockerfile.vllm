@@ -169,7 +169,7 @@ RUN uv pip install /workspace/wheels/nixl/*.whl
 ARG VLLM_REF="0.8.4"
 ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
 ARG VLLM_PATCHED_PACKAGE_NAME="ai_dynamo_vllm"
-ARG VLLM_PATCHED_PACKAGE_VERSION="0.8.4.post1"
+ARG VLLM_PATCHED_PACKAGE_VERSION="0.8.4.post2"
 ARG VLLM_MAX_JOBS=4
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
@@ -298,14 +298,14 @@ COPY --from=base --chown=$USER_UID:$USER_GID /opt/dynamo/venv/ /opt/dynamo/venv/
 RUN chown $USERNAME:$USERNAME /opt/dynamo/venv
 COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
 
+# so we can use maturin develop
+RUN uv pip install maturin
+
 USER $USERNAME
 ENV HOME=/home/$USERNAME
 ENV PYTHONPATH=$HOME/dynamo/deploy/sdk/src:$PYTHONPATH:$HOME/dynamo/components/planner/src:$PYTHONPATH
 ENV CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 WORKDIR $HOME
-
-# so we can use maturin develop
-RUN uv pip install maturin
 
 # https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
 RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.commandhistory/.bash_history" \
@@ -403,6 +403,9 @@ COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
 # Copy Cargo cache to avoid re-downloading dependencies
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
+# Copy rest of the code
+COPY . /workspace
+
 # Build C bindings, creates lib/bindings/c/include
 #
 # TODO: In theory the 'cargo build' in earlier stage covers this, we "just" need to copy the
@@ -446,8 +449,6 @@ ARG GENAI_PERF_VERSION
 
 # Install genai-perf for benchmarking
 RUN uv pip install genai-perf==$GENAI_PERF_VERSION
-
-COPY . /workspace
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 

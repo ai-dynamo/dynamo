@@ -40,7 +40,7 @@ class VllmBaseWorker:
         signal.signal(signal.SIGTERM, self.shutdown_vllm_engine)
         signal.signal(signal.SIGINT, self.shutdown_vllm_engine)
 
-        self.set_side_channel_port()
+        self.set_side_channel_host_and_port()
 
     async def async_init(self):
         self._engine_context = build_async_engine_client_from_engine_args(
@@ -74,6 +74,7 @@ class VllmBaseWorker:
         )
 
         async for response in gen:
+            logger.debug(f"Response kv_transfer_params: {response.kv_transfer_params}")
             yield MyRequestOutput(
                 request_id=response.request_id,
                 prompt=response.prompt,
@@ -85,14 +86,20 @@ class VllmBaseWorker:
                 kv_transfer_params=response.kv_transfer_params,
             ).model_dump_json()
 
-    def set_side_channel_port(self, port: Optional[int] = None):
+    def set_side_channel_host_and_port(
+        self, hostname: Optional[str] = None, port: Optional[int] = None
+    ):
         """vLLM V1 NixlConnector creates a side channel to exchange metadata with other NIXL connectors.
         This sets the port number for the side channel.
         """
+        if hostname is None:
+            hostname = socket.gethostname()
         if port is None:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind(("", 0))  # Bind to a free port provided by the host.
                 port = s.getsockname()[1]  # Get the port number assigned.
+        logger.debug("Setting VLLM_NIXL_SIDE_CHANNEL_HOST to %s", hostname)
+        os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = hostname
         logger.debug("Setting VLLM_NIXL_SIDE_CHANNEL_PORT to %s", port)
         os.environ["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(port)
 

@@ -41,7 +41,9 @@ pub struct WorkerSelectionResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ForwardPassMetrics {
-    pub data_parallel_rank: Option<u32>, // backwards compatible
+    // https://lmsys.org/blog/2024-12-04-sglang-v0-4/#data-parallelism-attention-for-deepseek-models
+    // Data parallel ranks are semi-independent, so we need to track metrics at the DP level
+    pub data_parallel_rank: Option<u32>, // Optional for backwards compatibility
     pub request_active_slots: u64,
     pub request_total_slots: u64,
     pub kv_active_blocks: u64,
@@ -105,10 +107,9 @@ pub struct KvCacheEvent {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum KvCacheEventData {
-    /// Data for a stored cache event.
     Stored(KvCacheStoreData),
-    /// Data for a removed cache event.
     Removed(KvCacheRemoveData),
+    Cleared,
 }
 
 /// Represents the data associated with a stored cache event.

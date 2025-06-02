@@ -26,7 +26,7 @@ use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 
 use crate::backend::ExecutionContext;
-use crate::preprocessor::BackendInput;
+use crate::preprocessor::PreprocessedRequest;
 use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -86,12 +86,12 @@ pub fn make_engine_core() -> ExecutionContext {
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for EchoEngineCore
 {
     async fn generate(
         &self,
-        incoming_request: SingleIn<BackendInput>,
+        incoming_request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, context) = incoming_request.into_parts();
         let ctx = context.context();

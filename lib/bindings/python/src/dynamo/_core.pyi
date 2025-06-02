@@ -344,16 +344,16 @@ class DisaggregatedRouter:
         """
         ...
 
-class KvMetricsPublisher:
+class WorkerMetricsPublisher:
     """
-    A metrics publisher will provide KV metrics to the router.
+    A metrics publisher will provide metrics to the router.
     """
 
     ...
 
     def __init__(self) -> None:
         """
-        Create a `KvMetricsPublisher` object
+        Create a `WorkerMetricsPublisher` object
         """
 
     def create_service(self, component: Component) -> None:
@@ -579,7 +579,7 @@ class KvEventPublisher:
         """
         ...
 
-class KvEventPublisherFromZmqConfig:
+class ZmqKvEventPublisherConfig:
     def __init__(
         self,
         worker_id: int,
@@ -588,7 +588,7 @@ class KvEventPublisherFromZmqConfig:
         zmq_topic: str = ""
     ) -> None:
         """
-        Configuration for the KvEventPublisherFromZmq.
+        Configuration for the ZmqKvEventPublisher.
 
         :param worker_id: The worker ID.
         :param kv_block_size: The block size for the key-value store.
@@ -597,10 +597,10 @@ class KvEventPublisherFromZmqConfig:
         """
         ...
 
-class KvEventPublisherFromZmq:
-    def __init__(self, component: Component, config: KvEventPublisherFromZmqConfig) -> None:
+class ZmqKvEventPublisher:
+    def __init__(self, component: Component, config: ZmqKvEventPublisherConfig) -> None:
         """
-        Initializes a new KvEventPublisherFromZmq instance.
+        Initializes a new ZmqKvEventPublisher instance.
 
         :param component: The component to be used.
         :param config: Configuration for the event publisher.
@@ -710,6 +710,25 @@ class NatsQueue:
         """
         ...
 
+class Layer:
+    """
+    A KV cache block layer
+    """
+
+    ...
+
+    def __dlpack__(self, stream: Optional[Any] = None, max_version: Optional[Any] = None, dl_device: Optional[Any] = None, copy: Optional[bool] = None) -> Any:
+        """
+        Get a dlpack capsule of the layer
+        """
+        ...
+
+    def __dlpack_device__(self) -> Any:
+        """
+        Get the dlpack device of the layer
+        """
+        ...
+
 class Block:
     """
     A KV cache block
@@ -717,9 +736,40 @@ class Block:
 
     ...
 
+    def __len__(self) -> int:
+        """
+        Get the number of layers in the list
+        """
+        ...
+
+    def __getitem__(self, index: int) -> Layer:
+        """
+        Get a layer by index
+        """
+        ...
+
+    def __iter__(self) -> 'Block':
+        """
+        Get an iterator over the layers
+        """
+        ...
+
+    def __next__(self) -> Block:
+        """
+        Get the next layer in the iterator
+        """
+        ...
+
+    def to_list(self) -> List[Layer]:
+        """
+        Get a list of layers
+        """
+        ...
+
     def __dlpack__(self, stream: Optional[Any] = None, max_version: Optional[Any] = None, dl_device: Optional[Any] = None, copy: Optional[bool] = None) -> Any:
         """
-        Get a dlpack capsule from the block
+        Get a dlpack capsule of the block
+        Exception raised if the block is not contiguous
         """
         ...
 
@@ -822,9 +872,41 @@ class BlockManager:
         """
         ...
 
+    async def allocate_host_blocks(self, count: int) -> BlockList:
+        """
+        Allocate a list of host blocks
+
+        Parameters:
+        -----------
+        count: int
+            Number of blocks to allocate
+
+        Returns:
+        --------
+        BlockList
+            List of allocated blocks
+        """
+        ...
+
     def allocate_device_blocks_blocking(self, count: int) -> BlockList:
         """
         Allocate a list of device blocks (blocking call)
+
+        Parameters:
+        -----------
+        count: int
+            Number of blocks to allocate
+
+        Returns:
+        --------
+        BlockList
+            List of allocated blocks
+        """
+        ...
+
+    async def allocate_device_blocks(self, count: int) -> BlockList:
+        """
+        Allocate a list of device blocks
 
         Parameters:
         -----------

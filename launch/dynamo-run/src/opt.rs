@@ -165,23 +165,6 @@ impl fmt::Display for Output {
     }
 }
 
-/// Returns the engine to use if user did not say on cmd line.
-/// Nearly always defaults to mistralrs which has no dependencies and we include by default.
-/// If built with --no-default-features default to subprocess vllm.
-#[allow(unused_assignments, unused_mut)]
-impl Default for Output {
-    fn default() -> Self {
-        let mut out = Output::Vllm;
-
-        #[cfg(feature = "mistralrs")]
-        {
-            out = Output::MistralRs;
-        }
-
-        out
-    }
-}
-
 impl Output {
     #[allow(unused_mut)]
     pub fn available_engines() -> Vec<String> {

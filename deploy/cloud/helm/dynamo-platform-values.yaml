@@ -66,6 +66,12 @@ dynamo-api-store:
           - path: /
             pathType: Prefix
 
+postgresql:
+  enabled: true
+
+minio:
+  enabled: true
+
 etcd:
   enabled: true
   persistence:

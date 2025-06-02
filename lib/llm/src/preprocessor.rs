@@ -55,7 +55,7 @@ use crate::tokenizers::{traits::Tokenizer, HuggingFaceTokenizer};
 
 use crate::preprocessor::prompt::PromptFormatter;
 
-pub use crate::protocols::common::llm_backend::{BackendInput, BackendOutput};
+pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
 
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
 pub const ANNOTATION_TOKEN_IDS: &str = "token_ids";
@@ -121,9 +121,9 @@ impl OpenAIPreprocessor {
     >(
         &self,
         request: &R,
-    ) -> Result<(BackendInput, HashMap<String, String>)> {
+    ) -> Result<(PreprocessedRequest, HashMap<String, String>)> {
         let mut annotations = HashMap::new();
-        let mut builder = BackendInput::builder();
+        let mut builder = PreprocessedRequest::builder();
 
         let use_raw_prompt = request
             .nvext()
@@ -177,6 +177,7 @@ impl OpenAIPreprocessor {
         builder.stop_conditions(stop_conditions);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
+        builder.estimated_prefix_hit_num_blocks(None);
 
         Ok((builder.build()?, annotations))
     }
@@ -265,7 +266,7 @@ impl
     Operator<
         SingleIn<NvCreateChatCompletionRequest>,
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-        SingleIn<BackendInput>,
+        SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<BackendOutput>>,
     > for OpenAIPreprocessor
 {
@@ -273,7 +274,11 @@ impl
         &self,
         request: SingleIn<NvCreateChatCompletionRequest>,
         next: Arc<
-            dyn AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<BackendOutput>>, Error>,
+            dyn AsyncEngine<
+                SingleIn<PreprocessedRequest>,
+                ManyOut<Annotated<BackendOutput>>,
+                Error,
+            >,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         // unpack the request
@@ -319,7 +324,7 @@ impl
     Operator<
         SingleIn<CompletionRequest>,
         ManyOut<Annotated<CompletionResponse>>,
-        SingleIn<BackendInput>,
+        SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<BackendOutput>>,
     > for OpenAIPreprocessor
 {
@@ -327,7 +332,11 @@ impl
         &self,
         request: SingleIn<CompletionRequest>,
         next: Arc<
-            dyn AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<BackendOutput>>, Error>,
+            dyn AsyncEngine<
+                SingleIn<PreprocessedRequest>,
+                ManyOut<Annotated<BackendOutput>>,
+                Error,
+            >,
         >,
     ) -> Result<ManyOut<Annotated<CompletionResponse>>, Error> {
         // unpack the request

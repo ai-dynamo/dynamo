@@ -81,7 +81,7 @@ regex = "1"
 rayon = "1"
 
 # block_manager
-nixl-sys = { version = "0.2.1-rc.3", optional = true }
+nixl-sys = { version = "0.3.0-rc.2", optional = true }
 cudarc = { version = "0.16.2", features = ["cuda-12020"], optional = true }
 ndarray = { version = "0.16", optional = true }
 nix = { version = "0.26", optional = true }
