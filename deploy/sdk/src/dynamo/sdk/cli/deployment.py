@@ -97,7 +97,7 @@ def _build_env_dicts(
     """
     if env_secrets_name is None:
         env_secrets_name = os.environ.get("DYNAMO_ENV_SECRETS", "dynamo-env-secrets")
-    env_dicts = []
+    env_dicts: t.List[t.Dict[str, t.Any]] = []
     if config_file or args:
         service_configs = resolve_service_config(config_file=config_file, args=args)
         config_json = json.dumps(service_configs)
