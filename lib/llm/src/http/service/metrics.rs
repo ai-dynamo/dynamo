@@ -45,8 +45,8 @@ pub struct InflightGuard {
     request_type: RequestType,
     status: Status,
     timer: Instant,
-    // we use is_first_token to distinguish TTFT from ITL. It is false by default and
-    // flip to true when the first token is returned and TTFT is published.
+    // we use is_first_token to distinguish TTFT from ITL. It is true by default and
+    // flipped to false when the first token is returned and TTFT is published.
     is_first_token: bool,
     // we track the last response time so that ITL for the newly returned tokens can
     // be computed.
