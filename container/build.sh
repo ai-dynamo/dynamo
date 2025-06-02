@@ -348,6 +348,8 @@ show_help() {
     echo "  [--no-cache disable docker build cache]"
     echo "  [--dry-run print docker commands without running]"
     echo "  [--build-context name=path to add build context]"
+    echo "  [--release-build perform a release build]"
+    echo "  [--make-efa Enables EFA support for NIXL]"
     exit 0
 }
 
