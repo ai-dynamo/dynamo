@@ -319,6 +319,10 @@ impl InflightGuard {
     }
 
     pub(crate) fn observe_response(&mut self, isl: usize, num_tokens: usize) {
+        if num_tokens == 0 {
+            return;
+        }
+
         if self.is_first_token {
             // NOTE: when there are multiple tokens in the first response,
             // we use the full response time as TTFT and ignore the ITL
