@@ -13,105 +13,215 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
 import shutil
 import socket
 import subprocess
 import time
-from dataclasses import dataclass
-from typing import ClassVar, List, Optional
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+import psutil
+import requests
+
+# Custom format inspired by your example
+LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format=LOG_FORMAT,
+    datefmt="%Y-%m-%dT%H:%M:%S",  # ISO 8601 UTC format with microseconds
+)
 
 
 @dataclass
 class ManagedProcess:
     command: List[str]
     env: Optional[dict] = None
-    health_check: Optional[List[int | str]] = None
+    health_check_ports: Optional[List[int]] = field(default_factory=list)
+    health_check_urls: Optional[List[str]] = field(default_factory=list)
     timeout: int = 300
     cwd: Optional[str] = None
-    output: bool = False
+    display_output: bool = False
     data_dir: Optional[str] = None
+    terminate_existing: bool = True
+    log_dir = os.getcwd()
 
-    ensure_not_running: bool = False
-    _processes: ClassVar[list[object]] = []
+    _logger = None
+    _command_name = None
+    _log_path = None
 
     def __enter__(self):
-        if self.data_dir:
-            self._remove_directory(self.data_dir)
-        # if self.ensure_not_running:
-        #     for proc in _processes:
-        #         if proc.command == self.command:
-        #             raise RuntimeError("Process is already running")
+        try:
+            self._logger = logging.getLogger(self.__class__.__name__)
+            self._command_name = self.command[0]
+            os.makedirs(self.log_dir, exist_ok=True)
+            log_name = f"{self._command_name}.log.txt"
+            self._log_path = os.path.join(self.log_dir, log_name)
 
-        print(f"Running command: {' '.join(self.command)} in {self.cwd or os.getcwd()}")
+            if self.data_dir:
+                self._remove_directory(self.data_dir)
 
-        stdin = subprocess.DEVNULL
-        stdout = subprocess.DEVNULL
-        stderr = subprocess.DEVNULL
-        if self.output:
-            stdin = None
-            stdout = None
-            stderr = None
+            self._terminate_existing()
+            self._start_process()
+            self.timeout -= self._check_ports(self.timeout)
+            self.timeout -= self._check_urls(self.timeout)
 
-        self.proc = subprocess.Popen(
-            self.command,
-            env=self.env or os.environ.copy(),
-            cwd=self.cwd,
-            stdin=stdin,
-            stdout=stdout,
-            stderr=stderr,
-        )
-        start_time = time.time()
+            return self.proc
 
-        if self.check_ports:
-            print(f"Waiting for ports: {self.check_ports}")
-            while time.time() - start_time < self.timeout:
-                if all(is_port_open(p) for p in self.check_ports):
-                    print(f"All ports {self.check_ports} are ready")
-                    break
-                time.sleep(0.1)
-            else:
-                self.proc.terminate()
-                raise TimeoutError(f"Ports {self.check_ports} not ready in time")
-
-        ManagedProcess._processes.append(self)
-        return self.proc
+        except Exception as e:
+            self.__exit__(None, None, None)
+            raise e
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        global _processes
         if self.proc:
-            print(f"Terminating process: {self.command[0]}")
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                print("Process did not terminate gracefully, killing it")
-                self.proc.kill()
-                self.proc.wait()
-            ManagedProcess._processes.remove(self)
+            self._terminate_process_tree(self.proc.pid)
+            self.proc.wait()
+        if self._sed_proc:
+            self._terminate_process_tree(self._sed_proc.pid)
+            self._sed_proc.wait()
+        if self._tee_proc:
+            self._terminate_process_tree(self._tee_proc.pid)
+            self._tee_proc.wait()
         if self.data_dir:
-            self._cleanup_directory(self.data_dir)
+            self._remove_directory(self.data_dir)
 
-    def _remove_directory(path: str) -> None:
+    def _start_process(self):
+        self._logger.info(
+            f"Running command: {' '.join(self.command)} in {self.cwd or os.getcwd()}"
+        )
+
+        stdin = subprocess.DEVNULL
+        stdout = subprocess.PIPE
+        stderr = subprocess.STDOUT
+
+        if self.display_output:
+            self.proc = subprocess.Popen(
+                self.command,
+                env=self.env or os.environ.copy(),
+                cwd=self.cwd,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+            )
+            self._sed_proc = subprocess.Popen(
+                ["sed", "-u", f"s/^/[{self._command_name.upper()}] /"],
+                stdin=self.proc.stdout,
+                stdout=subprocess.PIPE,
+            )
+
+            self._tee_proc = subprocess.Popen(
+                ["tee", self._log_path], stdin=self._sed_proc.stdout
+            )
+
+        else:
+            with open(self._log_path, "w") as f:
+                self.proc = subprocess.Popen(
+                    self.command,
+                    env=self.env or os.environ.copy(),
+                    cwd=self.cwd,
+                    stdin=stdin,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+                self._sed_proc = subprocess.Popen(
+                    ["sed", "-u", f"s/^/[{self._command_name.upper()}] /"],
+                    stdin=self.proc.stdout,
+                    stdout=f,
+                )
+                self._log_proc = None
+
+    def _remove_directory(self, path: str) -> None:
         """Remove a directory."""
         try:
             shutil.rmtree(path, ignore_errors=True)
         except Exception as e:
-            print(f"Warning: Failed to remove directory {path}: {e}")
+            self._logger.warn(f"Warning: Failed to remove directory {path}: {e}")
 
-    def _is_port_open(port: int) -> bool:
+    def _check_ports(self, timeout):
+        time_taken = 0
+        for port in self.health_check_ports:
+            time_taken += self._check_port(port, timeout)
+        return time_taken
+
+    def _check_port(self, port, timeout=30, sleep=0.1):
         """Check if a port is open on localhost."""
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            return s.connect_ex(("localhost", port)) == 0
+        start_time = time.time()
+        self._logger.info(f"Checking Port: {port}")
+        while time.time() - start_time < timeout:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                if s.connect_ex(("localhost", port)) == 0:
+                    self._logger.info(f"SUCCESS: Check Port:{port}")
+                    return time.time() - start_time
+            time.sleep(sleep)
+        self._logger.error(f"FAILED: Check Port: {port}")
+        raise RuntimeError(f"FAILED: Check Port: {port}")
 
-    def _check_health(url_or_port, timeout):
-        pass
+    def _check_urls(self, timeout):
+        time_taken = 0
+        for url in self.health_check_urls:
+            time_taken += self._check_url(url, timeout)
+        return time_taken
+
+    def _check_url(self, url, timeout=30, sleep=0.1):
+        start_time = time.time()
+        self._logger.info(f"Checking URL {url}")
+        while time.time() - start_time < timeout:
+            try:
+                response = requests.get(url, timeout=timeout)
+                if response.status_code == 200:
+                    return time.time() - start_time
+            except Exception:
+                pass
+            time.sleep(sleep)
+
+        self._logger.error(f"FAILED: Check URL: {url}")
+        raise RuntimeError(f"FAILED: Check URL: {url}")
+
+    def _terminate_existing(self):
+        if self.terminate_existing:
+            self._logger.info(f"Terminating Existing {self._command_name}")
+            for proc in psutil.process_iter(["name", "cmdline"]):
+                if proc.name() == self._command_name:
+                    self._terminate_process_tree(proc.pid)
+
+    def _terminate_process(self, process):
+        try:
+            self._logger.info(f"Terminating {process}")
+            process.terminate()
+        except psutil.AccessDenied:
+            self._logger.warn(f"Access denied for PID {process.pid}")
+        except psutil.NoSuchProcess:
+            self._logger.warn(f"PID {process.pid} no longer exists")
+        except psutil.TimeoutExpired:
+            self._logger(f"PID {process.pid} did not terminate in timeout, killing")
+            process.kill()
+
+    def _terminate_process_tree(self, pid):
+        parent = psutil.Process(pid)
+        for child in parent.children(recursive=True):
+            self._terminate_process(child)
+        self._terminate_process(parent)
 
 
 def main():
     with ManagedProcess(
-        command=["dynamo", "run", "out=vllm", "Qwen/Qwen2.5-3B-Instruct"], output=True
-    ) as mp:
+        command=[
+            "dynamo",
+            "run",
+            "in=http",
+            "out=vllm",
+            "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        ],
+        display_output=True,
+        terminate_existing=True,
+        health_check_ports=[8080],
+        health_check_urls=["http://localhost:8080/v1/models"],
+        timeout=10,
+    ):
         time.sleep(60)
         pass
 
