@@ -1,0 +1,23 @@
+---
+source: lib/llm/tests/preprocessor.rs
+expression: formatted_prompt
+info:
+  messages:
+    - role: system
+      content: You are a very helpful assistant!
+    - role: user
+      content: How do I reverse a string in Python?
+    - role: assistant
+      content: "You can reverse a "
+  model: meta-llama_llama-3_1-70b-instruct--1605565
+---
+<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+Cutting Knowledge Date: December 2023
+Today Date: <redacted>
+
+You are a very helpful assistant!<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+How do I reverse a string in Python?<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+You can reverse a<|eot_id|>

@@ -24,7 +24,7 @@ Frontend:
 Middle:
   message: "moon"
   ServiceArgs:
-    workers: 1
+    workers: 2
     resources:
       cpu: "1"
 

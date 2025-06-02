@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! The [Component] module defines the top-level API for building distributed applications.
 //!
@@ -48,6 +36,7 @@ use super::{
 };
 
 use crate::pipeline::network::{ingress::push_endpoint::PushEndpoint, PushWorkHandler};
+use crate::protocols::Endpoint as EndpointId;
 use async_nats::{
     rustls::quic,
     service::{Service, ServiceExt},
@@ -57,7 +46,7 @@ use derive_getters::Getters;
 use educe::Educe;
 use serde::{Deserialize, Serialize};
 use service::EndpointStatsHandler;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, hash::Hash, sync::Arc};
 use validator::{Validate, ValidationError};
 
 mod client;
@@ -68,7 +57,11 @@ mod namespace;
 mod registry;
 pub mod service;
 
-pub use client::{Client, RouterMode};
+pub use client::{Client, InstanceSource};
+
+/// The root etcd path where each instance registers itself in etcd.
+/// An instance is namespace+component+endpoint+lease_id and must be unique.
+pub const INSTANCE_ROOT_PATH: &str = "instances";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -88,12 +81,18 @@ pub struct Registry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComponentEndpointInfo {
+pub struct Instance {
     pub component: String,
     pub endpoint: String,
     pub namespace: String,
-    pub lease_id: i64,
+    pub instance_id: i64,
     pub transport: TransportType,
+}
+
+impl Instance {
+    pub fn id(&self) -> i64 {
+        self.instance_id
+    }
 }
 
 /// A [Component] a discoverable entity in the distributed runtime.
@@ -124,6 +123,24 @@ pub struct Component {
     is_static: bool,
 }
 
+impl Hash for Component {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.namespace.name().hash(state);
+        self.name.hash(state);
+        self.is_static.hash(state);
+    }
+}
+
+impl PartialEq for Component {
+    fn eq(&self, other: &Self) -> bool {
+        self.namespace.name() == other.namespace.name()
+            && self.name == other.name
+            && self.is_static == other.is_static
+    }
+}
+
+impl Eq for Component {}
+
 impl std::fmt::Display for Component {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}.{}", self.namespace.name(), self.name)
@@ -143,13 +160,16 @@ impl RuntimeProvider for Component {
 }
 
 impl Component {
-    pub fn etcd_path(&self) -> String {
-        format!("{}/components/{}", self.namespace.name(), self.name)
+    /// The component part of an instance path in etcd.
+    pub fn etcd_root(&self) -> String {
+        let ns = self.namespace.name();
+        let cp = &self.name;
+        format!("{INSTANCE_ROOT_PATH}/{ns}/{cp}")
     }
 
     pub fn service_name(&self) -> String {
         let service_name = format!("{}_{}", self.namespace.name(), self.name);
-        Slug::slugify_unique(&service_name).to_string()
+        Slug::slugify(&service_name).to_string()
     }
 
     pub fn path(&self) -> String {
@@ -160,6 +180,10 @@ impl Component {
         &self.namespace
     }
 
+    pub fn name(&self) -> String {
+        self.name.clone()
+    }
+
     pub fn endpoint(&self, endpoint: impl Into<String>) -> Endpoint {
         Endpoint {
             component: self.clone(),
@@ -168,10 +192,28 @@ impl Component {
         }
     }
 
-    /// Get keys from etcd on the slug, splitting the endpoints and only returning the
-    /// set of unique endpoints.
-    pub async fn list_endpoints(&self) -> Vec<Endpoint> {
-        unimplemented!("endpoints")
+    pub async fn list_instances(&self) -> anyhow::Result<Vec<Instance>> {
+        let Some(etcd_client) = self.drt.etcd_client() else {
+            return Ok(vec![]);
+        };
+        let mut out = vec![];
+        // The extra slash is important to only list exact component matches, not substrings.
+        for kv in etcd_client
+            .kv_get_prefix(format!("{}/", self.etcd_root()))
+            .await?
+        {
+            let val = match serde_json::from_slice::<Instance>(kv.value()) {
+                Ok(val) => val,
+                Err(err) => {
+                    anyhow::bail!(
+                        "Error converting etcd response to Instance: {err}. {}",
+                        kv.value_str()?
+                    );
+                }
+            };
+            out.push(val);
+        }
+        Ok(out)
     }
 
     pub async fn scrape_stats(&self, timeout: Duration) -> Result<ServiceSet> {
@@ -214,6 +256,24 @@ pub struct Endpoint {
     is_static: bool,
 }
 
+impl Hash for Endpoint {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.component.hash(state);
+        self.name.hash(state);
+        self.is_static.hash(state);
+    }
+}
+
+impl PartialEq for Endpoint {
+    fn eq(&self, other: &Self) -> bool {
+        self.component == other.component
+            && self.name == other.name
+            && self.is_static == other.is_static
+    }
+}
+
+impl Eq for Endpoint {}
+
 impl DistributedRuntimeProvider for Endpoint {
     fn drt(&self) -> &DistributedRuntime {
         self.component.drt()
@@ -227,6 +287,14 @@ impl RuntimeProvider for Endpoint {
 }
 
 impl Endpoint {
+    pub fn id(&self) -> EndpointId {
+        EndpointId {
+            namespace: self.component.namespace().name().to_string(),
+            component: self.component.name().to_string(),
+            name: self.name().to_string(),
+        }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -239,15 +307,20 @@ impl Endpoint {
         format!("{}/{}", self.component.path(), self.name)
     }
 
-    pub fn etcd_path(&self) -> String {
-        format!("{}/{}", self.component.etcd_path(), self.name)
+    /// The endpoint part of an instance path in etcd
+    pub fn etcd_root(&self) -> String {
+        let component_path = self.component.etcd_root();
+        let endpoint_name = &self.name;
+        format!("{component_path}/{endpoint_name}")
     }
 
-    pub fn etcd_path_with_id(&self, lease_id: i64) -> String {
+    /// The fully path of an instance in etcd
+    pub fn etcd_path(&self, lease_id: i64) -> String {
+        let endpoint_root = self.etcd_root();
         if self.is_static {
-            self.etcd_path()
+            endpoint_root
         } else {
-            format!("{}:{:x}", self.etcd_path(), lease_id)
+            format!("{endpoint_root}:{lease_id:x}")
         }
     }
 
@@ -272,11 +345,7 @@ impl Endpoint {
         )
     }
 
-    pub async fn client<Req, Resp>(&self) -> Result<client::Client<Req, Resp>>
-    where
-        Req: Serialize + Send + Sync + 'static,
-        Resp: for<'de> Deserialize<'de> + Send + Sync + 'static,
-    {
+    pub async fn client(&self) -> Result<client::Client> {
         if self.is_static {
             client::Client::new_static(self.clone()).await
         } else {

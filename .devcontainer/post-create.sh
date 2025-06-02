@@ -49,20 +49,30 @@ mkdir -p $HOME/dynamo/.build/target
 export CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 
 # build project, it will be saved at $HOME/dynamo/.build/target
-cargo build --locked --profile dev --features mistralrs,sglang,vllm,python
+cargo build --locked --profile dev --features mistralrs
 cargo doc --no-deps
 
 # create symlinks for the binaries in the deploy directory
-mkdir -p $HOME/dynamo/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
-ln -sf $HOME/dynamo/.build/target/debug/dynamo-run $HOME/dynamo/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/dynamo-run
-ln -sf $HOME/dynamo/.build/target/debug/http $HOME/dynamo/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/http
-ln -sf $HOME/dynamo/.build/target/debug/llmctl $HOME/dynamo/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/llmctl
+mkdir -p $HOME/dynamo/deploy/sdk/src/dynamo/sdk/cli/bin
+ln -sf $HOME/dynamo/.build/target/debug/dynamo-run $HOME/dynamo/deploy/sdk/src/dynamo/sdk/cli/bin/dynamo-run
+ln -sf $HOME/dynamo/.build/target/debug/http $HOME/dynamo/deploy/sdk/src/dynamo/sdk/cli/bin/http
+ln -sf $HOME/dynamo/.build/target/debug/llmctl $HOME/dynamo/deploy/sdk/src/dynamo/sdk/cli/bin/llmctl
 
 # install the python bindings in editable mode
 cd $HOME/dynamo/lib/bindings/python && retry uv pip install -e .
 cd $HOME/dynamo && retry env DYNAMO_BIN_PATH=$HOME/dynamo/.build/target/debug uv pip install -e .
 
-# source the venv and set the VLLM_KV_CAPI_PATH in bashrc
-echo "source /opt/dynamo/venv/bin/activate" >> ~/.bashrc
-echo "export VLLM_KV_CAPI_PATH=$HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so" >> ~/.bashrc
-echo "export GPG_TTY=$(tty)" >> ~/.bashrc
+export PYTHONPATH=/home/ubuntu/dynamo/components/planner/src:$PYTHONPATH
+
+# Add to bashrc only if not already present
+if ! grep -q "source /opt/dynamo/venv/bin/activate" ~/.bashrc; then
+    echo "source /opt/dynamo/venv/bin/activate" >> ~/.bashrc
+fi
+
+if ! grep -q "export VLLM_KV_CAPI_PATH=" ~/.bashrc; then
+    echo "export VLLM_KV_CAPI_PATH=$HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so" >> ~/.bashrc
+fi
+
+if ! grep -q "export GPG_TTY=" ~/.bashrc; then
+    echo "export GPG_TTY=$(tty)" >> ~/.bashrc
+fi

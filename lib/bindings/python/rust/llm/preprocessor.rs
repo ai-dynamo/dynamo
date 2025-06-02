@@ -18,7 +18,7 @@ use crate::llm::model_card::ModelDeploymentCard;
 
 use llm_rs::{
     preprocessor::OpenAIPreprocessor,
-    protocols::common::llm_backend::{BackendInput, BackendOutput},
+    protocols::common::llm_backend::{BackendOutput, PreprocessedRequest},
     types::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -27,9 +27,9 @@ use llm_rs::{
     },
 };
 
-use dynamo_runtime::pipeline::{Operator, ServiceFrontend, Source};
-
-use dynamo_runtime::pipeline::{ManyOut, SegmentSink, SingleIn};
+use dynamo_runtime::pipeline::{
+    ManyOut, Operator, PushRouter, SegmentSink, ServiceFrontend, SingleIn, Source,
+};
 
 #[pyclass]
 pub(crate) struct OAIChatPreprocessor {
@@ -60,7 +60,7 @@ impl OAIChatPreprocessor {
         >::new();
 
         let network =
-            SegmentSink::<SingleIn<BackendInput>, ManyOut<Annotated<BackendOutput>>>::new();
+            SegmentSink::<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>>::new();
 
         let preprocessor = self.inner.into_operator();
         let pipeline = frontend
@@ -76,13 +76,14 @@ impl OAIChatPreprocessor {
         let builder = self.current.inner.endpoint_builder().handler(ingress);
         let endpoint = Arc::new(self.next.inner.clone());
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let client = Arc::new(
-                endpoint
-                    .client::<BackendInput, Annotated<BackendOutput>>()
-                    .await
-                    .map_err(to_pyerr)?,
-            );
-            network.attach(client).map_err(to_pyerr)?;
+            let client = endpoint.client().await.map_err(to_pyerr)?;
+            let router = PushRouter::<PreprocessedRequest, Annotated<BackendOutput>>::from_client(
+                client,
+                Default::default(),
+            )
+            .await
+            .map_err(to_pyerr)?;
+            network.attach(Arc::new(router)).map_err(to_pyerr)?;
             builder.start().await.map_err(to_pyerr)?;
             Ok(())
         })

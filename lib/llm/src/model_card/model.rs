@@ -34,14 +34,15 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_runtime::slug::Slug;
+use dynamo_runtime::transports::nats;
 use either::Either;
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
+use url::Url;
 
-use crate::gguf::{Content, ContentConfig};
+use crate::gguf::{Content, ContentConfig, ModelConfigLike};
+use crate::key_value_store::Versioned;
 use crate::protocols::TokenIdType;
-
-pub const BUCKET_NAME: &str = "mdc";
 
 /// Delete model deployment cards that haven't been re-published after this long.
 /// Cleans up if the worker stopped.
@@ -93,7 +94,7 @@ pub enum PromptContextMixin {
     Llama3DateTime,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Builder)]
+#[derive(Serialize, Deserialize, Clone, Debug, Builder, Default)]
 pub struct ModelDeploymentCard {
     /// Human readable model name, e.g. "Meta Llama 3.1 8B Instruct"
     pub display_name: String,
@@ -103,10 +104,10 @@ pub struct ModelDeploymentCard {
     pub service_name: String,
 
     /// Model information
-    pub model_info: ModelInfoType,
+    pub model_info: Option<ModelInfoType>,
 
     /// Tokenizer configuration
-    pub tokenizer: TokenizerKind,
+    pub tokenizer: Option<TokenizerKind>,
 
     /// Prompt Formatter configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -123,11 +124,12 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing)]
     pub revision: u64,
 
-    /// Does this model expect preprocessing (tokenization, etc) to be already done?
-    /// If this is true they get a BackendInput JSON. If this is false they get
-    /// a ChatCompletionRequest JSON.
-    #[serde(default)]
-    pub requires_preprocessing: bool,
+    /// Max context (in number of tokens) this model can handle
+    pub context_length: usize,
+
+    /// Size of a KV cache block - vllm only currently
+    /// Passed to the engine and the KV router.
+    pub kv_cache_block_size: usize,
 }
 
 impl ModelDeploymentCard {
@@ -135,15 +137,17 @@ impl ModelDeploymentCard {
         ModelDeploymentCardBuilder::default()
     }
 
-    /// A URL and NATS friendly and very likely unique ID for this model.
-    /// Mostly human readable. a-z, 0-9, _ and - only.
-    /// Pass the service_name.
-    pub fn service_name_slug(s: &str) -> Slug {
-        Slug::from_string(s)
-    }
-
-    pub fn set_service_name(&mut self, service_name: &str) {
-        self.service_name = service_name.to_string();
+    /// Create a ModelDeploymentCard where only the name is filled in.
+    ///
+    /// Single-process setups don't need an MDC to communicate model details, but it
+    /// simplifies the code to assume we always have one. This is how you get one in those
+    /// cases. A quasi-null object: <https://en.wikipedia.org/wiki/Null_object_pattern>
+    pub fn with_name_only(name: &str) -> ModelDeploymentCard {
+        ModelDeploymentCard {
+            display_name: name.to_string(),
+            service_name: Slug::slugify(name).to_string(),
+            ..Default::default()
+        }
     }
 
     /// How often we should check if a model deployment card expired because it's workers are gone
@@ -157,15 +161,9 @@ impl ModelDeploymentCard {
         }
     }
 
-    pub fn slug(&self) -> Slug {
-        ModelDeploymentCard::service_name_slug(&self.service_name)
-    }
-
     /// Load a model deployment card from a JSON file
     pub fn load_from_json_file<P: AsRef<Path>>(file: P) -> std::io::Result<Self> {
-        let mut card: ModelDeploymentCard = serde_json::from_str(&std::fs::read_to_string(file)?)?;
-        card.requires_preprocessing = false;
-        Ok(card)
+        Ok(serde_json::from_str(&std::fs::read_to_string(file)?)?)
     }
 
     /// Load a model deployment card from a JSON string
@@ -173,10 +171,22 @@ impl ModelDeploymentCard {
         Ok(serde_json::from_str(json)?)
     }
 
+    //
+    // Methods
+    //
+
     /// Save the model deployment card to a JSON file
     pub fn save_to_json_file(&self, file: &str) -> Result<(), anyhow::Error> {
         std::fs::write(file, self.to_json()?)?;
         Ok(())
+    }
+
+    pub fn set_service_name(&mut self, service_name: &str) {
+        self.service_name = service_name.to_string();
+    }
+
+    pub fn slug(&self) -> Slug {
+        Slug::from_string(&self.display_name)
     }
 
     /// Serialize the model deployment card to a JSON string
@@ -198,13 +208,153 @@ impl ModelDeploymentCard {
         }
     }
 
+    /// Is this a full model card with tokenizer?
+    /// There are cases where we have a placeholder card (see `with_name_only`).
+    pub fn has_tokenizer(&self) -> bool {
+        self.tokenizer.is_some()
+    }
+
     pub fn tokenizer_hf(&self) -> anyhow::Result<HfTokenizer> {
         match &self.tokenizer {
-            TokenizerKind::HfTokenizerJson(file) => {
+            Some(TokenizerKind::HfTokenizerJson(file)) => {
                 HfTokenizer::from_file(file).map_err(anyhow::Error::msg)
             }
-            TokenizerKind::GGUF(t) => Ok(*t.clone()),
+            Some(TokenizerKind::GGUF(t)) => Ok(*t.clone()),
+            None => {
+                anyhow::bail!("Blank ModelDeploymentCard does not have a tokenizer");
+            }
         }
+    }
+
+    pub fn is_gguf(&self) -> bool {
+        match &self.model_info {
+            Some(info) => info.is_gguf(),
+            None => false,
+        }
+    }
+
+    /// Move the files this MDC uses into the NATS object store.
+    /// Updates the URI's to point to NATS.
+    pub async fn move_to_nats(&mut self, nats_client: nats::Client) -> Result<()> {
+        let nats_addr = nats_client.addr();
+        let bucket_name = self.slug();
+        tracing::debug!(
+            nats_addr,
+            %bucket_name,
+            "Uploading model deployment card fields to NATS"
+        );
+
+        if let Some(ModelInfoType::HfConfigJson(ref src_file)) = self.model_info {
+            if !nats::is_nats_url(src_file) {
+                let target = format!("nats://{nats_addr}/{bucket_name}/config.json");
+                nats_client
+                    .object_store_upload(&PathBuf::from(src_file), Url::parse(&target)?)
+                    .await?;
+                self.model_info = Some(ModelInfoType::HfConfigJson(target));
+            }
+        }
+
+        if let Some(PromptFormatterArtifact::HfTokenizerConfigJson(ref src_file)) =
+            self.prompt_formatter
+        {
+            if !nats::is_nats_url(src_file) {
+                let target = format!("nats://{nats_addr}/{bucket_name}/tokenizer_config.json");
+                nats_client
+                    .object_store_upload(&PathBuf::from(src_file), Url::parse(&target)?)
+                    .await?;
+                self.prompt_formatter =
+                    Some(PromptFormatterArtifact::HfTokenizerConfigJson(target));
+            }
+        }
+
+        if let Some(TokenizerKind::HfTokenizerJson(ref src_file)) = self.tokenizer {
+            if !nats::is_nats_url(src_file) {
+                let target = format!("nats://{nats_addr}/{bucket_name}/tokenizer.json");
+                nats_client
+                    .object_store_upload(&PathBuf::from(src_file), Url::parse(&target)?)
+                    .await?;
+                self.tokenizer = Some(TokenizerKind::HfTokenizerJson(target));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Move the files this MDC uses from the NATS object store to local disk.
+    /// Updates the URI's to point to the created files.
+    ///
+    /// The returned TempDir must be kept alive, it cleans up on drop.
+    pub async fn move_from_nats(&mut self, nats_client: nats::Client) -> Result<tempfile::TempDir> {
+        let nats_addr = nats_client.addr();
+        let bucket_name = self.slug();
+        let target_dir = tempfile::TempDir::with_prefix(bucket_name.to_string())?;
+        tracing::debug!(
+            nats_addr,
+            %bucket_name,
+            target_dir = %target_dir.path().display(),
+            "Downloading model deployment card fields from NATS"
+        );
+
+        if let Some(ModelInfoType::HfConfigJson(ref src_url)) = self.model_info {
+            if nats::is_nats_url(src_url) {
+                let target = target_dir.path().join("config.json");
+                nats_client
+                    .object_store_download(Url::parse(src_url)?, &target)
+                    .await?;
+                self.model_info = Some(ModelInfoType::HfConfigJson(target.display().to_string()));
+            }
+        }
+
+        if let Some(PromptFormatterArtifact::HfTokenizerConfigJson(ref src_url)) =
+            self.prompt_formatter
+        {
+            if nats::is_nats_url(src_url) {
+                let target = target_dir.path().join("tokenizer_config.json");
+                nats_client
+                    .object_store_download(Url::parse(src_url)?, &target)
+                    .await?;
+                self.prompt_formatter = Some(PromptFormatterArtifact::HfTokenizerConfigJson(
+                    target.display().to_string(),
+                ));
+            }
+        }
+
+        if let Some(TokenizerKind::HfTokenizerJson(ref src_url)) = self.tokenizer {
+            if nats::is_nats_url(src_url) {
+                let target = target_dir.path().join("tokenizer.json");
+                nats_client
+                    .object_store_download(Url::parse(src_url)?, &target)
+                    .await?;
+                self.tokenizer = Some(TokenizerKind::HfTokenizerJson(target.display().to_string()));
+            }
+        }
+
+        Ok(target_dir)
+    }
+
+    /// Delete this card from the key-value store and it's URLs from the object store
+    pub async fn delete_from_nats(&mut self, nats_client: nats::Client) -> Result<()> {
+        let nats_addr = nats_client.addr();
+        let bucket_name = self.slug();
+        tracing::trace!(
+            nats_addr,
+            %bucket_name,
+            "Delete model deployment card from NATS"
+        );
+        nats_client
+            .object_store_delete_bucket(bucket_name.as_ref())
+            .await
+    }
+}
+
+impl Versioned for ModelDeploymentCard {
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn set_revision(&mut self, revision: u64) {
+        self.last_published = Some(chrono::Utc::now());
+        self.revision = revision;
     }
 }
 
@@ -237,21 +387,29 @@ impl ModelInfoType {
             Self::GGUF(path) => HFConfig::from_gguf(path),
         }
     }
+    pub fn is_gguf(&self) -> bool {
+        matches!(self, Self::GGUF(_))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HFConfig {
-    bos_token_id: TokenIdType,
-
-    #[serde(with = "either::serde_untagged")]
-    eos_token_id: Either<TokenIdType, Vec<TokenIdType>>,
-
     /// denotes the mixin to the flattened data model which can be present
     /// in the config.json file
     architectures: Vec<String>,
 
     /// general model type
     model_type: String,
+
+    text_config: Option<HFTextConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HFTextConfig {
+    bos_token_id: TokenIdType,
+
+    #[serde(with = "either::serde_untagged")]
+    eos_token_id: Either<TokenIdType, Vec<TokenIdType>>,
 
     /// max sequence length
     max_position_embeddings: usize,
@@ -267,9 +425,13 @@ struct HFConfig {
 }
 
 impl HFConfig {
-    async fn from_json_file(file: &String) -> Result<Arc<dyn ModelInfo>> {
+    async fn from_json_file(file: &str) -> Result<Arc<dyn ModelInfo>> {
         let contents = std::fs::read_to_string(file)?;
-        let config: Self = serde_json::from_str(&contents)?;
+        let mut config: Self = serde_json::from_str(&contents)?;
+        if config.text_config.is_none() {
+            let text_config: HFTextConfig = serde_json::from_str(&contents)?;
+            config.text_config = Some(text_config);
+        }
         Ok(Arc::new(config))
     }
     fn from_gguf(gguf_file: &Path) -> Result<Arc<dyn ModelInfo>> {
@@ -288,19 +450,21 @@ impl HFConfig {
 
         let arch = content.arch().to_string();
         Ok(Arc::new(HFConfig {
-            bos_token_id,
-            eos_token_id: Either::Left(eos_token_id),
             architectures: vec![format!("{}ForCausalLM", capitalize(&arch))],
             // "general.architecture"
             model_type: arch,
-            // "llama.context_length"
-            max_position_embeddings: model_config_metadata.max_seq_len(),
-            // "llama.block_count"
-            num_hidden_layers,
-            // "llama.attention.head_count"
-            num_attention_heads: model_config_metadata.num_attn_heads(),
-            // "tokenizer.ggml.tokens".len()
-            vocab_size,
+            text_config: Some(HFTextConfig {
+                bos_token_id,
+                eos_token_id: Either::Left(eos_token_id),
+                // "llama.context_length"
+                max_position_embeddings: model_config_metadata.max_seq_len(),
+                // "llama.block_count"
+                num_hidden_layers,
+                // "llama.attention.head_count"
+                num_attention_heads: model_config_metadata.num_attn_heads(),
+                // "tokenizer.ggml.tokens".len()
+                vocab_size,
+            }),
         }))
     }
 }
@@ -311,22 +475,22 @@ impl ModelInfo for HFConfig {
     }
 
     fn bos_token_id(&self) -> TokenIdType {
-        self.bos_token_id
+        self.text_config.as_ref().unwrap().bos_token_id
     }
 
     fn eos_token_ids(&self) -> Vec<TokenIdType> {
-        match &self.eos_token_id {
+        match &self.text_config.as_ref().unwrap().eos_token_id {
             Either::Left(eos_token_id) => vec![*eos_token_id],
             Either::Right(eos_token_ids) => eos_token_ids.clone(),
         }
     }
 
     fn max_position_embeddings(&self) -> usize {
-        self.max_position_embeddings
+        self.text_config.as_ref().unwrap().max_position_embeddings
     }
 
     fn vocab_size(&self) -> usize {
-        self.vocab_size
+        self.text_config.as_ref().unwrap().vocab_size
     }
 }
 
@@ -339,7 +503,7 @@ impl TokenizerKind {
     }
 }
 
-fn load_gguf(gguf_file: &Path) -> anyhow::Result<Content> {
+pub(crate) fn load_gguf(gguf_file: &Path) -> anyhow::Result<Content> {
     let filename = gguf_file.display().to_string();
     let mut f = File::open(gguf_file).with_context(|| filename.clone())?;
     // vec because GGUF can be split into multiple files (shards)
@@ -358,4 +522,28 @@ fn capitalize(s: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HFConfig;
+    use std::path::Path;
+
+    #[tokio::test]
+    pub async fn test_config_json_llama3() -> anyhow::Result<()> {
+        let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct/config.json");
+        let config = HFConfig::from_json_file(&config_file.display().to_string()).await?;
+        assert_eq!(config.bos_token_id(), 128000);
+        Ok(())
+    }
+
+    #[tokio::test]
+    pub async fn test_config_json_llama4() -> anyhow::Result<()> {
+        let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/Llama-4-Scout-17B-16E-Instruct/config.json");
+        let config = HFConfig::from_json_file(&config_file.display().to_string()).await?;
+        assert_eq!(config.bos_token_id(), 200000);
+        Ok(())
+    }
 }

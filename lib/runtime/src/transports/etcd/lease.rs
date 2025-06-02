@@ -44,6 +44,17 @@ pub async fn create_lease(
     })
 }
 
+/// Revoke a lease given its lease id. A wrapper over etcd_client::LeaseClient::revoke
+pub async fn revoke_lease(mut lease_client: LeaseClient, lease_id: i64) -> Result<()> {
+    match lease_client.revoke(lease_id).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            tracing::warn!("failed to revoke lease: {:?}", e);
+            Err(e.into())
+        }
+    }
+}
+
 /// Task to keep leases alive.
 ///
 /// If this task returns an error, the cancellation token will be invoked on the runtime.

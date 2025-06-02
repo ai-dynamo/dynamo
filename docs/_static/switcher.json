@@ -1,0 +1,12 @@
+[
+    {
+        "name": "0.1.0 (current release)",
+        "version": "0.1.0",
+        "url": "https://docs.nvidia.com/dynamo/latest/index.html"
+    },
+    {
+        "name": "older releases",
+        "version": "archives",
+        "url": "https://docs.nvidia.com/dynamo/archives/"
+    }
+]

@@ -39,7 +39,9 @@
 use super::*;
 
 pub mod backend;
+pub mod block_manager;
 pub mod disagg_router;
 pub mod kv;
 pub mod model_card;
+pub mod nats;
 pub mod preprocessor;

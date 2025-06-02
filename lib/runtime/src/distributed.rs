@@ -15,17 +15,19 @@
 
 pub use crate::component::Component;
 use crate::{
-    component::{self, ComponentBuilder, Namespace},
+    component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
     discovery::DiscoveryClient,
     service::ServiceClient,
     transports::{etcd, nats, tcp},
     ErrorContext,
 };
 
-use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, OK};
+use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, Weak, OK};
 
 use derive_getters::Dissolve;
 use figment::error;
+use std::collections::HashMap;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 impl DistributedRuntime {
@@ -70,6 +72,7 @@ impl DistributedRuntime {
             tcp_server: Arc::new(OnceCell::new()),
             component_registry: component::Registry::new(),
             is_static,
+            instance_sources: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -154,6 +157,10 @@ impl DistributedRuntime {
 
     pub fn child_token(&self) -> CancellationToken {
         self.runtime.child_token()
+    }
+
+    pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>> {
+        self.instance_sources.clone()
     }
 }
 

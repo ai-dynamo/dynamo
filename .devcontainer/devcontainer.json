@@ -24,7 +24,8 @@
         "--cap-add=SYS_PTRACE",
         "--shm-size=10G",
         "--ulimit=memlock=-1",
-        "--ulimit=stack=67108864"
+        "--ulimit=stack=67108864",
+        "--ulimit=nofile=65536:65536"
     ],
     "service": "dynamo",
     "customizations": {

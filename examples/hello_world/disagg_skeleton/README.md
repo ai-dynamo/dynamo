@@ -45,9 +45,9 @@ In this example, we will use 2 nodes to demo the disagg serving.
   - Deploys DummyWorker as the monolith worker
 
 ### Prerequisites
-On Node 1, start required services (etcd and NATS) using [Docker Compose](../../../deploy/docker-compose.yml)
+On Node 1, start required services (etcd and NATS) using [Docker Compose](../../../deploy/metrics/docker-compose.yml)
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
 ### Run the Deployment
@@ -81,7 +81,7 @@ Now you should see both workers are ready in Node 1's terminal.
 - `Response: {"worker_output":"Which team won 2020 World Series_GeneratedBy_NODE2HOSTNAME","request_id":"id_number"}`
 ```
 curl -X 'POST' \
-  'http://localhost:3000/generate' \
+  'http://localhost:8000/generate' \
   -H 'accept: text/event-stream' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -89,7 +89,7 @@ curl -X 'POST' \
   "request_id":"id_number"
 }'
 curl -X 'POST' \
-  'http://localhost:3000/generate' \
+  'http://localhost:8000/generate' \
   -H 'accept: text/event-stream' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -100,7 +100,7 @@ curl -X 'POST' \
 6. Then modify the prompt and you will notice prompts with similar prefix will be routed to the same worker due to the simply routing algorithm used in this demo. For example, following query will be routed to the worker proceesed "Tell me a joke" prompt.
 ```
 curl -X 'POST' \
-  'http://localhost:3000/generate' \
+  'http://localhost:8000/generate' \
   -H 'accept: text/event-stream' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -134,7 +134,7 @@ dynamo serve components.prefill_worker:PrefillWorker
 3. Query the Frontend. This time decode workers push requests to the prefill queue, and prefill worker pulles task from the queue to simulate the prefill task. The actual prefill is skipped in this demo.
 ```
 curl -X 'POST' \
-  'http://localhost:3000/generate' \
+  'http://localhost:8000/generate' \
   -H 'accept: text/event-stream' \
   -H 'Content-Type: application/json' \
   -d '{

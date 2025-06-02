@@ -13,11 +13,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::{future::Future, pin::Pin, sync::Arc};
+
 use dynamo_llm::{
     backend::Backend,
-    http::service::discovery::ModelEntry,
+    engines::StreamingEngineAdapter,
     model_type::ModelType,
-    preprocessor::OpenAIPreprocessor,
+    preprocessor::{BackendOutput, PreprocessedRequest},
     types::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -25,10 +27,11 @@ use dynamo_llm::{
         Annotated,
     },
 };
+use dynamo_runtime::engine::AsyncEngineStream;
 use dynamo_runtime::pipeline::{
-    network::Ingress, ManyOut, Operator, SegmentSource, ServiceBackend, SingleIn, Source,
+    network::Ingress, Context, ManyOut, Operator, SegmentSource, ServiceBackend, SingleIn, Source,
 };
-use dynamo_runtime::{protocols::Endpoint, DistributedRuntime};
+use dynamo_runtime::{protocols::Endpoint as EndpointId, DistributedRuntime};
 
 use crate::EngineConfig;
 
@@ -37,77 +40,65 @@ pub async fn run(
     path: String,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
-    // This will attempt to connect to NATS and etcd
-
     let cancel_token = distributed_runtime.primary_token().clone();
-    let endpoint_id: Endpoint = path.parse()?;
-
-    let etcd_client = distributed_runtime.etcd_client();
-
-    let (ingress, service_name) = match engine_config {
-        EngineConfig::StaticFull {
-            service_name,
-            engine,
-        } => (Ingress::for_engine(engine)?, service_name),
-        EngineConfig::StaticCore {
-            service_name,
-            engine: inner_engine,
-            card,
-        } => {
-            let frontend = SegmentSource::<
-                SingleIn<NvCreateChatCompletionRequest>,
-                ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-            >::new();
-            let preprocessor = OpenAIPreprocessor::new(*card.clone())
-                .await?
-                .into_operator();
-            let backend = Backend::from_mdc(*card.clone()).await?.into_operator();
-            let engine = ServiceBackend::from_engine(inner_engine);
-
-            let pipeline = frontend
-                .link(preprocessor.forward_edge())?
-                .link(backend.forward_edge())?
-                .link(engine)?
-                .link(backend.backward_edge())?
-                .link(preprocessor.backward_edge())?
-                .link(frontend)?;
-
-            (Ingress::for_pipeline(pipeline)?, service_name)
-        }
-        EngineConfig::Dynamic(_) => {
-            anyhow::bail!("Cannot use endpoint for both in and out");
-        }
-        EngineConfig::None => unreachable!(),
-    };
-
-    let model_registration = ModelEntry {
-        name: service_name.to_string(),
-        endpoint: endpoint_id.clone(),
-        model_type: ModelType::Chat,
-    };
+    let endpoint_id: EndpointId = path.parse()?;
 
     let component = distributed_runtime
-        .namespace(endpoint_id.namespace)?
-        .component(endpoint_id.component)?;
+        .namespace(&endpoint_id.namespace)?
+        .component(&endpoint_id.component)?;
     let endpoint = component
         .service_builder()
         .create()
         .await?
-        .endpoint(endpoint_id.name);
+        .endpoint(&endpoint_id.name);
 
-    if let Some(etcd_client) = etcd_client {
-        let network_name = endpoint.subject_to(etcd_client.lease_id());
-        tracing::debug!("Registering with etcd as {network_name}");
-        etcd_client
-            .kv_create(
-                network_name.clone(),
-                serde_json::to_vec_pretty(&model_registration)?,
-                Some(etcd_client.lease_id()),
-            )
-            .await?;
-    }
+    let (rt_fut, card): (Pin<Box<dyn Future<Output = _> + Send + 'static>>, _) = match engine_config
+    {
+        EngineConfig::StaticFull { engine, mut model } => {
+            let engine = Arc::new(StreamingEngineAdapter::new(engine));
+            let ingress_chat = Ingress::<
+                Context<NvCreateChatCompletionRequest>,
+                Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateChatCompletionStreamResponse>>>>,
+            >::for_engine(engine)?;
 
-    let rt_fut = endpoint.endpoint_builder().handler(ingress).start();
+            model.attach(&endpoint, ModelType::Chat).await?;
+            let fut_chat = endpoint.endpoint_builder().handler(ingress_chat).start();
+
+            (Box::pin(fut_chat), Some(model.card().clone()))
+        }
+        EngineConfig::StaticCore {
+            engine: inner_engine,
+            mut model,
+        } => {
+            // Pre-processing is done ingress-side, so it should be already done.
+            let frontend = SegmentSource::<
+                SingleIn<PreprocessedRequest>,
+                ManyOut<Annotated<BackendOutput>>,
+            >::new();
+            let backend = Backend::from_mdc(model.card().clone())
+                .await?
+                .into_operator();
+            let engine = ServiceBackend::from_engine(inner_engine);
+            let pipeline = frontend
+                .link(backend.forward_edge())?
+                .link(engine)?
+                .link(backend.backward_edge())?
+                .link(frontend)?;
+            let ingress = Ingress::for_pipeline(pipeline)?;
+
+            model.attach(&endpoint, ModelType::Backend).await?;
+            let fut = endpoint.endpoint_builder().handler(ingress).start();
+
+            (Box::pin(fut), Some(model.card().clone()))
+        }
+        EngineConfig::Dynamic => {
+            // We can only get here for in=dyn out=vllm|sglang`, because vllm and sglang are a
+            // subprocess that we talk to like a remote endpoint.
+            // That means the vllm/sglang subprocess is doing all the work, we are idle.
+            (never_ready(), None)
+        }
+    };
+
     tokio::select! {
         _ = rt_fut => {
             tracing::debug!("Endpoint ingress ended");
@@ -115,5 +106,20 @@ pub async fn run(
         _ = cancel_token.cancelled() => {
         }
     }
+
+    // Cleanup on shutdown
+    if let Some(mut card) = card {
+        if let Err(err) = card
+            .delete_from_nats(distributed_runtime.nats_client())
+            .await
+        {
+            tracing::error!(%err, "delete_from_nats error on shutdown");
+        }
+    }
+
     Ok(())
+}
+
+fn never_ready() -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'static>> {
+    Box::pin(std::future::pending::<anyhow::Result<()>>())
 }

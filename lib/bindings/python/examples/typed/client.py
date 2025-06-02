@@ -31,8 +31,8 @@ async def worker(runtime: DistributedRuntime):
     # create client
     client = await endpoint.client()
 
-    # list the endpoints
-    print(client.endpoint_ids())
+    # list the endpoint instances
+    print(client.instance_ids())
 
     # issue request
     stream = await client.generate(Request(data="hello world").model_dump_json())

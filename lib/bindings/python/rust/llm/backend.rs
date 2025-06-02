@@ -16,7 +16,7 @@
 use super::*;
 use crate::llm::model_card::ModelDeploymentCard;
 
-use llm_rs::protocols::common::llm_backend::{BackendInput, BackendOutput};
+use llm_rs::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
 use llm_rs::types::Annotated;
 
 use dynamo_runtime::pipeline::{Operator, ServiceBackend, ServiceFrontend, Source};
@@ -44,8 +44,10 @@ impl Backend {
     }
 
     fn start<'p>(&self, py: Python<'p>, generator: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let frontend =
-            ServiceFrontend::<SingleIn<BackendInput>, ManyOut<Annotated<BackendOutput>>>::new();
+        let frontend = ServiceFrontend::<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<BackendOutput>>,
+        >::new();
 
         let backend = self.inner.into_operator();
         let engine = Arc::new(PythonAsyncEngine::new(

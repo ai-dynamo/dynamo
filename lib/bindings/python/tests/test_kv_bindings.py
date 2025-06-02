@@ -28,7 +28,7 @@ from dynamo.llm import (
     KvEventPublisher,
     KvIndexer,
     KvMetricsAggregator,
-    KvMetricsPublisher,
+    WorkerMetricsPublisher,
 )
 from dynamo.runtime import Component, DistributedRuntime
 
@@ -256,7 +256,7 @@ async def test_metrics_aggregator(distributed_runtime):
 
 
 async def metrics_publisher_task(kv_listener, expected_metrics):
-    metrics_publisher = KvMetricsPublisher()
+    metrics_publisher = WorkerMetricsPublisher()
     metrics_publisher.publish(
         expected_metrics["request_active_slots"],
         expected_metrics["request_total_slots"],

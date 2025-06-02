@@ -19,7 +19,7 @@
     "single_word": false
   },
   "legacy": false,
-  "model_max_length": 1000000000000000019884624838656,
+  "model_max_length": 2048,
   "pad_token": null,
   "padding_side": "right",
   "sp_model_kwargs": {},

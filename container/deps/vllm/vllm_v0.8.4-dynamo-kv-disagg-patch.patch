@@ -1,3 +1,28 @@
+diff --git a/vllm/attention/backends/mla/common.py b/vllm/attention/backends/mla/common.py
+index 54278f5f6..7eaf92feb 100644
+--- a/vllm/attention/backends/mla/common.py
++++ b/vllm/attention/backends/mla/common.py
+@@ -300,7 +300,8 @@ class MLACommonState(AttentionState, Generic[T]):
+         cache_config = runner.cache_config
+ 
+         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
+-        self.enable_prefix_caching = cache_config.enable_prefix_caching
++        # TODO ptarasiewicz: we pretend that prefix caching is enabled to make fetching from Decode kv cache work
++        self.enable_prefix_caching = True # cache_config.enable_prefix_caching
+ 
+         if self.chunked_prefill_enabled or self.enable_prefix_caching:
+             self.context_chunk_workspace_size = min(
+@@ -735,8 +736,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
+         self.block_size = input_builder.block_size
+         self.chunked_prefill_enabled = \
+             self.runner.scheduler_config.chunked_prefill_enabled
+-        self.enable_prefix_caching = \
+-            self.runner.cache_config.enable_prefix_caching
++        # TODO ptarasiewicz: we pretend that prefix caching is enabled to make fetching from Decode kv cache work
++        self.enable_prefix_caching = True # self.runner.cache_config.enable_prefix_caching
+ 
+         if self.chunked_prefill_enabled or self.enable_prefix_caching:
+             attn_state = self.input_builder.runner.attn_state
 diff --git a/vllm/config.py b/vllm/config.py
 index 2912361ee..eea9cb65d 100644
 --- a/vllm/config.py
@@ -508,7 +533,7 @@ index 000000000..79eb8db67
 +
 +        self.event_id_counter += 1
 diff --git a/vllm/core/scheduler.py b/vllm/core/scheduler.py
-index cf85a2135..f9087b5c3 100644
+index cf85a2135..f157aa231 100644
 --- a/vllm/core/scheduler.py
 +++ b/vllm/core/scheduler.py
 @@ -1,16 +1,30 @@
@@ -677,7 +702,13 @@ index cf85a2135..f9087b5c3 100644
          running_queue = self.running
          assert len(self._async_stopped) == 0
          while running_queue:
-@@ -1073,6 +1138,7 @@ class Scheduler:
+@@ -1068,11 +1133,13 @@ class Scheduler:
+                 ignored_seq_groups=[],
+                 num_lookahead_slots=self._get_num_lookahead_slots(
+                     is_prefill=True, enable_chunking=enable_chunking),
++                num_remote_prefill_groups=0
+             )
+         ignored_seq_groups: List[SequenceGroup] = []
          seq_groups: List[ScheduledSequenceGroup] = []
  
          waiting_queue = self.waiting
@@ -685,7 +716,7 @@ index cf85a2135..f9087b5c3 100644
  
          leftover_waiting_sequences: Deque[SequenceGroup] = deque()
          while self._passed_delay(time.time()) and waiting_queue:
-@@ -1121,8 +1187,10 @@ class Scheduler:
+@@ -1121,8 +1188,10 @@ class Scheduler:
                      True, enable_chunking)
  
              # If the sequence group cannot be allocated, stop.
@@ -697,7 +728,7 @@ index cf85a2135..f9087b5c3 100644
              if can_allocate == AllocStatus.LATER:
                  break
              elif can_allocate == AllocStatus.NEVER:
-@@ -1170,7 +1238,18 @@ class Scheduler:
+@@ -1170,7 +1239,18 @@ class Scheduler:
              if curr_loras is not None and lora_int_id > 0:
                  curr_loras.add(lora_int_id)
              waiting_queue.popleft()
@@ -717,7 +748,7 @@ index cf85a2135..f9087b5c3 100644
  
              if partial_prefill_metadata is not None:
                  partial_prefill_metadata.maybe_increment_partial_prefills(
-@@ -1214,9 +1293,10 @@ class Scheduler:
+@@ -1214,9 +1294,10 @@ class Scheduler:
              ignored_seq_groups=ignored_seq_groups,
              num_lookahead_slots=self._get_num_lookahead_slots(
                  is_prefill=True, enable_chunking=enable_chunking),
@@ -729,7 +760,7 @@ index cf85a2135..f9087b5c3 100644
          """Schedule queued requests.
  
          The current policy is designed to optimize the throughput. First,
-@@ -1234,6 +1314,9 @@ class Scheduler:
+@@ -1234,6 +1315,9 @@ class Scheduler:
          for seq_group in self.running:
              budget.add_num_seqs(seq_group.request_id,
                                  seq_group.get_max_num_running_seqs())
@@ -739,7 +770,7 @@ index cf85a2135..f9087b5c3 100644
          curr_loras = (set(
              seq_group.lora_int_id for seq_group in self.running
              if seq_group.lora_int_id > 0) if self.lora_enabled else None)
-@@ -1258,7 +1341,9 @@ class Scheduler:
+@@ -1258,7 +1342,9 @@ class Scheduler:
          if len(prefills.seq_groups) == 0:
              running_scheduled = self._schedule_running(budget,
                                                         curr_loras,
@@ -750,7 +781,7 @@ index cf85a2135..f9087b5c3 100644
  
              # If any sequence group is preempted, do not swap in any sequence
              # group. because it means there's no slot for new running requests.
-@@ -1275,7 +1360,12 @@ class Scheduler:
+@@ -1275,7 +1361,12 @@ class Scheduler:
          self.waiting.extendleft(running_scheduled.preempted)
          # Update new running requests.
          if len(prefills.seq_groups) > 0:
@@ -764,7 +795,7 @@ index cf85a2135..f9087b5c3 100644
  
          self.running.extend(running_scheduled.decode_seq_groups_list)
  
-@@ -1452,12 +1542,14 @@ class Scheduler:
+@@ -1452,12 +1543,14 @@ class Scheduler:
          ]
          return finishing + not_finishing
  
@@ -781,7 +812,7 @@ index cf85a2135..f9087b5c3 100644
  
      def _can_append_slots(self, seq_group: SequenceGroup,
                            enable_chunking: bool) -> bool:
-@@ -1491,14 +1583,16 @@ class Scheduler:
+@@ -1491,14 +1584,16 @@ class Scheduler:
          return no_single_seq
  
      def schedule(
@@ -801,7 +832,7 @@ index cf85a2135..f9087b5c3 100644
          now = time.time()
  
          if not self.cache_config.enable_prefix_caching:
-@@ -1537,7 +1631,8 @@ class Scheduler:
+@@ -1537,7 +1632,8 @@ class Scheduler:
                  encoder_seq_data = None
                  cross_block_table = None
  
@@ -811,7 +842,7 @@ index cf85a2135..f9087b5c3 100644
                  seq_id = seq.seq_id
                  seq_data[seq_id] = seq.data
                  block_tables[seq_id] = self.block_manager.get_block_table(seq)
-@@ -1546,7 +1641,9 @@ class Scheduler:
+@@ -1546,7 +1642,9 @@ class Scheduler:
              if self.cache_config.enable_prefix_caching:
                  common_computed_block_nums = (
                      self.block_manager.get_common_computed_block_ids(
@@ -822,7 +853,7 @@ index cf85a2135..f9087b5c3 100644
  
              do_sample = True
              is_prompt = seq_group.is_prefill()
-@@ -1568,9 +1665,30 @@ class Scheduler:
+@@ -1568,9 +1666,30 @@ class Scheduler:
                          < seqs[0].data.get_len()):
                      do_sample = False
  
@@ -853,7 +884,7 @@ index cf85a2135..f9087b5c3 100644
                  seq_group_metadata = SequenceGroupMetadata(
                      request_id=seq_group.request_id,
                      is_prompt=is_prompt,
-@@ -1598,6 +1716,7 @@ class Scheduler:
+@@ -1598,6 +1717,7 @@ class Scheduler:
                          if scheduler_outputs.num_prefill_groups > 0 else None),
                      mm_processor_kwargs=seq_group.mm_processor_kwargs,
                      prompt_adapter_request=seq_group.prompt_adapter_request,
@@ -861,7 +892,7 @@ index cf85a2135..f9087b5c3 100644
                  )
              else:
                  # When SPMD mode is enabled, we only send delta data except for
-@@ -1696,10 +1815,16 @@ class Scheduler:
+@@ -1696,10 +1816,16 @@ class Scheduler:
  
              self._async_stopped.clear()
  
@@ -1014,10 +1045,10 @@ index 000000000..a2f9ce99e
 \ No newline at end of file
 diff --git a/vllm/distributed/device_communicators/nixl.py b/vllm/distributed/device_communicators/nixl.py
 new file mode 100644
-index 000000000..136a0bd37
+index 000000000..bd4ac984e
 --- /dev/null
 +++ b/vllm/distributed/device_communicators/nixl.py
-@@ -0,0 +1,394 @@
+@@ -0,0 +1,445 @@
 +# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 +# SPDX-License-Identifier: Apache-2.0
 +#
@@ -1060,7 +1091,7 @@ index 000000000..136a0bd37
 +        dict=True):
 +    engine_id: str
 +    agent_metadata: List[bytes]
-+    kv_caches_base_addr: List[List[Tuple[int, int]]] # base address for each rank for each layer for keys and values
++    kv_caches_base_addr: List[List[List[int]]] # base address for each rank for each layer for keys and values
 +    num_blocks: int
 +
 +
@@ -1096,6 +1127,7 @@ index 000000000..136a0bd37
 +
 +
 +        self._tp_size[engine_id] = vllm_config.parallel_config.tensor_parallel_size
++        self._is_mla = "deepseek" in vllm_config.model_config.architectures[0].lower()
 +        
 +
 +    @property
@@ -1103,27 +1135,59 @@ index 000000000..136a0bd37
 +        return self.nixl_wrapper.name
 +
 +    def register_kv_caches(self, kv_caches: List[torch.Tensor]):
-+        _, num_blocks, block_size, num_heads, head_dim = kv_caches[0].shape
-+        self.block_len = block_size * num_heads * head_dim * kv_caches[0].element_size()
-+        logger.debug("Per layer kv cache size: %s", kv_caches[0].shape)
-+        self.num_layers = len(kv_caches)
-+        self.num_blocks = num_blocks
-+        self.num_heads = num_heads
-+        self.kv_caches = kv_caches
-+        kv_caches_base_addr = []
-+        caches_data = []
-+        for key_cache, value_cache in kv_caches:
-+            base_addr = key_cache.data_ptr()
-+            region_len = 2 * num_blocks * self.block_len
-+            caches_data.append((base_addr, region_len, self.rank, ""))
-+            kv_caches_base_addr.append((key_cache.data_ptr(), value_cache.data_ptr()))
++        logger.debug("--------------------------------")
++        logger.debug("Registering kv caches for engine %s", self.engine_id)
++        logger.debug(f"Is deepseek: {self._is_mla}")
++        logger.debug(f"kv_cache shape: {kv_caches[0].shape}")
++        logger.debug("--------------------------------")
 +
-+        self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
++        if self._is_mla:
++            num_blocks, block_size, head_dim = kv_caches[0].shape
++            self.block_len = head_dim * block_size * kv_caches[0].element_size()
++            logger.debug("Per layer kv cache size: %s", kv_caches[0].shape)
++            self.num_layers = len(kv_caches)
++            self.num_blocks = num_blocks
++            self.num_heads = 1
++            self.kv_caches = kv_caches
++            self.num_cache_entries = 1
 +
-+        descs = self.nixl_wrapper.get_reg_descs(caches_data, "VRAM")
-+        logger.debug("Registering descs: %s", caches_data)
-+        self.nixl_wrapper.register_memory(descs)
-+        self._registered_descs.append(descs)
++            kv_caches_base_addr = []
++            caches_data = []
++            for kv_cache in kv_caches:
++                base_addr = kv_cache.data_ptr()
++                region_len = self.num_cache_entries * num_blocks * self.block_len
++                caches_data.append((base_addr, region_len, self.rank, ""))
++                kv_caches_base_addr.append([base_addr,])
++
++            self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
++
++            descs = self.nixl_wrapper.get_reg_descs(caches_data, "VRAM")
++            logger.debug("Registering descs: %s", caches_data)
++            self.nixl_wrapper.register_memory(descs)
++            self._registered_descs.append(descs)
++        else:
++            _, num_blocks, block_size, num_heads, head_dim = kv_caches[0].shape
++            self.block_len = block_size * num_heads * head_dim * kv_caches[0].element_size()
++            logger.debug("Per layer kv cache size: %s", kv_caches[0].shape)
++            self.num_layers = len(kv_caches)
++            self.num_blocks = num_blocks
++            self.num_heads = num_heads
++            self.kv_caches = kv_caches
++            self.num_cache_entries = 2
++            kv_caches_base_addr = []
++            caches_data = []
++            for key_cache, value_cache in kv_caches:
++                base_addr = key_cache.data_ptr()
++                region_len = self.num_cache_entries * num_blocks * self.block_len
++                caches_data.append((base_addr, region_len, self.rank, ""))
++                kv_caches_base_addr.append([key_cache.data_ptr(), value_cache.data_ptr()])
++
++            self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
++
++            descs = self.nixl_wrapper.get_reg_descs(caches_data, "VRAM")
++            logger.debug("Registering descs: %s", caches_data)
++            self.nixl_wrapper.register_memory(descs)
++            self._registered_descs.append(descs)
 +
 +    def get_agent_metadata(self):
 +        return self.nixl_wrapper.get_agent_metadata()
@@ -1138,7 +1202,7 @@ index 000000000..136a0bd37
 +            self.nixl_wrapper.release_dlist_handle(src_xfer_side_handle)
 +        for dst_xfer_side_handles in self.dst_xfer_side_handles.values():
 +            for dst_xfer_side_handle in dst_xfer_side_handles.values():
-+                self.nixl_wrapper.delete_xfer_side(dst_xfer_side_handle)
++                self.nixl_wrapper.release_dlist_handle(dst_xfer_side_handle)
 +
 +    def _get_ranges(self, block_ids):
 +        # This function should return a list of ranges of block ids that are contiguous
@@ -1167,20 +1231,23 @@ index 000000000..136a0bd37
 +        if i is not None:
 +            num_blocks = self.num_blocks
 +            for layer_id in layer_ids:
-+                for is_value in [0, 1]:
++                for entry_index in range(self.num_cache_entries):
 +                    staging_range_idx = 0
 +                    for block_id in block_ids:
-+                        if block_id > staging_ranges[staging_range_idx][1] or block_id < staging_ranges[staging_range_idx][0]:
-+                            staging_range_idx += 1
-+                        start_offset = staging_ranges[staging_range_idx][0]
-+                        i_offset = i * (staging_ranges[staging_range_idx][-1] - start_offset + 1)
-+                        descs_ids.append(layer_id * 2 * num_blocks * tp_multiplier + is_value * num_blocks * tp_multiplier + start_offset * tp_multiplier + i_offset + (block_id - start_offset))
++                        if staging_ranges is not None:
++                            if block_id > staging_ranges[staging_range_idx][1] or block_id < staging_ranges[staging_range_idx][0]:
++                                staging_range_idx += 1
++                            start_offset = staging_ranges[staging_range_idx][0]
++                            i_offset = i * (staging_ranges[staging_range_idx][-1] - start_offset + 1)
++                            descs_ids.append(layer_id * self.num_cache_entries * num_blocks * tp_multiplier + entry_index * num_blocks * tp_multiplier + start_offset * tp_multiplier + i_offset + (block_id - start_offset))
++                        else:
++                            descs_ids.append(layer_id * self.num_cache_entries * num_blocks + entry_index * num_blocks + block_id)
 +        else:
 +            num_blocks = self.dst_num_blocks[engine_id]
 +            for layer_id in layer_ids:
-+                for is_value in [0, 1]:
++                for entry_index in range(self.num_cache_entries):
 +                    for block_id in block_ids:
-+                        descs_ids.append(layer_id * 2 * num_blocks + is_value * num_blocks + block_id)
++                        descs_ids.append(layer_id * self.num_cache_entries * num_blocks + entry_index * num_blocks + block_id)
 +        return descs_ids
 +
 +    def _get_same_length_ranges(self, src_ranges, dst_ranges, return_original_src_ranges=False):
@@ -1243,10 +1310,15 @@ index 000000000..136a0bd37
 +
 +        start_time = time.perf_counter()
 +
-+        local_ranges = self._get_ranges(local_block_ids)
-+        staging_ranges = self._get_ranges(staging_block_ids)
++        if self._is_mla:
++            # TODO ptarasiewicz: we skip staging when is_mla is true, we shouldn't assign staging blocks at all
++            staging_rearranging_ranges = None
++            staging_block_ids = local_block_ids
++        else:
++            local_ranges = self._get_ranges(local_block_ids)
++            staging_ranges = self._get_ranges(staging_block_ids)
 +
-+        local_rearranging_ranges, staging_rearranging_ranges = self._get_same_length_ranges(local_ranges, staging_ranges)
++            local_rearranging_ranges, staging_rearranging_ranges = self._get_same_length_ranges(local_ranges, staging_ranges)
 +
 +        tp_multiplier = self._tp_size[dst_engine_id] // self._tp_size[self.engine_id]
 +        remote_block_descs_ids = self._get_block_descs_ids(dst_engine_id, "all", remote_block_ids)
@@ -1282,11 +1354,12 @@ index 000000000..136a0bd37
 +
 +        rearrange_start_time = time.perf_counter()
 +
-+        for local_range, staging_range in zip(local_rearranging_ranges, staging_rearranging_ranges):
-+            logger.debug("Rearranging tensors for cache: %s, local_range: %s, staging_range: %s", self.kv_caches[0].shape, local_range, staging_range)
-+            for kv_cache in self.kv_caches:
-+                for cache in kv_cache:
-+                    rearrange_tensors(cache[local_range[0]:local_range[1] + 1], cache[staging_range[0]:staging_range[1] + 1], tp_multiplier, "read")
++        if not self._is_mla:
++            for local_range, staging_range in zip(local_rearranging_ranges, staging_rearranging_ranges):
++                logger.debug("Rearranging tensors for cache: %s, local_range: %s, staging_range: %s", self.kv_caches[0].shape, local_range, staging_range)
++                for kv_cache in self.kv_caches:
++                    for cache in kv_cache:
++                        rearrange_tensors(cache[local_range[0]:local_range[1] + 1], cache[staging_range[0]:staging_range[1] + 1], tp_multiplier, "read")
 +
 +        logger.debug("Time to rearrange tensors: %s ms", (time.perf_counter() - rearrange_start_time) * 1000)
 +        logger.debug("Total time for read: %s ms", (time.perf_counter() - start_time) * 1000)
@@ -1311,16 +1384,21 @@ index 000000000..136a0bd37
 +        
 +        start_time = time.perf_counter()
 +
-+        local_ranges = self._get_ranges(local_block_ids)
-+        staging_ranges = self._get_ranges(staging_block_ids)
++        if self._is_mla:
++            # TODO ptarasiewicz: we skip staging when is_mla is true, we shouldn't assign staging blocks at all
++            staging_rearranging_ranges = None
++            staging_block_ids = local_block_ids
++        else:
++            local_ranges = self._get_ranges(local_block_ids)
++            staging_ranges = self._get_ranges(staging_block_ids)
 +
-+        local_rearranging_ranges, staging_rearranging_ranges = self._get_same_length_ranges(local_ranges, staging_ranges)
-+        
-+        for local_range, staging_range in zip(local_rearranging_ranges, staging_rearranging_ranges):
-+            logger.debug("Rearranging tensors for cache: %s, local_range: %s, staging_range: %s", self.kv_caches[0].shape, local_range, staging_range)
-+            for kv_cache in self.kv_caches:
-+                for cache in kv_cache:
-+                    rearrange_tensors(cache[local_range[0]:local_range[1] + 1], cache[staging_range[0]:staging_range[1] + 1], tp_multiplier, "write")
++            local_rearranging_ranges, staging_rearranging_ranges = self._get_same_length_ranges(local_ranges, staging_ranges)
++            
++            for local_range, staging_range in zip(local_rearranging_ranges, staging_rearranging_ranges):
++                logger.debug("Rearranging tensors for cache: %s, local_range: %s, staging_range: %s", self.kv_caches[0].shape, local_range, staging_range)
++                for kv_cache in self.kv_caches:
++                    for cache in kv_cache:
++                        rearrange_tensors(cache[local_range[0]:local_range[1] + 1], cache[staging_range[0]:staging_range[1] + 1], tp_multiplier, "write")
 +
 +        logger.debug("Time to rearrange tensors: %s ms", (time.perf_counter() - start_time) * 1000)
 +
@@ -1330,6 +1408,7 @@ index 000000000..136a0bd37
 +        remote_block_descs_ids = self._get_block_descs_ids(dst_engine_id, "all", remote_block_ids)
 +        local_xfer_side_handle = self.src_xfer_side_handles[tp_multiplier]
 +        
++        logger.debug("Creating xfer handles")
 +        for i in range(tp_multiplier):
 +            staging_block_descs_ids = self._get_block_descs_ids(self.engine_id, "all", staging_block_ids, i=i, tp_multiplier=tp_multiplier, staging_ranges=staging_rearranging_ranges)
 +            assert len(staging_block_descs_ids) == len(remote_block_descs_ids)
@@ -1364,7 +1443,10 @@ index 000000000..136a0bd37
 +        assert tp_multiplier > 0, f"Decode TP cannot be smaller than prefill TP, got {self._tp_size[engine_id]} and {self._tp_size[self.engine_id]}"
 +
 +        logger.debug("Creating src xfer side handles for engine %s, tp_multiplier: %s", engine_id, tp_multiplier)
-+        dst_block_len = self.block_len // tp_multiplier
++        if self._is_mla:
++            dst_block_len = self.block_len
++        else:
++            dst_block_len = self.block_len // tp_multiplier
 +        if tp_multiplier not in self.src_xfer_side_handles:
 +            # create descs and xfer side handles
 +            blocks_data = []
@@ -1372,7 +1454,7 @@ index 000000000..136a0bd37
 +                for base_addr in self.kv_caches_base_addr[self.engine_id][layer_id]:
 +                    for block_id in range(self.num_blocks):
 +                            block_offset = block_id * self.block_len
-+                            for i in range(tp_multiplier):
++                            for i in range(1 if self._is_mla else tp_multiplier):
 +                                tp_multiplier_offset = i * dst_block_len
 +                                blocks_data.append((base_addr + block_offset + tp_multiplier_offset, dst_block_len, self.rank))
 +            logger.debug("Created %s blocks for src engine %s and rank %s", len(blocks_data), self.engine_id, self.rank * tp_multiplier + i)
@@ -2814,7 +2896,7 @@ index 975afe5ad..2208abea0 100644
              use_v1 = True
  
 diff --git a/vllm/engine/llm_engine.py b/vllm/engine/llm_engine.py
-index 54f7b8fb6..0559f9db2 100644
+index 54f7b8fb6..9c1c2635f 100644
 --- a/vllm/engine/llm_engine.py
 +++ b/vllm/engine/llm_engine.py
 @@ -1,11 +1,28 @@
@@ -3057,7 +3139,7 @@ index 54f7b8fb6..0559f9db2 100644
  
          # Skip the scheduler if there are any remaining steps in the seq groups.
          # This ensures that the scheduler is only called again when the current
-@@ -1372,7 +1452,41 @@ class LLMEngine:
+@@ -1372,7 +1452,43 @@ class LLMEngine:
              # Schedule iteration
              (seq_group_metadata_list, scheduler_outputs,
               allow_async_output_proc
@@ -3087,6 +3169,7 @@ index 54f7b8fb6..0559f9db2 100644
 +                    logger.debug("No blocks to prefill")
 +                    self._finished_prefills.add(seq_group_metadata.request_id)
 +                    continue
++                
 +                remote_prefill_request = RemotePrefillRequest(
 +                    request_id=seq_group_metadata.request_id,
 +                    # prompt_token_ids=scheduled_seq_group.seq_group.seqs[0].inputs.prompt_token_ids[:-1], # last one will be decoded on decode for sampling anyway
@@ -3095,12 +3178,13 @@ index 54f7b8fb6..0559f9db2 100644
 +                    block_ids=block_table,
 +                    engine_id=self.engine_id,
 +                    computed_block_ids=seq_group_metadata.computed_block_nums,
++                    multimodal_data_source=scheduled_seq_group.seq_group.remote_prefill_params.multimodal_data_source
 +                )
 +                scheduled_seq_group.seq_group.remote_prefill_params.remote_prefill_request_callback(remote_prefill_request)
  
              ctx.seq_group_metadata_list = seq_group_metadata_list
              ctx.scheduler_outputs = scheduler_outputs
-@@ -1427,8 +1541,46 @@ class LLMEngine:
+@@ -1427,8 +1543,46 @@ class LLMEngine:
                  execute_model_req.async_callback = self.async_callbacks[
                      virtual_engine]
  
@@ -3148,7 +3232,7 @@ index 54f7b8fb6..0559f9db2 100644
                      execute_model_req=execute_model_req)
                  self._skip_scheduling_next_step = False
              except InputProcessingError as e:
-@@ -1444,7 +1596,6 @@ class LLMEngine:
+@@ -1444,7 +1598,6 @@ class LLMEngine:
                      allow_async_output_proc=allow_async_output_proc)
                  # Raise so the caller is notified that this request failed
                  raise
@@ -3156,7 +3240,7 @@ index 54f7b8fb6..0559f9db2 100644
              # We need to do this here so that last step's sampled_token_ids can
              # be passed to the next iteration for PP.
              if self.scheduler_config.is_multi_step:
-@@ -1455,7 +1606,26 @@ class LLMEngine:
+@@ -1455,7 +1608,26 @@ class LLMEngine:
              if len(ctx.output_queue) > 0:
                  self._process_model_outputs(ctx=ctx)
              # No outputs in this case
@@ -3184,7 +3268,7 @@ index 54f7b8fb6..0559f9db2 100644
  
          # Finish the current step for all the sequence groups.
          if self.scheduler_config.is_multi_step:
-@@ -1515,7 +1685,7 @@ class LLMEngine:
+@@ -1515,7 +1687,7 @@ class LLMEngine:
              # queued control plane messages, such as add/remove lora adapters.
              logger.debug("Stopping remote worker execution loop.")
              self.model_executor.stop_remote_worker_execution_loop()
@@ -3194,7 +3278,7 @@ index 54f7b8fb6..0559f9db2 100644
  
      def _abort_and_cache_schedule(
 diff --git a/vllm/engine/multiprocessing/__init__.py b/vllm/engine/multiprocessing/__init__.py
-index cafd8150b..ab1c11329 100644
+index cafd8150b..6a5e45b4e 100644
 --- a/vllm/engine/multiprocessing/__init__.py
 +++ b/vllm/engine/multiprocessing/__init__.py
 @@ -1,4 +1,17 @@
@@ -3259,16 +3343,42 @@ index cafd8150b..ab1c11329 100644
  
  @dataclass
  class RPCError:
-@@ -116,7 +135,7 @@ class RPCStartupRequest(Enum):
+@@ -113,9 +132,21 @@ class RPCStartupRequest(Enum):
+     IS_SERVER_READY = 1
+ 
+ 
++@dataclass
++class RPCHasUnfinishedRequestsRequest:
++    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
++
++
  @dataclass
  class RPCStartupResponse:
      tracing_enabled: bool
--
 +    nixl_metadata: Optional[bytes] = None
++
++
++@dataclass
++class RPCHasUnfinishedRequestsResponse:
++    has_unfinished_requests: bool
++    request_id: str
+ 
  
  class RPCUProfileRequest(Enum):
-     START_PROFILE = 1
-@@ -181,3 +200,13 @@ def ENGINE_DEAD_ERROR(
+@@ -165,10 +196,10 @@ class RPCAdapterLoadedResponse:
+ RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
+                       RPCUProfileRequest, RPCLoadAdapterRequest,
+                       RPCResetPrefixCacheRequest, RPCSleepRequest,
+-                      RPCWakeUpRequest, RPCIsSleepingRequest]
++                      RPCWakeUpRequest, RPCIsSleepingRequest, RPCHasUnfinishedRequestsRequest]
+ 
+ REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCAdapterLoadedResponse,
+-                          RPCIsSleepingResponse, RPCError]
++                          RPCIsSleepingResponse, RPCError, RPCHasUnfinishedRequestsResponse]
+ 
+ 
+ def ENGINE_DEAD_ERROR(
+@@ -181,3 +212,13 @@ def ENGINE_DEAD_ERROR(
      return MQEngineDeadError(
          "Engine loop is not running. Inspect the stacktrace to "
          f"find the original error: {repr(error)}.")
@@ -3283,7 +3393,7 @@ index cafd8150b..ab1c11329 100644
 +    gpu_cache_usage_perc: float
 +    gpu_prefix_cache_hit_rate: float
 diff --git a/vllm/engine/multiprocessing/client.py b/vllm/engine/multiprocessing/client.py
-index f058b1329..fa99e635c 100644
+index f058b1329..2fdb5b8bf 100644
 --- a/vllm/engine/multiprocessing/client.py
 +++ b/vllm/engine/multiprocessing/client.py
 @@ -1,4 +1,17 @@
@@ -3332,16 +3442,19 @@ index f058b1329..fa99e635c 100644
                                           RPCAdapterLoadedResponse, RPCError,
                                           RPCIsSleepingRequest,
                                           RPCIsSleepingResponse,
-@@ -34,7 +51,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
+@@ -33,8 +50,9 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
+                                          RPCProcessRequest,
                                           RPCResetPrefixCacheRequest,
                                           RPCSleepRequest, RPCStartupRequest,
-                                          RPCStartupResponse,
+-                                         RPCStartupResponse,
 -                                         RPCUProfileRequest, RPCWakeUpRequest)
++                                         RPCStartupResponse, RPCHasUnfinishedRequestsRequest,
++                                         RPCHasUnfinishedRequestsResponse,
 +                                         RPCUProfileRequest, KvMetrics, RPCWakeUpRequest)
  from vllm.engine.protocol import EngineClient
  # yapf: enable
  from vllm.envs import VLLM_RPC_TIMEOUT
-@@ -48,6 +65,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
+@@ -48,6 +66,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
  from vllm.sampling_params import SamplingParams
  from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
  from vllm.utils import Device, deprecate_kwargs
@@ -3350,7 +3463,7 @@ index f058b1329..fa99e635c 100644
  
  logger = init_logger(__name__)
  
-@@ -93,6 +112,7 @@ class MQLLMEngineClient(EngineClient):
+@@ -93,6 +113,7 @@ class MQLLMEngineClient(EngineClient):
          self._errored_with: Optional[BaseException] = None
  
          # Get the configs.
@@ -3358,7 +3471,7 @@ index f058b1329..fa99e635c 100644
          self.model_config = engine_config.model_config
          self.decoding_config = engine_config.decoding_config
  
-@@ -117,6 +137,10 @@ class MQLLMEngineClient(EngineClient):
+@@ -117,6 +138,10 @@ class MQLLMEngineClient(EngineClient):
          self.heartbeat_socket: Socket = self.context.socket(zmq.constants.PULL)
          self.heartbeat_socket.connect(f"{ipc_path}{IPC_HEALTH_EXT}")
  
@@ -3369,7 +3482,7 @@ index f058b1329..fa99e635c 100644
          # IPC path for the data socket.
          self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
  
-@@ -131,8 +155,27 @@ class MQLLMEngineClient(EngineClient):
+@@ -131,8 +156,27 @@ class MQLLMEngineClient(EngineClient):
          # Loop to check health of the LLMEngine periodically.
          # Started after the MQLLMEngine is ready.
          self.health_loop: Optional[asyncio.Task] = None
@@ -3397,7 +3510,7 @@ index f058b1329..fa99e635c 100644
      @staticmethod
      def is_unsupported_config(vllm_config: VllmConfig):
          # Pipeline parallel not yet supported
-@@ -182,6 +225,61 @@ class MQLLMEngineClient(EngineClient):
+@@ -182,6 +226,61 @@ class MQLLMEngineClient(EngineClient):
          except Exception as e:
              self._set_errored(e)
  
@@ -3459,7 +3572,25 @@ index f058b1329..fa99e635c 100644
      async def run_output_handler_loop(self):
          """Get RequestOutputs from Engine and stream to Request Queues"""
  
-@@ -283,12 +381,26 @@ class MQLLMEngineClient(EngineClient):
+@@ -250,7 +349,7 @@ class MQLLMEngineClient(EngineClient):
+                 # Put each output into the appropriate queue.
+                 elif isinstance(
+                         request_outputs,
+-                    (RPCAdapterLoadedResponse, RPCIsSleepingResponse)):
++                    (RPCAdapterLoadedResponse, RPCIsSleepingResponse, RPCHasUnfinishedRequestsResponse)):
+                     self._add_output(request_outputs)
+                 else:
+                     for request_output in request_outputs:
+@@ -261,7 +360,7 @@ class MQLLMEngineClient(EngineClient):
+ 
+     def _add_output(self, request_output: Union[RequestOutput,
+                                                 RPCAdapterLoadedResponse,
+-                                                RPCIsSleepingResponse]):
++                                                RPCIsSleepingResponse, RPCHasUnfinishedRequestsResponse]):
+         queue = self.output_queues.get(request_output.request_id)
+         if queue is not None:
+             queue.put_nowait(request_output)
+@@ -283,12 +382,25 @@ class MQLLMEngineClient(EngineClient):
              # Wait until server is ready.
              response = await self._wait_for_server_rpc(socket)
  
@@ -3482,7 +3613,6 @@ index f058b1329..fa99e635c 100644
 +            if self.metrics_loop is None:
 +                self.metrics_loop = asyncio.create_task(
 +                    self.run_metrics_loop(timeout=VLLM_RPC_TIMEOUT))
-+
  
      def close(self):
          """Destroy the ZeroMQ Context."""
@@ -3558,15 +3688,31 @@ index f058b1329..fa99e635c 100644
              await self.input_socket.send_multipart(parts, copy=False)
  
              # 4) Stream the RequestOutputs from the output queue. Note
-@@ -740,3 +866,6 @@ class MQLLMEngineClient(EngineClient):
+@@ -740,3 +866,22 @@ class MQLLMEngineClient(EngineClient):
          # Raise on error, otherwise happily return None
          if isinstance(request_output, BaseException):
              raise request_output
 +
 +    def set_metrics_publisher(self, metrics_publisher):
 +        self.metrics_publisher = metrics_publisher
++                
++    async def has_unfinished_requests(self) -> bool:
++        logger.info("Checking if there are unfinished requests")
++        if "has_unfinished_requests" not in self.output_queues:
++            logger.info("Creating has unfinished requests queue")
++            
++        request = RPCHasUnfinishedRequestsRequest()
++        queue: asyncio.Queue[Union[BaseException, RPCHasUnfinishedRequestsResponse]] = asyncio.Queue()
++        self.output_queues[request.request_id] = queue
++        request_bytes = pickle.dumps(request)
++        await self.input_socket.send_multipart((request_bytes, ), copy=False)
++        response = await queue.get()
++        self.output_queues.pop(request.request_id)
++        if isinstance(response, BaseException):
++            raise response
++        return response.has_unfinished_requests
 diff --git a/vllm/engine/multiprocessing/engine.py b/vllm/engine/multiprocessing/engine.py
-index 6ed5ae0a9..af4bd942b 100644
+index 6ed5ae0a9..3a320c42c 100644
 --- a/vllm/engine/multiprocessing/engine.py
 +++ b/vllm/engine/multiprocessing/engine.py
 @@ -1,13 +1,27 @@
@@ -3612,11 +3758,13 @@ index 6ed5ae0a9..af4bd942b 100644
                                           RPCAdapterLoadedResponse, RPCError,
                                           RPCIsSleepingRequest,
                                           RPCIsSleepingResponse,
-@@ -25,13 +41,19 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
+@@ -25,13 +41,21 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                           RPCResetPrefixCacheRequest,
                                           RPCSleepRequest, RPCStartupRequest,
                                           RPCStartupResponse,
 -                                         RPCUProfileRequest, RPCWakeUpRequest)
++                                         RPCHasUnfinishedRequestsRequest,
++                                         RPCHasUnfinishedRequestsResponse,
 +                                         RPCUProfileRequest, RPCWakeUpRequest, KvMetrics,
 +                                         IPC_REMOTE_NIXL_METADATA_EXT)
  # yapf: enable
@@ -3633,7 +3781,7 @@ index 6ed5ae0a9..af4bd942b 100644
  from vllm.worker.model_runner_base import InputProcessingError
  
  logger = init_logger(__name__)
-@@ -39,6 +61,77 @@ logger = init_logger(__name__)
+@@ -39,6 +63,77 @@ logger = init_logger(__name__)
  POLLING_TIMEOUT_MS = 10000
  HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
  
@@ -3711,7 +3859,7 @@ index 6ed5ae0a9..af4bd942b 100644
  
  class MQLLMEngine:
      """A multiprocessing wrapper for :class:`LLMEngine`.
-@@ -101,12 +194,37 @@ class MQLLMEngine:
+@@ -101,12 +196,37 @@ class MQLLMEngine:
          self.heartbeat_socket = self.ctx.socket(zmq.constants.PUSH)
          self.heartbeat_socket.bind(f"{ipc_path}{IPC_HEALTH_EXT}")
  
@@ -3749,7 +3897,7 @@ index 6ed5ae0a9..af4bd942b 100644
      @property
      def dead_error(self) -> BaseException:
          if self._errored_with is not None:
-@@ -192,8 +310,17 @@ class MQLLMEngine:
+@@ -192,8 +312,17 @@ class MQLLMEngine:
                  # Handle the query from the Client.
                  if request == RPCStartupRequest.IS_SERVER_READY:
                      tracing_enabled = self.engine.is_tracing_enabled()
@@ -3769,7 +3917,7 @@ index 6ed5ae0a9..af4bd942b 100644
  
              except Exception as e:
                  response = e
-@@ -206,6 +333,7 @@ class MQLLMEngine:
+@@ -206,6 +335,7 @@ class MQLLMEngine:
  
          while True:
              if not self.engine.has_unfinished_requests():
@@ -3777,7 +3925,7 @@ index 6ed5ae0a9..af4bd942b 100644
                  # Poll until there is work to do.
                  while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
                      # When there's no work, check on engine health and send
-@@ -249,6 +377,13 @@ class MQLLMEngine:
+@@ -249,6 +379,13 @@ class MQLLMEngine:
      def handle_new_input(self):
          """Handle new input from the socket"""
          try:
@@ -3791,7 +3939,16 @@ index 6ed5ae0a9..af4bd942b 100644
              while self.input_socket.poll(timeout=0) != 0:
                  frames = self.input_socket.recv_multipart(copy=False)
                  request = pickle.loads(frames[0].buffer)
-@@ -297,6 +432,11 @@ class MQLLMEngine:
+@@ -277,6 +414,8 @@ class MQLLMEngine:
+                     self.wake_up(request.tags)
+                 elif isinstance(request, RPCIsSleepingRequest):
+                     self._handle_is_sleeping_request(request)
++                elif isinstance(request, RPCHasUnfinishedRequestsRequest):
++                    self._handle_has_unfinished_requests_request(request)
+                 else:
+                     raise ValueError("Unknown RPCRequest Type: "
+                                      f"{type(request)}")
+@@ -297,6 +436,11 @@ class MQLLMEngine:
              self._send_outputs(rpc_err)
  
          try:
@@ -3803,7 +3960,7 @@ index 6ed5ae0a9..af4bd942b 100644
              self.engine.add_request(
                  request_id=request_id,
                  prompt=request.prompt,
-@@ -304,7 +444,9 @@ class MQLLMEngine:
+@@ -304,7 +448,9 @@ class MQLLMEngine:
                  lora_request=request.lora_request,
                  trace_headers=request.trace_headers,
                  prompt_adapter_request=request.prompt_adapter_request,
@@ -3814,6 +3971,17 @@ index 6ed5ae0a9..af4bd942b 100644
  
              if self.log_requests:
                  logger.info("Added request %s.", request.request_id)
+@@ -348,6 +494,10 @@ class MQLLMEngine:
+         self._send_outputs(
+             RPCIsSleepingResponse(request_id=request.request_id,
+                                   is_sleeping=is_sleeping))
++        
++    def _handle_has_unfinished_requests_request(self, request: RPCHasUnfinishedRequestsRequest):
++        response =  RPCHasUnfinishedRequestsResponse(request_id=request.request_id, has_unfinished_requests=self.engine.has_unfinished_requests())
++        self._send_outputs(response)
+ 
+     def _health_check(self):
+         # Send unhealthy if engine has already errored
 diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
 index dd0b67df4..f436b0752 100644
 --- a/vllm/entrypoints/openai/serving_chat.py
@@ -4012,10 +4180,10 @@ index 0ed221043..08dbc0e78 100644
              "The vLLM package was not found, so its version could not be "
 diff --git a/vllm/remote_prefill.py b/vllm/remote_prefill.py
 new file mode 100644
-index 000000000..83f6cd575
+index 000000000..0a063f1ca
 --- /dev/null
 +++ b/vllm/remote_prefill.py
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,84 @@
 +# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 +# SPDX-License-Identifier: Apache-2.0
 +#
@@ -4061,6 +4229,7 @@ index 000000000..83f6cd575
 +    sampling_params: SamplingParams
 +    block_ids: List[int]
 +    computed_block_ids: List[int]
++    multimodal_data_source: Optional[dict[str, str]] = None
 +
 +
 +class MemoryOpType(str, Enum):
@@ -4098,7 +4267,7 @@ index 000000000..83f6cd575
 +    decode_computed_block_ids: Optional[List[int]] = None
 +    decode_engine_id: Optional[str] = None
 +    remote_prefill_request_callback: Optional[RemotePrefillRequestCallback] = None
-\ No newline at end of file
++    multimodal_data_source: Optional[dict[str, str]] = None
 diff --git a/vllm/sampling_params.py b/vllm/sampling_params.py
 index 68ed99664..5b0b7e6dc 100644
 --- a/vllm/sampling_params.py

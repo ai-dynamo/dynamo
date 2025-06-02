@@ -28,7 +28,7 @@ from components.utils import (
 from vllm.distributed.device_communicators.nixl import NixlMetadata
 
 from dynamo.llm import KvMetricsPublisher
-from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +133,7 @@ class DummyWorker:
             self.gpu_prefix_cache_hit_rate,
         )
 
-    @dynamo_endpoint()
+    @endpoint()
     async def worker_generate(self, request: GeneralRequest):
         # TODO: consider prefix hit when deciding prefill locally or remotely
 

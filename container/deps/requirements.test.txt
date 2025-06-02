@@ -24,3 +24,4 @@ pytest-mypy
 pytest-timeout
 # add types library stub for PyYAML
 types-PyYAML
+types-requests

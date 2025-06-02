@@ -17,6 +17,7 @@ import logging
 import subprocess
 from pathlib import Path
 
+from components.planner_service import Planner
 from components.processor import Processor
 from components.worker import VllmWorker
 from pydantic import BaseModel
@@ -49,21 +50,23 @@ class FrontendConfig(BaseModel):
 
 # todo this should be called ApiServer
 @service(
+    dynamo={
+        "namespace": "dynamo",
+    },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
     image=DYNAMO_IMAGE,
 )
 class Frontend:
+    planner = depends(Planner)
     worker = depends(VllmWorker)
     processor = depends(Processor)
 
     def __init__(self):
         """Initialize Frontend service with HTTP server and model configuration."""
-        config = ServiceConfig.get_instance()
-        frontend_config = FrontendConfig(**config.get("Frontend", {}))
+        frontend_config = FrontendConfig(**ServiceConfig.get_parsed_config("Frontend"))
         self.frontend_config = frontend_config
         self.process = None
-
         self.setup_model()
         self.start_http_server()
 

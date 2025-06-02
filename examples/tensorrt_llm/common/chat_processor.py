@@ -19,7 +19,6 @@ from typing import Any, Dict, List, Union
 
 from common.parser import LLMAPIConfig
 from common.protocol import (
-    DisaggregatedTypeConverter,
     DynamoTRTLLMChatCompletionResponseStreamChoice,
     DynamoTRTLLMChatCompletionStreamResponse,
     DynamoTRTLLMCompletionResponseStreamChoice,
@@ -32,6 +31,7 @@ from common.protocol import (
 from common.utils import ConversationMessage
 from openai.types.chat import ChatCompletionMessageParam
 from tensorrt_llm.llmapi.llm import RequestOutput
+from tensorrt_llm.llmapi.tokenizer import TokenizerBase, tokenizer_factory
 from tensorrt_llm.serve.openai_protocol import (
     ChatCompletionLogProbs,
     ChatCompletionLogProbsContent,
@@ -42,9 +42,6 @@ from tensorrt_llm.serve.openai_protocol import (
     ToolCall,
     UsageInfo,
 )
-from transformers import AutoTokenizer
-from transformers.tokenization_utils import PreTrainedTokenizer
-from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
 logger = logging.getLogger(__name__)
 
@@ -58,22 +55,7 @@ class ChatProcessorMixin:
         # model name for chat processor
         self._model_name = self._engine_config.model_name
         logger.info(f"Set model name: {self._model_name}")
-        # model for LLMAPI input
-        self._model = self._model_name
-        if self._engine_config.model_path:
-            self._model = self._engine_config.model_path
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                self._engine_config.model_path
-            )
-            logger.info(f"Using model from path: {self._engine_config.model_path}")
-        else:
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                self._engine_config.model_name
-            )
-        if self._engine_config.extra_args.get("tokenizer", None):
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                self._engine_config.extra_args.get("tokenizer", None)
-            )
+        self._tokenizer = tokenizer_factory(self._model_name)
         self.chat_processor = ChatProcessor(
             self._model_name, self._tokenizer, using_engine_generator
         )
@@ -110,7 +92,7 @@ class BaseChatProcessor:
     def __init__(
         self,
         model: str,
-        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        tokenizer: TokenizerBase,
     ):
         self.model = model
         self.tokenizer = tokenizer
@@ -164,7 +146,7 @@ class ChatProcessor(BaseChatProcessor):
     def __init__(
         self,
         model: str,
-        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        tokenizer: TokenizerBase,
         using_engine_generator: bool = False,
     ):
         super().__init__(model, tokenizer)
@@ -189,11 +171,10 @@ class ChatProcessor(BaseChatProcessor):
                 finish_reason=None,
             )
             if response.outputs[0].disaggregated_params is not None:
-                choice.disaggregated_params = (
-                    DisaggregatedTypeConverter.to_oai_disaggregated_params(
-                        response.outputs[0].disaggregated_params
-                    )
-                )
+                # Do not include the disaggregated params in response
+                # from processor.
+                pass
+
             chunk = DynamoTRTLLMChatCompletionStreamResponse(
                 id=request_id,
                 choices=[choice],
@@ -270,12 +251,7 @@ class ChatProcessor(BaseChatProcessor):
                 choice.finish_reason = output.finish_reason
                 choice.stop_reason = output.stop_reason
                 finish_reason_sent[i] = True
-            if output.disaggregated_params is not None:
-                choice.disaggregated_params = (
-                    DisaggregatedTypeConverter.to_oai_disaggregated_params(
-                        output.disaggregated_params
-                    )
-                )
+
             chunk = DynamoTRTLLMChatCompletionStreamResponse(
                 id=request_id,
                 choices=[choice],
@@ -314,7 +290,7 @@ class ChatProcessor(BaseChatProcessor):
         )
         prompt = self.tokenizer.apply_chat_template(
             conversation=conversation,
-            tokenize=False,
+            tokenize=True,
             add_generation_prompt=request.add_generation_prompt,
             tools=tool_dicts,
             documents=request.documents,
@@ -322,16 +298,17 @@ class ChatProcessor(BaseChatProcessor):
             **(request.chat_template_kwargs or {}),
         )
         sampling_params = request.to_sampling_params()
+        sampling_params._setup(self.tokenizer)
+        sampling_params.stop = None
 
         return TRTLLMWorkerRequest(
             id=request.id,
             model=request.model,
-            prompt=prompt,
             sampling_params=asdict(sampling_params),
+            streaming=request.stream,
             conversation=conversation,
             disaggregated_params=request.disaggregated_params,
-            # NOTE: dont include the first token (e.g. <s>) when searching for a prefix match. We might want to exclude all special tokens at some point.
-            tokens=Tokens(tokens=self.tokenizer.encode(prompt)[1:]),
+            tokens=Tokens(tokens=prompt),
         )
 
     async def postprocess(
@@ -341,8 +318,6 @@ class ChatProcessor(BaseChatProcessor):
         conversation,
     ):
         first_iteration = True
-        last_text_len = 0
-        last_token_ids_len = 0
         async for raw_response in engine_generator:
             if self.using_engine_generator:
                 response = TRTLLMWorkerResponse(
@@ -355,17 +330,10 @@ class ChatProcessor(BaseChatProcessor):
                 response.outputs = [TRTLLMWorkerResponseOutput(**response.outputs[0])]
             else:
                 response = TRTLLMWorkerResponse.model_validate_json(raw_response.data())
+                last_token_ids_len = response.outputs[0]["_last_token_ids_len"]
                 response.outputs[0]["text"] = self.tokenizer.decode(
-                    response.outputs[0]["token_ids"]
+                    response.outputs[0]["token_ids"][last_token_ids_len:]
                 )
-                # Need to keep track of the last text and token ids length
-                # to calculate the diff.
-                # TODO: This is a hack to get the diff. We should identify why
-                # the diff is not being calculated in the worker.
-                response.outputs[0]["_last_text_len"] = last_text_len
-                response.outputs[0]["_last_token_ids_len"] = last_token_ids_len
-                last_text_len = len(response.outputs[0]["text"])
-                last_token_ids_len = len(response.outputs[0]["token_ids"])
                 response.outputs = [TRTLLMWorkerResponseOutput(**response.outputs[0])]
 
             response_data = self.create_chat_stream_response(
@@ -384,7 +352,7 @@ class CompletionsProcessor:
     def __init__(
         self,
         model: str,
-        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        tokenizer: TokenizerBase,
     ):
         self.model = model
         self.tokenizer = tokenizer
@@ -395,22 +363,15 @@ class CompletionsProcessor:
 
         # len(response.outputs) is always 1
         for gen_idx, output in enumerate(response.outputs):
-            delta_text = output.text_diff
+            text = output.text
             if request.echo and not echoed[gen_idx]:
-                delta_text = request.prompt + delta_text
-                echoed[gen_idx] = True
+                text = request.prompt + text
             choice = DynamoTRTLLMCompletionResponseStreamChoice(
-                index=gen_idx,
-                text=delta_text,
+                text=text,
+                index=output.index,
                 stop_reason=output.stop_reason,
                 finish_reason=output.finish_reason,
             )
-            if output.disaggregated_params is not None:
-                choice.disaggregated_params = (
-                    DisaggregatedTypeConverter.to_oai_disaggregated_params(
-                        output.disaggregated_params
-                    )
-                )
             chunk = DynamoTRTLLMCompletionStreamResponse(
                 model=self.model,
                 choices=[choice],
@@ -429,13 +390,16 @@ class CompletionsProcessor:
             )
 
         sampling_params = request.to_sampling_params()
+        sampling_params._setup(self.tokenizer)
+        sampling_params.stop = None
 
         return TRTLLMWorkerRequest(
             id=request.id,
-            prompt=prompt,
+            model=request.model,
+            streaming=request.stream,
             sampling_params=asdict(sampling_params),
             disaggregated_params=request.disaggregated_params,
-            tokens=Tokens(tokens=self.tokenizer.encode(prompt)[1:]),
+            tokens=Tokens(tokens=self.tokenizer.encode(prompt)),
         )
 
     async def postprocess(
@@ -445,8 +409,12 @@ class CompletionsProcessor:
     ):
         async for raw_response in engine_generator:
             response = TRTLLMWorkerResponse.model_validate_json(raw_response.data())
-            response.outputs = [TRTLLMWorkerResponseOutput(**response.outputs[0])]
 
+            last_token_ids_len = response.outputs[0]["_last_token_ids_len"]
+            response.outputs[0]["text"] = self.tokenizer.decode(
+                response.outputs[0]["token_ids"][last_token_ids_len:]
+            )
+            response.outputs = [TRTLLMWorkerResponseOutput(**response.outputs[0])]
             response_data = self.create_completion_stream_response(
                 request,
                 response,

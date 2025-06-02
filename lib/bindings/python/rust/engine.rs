@@ -15,16 +15,21 @@
 
 use std::sync::Arc;
 
-use dynamo_engine_python::PythonServerStreamingEngine;
-use dynamo_runtime::CancellationToken;
+use pyo3::prelude::*;
+use pyo3_async_runtimes::TaskLocals;
+use pythonize::{depythonize, pythonize};
+use tokio::sync::mpsc;
+use tokio_stream::{wrappers::ReceiverStream, StreamExt};
+
 pub use dynamo_runtime::{
-    pipeline::{async_trait, AsyncEngine, Data, ManyOut, SingleIn},
+    pipeline::{
+        async_trait, AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream,
+        SingleIn,
+    },
     protocols::annotated::Annotated,
-    Error, Result,
+    CancellationToken, Error, Result,
 };
 pub use serde::{Deserialize, Serialize};
-
-use pyo3::prelude::*;
 
 /// Add bingings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -101,4 +106,187 @@ where
     async fn generate(&self, request: SingleIn<Req>) -> Result<ManyOut<Annotated<Resp>>, Error> {
         self.0.generate(request).await
     }
+}
+
+#[derive(Clone)]
+pub struct PythonServerStreamingEngine {
+    _cancel_token: CancellationToken,
+    generator: Arc<PyObject>,
+    event_loop: Arc<PyObject>,
+}
+
+impl PythonServerStreamingEngine {
+    pub fn new(
+        cancel_token: CancellationToken,
+        generator: Arc<PyObject>,
+        event_loop: Arc<PyObject>,
+    ) -> Self {
+        PythonServerStreamingEngine {
+            _cancel_token: cancel_token,
+            generator,
+            event_loop,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ResponseProcessingError {
+    #[error("python exception: {0}")]
+    PythonException(String),
+
+    #[error("deserialize error: {0}")]
+    DeserializeError(String),
+
+    #[error("gil offload error: {0}")]
+    OffloadError(String),
+}
+
+#[async_trait]
+impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error>
+    for PythonServerStreamingEngine
+where
+    Req: Data + Serialize,
+    Resp: Data + for<'de> Deserialize<'de>,
+{
+    async fn generate(&self, request: SingleIn<Req>) -> Result<ManyOut<Annotated<Resp>>, Error> {
+        // Create a context
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+
+        let id = context.id().to_string();
+        tracing::trace!("processing request: {}", id);
+
+        // Clone the PyObject to move into the thread
+
+        // Create a channel to communicate between the Python thread and the Rust async context
+        let (tx, rx) = mpsc::channel::<Annotated<Resp>>(128);
+
+        let generator = self.generator.clone();
+        let event_loop = self.event_loop.clone();
+
+        // Acquiring the GIL is similar to acquiring a standard lock/mutex
+        // Performing this in an tokio async task could block the thread for an undefined amount of time
+        // To avoid this, we spawn a blocking task to acquire the GIL and perform the operations needed
+        // while holding the GIL.
+        //
+        // Under low GIL contention, we wouldn't need to do this.
+        // However, under high GIL contention, this can lead to significant performance degradation.
+        //
+        // Since we cannot predict the GIL contention, we will always use the blocking task and pay the
+        // cost. The Python GIL is the gift that keeps on giving -- performance hits...
+        let stream = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| {
+                let py_request = pythonize(py, &request)?;
+                let gen = generator.call1(py, (py_request,))?;
+                let locals = TaskLocals::new(event_loop.bind(py).clone());
+                pyo3_async_runtimes::tokio::into_stream_with_locals_v1(locals, gen.into_bound(py))
+            })
+        })
+        .await??;
+
+        let stream = Box::pin(stream);
+
+        // process the stream
+        // any error thrown in the stream will be caught and complete the processing task
+        // errors are captured by a task that is watching the processing task
+        // the error will be emitted as an annotated error
+        let request_id = id.clone();
+
+        tokio::spawn(async move {
+            tracing::debug!(
+                request_id,
+                "starting task to process python async generator stream"
+            );
+
+            let mut stream = stream;
+            let mut count = 0;
+
+            while let Some(item) = stream.next().await {
+                count += 1;
+                tracing::trace!(
+                    request_id,
+                    "processing the {}th item from python async generator",
+                    count
+                );
+
+                let mut done = false;
+
+                let response = match process_item::<Resp>(item).await {
+                    Ok(response) => response,
+                    Err(e) => {
+                        done = true;
+
+                        let msg = match &e {
+                            ResponseProcessingError::DeserializeError(e) => {
+                                // tell the python async generator to stop generating
+                                // right now, this is impossible as we are not passing the context to the python async generator
+                                // todo: add task-local context to the python async generator
+                                ctx.stop_generating();
+                                let msg = format!("critical error: invalid response object from python async generator; application-logic-mismatch: {}", e);
+                                msg
+                            }
+                            ResponseProcessingError::PythonException(e) => {
+                                let msg = format!("a python exception was caught while processing the async generator: {}", e);
+                                msg
+                            }
+                            ResponseProcessingError::OffloadError(e) => {
+                                let msg = format!("critical error: failed to offload the python async generator to a new thread: {}", e);
+                                msg
+                            }
+                        };
+
+                        Annotated::from_error(msg)
+                    }
+                };
+
+                if tx.send(response).await.is_err() {
+                    tracing::trace!(
+                        request_id,
+                        "error forwarding annotated response to channel; channel is closed"
+                    );
+                    break;
+                }
+
+                if done {
+                    tracing::debug!(
+                        request_id,
+                        "early termination of python async generator stream task"
+                    );
+                    break;
+                }
+            }
+
+            tracing::debug!(
+                request_id,
+                "finished processing python async generator stream"
+            );
+        });
+
+        let stream = ReceiverStream::new(rx);
+
+        Ok(ResponseStream::new(Box::pin(stream), context.context()))
+    }
+}
+
+async fn process_item<Resp>(
+    item: Result<Py<PyAny>, PyErr>,
+) -> Result<Annotated<Resp>, ResponseProcessingError>
+where
+    Resp: Data + for<'de> Deserialize<'de>,
+{
+    let item = item.map_err(|e| {
+        println!();
+        Python::with_gil(|py| e.display(py));
+        ResponseProcessingError::PythonException(e.to_string())
+    })?;
+    let response = tokio::task::spawn_blocking(move || {
+        Python::with_gil(|py| depythonize::<Resp>(&item.into_bound(py)))
+    })
+    .await
+    .map_err(|e| ResponseProcessingError::OffloadError(e.to_string()))?
+    .map_err(|e| ResponseProcessingError::DeserializeError(e.to_string()))?;
+
+    let response = Annotated::from_data(response);
+
+    Ok(response)
 }

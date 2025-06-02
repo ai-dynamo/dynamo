@@ -1,0 +1,44 @@
+# Use ARG to allow base image to be specified at build time
+ARG BASE_IMAGE=__BASE_IMAGE__
+FROM ${BASE_IMAGE}
+
+# Build arguments for user configuration
+ARG USER_ID=1024
+ARG GROUP_ID=1024
+ARG USERNAME=dynamo
+ARG GROUPNAME=dynamo
+ARG HOME_DIR=/home/${USERNAME}
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PATH="${HOME_DIR}/.local/bin:$PATH"
+ENV PYTHONPATH="${HOME_DIR}/app:$PYTHONPATH"
+
+# Create group and user
+RUN if [ "$(id -u)" != "0" ]; then \
+        echo "Using sudo for user/group creation"; \
+        sudo groupadd --gid ${GROUP_ID} ${GROUPNAME} \
+        && sudo useradd --uid ${USER_ID} --gid ${GROUP_ID} --create-home --shell /bin/bash ${USERNAME} \
+        && sudo mkdir -p ${HOME_DIR}/app \
+        && sudo mkdir -p ${HOME_DIR}/.local/bin \
+        && sudo mkdir -p ${HOME_DIR}/.cache/pip \
+        && sudo chown -R ${USERNAME}:${GROUPNAME} ${HOME_DIR}; \
+    else \
+        echo "Running as root, no sudo needed"; \
+        groupadd --gid ${GROUP_ID} ${GROUPNAME} \
+        && useradd --uid ${USER_ID} --gid ${GROUP_ID} --create-home --shell /bin/bash ${USERNAME} \
+        && mkdir -p ${HOME_DIR}/app \
+        && mkdir -p ${HOME_DIR}/.local/bin \
+        && mkdir -p ${HOME_DIR}/.cache/pip \
+        && chown -R ${USERNAME}:${GROUPNAME} ${HOME_DIR}; \
+    fi
+
+# Switch to non-root user
+USER ${USERNAME}
+WORKDIR ${HOME_DIR}/app
+
+# Copy application code
+COPY --chown=${USERNAME}:${GROUPNAME} . .
+
+RUN chmod +x ${HOME_DIR}/app

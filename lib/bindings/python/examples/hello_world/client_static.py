@@ -36,7 +36,7 @@ async def init(runtime: DistributedRuntime, ns: str):
     client = await endpoint.client()
 
     # wait for an endpoint to be ready
-    await client.wait_for_endpoints()
+    await client.wait_for_instances()
 
     # issue request
     stream = await client.generate("hello world")

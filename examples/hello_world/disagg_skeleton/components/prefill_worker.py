@@ -23,7 +23,7 @@ import sys
 from components.utils import NixlMetadataStore, PrefillQueue, RemotePrefillRequest
 from vllm.distributed.device_communicators.nixl import NixlMetadata
 
-from dynamo.sdk import async_on_start, dynamo_context, dynamo_endpoint, service
+from dynamo.sdk import async_on_start, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +108,6 @@ class PrefillWorker:
         )
         yield "prefill invoked"
 
-    @dynamo_endpoint()
+    @endpoint()
     async def mock(self, req: RemotePrefillRequest):
         yield f"mock_response: {req}"

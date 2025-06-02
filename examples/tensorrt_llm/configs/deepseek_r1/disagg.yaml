@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+Frontend:
+  # This is the client-facing model name, you can set this to anything you'd like.
+  served_model_name: "nvidia/DeepSeek-R1-FP4"
+  endpoint_chat: dynamo.Processor.chat/completions
+  endpoint_completions: dynamo.Processor.completions
+  port: 8000
+
+Processor:
+  engine_args: "configs/deepseek_r1/agg_llm_api_config.yaml"
+  router: round-robin
+  remote-prefill: true
+  # Parallelize preprocessing/tokenization to avoid bottlenecks
+  ServiceArgs:
+    workers: 5
+
+TensorRTLLMWorker:
+  engine_args: "configs/deepseek_r1/agg_llm_api_config.yaml"
+  llmapi-disaggregated-config: "configs/deepseek_r1/disagg_llm_api_config.yaml"
+  remote-prefill: true
+  # NOTE: When testing/benchmarking multiple prefill workers, you can set
+  # this number to the exact amount of prefill workers if you want Dynamo to
+  # wait until all the prefill workers are ready before marking the decode
+  # worker ready.
+  min-prefill-workers: 1
+  router: round-robin
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: 4
+
+TensorRTLLMPrefillWorker:
+  engine_args: "configs/deepseek_r1/agg_llm_api_config.yaml"
+  llmapi-disaggregated-config: "configs/deepseek_r1/disagg_llm_api_config.yaml"
+  router: round-robin
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: 4

@@ -18,8 +18,14 @@ use strum::Display;
 
 #[derive(Copy, Debug, Clone, Display, Serialize, Deserialize, Eq, PartialEq)]
 pub enum ModelType {
+    // Chat Completions API
     Chat,
+    /// Older completions API
     Completion,
+    /// Embeddings API
+    Embedding,
+    // Pre-processed requests
+    Backend,
 }
 
 impl ModelType {
@@ -27,10 +33,12 @@ impl ModelType {
         match self {
             Self::Chat => "chat",
             Self::Completion => "completion",
+            Self::Embedding => "embedding",
+            Self::Backend => "backend",
         }
     }
 
     pub fn all() -> Vec<Self> {
-        vec![Self::Chat, Self::Completion]
+        vec![Self::Chat, Self::Completion, Self::Embedding, Self::Backend]
     }
 }

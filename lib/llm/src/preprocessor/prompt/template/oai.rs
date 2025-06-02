@@ -66,12 +66,7 @@ impl OAIChatLikeRequest for CompletionRequest {
             },
         );
 
-        // Convert to a JSON string first
-        let json_string =
-            serde_json::to_string(&vec![message]).expect("Serialization to JSON string failed");
-
-        // Convert to MiniJinja Value
-        minijinja::value::Value::from_safe_string(json_string)
+        minijinja::value::Value::from_serialize(vec![message])
     }
 
     fn should_add_generation_prompt(&self) -> bool {

@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes#configuring-automatically-generated-release-notes
+
+changelog:
+  exclude:
+  categories:
+    - title: 🚀 Features & Improvements
+      labels: [feat, perf, refactor]
+    - title: 🐛 Bug Fixes
+      labels: [fix, revert]
+    - title: 📚 Documentation
+      labels: [docs]
+    - title: 🛠️ Build, CI and Test
+      labels: [build, ci, test]
+    - title: Other Changes
+      labels: ["*"]
+      exclude:
+        labels: [chore, style]

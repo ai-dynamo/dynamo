@@ -15,7 +15,7 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use anyhow::{Ok, Result};
+use anyhow::{Context, Ok, Result};
 use minijinja::Environment;
 
 use crate::model_card::model::{ModelDeploymentCard, PromptContextMixin, PromptFormatterArtifact};
@@ -35,7 +35,8 @@ impl PromptFormatter {
             .ok_or(anyhow::anyhow!("MDC does not contain a prompt formatter"))?
         {
             PromptFormatterArtifact::HfTokenizerConfigJson(file) => {
-                let content = std::fs::read_to_string(file)?;
+                let content = std::fs::read_to_string(&file)
+                    .with_context(|| format!("fs:read_to_string '{file}'"))?;
                 let config: ChatTemplate = serde_json::from_str(&content)?;
                 Self::from_parts(
                     config,

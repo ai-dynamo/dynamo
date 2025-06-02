@@ -41,8 +41,10 @@ chrono = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
 either = { workspace = true }
+etcd-client = { workspace = true }
 futures = { workspace = true }
 humantime = { workspace = true }
+prometheus = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -51,26 +53,23 @@ tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-validator = { workspace = true }
-uuid = { workspace = true }
-xxhash-rust = { workspace = true }
-prometheus = { workspace = true }
 thiserror = { workspace = true }
-
-# Dependencies not yet in workspace
-figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
-log = { version = "0.4" }
-once_cell = { version = "1" }
-regex = { version = "1" }
-socket2 = { version = "0.5.8" }
+uuid = { workspace = true }
+url = { workspace = true }
+validator = { workspace = true }
+xxhash-rust = { workspace = true }
 
 async-once-cell = { version = "0.5.4" }
 educe = { version = "0.6.0" }
-etcd-client = { version = "0.14" }
+figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
 local-ip-address = { version = "0.6.3" }
+log = { version = "0.4" }
 nid = { version = "3.0.0", features = ["serde"] }
 nix = { version = "0.29", features = ["signal"] }
 nuid = { version = "0.5" }
+once_cell = { version = "1" }
+regex = { version = "1" }
+socket2 = { version = "0.5.8" }
 
 [dev-dependencies]
 assert_matches = { version = "1.5.0" }

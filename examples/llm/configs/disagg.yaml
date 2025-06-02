@@ -35,7 +35,7 @@ VllmWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 1
+      gpu: '1'
   common-configs: [model, block-size, max-model-len, kv-transfer-config]
 
 PrefillWorker:
@@ -43,5 +43,9 @@ PrefillWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 1
+      gpu: '1'
   common-configs: [model, block-size, max-model-len, kv-transfer-config]
+
+Planner:
+  environment: local
+  no-operation: true

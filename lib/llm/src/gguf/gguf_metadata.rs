@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 // Adapted from mistral.rs
 //
@@ -45,6 +33,16 @@ use std::collections::HashMap;
 use tracing::warn;
 
 use crate::gguf::Content;
+
+pub trait ModelConfigLike {
+    fn max_seq_len(&self) -> usize;
+    fn num_layers(&self) -> usize;
+    fn hidden_size(&self) -> usize;
+    fn num_kv_heads(&self) -> usize;
+    fn num_attn_heads(&self) -> usize;
+    fn k_head_dim(&self) -> usize;
+    fn v_head_dim(&self) -> usize;
+}
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -87,28 +85,27 @@ impl From<&Content> for ContentConfig {
     }
 }
 
-#[allow(dead_code)]
-impl ContentConfig {
-    pub fn max_seq_len(&self) -> usize {
+impl ModelConfigLike for ContentConfig {
+    fn max_seq_len(&self) -> usize {
         self.max_seq_len
     }
-    pub fn hidden_size(&self) -> usize {
+    fn hidden_size(&self) -> usize {
         self.hidden_size
     }
-    pub fn num_attn_heads(&self) -> usize {
+    fn num_attn_heads(&self) -> usize {
         self.num_attn_heads
     }
-    pub fn num_kv_heads(&self) -> usize {
+    fn num_kv_heads(&self) -> usize {
         self.num_kv_heads
     }
-    pub fn num_layers(&self) -> usize {
+    fn num_layers(&self) -> usize {
         self.num_layers
     }
-    pub fn k_head_dim(&self) -> usize {
+    fn k_head_dim(&self) -> usize {
         self.key_length
             .unwrap_or(self.hidden_size / self.num_attn_heads)
     }
-    pub fn v_head_dim(&self) -> usize {
+    fn v_head_dim(&self) -> usize {
         self.value_length
             .unwrap_or(self.hidden_size / self.num_attn_heads)
     }

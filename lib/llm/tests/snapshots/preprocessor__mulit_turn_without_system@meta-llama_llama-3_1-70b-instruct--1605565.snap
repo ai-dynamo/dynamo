@@ -1,0 +1,35 @@
+---
+source: lib/llm/tests/preprocessor.rs
+expression: formatted_prompt
+info:
+  messages:
+    - role: user
+      content: How do I reverse a string in Python?
+    - role: assistant
+      content: "You can reverse a string in Python using slicing:\n\n```python\nreversed_string = your_string[::-1]\n```\n\nAlternatively, you can use `reversed()` with `join()`:\n\n```python\nreversed_string = ''.join(reversed(your_string))\n```\n"
+    - role: user
+      content: What if I want to reverse each word in a sentence but keep their order?
+  model: meta-llama_llama-3_1-70b-instruct--1605565
+---
+<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+Cutting Knowledge Date: December 2023
+Today Date: <redacted>
+
+<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+How do I reverse a string in Python?<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+You can reverse a string in Python using slicing:
+
+```python
+reversed_string = your_string[::-1]
+```
+
+Alternatively, you can use `reversed()` with `join()`:
+
+```python
+reversed_string = ''.join(reversed(your_string))
+```<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+What if I want to reverse each word in a sentence but keep their order?<|eot_id|><|start_header_id|>assistant<|end_header_id|>
