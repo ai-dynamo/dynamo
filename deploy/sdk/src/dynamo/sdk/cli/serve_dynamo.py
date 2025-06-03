@@ -61,7 +61,7 @@ def add_fastapi_routes(app, service, class_instance):
             path = name if name.startswith("/") else f"/{name}"
             # Bind the method to the class instance
             bound_method = endpoint.func.__get__(class_instance)
-
+            method = endpoint.http_method or "POST"
             # Check if the method is a generator or async generator
             is_streaming = inspect.isasyncgenfunction(
                 bound_method
@@ -69,11 +69,13 @@ def add_fastapi_routes(app, service, class_instance):
 
             # Set up appropriate response model and response class
             if is_streaming:
-                logger.info(f"Registering streaming endpoint {path}")
+                logger.info(
+                    f"Registering streaming endpoint {path} with method {endpoint.http_method}"
+                )
                 app.add_api_route(
                     path,
                     bound_method,
-                    methods=["POST"],
+                    methods=[method],
                     response_class=StreamingResponse,
                 )
             else:
@@ -81,11 +83,11 @@ def add_fastapi_routes(app, service, class_instance):
                 app.add_api_route(
                     path,
                     bound_method,
-                    methods=["POST"],
+                    methods=[method],
                 )
 
             added_routes.append(path)
-            logger.info(f"Added API route {path} to FastAPI app")
+            logger.info(f"Added API route {path} with method {method} to FastAPI app")
     return added_routes
 
 

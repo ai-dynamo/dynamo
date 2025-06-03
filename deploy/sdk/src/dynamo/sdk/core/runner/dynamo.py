@@ -50,15 +50,24 @@ class LocalEndpoint(DynamoEndpoint):
     """Circus-specific endpoint implementation"""
 
     def __init__(
-        self, name: str, service: "LocalService", transports: List[DynamoTransport]
+        self,
+        name: str,
+        service: "LocalService",
+        transports: List[DynamoTransport],
+        http_method: Optional[str] = None,
     ):
         self._name = name
         self._service = service
         self._transports = transports
+        self._http_method = http_method.upper() if http_method else None
 
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def http_method(self) -> str | None:
+        return self._http_method
 
 
 class LocalService(ServiceMixin, ServiceInterface[T]):
@@ -87,7 +96,10 @@ class LocalService(ServiceMixin, ServiceInterface[T]):
             field = getattr(inner_cls, field_name)
             if isinstance(field, DynamoEndpoint):
                 self._endpoints[field.name] = LocalEndpoint(
-                    field.name, self, field.transports
+                    field.name,
+                    self,
+                    field.transports,
+                    field.http_method,
                 )
             if isinstance(field, DependencyInterface):
                 self._dependencies[field_name] = field

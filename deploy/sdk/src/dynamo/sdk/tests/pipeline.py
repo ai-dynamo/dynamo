@@ -17,10 +17,12 @@
 # Use this to test changes made to CLI, SDK, etc
 
 
+from typing import Dict
+
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from dynamo.sdk import depends, endpoint, service
+from dynamo.sdk import api, depends, endpoint, service
 from dynamo.sdk.core.protocol.interface import DynamoTransport
 
 """
@@ -154,6 +156,11 @@ class Frontend:
 
     def __init__(self) -> None:
         print("Starting frontend")
+
+    @api(http_method="GET")
+    async def ping(self) -> Dict[str, str]:
+        """Check health status."""
+        return {"status": "healthy"}
 
     @endpoint(transports=[DynamoTransport.HTTP])
     async def generate(self, request: RequestType):

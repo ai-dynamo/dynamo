@@ -34,10 +34,13 @@ class DynamoEndpoint:
         func: t.Callable,
         name: str | None = None,
         transports: t.List[DynamoTransport] | None = None,
+        http_method: str | None = None,
     ):
         self.func = func
         self.name = name or func.__name__
         self._transports = transports or [DynamoTransport.DEFAULT]
+        self.http_method = http_method.upper() if http_method else None
+
         # Extract request type from hints
         hints = get_type_hints(func)
         args = list(hints.items())
@@ -68,26 +71,36 @@ class DynamoEndpoint:
 def endpoint(
     name: str | None = None,
     is_api: bool = False,
+    http_method: str | None = None,
 ) -> t.Callable[[t.Callable], DynamoEndpoint]:
     """Decorator for Dynamo endpoints.
 
     Args:
         name: Optional name for the endpoint. Defaults to function name.
         is_api: Whether to expose the endpoint as an API. Defaults to False.
+        http_method: Optional HTTP method for API endpoints. Defaults to None (which means POST).
+                    Only valid when is_api=True.
 
     Example:
         @endpoint()
         def my_endpoint(self, input: str) -> str:
             return input
 
-        @endpoint(name="custom_name")
+        @endpoint(name="custom_name", is_api=True, http_method="GET")
         def another_endpoint(self, input: str) -> str:
             return input
+
+    Raises:
+        ValueError: If http_method is specified but is_api is False.
     """
 
     def decorator(func: t.Callable) -> DynamoEndpoint:
         transports = [DynamoTransport.HTTP] if is_api else [DynamoTransport.DEFAULT]
-        return DynamoEndpoint(func, name, transports)
+        if http_method is not None and not is_api:
+            raise ValueError(
+                "http_method can only be specified for API endpoints (is_api=True)"
+            )
+        return DynamoEndpoint(func, name, transports, http_method if is_api else None)
 
     return decorator
 
