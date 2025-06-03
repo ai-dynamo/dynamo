@@ -23,10 +23,9 @@ This directory contains examples for deploying vLLM models in both aggregated an
 
 1. Install vLLM:
 ```bash
-# Note: Currently requires installation from main branch
-# From vLLM 0.8.6 onwards, you can install directly from wheel
-git clone https://github.com/vllm-project/vllm.git
-VLLM_USE_PRECOMPILED=1 uv pip install --editable ./vllm/
+# Note: Uninstalling vLLM patch for V0 arch
+uv pip uninstall ai-dynamo-vllm
+uv pip install vllm==0.9.0
 ```
 
 2. Start required services:
