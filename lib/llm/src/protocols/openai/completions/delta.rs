@@ -126,4 +126,9 @@ impl crate::protocols::openai::DeltaGeneratorExt<CompletionResponse> for DeltaGe
         let index = 0;
         Ok(self.create_choice(index, delta.text, finish_reason))
     }
+
+    // TODO: This is a hack. Change `prompt_tokens` to u32
+    fn get_isl(&self) -> Option<u32> {
+        Some(self.usage.prompt_tokens as u32)
+    }
 }

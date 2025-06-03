@@ -23,7 +23,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
     error::HttpError,
-    metrics::{Endpoint, InflightGuard},
+    metrics::{Endpoint, InflightGuard, ResponseMetricCollector},
     service_v2, RouteDoc,
 };
 
@@ -152,11 +152,12 @@ async fn completions(
         .get_completions_engine(model)
         .map_err(|_| ErrorResponse::model_not_found())?;
 
-    // this will increment the inflight gauge for the model
-    let mut inflight =
+    let mut inflight_guard =
         state
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::Completions, streaming);
+
+    let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     // setup context
     // todo - inherit request_id from distributed trace details
@@ -175,8 +176,10 @@ async fn completions(
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
-        let stream = stream.map(|response| Event::try_from(EventConverter::from(response)));
-        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight).await;
+        let stream = stream.map(move |response| {
+            process_event_converter(EventConverter::from(response), &mut response_collector)
+        });
+        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight_guard).await;
 
         let mut sse_stream = Sse::new(stream);
 
@@ -186,6 +189,7 @@ async fn completions(
 
         Ok(sse_stream.into_response())
     } else {
+        // TODO: report ISL/OSL for non-streaming requests
         let response = CompletionResponse::from_annotated_stream(stream.into())
             .await
             .map_err(|e| {
@@ -197,7 +201,7 @@ async fn completions(
                 ErrorResponse::internal_server_error("Failed to fold completions stream")
             })?;
 
-        inflight.mark_ok();
+        inflight_guard.mark_ok();
         Ok(Json(response).into_response())
     }
 }
@@ -269,11 +273,12 @@ async fn chat_completions(
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorResponse::model_not_found())?;
 
-    // this will increment the inflight gauge for the model
-    let mut inflight =
+    let mut inflight_guard =
         state
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::ChatCompletions, streaming);
+
+    let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     // setup context
     // todo - inherit request_id from distributed trace details
@@ -294,8 +299,10 @@ async fn chat_completions(
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
-        let stream = stream.map(|response| Event::try_from(EventConverter::from(response)));
-        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight).await;
+        let stream = stream.map(move |response| {
+            process_event_converter(EventConverter::from(response), &mut response_collector)
+        });
+        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight_guard).await;
 
         let mut sse_stream = Sse::new(stream);
 
@@ -305,6 +312,7 @@ async fn chat_completions(
 
         Ok(sse_stream.into_response())
     } else {
+        // TODO: report ISL/OSL for non-streaming requests
         let response = NvCreateChatCompletionResponse::from_annotated_stream(stream.into())
             .await
             .map_err(|e| {
@@ -319,7 +327,7 @@ async fn chat_completions(
                 ))
             })?;
 
-        inflight.mark_ok();
+        inflight_guard.mark_ok();
         Ok(Json(response).into_response())
     }
 }
@@ -399,12 +407,11 @@ async fn monitor_for_disconnects(
         Box<dyn Stream<Item = Result<axum::response::sse::Event, axum::Error>> + std::marker::Send>,
     >,
     context: Arc<dyn AsyncEngineContext>,
-    inflight: InflightGuard,
+    mut inflight_guard: InflightGuard,
 ) -> ReceiverStream<Result<Event, axum::Error>> {
     let (tx, rx) = tokio::sync::mpsc::channel(8);
 
     tokio::spawn(async move {
-        let mut inflight = inflight;
         let mut stream = stream;
         while let Some(event) = stream.next().await {
             let event = match event {
@@ -419,10 +426,9 @@ async fn monitor_for_disconnects(
             }
         }
 
-        // the stream completed successfully - mark as ok
-        // this will increment the request counter with an "success" status
+        // Stream completed successfully - mark as ok
         if tx.send(Ok(Event::default().data("[DONE]"))).await.is_ok() {
-            inflight.mark_ok();
+            inflight_guard.mark_ok();
         }
     });
 
@@ -437,40 +443,45 @@ impl<T> From<Annotated<T>> for EventConverter<T> {
     }
 }
 
-/// Convert an Annotated into an Event
-/// If the Event represents an Error, then return an axum::Error
-/// The [`monitor_for_disconnects`] method will handle the error, emit to the sse stream
-/// then stop the generation of completions.
-impl<T: Serialize> TryFrom<EventConverter<T>> for Event {
-    type Error = axum::Error;
+fn process_event_converter<T: Serialize>(
+    annotated: EventConverter<T>,
+    response_collector: &mut ResponseMetricCollector,
+) -> Result<Event, axum::Error> {
+    let annotated = annotated.0;
 
-    fn try_from(annotated: EventConverter<T>) -> Result<Self, Self::Error> {
-        let annotated = annotated.0;
+    let mut event = Event::default();
 
-        let mut event = Event::default();
-
-        if let Some(data) = annotated.data {
-            event = event.json_data(data)?;
-        }
-
-        if let Some(msg) = annotated.event {
-            if msg == "error" {
-                let msgs = annotated
-                    .comment
-                    .unwrap_or_else(|| vec!["unspecified error".to_string()]);
-                return Err(axum::Error::new(msgs.join(" -- ")));
-            }
-            event = event.event(msg);
-        }
-
-        if let Some(comments) = annotated.comment {
-            for comment in comments {
-                event = event.comment(comment);
-            }
-        }
-
-        Ok(event)
+    if let Some(data) = annotated.data {
+        event = event.json_data(data)?;
     }
+
+    if let Some(msg) = annotated.event {
+        if msg == "error" {
+            let msgs = annotated
+                .comment
+                .unwrap_or_else(|| vec!["unspecified error".to_string()]);
+            return Err(axum::Error::new(msgs.join(" -- ")));
+        }
+        event = event.event(msg);
+    }
+
+    if let Some(osl) = annotated.output_tokens {
+        response_collector.observe_current_osl(osl);
+    }
+
+    if let Some(isl) = annotated.input_tokens {
+        if let Some(chunk_tokens) = annotated.chunk_tokens {
+            response_collector.observe_response(isl, chunk_tokens);
+        }
+    }
+
+    if let Some(comments) = annotated.comment {
+        for comment in comments {
+            event = event.comment(comment);
+        }
+    }
+
+    Ok(event)
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Completions endpoint
