@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+
 from dynamo._core import AggregatedMetrics as AggregatedMetrics
 
 try:
@@ -45,3 +47,7 @@ try:
     )
 except ImportError:
     pass  # TensorRTLLM is not enabled by default
+except Exception as e:
+    # Don't let TensorRTLLM break other engines
+    logger = logging.getLogger(__name__)
+    logger.exception(f"Error importing TensorRT-LLM components: {e}")

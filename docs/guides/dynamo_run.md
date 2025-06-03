@@ -311,6 +311,12 @@ If you have multiple GPUs, mistral.rs does automatic tensor parallelism. You do 
 cargo build --features cuda|metal|vulkan -p dynamo-run
 ```
 
+For GNU OpenMP support add the `openmp` feature. On Ubuntu this requires `libgomp1` (part of `build-essential`) at build and runtime.
+
+```
+cargo build --features cuda,openmp -p dynamo-run
+```
+
 ```
 dynamo-run out=llamacpp ~/llms/gemma-3-1b-it-q4_0.gguf
 dynamo-run out=llamacpp ~/llms/Qwen3-0.6B-Q8_0.gguf # From https://huggingface.co/ggml-org

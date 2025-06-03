@@ -29,6 +29,7 @@ default = []
 cuda = ["llama-cpp-2/cuda"]
 metal = ["llama-cpp-2/metal"]
 vulkan = ["llama-cpp-2/vulkan"]
+openmp = ["llama-cpp-2/openmp"]
 
 [dependencies]
 dynamo-runtime = { workspace = true }
@@ -38,4 +39,5 @@ async-stream = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
-llama-cpp-2 = { version = "0.1.103" }
+# default-features = false to disable openmp because that needs libgomp1 installed
+llama-cpp-2 = { version = "0.1.107", default-features = false }
