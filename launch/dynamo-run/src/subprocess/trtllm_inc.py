@@ -21,7 +21,7 @@ import copy
 import logging
 import sys
 import warnings
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import Optional
 
 import uvloop
@@ -76,19 +76,19 @@ class DisaggregatedParamsCodec:
     ) -> DisaggregatedParams:
         if disaggregated_params is None:
             return None
-        else:
-            opaque_state = (
-                base64.b64decode(disaggregated_params.opaque_state)
-                if disaggregated_params.opaque_state is not None
-                else None
-            )
-            return DisaggregatedParams(
-                request_type=disaggregated_params.request_type,
-                first_gen_tokens=disaggregated_params.first_gen_tokens,
-                ctx_request_id=disaggregated_params.ctx_request_id,
-                opaque_state=opaque_state,
-                draft_tokens=disaggregated_params.draft_tokens,
-            )
+
+        opaque_state = (
+            base64.b64decode(disaggregated_params.opaque_state)
+            if disaggregated_params.opaque_state is not None
+            else None
+        )
+        return DisaggregatedParams(
+            request_type=disaggregated_params.request_type,
+            first_gen_tokens=disaggregated_params.first_gen_tokens,
+            ctx_request_id=disaggregated_params.ctx_request_id,
+            opaque_state=opaque_state,
+            draft_tokens=disaggregated_params.draft_tokens,
+        )
 
     @staticmethod
     def encode(
@@ -96,19 +96,19 @@ class DisaggregatedParamsCodec:
     ) -> DisaggregatedParams:
         if disaggregated_params is None:
             return None
-        else:
-            encoded_opaque_state = (
-                base64.b64encode(disaggregated_params.opaque_state).decode("utf-8")
-                if disaggregated_params.opaque_state is not None
-                else None
-            )
-            return DisaggregatedParams(
-                request_type=disaggregated_params.request_type,
-                first_gen_tokens=disaggregated_params.first_gen_tokens,
-                ctx_request_id=disaggregated_params.ctx_request_id,
-                opaque_state=encoded_opaque_state,
-                draft_tokens=disaggregated_params.draft_tokens,
-            )
+
+        encoded_opaque_state = (
+            base64.b64encode(disaggregated_params.opaque_state).decode("utf-8")
+            if disaggregated_params.opaque_state is not None
+            else None
+        )
+        return DisaggregatedParams(
+            request_type=disaggregated_params.request_type,
+            first_gen_tokens=disaggregated_params.first_gen_tokens,
+            ctx_request_id=disaggregated_params.ctx_request_id,
+            opaque_state=encoded_opaque_state,
+            draft_tokens=disaggregated_params.draft_tokens,
+        )
 
 
 class Config:
@@ -142,30 +142,50 @@ class Config:
         )
 
 
+@dataclass
+class RequestHandlerConfig:
+    """
+    Configuration for the request handler
+    """
+
+    component: object
+    engine: object
+    default_sampling_params: object
+    publishers: object
+    disaggregation_mode: str
+    remote_prefill_client: object
+
+
 class RequestHandler:
     """
     Request handler for the generate endpoint
     """
 
-    def __init__(
-        self,
-        component,
-        engine,
-        default_sampling_params,
-        publishers,
-        disaggregation_mode,
-        remote_prefill_client,
-    ):
-        self.engine = engine
-        self.component = component
-        self.default_sampling_params = default_sampling_params
-        self.publishers = publishers
-        self.disaggregation_mode = disaggregation_mode
-        self.remote_prefill_client = remote_prefill_client
+    def __init__(self, config: RequestHandlerConfig):
+        self.engine = config.engine
+        self.component = config.component
+        self.default_sampling_params = config.default_sampling_params
+        self.publishers = config.publishers
+        self.disaggregation_mode = config.disaggregation_mode
+        self.remote_prefill_client = config.remote_prefill_client
         self.first_generation = True
 
     async def remote_prefill(self, request):
+        """
+        Send a prefill request to the remote prefill worker.
+
+        Args:
+            request: The original request to be sent for prefill
+
+        Returns:
+            The response from the remote prefill worker
+
+        Raises:
+            ValueError: If prefill client is not initialized or multiple responses received
+        """
+
         prefill_request = copy.deepcopy(request)
+        # TRTLLM requires max_tokens to be set for prefill requests.
         prefill_request["stop_conditions"]["max_tokens"] = 1
 
         # Set the disaggregated params to context_only for remote prefill
@@ -177,18 +197,25 @@ class RequestHandler:
 
         if self.remote_prefill_client is None:
             raise ValueError("Prefill client not initialized")
+        try:
+            # TODO: Use smart KV router to determine which prefill worker to use. This would also require supporting publishing events for prefill workers.
+            remote_prefill_responses = [
+                remote_prefill_response
+                async for remote_prefill_response in await self.remote_prefill_client.round_robin(
+                    prefill_request
+                )
+            ]
+        except Exception as e:
+            raise ValueError(f"Error in remote prefill: {e}")
 
-        # TODO: Use smart KV router to determine which prefill worker to use. This would also require supporting publishing events for prefill workers.
-        remote_prefill_responses = [
-            remote_prefill_response
-            async for remote_prefill_response in await self.remote_prefill_client.round_robin(
-                prefill_request
-            )
-        ]
         if len(remote_prefill_responses) > 1:
             raise ValueError(
                 "Prefill worker returned more than one response. This is currently not supported in remote prefill mode."
             )
+
+        if len(remote_prefill_responses) == 0:
+            raise ValueError("No response received from remote prefill worker")
+
         remote_prefill_response = remote_prefill_responses[0]
         return remote_prefill_response
 
@@ -214,7 +241,11 @@ class RequestHandler:
 
         if self.disaggregation_mode == "decode":
             # Run prefill/context phase remotely if disaggregation mode is decode.
-            prefill_result = await self.remote_prefill(request)
+            try:
+                prefill_result = await self.remote_prefill(request)
+            except Exception as e:
+                raise ValueError(f"Error in remote prefill: {e}")
+
             remote_prefill_response = prefill_result.data()
             if (
                 remote_prefill_response["finish_reason"] == "stop"
@@ -393,25 +424,27 @@ async def init(runtime: DistributedRuntime, config: Config):
                 int(endpoint.lease_id()),
                 config.kv_block_size,
             ) as publisher:
-                handler = RequestHandler(
-                    component,
-                    engine,
-                    default_sampling_params,
-                    publisher,
-                    config.disaggregation_mode,
-                    remote_prefill_client,
+                handler_config = RequestHandlerConfig(
+                    component=component,
+                    engine=engine,
+                    default_sampling_params=default_sampling_params,
+                    publishers=publisher,
+                    disaggregation_mode=config.disaggregation_mode,
+                    remote_prefill_client=remote_prefill_client,
                 )
+                handler = RequestHandler(handler_config)
                 await endpoint.serve_endpoint(handler.generate)
         else:
             # No publishers, so just pass in None to the request handler.
-            handler = RequestHandler(
-                component,
-                engine,
-                default_sampling_params,
-                None,
-                config.disaggregation_mode,
-                remote_prefill_client,
+            handler_config = RequestHandlerConfig(
+                component=component,
+                engine=engine,
+                default_sampling_params=default_sampling_params,
+                publishers=None,
+                disaggregation_mode=config.disaggregation_mode,
+                remote_prefill_client=remote_prefill_client,
             )
+            handler = RequestHandler(handler_config)
             await endpoint.serve_endpoint(handler.generate)
 
 
