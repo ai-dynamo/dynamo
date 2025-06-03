@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, List
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional
 
 
 @dataclass
@@ -29,6 +29,7 @@ class DeploymentGraph:
     endpoint: str
     response_handler: Callable[[Any], str]
     timeout: int = 900
+    marks: Optional[List[Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -49,7 +50,6 @@ def multimodal_response_handler(response):
     if response.status_code != 200:
         return ""
     result = response.json()
-    print(result)
     return result
 
 
@@ -65,10 +65,3 @@ def completions_response_handler(response):
     assert "message" in result["choices"][0], "Missing 'message' in first choice"
     assert "content" in result["choices"][0]["message"], "Missing 'content' in message"
     return result["choices"][0]["message"]["content"]
-
-
-def get_test_deployment_graphs():
-    """
-    Get a dictionary of deployment graph test configurations.
-    """
-    # Shorter prompt for faster test execution

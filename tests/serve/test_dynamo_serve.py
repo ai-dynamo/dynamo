@@ -82,6 +82,7 @@ deployment_graphs = {
             "/workspace/examples/llm",
             "v1/chat/completions",
             completions_response_handler,
+            marks=[pytest.mark.gpu, pytest.mark.vllm],
         ),
         text_payload,
     ),
@@ -92,6 +93,7 @@ deployment_graphs = {
             "/workspace/examples/sglang",
             "v1/chat/completions",
             completions_response_handler,
+            marks=[pytest.mark.gpu, pytest.mark.sglang],
         ),
         text_payload,
     ),
@@ -102,6 +104,7 @@ deployment_graphs = {
             "/workspace/examples/llm",
             "v1/chat/completions",
             completions_response_handler,
+            marks=[pytest.mark.gpu_2, pytest.mark.vllm],
         ),
         text_payload,
     ),
@@ -112,6 +115,7 @@ deployment_graphs = {
             "/workspace/examples/llm",
             "v1/chat/completions",
             completions_response_handler,
+            marks=[pytest.mark.gpu, pytest.mark.vllm],
         ),
         text_payload,
     ),
@@ -122,6 +126,7 @@ deployment_graphs = {
             "/workspace/examples/llm",
             "v1/chat/completions",
             completions_response_handler,
+            marks=[pytest.mark.gpu_2, pytest.mark.vllm],
         ),
         text_payload,
     ),
@@ -132,6 +137,7 @@ deployment_graphs = {
             "/workspace/examples/multimodal",
             "v1/chat/completions",
             completions_response_handler,
+            marks=[pytest.mark.gpu_2, pytest.mark.vllm],
         ),
         multimodal_payload,
     ),
@@ -174,10 +180,14 @@ class DynamoServeProcess(ManagedProcess):
 
 @pytest.fixture(
     params=[
-        "agg",
-        "agg_router",
+        pytest.param("agg", marks=[pytest.mark.vllm, pytest.mark.gpu]),
+        pytest.param("agg_router", marks=[pytest.mark.vllm, pytest.mark.gpu]),
+        pytest.param("disagg", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
+        pytest.param("disagg_router", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
+        pytest.param("multimodal_agg", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
+        pytest.param("sglang", marks=[pytest.mark.sglang, pytest.mark.gpu_2]),
     ]
-)  # "multimodal_agg",]) #"sglang_agg"])
+)
 def deployment_graph_test(request):
     """
     Fixture that provides different deployment graph test configurations.
@@ -186,9 +196,7 @@ def deployment_graph_test(request):
     return deployment_graphs[request.param]
 
 
-@pytest.mark.gpu
 @pytest.mark.e2e
-@pytest.mark.vllm
 @pytest.mark.slow
 def test_serve_deployment(deployment_graph_test, request, runtime_services):
     """
