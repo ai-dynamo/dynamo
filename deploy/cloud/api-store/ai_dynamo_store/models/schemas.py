@@ -15,7 +15,7 @@
 #  limitations under the License.
 
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -49,7 +49,7 @@ class ClusterSchema(ResourceSchema):
 
 class DeploymentConfigSchema(BaseModel):
     access_authorization: bool = False
-    envs: Optional[List[Dict[str, str]]] = None
+    envs: Optional[List[Dict[str, Any]]] = None
     labels: Optional[List[Dict[str, str]]] = None
     secrets: Optional[List[str]] = None
     services: Dict[str, Dict] = Field(default_factory=dict)

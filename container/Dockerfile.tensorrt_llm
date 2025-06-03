@@ -300,6 +300,9 @@ COPY --from=wheel_builder /workspace /workspace
 # Copy Cargo cache to avoid re-downloading dependencies
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
+# Copy rest of the code
+COPY . /workspace
+
 # Build C bindings, creates lib/bindings/c/include
 RUN cd /workspace/lib/bindings/c && cargo build --release --locked
 

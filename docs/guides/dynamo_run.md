@@ -1,24 +1,37 @@
 # Running Dynamo (`dynamo run`)
 
-* [Quickstart with pip and vllm](#quickstart-with-pip-and-vllm)
-    * [Automatically download a model from Hugging Face](#use-model-from-hugging-face)
-    * [Run a model from local file](#run-a-model-from-local-file)
-    * [Distributed system](#distributed-system)
-    * [Network names](#network-names)
-    * [KV-aware routing](#kv-aware-routing)
-* [Full usage details](#full-usage-details)
-    * [Setup](#setup)
-    * [mistral.rs](#mistralrs)
-    * [llama.cpp](#llamacpp)
-    * [Sglang](#sglang)
-    * [Vllm](#vllm)
-    * [TensorRT-LLM](#trtllm)
-    * [Echo Engines](#echo-engines)
-    * [Writing your own engine in Python](#writing-your-own-engine-in-python)
-* [Batch mode](#batch-mode)
-* [Defaults](#defaults)
-* [Extra engine arguments](#extra-engine-arguments)
-
+- [Running Dynamo (`dynamo run`)](#running-dynamo-dynamo-run)
+  - [Quickstart with pip and vllm](#quickstart-with-pip-and-vllm)
+    - [Use model from Hugging Face](#use-model-from-hugging-face)
+    - [Run a model from local file](#run-a-model-from-local-file)
+      - [Download model from Hugging Face](#download-model-from-hugging-face)
+      - [Run model from local file](#run-model-from-local-file)
+    - [Distributed System](#distributed-system)
+    - [Network names](#network-names)
+    - [KV-aware routing](#kv-aware-routing)
+  - [Full usage details](#full-usage-details)
+    - [Getting Started](#getting-started)
+      - [Setup](#setup)
+        - [Step 1: Install libraries](#step-1-install-libraries)
+        - [Step 2: Install Rust](#step-2-install-rust)
+        - [Step 3: Build](#step-3-build)
+      - [Defaults](#defaults)
+    - [Running Inference with Pre-built Engines](#running-inference-with-pre-built-engines)
+      - [mistralrs](#mistralrs)
+      - [llamacpp](#llamacpp)
+      - [sglang](#sglang)
+      - [vllm](#vllm)
+      - [trtllm](#trtllm)
+        - [Step 1: Build the environment](#step-1-build-the-environment)
+        - [Step 2: Run the environment](#step-2-run-the-environment)
+        - [Step 3: Execute `dynamo run` command](#step-3-execute-dynamo-run-command)
+      - [Echo Engines](#echo-engines)
+        - [echo\_core](#echo_core)
+        - [echo\_full](#echo_full)
+        - [Configuration](#configuration)
+      - [Batch mode](#batch-mode)
+    - [Extra engine arguments](#extra-engine-arguments)
+    - [Writing your own engine in Python](#writing-your-own-engine-in-python)
 
 This guide explains the`dynamo run` command.
 
@@ -28,7 +41,7 @@ It supports these engines: mistralrs, llamacpp, sglang, vllm, and tensorrt-llm. 
 
 Usage:
 ```
-dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv]
+dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=2.0] [--kv-gpu-cache-usage-weight=1.0] [--kv-waiting-requests-weight=1.0]
 ```
 
 Example: `dynamo run Qwen/Qwen3-0.6B`
@@ -309,6 +322,12 @@ If you have multiple GPUs, mistral.rs does automatic tensor parallelism. You do 
 
 ```
 cargo build --features cuda|metal|vulkan -p dynamo-run
+```
+
+For GNU OpenMP support add the `openmp` feature. On Ubuntu this requires `libgomp1` (part of `build-essential`) at build and runtime.
+
+```
+cargo build --features cuda,openmp -p dynamo-run
 ```
 
 ```

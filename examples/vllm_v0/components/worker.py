@@ -212,7 +212,8 @@ class VllmWorker:
                 prefill_queue_size = await prefill_queue.get_queue_size()
             disagg_router_decision = await self.disaggregated_router.prefill_remote(
                 len(request.token_ids),
-                request.estimated_prefix_hit_num_blocks * self.engine_args.block_size,
+                (request.estimated_prefix_hit_num_blocks or 0)
+                * self.engine_args.block_size,
                 prefill_queue_size,
             )
         else:
@@ -230,7 +231,7 @@ class VllmWorker:
         else:
             remote_prefill_params = None
             logger.info(
-                f"Prefilling locally for request {request_id} with length {len(request.token_ids)} (estimated prefix hit length {request.estimated_prefix_hit_num_blocks * self.engine_args.block_size})"
+                f"Prefilling locally for request {request_id} with length {len(request.token_ids)} (estimated prefix hit length {(request.estimated_prefix_hit_num_blocks or 0) * self.engine_args.block_size})"
             )
 
         sampling_params = SamplingParams(**self.default_sampling_params)

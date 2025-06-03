@@ -13,31 +13,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 Common:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  kv-transfer-config: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  model: deepseek-ai/DeepSeek-R1
+  kv_transfer_config:
+    kv_connector: NixlConnector
+    kv_role: kv_both
+  served_model_name: deepseek-ai/DeepSeek-R1
 
 Frontend:
-  endpoint: dynamo.SimpleLoadBalancer.generate_disagg
+  endpoint: dynamo.SimpleLoadBalancer.generate
   port: 8000
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  common-configs: [served_model_name]
 
 SimpleLoadBalancer:
   enable_disagg: true
-  common-configs: [model, kv-transfer-config, served_model_name]
+  common-configs: [model, kv_transfer_config, served_model_name]
 
 VllmPrefillWorker:
-  enforce-eager: true
+  tensor_parallel_size: 16
   ServiceArgs:
     workers: 1
     resources:
-      gpu: '1'
-  common-configs: [model, kv-transfer-config, served_model_name]
+      gpu: '16'
+  common-configs: [model, kv_transfer_config, served_model_name]
+
 
 VllmDecodeWorker:
-  enforce-eager: true
+  tensor_parallel_size: 16
   ServiceArgs:
     workers: 1
     resources:
-      gpu: '1'
-  common-configs: [model, kv-transfer-config, served_model_name]
+      gpu: '16'
+  common-configs: [model, kv_transfer_config, served_model_name]

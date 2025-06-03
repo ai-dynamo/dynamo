@@ -26,7 +26,7 @@ use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 
 use crate::backend::ExecutionContext;
-use crate::preprocessor::BackendInput;
+use crate::preprocessor::PreprocessedRequest;
 use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -86,12 +86,12 @@ pub fn make_engine_core() -> ExecutionContext {
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for EchoEngineCore
 {
     async fn generate(
         &self,
-        incoming_request: SingleIn<BackendInput>,
+        incoming_request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, context) = incoming_request.into_parts();
         let ctx = context.context();
@@ -202,7 +202,7 @@ impl
                 let response = NvCreateChatCompletionStreamResponse {
                     inner,
                 };
-                yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None };
+                yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, chunk_tokens: None, input_tokens: None, output_tokens: None, comment: None };
                 id += 1;
             }
 
@@ -210,7 +210,7 @@ impl
             let response = NvCreateChatCompletionStreamResponse {
                 inner,
             };
-            yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None };
+            yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, chunk_tokens: None, input_tokens: None, output_tokens: None, comment: None };
         };
 
         Ok(ResponseStream::new(Box::pin(output), ctx))
@@ -234,11 +234,11 @@ impl AsyncEngine<SingleIn<CompletionRequest>, ManyOut<Annotated<CompletionRespon
             for c in chars_string.chars() {
                 tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
                 let response = deltas.create_choice(0, Some(c.to_string()), None);
-                yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None };
+                yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, chunk_tokens: None, input_tokens: None, output_tokens: None, comment: None };
                 id += 1;
             }
             let response = deltas.create_choice(0, None, Some("stop".to_string()));
-            yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None };
+            yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, chunk_tokens: None, input_tokens: None, output_tokens: None, comment: None };
 
         };
 
