@@ -172,7 +172,7 @@ def serve_dynamo_graph(
     namespace: str = ""
     env: dict[str, Any] = {}
     svc = find_and_load_service(dynamo_pipeline, working_dir)
-    bento_path = pathlib.Path(working_dir or ".")
+    dynamo_path = pathlib.Path(working_dir or ".")
 
     watchers: list[Watcher] = []
     sockets: list[CircusSocket] = []
@@ -236,7 +236,7 @@ def serve_dynamo_graph(
                         dep_svc,
                         uds_path,
                         allocator,
-                        str(bento_path.absolute()),
+                        str(dynamo_path.absolute()),
                         env=env,
                         target=target,
                     )
@@ -283,7 +283,7 @@ def serve_dynamo_graph(
             name=f"{namespace}_{svc.name}",
             args=dynamo_args,
             numprocesses=num_workers,
-            working_dir=str(bento_path.absolute()),
+            working_dir=str(dynamo_path.absolute()),
             env=worker_env,
         )
         watchers.append(watcher)
