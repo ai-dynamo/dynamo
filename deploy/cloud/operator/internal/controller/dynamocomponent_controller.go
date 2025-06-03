@@ -235,13 +235,9 @@ func (r *DynamoComponentReconciler) ensureImageExists(ctx context.Context, opt e
 	DynamoComponent = opt.DynamoComponent
 	req := opt.req
 
-	imageInfo, err = r.getImageInfo(GetImageInfoOption{
+	imageInfo = r.getImageInfo(GetImageInfoOption{
 		DynamoComponent: DynamoComponent,
 	})
-	if err != nil {
-		err = errors.Wrap(err, "get image info")
-		return
-	}
 
 	imageExistsCheckedCondition := meta.FindStatusCondition(DynamoComponent.Status.Conditions, nvidiacomv1alpha1.DynamoComponentConditionTypeImageExistsChecked)
 	imageExistsCondition := meta.FindStatusCondition(DynamoComponent.Status.Conditions, nvidiacomv1alpha1.DynamoComponentConditionTypeImageExists)
@@ -594,7 +590,7 @@ func (r *DynamoComponentReconciler) getApiStoreClient(ctx context.Context) (*api
 }
 
 //nolint:nakedret
-func (r *DynamoComponentReconciler) getDockerRegistry(DynamoComponent *nvidiacomv1alpha1.DynamoComponent) (dockerRegistry *schemas.DockerRegistrySchema, err error) {
+func (r *DynamoComponentReconciler) getDockerRegistry(DynamoComponent *nvidiacomv1alpha1.DynamoComponent) *schemas.DockerRegistrySchema {
 
 	dockerRegistryConfig := commonconfig.GetDockerRegistryConfig()
 
@@ -611,13 +607,12 @@ func (r *DynamoComponentReconciler) getDockerRegistry(DynamoComponent *nvidiacom
 		dockerRegistryConfig.SecretName = DynamoComponent.Spec.DockerConfigJSONSecretName
 	}
 
-	dockerRegistry = &schemas.DockerRegistrySchema{
+	return &schemas.DockerRegistrySchema{
 		Server:              dockerRegistryConfig.Server,
 		Secure:              dockerRegistryConfig.Secure,
 		DynamoRepositoryURI: dynamoRepositoryURI,
 		SecretName:          dockerRegistryConfig.SecretName,
 	}
-	return
 }
 
 func isAddNamespacePrefix() bool {
@@ -701,20 +696,16 @@ type GetImageInfoOption struct {
 }
 
 //nolint:nakedret
-func (r *DynamoComponentReconciler) getImageInfo(opt GetImageInfoOption) (imageInfo ImageInfo, err error) {
+func (r *DynamoComponentReconciler) getImageInfo(opt GetImageInfoOption) ImageInfo {
 	dynamoComponentRepositoryName, _, dynamoComponentVersion := xstrings.Partition(opt.DynamoComponent.Spec.DynamoComponent, ":")
-	dockerRegistry, err := r.getDockerRegistry(opt.DynamoComponent)
-	if err != nil {
-		err = errors.Wrap(err, "get docker registry")
-		return
+	dockerRegistry := r.getDockerRegistry(opt.DynamoComponent)
+	imageInfo := ImageInfo{
+		DockerRegistry:             *dockerRegistry,
+		ImageName:                  getDynamoComponentImageName(opt.DynamoComponent, *dockerRegistry, dynamoComponentRepositoryName, dynamoComponentVersion),
+		DockerConfigJSONSecretName: dockerRegistry.SecretName,
+		DockerRegistryInsecure:     opt.DynamoComponent.Annotations[commonconsts.KubeAnnotationDynamoDockerRegistryInsecure] == "true",
 	}
-	imageInfo.DockerRegistry = *dockerRegistry
-	imageInfo.ImageName = getDynamoComponentImageName(opt.DynamoComponent, *dockerRegistry, dynamoComponentRepositoryName, dynamoComponentVersion)
-
-	imageInfo.DockerConfigJSONSecretName = dockerRegistry.SecretName
-
-	imageInfo.DockerRegistryInsecure = opt.DynamoComponent.Annotations[commonconsts.KubeAnnotationDynamoDockerRegistryInsecure] == "true"
-	return
+	return imageInfo
 }
 
 func (r *DynamoComponentReconciler) getImageBuilderJobName() string {
