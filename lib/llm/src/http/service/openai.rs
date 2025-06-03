@@ -170,7 +170,7 @@ async fn completions(
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     // setup context
-    
+
     // setup context with request ID for distributed tracing
     let request = Context::with_id(request, request_id.clone());
 
@@ -300,7 +300,7 @@ async fn chat_completions(
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     // setup context
-    
+
     // setup context with request ID for distributed tracing
     let request = Context::with_id(request, request_id.clone());
 
@@ -351,7 +351,7 @@ async fn chat_completions(
                     e
                 ))
             })?;
-       
+
         inflight_guard.mark_ok();
         let mut json_response = Json(response).into_response();
         // Add X-Request-Id header to response
